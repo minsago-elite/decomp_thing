@@ -87,6 +87,9 @@ class WebJobService(
     /** True when the service is closed and no workflows or uploads remain; ownership-handoff evidence. */
     internal fun isIdle(): Boolean = synchronized(this) { closed && active.isEmpty() && uploads.isEmpty() }
 
+    /** Invoked whenever quiescence is (re)established after close; used to release outer ownership. */
+    internal var onQuiescent: (() -> Unit)? = null
+
     @Synchronized
     fun initializeExistingStorage() {
         check(!closed && active.isEmpty()) { "Storage initialization requires an idle service" }
@@ -390,6 +393,7 @@ class WebJobService(
             val restoreInterrupt = Thread.interrupted()
             try { attempts?.close(); attempts = null }
             finally { if (restoreInterrupt) Thread.currentThread().interrupt() }
+            try { onQuiescent?.invoke() } catch (_: Exception) { }
         }
     }
 

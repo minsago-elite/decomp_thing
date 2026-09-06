@@ -140,6 +140,58 @@ class UploadServerTest {
     }
 
     @Test
+    fun `late caller-owned worker completion releases ownership without a second stop`() {
+        val dataDir = createTempDirectory("web-caller-release-")
+        val started = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val finished = java.util.concurrent.CountDownLatch(1)
+        val executor = java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "caller-owned-worker")
+        }
+        val server = UploadServer("127.0.0.1", 0, dataDir, analyzer = JobAnalyzer { _, _ ->
+            started.countDown()
+            while (release.count != 0L) {
+                try { release.await() } catch (_: InterruptedException) { }
+            }
+            finished.countDown()
+        }, executor = executor)
+        server.start()
+        try {
+            val uploaded = upload(server, "late-worker.elf", elfFixture(), acceptJson = true)
+            val id = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            val stopped = kotlin.test.assertFailsWith<WebJobServiceException> { server.stop() }
+            assertEquals("SHUTDOWN_INCOMPLETE", stopped.code)
+            val store = decompengine.jobs.JobStore(dataDir)
+            assertEquals("analyzing", store.get(id).status)
+            val refused = kotlin.test.assertFailsWith<IllegalStateException> { UploadServer("127.0.0.1", 0, dataDir) }
+            assertEquals("Job store already has a live web server owner", refused.message)
+
+            release.countDown()
+            assertTrue(finished.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+            var replacement: UploadServer? = null
+            while (replacement == null) {
+                assertTrue(System.nanoTime() < deadline, "store ownership was not released after the worker exited")
+                try {
+                    replacement = UploadServer("127.0.0.1", 0, dataDir).also { it.start() }
+                } catch (_: IllegalStateException) {
+                    Thread.sleep(20)
+                }
+            }
+            try {
+                assertEquals("Server stopped before the operation reported completion", store.get(id).statusMessage)
+            } finally {
+                replacement.stop()
+            }
+        } finally {
+            release.countDown()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
     fun `shutdown timeout retains store ownership until the worker exits and cleanup is retried`() {
         val dataDir = createTempDirectory("web-retained-owner-")
         val started = java.util.concurrent.CountDownLatch(1)

@@ -43,8 +43,7 @@ class WebRequestLifetimeTest {
             assertTrue(entered.await(5, TimeUnit.SECONDS))
             val stopped = assertFailsWith<IllegalStateException> { server.stop() }
             assertEquals("HTTP requests remain active after server stop", stopped.message)
-            val contender = UploadServer("127.0.0.1", 0, root)
-            val refused = assertFailsWith<IllegalStateException> { contender.start() }
+            val refused = assertFailsWith<IllegalStateException> { UploadServer("127.0.0.1", 0, root) }
             assertEquals("Job store already has a live web server owner", refused.message)
             assertEquals("uploaded", store.get(job.id).status)
             assertFalse(server.withActiveRequest { error("late request must not run") })

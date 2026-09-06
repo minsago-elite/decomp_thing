@@ -24,6 +24,12 @@ import kotlin.test.assertTrue
 class UploadUncertaintyHttpTest {
     @Test
     fun `HTTP upload uncertainty identifies the published job in JSON and HTML without retry hints`() {
+        assertUncertainUploadResponse(acceptJson = true)
+        assertUncertainUploadResponse(acceptJson = false)
+    }
+
+    /** Each variant uses an isolated root and service: after RECOVERY_REQUIRED the service refuses further uploads. */
+    private fun assertUncertainUploadResponse(acceptJson: Boolean) {
         val root = createTempDirectory("upload-uncertainty-http-")
         val privateDiagnostic = "private filesystem failure details"
         val service = WebJobService(JobStore(root), JobAnalyzer { _, _ -> error("uncertainty precedes analysis") },
@@ -35,50 +41,47 @@ class UploadUncertaintyHttpTest {
         server.createContext("/jobs") { handleUploadRequest(it, service) }
         server.start()
         try {
-            for (acceptJson in listOf(true, false)) {
-                val boundary = "decomp-uncertain-upload"
-                val body = ("--$boundary\r\n" +
-                    "Content-Disposition: form-data; name=\"binary\"; filename=\"fixture.elf\"\r\n" +
-                    "Content-Type: application/x-elf\r\n\r\n").toByteArray() +
-                    elfFixture() + "\r\n--$boundary--\r\n".toByteArray()
-                val connection = URI("http://127.0.0.1:${server.address.port}/jobs")
-                    .toURL().openConnection() as HttpURLConnection
-                try {
-                    connection.requestMethod = "POST"
-                    connection.instanceFollowRedirects = false
-                    connection.connectTimeout = 5000
-                    connection.readTimeout = 5000
-                    connection.doOutput = true
-                    connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
-                    connection.setRequestProperty("Accept", if (acceptJson) "application/json" else "text/html")
-                    connection.outputStream.use { it.write(body) }
-                    assertEquals(409, connection.responseCode)
-                    val location = connection.getHeaderField("Location")
-                    assertTrue(location.matches(Regex("/jobs/[a-f0-9]{32}")))
-                    assertNull(connection.getHeaderField("Retry-After"))
-                    val response = connection.errorStream.use { it.readBytes().decodeToString() }
-                    assertFalse(response.contains(privateDiagnostic))
-                    val id = location.substringAfterLast('/')
-                    if (acceptJson) {
-                        assertTrue(connection.contentType.startsWith("application/json"))
-                        val problem = Json.parseToJsonElement(response).jsonObject
-                        assertEquals("upload_publication_uncertain", problem["error"]!!.jsonPrimitive.content)
-                        assertEquals(id, problem["job_id"]!!.jsonPrimitive.content)
-                        assertEquals(location, problem["job_url"]!!.jsonPrimitive.content)
-                        assertEquals("false", problem["retry_upload"].toString())
-                    } else {
-                        assertTrue(connection.contentType.startsWith("text/html"))
-                        assertTrue(response.contains("href=\"$location\""))
-                        assertTrue(response.contains("Check job"))
-                    }
-                    val published = JobStore(root).get(id)
-                    assertEquals("uploaded", published.status)
-                    assertContentEquals(elfFixture(), published.binaryPath.readBytes())
-                } finally {
-                    connection.disconnect()
+            val boundary = "decomp-uncertain-upload"
+            val body = ("--$boundary\r\n" +
+                "Content-Disposition: form-data; name=\"binary\"; filename=\"fixture.elf\"\r\n" +
+                "Content-Type: application/x-elf\r\n\r\n").toByteArray() +
+                elfFixture() + "\r\n--$boundary--\r\n".toByteArray()
+            val connection = URI("http://127.0.0.1:${server.address.port}/jobs")
+                .toURL().openConnection() as HttpURLConnection
+            try {
+                connection.requestMethod = "POST"
+                connection.instanceFollowRedirects = false
+                connection.connectTimeout = 5000
+                connection.readTimeout = 5000
+                connection.doOutput = true
+                connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+                connection.setRequestProperty("Accept", if (acceptJson) "application/json" else "text/html")
+                connection.outputStream.use { it.write(body) }
+                assertEquals(409, connection.responseCode)
+                val location = connection.getHeaderField("Location")
+                assertTrue(location.matches(Regex("/jobs/[a-f0-9]{32}")))
+                assertNull(connection.getHeaderField("Retry-After"))
+                val response = connection.errorStream.use { it.readBytes().decodeToString() }
+                assertFalse(response.contains(privateDiagnostic))
+                val id = location.substringAfterLast('/')
+                if (acceptJson) {
+                    assertTrue(connection.contentType.startsWith("application/json"))
+                    val problem = Json.parseToJsonElement(response).jsonObject
+                    assertEquals("upload_publication_uncertain", problem["error"]!!.jsonPrimitive.content)
+                    assertEquals(id, problem["job_id"]!!.jsonPrimitive.content)
+                    assertEquals(location, problem["job_url"]!!.jsonPrimitive.content)
+                    assertEquals("false", problem["retry_upload"].toString())
+                } else {
+                    assertTrue(connection.contentType.startsWith("text/html"))
+                    assertTrue(response.contains("href=\"$location\""))
+                    assertTrue(response.contains("Check job"))
                 }
+                val published = JobStore(root).get(id)
+                assertEquals("uploaded", published.status)
+                assertContentEquals(elfFixture(), published.binaryPath.readBytes())
+            } finally {
+                connection.disconnect()
             }
-            assertEquals(2, JobStore(root).list().size)
         } finally {
             server.stop(0)
         }

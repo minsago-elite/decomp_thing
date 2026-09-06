@@ -15,6 +15,7 @@ import decompengine.jobs.InvalidUploadException
 import decompengine.jobs.Job
 import decompengine.jobs.JobStore
 import decompengine.jobs.JobStoreException
+import decompengine.jobs.WorkflowAttemptStore
 import decompengine.jobs.UploadPublicationUncertainException
 import decompengine.jobs.AgentProgressJournal
 import decompengine.jobs.ProgressRedactor
@@ -181,8 +182,7 @@ class UploadServer(
     init { require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" } }
     private val diagnosticRedactor = ProgressRedactor(sensitiveValues)
     // Verify trusted application bytes before binding a listening socket.
-    private val spaAssets = when (uiMode) {
-        WebUiMode.SPA -> {
+    private val spaAssets = when (uiMode) {        WebUiMode.SPA -> {
             require(java.net.InetAddress.getByName(host).isLoopbackAddress) {
                 "the SPA preview currently requires a loopback host"
             }
@@ -198,9 +198,17 @@ class UploadServer(
             null
         }
     }
+    // Acquire cooperative ownership before binding so a refused contender never occupies a listener.
+    private val ownership: WebJobStoreOwnership = WebJobStoreOwnership.acquire(dataDir.toAbsolutePath().normalize())
     private val server = HttpServer.create(InetSocketAddress(host, port), listenBacklog)
     private val store = JobStore(dataDir)
-    private val jobs = WebJobService(store, analyzer, reconstructor, executor, shutdownTimeoutMs = 5000, failureDiagnostic = { diagnostic(it, "Background operation failed") })
+    private val jobs = WebJobService(store, analyzer, reconstructor, executor,
+        attemptStoreFactory = { root ->
+            // Storage creation is the upgrade point: claim the cross-JVM web lock as the root appears.
+            ownership.ensureLockFile()
+            WorkflowAttemptStore.open(root)
+        },
+        shutdownTimeoutMs = 5000, failureDiagnostic = { diagnostic(it, "Background operation failed") })
     private val sourceEvidence = WebSourceEvidence(store, sourceProfiles, jobs::readArtifact)
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
     private val access = spaAssets?.let {
@@ -216,7 +224,6 @@ class UploadServer(
     private val requestDeadlines = ScheduledThreadPoolExecutor(1) { task ->
         Thread(task, "decomp-web-deadline").apply { isDaemon = true }
     }.apply { removeOnCancelPolicy = true }
-    private var ownership: WebJobStoreOwnership? = null
     private val lifecycleLock = Any()
     private var stopping = false
     private var activeRequests = 0
@@ -227,8 +234,14 @@ class UploadServer(
     fun issueBrowserBootstrap(): WebBootstrapToken = checkNotNull(access) { "Browser sessions require --ui spa" }.issueBootstrap()
 
     init {
+        jobs.onQuiescent = {
+            try {
+                releaseOwnershipIfIdle()
+            } catch (_: Exception) {
+                System.err.println("Web request cleanup did not release store ownership; recovery is required")
+            }
+        }
         try {
-            ownership = WebJobStoreOwnership.acquire(dataDir.toAbsolutePath().normalize())
             jobs.initializeExistingStorage()
         } catch (failure: Throwable) {
             server.stop(0)
@@ -236,8 +249,7 @@ class UploadServer(
             requestDeadlines.shutdownNow()
             access?.close()
             jobs.close()
-            ownership?.close()
-            ownership = null
+            ownership.close()
             throw failure
         }
         server.executor = requestExecutor
@@ -282,42 +294,17 @@ class UploadServer(
         }
     }
 
-    private fun releaseOwnershipIfIdle(): Boolean = synchronized(lifecycleLock) {
-        if (stopping && activeRequests == 0 && jobs.isIdle()) {
-            ownership?.close()
-            ownership = null
-            true
-        } else false
-    }
-    }
-
-    private fun releaseOwnershipIfIdle() = synchronized(lifecycleLock) {
-        if (stopping && activeRequests == 0 && ownedExecutor?.isTerminated != false && runningJobs.isEmpty()) {
-            ownership?.close()
-            ownership = null
+    private fun releaseOwnershipIfIdle(): Boolean {
+        // Sample service quiescence before taking the lifecycle lock; stopping closes the service to new work.
+        val jobsIdle = jobs.isIdle()
+        return synchronized(lifecycleLock) {
+            if (stopping && activeRequests == 0 && jobsIdle) {
+                ownership.close()
+                true
+            } else false
         }
     }
 
-    /** Admission covers the whole handler, including upload publication and error handling. */
-    internal fun withActiveRequest(action: () -> Unit): Boolean {
-        synchronized(lifecycleLock) {
-            if (stopping) return false
-            activeRequests++
-        }
-        try {
-            action()
-            return true
-        } finally {
-            synchronized(lifecycleLock) { activeRequests-- }
-            try {
-                releaseOwnershipIfIdle()
-            } catch (_: Exception) {
-                System.err.println("Web request cleanup did not release store ownership; recovery is required")
-            }
-        }
-    }
-
-    private fun route(exchange: HttpExchange) {
     private fun route(exchange: HttpExchange) {
         if (!withActiveRequest { routeAdmitted(exchange) }) exchange.close()
     }
@@ -511,6 +498,10 @@ class UploadServer(
     }
 }
 
+private const val MAX_UPLOAD_BYTES = 32L * 1024 * 1024
+
+private fun encodeJob(job: Job): String = Json.encodeToString(JsonElement.serializer(), job.toJson())
+
 private fun webOrigin(host: String, port: Int): String {
     val authority = if (':' in host && !host.startsWith('[')) "[$host]" else host
     return "http://$authority:$port"
@@ -538,7 +529,6 @@ internal fun handleUploadRequest(exchange: HttpExchange, jobs: WebJobService) {
             exchange.sendHtml(409, renderUploadPublicationUncertainPage(uncertain.jobId))
         }
     }
-}
 }
 
 /** CLI lifecycle: allow owned workers to record interruption before the JVM exits. */
