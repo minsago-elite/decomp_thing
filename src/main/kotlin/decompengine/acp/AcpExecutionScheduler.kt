@@ -70,6 +70,26 @@ internal class AcpExecutionScheduler(
         val waiter = Waiter(workspaceGroup)
         var queued = false
         try {
+            // The queue position is reserved before the caller's first observer runs, so a
+            // slow observer can neither be overtaken by later callers nor wait outside the
+            // queue bounds.
+            lock.withLock {
+                if (quarantinedByGroup.containsKey(workspaceGroup) || quarantinedCount() == limits.maximumActive) {
+                    throw schedulingFailure("cleanupUnverified", AgentFailureKind.UNAVAILABLE, retryable = false)
+                }
+                val immediatelyAdmissible = active < limits.maximumActive &&
+                    eligible(workspaceGroup) &&
+                    queue.none { eligible(it.group) }
+                if (!immediatelyAdmissible) {
+                    if (queue.size >= limits.maximumQueued ||
+                        queue.count { it.group == workspaceGroup } >= limits.maximumQueuedPerWorkspace
+                    ) {
+                        throw schedulingFailure("queueCapacity", AgentFailureKind.RESOURCE_EXHAUSTED)
+                    }
+                    queue.add(waiter)
+                    queued = true
+                }
+            }
             while (true) {
                 // Caller-provided observers must never hold the process-wide scheduler lock.
                 // A slow observer must not prevent permit release or observation of scheduler state.
