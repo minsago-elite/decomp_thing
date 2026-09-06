@@ -320,6 +320,41 @@ class UploadServerTest {
     }
 
     @Test
+    fun `legacy progress withholds uncertified prose and unknown fields in JSON and HTML`() = withServer { server, root ->
+        val id = uploadedJobId(server)
+        val reports = root.resolve(id).resolve("reports").createDirectories()
+        val journal = reports.resolve(decompengine.jobs.AgentProgressJournal.FILE_NAME)
+        val roles = listOf("thought", "system", "assistant", "unknown")
+        val events = roles.mapIndexed { index, role ->
+            """{"sequence":$index,"kind":"message","role":"$role","text":"PRIVATE_MESSAGE_$role","textOmitted":false,"contentSha256":"${"a".repeat(64)}","futureField":{"nested":"PRIVATE_UNKNOWN"}}"""
+        } + """{"sequence":4,"kind":"plan","entryCount":1,"entries":[{"idSha256":"${"b".repeat(64)}","status":"pending","text":"PRIVATE_PLAN"}]}""" +
+            """{"sequence":5,"kind":"tool","text":"PRIVATE_TOOL","path":"/PRIVATE_HOST_ROOT/input","inputTokens":9223372036854775807,"taskId":{"nested":"PRIVATE_NESTED_LABEL"}}"""
+        journal.writeText("""{"schemaVersion":1,"displayOnly":true,"nextSequence":6,"queueDropped":0,"historyDropped":0,"truncated":false,"futureRoot":"PRIVATE_ROOT","events":[${events.joinToString(",") }]}""")
+        val original = journal.readBytes()
+        val response = request(server, "GET", "/api/jobs/$id/events")
+        assertEquals(200, response.status)
+        val projected = Json.parseToJsonElement(response.body.decodeToString()).jsonObject
+        assertEquals("1", projected.getValue("presentationOmittedFields").toString())
+        val rows = projected.getValue("events") as kotlinx.serialization.json.JsonArray
+        assertEquals(6, rows.size)
+        rows.take(4).forEachIndexed { index, item ->
+            val event = item.jsonObject
+            assertEquals(index.toString(), event.getValue("sequence").toString())
+            assertEquals("true", event.getValue("textOmitted").toString())
+            assertEquals("2", event.getValue("presentationOmittedFields").toString())
+            assertEquals("\"${"a".repeat(64)}\"", event.getValue("contentSha256").toString())
+        }
+        assertEquals("1", rows[4].jsonObject.getValue("entryCount").toString())
+        assertEquals("9223372036854775807", rows[5].jsonObject.getValue("inputTokens").toString())
+        val page = request(server, "GET", "/jobs/$id")
+        assertEquals(200, page.status)
+        assertTrue(page.body.decodeToString().contains("does not certify public visibility"))
+        assertTrue(page.body.decodeToString().contains("Some event fields withheld"))
+        listOf(response, page).forEach { assertTrue(!it.body.decodeToString().contains("PRIVATE_")) }
+        assertContentEquals(original, journal.readBytes())
+    }
+
+    @Test
     fun `legacy progress distinguishes unavailable journals from a persisted empty journal`() = withServer { server, root ->
         val id = uploadedJobId(server)
         val record = root.resolve(id).resolve("job.json")
