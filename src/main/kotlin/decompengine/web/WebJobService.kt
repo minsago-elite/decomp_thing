@@ -229,6 +229,19 @@ class WebJobService(
         return context(jobId, runId)
     }
 
+    /** Shared fixed-path journal read for both HTTP adapters; absence is not empty history. */
+    @Synchronized
+    internal fun readProgressJournal(jobId: String, runId: String? = null): ByteArray {
+        val context = reportContext(jobId, runId)
+        return try {
+            readArtifact(jobId, "${context.artifactPrefix}/${decompengine.jobs.AgentProgressJournal.FILE_NAME}",
+                decompengine.jobs.AgentProgressJournal.MAXIMUM_READ_BYTES.toLong()).bytes
+        } catch (_: Exception) {
+            throw WebJobServiceException("PROGRESS_UNAVAILABLE",
+                "The retained progress journal is unavailable. Missing data does not establish an empty history.")
+        }
+    }
+
     @Synchronized
     fun resolveArtifact(jobId: String, relativePath: String): Path {
         requireInitializedRead()
