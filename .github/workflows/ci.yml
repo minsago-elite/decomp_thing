@@ -43,6 +43,10 @@ jobs:
         run: bash scripts/ci-prepare-oracle-ext4-scratch.sh
       - name: Prepare separate bounded ext4 bundled-analysis scratch
         run: bash scripts/ci-prepare-oracle-ext4-scratch.sh --bundled-ghidra
+      - name: Prepare separate bundled interruption-resume scratch
+        run: bash scripts/ci-prepare-oracle-ext4-scratch.sh --bundled-ghidra-resume
+      - name: Prepare separate bundled resume fresh-control scratch
+        run: bash scripts/ci-prepare-oracle-ext4-scratch.sh --bundled-ghidra-resume-control
       - name: Prepare executable root-owned application-bundled Ghidra
         run: bash scripts/ci-prepare-bundled-ghidra-runtime.sh
       - name: Run JVM and Kotlin checks
@@ -63,6 +67,12 @@ jobs:
       - name: Release bounded ext4 bundled-analysis fixture scratch
         if: always()
         run: bash scripts/ci-release-oracle-ext4-scratch.sh --bundled-ghidra
+      - name: Release bundled interruption-resume scratch
+        if: always()
+        run: bash scripts/ci-release-oracle-ext4-scratch.sh --bundled-ghidra-resume
+      - name: Release bundled resume fresh-control scratch
+        if: always()
+        run: bash scripts/ci-release-oracle-ext4-scratch.sh --bundled-ghidra-resume-control
       - uses: actions/upload-artifact@v7
         if: always()
         with:

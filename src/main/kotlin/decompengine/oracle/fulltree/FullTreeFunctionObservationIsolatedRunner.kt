@@ -1032,16 +1032,19 @@ internal object KotlinSystemdCgroupCommandLauncher {
         controlDirectoryName: String? = null,
         readOnlyControlDirectories: Map<String, LinuxFileIdentity> = emptyMap(),
         readOnlyStateDirectory: LinuxFileIdentity? = null,
+        operationDeadline: ContainedCommandOperationDeadline? = null,
+        readOnlyReportsDirectory: LinuxFileIdentity? = null,
     ): KotlinSystemdCgroupCommandExecution {
         val cleanup = ContainedCommandCleanup()
         val secret = ByteArray(32).also(SECURE_RANDOM::nextBytes)
         try {
+            operationDeadline?.requireCurrent()
             require(unitName.matches(PRODUCTION_KOTLIN_BOOT_UNIT_NAME) && nonce.matches(SHA256))
             require(deploymentClosureSha256.matches(SHA256))
             require(controlDirectoryName == null || validContainedControlName(controlDirectoryName)) {
                 "contained command control directory must have a canonical execution name"
             }
-            val retainedDirectories = ContainedCommandRetainedDirectories(controlDirectoryName, readOnlyControlDirectories, readOnlyStateDirectory)
+            val retainedDirectories = ContainedCommandRetainedDirectories(controlDirectoryName, readOnlyControlDirectories, readOnlyStateDirectory, readOnlyReportsDirectory)
             borrowed.withPinnedDescriptor(retainedDirectories::verify)
             val writableRoot = borrowed.path
             val controlPath = controlDirectoryName?.let(writableRoot::resolve) ?: writableRoot
@@ -1072,7 +1075,9 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 "writableRoot" to JsonPrimitive(writableRoot.toString()),
             )) + (if (retainedDirectories.controlsAreEmpty) emptyMap() else mapOf(
                 "readOnlyControlDirectories" to retainedDirectories.controlsToJson(),
-            )) + (retainedDirectories.stateToJson()?.let { mapOf("readOnlyStateDirectory" to it) } ?: emptyMap()))))
+            )) + (retainedDirectories.stateToJson()?.let { mapOf("readOnlyStateDirectory" to it) } ?: emptyMap()) +
+                (retainedDirectories.reportsToJson()?.let { mapOf("readOnlyReportsDirectory" to it) } ?: emptyMap()) +
+                (operationDeadline?.let { mapOf("operationWallDeadline" to it.policy) } ?: emptyMap()))))
             val runtime = AuthenticatedObservationRuntime.open(configuration)
             cleanup.runtime = runtime
             for (input in additionalInputs) {
@@ -1084,6 +1089,7 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 }
             }
             fun verifyInputs(label: String) {
+                operationDeadline?.requireCurrent()
                 borrowed.withPinnedDescriptor(retainedDirectories::verify)
                 runtime.verify(label)
                 additionalMounts.forEach { mount ->
@@ -1092,6 +1098,7 @@ internal object KotlinSystemdCgroupCommandLauncher {
                     }
                 }
                 cleanup.inputs.forEach { it.verifyUnchanged(label) }
+                operationDeadline?.requireCurrent()
             }
             val effectiveResources = IsolatedObservationResources.forContainedCommand(resources)
             val request = KotlinContainedCommandRequest(
@@ -1178,7 +1185,9 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 )
                 requirePrepared(true)
                 verifyInputs("before contained command START publication")
+                operationDeadline?.requireCurrent()
                 beforeStart(attachment)
+                operationDeadline?.requireCurrent()
                 verifyInputs("after contained command START authorization")
                 requirePrepared(true)
                 val finalBoot = readContainedCommandProtocol(runTree, KotlinContainedCommandProtocol.BOOT_FILE)
@@ -1193,15 +1202,19 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 require(MessageDigest.isEqual(attachment.canonicalBytes, repeated.canonicalBytes)) {
                     "contained command attachment changed across START authorization"
                 }
+                operationDeadline?.requireCurrent()
                 val started = System.nanoTime()
                 runTree.withPinnedDescriptor { root ->
+                    operationDeadline?.requireCurrent()
                     DescriptorBoundAtomicStateFile.publishNoReplace(
                         root, KotlinContainedCommandProtocol.START_FILE,
                         KotlinContainedCommandProtocol.start(secret, request, keeperPid),
                         KotlinContainedCommandProtocol.MAXIMUM_PROTOCOL_BYTES,
                     )
                 }
-                val outcomeBytes = unit.awaitContainedCommandOutcome(runTree, resources.wallClockMillis) {
+                val remainingWall = operationDeadline?.remainingMillis(resources.wallClockMillis) ?: resources.wallClockMillis
+                val outcomeBytes = unit.awaitContainedCommandOutcome(runTree, remainingWall) {
+                    operationDeadline?.requireCurrent()
                     interruption?.pollAndDeliver(request, secret, keeperPid) { token ->
                         verifyInputs("before contained command INTERRUPT delivery")
                         runTree.withPinnedDescriptor { root ->
@@ -1210,6 +1223,7 @@ internal object KotlinSystemdCgroupCommandLauncher {
                         }
                     }
                 }
+                operationDeadline?.requireCurrent()
                 val outcome = KotlinContainedCommandProtocol.requireOutcome(outcomeBytes, secret, request, keeperPid)
                 val interruptionAuthorization = if (interruption == null) {
                     outcome.requireSuccessful()
@@ -1250,7 +1264,8 @@ internal object KotlinSystemdCgroupCommandLauncher {
                     "controlDirectory" to JsonPrimitive(controlPath.toString()),
                     "controlDirectoryIdentity" to containedControlIdentityJson(checkNotNull(controlDirectoryName), controlIdentity),
                 ))
-                return KotlinSystemdCgroupCommandExecution(containedCommandRecord(withControl, "executionSha256"), controlIdentity)
+                val withDeadline = operationDeadline?.let { JsonObject(withControl + ("operationWallTime" to it.snapshot())) } ?: withControl
+                return KotlinSystemdCgroupCommandExecution(containedCommandRecord(withDeadline, "executionSha256"), controlIdentity)
             }
         } catch (failure: Throwable) {
             runCatching { cleanup.closeAndProveAbsent() }.exceptionOrNull()?.takeIf { it !== failure }?.let(failure::addSuppressed)

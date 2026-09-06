@@ -1160,6 +1160,12 @@ distributions {
 
 tasks.test {
     useJUnitPlatform()
+    if (providers.environmentVariable("DECOMP_REQUIRE_GCC_ENGINE_CLI").orNull == "true") {
+        // The real-engine CLI runs in this host JVM; this heap setting is not aggregate RSS qualification.
+        maxHeapSize = "8g"
+        outputs.upToDateWhen { false }
+        outputs.cacheIf("live GCC CLI qualification must execute") { false }
+    }
     dependsOn(stageOracleNativeLibraries)
     dependsOn(":ghidra-bridge:stageBundle")
     val testInstalledGhidra = providers.environmentVariable("RUN_REAL_GHIDRA").orNull == "true" ||

@@ -60,6 +60,49 @@ class DeterministicModulePlannerScaleTest {
         }
     }
 
+    @Test
+    fun `exact work ceiling preserves plan and accounting while one fewer unit rejects`() {
+        val model = sparseModel(functionCount = 512, globalCount = 256)
+        val baseline = DeterministicModulePlanner().planWithComplexity(model)
+        val bounded = DeterministicModulePlanner(maximumWorkUnits = baseline.complexity.sparseWorkUnits).planWithComplexity(model)
+        assertEquals(baseline.plan.toJson(), bounded.plan.toJson())
+        assertEquals(baseline.complexity, bounded.complexity)
+        assertFailsWith<IllegalArgumentException> {
+            DeterministicModulePlanner(maximumWorkUnits = baseline.complexity.sparseWorkUnits - 1).plan(model)
+        }
+    }
+
+    @Test
+    fun `work ceiling interrupts evidence traversal before later entries are consumed`() {
+        var visited = 0
+        val evidence = object : AbstractSet<String>() {
+            override val size = 1000
+            override fun iterator(): Iterator<String> = object : Iterator<String> {
+                private var index = 0
+                override fun hasNext() = index < size
+                override fun next(): String {
+                    check(index < size)
+                    visited++
+                    return "marker_${index++}"
+                }
+            }
+        }
+        val model = RecoveredProgramModel(inputSha256 = "budget-fixture", functions = listOf(
+            RecoveredFunction(id = "named", name = "module_entry", address = 0UL, prototype = "int module_entry(void)", strings = evidence),
+        ))
+        val twoEntities = model.copy(functions = model.functions + model.functions.single().copy(id = "second", address = 1UL))
+        assertFailsWith<IllegalArgumentException> {
+            DeterministicModulePlanner(maximumWorkUnits = 1).plan(twoEntities)
+        }
+        assertEquals(0, visited)
+        val failure = assertFailsWith<IllegalArgumentException> {
+            DeterministicModulePlanner(maximumWorkUnits = 2).plan(model)
+        }
+        assertTrue(failure.message.orEmpty().contains("during traversal"))
+        // One base entity, one permitted evidence visit, then rejection at the next charge.
+        assertEquals(2, visited)
+    }
+
     private fun sparseModel(functionCount: Int, globalCount: Int): RecoveredProgramModel {
         require(functionCount > 0 && functionCount % 2 == 0)
         val pairCount = functionCount / 2

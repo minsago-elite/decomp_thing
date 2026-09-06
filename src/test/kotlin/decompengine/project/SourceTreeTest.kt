@@ -27,8 +27,307 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
 
 class SourceTreeTest {
+    @Test
+    fun `explicit byte typedef is resolved by the compiler`() {
+        val project = createTempDirectory("source-defined-byte-type-")
+        val reconstructor = ModuleReconstructor {
+            val source = "/* fn_0000000000401000 */\ntypedef unsigned char byte;\nint parse_input(void) { byte value = 17; return value; }\n"
+            ReconstructedModule(source, "scripted", sha256(source.toByteArray()))
+        }
+        val manifest = SourceTreeGenerator.generate(oneModuleModel(), project, reconstructor = reconstructor)
+        assertTrue(manifest.unresolvedImplementationIds.isEmpty())
+    }
+
+    @Test
+    fun `decompiler-like words used as identifiers are accepted by the compiler gate`() {
+        for (name in listOf("byte", "longlong", "undefined", "undefined1", "undefined2", "undefined4", "undefined8")) {
+            val project = createTempDirectory("source-valid-identifier-")
+            val reconstructor = ModuleReconstructor {
+                val source = "/* fn_0000000000401000 */\nint parse_input(void) { int $name = 17; return $name; }\n"
+                ReconstructedModule(source, "scripted", sha256(source.toByteArray()))
+            }
+            val manifest = SourceTreeGenerator.generate(oneModuleModel(), project, reconstructor = reconstructor)
+            assertTrue(manifest.unresolvedImplementationIds.isEmpty(), name)
+            val checkpoint = Json.parseToJsonElement(project.resolve("reports/modules/parse.json").readText()).jsonObject
+            assertEquals("passed", checkpoint.getValue("compilation").jsonObject.getValue("outcome").jsonPrimitive.content)
+        }
+    }
+
+    @Test
+    fun `undeclared decompiler types still fail compilation and remain unresolved`() {
+        for (type in listOf("byte", "longlong", "undefined", "undefined1", "undefined2", "undefined4", "undefined8")) {
+            val project = createTempDirectory("source-undeclared-type-")
+            val reconstructor = ModuleReconstructor {
+                val source = "/* fn_0000000000401000 */\nint parse_input(void) { $type value = 17; return value; }\n"
+                ReconstructedModule(source, "scripted", sha256(source.toByteArray()))
+            }
+            val manifest = SourceTreeGenerator.generate(oneModuleModel(), project, reconstructor = reconstructor)
+            assertEquals(oneModuleModel().functions.map { it.id }, manifest.unresolvedImplementationIds, type)
+            val checkpoint = Json.parseToJsonElement(project.resolve("reports/modules/parse.json").readText()).jsonObject
+            assertEquals("false", checkpoint.getValue("accepted").jsonPrimitive.content)
+            assertEquals("failed", checkpoint.getValue("compilation").jsonObject.getValue("outcome").jsonPrimitive.content)
+        }
+    }
+
+    @Test
+    fun `global owners precede consumers and invalidate downstream interface caches`() {
+        val model = RecoveredProgramModel(inputSha256 = "input", functions = listOf(
+            RecoveredFunction("consumer", "consumer", 1u, "int consumer(void)", "int consumer(void) { return counter; }", referencedGlobals = setOf("counter")),
+            RecoveredFunction("root", "root", 2u, "int root(void)", "int root(void) { return consumer(); }", calls = setOf("consumer")),
+            RecoveredFunction("unrelated", "unrelated", 3u, "int unrelated(void)", "int unrelated(void) { return 0; }"),
+        ), globals = listOf(RecoveredGlobal("counter", "counter", 4u, "int", "1")))
+        val overrides = mapOf("consumer" to "consumer", "root" to "root", "unrelated" to "unrelated", "counter" to "zz_data")
+        val project = createTempDirectory("source-global-dependencies-")
+        val calls = mutableListOf<String>()
+        val reconstructor = ModuleReconstructor { request ->
+            calls += request.module.id
+            if (request.module.id == "consumer") assertTrue("include/modules/zz_data.h" in request.dependencyHeaders)
+            EvidenceModuleReconstructor(true).reconstruct(request)
+        }
+        val initial = SourceTreeGenerator.generate(model, project, reconstructor = reconstructor, overrides = overrides)
+        assertTrue(initial.unresolvedImplementationIds.isEmpty())
+        assertEquals(listOf("zz_data", "consumer", "root", "unrelated"), calls)
+        val unrelated = project.resolve("reports/modules/unrelated.json").readText()
+        calls.clear()
+        val changed = model.copy(globals = model.globals.map { it.copy(type = "long") })
+        val revised = SourceTreeGenerator.generate(changed, project, reconstructor = reconstructor, overrides = overrides)
+        assertTrue(revised.unresolvedImplementationIds.isEmpty())
+        assertEquals(listOf("zz_data", "consumer", "root"), calls)
+        assertEquals(unrelated, project.resolve("reports/modules/unrelated.json").readText())
+        assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+        calls.clear()
+        SourceTreeGenerator.generate(changed, project, reconstructor = reconstructor, overrides = overrides)
+        assertTrue(calls.isEmpty())
+    }
+
+    @Test
+    fun `interface changes invalidate transitive consumers and resume preserves completed revisions`() {
+        val functions = listOf(
+            RecoveredFunction("leaf", "leaf", 1u, "int leaf(void)"),
+            RecoveredFunction("middle", "middle", 2u, "int middle(void)", calls = setOf("leaf")),
+            RecoveredFunction("root", "root", 3u, "int root(void)", calls = setOf("middle")),
+            RecoveredFunction("unrelated", "unrelated", 4u, "int unrelated(void)"),
+        )
+        val model = RecoveredProgramModel(inputSha256 = sha256("authored dependency resume fixture".toByteArray()), functions = functions)
+        val overrides = functions.associate { it.id to it.id }
+        val project = createTempDirectory("source-transitive-resume-")
+        val calls = mutableListOf<String>()
+        var interruptRoot = false
+        val reconstructor = object : ModuleReconstructor {
+            override fun cacheIdentity() = "transitive-resume-test"
+            override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule {
+                calls += request.module.id
+                if (interruptRoot && request.module.id == "root") {
+                    throw ModuleReconstructionInterruptedException("root", AgentStopReason.CANCELLED, "test checkpoint interruption")
+                }
+                val function = request.model.functions.single { it.id == request.module.functionIds.single() }
+                val source = buildString {
+                    append("#include \"modules/${request.module.id}.h\"\n")
+                    request.dependencyHeaders.keys.sorted().forEach { header ->
+                        append("#include \"${header.removePrefix("include/")}\"\n")
+                    }
+                    val result = function.calls.sorted().joinToString(" + ") { callee ->
+                        request.model.functions.single { it.id == callee }.name + "()"
+                    }.ifEmpty { "1" }
+                    append("/* ${function.id} */\n${function.prototype} { return $result; }\n")
+                }
+                return ReconstructedModule(source, "scripted", sha256(source.toByteArray()))
+            }
+        }
+        SourceTreeGenerator.generate(model, project, reconstructor = reconstructor, overrides = overrides)
+        assertEquals(setOf("leaf", "middle", "root", "unrelated"), calls.toSet())
+        assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+        val initialAudit = ArchivalProjectAuditor.audit(project)
+        assertTrue(initialAudit.moduleCompilationEvidenceProblems.isEmpty())
+        val unrelatedCheckpoint = project.resolve("reports/modules/unrelated.json").readText()
+        val changed = model.copy(functions = functions.map { if (it.id == "leaf") it.copy(prototype = "long leaf(void)") else it })
+        calls.clear()
+        interruptRoot = true
+        assertFailsWith<ModuleReconstructionInterruptedException> {
+            SourceTreeGenerator.generate(changed, project, reconstructor = reconstructor, overrides = overrides)
+        }
+        assertEquals(listOf("leaf", "middle", "root"), calls)
+        val completed = listOf("leaf", "middle").associateWith { project.resolve("reports/modules/$it.json").readText() }
+        calls.clear()
+        interruptRoot = false
+        val manifest = SourceTreeGenerator.generate(changed, project, reconstructor = reconstructor, overrides = overrides)
+        assertEquals(listOf("root"), calls)
+        assertTrue(manifest.unresolvedImplementationIds.isEmpty())
+        completed.forEach { (id, bytes) -> assertEquals(bytes, project.resolve("reports/modules/$id.json").readText()) }
+        assertEquals(unrelatedCheckpoint, project.resolve("reports/modules/unrelated.json").readText())
+        val confidence = Json.parseToJsonElement(project.resolve("reports/confidence.json").readText()).jsonObject
+        confidence.getValue("modules").jsonArray.forEach { element ->
+            val revision = element.jsonObject.getValue("revisionEvidence").jsonObject
+            for ((pathField, hashField) in listOf("sourcePath" to "sourceSha256", "checkpointPath" to "checkpointSha256")) {
+                val bytes = project.resolve(revision.getValue(pathField).jsonPrimitive.content).readText().toByteArray()
+                assertEquals(sha256(bytes), revision.getValue(hashField).jsonPrimitive.content)
+            }
+        }
+        assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+        val plan = Json.parseToJsonElement(project.resolve("reports/module_plan.json").readText()).jsonObject
+        val expectedRevisions = plan.getValue("modules").jsonArray.associate { element ->
+            val module = element.jsonObject
+            module.getValue("id").jsonPrimitive.content to
+                sha256(project.resolve(module.getValue("sourcePath").jsonPrimitive.content).readBytes())
+        }
+        assertNotEquals(initialAudit.moduleRevisionSha256.getValue("leaf"), expectedRevisions.getValue("leaf"))
+        for (id in listOf("middle", "root", "unrelated")) {
+            assertEquals(initialAudit.moduleRevisionSha256.getValue(id), expectedRevisions.getValue(id))
+        }
+        fun verifyAudit(directory: Path) {
+            val audit = ArchivalProjectAuditor.audit(directory)
+            assertTrue(audit.provenanceComplete)
+            assertTrue(audit.moduleCompilationEvidenceProblems.isEmpty())
+            assertEquals(expectedRevisions, audit.moduleRevisionSha256)
+            assertTrue(audit.unresolvedEntityIds.isEmpty())
+            assertNull(audit.behaviorMatched)
+            assertTrue("no-behavior-evidence" in audit.behaviorEvidenceProblems)
+            val document = Json.parseToJsonElement(audit.toJson()).jsonObject
+            assertEquals("not-observed", document.getValue("moduleExecutionCoverage").jsonPrimitive.content)
+            assertTrue(document.getValue("moduleBehaviorEvidence").jsonArray.isEmpty())
+        }
+        verifyAudit(project)
+        val archive = project.parent.resolve(project.fileName.toString() + ".zip")
+        ArchivalPackager.create(project, archive)
+        val extracted = project.parent.resolve(project.fileName.toString() + "-extracted")
+        ArchivalBundleVerifier.extractAndVerify(archive, extracted)
+        assertEquals(0, MakeProjectBuilder.build(extracted).returnCode)
+        verifyAudit(extracted)
+    }
+
+    @Test
+    fun `cyclic interface dependencies invalidate together and stabilize on resume`() {
+        val functions = listOf(
+            RecoveredFunction("left", "left", 1u, "int left(void)", calls = setOf("right")),
+            RecoveredFunction("right", "right", 2u, "int right(void)", calls = setOf("left")),
+            RecoveredFunction("unrelated", "unrelated", 3u, "int unrelated(void)"),
+        )
+        val model = RecoveredProgramModel(inputSha256 = "input", functions = functions)
+        val overrides = functions.associate { it.id to it.id }
+        val project = createTempDirectory("source-cycle-interfaces-")
+        val calls = mutableListOf<String>()
+        val reconstructor = ModuleReconstructor { request ->
+            calls += request.module.id
+            validReconstructor().reconstruct(request)
+        }
+        SourceTreeGenerator.generate(model, project, reconstructor = reconstructor, overrides = overrides)
+        val changed = model.copy(functions = functions.map {
+            if (it.id == "left") it.copy(name = "left_updated", prototype = "int left_updated(void)") else it
+        })
+        calls.clear()
+        SourceTreeGenerator.generate(changed, project, reconstructor = reconstructor, overrides = overrides)
+        assertEquals(setOf("left", "right"), calls.toSet())
+        assertEquals(2, calls.size)
+        calls.clear()
+        SourceTreeGenerator.generate(changed, project, reconstructor = reconstructor, overrides = overrides)
+        assertTrue(calls.isEmpty())
+    }
+
+    @Test
+    fun `accepted implementations retain unresolved recovery evidence across resume`() {
+        val recovered = model().let { original -> original.copy(
+            functions = original.functions.map { it.copy(status = RecoveryStatus.PARTIAL) },
+        ) }
+        val project = createTempDirectory("source-confidence-accepted-")
+        var calls = 0
+        val reconstructor = validReconstructor { calls++ }
+        val manifest = SourceTreeGenerator.generate(recovered, project, reconstructor = reconstructor)
+        assertTrue(manifest.unresolvedImplementationIds.isEmpty())
+        val confidence = project.resolve("reports/confidence.json").readText()
+        val report = Json.parseToJsonElement(confidence).jsonObject
+        assertTrue(report.getValue("unresolvedImplementationIds").jsonArray.isEmpty())
+        val recoveryIds = report.getValue("unresolvedRecoveryEntityIds").jsonArray.map { it.jsonPrimitive.content }
+        assertTrue(recoveryIds.containsAll(recovered.functions.map { it.id }))
+        assertEquals(recoveryIds, report.getValue("unresolvedEntityIds").jsonArray.map { it.jsonPrimitive.content })
+        assertTrue(report.getValue("modules").jsonArray.all {
+            it.jsonObject.getValue("unresolvedImplementationIds").jsonArray.isEmpty()
+        })
+        report.getValue("modules").jsonArray.forEach { entry ->
+            val revision = entry.jsonObject.getValue("revisionEvidence").jsonObject
+            val checkpointPath = revision.getValue("checkpointPath").jsonPrimitive.content
+            val checkpointText = project.resolve(checkpointPath).readText()
+            val checkpoint = Json.parseToJsonElement(checkpointText).jsonObject
+            assertEquals(sha256(checkpointText.toByteArray()), revision.getValue("checkpointSha256").jsonPrimitive.content)
+            assertEquals(checkpoint.getValue("fingerprint"), revision.getValue("inputFingerprint"))
+            val source = project.resolve(revision.getValue("sourcePath").jsonPrimitive.content).readText()
+            assertEquals(sha256(source.toByteArray()), revision.getValue("sourceSha256").jsonPrimitive.content)
+            assertEquals("true", revision.getValue("acceptedImplementation").jsonPrimitive.content)
+            val compilation = revision.getValue("compilation").jsonObject
+            assertEquals(checkpoint.getValue("compilation"), compilation)
+            assertEquals(revision.getValue("sourceSha256"), compilation.getValue("sourceSha256"))
+            assertEquals("passed", compilation.getValue("outcome").jsonPrimitive.content)
+            assertEquals("0", compilation.getValue("returnCode").jsonPrimitive.content)
+            val behavior = revision.getValue("behavior").jsonObject
+            assertEquals("unknown", behavior.getValue("status").jsonPrimitive.content)
+            assertEquals(JsonNull, behavior.getValue("coverage"))
+            assertEquals(JsonNull, behavior.getValue("outputAgreement"))
+            assertEquals("unknown", behavior.getValue("unobservedBehavior").jsonPrimitive.content)
+        }
+        val initialCalls = calls
+        assertTrue(initialCalls > 0)
+        SourceTreeGenerator.generate(recovered, project, reconstructor = reconstructor)
+        assertEquals(initialCalls, calls)
+        assertEquals(confidence, project.resolve("reports/confidence.json").readText())
+    }
+
+    @Test
+    fun `fully recovered entities still report unresolved implementations in confidence`() {
+        val recovered = model().let { original -> original.copy(
+            functions = original.functions.map { it.copy(status = RecoveryStatus.RECOVERED) },
+            globals = original.globals.map { it.copy(status = RecoveryStatus.RECOVERED) },
+            types = original.types.map { it.copy(status = RecoveryStatus.RECOVERED) },
+        ) }
+        val project = createTempDirectory("source-confidence-implementation-")
+        val manifest = SourceTreeGenerator.generate(recovered, project)
+        assertTrue(manifest.unresolvedImplementationIds.isNotEmpty())
+        val report = Json.parseToJsonElement(project.resolve("reports/confidence.json").readText()).jsonObject
+        assertEquals("2", report.getValue("schemaVersion").jsonPrimitive.content)
+        assertEquals("1.0000", report.getValue("projectScore").jsonPrimitive.content)
+        val interpretation = report.getValue("scoreInterpretation").jsonObject
+        assertEquals("structural-recovery", interpretation.getValue("kind").jsonPrimitive.content)
+        assertEquals("uncalibrated", interpretation.getValue("calibrationStatus").jsonPrimitive.content)
+        assertEquals(JsonNull, interpretation.getValue("calibratedProbability"))
+        assertEquals(JsonNull, interpretation.getValue("empiricalSampleCount"))
+        assertTrue(report.getValue("unresolvedRecoveryEntityIds").jsonArray.isEmpty())
+        val implementationIds = report.getValue("unresolvedImplementationIds").jsonArray.map { it.jsonPrimitive.content }
+        assertEquals(manifest.unresolvedImplementationIds, implementationIds)
+        assertEquals(implementationIds, report.getValue("unresolvedEntityIds").jsonArray.map { it.jsonPrimitive.content })
+        val perModule = report.getValue("modules").jsonArray.flatMap {
+            it.jsonObject.getValue("unresolvedImplementationIds").jsonArray.map { value -> value.jsonPrimitive.content }
+        }
+        assertEquals(implementationIds, perModule.sorted())
+        assertTrue(report.getValue("scoreMeaning").jsonPrimitive.content.contains("not implementation acceptance"))
+        report.getValue("modules").jsonArray.forEach { entry ->
+            val revision = entry.jsonObject.getValue("revisionEvidence").jsonObject
+            assertEquals("false", revision.getValue("acceptedImplementation").jsonPrimitive.content)
+            assertEquals(JsonNull, revision.getValue("compilation"))
+            assertEquals("unknown", revision.getValue("behavior").jsonObject.getValue("status").jsonPrimitive.content)
+        }
+    }
+
+    @Test
+    fun `confidence escapes entity identifiers and separates overlapping unresolved populations`() {
+        val id = "quoted\"entity"
+        val recovered = RecoveredProgramModel(inputSha256 = "input", functions = listOf(
+            RecoveredFunction(id, "entry", 1u, "int entry(void)", status = RecoveryStatus.FAILED)))
+        val project = createTempDirectory("source-confidence-identifiers-")
+        val manifest = SourceTreeGenerator.generate(recovered, project)
+        val report = Json.parseToJsonElement(project.resolve("reports/confidence.json").readText()).jsonObject
+        assertEquals(listOf(id), report.getValue("unresolvedRecoveryEntityIds").jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(manifest.unresolvedImplementationIds, report.getValue("unresolvedImplementationIds").jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(listOf(id), report.getValue("unresolvedEntityIds").jsonArray.map { it.jsonPrimitive.content })
+    }
+
     @Test
     fun `agent cache identity binds the complete factory provenance without exposing it`() {
         val harness = AgentHarness { _, _ -> AgentExecutionResult(AgentStopReason.NO_CHANGES) }
@@ -312,6 +611,11 @@ class SourceTreeTest {
         assertTrue(checkpoint.contains("module-compilation-failed"))
         assertTrue(checkpoint.contains("\"outcome\":\"failed\""))
         assertTrue(checkpoint.contains("\"accepted\": false"))
+        val confidence = Json.parseToJsonElement(project.resolve("reports/confidence.json").readText()).jsonObject
+        val revision = confidence.getValue("modules").jsonArray.single().jsonObject.getValue("revisionEvidence").jsonObject
+        assertEquals("false", revision.getValue("acceptedImplementation").jsonPrimitive.content)
+        assertEquals(Json.parseToJsonElement(checkpoint).jsonObject.getValue("compilation"), revision.getValue("compilation"))
+        assertEquals("failed", revision.getValue("compilation").jsonObject.getValue("outcome").jsonPrimitive.content)
     }
 
     @Test
@@ -360,6 +664,44 @@ class SourceTreeTest {
 
         assertEquals(before, source.readText())
         assertTrue(project.resolve("reports/modules/parse.attempt.json").readText().contains("\"status\": \"interrupted\""))
+    }
+
+    @Test
+    fun `contradictory accepted checkpoints are neither reused nor offered as rollback baselines`() {
+        for (change in listOf("command", "owners", "duplicate", "status", "issues", "schema")) {
+            val project = createTempDirectory("source-checkpoint-acceptance-")
+            val input = oneModuleModel()
+            SourceTreeGenerator.generate(input, project, reconstructor = validReconstructor())
+            val path = project.resolve("reports/modules/parse.json")
+            val checkpoint = Json.parseToJsonElement(path.readText()).jsonObject
+            val statuses = checkpoint.getValue("entityStatuses").jsonArray
+            val changed = when (change) {
+                "command" -> JsonObject(checkpoint + ("compilation" to JsonObject(
+                    checkpoint.getValue("compilation").jsonObject + ("command" to JsonArray(listOf(JsonPrimitive("other-compiler")))))))
+                "owners" -> JsonObject(checkpoint + ("entityStatuses" to JsonArray(emptyList())))
+                "duplicate" -> JsonObject(checkpoint + ("entityStatuses" to JsonArray(statuses + statuses.first())))
+                "status" -> JsonObject(checkpoint + ("entityStatuses" to JsonArray(statuses.map {
+                    JsonObject(it.jsonObject + ("status" to JsonPrimitive("unresolved")))
+                })))
+                "issues" -> JsonObject(checkpoint + ("issues" to JsonArray(listOf(JsonObject(mapOf(
+                    "code" to JsonPrimitive("pending"), "message" to JsonPrimitive("pending"),
+                    "entityIds" to JsonArray(emptyList()),
+                ))))))
+                else -> JsonObject(checkpoint + ("schemaVersion" to JsonPrimitive(4)))
+            }
+            path.writeText(changed.toString())
+            var calls = 0
+            val delegate = validReconstructor()
+            val reconstructor = ModuleReconstructor { request ->
+                calls++
+                assertNull(request.acceptedSourceSha256, change)
+                delegate.reconstruct(request)
+            }
+            SourceTreeGenerator.generate(input, project, reconstructor = reconstructor)
+            assertEquals(1, calls, change)
+            SourceTreeGenerator.generate(input, project, reconstructor = reconstructor)
+            assertEquals(1, calls, "repaired checkpoint must resume: $change")
+        }
     }
 
     @Test
@@ -585,7 +927,7 @@ class SourceTreeTest {
     }
 
     @Test
-    fun `partial agent modules and undefined decompiler types are never accepted`() {
+    fun `partial agent modules remain unresolved before compiler validation`() {
         val project = createTempDirectory("source-tree-partial-agent-")
         val functions = listOf(
             model().functions[0].copy(name = "parse_first", calls = emptySet()),
@@ -604,7 +946,6 @@ class SourceTreeTest {
 
         assertEquals(functions.map { it.id }.sorted(), manifest.unresolvedImplementationIds.sorted())
         val checkpoint = project.resolve("reports/modules/parse.json").readText()
-        assertTrue(checkpoint.contains("undefined-decompiler-type"))
         assertTrue(checkpoint.contains("missing-function-definition"))
         assertTrue(checkpoint.contains("fn_0000000000401020"))
     }

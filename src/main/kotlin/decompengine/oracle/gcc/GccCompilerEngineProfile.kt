@@ -180,6 +180,14 @@ data class GccCompilerEngineSuite(
 
 /** Kotlin/JVM authority for the checked GCC cc1/lto1 benchmark control plane. */
 object GccCompilerEngineProfiles {
+    fun load(path: Path): GccCompilerEngineSuite = GccCompilerEngineProfileLoader { path, maximum, _ ->
+        OracleArtifacts.read(path, OracleArtifactLimits(maximum))
+    }.load(path)
+}
+
+internal class GccCompilerEngineProfileLoader(
+    private val readArtifact: (Path, Int, String) -> decompengine.oracle.core.OracleArtifactSnapshot,
+) {
     fun load(path: Path): GccCompilerEngineSuite {
         val profileArtifact = readJsonArtifact(path, MAXIMUM_PROFILE_BYTES, "compiler-engine profile", "gcc/compiler-engines")
         val profile = profileArtifact.document
@@ -273,7 +281,7 @@ object GccCompilerEngineProfiles {
 
     private fun authenticateAnalysisToolchain(analysis: GccCompilerEngineAnalysisToolchain) {
         if (
-            analysis.exporterId != "decompengine-ghidra-program-model" || analysis.exporterVersion != 9 ||
+            analysis.exporterId != "decompengine-ghidra-program-model" || analysis.exporterVersion != 10 ||
             analysis.exporterMode != "planning" ||
             analysis.plannerId != "deterministic-module-planner" || analysis.plannerVersion != 1
         ) {
@@ -488,7 +496,7 @@ object GccCompilerEngineProfiles {
         requireDigest(expectedSha256, "$label binding")
         val path = resolveBaseName(root, relative, label)
         val snapshot = try {
-            OracleArtifacts.read(path, OracleArtifactLimits(maximumBytes))
+            readArtifact(path, maximumBytes, label)
         } catch (failure: Exception) {
             throw GccCompilerEngineProfileException("cannot read authenticated $label", failure)
         }
@@ -499,7 +507,7 @@ object GccCompilerEngineProfiles {
     private fun readJsonArtifact(path: Path, maximumBytes: Int, label: String, schemaName: String): JsonArtifact {
         val normalized = path.toAbsolutePath().normalize()
         val snapshot = try {
-            OracleArtifacts.read(normalized, OracleArtifactLimits(maximumBytes))
+            readArtifact(normalized, maximumBytes, label)
         } catch (failure: Exception) {
             throw GccCompilerEngineProfileException("cannot read authenticated $label", failure)
         }
@@ -581,13 +589,15 @@ object GccCompilerEngineProfiles {
 
     private data class RawArtifact(val path: Path, val bytes: ByteArray, val sha256: String)
 
-    private const val MAXIMUM_PROFILE_BYTES = 1024 * 1024
-    private const val MAXIMUM_CONTROL_BYTES = 32 * 1024 * 1024
-    private const val MAXIMUM_MANIFEST_BYTES = 32 * 1024 * 1024
-    private const val MAXIMUM_DOCKERFILE_BYTES = 4 * 1024 * 1024
-    private const val MAXIMUM_EXPORTER_BYTES = 1024 * 1024
-    private const val MAXIMUM_ENGINE_ARTIFACT_BYTES = 1024L * 1024 * 1024
-    private val SHA256 = Regex("[0-9a-f]{64}")
+    private companion object {
+        const val MAXIMUM_PROFILE_BYTES = 1024 * 1024
+        private const val MAXIMUM_CONTROL_BYTES = 32 * 1024 * 1024
+        private const val MAXIMUM_MANIFEST_BYTES = 32 * 1024 * 1024
+        private const val MAXIMUM_DOCKERFILE_BYTES = 4 * 1024 * 1024
+        private const val MAXIMUM_EXPORTER_BYTES = 1024 * 1024
+        private const val MAXIMUM_ENGINE_ARTIFACT_BYTES = 1024L * 1024 * 1024
+        val SHA256 = Regex("[0-9a-f]{64}")
+    }
 }
 
 internal fun authenticateLargeArtifact(

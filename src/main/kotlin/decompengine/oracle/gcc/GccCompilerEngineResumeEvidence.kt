@@ -624,7 +624,7 @@ private fun verifyAssembledModel(
     requireSha256(inputSha256, "assembled program-model input")
     val verifier = ExactByteVerifier(actual, "completed program model", limits.assembledModelBytes)
     verifier.accept(
-        "{\n  \"schemaVersion\": 1,\n  \"inputSha256\": \"$inputSha256\",\n  \"functions\": [\n",
+        "{\n  \"schemaVersion\": 2,\n  \"inputSha256\": \"$inputSha256\",\n  \"functions\": [\n",
     )
     verifier.acceptRecordArray(functions.map { it.bytes })
     verifier.accept("  ],\n  \"globals\": [\n")
@@ -747,6 +747,12 @@ internal class GccResumeEquivalenceAssessment internal constructor(
     val modulePlanSha256: String,
 )
 
+/** Diagnostic derived progress; never a replacement for the captured exporter progress file. */
+internal class GccStoppedCheckpointPrefix(val assessment: GccInterruptedPrefixAssessment, effectiveProgress: ByteArray) {
+    private val progress = effectiveProgress.copyOf()
+    val effectiveProgress: ByteArray get() = progress.copyOf()
+}
+
 private class ValidatedInterruptedPrefix(
     val state: ParsedExporterState,
     val progress: ParsedExportProgress,
@@ -766,14 +772,14 @@ private fun validateInterruptedPrefix(
     val state = parseExporterState(run.state, limits)
     val progress = parseExportProgress(state, run.progress, limits)
     if (progress.phase != "planning" || progress.completed < PLANNING_BATCH_FUNCTIONS ||
-        progress.completed >= progress.total || progress.reused != 0L
+        progress.completed > progress.total || progress.reused != 0L
     ) {
         resumeValidationFailure(
-            "interrupted prefix must be an incomplete planning leg with at least one full checkpoint and no reuse",
+            "interrupted prefix must be a planning leg with at least one full checkpoint and no reuse",
         )
     }
-    val observedBatchCount = progress.completed / PLANNING_BATCH_FUNCTIONS
-    if (run.batches.size.toLong() != observedBatchCount || observedBatchCount >= state.planningBatchCount) {
+    val observedBatchCount = (progress.completed + PLANNING_BATCH_FUNCTIONS - 1) / PLANNING_BATCH_FUNCTIONS
+    if (run.batches.size.toLong() != observedBatchCount || observedBatchCount > state.planningBatchCount) {
         resumeValidationFailure("interrupted prefix batch count differs from its completed position")
     }
 
@@ -788,8 +794,8 @@ private fun validateInterruptedPrefix(
     val batches = ArrayList<ParsedPlanningBatch>(run.batches.size)
     run.batches.forEach { captured ->
         val batch = parsePlanningBatch(state, captured, limits)
-        if (batch.startIndex != nextStart || batch.endExclusive - batch.startIndex != PLANNING_BATCH_FUNCTIONS) {
-            resumeValidationFailure("interrupted planning batches are not an exact contiguous full-checkpoint prefix")
+        if (batch.startIndex != nextStart || batch.endExclusive != minOf(batch.startIndex + PLANNING_BATCH_FUNCTIONS, state.functionCount)) {
+            resumeValidationFailure("interrupted planning batches are not an exact contiguous checkpoint prefix")
         }
         nextStart = batch.endExclusive
         if (inventorySha256 != null && inventorySha256 != batch.inventorySha256) {
@@ -814,6 +820,18 @@ private fun validateInterruptedPrefix(
         exactAdd("interrupted-prefix progress counts", partial, failed) != progress.completed
     ) {
         resumeValidationFailure("interrupted progress differs from the exact observed planning prefix")
+    }
+    if (progress.completed == state.functionCount) {
+        val functions = batches.flatMap { batch ->
+            batch.functionIds.zip(batch.functions.records).map { (id, record) -> BoundRecord(id, record) }
+        }
+        if (inventorySha256 != inventorySha256(functions.map { it.id }) ||
+            batchCommitmentSha256(batches, run.batches) != state.batchCommitmentSha256
+        ) resumeValidationFailure("terminal planning prefix commitments are not reproducible")
+        val semantic = semanticFingerprint(functions, failures, globals, types)
+        if (semantic.canonicalBytes != state.canonicalBytes || semantic.sha256 != state.semanticSha256) {
+            resumeValidationFailure("terminal planning prefix semantic fingerprint is not reproducible")
+        }
     }
     val declaredInventory = inventorySha256
         ?: resumeValidationFailure("interrupted prefix has no inventory binding")
@@ -1023,6 +1041,59 @@ internal object GccCompilerEngineResumeByteValidator {
         limits,
     ).assessment
 
+    /** Validates a model published before worker absence, retaining planning progress only as a diagnostic. */
+    fun assessStoppedPublishedModel(
+        rawState: ByteArray,
+        rawProgress: ByteArray,
+        rawBatches: List<GccPlanningBatchBytes>,
+        rawProgramModel: ByteArray,
+        limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
+    ): GccStoppedCheckpointPrefix {
+        val run = captureRun(rawState, rawProgress, rawBatches, rawProgramModel, limits)
+        val state = parseExporterState(run.state, limits)
+        val observed = parseExportProgress(state, run.progress, limits)
+        if (observed.completed != state.functionCount || observed.reused != 0L) {
+            resumeValidationFailure("stopped published model requires all fresh checkpoints and published planning progress")
+        }
+        val complete = renderExportProgress(observed.copy(phase = "complete")).toByteArray(StandardCharsets.UTF_8)
+        validateCompletedRun(CapturedRun(run.state, complete, run.batches, run.programModel), limits)
+        val planning = renderExportProgress(observed.copy(phase = "planning")).toByteArray(StandardCharsets.UTF_8)
+        val prefix = validateInterruptedPrefix(CapturedInterruptedPrefix(run.state, planning, run.batches), limits)
+        return GccStoppedCheckpointPrefix(prefix.assessment, planning)
+    }
+
+    /** Derives at most one committed batch beyond the separately validated observed progress. */
+    fun assessStoppedCheckpointPrefix(
+        rawState: ByteArray,
+        rawProgress: ByteArray,
+        rawBatches: List<GccPlanningBatchBytes>,
+        limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
+    ): GccStoppedCheckpointPrefix {
+        val run = captureInterruptedPrefix(rawState, rawProgress, rawBatches, limits)
+        val state = parseExporterState(run.state, limits)
+        val observed = parseExportProgress(state, run.progress, limits)
+        val count = (observed.completed + PLANNING_BATCH_FUNCTIONS - 1) / PLANNING_BATCH_FUNCTIONS
+        if (run.batches.size.toLong() == count) {
+            return GccStoppedCheckpointPrefix(validateInterruptedPrefix(run, limits).assessment, run.progress)
+        }
+        if (run.batches.size.toLong() != count + 1 || count < 1) {
+            resumeValidationFailure("stopped checkpoint prefix may advance by at most one batch")
+        }
+        validateInterruptedPrefix(CapturedInterruptedPrefix(run.state, run.progress, run.batches.take(count.toInt())), limits)
+        val next = parsePlanningBatch(state, run.batches.last(), limits)
+        if (next.startIndex != observed.completed || next.endExclusive != minOf(observed.completed + PLANNING_BATCH_FUNCTIONS, observed.total) ||
+            observed.completed >= observed.total) {
+            resumeValidationFailure("advanced stopped checkpoint must be the next complete batch")
+        }
+        val effective = renderExportProgress(observed.copy(
+            completed = next.endExclusive,
+            partial = exactAdd("stopped partial count", observed.partial, next.partial),
+            failed = exactAdd("stopped failed count", observed.failed, next.failed),
+        )).toByteArray(StandardCharsets.UTF_8)
+        val assessment = validateInterruptedPrefix(CapturedInterruptedPrefix(run.state, effective, run.batches), limits).assessment
+        return GccStoppedCheckpointPrefix(assessment, effective)
+    }
+
     @Suppress("LongParameterList")
     fun assessResumeEquivalence(
         rawInterruptedState: ByteArray,
@@ -1143,8 +1214,11 @@ private fun parseFunctionFragment(
     val failedIds = ArrayList<String>()
     records.forEachIndexed { index, record ->
         val root = record.document
+        if (root.stringValue("recoveryAssessment", "extracted record") != "unassessed") {
+            resumeValidationFailure("extracted record cannot supply a scored recovery assessment")
+        }
         root.requireExactKeys(
-            setOf("id", "name", "address", "prototype", "status", "calls", "referencedGlobals", "strings", "decompiledC"),
+            setOf("id", "name", "address", "prototype", "extractionStatus", "recoveryAssessment", "calls", "referencedGlobals", "strings", "decompiledC"),
             "function record",
         )
         val id = root.stringValue("id", "function record")
@@ -1153,7 +1227,7 @@ private fun parseFunctionFragment(
         val address = root.stringValue("address", "function record")
         requireAddressIdentity(address, id, "fn_", "function")
         val prototype = root.recordString("prototype", "function prototype", MAXIMUM_PLANNING_BATCH_FRAGMENT_BYTES)
-        val status = root.stringValue("status", "function record")
+        val status = root.stringValue("extractionStatus", "function record")
         when (status) {
             "recovered" -> resumeValidationFailure("planning function fragment contains a recovered record")
             "partial" -> partial++
@@ -1202,7 +1276,10 @@ private fun parseGlobalFragment(bytes: ByteArray, expectedIds: List<String>): Pa
     val ids = ArrayList<String>()
     records.forEachIndexed { index, record ->
         val root = record.document
-        root.requireExactKeys(setOf("id", "name", "address", "type", "initializer", "status"), "global record")
+        if (root.stringValue("recoveryAssessment", "extracted record") != "unassessed") {
+            resumeValidationFailure("extracted record cannot supply a scored recovery assessment")
+        }
+        root.requireExactKeys(setOf("id", "name", "address", "type", "initializer", "extractionStatus", "recoveryAssessment"), "global record")
         val id = root.stringValue("id", "global record")
         if (!id.matches(GLOBAL_ID)) resumeValidationFailure("global record has an invalid identity")
         if (id != expectedIds[index]) resumeValidationFailure("global fragment embedded identity differs from checkpoint")
@@ -1221,7 +1298,7 @@ private fun parseGlobalFragment(bytes: ByteArray, expectedIds: List<String>): Pa
         if (initializer != null && initializer.toByteArray(StandardCharsets.UTF_8).size > MAXIMUM_PLANNING_EVIDENCE_RECORD_BYTES) {
             resumeValidationFailure("global initializer exceeds its record bound")
         }
-        if (root.stringValue("status", "global record") != "recovered") {
+        if (root.stringValue("extractionStatus", "global record") != "recovered") {
             resumeValidationFailure("global record status is not recovered")
         }
         requireExactBytes(record.bytes, renderGlobalRecord(id, name, address, type, initializer), "global record")
@@ -1243,7 +1320,10 @@ private fun parseTypeFragment(bytes: ByteArray, expectedIds: List<String>): Pars
     val ids = ArrayList<String>()
     records.forEachIndexed { index, record ->
         val root = record.document
-        root.requireExactKeys(setOf("id", "declaration", "sourceAddress", "status"), "type record")
+        if (root.stringValue("recoveryAssessment", "extracted record") != "unassessed") {
+            resumeValidationFailure("extracted record cannot supply a scored recovery assessment")
+        }
+        root.requireExactKeys(setOf("id", "declaration", "sourceAddress", "extractionStatus", "recoveryAssessment"), "type record")
         val id = root.stringValue("id", "type record")
         if (!id.matches(TYPE_ID)) resumeValidationFailure("type record has an invalid identity")
         if (id != expectedIds[index]) resumeValidationFailure("type fragment embedded identity differs from checkpoint")
@@ -1254,7 +1334,7 @@ private fun parseTypeFragment(bytes: ByteArray, expectedIds: List<String>): Pars
         )
         val sourceAddress = root.stringValue("sourceAddress", "type record")
         requireHexAddress(sourceAddress, "type source address")
-        if (root.stringValue("status", "type record") != "partial") {
+        if (root.stringValue("extractionStatus", "type record") != "partial") {
             resumeValidationFailure("type record status is not partial")
         }
         requireExactBytes(record.bytes, renderTypeRecord(id, declaration, sourceAddress), "type record")
@@ -1385,7 +1465,8 @@ private fun renderFunctionRecord(
     append("      \"name\": ").append(exporterJsonString(name)).append(",\n")
     append("      \"address\": ").append(exporterJsonString(address)).append(",\n")
     append("      \"prototype\": ").append(exporterJsonString(prototype)).append(",\n")
-    append("      \"status\": ").append(exporterJsonString(status)).append(",\n")
+    append("      \"extractionStatus\": ").append(exporterJsonString(status)).append(",\n")
+    append("      \"recoveryAssessment\": \"unassessed\",\n")
     append("      \"calls\": [").append(renderStringArray(calls)).append("],\n")
     append("      \"referencedGlobals\": [").append(renderStringArray(referencedGlobals)).append("],\n")
     append("      \"strings\": [").append(renderStringArray(strings)).append("],\n")
@@ -1401,7 +1482,8 @@ private fun renderGlobalRecord(id: String, name: String, address: String, type: 
         append("      \"address\": ").append(exporterJsonString(address)).append(",\n")
         append("      \"type\": ").append(exporterJsonString(type)).append(",\n")
         append("      \"initializer\": ").append(initializer?.let(::exporterJsonString) ?: "null").append(",\n")
-        append("      \"status\": \"recovered\"\n")
+        append("      \"extractionStatus\": \"recovered\",\n")
+        append("      \"recoveryAssessment\": \"unassessed\"\n")
         append("    }")
     }
 
@@ -1410,7 +1492,8 @@ private fun renderTypeRecord(id: String, declaration: String, sourceAddress: Str
     append("      \"id\": ").append(exporterJsonString(id)).append(",\n")
     append("      \"declaration\": ").append(exporterJsonString(declaration)).append(",\n")
     append("      \"sourceAddress\": ").append(exporterJsonString(sourceAddress)).append(",\n")
-    append("      \"status\": \"partial\"\n")
+    append("      \"extractionStatus\": \"partial\",\n")
+    append("      \"recoveryAssessment\": \"unassessed\"\n")
     append("    }")
 }
 
@@ -1710,7 +1793,7 @@ private const val MAXIMUM_RECORD_STRING_BYTES = 1024 * 1024
 private const val MAXIMUM_RECORD_JSON_NODES = 1_000_000
 private const val MAXIMUM_RECORD_ARRAY_ENTRIES = 1_000_000
 private const val MAXIMUM_IDENTITY_CHARACTERS = 256
-private const val SUPPORTED_EXPORTER_VERSION = 9
+private const val SUPPORTED_EXPORTER_VERSION = 10
 private const val FUNCTION_RECORD_TAG: Byte = 1
 private const val GLOBAL_RECORD_TAG: Byte = 2
 private const val TYPE_RECORD_TAG: Byte = 3

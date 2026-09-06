@@ -12,6 +12,8 @@ internal class GccBundledOperationInputs private constructor(
     private val bundledRuntime: GccBundledGhidraRetainedRuntime,
     private val guards: List<Pair<String, StableControlFile>>,
     classPathEntries: List<FullTreeFunctionObservationClassPathEntry>,
+    private val plannerProfile: GccRetainedCompilerEngineProfile?,
+    private val cliInvocation: GccBundledCliInvocation?,
 ) : AutoCloseable {
     val deploymentClosureSha256: String = gccBundledLiveDeploymentClosureSha256(
         deploymentReference.closureSha256,
@@ -23,8 +25,20 @@ internal class GccBundledOperationInputs private constructor(
     private var closed = false
 
     @Synchronized
+    fun plannerRequest(intent: GccBundledOperationIntent, exported: GccBundledExecutedOperation,
+        modelPath: Path, outputDirectory: Path): GccBundledPlannerRequest {
+        verify("before planner request derivation")
+        val profile = checkNotNull(plannerProfile) { "GCC planning requires a retained planner profile" }
+        return GccBundledPlannerRequest.fromProfile(profile, intent.engineId, exported, intent.requestSha256,
+            modelPath, outputDirectory, minOf(intent.diskPolicy.maximumFilesystemBytes, 512L * 1024 * 1024).toInt())
+            .also { verify("after planner request derivation") }
+    }
+
+    @Synchronized
     fun verify(label: String) {
         check(!closed) { "bundled operation inputs are closed" }
+        plannerProfile?.requireCurrent()
+        cliInvocation?.requireCurrent()
         deploymentReference.verify(label)
         bundledRuntime.verify(label)
         guards.forEach { (name, guard) -> guard.verifyUnchanged("$name $label") }
@@ -35,13 +49,14 @@ internal class GccBundledOperationInputs private constructor(
         if (closed) return
         closed = true
         var failure: Throwable? = null
-        fun release(resource: AutoCloseable) {
-            runCatching { resource.close() }.exceptionOrNull()?.let { next ->
+        fun release(resource: AutoCloseable?) {
+            runCatching { resource?.close() }.exceptionOrNull()?.let { next ->
                 val previous = failure
                 if (previous == null) failure = next else if (previous !== next) previous.addSuppressed(next)
             }
         }
         guards.asReversed().forEach { (_, guard) -> release(guard) }
+        release(plannerProfile)
         release(deploymentReference)
         release(bundledRuntime)
         failure?.let { throw it }
@@ -73,7 +88,10 @@ internal class GccBundledOperationInputs private constructor(
             val opened = mutableListOf<Pair<String, StableControlFile>>()
             var deployment: GccKotlinBootClasspathReference? = null
             var retained: GccBundledGhidraRetainedRuntime? = null
+            var plannerProfile: GccRetainedCompilerEngineProfile? = null
             try {
+                plannerProfile = intent.openPlannerProfile(excluded)
+
                 for (artifact in artifacts) {
                     val label = "bundled operation artifact ${artifact.role.wireName}"
                     val guard = StableControlFile.open(artifact.path, artifact.bytes, label)
@@ -83,6 +101,15 @@ internal class GccBundledOperationInputs private constructor(
                     }
                 }
                 val manifest = opened[artifacts.indexOf(manifestArtifact)].second
+                intent.cliInvocation?.let { invocation ->
+                    invocation.requireCurrent()
+                    val bytes = invocation.canonicalBytes
+                    val guard = StableControlFile.open(invocation.path, bytes.size.toLong(), "CLI invocation")
+                    opened += "CLI invocation" to guard
+                    require(guard.size == bytes.size.toLong() && guard.readExactly(0, bytes.size, "CLI invocation").contentEquals(bytes)) {
+                        "CLI invocation file differs from the operation request"
+                    }
+                }
                 val entries = parseBootClassPathManifest(
                     manifest.readExactly(0L, manifest.size.toInt(), "bundled operation BOOT manifest"),
                     excluded.first(),
@@ -108,7 +135,7 @@ internal class GccBundledOperationInputs private constructor(
                 val bundle = GccBundledGhidraRetainedRuntime.open(runtime, artifacts, excluded)
                 retained = bundle
                 val inputs = GccBundledOperationInputs(
-                    reference, bundle, Collections.unmodifiableList(opened.toList()), classPath,
+                    reference, bundle, Collections.unmodifiableList(opened.toList()), classPath, plannerProfile, intent.cliInvocation,
                 )
                 inputs.verify("after prepared operation input authentication")
                 return inputs
@@ -118,6 +145,7 @@ internal class GccBundledOperationInputs private constructor(
                         ?.takeIf { it !== failure }?.let(failure::addSuppressed)
                 }
                 opened.asReversed().forEach { (_, guard) -> release(guard) }
+                release(plannerProfile)
                 release(deployment)
                 release(retained)
                 throw failure
