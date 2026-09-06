@@ -202,7 +202,7 @@ private fun runExplore(args: List<String>) {
     val report = AutomaticExplorer().explore(binary, seeds, reports)
     println(
         "exploration generated ${report.candidates.size} input(s), discovered " +
-            "${report.coverage.newSignatures.size} new output signature(s), confidence=${"%.4f".format(Locale.ROOT, report.confidence.score)}",
+            "${report.coverage.newSignatures.size} new output signature(s), uncalibrated exploration heuristic=${"%.4f".format(Locale.ROOT, report.confidence.score)}",
     )
     println("report: ${report.reportPath}")
 }

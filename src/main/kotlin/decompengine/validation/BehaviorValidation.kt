@@ -90,6 +90,16 @@ class BehaviorOutputLimitException(message: String) : RuntimeException(message)
 
 class BehaviorExecutionTimeoutException(message: String) : RuntimeException(message)
 
+class BehaviorExecutionOutcomeException(message: String) : RuntimeException(message)
+
+internal fun rejectReservedWrapperExit(exitCode: Int) {
+    if (exitCode !in 0..123) {
+        throw BehaviorExecutionOutcomeException(
+            "local wrapper exit $exitCode lacks unambiguous application completion evidence",
+        )
+    }
+}
+
 data class SandboxOutputLimits(
     val maximumStdoutBytes: Long = 8L * 1024 * 1024,
     val maximumStderrBytes: Long = 8L * 1024 * 1024,
@@ -226,6 +236,7 @@ class SandboxRunner(
             val stdout = awaitIo(stdoutFuture)
             val stderr = awaitIo(stderrFuture)
             awaitIo(stdinFuture)
+            rejectReservedWrapperExit(exitCode)
             return ProcessOutput(
                 exitCode = exitCode,
                 stdout = stdout,

@@ -86,6 +86,25 @@ comparison flag, source-revision encoding and all commitments. It also reconstru
 the expected sandbox argv and checks output sizes against the recorded limits.
 A rehashed contradictory report still fails validation.
 
+Native timeout arguments preserve the selected milliseconds (`1900` becomes
+`1.900s`), alongside the JVM watchdog. Historical integer-second command recipes
+remain readable, but arbitrary durations do not satisfy the recorded policy.
+The live timing regression requires a 1.2-second authored program to finish within
+a 1.9-second policy with its expected output and exit status; equal timeout exits
+cannot satisfy that assertion. Distinguishing native watchdog termination from an
+application's own exit status still requires a separate completion signal in the
+local execution contract.
+
+Until that completion channel exists, execution and record decoding conservatively
+reject wrapper statuses outside 0–123. This includes watchdog status 124, wrapper
+errors 125–127 and signal-style statuses. Genuine application exits in the same
+range also remain unqualified. Rejected runs preserve any prior report; archived
+records with these statuses remain present and appear as unresolved audit problems,
+even when both observations match and every commitment is internally consistent.
+Accepting a lower status does not independently establish application completion:
+wrapper setup failures may also use lower statuses. This guard is partial progress
+on #354, not the separate execution-owner completion signal required by that issue.
+
 The record limits are 1,024 cases, 8 MiB of stdin, 1 MiB of argument bytes and
 16 MiB of comparison output. Captured input files are limited to 64 MiB each,
 512 MiB in total and 10,000 tracked paths. Source enumeration has a 10,000-entry
@@ -112,6 +131,41 @@ Current module hashes are emitted as `moduleSourceRevisions`. Qualified report
 paths appear separately in `projectBehaviorReportIds`. `moduleBehaviorEvidence`
 stays empty and `moduleExecutionCoverage` is `not-observed`, because a project
 comparison does not establish which individual modules executed.
+
+For an accepted module, the audit requires its manifest-bound checkpoint to use
+compiler acceptance schema 5, contain no reconstruction issues, and record exactly
+the module plan's function/global owners once each with accepted status. It also
+checks successful compilation of the current source under the profile's command.
+Unsupported schemas, missing or foreign owners, duplicate owners and contradictory
+acceptance details become `moduleCompilationEvidenceProblems` and leave the module's
+entities unresolved. These consistency checks do not authenticate an external
+reconstructor invocation or establish execution coverage.
+
+Reconstruction resume applies the same module acceptance constraints before reusing
+an accepted checkpoint or supplying it as a rollback baseline. The checkpoint reader
+also rejects entity statuses that contradict the top-level acceptance flag. Invalid
+acceptance requires reconstruction again; a newly validated replacement can then be
+reused normally. Historical checkpoints without compiler acceptance schema 5 do not
+supply accepted rollback evidence.
+
+The authored four-module resume fixture generates actual C calls along a
+leaf/middle/root dependency chain, plus an unrelated module. After initial build
+and audit, changing the leaf interface regenerates its consumers. An interruption
+at the root preserves completed leaf/middle checkpoints; resume invokes only the
+root and keeps the unrelated checkpoint unchanged. The final audit checks source
+hashes independently of confidence records. Packaging, extraction, a clean rebuild
+and a fresh consumer audit reproduce the same module revisions and successful
+compiler evidence while leaving behavior and coverage explicitly unknown. This
+tests a local scripted reconstructor, not authenticated external-agent restart or
+behavior-driven repair convergence.
+
+The web views present source-tree scores as reported structural heuristics and
+exploration scores as exploration heuristics, explicitly uncalibrated. They use
+decimal scores rather than confidence percentages; a missing or out-of-range
+exploration score is unavailable. CLI exploration summaries use the same
+uncalibrated terminology. Stored `confidence` fields remain compatible with the
+existing report formats. These labels do not supply the empirical calibration,
+validated assessment contract or evidence-gated equivalence required by #42.
 
 `sandboxReported` describes a checked execution request. The audit leaves
 `networkIsolationObserved` empty and states the assurance scope explicitly.

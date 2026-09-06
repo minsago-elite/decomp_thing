@@ -31,6 +31,60 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class BehaviorEvidenceTest {
     @Test
+    fun `matching reserved exits remain unresolved even with consistent commitments`() {
+        val fixture = fixture()
+        val report = fixture.evaluate()
+        val record = BehaviorEvidence.decode(report.reportPath.readBytes())
+        for (status in listOf(124, 125, 126, 127, 137, 143, 255)) {
+            val cases = JsonArray(record.getValue("cases").jsonArray.map { element ->
+                val case = element.jsonObject
+                JsonObject(case + listOf("original", "rebuilt").associateWith { side ->
+                    JsonObject(case.getValue(side).jsonObject + ("exitCode" to JsonPrimitive(status)))
+                })
+            })
+            val changed = JsonObject(record + mapOf("cases" to cases,
+                "observationsSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(cases)))))
+            val digest = OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(changed - "reportSha256")))
+            val bytes = OracleJson.canonicalBytes(JsonObject(changed + ("reportSha256" to JsonPrimitive(digest))))
+            assertFailsWith<BehaviorExecutionOutcomeException> { BehaviorEvidence.decode(bytes) }
+            Files.write(report.reportPath, bytes)
+            val audit = ArchivalProjectAuditor.audit(fixture.project)
+            assertEquals(null, audit.behaviorMatched)
+            assertTrue("reports/probe.behavior.json" in audit.behaviorEvidenceProblems)
+            assertTrue("reports/probe.behavior.json" in audit.unresolvedBehaviorReportIds)
+            assertTrue(audit.projectBehaviorReportIds.isEmpty())
+            assertTrue(bytes.contentEquals(report.reportPath.readBytes()))
+        }
+    }
+
+    @Test
+    fun `historical rounded timeout commands remain readable but arbitrary durations fail`() {
+        val fixture = fixture()
+        val sandbox = SandboxRunner(timeout = java.time.Duration.ofMillis(1900),
+            bwrapPath = fixture.original.parent.resolve("authored-runner-shim"), networkIsolation = false)
+        val report = BehaviorComparator(sandbox).evaluate("timeout_recipe", fixture.original, fixture.rebuilt,
+            listOf(ProcessInput("empty")), fixture.project.resolve("reports"), BehaviorProjectContext(fixture.project))
+        val record = BehaviorEvidence.decode(report.reportPath.readBytes())
+        fun changedDuration(duration: String): ByteArray {
+            val cases = JsonArray(record.getValue("cases").jsonArray.map { element ->
+                val case = element.jsonObject
+                JsonObject(case + listOf("original", "rebuilt").associateWith { side ->
+                    val output = case.getValue(side).jsonObject
+                    val command = output.getValue("sandboxCommand").jsonArray.toMutableList()
+                    command[1] = JsonPrimitive(duration)
+                    JsonObject(output + ("sandboxCommand" to JsonArray(command)))
+                })
+            })
+            val changed = JsonObject(record + mapOf("cases" to cases,
+                "observationsSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(cases)))))
+            val digest = OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(changed - "reportSha256")))
+            return JsonObject(changed + ("reportSha256" to JsonPrimitive(digest))).toString().toByteArray()
+        }
+        BehaviorEvidence.decode(changedDuration("1s"))
+        assertFails { BehaviorEvidence.decode(changedDuration("2s")) }
+    }
+
+    @Test
     fun `packaging enforces corpus selection and preserves prior archives on rejection`() {
         val fixture = fixture()
         val report = fixture.evaluate()
