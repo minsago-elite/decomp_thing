@@ -85,6 +85,7 @@ internal class BuiltinCapturedContextTools(
             page.forEach { item ->
                 control.checkpoint()
                 out.writeStartObject(); out.writeStringField("id", item.id); out.writeStringField("mediaType", item.mediaType)
+                out.writeFieldName("description"); item.description?.let(out::writeString) ?: out.writeNull()
                 out.writeStringField("sha256", hash(item.content)); out.writeNumberField("utf8Bytes", item.content.toByteArray().size); out.writeEndObject()
             }
             out.writeEndArray(); out.writeNumberField("totalEntries", items.size)
@@ -104,6 +105,7 @@ internal class BuiltinCapturedContextTools(
         control.checkpoint()
         return json { out ->
             out.writeStartObject(); out.writeStringField("id", item.id); out.writeStringField("mediaType", item.mediaType)
+            out.writeFieldName("description"); item.description?.let(out::writeString) ?: out.writeNull()
             out.writeStringField("source", "immutable-request-context"); out.writeStringField("sha256", hash(item.content))
             out.writeNumberField("offset", offset); out.writeStringField("text", item.content.substring(offset, end))
             out.writeFieldName("nextOffset"); if (end < item.content.length) out.writeNumber(end) else out.writeNull()
