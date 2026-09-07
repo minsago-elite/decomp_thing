@@ -145,6 +145,15 @@ internal class BuiltinProcessToolSession(
     override fun execute(call: ModelToolCall, control: BuiltinExecutionControl): BuiltinToolResult =
         if (call.name == "run_process") terminals.execute(call, control) else workspace.execute(call, control)
     override fun changes(control: BuiltinExecutionControl) = workspace.changes(control)
+    override fun checkpointSnapshot(control: BuiltinExecutionControl) = workspace.checkpointSnapshot(control)
+    override fun checkpointAuthoritySha256(control: BuiltinExecutionControl) = workspace.checkpointAuthoritySha256(control)
+    override fun restoreCheckpointStage(expectedSourceSha256: String, control: BuiltinExecutionControl) =
+        workspace.restoreCheckpointStage(expectedSourceSha256, control)
+    override fun persistCheckpointSource(snapshot: BuiltinWorkspaceSnapshot, control: BuiltinExecutionControl) =
+        workspace.persistCheckpointSource(snapshot, control)
+    override fun finalChanges() = workspace.finalChanges()
+    override fun finalToolAudit() = workspace.finalToolAudit()
+    override fun checkpointToolAudit(control: BuiltinExecutionControl) = workspace.checkpointToolAudit(control)
     override fun validateCompletion(control: BuiltinExecutionControl): BuiltinCompletion {
         control.checkpoint(); terminals.finish(); return workspace.validateCompletion(control)
     }
