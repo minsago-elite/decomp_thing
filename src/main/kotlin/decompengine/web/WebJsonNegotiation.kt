@@ -22,10 +22,20 @@ internal fun acceptsWebMediaType(exchange: HttpExchange, mediaType: String, expl
             "*/*" -> 0
             else -> return@mapNotNull null
         }
-        if (parts.size > 2) return@mapNotNull null
-        val quality = if (parts.size == 1) 1.0 else {
-            if (!parts[1].matches(Regex("q=(?:0(?:\\.[0-9]{0,3})?|1(?:\\.0{0,3})?)"))) return@mapNotNull null
-            parts[1].removePrefix("q=").toDouble()
+        var quality = 1.0
+        var qualitySeen = false
+        for (parameter in parts.drop(1)) {
+            when {
+                parameter == "charset=utf-8" || parameter == "charset=\"utf-8\"" -> Unit
+                parameter.startsWith("q=") && !qualitySeen -> {
+                    if (!parameter.matches(Regex("q=(?:0(?:\\.[0-9]{0,3})?|1(?:\\.0{0,3})?)"))) {
+                        return@mapNotNull null
+                    }
+                    quality = parameter.removePrefix("q=").toDouble()
+                    qualitySeen = true
+                }
+                else -> return@mapNotNull null
+            }
         }
         specificity to quality
     }
@@ -33,4 +43,3 @@ internal fun acceptsWebMediaType(exchange: HttpExchange, mediaType: String, expl
     val accepted = specificity != null && ranges.filter { it.first == specificity }.any { it.second > 0 }
     return accepted && (!explicit || specificity == 2)
 }
-
