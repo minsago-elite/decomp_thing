@@ -119,6 +119,7 @@ class BuiltinCapturedRepairHarness(
         require(checkpointConfiguration == null || journalConfiguration != null)
         require(resume == null || checkpointConfiguration != null)
         require(sourceStoreConfiguration == null || checkpointConfiguration != null)
+        require(resume == null || !resume.requiresSourceStore || sourceStoreConfiguration != null)
     }
     override fun implementationIdentifier() = "builtin-captured-repair-v1"
     override fun execute(request: AgentExecutionRequest, onEvent: (AgentExecutionEvent) -> Unit) =
