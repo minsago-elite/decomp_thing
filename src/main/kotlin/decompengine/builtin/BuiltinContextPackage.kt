@@ -7,7 +7,14 @@ import kotlinx.serialization.json.*
 import java.security.MessageDigest
 import java.util.Collections
 
-data class BuiltinContextEntry(val id: String, val mediaType: String, val sha256: String, val bytes: Long, val included: Boolean)
+data class BuiltinContextEntry(
+    val id: String,
+    val mediaType: String,
+    val sha256: String,
+    val bytes: Long,
+    val description: String?,
+    val included: Boolean,
+)
 
 class BuiltinContextPackage(
     messages: List<ModelMessage>,
@@ -41,10 +48,13 @@ internal object BuiltinContextAssembler {
         var totalEvidenceBytes = 0L
         val entries = inputs.map { input ->
             control.checkpoint()
+            val description = input.description?.also {
+                if (utf8Length(it, control::checkpoint) > MAXIMUM_DESCRIPTION_BYTES) exhausted()
+            }
             val bytes = utf8Length(input.content, control::checkpoint)
             if (bytes > maximumEvidenceBytes - totalEvidenceBytes) exhausted()
             totalEvidenceBytes += bytes
-            BuiltinContextEntry(input.id, input.mediaType, hash(input.content.toByteArray()), bytes, false)
+            BuiltinContextEntry(input.id, input.mediaType, hash(input.content.toByteArray()), bytes, description, false)
         }.toMutableList()
         val manifestIndex = base.size
         val messages = (base + manifest(entries, maximumBytes)).toMutableList()
@@ -52,7 +62,8 @@ internal object BuiltinContextAssembler {
         if (reservedBytes > maximumBytes) exhausted()
         inputs.forEachIndexed { index, input ->
             control.checkpoint()
-            val message = ModelMessage(ModelRole.USER, "Context ${input.id} (${input.mediaType}):\n${input.content}")
+            val description = entries[index].description?.let { "\nDescription: $it" } ?: ""
+            val message = ModelMessage(ModelRole.USER, "Context ${input.id} (${input.mediaType})$description:\n${input.content}")
             // This matches the loop's message encoding. Reserve the worst-case manifest (included=false).
             val messageBytes = if (message.content.length > maximumBytes) null else try {
                 boundedProviderJson(maximumBytes) { json ->
@@ -100,6 +111,7 @@ internal object BuiltinContextAssembler {
             out.writeArrayFieldStart("inputs")
             entries.forEach { entry ->
                 out.writeStartObject(); out.writeStringField("id", entry.id); out.writeStringField("mediaType", entry.mediaType)
+                out.writeFieldName("description"); entry.description?.let(out::writeString) ?: out.writeNull()
                 out.writeStringField("sha256", entry.sha256); out.writeNumberField("bytes", entry.bytes); out.writeBooleanField("included", entry.included)
                 out.writeEndObject()
             }
@@ -107,4 +119,5 @@ internal object BuiltinContextAssembler {
         }.decodeToString())
     private fun hash(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
     private fun exhausted(): Nothing = throw ModelProviderException(ModelFailureKind.RESOURCE_EXHAUSTED)
+    private const val MAXIMUM_DESCRIPTION_BYTES = 4096L
 }
