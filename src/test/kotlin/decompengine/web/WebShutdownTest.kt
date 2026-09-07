@@ -67,13 +67,13 @@ class WebShutdownTest {
                 try {
                     restarted.start()
                     ids.take(2).forEach { id ->
-                        // Recovery projects interruption without overwriting historical legacy metadata.
+                        // Recovery projects the effective interruption state without exposing historical diagnostics.
                         assertEquals("analyzing", store.get(id).status)
                         val response = URI("http://127.0.0.1:${restarted.serverPort}/api/jobs/$id").toURL().openStream().use {
                             kotlinx.serialization.json.Json.parseToJsonElement(it.readBytes().decodeToString())
                         } as kotlinx.serialization.json.JsonObject
                         assertEquals(kotlinx.serialization.json.JsonPrimitive("failed"), response["status"])
-                        assertTrue(response["status_message"].toString().contains("interrupted"))
+                        assertEquals(null, response["status_message"])
                     }
                     assertEquals("Server stopped before the operation started", store.get(ids.last()).statusMessage)
                 } finally {
