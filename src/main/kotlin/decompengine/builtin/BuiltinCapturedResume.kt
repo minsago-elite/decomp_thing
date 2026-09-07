@@ -22,6 +22,7 @@ class BuiltinCapturedResume private constructor(val checkpoint: BuiltinCheckpoin
             return Collections.unmodifiableMap(files.mapValuesTo(TreeMap()) { (_, content) -> content.copyOf() })
         }
     }
+    internal val requiresSourceStore: Boolean get() = captured == null
     internal fun files(): Map<String, ByteArray>? = captured?.mapValuesTo(TreeMap()) { (_, content) -> content.copyOf() }
     override fun toString() = "BuiltinCapturedResume(checkpoint=$checkpoint, source=redacted)"
 }
