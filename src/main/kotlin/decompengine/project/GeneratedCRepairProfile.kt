@@ -159,12 +159,12 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
             pathDependencies = deriveIncludes(projectRoot, sourcePaths.toSet(), budget),
             fallbackModuleIdsByPath = fallbackModules,
             behaviorRootModuleIds = fallbackModules
-                .filterKeys { it.endsWith(".c") }
+                .filterKeys { it in editable && it.endsWith(".c") }
                 .values
                 .distinct()
                 .sorted(),
             behaviorRootEntityIds = evidence.functions.filter {
-                it.name in profile.adapterConfiguration.getValue("entry-symbol-candidates")
+                safeCName(it.name) in profile.adapterConfiguration.getValue("entry-symbol-candidates")
             }.map { it.id }.sorted(),
         )
     }
