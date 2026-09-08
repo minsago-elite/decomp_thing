@@ -4,6 +4,7 @@ import decompengine.analysis.BundledGhidra
 import decompengine.analysis.GhidraInvocation
 import decompengine.analysis.GhidraPostScript
 import decompengine.analysis.GhidraWorkerCommand
+import decompengine.oracle.core.OracleArtifacts
 import java.nio.file.Path
 import java.util.Collections
 import kotlinx.serialization.json.JsonArray
@@ -22,13 +23,13 @@ internal data class GccBundledGhidraClassPathEntry(val path: Path, val bytes: Lo
 internal class GccBundledGhidraRuntime(
     val root: Path,
     classPath: List<GccBundledGhidraClassPathEntry>,
-    val invocationVersion: Int = 2,
+    val invocationVersion: Int = 3,
 ) {
     val classPath: List<GccBundledGhidraClassPathEntry>
     val release: Path
 
     init {
-        require(invocationVersion in 1..2) { "bundled Ghidra invocation version is unsupported" }
+        require(invocationVersion in 1..3) { "bundled Ghidra invocation version is unsupported" }
         requireRuntimePath(root)
         val copied = ArrayList<GccBundledGhidraClassPathEntry>()
         for (entry in classPath) {
@@ -69,6 +70,14 @@ internal class GccBundledGhidraRuntime(
         }
     }
 
+    /** Fresh leg only: choose before command hashing to avoid a self-referential JVM temp path. */
+    fun freshControlDirectoryName(outputRoot: Path): String? {
+        requireRuntimePath(outputRoot)
+        if (invocationVersion < 3) return null
+        val digest = OracleArtifacts.sha256("gcc-bundled-fresh-control-v1\n$outputRoot".toByteArray(Charsets.UTF_8))
+        return "control-$digest"
+    }
+
     fun command(
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
         state: GccCompilerEngineAnalysisStateIdentity,
@@ -94,9 +103,11 @@ internal class GccBundledGhidraRuntime(
             byRole.getValue(GccCompilerEngineContainmentArtifactRole.JAVA_EXECUTABLE).path,
             release, classPath.map { it.path },
         )
-        val isolatedPrefix = if (invocationVersion == 2) {
+        val controlRoot = freshControlDirectoryName(lease.path)?.let(lease.path::resolve) ?: lease.path
+        val temporaryDirectory = controlRoot.resolve("tmp")
+        val isolatedPrefix = if (invocationVersion >= 2) {
             listOf(
-                prefix.first(), "-Duser.home=${lease.path.resolve("tmp")}", "-Djava.io.tmpdir=${lease.path.resolve("tmp")}",
+                prefix.first(), "-Duser.home=${temporaryDirectory}", "-Djava.io.tmpdir=${temporaryDirectory}",
                 "-XX:ActiveProcessorCount=1", "-XX:+DisableAttachMechanism",
             ) + prefix.drop(1)
         } else {
@@ -128,6 +139,7 @@ internal class GccBundledGhidraRuntime(
             val version = when (document.strictString("provider")) {
                 "${PROVIDER_PREFIX}1" -> 1
                 "${PROVIDER_PREFIX}2" -> 2
+                "${PROVIDER_PREFIX}3" -> 3
                 else -> throw IllegalArgumentException("bundled Ghidra runtime provider is invalid")
             }
             val entries = document["classPath"] as? JsonArray
