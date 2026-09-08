@@ -22,22 +22,38 @@ class WebProgressObservationTest {
     }
 
     @Test fun `projection matches the shared contract fixture without promoting reported acceptance`() {
-        assertEquals(fixture(), project(record()))
+        assertEquals(Json.parseToJsonElement(Files.readString(Path.of("contracts/web/v1/fixtures/event-observation-public-metadata.json"))), project(record()))
     }
 
-    @Test fun `bounded plans and upstream truncation markers match the shared fixture`() {
+    @Test fun `plan prose is withheld while bounded task labels retain upstream truncation markers`() {
         val expected = Json.parseToJsonElement(Files.readString(Path.of("contracts/web/v1/fixtures/event-observation-truncated-preview.json"))).jsonObject
         val source = JsonObject(record(expected) + ("futureField" to JsonPrimitive("omitted")))
-        assertEquals(expected, project(source))
+        assertEquals(Json.parseToJsonElement(Files.readString(Path.of("contracts/web/v1/fixtures/event-observation-plan-metadata.json"))), project(source))
     }
 
     @Test fun `unknown fields are counted but not copied into observations`() {
         val event = project(JsonObject(record() + ("future_private_field" to JsonPrimitive("must not escape"))))
         val payload = event.getValue("payload").jsonObject
-        assertEquals("1", payload.getValue("omittedFieldCount").jsonPrimitive.content)
+        assertEquals("2", payload.getValue("omittedFieldCount").jsonPrimitive.content)
         assertFalse(event.toString().contains("must not escape"))
         assertFalse(event.toString().contains("future_private_field"))
         assertEquals("observations", payload.getValue("authority").jsonPrimitive.content)
+    }
+
+    @Test fun `all message roles withhold prose and path without losing correlation`() {
+        for (role in listOf("thought", "system", "assistant", "unknown")) {
+            val output = project(JsonObject(record() + mapOf(
+                "role" to JsonPrimitive(role), "text" to JsonPrimitive("PRIVATE_PROSE"),
+                "path" to JsonPrimitive("/PRIVATE_HOST_ROOT/input"), "textOmitted" to JsonPrimitive(false),
+            )))
+            val payload = output.getValue("payload").jsonObject
+            val fields = payload.getValue("fields").jsonObject
+            assertFalse(output.toString().contains("PRIVATE_"))
+            assertEquals("true", fields.getValue("textOmitted").jsonPrimitive.content)
+            assertEquals("2", payload.getValue("omittedFieldCount").jsonPrimitive.content)
+            assertEquals(role, fields.getValue("role").jsonPrimitive.content)
+            assertEquals("18446744073709551615", fields.getValue("inputTokens").jsonPrimitive.content)
+        }
     }
 
     @Test fun `invalid known values fail instead of silently changing counts or flags`() {
