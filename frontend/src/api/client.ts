@@ -15,6 +15,7 @@ export interface MutationOptions extends RequestOptions {
 }
 interface ClientOptions {
   basePath: string;
+  observeFailure?: () => (error: ApiClientError) => void;
   fetch?: typeof globalThis.fetch;
   timeoutMs?: number;
   maxResponseBytes?: number;
@@ -54,6 +55,7 @@ export function createApiClient(options: ClientOptions) {
       if (!/^[a-f0-9]{32}$/.test(settings.uploadId)) throw new ApiClientError('invalid_request');
       headers.set('X-Upload-ID', settings.uploadId);
     }
+    const observeFailure = options.observeFailure?.();
     const controller = new AbortController();
     let timedOut = false;
     const abort = () => { controller.abort(); };
@@ -96,11 +98,13 @@ export function createApiClient(options: ClientOptions) {
       controller.abort();
       if (response?.body && !response.body.locked) void response.body.cancel().catch(() => undefined);
       const source = error instanceof ApiClientError ? error : new ApiClientError('network_error');
-      throw new ApiClientError(source.code, {
+      const failure = new ApiClientError(source.code, {
         ...(response === undefined ? {} : { status: response.status }),
         ...(requestId === undefined ? {} : { requestId }),
         ...(source.serverCode === undefined ? {} : { serverCode: source.serverCode }),
       });
+      observeFailure?.(failure);
+      throw failure;
     } finally {
       clearTimeout(timer);
       settings.signal?.removeEventListener('abort', abort);

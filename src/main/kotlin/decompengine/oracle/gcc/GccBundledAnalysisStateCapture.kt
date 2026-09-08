@@ -40,6 +40,9 @@ internal class GccBundledAnalysisStateSnapshot internal constructor(
     private val bytes = canonicalBytes.copyOf()
     val canonicalBytes: ByteArray get() = bytes.copyOf()
     val sha256: String = OracleArtifacts.sha256(bytes)
+
+    internal fun hasSameBytesAs(other: GccBundledAnalysisStateSnapshot): Boolean =
+        entryCount == other.entryCount && totalBytes == other.totalBytes && MessageDigest.isEqual(bytes, other.bytes)
 }
 
 internal object GccBundledAnalysisStateCapture {
@@ -55,6 +58,18 @@ internal object GccBundledAnalysisStateCapture {
                     "GCC analysis-state root changed during capture"
                 }
             }
+        }
+    }
+
+    fun requireUnchanged(
+        run: LinuxDescriptor,
+        expectedState: LinuxFileIdentity,
+        expected: GccBundledAnalysisStateSnapshot,
+        limits: GccAnalysisStateCaptureLimits = GccAnalysisStateCaptureLimits(),
+    ) {
+        val current = capture(run, expectedState, limits)
+        require(current.hasSameBytesAs(expected)) {
+            "GCC retained analysis state differs from its stopped manifest"
         }
     }
 

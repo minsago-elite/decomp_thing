@@ -90,11 +90,19 @@ retained ext4 run. The separate historical BOOT-only keeper remains unchanged.
 `KotlinSystemdCgroupCommandLauncher` uses a distinct fixed Kotlin keeper inside
 the existing authenticated systemd/cgroup-v2, prlimit and bubblewrap boundary.
 The bundled direct-API child executes the exact definition argv and three-field
-environment. Runtime provider `bundled-ghidra-java-api-runtime-v2` explicitly
-binds `-Duser.home=<run>/tmp` and `-Djava.io.tmpdir=<run>/tmp`; provider v1 still
-parses and preserves its original command but is not accepted for execution.
-Provider v2 also binds one active JVM processor to match the single-CPU scope
-quota and disables the child's JVM attachment mechanism.
+environment. The default runtime provider `bundled-ghidra-java-api-runtime-v3`
+binds JVM home and temporary paths to `<run>/control-<digest>/tmp`, separate from
+the shared project and reports. The digest is SHA-256 of UTF-8
+`gcc-bundled-fresh-control-v1\n<absolute run path>` (with an actual newline).
+This fresh-leg name is derived before command hashing and is bound in the
+validated command, keeper request and runtime closure. The launcher creates it
+only at execution, through the opaque lease-issued borrow; preparation leaves
+it absent. A later resume leg will need a distinct name.
+
+Provider v2 preserves its exact `<run>/tmp` command and legacy launcher layout;
+provider v1 still parses unchanged but is not accepted for execution. Both v2
+and v3 bind one active JVM processor to match the single-CPU scope quota and
+disable the child's JVM attachment mechanism.
 The JDK, native libraries, bundled release, exporter and engine input are
 read-only. Project, reports and temporary writes use the dedicated filesystem;
 the journal, lease record and host systemd socket are absent from the sandbox.
@@ -285,8 +293,8 @@ fresh/resumed equivalence is established by these fixtures.
 
 ## Per-execution control-directory groundwork
 
-The command launcher has an optional `controlDirectoryName` equal to
-`control-<exact invocation nonce>`. It creates that fresh directory below the
+The command launcher has an optional `controlDirectoryName` of the form
+`control-<64 lowercase hexadecimal characters>`. It creates that fresh directory below the
 opaque lease-issued run-root borrow, using no-replace descriptor-relative
 construction. Its private `state`, `reports`, and `tmp` children hold the keeper's
 own control layout; the request and materialized classpath enter its `runtime`
@@ -300,13 +308,112 @@ lease-owned writable root while making the selected control directory's runtime
 read-only. This allows the command's project and export paths to remain at the
 original run root while its keeper protocol and logs use a fresh child directory.
 No arbitrary external writable directory is admitted: the optional directory is
-exactly one child of the retained root, named by the invocation nonce. The default
+exactly one child of the retained root. Its name is chosen before command hashing
+so a JVM temporary path can refer to it without a circular hash dependency; the
+request and runtime closure bind the chosen path. The default
 layout and its runtime commitment remain unchanged when this option is absent.
 
-This is not yet production resume. The GCC coordinator still uses its existing
-layout. Resume must explicitly select this layout, bind/revalidate the prior
+This is not yet production resume. The GCC coordinator selects this layout for
+the default v3 fresh or interrupted leg. Resume must bind/revalidate the prior
 analysis state and export prefix, choose a fresh temporary directory for the
-analysis JVM, and protect retained earlier control evidence during the next
+analysis JVM, and supply retained earlier control identities for protection during the next
 execution. The directory tests establish separation, no-replace behavior and
 identity checks only; they do not qualify the new namespace layout under hosted
 systemd/ext4 execution.
+
+The launcher accepts up to 256 prior control-directory identities alongside a
+separate active control name. It verifies each prior directory against the pinned
+lease-root descriptor before launch and after process absence, commits the sorted
+identities in the runtime closure, and adds read-only subtree binds after the
+writable root bind. The execution receipt returns the selected control-directory
+identity for a later invocation. These identities attest directory bindings, not
+the contents of prior protocol files; callers still must validate retained bytes.
+Local tests cover identity replacement, permission changes, active-name exclusion,
+and immutable mount membership. Kernel mount enforcement and complete resume
+remain unqualified by these tests.
+
+## Retained interrupted-state revalidation
+
+After `executeUntilCheckpoint` completes both its journal writes and the lease's
+post-execution validation, the same live owner retains the stopped result and
+selected trigger. `requireInterruptedStateCurrent()` checks the held inputs,
+journal and dedicated lease, then recaptures the analysis-state manifest and
+export prefix through the lease-issued descriptor borrow. It requires exact
+manifest bytes, counts and stopped-prefix commitments. A prefix that advanced
+during stop delivery may be accepted at capture time; any advancement after
+that captured boundary fails revalidation. A validation failure poisons the
+owner. Calls before successful interruption or after close are rejected.
+
+This method accepts no detached receipt or caller-selected checkpoint. It does
+not authorize START, verify prior control-file contents, prove saved-project
+semantic equivalence, or enable resume. The next execution must still establish
+its separate control lifecycle and revalidate evidence before authorization.
+Local tests exercise state content, metadata, membership and inode changes and
+prefix advancement/regression; retained-owner execution still needs the hosted
+systemd/ext4 environment.
+
+## Explicit resume reanalysis definition
+
+Runtime provider `bundled-ghidra-java-api-runtime-v4` is opt-in and resume-only.
+It accepts a manifest-bound `RESUMED` definition whose original state path is
+`<run>/state`. Its control name is SHA-256 of UTF-8
+`gcc-bundled-resume-control-v1\n<absolute run path>\n<stopped manifest SHA-256>`
+(with actual newlines), prefixed by `control-`. JVM home/temp use that control's
+`tmp` directory, and the bundled worker imports the original binary into a new
+project under that control's `state` directory. The exporter still targets
+`<run>/reports/program_model.json` and its existing checkpoint inventory.
+
+This chooses normal import/analysis before exporter reuse, avoiding reliance on
+the historically different saved-project reload path. Whole-program exporter
+semantic validation must still reject incompatible checkpoints before reuse.
+The command definition binds the stopped manifest and derived fresh paths; it
+does not authenticate the manifest or prove that repeated analysis is identical.
+
+The default remains v3. Fresh operation intents reject v4 before acquiring a
+lease, and the existing execution path accepts only v2/v3. A resume controller
+must revalidate retained state/control evidence, protect the original state,
+create the separate control directory, journal attachment and START, and prove
+absence/resource accounting. No v4 execution or benchmark qualification is
+claimed by command-contract tests.
+
+## Resume journal lifecycle
+
+After stopped-state capture, `recordResumePrepared` admits a v4 resumed definition
+only for an interrupted v3 original. It checks the same engine, artifact identities,
+runtime inventory, output lease, environment and original state path, and requires
+the stopped manifest hash and counts. Resume budgets cannot exceed original
+per-leg ceilings; this check alone does not establish cumulative resource use.
+
+The journal preserves all eleven stopped-run records and adds six no-replace
+files: `resume-definition.json`, `resume-prepared.json`, `resume-attachment.json`,
+`resume-start-authorized.json`, `resume-execution.json`, and
+`resume-export-assessment.json`. Preparation binds the exact new definition and
+links to stopped-state capture. Subsequent records hash-link to their predecessor.
+The intermediate definition-only stage is explicit, so partial publication remains
+preserved residue. Every stage checks exact membership and retained file identities;
+wrong order, replacement, changed bytes and repeated transitions poison the journal.
+
+These APIs record host decisions and assessments. They do not independently prove
+attachment, START delivery, process absence, valid export contents or completion.
+All records keep complete/release eligibility false. The coordinator must supply
+those live checks when integrating the second execution. Local journal fixtures
+use synthetic payloads and establish persistence/ordering only.
+
+## Retained original project mount
+
+The contained command launcher accepts an optional `readOnlyStateDirectory`
+identity for the original `<run>/state` directory. It requires a separate active
+control directory, verifies the original state and prior controls against the
+pinned lease-root descriptor before launch and after absence, and commits the
+state identity separately in the runtime closure. After binding the writable
+run root, it applies read-only binds for the retained state and controls. The
+active control's new project and the shared reports remain writable.
+
+The option accepts an identity for the fixed `state` child; it does not accept
+an arbitrary mount path or change the allowed prior-control names. Directory
+identity is not a content manifest, so the resume coordinator must still run
+stopped-state revalidation. Existing runtime commitments remain unchanged when
+the option is absent. Descriptor fixtures exercise replacement and permission
+changes. A local bubblewrap fixture tests retained write rejection and successful
+writes to the new project/reports, without claiming authenticated runtime,
+systemd/cgroup, dedicated ext4 or live compiler qualification.

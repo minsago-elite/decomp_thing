@@ -230,7 +230,16 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   try {
     await fs.writeFile(publication, JSON.stringify(appended), { flag: 'wx', mode: 0o600 });
     await fs.rename(publication, fixture.progressPath);
-    await ready(tab, `(${activityRows}).includes('Sequence 205')`, 'Activity received appended SSE observation');
+    try {
+      await ready(tab, `(${activityRows}).includes('Sequence 205')`, 'Activity received appended SSE observation');
+    } catch (error) {
+      const diagnostic = await evaluate(tab, `({
+        visibility: document.visibilityState, online: navigator.onLine,
+        rows: ${activityRows},
+        notices: [...document.querySelectorAll('[role="status"], [role="alert"]')].map(node => node.textContent.slice(0, 500))
+      })`);
+      throw new Error(`Activity append diagnostic: ${JSON.stringify(diagnostic)}; responses: ${JSON.stringify(tab.responses.slice(-8))}`, { cause: error });
+    }
     assert.deepEqual(await evaluate(tab, activityRows), Array.from({ length: 6 }, (_, index) => `Sequence ${index + 200}`));
     assert.equal(activityPolls, pollingBeforeAppend,
       'The appended observation must arrive over the existing stream, without another polling request');

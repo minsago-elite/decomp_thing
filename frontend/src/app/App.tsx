@@ -5,6 +5,7 @@ import UploadPage from '../routes/UploadPage';
 import { NotFound } from '../routes/NotFound';
 import { ViewBoundary } from '../shared/ViewBoundary';
 import { AssetRecoveryNotice } from '../shared/AssetRecoveryNotice';
+import { PrivateSessionContext } from '../session/PrivateTransport';
 import { SessionStatus } from '../session/SessionStatus';
 import type { BrowserSession } from '../session/session';
 import { lazyRoute } from '../shared/LazyRoute';
@@ -106,7 +107,9 @@ export function App({ basePath = '', identity = UNKNOWN_BUILD, recovery: supplie
   return (
     <ViewBoundary>
       <LocationProvider scope={`${basePath}/`}>
-        <Shell basePath={basePath} identity={identity} recovery={recovery} reload={reload} session={session} />
+        <PrivateSessionContext.Provider value={session}>
+          <Shell basePath={basePath} identity={identity} recovery={recovery} reload={reload} session={session} />
+        </PrivateSessionContext.Provider>
       </LocationProvider>
     </ViewBoundary>
   );
