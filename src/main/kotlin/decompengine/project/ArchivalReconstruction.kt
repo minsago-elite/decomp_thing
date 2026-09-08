@@ -300,7 +300,11 @@ class GhidraHeadlessProgramModelAnalyzer internal constructor(
 
         fun bundled(
             profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
-        ): GhidraHeadlessProgramModelAnalyzer = GhidraHeadlessProgramModelAnalyzer(GhidraProgramModelExportLimits.from(profile))
+            hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+        ): GhidraHeadlessProgramModelAnalyzer {
+            hostSafetyLimits.requireAllows(profile.budgets)
+            return GhidraHeadlessProgramModelAnalyzer(GhidraProgramModelExportLimits.from(profile))
+        }
     }
 }
 
@@ -325,7 +329,7 @@ class ArchivalReconstructionService(
     private val analyzer: ProgramModelAnalyzer,
     private val reconstructor: ModuleReconstructor? = null,
     private val profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
-    hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits(profile.budgets),
+    hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
     private val progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
 ) {
     init {

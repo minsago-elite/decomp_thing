@@ -200,3 +200,19 @@ uses the module count observed during generation rather than planning a second t
 for its final summary. Focused Make/Ninja service tests cover a buildable placeholder
 tree remaining unresolved and an accepted authored implementation reaching local
 completion, including the persisted summary and progress fields.
+
+`ArchivalReconstructionService` and the bundled model-analyzer factory default to
+`ReconstructionHostSafetyLimits.DEFAULT`, an independent immutable host policy.
+The service no longer copies the requested profile's budgets into its own admission
+ceiling. The default limits cover export time/memory, planner work and cardinality,
+module/context size, build time/output and archive inventory/bytes; their initial
+values admit both built-in profiles without changing either descriptor digest.
+Requests exceeding a default ceiling are rejected before analysis or reconstruction.
+
+A JVM host that explicitly authorizes different limits can pass the same
+`ReconstructionHostSafetyLimits` to `GhidraHeadlessProgramModelAnalyzer.bundled`
+and `ArchivalReconstructionService`. This leaves requested budgets and profile
+identity unchanged rather than silently clamping them. The admission test checks
+an increased context request, both default entry points, unchanged identities and
+explicit host authorization. Individual phases still need their own measured
+resource enforcement; admission alone does not prove complete phase budgeting.
