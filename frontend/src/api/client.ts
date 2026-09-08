@@ -30,7 +30,7 @@ export function createApiClient(options: ClientOptions) {
     || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_JSON_BYTES) throw new ApiClientError('invalid_request');
   const fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
 
-  async function request<K extends ResponseKind>(kind: K | null, path: string, method: 'GET' | 'POST' | 'DELETE', body: string | FormData | undefined, settings: MutationOptions, session = false, upload = false): Promise<ResponseOf<K> | undefined> {
+  async function request<K extends ResponseKind>(kind: K | null, path: string, method: 'GET' | 'POST' | 'PUT' | 'DELETE', body: string | FormData | undefined, settings: MutationOptions, session = false, upload = false): Promise<ResponseOf<K> | undefined> {
     let url: string;
     try { url = apiPath(basePath, path); } catch { throw new ApiClientError('invalid_request'); }
     if (session && path !== '/session') throw new ApiClientError('invalid_request');
@@ -86,7 +86,9 @@ export function createApiClient(options: ClientOptions) {
       if (!('requestId' in document) || document.requestId !== requestId) throw new ApiClientError('invalid_headers');
       if (document.kind === 'error') throw new ApiClientError('http_error', { serverCode: document.error.code });
       if (!response.ok || (upload && response.status !== 201) || document.kind !== kind) throw new ApiClientError('unexpected_response');
-      return document as ResponseOf<K>;
+      return (method === 'PUT'
+        ? Object.assign(document, { replayed: response.headers.get('Idempotency-Replayed') === 'true' })
+        : document) as ResponseOf<K>;
     };
     try {
       return await Promise.race([operation(), cancelled]);
@@ -112,6 +114,9 @@ export function createApiClient(options: ClientOptions) {
     async post<K extends ResponseKind, Q extends RequestKind>(kind: K, path: string, requestKind: Q, data: RequestData<Q>, settings: MutationOptions = {}): Promise<ResponseOf<K>> {
       const session = requestKind === 'sessionStartRequest';
       return await request(kind, path, 'POST', encodeRequest(requestKind, data), settings, session) as ResponseOf<K>;
+    },
+    async put(path: string, data: RequestData<'progressPinRequest'>, settings: MutationOptions = {}): Promise<ResponseOf<'progressPin'> & { replayed: boolean }> {
+      return await request('progressPin', path, 'PUT', encodeRequest('progressPinRequest', data), settings) as ResponseOf<'progressPin'> & { replayed: boolean };
     },
     async upload(file: File, settings: MutationOptions): Promise<ResponseOf<'job'>> {
       const body = new FormData();

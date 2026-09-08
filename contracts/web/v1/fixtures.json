@@ -349,6 +349,22 @@
     {
       "file": "fixtures/invalid-empty-cutover-missing-watermark.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/progress-pin.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-progress-pin.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-progress-pin-numeric.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-progress-pin-actor.json",
+      "valid": false
     }
   ]
 }

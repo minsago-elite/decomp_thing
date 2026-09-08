@@ -2692,6 +2692,42 @@
         "snapshotHref"
       ],
       "additionalProperties": false
+    },
+    "progressPin": {
+      "type": "object",
+      "properties": {
+        "jobId": {
+          "$ref": "#/definitions/id"
+        },
+        "runId": {
+          "$ref": "#/definitions/id"
+        },
+        "version": {
+          "$ref": "#/definitions/version"
+        },
+        "pinned": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "jobId",
+        "runId",
+        "version",
+        "pinned"
+      ],
+      "additionalProperties": false
+    },
+    "progressPinChange": {
+      "type": "object",
+      "properties": {
+        "pinned": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "pinned"
+      ],
+      "additionalProperties": false
     }
   },
   "oneOf": [
@@ -3154,6 +3190,50 @@
         "apiVersion",
         "kind",
         "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "progressPin"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/progressPin"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "progressPinRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/progressPinChange"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
         "data"
       ],
       "additionalProperties": false

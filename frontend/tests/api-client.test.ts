@@ -21,6 +21,28 @@ describe('bounded v1 fetch client', () => {
     expect(settings).toMatchObject({ method: 'GET', credentials: 'same-origin', mode: 'same-origin', redirect: 'error', cache: 'no-store' });
     expect(new Headers(settings?.headers).get('Accept')).toBe('application/json');
   });
+  it('sends guarded typed pin PUT exactly once and validates its response', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response('progress-pin', 200, { 'X-Request-ID': 'request_pin_fixture', 'Idempotency-Replayed': 'true' }));
+    const client = createApiClient({ basePath: '/workbench/', fetch: fetcher });
+    const path = '/jobs/job_fixture/runs/run_fixture/progress-pin';
+    await expect(client.put(path, { pinned: true })).rejects.toMatchObject({ code: 'invalid_request' });
+    expect(fetcher).not.toHaveBeenCalled();
+    const settings = { csrfToken: 'a'.repeat(43), idempotencyKey: 'pin_intent_example_1', ifMatch: '"version_before"' };
+    const result = await client.put(path, { pinned: true }, settings);
+    expect(result.data.pinned).toBe(true);
+    expect(result.replayed).toBe(true);
+    expect(fetcher).toHaveBeenCalledOnce();
+    const [url, init] = fetcher.mock.calls[0] ?? [];
+    expect(url).toBe('/workbench/api/v1' + path);
+    expect(init?.method).toBe('PUT'); expect(init?.body).toBe('{"pinned":true}');
+    const headers = new Headers(init?.headers);
+    expect(headers.get('If-Match')).toBe(settings.ifMatch);
+    expect(headers.get('Idempotency-Key')).toBe(settings.idempotencyKey);
+    expect(headers.get('X-CSRF-Token')).toBe(settings.csrfToken);
+    fetcher.mockRejectedValueOnce(Error('private transport detail'));
+    await expect(client.put(path, { pinned: false }, settings)).rejects.toMatchObject({ code: 'network_error' });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
   it('retains encoded queries through the shared API path helper', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response('jobs-page'));
     const client = createApiClient({ basePath: '/tools/decomp/', fetch: fetcher });

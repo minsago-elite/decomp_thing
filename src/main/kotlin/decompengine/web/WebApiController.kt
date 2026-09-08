@@ -24,6 +24,7 @@ internal class WebApiController(
     private val applicationBuildId = applicationBuildId()
     private val sessions = WebSessionController(access)
     private val uploadProgress = WebUploadProgress()
+    private val progressPins = WebProgressPinController(access, jobs)
     private val runPages = WebRunPages { jobId ->
         when (val inspection = jobs.inspectDurableJob(jobId)) {
             is decompengine.jobs.WorkflowJobInspection.Available -> inspection.snapshot
@@ -40,7 +41,7 @@ internal class WebApiController(
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/exploration|/snapshot|/events)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/exploration|/snapshot|/events|/progress-pin)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -107,6 +108,10 @@ internal class WebApiController(
                             exchange.responseBody.use { it.write(bytes) }
                         }
                     } finally { exchange.close() }
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/progress-pin")) -> {
+                    val parts = resource.split('/')
+                    progressPins.handle(exchange, parts[1], parts[3])
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/(?:snapshot|events)")) -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead()))

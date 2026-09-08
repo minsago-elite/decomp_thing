@@ -57,7 +57,9 @@ class WorkflowPinAudit private constructor(val omitted: ULong, entries: List<Wor
         val next = omitted + entries.size.toULong()
         if (next == ULong.MAX_VALUE) throw WorkflowStoreException("STORE_LIMIT", "The retained pin audit sequence is exhausted.")
         if (entries.size == MAX_ENTRIES && entries.first().let { it.requestKeyDigest != null && java.time.Duration.between(it.at, at) < REQUEST_RETENTION }) {
-            throw WorkflowStoreException("PIN_RECEIPT_CAPACITY", "Retained pin request receipts are at capacity. Retry after their retention window.")
+            val elapsedMillis = java.time.Duration.between(it.at, at).toMillis()
+            val retryAfterMillis = (REQUEST_RETENTION.toMillis() - elapsedMillis).coerceAtLeast(1L)
+            throw WorkflowStoreException("PIN_RECEIPT_CAPACITY", "Retained pin request receipts are at capacity. Retry after their retention window.", retryAfterMs = retryAfterMillis)
         }
         val appended = entries + WorkflowPinAuditEntry(next, at, actor, after.runId, after.progressRetentionPinned, before.version, after.version, requestKeyDigest)
         return WorkflowPinAudit(omitted + if (entries.size == MAX_ENTRIES) 1uL else 0uL, appended.takeLast(MAX_ENTRIES))

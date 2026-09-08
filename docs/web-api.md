@@ -103,6 +103,8 @@ internal storage optimization and must not merge identity, permissions or histor
 | `PATCH J` | `200 job` | Allowlisted label/archive metadata, If-Match and idempotency; #173 |
 | `DELETE J` | `202 operation` | Reviewed retention/deletion policy and If-Match; #172 |
 | `GET J/runs`, `GET R` | `200 runs`, `200 run` | Bounded attempts or durable attempt snapshot; #160 |
+| `GET R/progress-pin` | `200 progressPin`, strong run ETag | Current per-attempt journal pin; #172 |
+| `PUT R/progress-pin` | `200 progressPin`, original result on keyed replay | Strict `progressPinRequest`, session/Origin/CSRF, run If-Match and idempotency; #172/#177 |
 | `POST J/runs` | `202 run`, `Location: R` | `workflowStart` request, capability/limits/input checks, job If-Match; #163 |
 | `POST R/cancel` | `202 run` or `200 run` if already terminal | Idempotent recorded intent, run If-Match; #163 |
 | `POST R/recover` | `202 run`, `Location` of a new attempt | Explicit `retry` or capability-gated `resume`; If-Match; #163 |
@@ -297,6 +299,7 @@ sanitized derivatives have separate identity, digest and provenance.
 
 | DTO fields | Authoritative current source or explicit implementation owner |
 | --- | --- |
+| `progressPin.jobId/runId/version/pinned` | Selected durable `WorkflowAttempt` for GET; atomic `WorkflowPinAuditEntry` original result for PUT/replay. No actor, key digest or receipt internals are public. |
 | `job.jobId`, display filename, timestamps | `Jobs.kt: Job.id/filename/createdAt/updatedAt`; never expose `binaryPath` |
 | `job.sizeBytes`, `binary.*` | `Job.sizeBytes` to decimal string; `ElfMetadata` names/format and unsigned `entryPoint` to hex. V1 must not reuse lossy/signed `Job.toJson()` numerics |
 | `job.version/status/latestRunId/acceptedRevisionId` | #160 durable adapter/registry. Legacy `Job.status` is only historical workflow status; it cannot establish an attempt or acceptance |
@@ -504,3 +507,13 @@ Activity uses SSE after bounded polling catch-up, with bounded reconnect and pol
 Run state now stays locked during bounded journal capture, with locks released before HTTP delivery.
 Controlled authenticated HTTP snapshot/replay and SSE eviction/resume checks now cover concurrent
 cutover. Slow-socket qualification and timed retention remain outstanding under #174.
+
+## Implemented progress-pin policy endpoint
+
+`GET` and `PUT /api/v1/jobs/{jobId}/runs/{runId}/progress-pin` are available under the configured deployment prefix. This pin protects only the selected persisted progress journal. It does not pin the full job, source revisions, reports or downloaded evidence. Unpinning neither resets the retention deadline nor restores removed history; periodic maintenance remains opt-in.
+
+GET requires a local session and returns `{jobId, runId, version, pinned}` in a `progressPin` envelope, with an ETag for the current run version and `Cache-Control: no-store`. Conditional read headers are rejected. The `progressPinRequest` wire body for PUT is exactly `{pinned: boolean}`, at most 1024 bytes, with duplicate JSON keys and unknown fields rejected. Authorization precedes body parsing. PUT requires the existing same-origin JSON mutation policy, cookie session, CSRF token, one strong If-Match version and one 16–128 character idempotency key. Caller-supplied actors, query parameters and extra conditional headers are rejected.
+
+Successful changes and no-ops use the durable receipts described in [pin audit/replay](web-pin-audit.md). An exact replay returns the original pin/version and ETag with `Idempotency-Replayed: true`; it may describe an earlier result than a subsequent GET. It never rolls current policy or an owned task backward. Reconcile with GET before a new action. Missing If-Match returns 428, stale fresh requests 412 VERSION_CONFLICT, reused keys with different intent 409 IDEMPOTENCY_CONFLICT, and protected receipt capacity 429 PIN_RECEIPT_CAPACITY. Uncertain publication returns an unavailable/recovery response, not success.
+
+The generated `progressPin`/`progressPinRequest` contracts and the client's guarded `put` method support this endpoint. The client performs one request without automatically retrying ambiguous mutations. Public UI controls, audit presentation and denied/failed-request audit coverage remain unfinished; successful policy receipts alone do not complete #177.

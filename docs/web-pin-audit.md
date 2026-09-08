@@ -12,11 +12,11 @@ Pin state and receipts use one publication, so interruptions cannot commit one w
 
 The optional `pinAudit` field is absent until the first applied change. Existing records without it remain readable without rewriting or inventing attribution for earlier changes. Malformed audit data is rejected and preserved, not defaulted away. Older strict application versions reject records containing the new field; reopening those records requires a compatible version or an appropriate verified backup.
 
-Tests use owned inert upload records and direct lifecycle transitions, plus an inert service callback. They exercise attribution forwarding, no-op/stale-byte preservation, restart, all five injected publication interruptions, bounded omission, immutable entries, malformed metadata and legacy reads. No binary analysis, provider or native workflow execution is required. Public mutation routes, rejected-request auditing, audit presentation/export, general operation coverage and retention-policy UI remain unfinished.
+Tests use owned inert upload records and direct lifecycle transitions, plus an inert service callback. They exercise attribution forwarding, no-op/stale-byte preservation, restart, all five injected publication interruptions, bounded omission, immutable entries, malformed metadata and legacy reads. No binary analysis, provider or native workflow execution is required. Rejected-request auditing, audit presentation/export, general operation coverage and retention-policy UI remain unfinished.
 
 All 285 selected JVM tests pass with the pin audit and termination-lock fix together. The [retained manifest](evidence/web-pin-audit-shutdown-20260908/manifest.json) identifies the tested source, passing reports, original deadlock and failing negative control. Frontend/package/browser checks were not repeated for these internal changes.
 
-## Durable request replay before HTTP exposure
+## Durable request replay
 
 `requestProgressRetentionPinned` requires a browser-session actor and a bounded idempotency key. Only a domain-separated digest scoped to the actor, job and selected run is stored. The raw key is neither persisted nor included in diagnostics. The normalized intent is the desired boolean plus the original run-version precondition; the operation itself is fixed to the selected progress-pin resource.
 
@@ -28,6 +28,8 @@ Keys remain replayable while retained, including after storage reopen. A same-ac
 
 The 24-hour protection starts at the successful request timestamp, including no-op requests. Backward clock movement conservatively retains the receipt. At the exact deadline eviction may resume, with an explicit omitted prefix; once a key is evicted, the request is new and must pass current CAS. Clients must reconcile state before choosing a fresh action rather than blindly retrying an expired key. Validation rejects null/non-digest keys, duplicate scoped keys, contradictory outcomes and unkeyed no-op records; older applied-only receipts remain readable.
 
-The next integration is the authenticated HTTP route and its typed client contract. This layer does not add a public mutation, claim rejected-request audit coverage, or enable periodic maintenance by default.
+The authenticated HTTP route and typed client now use this request boundary; see [the API contract](web-api.md#implemented-progress-pin-policy-endpoint). Rejected-request audit coverage and default periodic maintenance activation remain unfinished.
 
 All 292 selected JVM tests pass. The [request replay manifest and retained reports](evidence/web-pin-request-replay-20260908/manifest.json) identify the tested source and evidence hashes. Frontend/package/browser qualification was not repeated because the request path remains internal.
+
+HTTP integration is qualified by 296 selected JVM tests, 329 frontend tests, lint/typechecked bundle and 48 valid/39 invalid shared contract fixtures. The [HTTP manifest and four retained tests](evidence/web-pin-http-20260908/manifest.json) include production-route and storage-reopen coverage. Distribution archive and packaged browser checks were not repeated; UI controls remain unfinished.

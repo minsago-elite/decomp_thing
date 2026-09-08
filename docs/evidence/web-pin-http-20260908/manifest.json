@@ -1,0 +1,47 @@
+{
+  "status": "passed",
+  "sourceCommit": "447dd74a3acb91f1e788eb254fcaef8f56a9f869",
+  "command": "./gradlew -PfrontendNodeHome=/home/june/decomp_thing/build/tools/decomp-node-24.20.0/node-v24.20.0-linux-x64 test --tests 'decompengine.web.*' --tests 'decompengine.jobs.AgentProgressJournal*Test' --tests 'decompengine.jobs.WorkflowAttemptStoreTest' --tests 'decompengine.jobs.WorkflowPin*Test'",
+  "jvm": {
+    "tests": 296,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "frontend": {
+    "tests": 329,
+    "lint": "passed",
+    "generatedDrift": "passed",
+    "typecheckedBundle": "passed via Gradle frontendBuild"
+  },
+  "contracts": {
+    "command": "python3 contracts/web/v1/verify.py",
+    "validAccepted": 48,
+    "invalidRejected": 39
+  },
+  "retainedXml": {
+    "file": "TEST-decompengine.web.WebProgressPinControllerTest.xml",
+    "tests": 4,
+    "sha256": "0abbbb44223457a96d449f4941f13fb739280839c8811311c573139202dfc2d5"
+  },
+  "coverage": [
+    "Session/Origin/CSRF before publication",
+    "Strong If-Match and bounded key/body validation, duplicate JSON and caller actor rejection",
+    "Original-result replay after subsequent unpin without rewriting current state",
+    "Stale fresh request and key-intent conflict mapping",
+    "Explicit protected receipt capacity and sanitized publication failure responses",
+    "Production UploadServer prefixed route plus storage reopen verifies durable browser attribution",
+    "Typed guarded PUT performs one request without automatic retry"
+  ],
+  "fixtureExecution": "Owned inert upload records and direct store transitions; no binary analysis/provider/native workflow execution.",
+  "notRepeated": [
+    "distribution archive build",
+    "packaged browser qualification"
+  ],
+  "limitations": [
+    "Pin UI and public audit presentation are not implemented.",
+    "Denied/stale/failed-request auditing remains incomplete.",
+    "Only the selected progress journal is pinned; broader job/evidence retention remains unfinished.",
+    "Periodic maintenance remains opt-in."
+  ]
+}
