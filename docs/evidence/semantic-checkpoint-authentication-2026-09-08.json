@@ -1,0 +1,106 @@
+{
+  "schemaVersion": 1,
+  "issue": 926,
+  "recordedAtUtc": "2026-09-08T12:37:29Z",
+  "status": "implementation-evidence-only",
+  "scope": "Bounded source and synthetic-fixture audit for authenticating planning exporter semantic state before reusing export batches. This record does not qualify a real saved-project reload, bundled Ghidra run, GCC compiler-engine run, or production release.",
+  "sourceCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "sourceFiles": [
+    {
+      "path": "src/main/resources/ghidra_scripts/ExportProgramModel.java",
+      "sha256": "dc0debe2808c2744792f736d150d25aaefd6a46fd90910af7175a454686c6ab9",
+      "anchors": [
+        "ExporterSemanticFingerprintV1:47-412",
+        "computePlanningSemanticState:990-1055",
+        "state semanticStateBinding:1795-1825",
+        "existing-state identity check:1832-1855",
+        "retained planning-batch authentication:1950-1987",
+        "new planning-batch preflight and post-write authentication:2039-2139"
+      ],
+      "facts": [
+        "Planning preflight fingerprints ordered function records, unique failure/global/type evidence and a terminal function count using a domain-separated SHA-256 stream.",
+        "The persisted schema-2 state includes the exporter/tool/input identities, function and batch counts, canonical byte count, semantic SHA-256 and the ordered batch-commitment SHA-256.",
+        "An existing state must equal the newly recomputed state byte-for-byte; legacy schema 1 state is rejected because it has no whole-program semantic binding.",
+        "Each retained batch is checked against the preflight commitment before reuse, and each newly serialized batch is checked before its checkpoint is published."
+      ]
+    },
+    {
+      "path": "src/main/kotlin/decompengine/oracle/gcc/GccCompilerEngineResumeEvidence.kt",
+      "sha256": "6847fbfc2c0a29db362233cf1fb73fc385c385e982979b5e8a6b586b8043af6f",
+      "anchors": [
+        "parseExporterState semanticStateBinding:236-300",
+        "batchCommitmentSha256:474-506",
+        "semanticFingerprint:508-583",
+        "reauthenticateRun:592-613",
+        "validateInterruptedPrefix:768-883",
+        "validateCompletedRun:885-953"
+      ],
+      "facts": [
+        "Raw checkpoint validation recomputes the inventory, ordered batch commitments and semantic fingerprint from captured function, failure, global and type records.",
+        "Interrupted prefixes are accepted only as an exact contiguous prefix; terminal prefixes and completed runs must reproduce the declared semantic and batch bindings.",
+        "After validation, the state, progress, checkpoint and four batch-fragment byte snapshots are reauthenticated before the assessment is returned."
+      ]
+    }
+  ],
+  "fixtures": [
+    {
+      "path": "src/test/kotlin/decompengine/project/ExporterSemanticStateBindingTest.kt",
+      "sha256": "72e94957fbfaf03be2ac353eab40a90b3c2779775d531451b834e4c8bc45e562",
+      "tests": [
+        "exact production accumulator is deterministic and sensitive to every exported semantic category:19-39",
+        "semantic drift in a future batch changes state before a completed prefix can be reused:41-75",
+        "exact batch commitments reject every fragment category before checkpoint authority:77-91",
+        "legacy state is never migrated into reusable schema two state:93-107",
+        "semanticFixture and production-marker harness:206-388"
+      ],
+      "fixtureContract": "The harness extracts the exact ExporterSemanticFingerprintV1 implementation from ExportProgramModel.java. Its semanticFixture mutates function name/prototype/calls/globals/strings, global name/type/initializer, a type declaration, a failure record and a future function prototype; BatchFragments covers functions, globals, types and failures.",
+      "limitation": "The fixture is synthetic and reflection/compiler based. It does not open or reload a Ghidra saved project, run the exporter through a real Ghidra process, or publish a real batch."
+    },
+    {
+      "path": "src/test/kotlin/decompengine/oracle/gcc/GccCompilerEngineResumeEvidenceValidationTest.kt",
+      "sha256": "fcd151d13c6ac4960a379fd817be5ccdc91ea346d7f128f92a7177d347a05ba5",
+      "tests": [
+        "terminal checkpoint capture recomputes whole inventory and semantic commitments:326-344",
+        "one-shot raw run reproduces inventory commitments semantics and framed model:671-689",
+        "interrupted prefixes reject missing reordered substituted and internally drifting bytes:746-809",
+        "state inventory commitment and semantic drift all fail independently:918-928",
+        "oneBatchFixture/buildFixture/semanticBinding:1247-1534"
+      ],
+      "fixtureContract": "The authored one-, two- and three-batch RunFixture values contain schema-2 exporter state, planning checkpoints, four raw fragment categories, progress, assembled model bytes and deterministic semantic/batch commitments.",
+      "limitation": "These are raw-byte validator fixtures with authored records. They do not prove a live interrupted/resumed compiler-engine operation or a semantically changed reloaded project."
+    }
+  ],
+  "criteria": [
+    {
+      "criterion": "Authenticate the precise analysis-state boundary and reject checkpoints from a semantically different in-memory/reloaded project.",
+      "sourceStatus": "present-in-current-code",
+      "evidenceStatus": "runtime-unverified",
+      "detail": "The exporter recomputes the planning semantic boundary before state comparison, binds it to schema-2 state, and rejects state or retained-batch drift. The pinned fixtures cover the comparison and refusal paths, but no real reload was executed."
+    },
+    {
+      "criterion": "Exercise semantic drift in prototypes, calls, globals, initializers, types, current batches and future batches; reject reuse before publishing mixed evidence.",
+      "sourceStatus": "represented-by-focused-fixtures",
+      "evidenceStatus": "runtime-unverified",
+      "detail": "The pinned semantic fixture mutates the named semantic categories and future-batch data; the batch fixture mutates each fragment category. The production source checks retained batches before reuse and new batches before checkpoint publication, but this record contains no executed result."
+    }
+  ],
+  "unverifiedCriteria": [
+    "Tests were intentionally skipped for this documentation-only checkpoint, so fixture coverage is source-declared rather than a passing result.",
+    "No real Ghidra saved-project reload or semantically changed in-memory/reloaded project was exercised end to end.",
+    "No real GCC cc1/lto1 interrupted/resumed export produced authenticated current and future batches for this record.",
+    "No hosted, contained, production-scale, resource-accounted or release-eligible qualification is claimed; issue #926 and parent #137 remain open."
+  ],
+  "validation": {
+    "mode": "source-and-fixture-audit-only",
+    "testsExecuted": [],
+    "checks": ["git diff --check", "JSON syntax inspection"],
+    "decision": "Tests skipped per task instruction; this record must not be read as runtime or production qualification."
+  },
+  "disposition": {
+    "implementationStatus": "semantic state and per-batch authentication paths are present in the pinned planning exporter and raw-byte validator",
+    "evidenceStatus": "bounded and incomplete",
+    "complete": false,
+    "benchmarkAccepted": false,
+    "releaseEligible": false
+  }
+}
