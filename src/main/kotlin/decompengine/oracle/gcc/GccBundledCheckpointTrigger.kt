@@ -57,6 +57,7 @@ internal class GccBundledCheckpointTrigger(val minimumCompletedFunctions: Long) 
             "functionCount" to JsonPrimitive(prefix.functionCount),
             "completed" to JsonPrimitive(prefix.completed),
             "observedBatchCount" to JsonPrimitive(prefix.observedBatchCount),
+            "batchCommitmentSha256" to JsonPrimitive(prefix.batchCommitmentSha256),
             "declaredInventorySha256" to JsonPrimitive(prefix.declaredInventorySha256),
             "partial" to JsonPrimitive(prefix.partial), "failed" to JsonPrimitive(prefix.failed),
             "reused" to JsonPrimitive(prefix.reused),
