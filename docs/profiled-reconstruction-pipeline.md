@@ -28,7 +28,9 @@ generation performs admission before the wrapper creates supplemental report
 directories. The supplemental paths `reports/analysis.json` and
 `reports/unresolved.json` are reserved: selected declarations cannot occupy those
 files, their ancestors or descendants, including through templates. Both entry
-points check this before output. Existing report paths and contents are preserved.
+points check this before output. Existing report paths and fields are preserved;
+[bounded streaming publication](bounded-report-publication.md) now normalizes
+whitespace and appends effective report limits.
 
 The existing pipeline constructor, `generate(Path, Path)` method and generator
 method with its default reconstructor remain compatible, including the generator's
@@ -62,8 +64,8 @@ qualify production execution.
 
 The analyzer now uses a [bounded positional ELF inventory](bounded-elf-metadata.md)
 and shares its elapsed deadline across export and metadata. It verifies the input
-digest against the model before reporting. Downstream unresolved-symbol and
-generated-file reports still materialize complete strings; their independent
-streaming and publication bounds remain
-[#84](https://github.com/minsago-elite/decomp_thing/issues/84) work, along with the
-other open consumer, role-permission and production qualification criteria.
+digest against the model before reporting. Its summary and the downstream
+unresolved-symbol/generated-file reports now stream with independent byte and
+publication bounds. Complete phase bounds and the other consumer, role-permission
+and production qualification criteria remain
+[#84](https://github.com/minsago-elite/decomp_thing/issues/84) work.

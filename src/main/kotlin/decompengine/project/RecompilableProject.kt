@@ -2,17 +2,14 @@ package decompengine.project
 
 import decompengine.analysis.GhidraAnalysis
 import decompengine.analysis.GhidraJvmAnalyzer
-import decompengine.binary.UnresolvedSymbol
 import java.io.BufferedInputStream
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.util.Collections
-import kotlin.io.path.createDirectories
 import kotlin.io.path.pathString
 import kotlin.io.path.relativeTo
-import kotlin.io.path.writeText
 
 data class BuildReport(
     val projectDir: Path,
@@ -92,39 +89,6 @@ internal fun sha256File(path: Path, expectedBytes: Long): String {
     return digest.digest().joinToString("") { "%02x".format(it) }
 }
 
-private fun renderUnresolvedReport(analysis: GhidraAnalysis): String {
-    val inventory = analysis.symbolInventory
-    fun list(symbols: List<UnresolvedSymbol>) = symbols.joinToString(",\n") { it.toJson().prependIndent("      ") }
-    return """
-    {
-      "binary": "${analysis.binaryPath.pathString.escapeJson()}",
-      "machine": "${analysis.metadata.machine}",
-      "unresolvedFunctionCount": ${inventory.functions.size},
-      "unresolvedObjectCount": ${inventory.objects.size},
-      "unresolvedOtherCount": ${inventory.other.size},
-      "functions": [
-        ${list(inventory.functions)}
-      ],
-      "objects": [
-        ${list(inventory.objects)}
-      ],
-      "other": [
-        ${list(inventory.other)}
-      ],
-      "note": "Unresolved symbols are external imports (libc/runtime) that the reconstructed project depends on but does not define. Their presence does not imply behavioral equivalence."
-    }
-    """.trimIndent() + "\n"
-}
-
-private fun UnresolvedSymbol.toJson(): String = """
-{
-  "name": "${name.escapeJson()}",
-  "kind": "$kind",
-  "binding": "$binding",
-  "size": $size
-}
-""".trimIndent()
-
 internal fun String.escapeJson(): String =
     buildString {
         for (char in this@escapeJson) {
@@ -181,24 +145,7 @@ object RecompilableProjectGenerator {
             reconstructor = reconstructor,
             profile = profile,
         )
-        val reportsDir = projectDir.resolve("reports").createDirectories()
-        reportsDir.resolve("analysis.json").writeText(
-            """
-            {
-              "sourceAnalysis": "${analysis.reportPath.pathString}",
-              "metadata": {
-                "format": "${analysis.metadata.format}",
-                "machine": "${analysis.metadata.machine}",
-                "entryPoint": ${analysis.metadata.entryPoint}
-              },
-              "generatedFiles": [
-                ${manifest.files.map { it.path }.plus("reports/analysis.json").plus("reports/unresolved.json")
-                    .distinct().sorted().joinToString(",\n                ") { "\"$it\"" }}
-              ]
-            }
-            """.trimIndent() + "\n",
-        )
-        reportsDir.resolve("unresolved.json").writeText(renderUnresolvedReport(analysis))
+        ReconstructionReports.write(analysis, projectDir, manifest, profile)
         return projectDir
     }
 }

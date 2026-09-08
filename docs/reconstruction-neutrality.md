@@ -79,8 +79,9 @@ output, then forwards that profile and host policy through generation. Two exact
 single-occurrence allowances preserve the old generator and pipeline defaults;
 they do not exempt build dispatch. The analyzer now reads ELF metadata through
 bounded positional windows and checks it against the exported model's input
-identity. Downstream report rendering and complete phase resource bounds remain
-unfinished.
+identity. The analyzer summary and supplemental reports now use
+[bounded streaming publication](bounded-report-publication.md); complete phase
+resource bounds and other report consumers remain unfinished.
 
 Passing the authored scanner tests verifies its detection and exemption
 behavior. It does not make the repository scan pass or complete #84. Current
