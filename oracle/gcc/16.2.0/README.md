@@ -88,6 +88,13 @@ the oracle test suite. The
 documents clean reproduction and the CI gate. GCC remains one substantial C
 benchmark, not an engine-specific code path.
 
+The rebuild implementations live in `oracle/gcc/rebuild_oracle.py` and
+`oracle/gcc/rebuild_compiler_engines.py`. The existing
+`scripts/rebuild-gcc-oracle.py` and `scripts/rebuild-gcc-compiler-engines.py`
+commands are thin import/delegation wrappers with the same CLI arguments and
+defaults. The compiler-engine implementation imports the driver rebuild module
+directly; benchmark versions and artifact names stay in the owned package.
+
 ## Compiler-engine benchmark twins
 
 `compiler-engines.json` extends the same authenticated source and toolchain
