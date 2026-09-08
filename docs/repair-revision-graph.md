@@ -15,19 +15,29 @@ diagnostics. `RepairValidationStrategy` similarly keeps build commands and rebui
 outside the repair loop. GCC is one useful C benchmark, not an architectural dependency.
 
 The generated-C repair configuration fingerprint is SHA-256 over these UTF-8 bytes:
-`generated-c-repair-index-v2\n`, the canonical SHA-256 of
-`GeneratedCMakeReconstructionProfile.descriptor`, and a final newline. The prefix versions
+`generated-c-repair-index-v3\n`, the canonical SHA-256 of
+the selected reconstruction descriptor, and a final newline. The prefix versions
 repair-policy interpretation independently of the descriptor's layout, roles, build configuration
 and budgets. Repair resource budgets retain their separate graph/recovery binding.
 
-This intentionally changes the historical fingerprint, which hashed only `generated-c-make-v1`.
-Existing graphs carrying that historical identity are rejected before pending recovery writes;
+This intentionally changes both the historical ID-only fingerprint and the v2 policy fingerprint.
+Existing graphs carrying either prior identity are rejected before pending recovery writes;
 they are not silently relabelled or migrated. Preserve the existing workspace and retained graph.
 Recover a pending transaction using its matching historical implementation before moving accepted
 source into a separate new workspace with a new graph. This does not import or claim continuity
 of the historical accepted lineage. A qualified graph migration remains separate work.
-The configured repair adapter still supports only its fixed Make descriptor; this fingerprint
-prerequisite does not admit Ninja or relocated repair layouts.
+`GeneratedCRepairIndexProfile.forProfile(descriptor)` selects an index policy for registered
+Make and Ninja reconstruction descriptors. The compatibility singleton selects the built-in Make
+descriptor. Discovery retains descriptor-bound traversal of `src/` and `include/` and currently
+requires a root-level build definition. Nested build definitions and other source roots are rejected
+at construction. Evidence paths, shared/private interfaces and entry candidates follow the selected
+descriptor. Declared module source/header paths must agree with the plan's module ID.
+
+Only declared UTF-8 build inputs with the EDITABLE role grant writes. Undeclared auxiliary inputs
+are retained in the source inventory without write permission; read-only module interfaces remain
+owned context. Recovery derives the same editability set without consulting candidate content.
+This is index policy admission, not production runtime registration: the validation provider and
+snapshot boundary still admit only their fixed Make contract and remain unqualified.
 
 Production validation is a mandatory capability, not a weak default. Both
 `RepairValidationStrategy` and the generated-C `GeneratedCRepairValidationBoundary` expose immutable
@@ -42,7 +52,7 @@ complete provisioned compiler/runtime closure and public-factory path are qualif
 therefore remains unavailable for production repair; local fixture success does not remove that gate.
 
 The repair core never discovers or parses a report path or program-model schema. The generated-C
-profile alone reads its `reports/module_plan.json` and `reports/program_model.json`, translates C
+profile alone reads its declared module-plan and program-model evidence paths, translates C
 function/global/call evidence into the generic module/entity contract, adds the transitive local-
 include graph, and supplies source-bound build-failure ownership. Other profiles ignore those report
 names unless they explicitly choose them. The two generated-C index reports are an all-or-nothing,
