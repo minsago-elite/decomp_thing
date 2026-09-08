@@ -1,6 +1,6 @@
 {
   "status": "passed",
-  "sourceCommit": "8ce450a8ebbc1b85670d2553a8abe1a4c3fd172c",
+  "sourceCommit": "56fc55056eacbcefe743def235a3a214df7d6694",
   "verification": {
     "tests": 250,
     "failures": 0,
@@ -17,7 +17,8 @@
     "initialSnapshotsSucceeded": 33,
     "interruptedReadFallbacksObserved": 0,
     "pageLimit": 7,
-    "identicalRetryData": true
+    "identicalRetryData": true,
+    "publicationsOverlappedRead": 1
   },
   "sse": {
     "atomicEvictionGapAndClose": true,
@@ -25,7 +26,7 @@
     "freshSnapshotResumesLaterPublication": true,
     "deliveredSequencesMatchPolling": true
   },
-  "runtimeImplementationChanged": false,
+  "runtimeImplementationChanged": true,
   "workflowExecutionStarted": false,
   "fixtureLifecycleTransitionsOnly": true,
   "notRepeated": [
@@ -39,6 +40,6 @@
   ],
   "retainedXml": {
     "file": "TEST-decompengine.web.WebProgressCutoverTest.xml",
-    "sha256": "851ed1fc6460320339f941ef3fc6a88dc856cf018af45a758b10017fc1ec3ac3"
+    "sha256": "5a8eb17c12bd3f6cfccb03cc7e0832330f631ee180e1a68d095372fcc4f59319"
   }
 }
