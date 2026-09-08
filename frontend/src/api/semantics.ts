@@ -89,7 +89,7 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       if (document.data.progress) {
         const { nextSequence, queueDropped, historyDropped, retainedEventCount } = document.data.progress;
         const next = BigInt(nextSequence), count = BigInt(retainedEventCount);
-        requireValue(count <= 1024n && count + BigInt(queueDropped) + BigInt(historyDropped) <= next);
+        requireValue(count <= 1024n && count + BigInt(queueDropped) + BigInt(historyDropped) === next);
         requireValue((count === 0n) === (document.data.oldestCursor === null));
         requireValue((next === 0n) === (document.data.throughSequence === null));
         if (document.data.throughSequence !== null) requireValue(BigInt(document.data.throughSequence) + 1n === next);
