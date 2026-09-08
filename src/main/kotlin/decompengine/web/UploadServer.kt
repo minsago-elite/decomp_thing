@@ -178,8 +178,12 @@ class UploadServer(
     sensitiveValues: Collection<String> = System.getenv().values,
     private val listenBacklog: Int = 64,
     private val authenticationInspector: (decompengine.agent.AgentCancellation) -> decompengine.acp.AcpAuthenticationInventory = defaultWebAuthenticationInspector(),
+    private val requestShutdownTimeoutMs: Long = 1000,
 ) {
-    init { require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" } }
+    init {
+        require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" }
+        require(requestShutdownTimeoutMs in 0..5000) { "HTTP request shutdown wait must be between zero and five seconds" }
+    }
     private val diagnosticRedactor = ProgressRedactor(sensitiveValues)
     private val authenticationInspectionLock = Any()
     private var authenticationInspectionId: String? = null
@@ -239,6 +243,7 @@ class UploadServer(
     private var stopping = false
     private var started = false
     private var activeRequests = 0
+    private val requestsDrained = java.util.concurrent.CountDownLatch(1)
     private val stopRequested = java.util.concurrent.atomic.AtomicBoolean(false)
     val serverPort: Int get() = server.address.port
     val browserOrigin: String = devFrontendOrigin ?: webOrigin(host, serverPort)
@@ -332,6 +337,7 @@ class UploadServer(
         val callerWasInterrupted = Thread.currentThread().isInterrupted
         val inspection = synchronized(lifecycleLock) {
             stopping = true
+            if (activeRequests == 0) requestsDrained.countDown()
             // JDK HttpServer.stop does not release a bound listener before start. Start its
             // dispatcher only after closing request admission, then close it below. This also
             // covers failed ownership/recovery admission and explicit stop-before-start.
@@ -360,7 +366,17 @@ class UploadServer(
         } catch (exception: Exception) {
             if (exception is InterruptedException) Thread.currentThread().interrupt()
         }
-        if (inspectionWaitInterrupted) Thread.currentThread().interrupt()
+        // Interrupting the executor does not mean admitted handlers have finished their finally blocks.
+        // Admission is closed, so reaching zero here is permanent. Never hold lifecycleLock while waiting.
+        var requestWaitInterrupted = false
+        val requestDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(requestShutdownTimeoutMs)
+        while (requestsDrained.count != 0L) {
+            val remaining = requestDeadline - System.nanoTime()
+            if (remaining <= 0) break
+            try { requestsDrained.await(remaining, TimeUnit.NANOSECONDS) }
+            catch (_: InterruptedException) { requestWaitInterrupted = true }
+        }
+        if (callerWasInterrupted || inspectionWaitInterrupted || requestWaitInterrupted) Thread.currentThread().interrupt()
         if (!releaseOwnershipIfIdle()) throw IllegalStateException("HTTP requests remain active after server stop")
     }
 
@@ -381,7 +397,10 @@ class UploadServer(
             action()
             return true
         } finally {
-            synchronized(lifecycleLock) { activeRequests-- }
+            synchronized(lifecycleLock) {
+                activeRequests--
+                if (stopping && activeRequests == 0) requestsDrained.countDown()
+            }
             try {
                 releaseOwnershipIfIdle()
             } catch (_: Exception) {
