@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.web.WebAttemptCancellationTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-09-08T09:04:31.121Z" hostname="whatsername" time="0.798">
+  <properties/>
+  <testcase name="queued cancellation prevents execution even when an external executor later dispatches it()" classname="decompengine.web.WebAttemptCancellationTest" time="0.342"/>
+  <testcase name="failed cancellation publication distinguishes unchanged state from uncertain publication()" classname="decompengine.web.WebAttemptCancellationTest" time="0.203"/>
+  <testcase name="running cancellation is durable before signalling and remains pending until the worker exits()" classname="decompengine.web.WebAttemptCancellationTest" time="0.231"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
