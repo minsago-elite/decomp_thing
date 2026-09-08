@@ -6,6 +6,7 @@ import java.nio.file.Path
 internal object GeneratedCReconstructionAdapter : ReconstructionAdapter {
     override val compilation: ModuleCompilationPolicy = GeneratedCModuleValidation
     override val archiveBuild: ArchiveBuildPolicy = GeneratedCArchiveBuildPolicy
+    override val behaviorBuild: BehaviorBuildPolicy = GeneratedCBehaviorBuildPolicy
     override fun rendering(model: RecoveredProgramModel, plan: ModulePlan): ProjectRendering =
         GeneratedCProjectRendering(model, plan)
     override fun build(projectDir: Path, profile: ReconstructionProfile): BuildReport = MakeProjectBuilder.build(

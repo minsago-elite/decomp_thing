@@ -69,13 +69,25 @@ qualifying the extracted project after its clean rebuild and comparison.
 
 Project capture checks the schema-3 source manifest against its selected profile
 and every declared file. The original executable digest must match the project
-input. The successful schema-2 C/Make build contract must identify the current
-source inputs and the exact `build/reconstructed` bytes selected for comparison.
-Source inventory includes `Makefile` and regular files beneath `src` and `include`,
-using the existing build revision encoding. Enumeration rejects symbolic links,
+input. The selected reconstruction adapter supplies the build-contract parser,
+contract/artifact paths and source inventory layout. Make and Ninja share the
+generated-C schema-2 contract policy: the record must identify the current source
+inputs and exact `build/reconstructed` bytes selected for comparison. Its inventory
+includes the profile's declared build definition and regular files beneath `src`
+and `include`, using the existing build revision encoding. A nested definition is
+included, and a definition beneath a source root is captured once.
+
+The common capture retains stable file identities, its 64 MiB per-file and 512 MiB
+aggregate bounds, 10,000-file/entry bounds and depth limit. Enumeration rejects symbolic links,
 special files, excessive entry counts and excessive depth. The project revision
 records relative file identities, manifest/build-contract identities, the source
 revision and the built artifact identity. Project capture is repeated at the end.
+
+`ProfiledBehaviorEvidenceCaptureTest` builds tiny authored Make/Ninja projects and
+checks capture against their actual build contracts, including nested definitions
+and relocated module inputs. It also checks that a later source comment edit
+invalidates captured evidence. These tests capture identities without executing
+the programs; they do not establish matching behavior or production qualification.
 
 Each record retains argv, stdin, stdout, stderr and exit values, and commits the
 complete supplied case sequence separately from its observations. The report
@@ -138,9 +150,10 @@ stays empty and `moduleExecutionCoverage` is `not-observed`, because a project
 comparison does not establish which individual modules executed.
 
 For an accepted module, the audit requires its manifest-bound checkpoint to use
-compiler acceptance schema 5, contain no reconstruction issues, and record exactly
+compiler acceptance schema 6, contain no reconstruction issues, and record exactly
 the module plan's function/global owners once each with accepted status. It also
-checks successful compilation of the current source under the profile's command.
+checks the model binary/schema and profile identities, and successful compilation
+of the current source under the profile's command.
 Unsupported schemas, missing or foreign owners, duplicate owners and contradictory
 acceptance details become `moduleCompilationEvidenceProblems` and leave the module's
 entities unresolved. These consistency checks do not authenticate an external
@@ -150,7 +163,7 @@ Reconstruction resume applies the same module acceptance constraints before reus
 an accepted checkpoint or supplying it as a rollback baseline. The checkpoint reader
 also rejects entity statuses that contradict the top-level acceptance flag. Invalid
 acceptance requires reconstruction again; a newly validated replacement can then be
-reused normally. Historical checkpoints without compiler acceptance schema 5 do not
+reused normally. Historical checkpoints without compiler acceptance schema 6 do not
 supply accepted rollback evidence.
 
 The authored four-module resume fixture generates actual C calls along a
