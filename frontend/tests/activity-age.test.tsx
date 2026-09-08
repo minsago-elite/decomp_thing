@@ -2,7 +2,7 @@ import { act, cleanup, render, screen } from '@testing-library/preact';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { ActivityReceiptAge } from '../src/jobs/ActivityReceiptAge';
 
-const receipt = { at: '2026-09-05T00:00:00Z', monotonicMs: 0 };
+const receipt = { at: '2026-09-05T00:00:00Z', monotonicMs: 0, wallClockMs: 0 };
 let clock = 0;
 beforeEach(() => {
   vi.useFakeTimers(); clock = 0;
@@ -51,10 +51,23 @@ it('releases the timer while hidden, catches up on return, and cleans up on unmo
   view.unmount(); expect(vi.getTimerCount()).toBe(0);
 });
 
+it('reconciles a suspended interval when the browser monotonic clock pauses', async () => {
+  vi.setSystemTime(0);
+  const view = render(<ActivityReceiptAge receipt={receipt} visible />);
+  clock = 1000;
+  vi.setSystemTime(1000);
+  view.rerender(<ActivityReceiptAge receipt={receipt} visible={false} />);
+  clock = 2000;
+  vi.setSystemTime(3602000);
+  view.rerender(<ActivityReceiptAge receipt={receipt} visible />);
+  await act(async () => { await Promise.resolve(); });
+  expect(screen.getByText(/about 1 hour ago/)).toBeTruthy();
+});
+
 it('resets the receipt age when a new verified page arrives', async () => {
   const view = render(<ActivityReceiptAge receipt={receipt} visible />);
   await tick(60000);
-  const updated = { at: '2026-09-05T00:01:00Z', monotonicMs: clock };
+  const updated = { at: '2026-09-05T00:01:00Z', monotonicMs: clock, wallClockMs: clock };
   view.rerender(<ActivityReceiptAge receipt={updated} visible />);
   expect(screen.getByText(/less than 10 seconds ago/)).toBeTruthy();
   expect(document.querySelector('time')?.dateTime).toBe(updated.at);

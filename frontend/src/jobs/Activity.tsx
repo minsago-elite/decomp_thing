@@ -64,7 +64,7 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
         const next = [...previous.rows, ...added];
         if (next.length > capacity) throw new Error('capacity');
         position.current = { initialized: true, cursor: data.nextCursor ?? previous.cursor, rows: next, last };
-        setRows(next); setLastRead({ at: new Date().toISOString(), monotonicMs: performance.now() }); setRetry(0); failures.current = 0;
+        setRows(next); setLastRead({ at: new Date().toISOString(), monotonicMs: performance.now(), wallClockMs: Date.now() }); setRetry(0); failures.current = 0;
         if (next.length === capacity) { setFollowing(false); return; }
         timer = setTimeout(() => { void poll(); }, 2500);
       } catch (failure: unknown) {
