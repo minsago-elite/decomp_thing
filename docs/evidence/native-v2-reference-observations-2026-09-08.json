@@ -1,0 +1,101 @@
+{
+  "schemaVersion": 1,
+  "issue": 937,
+  "recordedAtUtc": "2026-09-08",
+  "scope": "Bounded source-and-fixture evidence for the native-v2 reference capture checkpoint; this record does not claim fresh reference observations, merged behavior, or production qualification.",
+  "sourceCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "evidenceMode": "current-source-and-fixture-inspection",
+  "sourceFiles": {
+    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorReferenceInputPlanV2.kt": "52f14e47d04a0d9adfdc115e6bf7517fb071c7198c1723469f37c35eec5713d9",
+    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorReferenceInputPlanV2Generator.kt": "0a0f711a6a6ea18b635cc3b2f9f171eedc283ae4491def4ca64219e402e78353",
+    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorReferenceEvidence.kt": "133d9eb8cd7970943b860a2cac57c521ac9dcd641afc481cfd5b28b7f08cb987",
+    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorNativeSandboxPolicyV2.kt": "bb80158cc248b5a92965bf9f0972b5f1e6a918e92c13edb54b872d809ea4e121",
+    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorRuntimePreflight.kt": "7fa6be6d1bbe79ce39b7f49ed1fff5bfcfb28d80a3487243899ab53e2c570831",
+    "src/main/c/decomp_llvm_behavior_helper.c": "8465bd7761e3ecc2eefc42f194505e24d6adf3ed68a676a8370ee294f30cd713",
+    "docs/llvm-behavior-reference-input-plan-v2.md": "859076dda16daa116adcb92fa4e1e59c7df1ac71c1e8764983d7564936a20118",
+    "docs/llvm-behavior-native-sandbox-policy-v2.md": "11967cfce59625b46a391291168d9ad416b2db0a0f89e13cc06d8411c4f80c7d",
+    "oracle/llvm-behavior-reference-input-plan-v2.schema.json": "e96f2bf456f363150a2ea8a9368831b534b413e8c1d1159c5994c3750c36ce23",
+    "oracle/llvm-behavior-native-sandbox-policy-v2.schema.json": "bdce127600546944a3545682c22983383a348aa5a453fa823292fd176bb6f079"
+  },
+  "fixtureFiles": {
+    "src/test/kotlin/decompengine/oracle/behavior/LlvmBehaviorReferenceInputPlanV2Test.kt": "1d25201726c0b8fe88d2c4c5cf27bceff5430695681e424115d436e2835c85aa",
+    "src/test/kotlin/decompengine/oracle/behavior/LlvmBehaviorReferenceEvidenceTest.kt": "0862c05081e56d7dcc655a0b2ba0ce6da291ead4b2c218934e71b83d1eae7bbd",
+    "src/test/kotlin/decompengine/oracle/behavior/LlvmBehaviorNativeSandboxPolicyV2Fixture.kt": "9f4b69bf18036ac0eda6b5a6cd1079ad5be6c1ff609f40fb6254c7af673a47b8",
+    "src/test/kotlin/decompengine/oracle/behavior/LlvmBehaviorNativeSandboxPolicyV2Test.kt": "ef9e27f8c8165ad1cfce67eaefb9d0d0f3bbb9fdda1e8d034e2c28e8d736dfa1",
+    "oracle/llvm/22.1.6/behavior-reference-input-plan-v2.json": "01424f3b14419b2da463c2c5aefbd89a81c03b11ac5847b750f79d72eb7e5d0d",
+    "oracle/llvm/22.1.6/behavior-case-ownership.json": "f403a57b1712df43d7043b3593f38aa705005136edfd97a78691e273c9a46c5f",
+    "oracle/llvm/22.1.6/build-record.json": "415afaf3554f954aed4442f0fa3c83ecc7e9f1fe0ddf68fb4c39e9231ece9005"
+  },
+  "v2InputPlan": {
+    "path": "oracle/llvm/22.1.6/behavior-reference-input-plan-v2.json",
+    "bytes": 46787,
+    "sha256": "01424f3b14419b2da463c2c5aefbd89a81c03b11ac5847b750f79d72eb7e5d0d",
+    "cases": 48,
+    "literalInputs": 54,
+    "sameRepetitionGeneratedInputs": 2,
+    "requiredRepetitions": 3,
+    "agreement": "canonical-observation-payload-byte-identical",
+    "claims": {
+      "observationsCaptured": false,
+      "referenceSubjectPinned": false,
+      "referenceTruthEstablished": false,
+      "runtimePreflightVerified": false,
+      "liveContainmentVerified": false,
+      "terminalAbsenceVerified": false
+    }
+  },
+  "captureArtifacts": {
+    "referenceDefinitionV2": {
+      "present": false,
+      "path": "oracle/llvm/22.1.6/reference-definition-v2.json"
+    },
+    "nativeSandboxPolicyV2": {
+      "present": false,
+      "path": "oracle/llvm/22.1.6/native-sandbox-policy-v2.json"
+    },
+    "runtimeImageHelperTuple": {
+      "present": false,
+      "reason": "No fresh Kotlin-authenticated runtime/image/helper/reference tuple is retained by this checkout."
+    }
+  },
+  "repetitions": [
+    {
+      "repetition": 1,
+      "status": "not-captured",
+      "canonicalObservationSha256": null
+    },
+    {
+      "repetition": 2,
+      "status": "not-captured",
+      "canonicalObservationSha256": null
+    },
+    {
+      "repetition": 3,
+      "status": "not-captured",
+      "canonicalObservationSha256": null
+    }
+  ],
+  "historicalV1Artifacts": {
+    "status": "incompatible-and-not-reused",
+    "reason": "These are the checked historical v1 corpus/report/matrix/manifest files used by the v1 evidence verifier; they do not satisfy the v2 capture contract and are not assigned v2 observation identities.",
+    "files": {
+      "oracle/llvm/22.1.6/behavior-corpus.json": "acaa7b33c390b2c9fde15b4e21b0a899ffff62fe98ce22226866272b4efe8d5b",
+      "oracle/llvm/22.1.6/behavior-corpus-evidence.json": "e9595bfd941c406d2c8fff618986e60dc0b810f1c384848b3ba540020ca00a6f",
+      "oracle/llvm/22.1.6/diagnostic-matrix.json": "9e3b3223e014de49e0df50892556ae4649f819d5571751378ed9bfd12d684b2d",
+      "oracle/llvm/22.1.6/oracle-manifest.json": "5b6f6e923e05ae4d51aefab55c8028d543d05e76b25a7c075c4e884005ce6b40"
+    }
+  },
+  "unverifiedCriteria": [
+    "Fresh native-v2 reference executable, runtime/image tuple, and complete policy authentication.",
+    "Fresh Kotlin-generated corpus, report, diagnostic matrix, and manifest bound to that exact tuple.",
+    "Three isolated native-v2 captures with canonical observation payloads that are byte-identical across all repetitions.",
+    "Retained live containment and terminal-absence proof for every repetition before reference authority.",
+    "Merged behavior and production qualification, including any downstream candidate, scoring, certification, or release decision."
+  ],
+  "validation": {
+    "testsRun": false,
+    "reason": "Skipped at user request.",
+    "productionQualification": false,
+    "mergedBehavior": false
+  }
+}
