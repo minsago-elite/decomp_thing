@@ -1241,7 +1241,8 @@ object SourceTreeGenerator {
             else -> "${failure::class.simpleName ?: "Exception"} during module reconstruction"
         }
         return fallback.copy(
-            generator = "unresolved:$reconstructorIdentity",
+            generator = if (failure is ModuleContextBudgetExceededException) "unresolved:profile-budget"
+                else "unresolved:$reconstructorIdentity",
             promptSha256 = agentOutcome?.promptSha256
                 ?: (failure as? ModuleContextBudgetExceededException)?.promptSha256
                 ?: fallback.promptSha256,
