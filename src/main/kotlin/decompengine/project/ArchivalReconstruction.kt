@@ -36,6 +36,7 @@ data class GhidraProgramModelExportLimits(
     val terminationGrace: Duration = Duration.ofSeconds(5),
     val maximumResidentBytes: Long = 4L * 1024 * 1024 * 1024,
     val maximumProgramModelBytes: Long = 512L * 1024 * 1024,
+    val maximumDiagnosticBytesPerStream: Int = 16 * 1024 * 1024,
 ) {
     init {
         require(!wallClockTimeout.isZero && !wallClockTimeout.isNegative && wallClockTimeout <= Duration.ofHours(24)) {
@@ -43,6 +44,9 @@ data class GhidraProgramModelExportLimits(
         }
         require(!terminationGrace.isNegative && terminationGrace <= Duration.ofSeconds(30)) {
             "Ghidra termination grace must be between zero and 30 seconds"
+        }
+        require(maximumDiagnosticBytesPerStream in 1..(16 * 1024 * 1024)) {
+            "Ghidra diagnostic stream limit must be positive and at most 16 MiB"
         }
         require(maximumResidentBytes > 0) { "Ghidra resident-memory limit must be positive" }
         require(maximumProgramModelBytes in 1..(512L * 1024 * 1024)) {
@@ -90,6 +94,7 @@ class GhidraHeadlessProgramModelAnalyzer internal constructor(
         workDir: Path,
         includeCallSites: Boolean,
     ): Pair<RecoveredProgramModel, RecoveredCallSiteReceipt?> {
+        if (Thread.interrupted()) throw InterruptedException("Ghidra program export cancelled")
         val startedNanos = System.nanoTime()
         val reports = workDir.resolve("reports").createDirectories()
         val scripts = workDir.resolve("scripts").createDirectories()
@@ -115,50 +120,7 @@ class GhidraHeadlessProgramModelAnalyzer internal constructor(
             )),
         )
         val command = commandFactory(GhidraInvocation(project, "archival_reconstruction", binaryPath, scripts, postScripts))
-        val process = ProcessBuilder(command)
-            .directory(workDir.toFile())
-            .start()
-        val peakResidentBytes = AtomicLong(0)
-        val memoryExceeded = AtomicBoolean(false)
-        val memoryMonitor = CompletableFuture.runAsync {
-            while (process.isAlive) {
-                val observed = residentBytes(process)
-                peakResidentBytes.accumulateAndGet(observed, ::maxOf)
-                if (observed > limits.maximumResidentBytes) {
-                    memoryExceeded.set(true)
-                    terminateProcessTree(process, limits.terminationGrace)
-                    break
-                }
-                Thread.sleep(25)
-            }
-        }
-        val stdout = CompletableFuture.supplyAsync { process.inputStream.bufferedReader().readText() }
-        val stderr = CompletableFuture.supplyAsync { process.errorStream.bufferedReader().readText() }
-        val completed = process.waitFor(limits.wallClockTimeout.toMillis(), TimeUnit.MILLISECONDS)
-        if (!completed) {
-            terminateProcessTree(process, limits.terminationGrace)
-        }
-        val exitCode = if (completed) process.exitValue() else -1
-        reports.resolve("ghidra_stdout.log").writeText(stdout.join())
-        reports.resolve("ghidra_stderr.log").writeText(stderr.join())
-        memoryMonitor.join()
-        reports.resolve("ghidra_resource_usage.json").writeText(
-            "{\"maximumResidentBytesLimit\":${limits.maximumResidentBytes}," +
-                "\"maximumResidentBytesObserved\":${peakResidentBytes.get()}," +
-                "\"wallClockMillisLimit\":${limits.wallClockTimeout.toMillis()}}\n",
-        )
-        if (memoryExceeded.get()) {
-            throw GhidraAnalysisException(
-                "Ghidra program recovery exceeded ${limits.maximumResidentBytes} resident bytes; " +
-                    "rerun with the same output directory to resume durable function checkpoints",
-            )
-        }
-        if (!completed) {
-            throw GhidraAnalysisException(
-                "Ghidra program recovery exceeded ${limits.wallClockTimeout.toSeconds()} seconds; " +
-                    "rerun with the same output directory to resume durable function checkpoints",
-            )
-        }
+        val exitCode = executeExport(command, workDir, reports, startedNanos)
         require(exitCode == 0 && Files.isRegularFile(output, LinkOption.NOFOLLOW_LINKS)) {
             "Ghidra program recovery failed with exit code $exitCode; see ${reports.resolve("ghidra_stderr.log")}"
         }
@@ -194,6 +156,98 @@ class GhidraHeadlessProgramModelAnalyzer internal constructor(
             ) { requireRemainingTime() }.also { requireRemainingTime() }
         }
         return model to calls
+    }
+
+    private fun executeExport(command: List<String>, workDir: Path, reports: Path, startedNanos: Long): Int {
+        if (Thread.interrupted()) throw InterruptedException("Ghidra program export cancelled")
+        val process = ProcessBuilder(command).directory(workDir.toFile()).start()
+        val peakResidentBytes = AtomicLong(0)
+        val memoryExceeded = AtomicBoolean(false)
+        val diagnosticsExceeded = AtomicBoolean(false)
+        val stopMemoryMonitor = AtomicBoolean(false)
+        val tasks = ArrayList<CompletableFuture<*>>()
+        var primaryFailure: Throwable? = null
+        try {
+            process.outputStream.close()
+            val memoryMonitor = CompletableFuture.runAsync {
+                try {
+                    while (!stopMemoryMonitor.get() && process.isAlive) {
+                        val observed = residentBytes(process)
+                        peakResidentBytes.accumulateAndGet(observed, ::maxOf)
+                        if (observed > limits.maximumResidentBytes) {
+                            memoryExceeded.set(true)
+                            terminateProcessTree(process, limits.terminationGrace)
+                            break
+                        }
+                        TimeUnit.MILLISECONDS.sleep(25)
+                    }
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
+            }.also(tasks::add)
+            fun capture(stream: java.io.InputStream): CompletableFuture<ByteArray> = CompletableFuture.supplyAsync {
+                val bytes = stream.readNBytes(limits.maximumDiagnosticBytesPerStream + 1)
+                if (bytes.size > limits.maximumDiagnosticBytesPerStream) {
+                    diagnosticsExceeded.set(true)
+                    terminateProcessTree(process, limits.terminationGrace)
+                    bytes.copyOf(limits.maximumDiagnosticBytesPerStream)
+                } else bytes
+            }.also(tasks::add)
+            val stdout = capture(process.inputStream)
+            val stderr = capture(process.errorStream)
+            val executionDeadline = startedNanos + limits.wallClockTimeout.toNanos()
+            val completed = process.waitFor(maxOf(0L, executionDeadline - System.nanoTime()), TimeUnit.NANOSECONDS)
+            if (!completed) terminateProcessTree(process, limits.terminationGrace)
+            stopMemoryMonitor.set(true)
+            memoryMonitor.get(1, TimeUnit.SECONDS)
+            // After timeout, allow bounded cleanup time to retain diagnostics already in the pipes.
+            val drainDeadline = if (completed) executionDeadline else System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            fun <T> await(task: CompletableFuture<T>): T =
+                task.get(maxOf(0L, drainDeadline - System.nanoTime()), TimeUnit.NANOSECONDS)
+            val stdoutBytes = await(stdout)
+            val stderrBytes = await(stderr)
+            reports.resolve("ghidra_stdout.log").writeBytes(stdoutBytes)
+            reports.resolve("ghidra_stderr.log").writeBytes(stderrBytes)
+            reports.resolve("ghidra_resource_usage.json").writeText(
+                "{\"maximumResidentBytesLimit\":${limits.maximumResidentBytes}," +
+                    "\"maximumResidentBytesObserved\":${peakResidentBytes.get()}," +
+                    "\"wallClockMillisLimit\":${limits.wallClockTimeout.toMillis()}," +
+                    "\"maximumDiagnosticBytesPerStream\":${limits.maximumDiagnosticBytesPerStream}," +
+                    "\"stdoutBytesRetained\":${stdoutBytes.size},\"stderrBytesRetained\":${stderrBytes.size}," +
+                    "\"diagnosticLimitExceeded\":${diagnosticsExceeded.get()}}\n",
+            )
+            if (memoryExceeded.get()) throw GhidraAnalysisException(
+                "Ghidra program recovery exceeded ${limits.maximumResidentBytes} resident bytes; " +
+                    "rerun with the same output directory to resume durable function checkpoints",
+            )
+            if (diagnosticsExceeded.get()) throw GhidraAnalysisException(
+                "Ghidra program recovery exceeded ${limits.maximumDiagnosticBytesPerStream} diagnostic bytes per stream; " +
+                    "rerun with the same output directory to resume durable function checkpoints",
+            )
+            if (!completed) throw java.util.concurrent.TimeoutException()
+            return process.exitValue()
+        } catch (failure: Throwable) {
+            val reported = if (failure is java.util.concurrent.TimeoutException) GhidraAnalysisException(
+                "Ghidra program recovery exceeded ${limits.wallClockTimeout.toMillis()} milliseconds; " +
+                    "rerun with the same output directory to resume durable function checkpoints",
+            ) else failure
+            primaryFailure = reported
+            throw reported
+        } finally {
+            var cleanupFailure: Throwable? = null
+            fun cleanup(action: () -> Unit) {
+                try { action() } catch (failure: Throwable) {
+                    val previous = primaryFailure ?: cleanupFailure
+                    if (previous == null) cleanupFailure = failure else previous.addSuppressed(failure)
+                }
+            }
+            cleanup { terminateProcessTree(process, limits.terminationGrace) }
+            tasks.forEach { task -> cleanup { task.cancel(true) } }
+            cleanup { process.inputStream.close() }
+            cleanup { process.errorStream.close() }
+            cleanup { process.outputStream.close() }
+            cleanupFailure?.let { throw it }
+        }
     }
 
     private fun readStableProgramModel(path: Path): ByteArray {

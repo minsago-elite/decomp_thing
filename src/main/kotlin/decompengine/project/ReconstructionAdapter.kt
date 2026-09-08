@@ -25,9 +25,9 @@ internal data class RenderedEntrypoint(val source: String, val entityIds: List<S
 
 /** Application-owned dispatch; profile data cannot register executable implementations. */
 internal object ReconstructionAdapters {
-    fun resolve(profile: ReconstructionProfile): ReconstructionAdapter = when (profile.id) {
-        GeneratedCMakeReconstructionProfile.PROFILE_ID -> GeneratedCReconstructionAdapter
-        GeneratedCNinjaReconstructionProfile.PROFILE_ID -> GeneratedCNinjaReconstructionAdapter
+    fun resolve(profile: ReconstructionProfile): ReconstructionAdapter = when {
+        GeneratedCMakeReconstructionProfile.supports(profile) -> GeneratedCReconstructionAdapter
+        profile.id == GeneratedCNinjaReconstructionProfile.PROFILE_ID -> GeneratedCNinjaReconstructionAdapter
         else -> throw IllegalArgumentException("no reconstruction adapter registered for profile: ${profile.id}")
     }
 }
