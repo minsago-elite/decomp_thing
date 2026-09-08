@@ -68,12 +68,13 @@ object ArchivalPackager {
         requiredCorpusSha256: Set<String> = emptySet(),
     ): ArchivalBundle {
         val archiveBuild = ReconstructionAdapters.resolve(profile).archiveBuild
+        val transport = archiveBuild.checkedTransportLayout(profile)
         val requiredCorpora = snapshotRequiredBehaviorCorpora(requiredCorpusSha256)
         require(!Files.isSymbolicLink(projectDir)) { "archive project root must not be a symbolic link" }
         require(projectDir.resolve("source_tree_manifest.json").isRegularFile(LinkOption.NOFOLLOW_LINKS)) {
             "project is missing source_tree_manifest.json"
         }
-        preflightProjectTree(projectDir, limits)
+        preflightProjectTree(projectDir, limits, transport)
         val projectBase = projectDir.toRealPath()
         val archiveAbsolute = archivePath.toAbsolutePath().normalize()
         val archiveLexicalParent = archiveAbsolute.parent
@@ -108,7 +109,7 @@ object ArchivalPackager {
             Verify payload hashes with `ARCHIVE_MANIFEST.sha256` before use.
             """.trimIndent() + "\n",
         )
-        val payload = collectPayload(projectDir, archiveDestination, limits)
+        val payload = collectPayload(projectDir, archiveDestination, limits, transport)
         validateSourceManifest(projectDir, payload.associateBy { it.relativePath }, profile)
         val payloadBytes = payload.fold(0L) { total, item -> Math.addExact(total, item.size) }
         val hashManifestBytes = payload.fold(0L) { total, item ->
@@ -169,6 +170,7 @@ object ArchivalPackager {
         projectDir: Path,
         archiveAbsolute: Path,
         limits: ArchivalBundleLimits,
+        transport: ArchiveTransportLayout,
     ): List<ArchivePayload> {
         val files = mutableListOf<ArchivePayload>()
         val portablePaths = mutableSetOf(portablePathKey(HASH_MANIFEST))
@@ -177,7 +179,7 @@ object ArchivalPackager {
             paths.forEach { path ->
                 if (path == projectDir) return@forEach
                 val relative = archiveRelativePath(projectDir, path)
-                if (relative == "build" || relative.startsWith("build/")) return@forEach
+                if (transport.excludes(relative)) return@forEach
                 if (path.toAbsolutePath().normalize() == archiveAbsolute || relative == HASH_MANIFEST) {
                     return@forEach
                 }
@@ -273,6 +275,8 @@ object ArchivalBundleVerifier {
         strictControlJson: Boolean = false,
     ): VerifiedArchiveExtraction {
         require(maximumPathDepth in 1..2048) { "archive path depth bound is invalid" }
+        val archiveBuild = ReconstructionAdapters.resolve(profile).archiveBuild
+        val transport = archiveBuild.checkedTransportLayout(profile)
         val targetBase = targetDir.toAbsolutePath().normalize()
         val targetExisted = Files.exists(targetBase, LinkOption.NOFOLLOW_LINKS)
         require(!Files.isSymbolicLink(targetBase)) { "archive target must not be a symbolic link" }
@@ -355,13 +359,13 @@ object ArchivalBundleVerifier {
                 require(digestFile(staging.resolve(relative)) == hash) { "archive payload hash mismatch: $relative" }
             }
             if (strictControlJson) {
-                for (relative in listOf("source_tree_manifest.json", "reports/build_contract.json",
-                    profile.layout.declaration("program-model-evidence").materialize())) {
+                for (relative in setOf("source_tree_manifest.json",
+                    profile.layout.declaration("program-model-evidence").materialize()) + transport.strictBuildControlPaths) {
                     val snapshot = decompengine.repair.readStableRegularFile(staging, relative, 4L * 1024 * 1024)
                     decompengine.oracle.core.OracleJson.parse(snapshot.bytes)
                 }
             }
-            ReconstructionAdapters.resolve(profile).archiveBuild.validate(staging, profile, requireArtifact = false)
+            archiveBuild.validate(staging, profile, requireArtifact = false)
             val payload = expected.map { (relative, hash) ->
                 val path = staging.resolve(relative)
                 ArchivePayload(relative, path, Files.size(path), hash, 0)
@@ -545,7 +549,7 @@ private fun portablePathKey(relative: String): String =
 private fun archiveRelativePath(root: Path, path: Path): String =
     path.relativeTo(root).joinToString("/") { it.toString() }
 
-private fun preflightProjectTree(projectDir: Path, limits: ArchivalBundleLimits) {
+private fun preflightProjectTree(projectDir: Path, limits: ArchivalBundleLimits, transport: ArchiveTransportLayout) {
     val portablePaths = mutableSetOf<String>()
     var entryCount = 0
     Files.walk(projectDir).use { paths ->
@@ -561,7 +565,7 @@ private fun preflightProjectTree(projectDir: Path, limits: ArchivalBundleLimits)
                 "archive project contains a non-portable colliding path: $relative"
             }
             require(!Files.isSymbolicLink(path)) { "archive project contains a symbolic link: $relative" }
-            if (relative == "build" || relative.startsWith("build/")) return@forEach
+            if (transport.excludes(relative)) return@forEach
             if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) return@forEach
             require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
                 "archive project contains a non-regular file: $relative"

@@ -41,11 +41,24 @@ internal object ReconstructionAdapters {
 /** Build-system-specific evidence requirements inside the shared archive transport. */
 internal interface ArchiveBuildPolicy {
     fun requiredPaths(profile: ReconstructionProfile): Set<String>
+    fun transportLayout(profile: ReconstructionProfile): ArchiveTransportLayout
     val rebuildInstructions: String
     fun validate(projectDir: Path, profile: ReconstructionProfile, requireArtifact: Boolean)
     fun sourceRevision(projectDir: Path, profile: ReconstructionProfile): BuildSourceRevision
     fun isBuildInput(profile: ReconstructionProfile, relativePath: String): Boolean
 }
+
+/** Validate application-owned transport policy before preparing archive paths. */
+internal fun ArchiveBuildPolicy.checkedTransportLayout(profile: ReconstructionProfile): ArchiveTransportLayout =
+    transportLayout(profile).also { layout ->
+        val required = requiredPaths(profile)
+        require(required.containsAll(layout.strictBuildControlPaths)) {
+            "archive build controls must be required payload evidence"
+        }
+        layout.requireRetains(required + setOf("ARCHIVE_MANIFEST.sha256", "ARCHIVE_README.md", "source_tree_manifest.json",
+            profile.layout.declaration("program-model-evidence").materialize()))
+        layout.requireRetainsDeclarations(profile.layout.declarations.filter { ProjectFileRole.ARCHIVE_PAYLOAD in it.roles })
+    }
 
 /** Application-owned build evidence policy; capture retains its own read and inventory bounds. */
 internal interface BehaviorBuildPolicy {
