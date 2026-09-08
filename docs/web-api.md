@@ -353,10 +353,32 @@ public projection: `id`, `filename`, `status`, `created_at`, `updated_at`, `size
 are removed for privacy: stored diagnostic text can contain host paths, environment values or
 raw exceptions, including records predating redaction. No placeholder diagnostic is invented.
 ELF metadata keeps its existing field names and numeric types, including signed/numeric
-`entry_point`; this legacy shape is not a v1 DTO. Execution POSTs still redirect and failures
-can still be HTML. The persistence serializer and stored `job.json` format are unchanged.
+`entry_point`; this legacy shape is not a v1 DTO. Execution POSTs still redirect.
+The persistence serializer and stored `job.json` format are unchanged.
 The HTTP regression in `UploadServerTest` checks both responses, an old private diagnostic,
 exact public keys, retained field values and byte-for-byte preservation of stored records.
+Legacy `/api/*` failures always return JSON, including unknown routes. POST `/jobs`
+returns JSON failures when the existing Accept switch selects `application/json`; HTML form
+requests retain HTML errors. The legacy error envelope is `{requestId, error: {code, message}}`,
+with the same opaque UUID in `X-Request-ID`, `Cache-Control: no-store` and a JSON content type.
+It is separate from the v1 envelope. Messages are fixed public text and never copy request
+paths, query strings, uploaded filenames, persisted diagnostics or exception messages.
+
+| Legacy failure | Status | Code |
+| --- | --- | --- |
+| Unknown API route or unsupported method | 404 | `NOT_FOUND` |
+| Missing job / attempt | 404 | `JOB_NOT_FOUND` / `RUN_NOT_FOUND` |
+| Unavailable or damaged service storage | 503 | `JOB_STORAGE_UNAVAILABLE` |
+| Invalid request arguments | 400 | `INVALID_REQUEST` |
+| Unsupported uploaded ELF | 400 | `INVALID_UPLOAD` |
+| Unexpected exception | 500 | `INTERNAL_ERROR` |
+
+The HTTP tests cover missing/unknown resources, invalid query/upload, damaged storage,
+request-ID agreement, content type, cache policy and preservation of stored bytes. Unexpected
+internal failures use the same response helper but are not fault-injected by that HTTP test.
+The full method/Accept negotiation, deprecation links and shared session boundary remain
+migration work; this change preserves the existing legacy upload Accept switch and status codes.
+
 D2/D13 preserve the non-sensitive legacy success fields through the first D-series release and
 at least one subsequent minor release, while documenting removal of `binary_path`, applying the
 same session/content boundary and making API failures JSON. Do not silently change old numeric

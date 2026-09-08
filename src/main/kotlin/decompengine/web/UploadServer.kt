@@ -37,6 +37,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
@@ -537,20 +538,42 @@ class UploadServer(
                         require(it.matches(Regex("runId=[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "Only an exact workflow attempt selection is supported" }
                         it.removePrefix("runId=")
                     }
-                    val snapshot = AgentProgressJournal.read(jobs.reportContext(job.id, runId).reportsDirectory)
+                    val snapshot = try {
+                        AgentProgressJournal.read(jobs.reportContext(job.id, runId).reportsDirectory)
+                    } catch (failure: IOException) {
+                        throw WebJobServiceException("JOB_STORAGE_UNAVAILABLE", "Persisted activity history is unavailable.", failure)
+                    } catch (failure: IllegalArgumentException) {
+                        throw WebJobServiceException("JOB_STORAGE_UNAVAILABLE", "Persisted activity history is invalid.", failure)
+                    }
                     exchange.sendJson(200, snapshot?.toString() ?: "{\"schemaVersion\":1,\"displayOnly\":true,\"nextSequence\":0,\"queueDropped\":0,\"historyDropped\":0,\"truncated\":false,\"events\":[]}")
                 }
-                else -> exchange.sendHtml(404, renderErrorPage(404, "Page not found", "The requested route does not exist."))
+                else -> legacyError(exchange, 404, "NOT_FOUND", "The requested route does not exist.") {
+                    renderErrorPage(404, "Page not found", "The requested route does not exist.")
+                }
             }
         } catch (exception: WebJobServiceException) {
             val status = if (exception.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else 503
-            exchange.sendHtml(status, renderErrorPage(status, "Job storage unavailable", "${exception.code}: ${exception.message}"))
+            val code = if (status == 404) exception.code else if (exception.code == "UPLOAD_CAPACITY") "UPLOAD_CAPACITY" else "JOB_STORAGE_UNAVAILABLE"
+            val message = when (code) {
+                "JOB_NOT_FOUND", "RUN_NOT_FOUND" -> "The requested job or attempt is unavailable."
+                "UPLOAD_CAPACITY" -> "Upload capacity is temporarily unavailable. Retry shortly."
+                else -> "Job storage is unavailable. Inspect storage before retrying."
+            }
+            legacyError(exchange, status, code, message) {
+                renderErrorPage(status, "Job storage unavailable", "${exception.code}: ${exception.message}")
+            }
         } catch (exception: JobStoreException) {
-            exchange.sendHtml(404, renderErrorPage(404, "Job not found", diagnostic(exception, "The job does not exist.")))
+            legacyError(exchange, 404, "JOB_NOT_FOUND", "The requested job is unavailable.") {
+                renderErrorPage(404, "Job not found", diagnostic(exception, "The job does not exist."))
+            }
         } catch (exception: IllegalArgumentException) {
-            exchange.sendHtml(400, renderErrorPage(400, "Invalid request", diagnostic(exception, "The request was invalid.")))
+            legacyError(exchange, 400, "INVALID_REQUEST", "The request was invalid.") {
+                renderErrorPage(400, "Invalid request", diagnostic(exception, "The request was invalid."))
+            }
         } catch (exception: Exception) {
-            exchange.sendHtml(500, renderErrorPage(500, "Unexpected error", diagnostic(exception, "The operation failed.")))
+            legacyError(exchange, 500, "INTERNAL_ERROR", "The operation failed.") {
+                renderErrorPage(500, "Unexpected error", diagnostic(exception, "The operation failed."))
+            }
         }
     }
 
@@ -597,7 +620,9 @@ class UploadServer(
         try {
             handleUploadRequest(exchange, jobs)
         } catch (exception: InvalidUploadException) {
-            exchange.sendHtml(400, renderErrorPage(400, "Unsupported binary", diagnostic(exception, "Upload a Linux ELF binary.")))
+            legacyError(exchange, 400, "INVALID_UPLOAD", "Upload a supported Linux ELF binary.") {
+                renderErrorPage(400, "Unsupported binary", diagnostic(exception, "Upload a Linux ELF binary."))
+            }
         }
     }
 
@@ -770,10 +795,10 @@ private fun HttpExchange.redirect(location: String) {
     close()
 }
 
-private fun HttpExchange.sendHtml(status: Int, body: String) =
+internal fun HttpExchange.sendHtml(status: Int, body: String) =
     sendBytes(status, body.toByteArray(StandardCharsets.UTF_8), "text/html; charset=utf-8")
 
-private fun HttpExchange.sendJson(status: Int, body: String) =
+internal fun HttpExchange.sendJson(status: Int, body: String) =
     sendBytes(status, body.toByteArray(StandardCharsets.UTF_8), "application/json; charset=utf-8")
 
 private fun HttpExchange.sendBytes(
