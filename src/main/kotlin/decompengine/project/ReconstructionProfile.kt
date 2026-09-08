@@ -90,6 +90,13 @@ class ProjectFileDeclaration(
 
     internal fun matches(path: String): Boolean = pathMatcher.matches(path)
 
+    internal fun canMaterializeUnder(root: String): Boolean {
+        val rootDepth = requireNormalizedProjectPath(root, "project output root").split('/').size
+        val components = pathTemplate.split('/')
+        if (rootDepth > components.size) return false
+        return compileTemplateMatcher(components.take(rootDepth).joinToString("/")).matches(root)
+    }
+
     internal fun canonicalJson(): String = buildString {
         append('{')
         append("\"id\":").append(id.canonicalJsonString()).append(',')

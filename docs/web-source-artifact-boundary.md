@@ -50,7 +50,12 @@ path-name accounting (2,048 paths of at most 4,096 characters, at most four byte
 per character, plus 4 KiB for staging names); it does not enlarge extraction limits.
 
 A descriptor-relative inventory of the complete current source tree, excluding
-the packager's excluded `build` subtree, must have exactly the archived file set.
+the registered archive policy's output roots, must have exactly the archived
+file set. The built-in Make/Ninja policies omit `build`; nested output roots are
+also supported by the inventory. The same immutable policy supplies omissions
+to archive packaging and preflight, and supplies build-control JSON paths to
+strict extraction. Generic source-manifest and program-model controls remain
+mandatory. Required evidence and declared payload paths cannot be omitted.
 Every archived payload, including manifest, build contract and other evidence,
 must match the current file bytes and selected identity. The current rebuilt
 executable is separately checked against the contract under a 64 MiB read bound.
@@ -63,7 +68,8 @@ The admitted reconstruction adapter supplies the build-contract and artifact
 paths and parses the build record. Web verification reads those exact paths,
 checks the artifact path against adapter policy, and retains the bounded byte,
 identity, inventory and final reread checks. The Make and Ninja profiles use
-this same route; the archive transport's own layout requirements still apply.
+this same route. Their adapters still use their established artifact and control
+locations; this transport policy does not independently change builder output.
 
 The job page displays a verified archive link only from this verification result,
 with its exact SHA-256 in both the displayed digest and download URL. A later
