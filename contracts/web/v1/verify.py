@@ -82,7 +82,7 @@ def check_semantics(document: dict) -> None:
         if "progress" in data:
             progress = data["progress"]
             count, next_sequence = int(progress["retainedEventCount"]), int(progress["nextSequence"])
-            if count > 1024 or count + int(progress["queueDropped"]) + int(progress["historyDropped"]) > next_sequence:
+            if count > 1024 or count + int(progress["queueDropped"]) + int(progress["historyDropped"]) != next_sequence:
                 raise ValueError("snapshot progress counters exceed the boundary")
             if (count == 0) != (data["oldestCursor"] is None) or (count == 0) != (data["throughSequence"] is None):
                 raise ValueError("snapshot retained records and cursors disagree")
