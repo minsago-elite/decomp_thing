@@ -1,5 +1,12 @@
 package decompengine.validation
 
+import decompengine.oracle.core.OracleArtifacts
+import decompengine.project.ArchivalProjectAuditor
+import decompengine.project.MakeProjectBuilder
+import decompengine.project.RecoveredCModuleReconstructor
+import decompengine.project.RecoveredFunction
+import decompengine.project.RecoveredProgramModel
+import decompengine.project.SourceTreeGenerator
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
@@ -14,6 +21,208 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class BehaviorValidationTest {
+    @Test
+    fun `completed programs exceeding stream or aggregate bounds preserve prior reports`() {
+        val root = createTempDirectory("validation-output-bounds-")
+        val source = """
+            #include <stdio.h>
+            #include <string.h>
+            int main(int argc, char **argv) {
+                if (argc == 1) return 0;
+                const char *bytes = "0123456789abcdef";
+                if (strcmp(argv[1], "stdout") == 0) {
+                    fputs(bytes, stdout); fputs(bytes, stdout);
+                } else if (strcmp(argv[1], "stderr") == 0) {
+                    fputs(bytes, stderr); fputs(bytes, stderr);
+                } else {
+                    fputs(bytes, stdout); fputs(bytes, stderr);
+                }
+                return 0;
+            }
+        """.trimIndent() + "\n"
+        val original = compileC(root, "original", source)
+        val rebuilt = compileC(root, "rebuilt", source)
+        val comparator = BehaviorComparator(SandboxRunner(networkIsolation = false,
+            outputLimits = SandboxOutputLimits(maximumStdoutBytes = 16, maximumStderrBytes = 16,
+                maximumAggregateBytes = 24)))
+        val report = comparator.compare("bounded", original, rebuilt,
+            listOf(ProcessInput("empty")), root.resolve("reports"))
+        val prior = java.nio.file.Files.readAllBytes(report.reportPath)
+        for (stream in listOf("stdout", "stderr", "aggregate")) {
+            assertFailsWith<BehaviorOutputLimitException> {
+                comparator.compare("bounded", original, rebuilt,
+                    listOf(ProcessInput("output", listOf(stream))), root.resolve("reports"))
+            }
+            assertTrue(prior.contentEquals(java.nio.file.Files.readAllBytes(report.reportPath)))
+        }
+    }
+
+    @Test
+    fun `interrupted cleanup confirms child termination and retains cancellation`() {
+        val process = ProcessBuilder("/bin/sleep", "10").start()
+        val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+        val retainedInterrupt = java.util.concurrent.atomic.AtomicBoolean()
+        val worker = Thread {
+            try {
+                Thread.currentThread().interrupt()
+                terminateProcessTree(process)
+                retainedInterrupt.set(Thread.currentThread().isInterrupted)
+            } catch (error: Throwable) {
+                failure.set(error)
+            }
+        }
+        try {
+            worker.start()
+            worker.join(4000)
+            assertFalse(worker.isAlive, "cleanup must finish within its bound")
+            assertEquals(null, failure.get())
+            assertFalse(process.isAlive, "cleanup must confirm child termination")
+            assertTrue(retainedInterrupt.get(), "caller cancellation must be preserved")
+        } finally {
+            process.destroyForcibly()
+            worker.join(4000)
+            process.inputStream.close()
+            process.errorStream.close()
+            process.outputStream.close()
+        }
+    }
+
+    @Test
+    fun `ambiguous wrapper exits and deadline expiry cannot replace passing evidence`() {
+        val tempDir = createTempDirectory("validation-wrapper-outcomes-")
+        val source = """
+            #define _POSIX_C_SOURCE 200809L
+            #include <time.h>
+            #include <stdlib.h>
+            #include <string.h>
+            int main(int argc, char **argv) {
+                if (argc == 1) return 0;
+                if (strcmp(argv[1], "wait") == 0) {
+                    struct timespec delay = {1, 0};
+                    nanosleep(&delay, NULL);
+                    return 0;
+                }
+                return atoi(argv[1]);
+            }
+        """.trimIndent() + "\n"
+        val original = compileC(tempDir, "outcome-original", source)
+        val rebuilt = compileC(tempDir, "outcome-rebuilt", source)
+        val comparator = BehaviorComparator(SandboxRunner(timeout = java.time.Duration.ofMillis(300), networkIsolation = false))
+        val report = comparator.compare("outcome", original, rebuilt, listOf(ProcessInput("normal")), tempDir.resolve("reports"))
+        val prior = java.nio.file.Files.readAllBytes(report.reportPath)
+        for (status in listOf(124, 125, 126, 127)) {
+            val completed = comparator.compare("application_$status", original, rebuilt,
+                listOf(ProcessInput("exit", listOf(status.toString()))), tempDir.resolve("reports"))
+            assertEquals(status, completed.cases.single().original.exitCode)
+            assertEquals(status, completed.cases.single().rebuilt.exitCode)
+        }
+        for (status in listOf(128, 137, 143, 255)) {
+            assertFailsWith<BehaviorExecutionOutcomeException> {
+                comparator.compare("outcome", original, rebuilt, listOf(ProcessInput("exit", listOf(status.toString()))), tempDir.resolve("reports"))
+            }
+            assertTrue(prior.contentEquals(java.nio.file.Files.readAllBytes(report.reportPath)))
+        }
+        val failure = kotlin.test.assertFails {
+            comparator.compare("outcome", original, rebuilt, listOf(ProcessInput("deadline", listOf("wait"))), tempDir.resolve("reports"))
+        }
+        assertTrue(failure is BehaviorExecutionTimeoutException || failure is BehaviorExecutionOutcomeException)
+        assertTrue(prior.contentEquals(java.nio.file.Files.readAllBytes(report.reportPath)))
+    }
+
+    @Test
+    fun `fractional second timeout does not terminate a program at the preceding whole second`() {
+        val tempDir = createTempDirectory("validation-fractional-timeout-")
+        val source = """
+            #define _POSIX_C_SOURCE 200809L
+            #include <time.h>
+            #include <stdio.h>
+            int main(void) {
+                struct timespec delay = {1, 200000000};
+                if (nanosleep(&delay, NULL) != 0) return 2;
+                puts("completed");
+                return 0;
+            }
+        """.trimIndent() + "\n"
+        val original = compileC(tempDir, "timed-original", source)
+        val rebuilt = compileC(tempDir, "timed-rebuilt", source)
+        val report = BehaviorComparator(SandboxRunner(timeout = java.time.Duration.ofMillis(1900), networkIsolation = false))
+            .compare("fractional", original, rebuilt, listOf(ProcessInput("wait")), tempDir.resolve("reports"))
+        for (output in listOf(report.cases.single().original, report.cases.single().rebuilt)) {
+            assertEquals(0, output.exitCode)
+            assertEquals("completed\n", output.stdout.decodeToString())
+            assertEquals("1.900s", output.sandboxCommand[1])
+        }
+        BehaviorEvidence.decode(java.nio.file.Files.readAllBytes(report.reportPath))
+    }
+
+    @Test
+    fun `real sandbox reads retained case files through read-only isolated mounts`() {
+        val tempDir = createTempDirectory("validation-file-mounts-")
+        val source = """
+            #include <stdio.h>
+            int main(int argc, char **argv) {
+                if (argc != 2) return 2;
+                FILE *input = fopen(argv[1], "rb");
+                if (!input) return 3;
+                int byte;
+                while ((byte = fgetc(input)) != EOF) {
+                    if (fputc(byte, stdout) == EOF) return 4;
+                }
+                if (ferror(input)) return 5;
+                fclose(input);
+                FILE *writable = fopen(argv[1], "ab");
+                if (writable) { fclose(writable); return 6; }
+                fputs("read-only\n", stderr);
+                return 0;
+            }
+        """.trimIndent() + "\n"
+        val original = compileC(tempDir, "file-original", source)
+        val project = tempDir.resolve("project")
+        SourceTreeGenerator.generate(
+            RecoveredProgramModel(
+                inputSha256 = OracleArtifacts.sha256(java.nio.file.Files.readAllBytes(original)),
+                functions = listOf(RecoveredFunction("fn_1000", "main", 0x1000UL,
+                    "int main(int argc, char **argv)", decompiledC = source)),
+            ), project, reconstructor = RecoveredCModuleReconstructor(),
+        )
+        assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+        val rebuilt = project.resolve("build/reconstructed")
+        val payload = byteArrayOf(0, 1, 10, 127, -128, -1)
+        val data = java.nio.file.Files.write(tempDir.resolve("payload.bin"), payload)
+        val empty = java.nio.file.Files.write(tempDir.resolve("empty.bin"), byteArrayOf())
+        val report = BehaviorComparator().compare(
+            "file_mounts", original, rebuilt,
+            listOf(
+                ProcessInput("bytes", listOf("/inputs/nested/payload.bin")),
+                ProcessInput("empty", listOf("/inputs/empty.bin")),
+                ProcessInput("undeclared", listOf("/inputs/nested/payload.bin")),
+            ),
+            project.resolve("reports"), BehaviorProjectContext(project),
+            fileInputs = mapOf(
+                "bytes" to mapOf("nested/payload.bin" to data),
+                "empty" to mapOf("empty.bin" to empty),
+            ),
+        )
+        for (case in report.cases.take(2)) {
+            assertEquals(0, case.original.exitCode)
+            assertEquals(0, case.rebuilt.exitCode)
+            assertEquals("read-only\n", case.original.stderr.decodeToString())
+            assertEquals("read-only\n", case.rebuilt.stderr.decodeToString())
+        }
+        assertTrue(report.cases[0].original.stdout.contentEquals(payload))
+        assertTrue(report.cases[0].rebuilt.stdout.contentEquals(payload))
+        assertTrue(report.cases[1].original.stdout.isEmpty())
+        assertTrue(report.cases[1].rebuilt.stdout.isEmpty())
+        assertEquals(3, report.cases[2].original.exitCode)
+        assertEquals(3, report.cases[2].rebuilt.exitCode)
+        assertTrue(java.nio.file.Files.readAllBytes(data).contentEquals(payload))
+        BehaviorEvidence.decode(java.nio.file.Files.readAllBytes(report.reportPath))
+        val audit = ArchivalProjectAuditor.audit(project)
+        assertEquals(true, audit.behaviorMatched)
+        assertEquals(listOf("reports/file_mounts.behavior.json"), audit.projectBehaviorReportIds)
+        assertTrue(audit.unresolvedEntityIds.isEmpty())
+    }
+
     @Test
     fun `hello-world binary passes byte-for-byte comparison`() {
         val tempDir = createTempDirectory("validation-hello-")

@@ -1,0 +1,28 @@
+{
+  "sourceCommit": "6f035c2033aaaf51692bd86257bc9350bdae5533",
+  "worktreeDirty": false,
+  "scope": "Selected web admission, recovery and authentication inspection regression tests",
+  "suites": {
+    "decompengine.web.UploadServerTest": {
+      "tests": 29,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "9c5376a1c4ce0b96e4af9b6d6b442e023b1f510371e54e5aa0b219b897f1e9dc"
+    },
+    "decompengine.web.WebAuthenticationInspectionTest": {
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "5d4faf8bc29abe31ea225c6bb92a054ae09440541a335eaae2d796037efc744e"
+    },
+    "decompengine.web.WebRecoveryAdmissionTest": {
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "3c2ee5315a145828df1c870d889c4a3a18fe20e697716a5d64b539f6abece6d4"
+    }
+  }
+}
