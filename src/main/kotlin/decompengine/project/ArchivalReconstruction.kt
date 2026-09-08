@@ -369,9 +369,13 @@ class ArchivalReconstructionService(
             ),
             profile,
         )
-        progressPath.writeText("{\"phase\":\"complete\",\"completed\":$moduleTotal,\"total\":$moduleTotal}\n")
-        progress.phase(if (build.returnCode == 0) AgentWorkflowPhase.COMPLETED
-            else AgentWorkflowPhase.UNRESOLVED)
+        val unresolvedEntities = requireNotNull(bundle.audit).unresolvedEntityIds
+        val implementationStatus = if (unresolvedEntities.isEmpty()) "complete" else "unresolved"
+        progressPath.writeText(
+            "{\"phase\":\"$implementationStatus\",\"completed\":$moduleTotal,\"total\":$moduleTotal," +
+                "\"unresolvedEntityCount\":${unresolvedEntities.size}}\n",
+        )
+        progress.phase(if (unresolvedEntities.isEmpty()) AgentWorkflowPhase.COMPLETED else AgentWorkflowPhase.UNRESOLVED)
         outputDir.resolve("reconstruction.json").writeText(
             """
             {
@@ -381,11 +385,13 @@ class ArchivalReconstructionService(
               "archiveSha256": "${bundle.archiveSha256}",
               "profileId": "${profile.id}",
               "profileSha256": "${profile.sha256}",
-              "moduleCount": ${planner.plan(model).modules.size},
+              "moduleCount": $moduleTotal,
               "functionCount": ${model.functions.size},
               "globalCount": ${model.globals.size},
               "typeCount": ${model.types.size},
-              "buildExitCode": ${build.returnCode}
+              "buildExitCode": ${build.returnCode},
+              "implementationStatus": "$implementationStatus",
+              "unresolvedEntityCount": ${unresolvedEntities.size}
             }
             """.trimIndent() + "\n",
         )

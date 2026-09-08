@@ -184,3 +184,19 @@ the plan to `reports/planning/modules.json`, compares planned IDs with build own
 and requires identical build contracts after archive extraction and rebuilding.
 This covers build ownership; the separate generated-C repair index still has
 its own default report-path assumptions.
+
+The archival reconstruction service derives its final implementation status from
+the audit produced during packaging. A successful build with any audited unresolved
+entity ends with the `UNRESOLVED` progress phase; its progress file uses `unresolved`.
+`reconstruction.json` records `implementationStatus` and `unresolvedEntityCount`
+alongside the independent build exit code. When the audited unresolved inventory is
+empty, the local implementation workflow uses `complete` / `COMPLETED`. This status
+does not assert calibrated recovery accuracy, behavior equivalence, production
+containment or release eligibility. Archives remain available for unresolved trees.
+
+The packager returns the audit with its bundle result so the service uses the same
+assessment without repeating the audit or reparsing its report. The service also
+uses the module count observed during generation rather than planning a second time
+for its final summary. Focused Make/Ninja service tests cover a buildable placeholder
+tree remaining unresolved and an accepted authored implementation reaching local
+completion, including the persisted summary and progress fields.
