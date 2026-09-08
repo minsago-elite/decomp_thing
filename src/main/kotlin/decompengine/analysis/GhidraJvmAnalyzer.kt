@@ -11,11 +11,13 @@ import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.project.ProgramModelAnalyzer
 import decompengine.project.RecoveredProgramModel
 import decompengine.project.ReconstructionBudgets
+import decompengine.reporting.JsonReportLimits
+import decompengine.reporting.JsonReportPublisher
+import decompengine.reporting.publicationLimitFields
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.createDirectories
 import kotlin.io.path.pathString
-import kotlin.io.path.writeText
 
 data class GhidraAnalysis(
     val binaryPath: Path,
@@ -87,76 +89,68 @@ class GhidraJvmAnalyzer private constructor(
             returnCode = 0,
         )
         checkpoint("before analysis report")
-        val report = analysis.toJson(inspection, metadataLimits)
-        checkpoint("after analysis report rendering")
-        analysis.reportPath.writeText(report)
+        analysis.writeReport(inspection, metadataLimits, ::checkpoint)
         return analysis
     }
 }
 
-private fun GhidraAnalysis.toJson(inspection: BoundedElfMetadataInspection, limits: BoundedElfMetadataLimits): String = """
-{
-  "tool": "ghidra-jvm",
-  "mainClass": "${mainClass.escapeJson()}",
-  "returnCode": $returnCode,
-  "binary": "${binaryPath.pathString.escapeJson()}",
-  "metadataInputSha256": "${inspection.inputSha256}",
-  "metadataInputBytes": ${inspection.inputBytes},
-  "metadataInspection": {
-    "limits": {
-      "maximumInputBytes": ${limits.maximumInputBytes},
-      "maximumSectionHeaders": ${limits.maximumSectionHeaders},
-      "maximumScannedSymbols": ${limits.maximumScannedSymbols},
-      "maximumRetainedSymbols": ${limits.maximumRetainedSymbols},
-      "maximumNameBytes": ${limits.maximumNameBytes},
-      "maximumNameByteVisits": ${limits.maximumNameByteVisits},
-      "maximumRetainedNameBytes": ${limits.maximumRetainedNameBytes},
-      "maximumModeledMetadataBytes": ${limits.maximumModeledMetadataBytes},
-      "maximumMetadataReadBytes": ${limits.maximumMetadataReadBytes},
-      "maximumWorkUnits": ${limits.maximumWorkUnits},
-      "maximumWallClockMillis": ${limits.maximumWallClockMillis}
-    },
-    "usage": {
-      "sectionHeadersVisited": ${inspection.usage.sectionHeadersVisited},
-      "symbolsScanned": ${inspection.usage.symbolsScanned},
-      "symbolsRetained": ${inspection.usage.symbolsRetained},
-      "nameBytesVisited": ${inspection.usage.nameBytesVisited},
-      "retainedNameBytes": ${inspection.usage.retainedNameBytes},
-      "modeledMetadataBytes": ${inspection.usage.modeledMetadataBytes},
-      "metadataReadBytes": ${inspection.usage.metadataReadBytes},
-      "workUnits": ${inspection.usage.workUnits}
-    }
-  },
-  "args": [${args.joinToString(", ") { "\"${it.escapeJson()}\"" }}],
-  "metadata": {
-    "format": "${metadata.format}",
-    "endianness": "${metadata.endianness}",
-    "elfVersion": ${metadata.elfVersion},
-    "osAbi": "${metadata.osAbi}",
-    "objectType": "${metadata.objectType}",
-    "machine": "${metadata.machine}",
-    "entryPoint": ${metadata.entryPoint},
-    "elfHeaderSize": ${metadata.elfHeaderSize},
-    "programHeaderCount": ${metadata.programHeaderCount},
-    "sectionHeaderCount": ${metadata.sectionHeaderCount},
-    "sectionNameTableIndex": ${metadata.sectionNameTableIndex}
-  },
-  "stdoutLog": "${reportsDir.resolve("ghidra_stdout.log").pathString.escapeJson()}",
-  "stderrLog": "${reportsDir.resolve("ghidra_stderr.log").pathString.escapeJson()}"
-  ,"programModel": "${reportsDir.resolve("program_model.json").pathString.escapeJson()}"
-}
-""".trimIndent() + "\n"
-
-private fun String.escapeJson(): String =
-    buildString {
-        for (char in this@escapeJson) {
-            when (char) {
-                '\\' -> append("\\\\")
-                '"' -> append("\\\"")
-                '\n' -> append("\\n")
-                '\r' -> append("\\r")
-                '\t' -> append("\\t")
-                else -> append(char)
+private fun GhidraAnalysis.writeReport(
+    inspection: BoundedElfMetadataInspection,
+    limits: BoundedElfMetadataLimits,
+    checkpoint: (String) -> Unit,
+) {
+    val publication = JsonReportLimits(maximumBytes = 1024 * 1024L)
+    JsonReportPublisher.write(reportPath, publication, checkpoint) {
+        objectValue {
+            field("tool", "ghidra-jvm")
+            field("mainClass", mainClass)
+            field("returnCode", returnCode.toLong())
+            field("binary", binaryPath.pathString)
+            field("metadataInputSha256", inspection.inputSha256)
+            field("metadataInputBytes", inspection.inputBytes)
+            objectField("metadataInspection") {
+                objectField("limits") {
+                    field("maximumInputBytes", limits.maximumInputBytes)
+                    field("maximumSectionHeaders", limits.maximumSectionHeaders.toLong())
+                    field("maximumScannedSymbols", limits.maximumScannedSymbols)
+                    field("maximumRetainedSymbols", limits.maximumRetainedSymbols.toLong())
+                    field("maximumNameBytes", limits.maximumNameBytes.toLong())
+                    field("maximumNameByteVisits", limits.maximumNameByteVisits)
+                    field("maximumRetainedNameBytes", limits.maximumRetainedNameBytes)
+                    field("maximumModeledMetadataBytes", limits.maximumModeledMetadataBytes)
+                    field("maximumMetadataReadBytes", limits.maximumMetadataReadBytes)
+                    field("maximumWorkUnits", limits.maximumWorkUnits)
+                    field("maximumWallClockMillis", limits.maximumWallClockMillis)
+                }
+                objectField("usage") {
+                    field("sectionHeadersVisited", inspection.usage.sectionHeadersVisited)
+                    field("symbolsScanned", inspection.usage.symbolsScanned)
+                    field("symbolsRetained", inspection.usage.symbolsRetained)
+                    field("nameBytesVisited", inspection.usage.nameBytesVisited)
+                    field("retainedNameBytes", inspection.usage.retainedNameBytes)
+                    field("modeledMetadataBytes", inspection.usage.modeledMetadataBytes)
+                    field("metadataReadBytes", inspection.usage.metadataReadBytes)
+                    field("workUnits", inspection.usage.workUnits)
+                }
             }
+            arrayField("args") { for (argument in args) value(argument) }
+            objectField("metadata") {
+                field("format", metadata.format)
+                field("endianness", metadata.endianness)
+                field("elfVersion", metadata.elfVersion.toLong())
+                field("osAbi", metadata.osAbi)
+                field("objectType", metadata.objectType)
+                field("machine", metadata.machine)
+                field("entryPoint", metadata.entryPoint)
+                field("elfHeaderSize", metadata.elfHeaderSize.toLong())
+                field("programHeaderCount", metadata.programHeaderCount.toLong())
+                field("sectionHeaderCount", metadata.sectionHeaderCount.toLong())
+                field("sectionNameTableIndex", metadata.sectionNameTableIndex.toLong())
+            }
+            field("stdoutLog", reportsDir.resolve("ghidra_stdout.log").pathString)
+            field("stderrLog", reportsDir.resolve("ghidra_stderr.log").pathString)
+            field("programModel", reportsDir.resolve("program_model.json").pathString)
+            objectField("reportPublication") { publicationLimitFields(publication) }
         }
     }
+}

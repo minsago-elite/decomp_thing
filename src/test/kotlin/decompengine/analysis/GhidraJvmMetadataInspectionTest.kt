@@ -19,6 +19,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
@@ -37,6 +38,19 @@ class GhidraJvmMetadataInspectionTest {
         val analysis = analyzer.analyze(input, root.resolve("analysis"))
 
         val report = Json.parseToJsonElement(analysis.reportPath.readText()).jsonObject
+        assertEquals(listOf("tool", "mainClass", "returnCode", "binary", "metadataInputSha256", "metadataInputBytes",
+            "metadataInspection", "args", "metadata", "stdoutLog", "stderrLog", "programModel", "reportPublication"),
+            report.keys.toList())
+        assertEquals(analysis.args, report.getValue("args").jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(analysis.binaryPath.toString(), report.getValue("binary").jsonPrimitive.content)
+        assertEquals(0L, report.getValue("returnCode").jsonPrimitive.long)
+        val metadata = report.getValue("metadata").jsonObject
+        assertEquals(listOf("format", "endianness", "elfVersion", "osAbi", "objectType", "machine", "entryPoint",
+            "elfHeaderSize", "programHeaderCount", "sectionHeaderCount", "sectionNameTableIndex"), metadata.keys.toList())
+        assertEquals(analysis.metadata.entryPoint, metadata.getValue("entryPoint").jsonPrimitive.content.toULong())
+        assertFalse(metadata.getValue("entryPoint").jsonPrimitive.isString)
+        assertEquals(1024 * 1024L,
+            report.getValue("reportPublication").jsonObject.getValue("maximumBytes").jsonPrimitive.long)
         assertEquals(sha256(bytes), report.getValue("metadataInputSha256").jsonPrimitive.content)
         assertEquals(bytes.size.toLong(), report.getValue("metadataInputBytes").jsonPrimitive.long)
         val inspection = report.getValue("metadataInspection").jsonObject
