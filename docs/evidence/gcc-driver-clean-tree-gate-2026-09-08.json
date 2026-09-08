@@ -1,0 +1,129 @@
+{
+  "schemaVersion": 1,
+  "kind": "gcc-driver-clean-tree-build-gate",
+  "recordedAt": "2026-09-08",
+  "observedRepositoryRevision": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "status": "unavailable",
+  "productionQualification": "unresolved",
+  "scope": "issue-48",
+  "target": {
+    "program": "GCC driver",
+    "oracleVersion": "16.2.0",
+    "reconstructionProfile": "generated-c-make-v1",
+    "profileImplementation": "src/main/kotlin/decompengine/project/GeneratedCMakeReconstructionProfile.kt",
+    "sourceAuthority": "oracle/gcc/16.2.0/source-lock.json"
+  },
+  "cleanTreeAdmission": {
+    "status": "unavailable",
+    "reasonCode": "genuine-reconstructed-tree-unavailable",
+    "requiredInput": "complete genuine driver reconstruction with accepted ABI/interface facts and per-module receipts",
+    "expectedCommand": [
+      "make",
+      "--jobs=4",
+      "--output-sync=target",
+      "CC=gcc",
+      "CFLAGS=-std=c11 -g -Wall -Wextra -Werror -Iinclude"
+    ],
+    "effectivePolicy": {
+      "warningsAsErrors": true,
+      "reproduciblePathMapping": true,
+      "apiCredentialsRequired": false,
+      "analysisCachesRequired": false,
+      "sourceMustRemainStableDuringBuild": true,
+      "requiredArtifact": "build/reconstructed"
+    },
+    "declaredDependencies": [
+      "GNU Make",
+      "C compiler (gcc)",
+      "POSIX shell",
+      "POSIX find",
+      "POSIX mkdir",
+      "POSIX rm"
+    ],
+    "sourceRevisionSha256": null,
+    "buildContractSha256": null,
+    "outputIdentity": null,
+    "moduleDiagnostics": null
+  },
+  "archiveAdmission": {
+    "status": "unavailable",
+    "reasonCode": "no-production-build-contract-or-source-revision",
+    "requiredEvidence": [
+      "source manifest and accepted reconstruction revision",
+      "successful build_contract.json from the fresh extracted tree",
+      "source stability and effective flags",
+      "per-module compiler and linker diagnostics",
+      "archive extraction and rebuild using the same source/build identity"
+    ]
+  },
+  "repositoryEvidence": {
+    "productionTreeMarkersPresent": false,
+    "checkedMarkers": [
+      "source_tree_manifest.json",
+      "reports/module_plan.json",
+      "reports/program_model.json",
+      "UNRESOLVED.md",
+      "src/modules/",
+      "src/main.c"
+    ],
+    "availableOracleInputs": [
+      "oracle/gcc/16.2.0/source-lock.json",
+      "oracle/gcc/16.2.0/oracle-manifest.json",
+      "oracle/gcc/16.2.0/artifacts/gcc-driver.full",
+      "oracle/gcc/16.2.0/artifacts/gcc-driver.stripped",
+      "oracle/gcc/16.2.0/function-recovery-oracle.json"
+    ],
+    "interpretation": "The committed GCC files are authenticated oracle/reference inputs and artifacts. They are not a reconstructed source tree and do not provide a production build contract or accepted generation receipt."
+  },
+  "dependencySnapshot": [
+    {"issue": 46, "state": "OPEN", "role": "ABI-compatible declarations and shared types", "url": "https://github.com/minsago-elite/decomp_thing/issues/46"},
+    {"issue": 47, "state": "OPEN", "role": "complete genuine reconstructed driver and generation receipts", "url": "https://github.com/minsago-elite/decomp_thing/issues/47"},
+    {"issue": 49, "state": "OPEN", "role": "validated repair and revision evidence", "url": "https://github.com/minsago-elite/decomp_thing/issues/49"},
+    {"issue": 50, "state": "OPEN", "role": "deterministic independently rebuildable archive", "url": "https://github.com/minsago-elite/decomp_thing/issues/50"},
+    {"issue": 54, "state": "OPEN", "role": "end-to-end GCC fidelity release gate", "url": "https://github.com/minsago-elite/decomp_thing/issues/54"},
+    {"issue": 84, "state": "OPEN", "role": "generated-C and build-policy isolation", "url": "https://github.com/minsago-elite/decomp_thing/issues/84"},
+    {"issue": 86, "state": "CLOSED", "role": "archival Ghidra regression lane; does not replace the production source build", "url": "https://github.com/minsago-elite/decomp_thing/issues/86"},
+    {"issue": 88, "state": "CLOSED", "role": "LLVM/Clang regression lane; does not replace the GCC production source build", "url": "https://github.com/minsago-elite/decomp_thing/issues/88"}
+  ],
+  "boundaryEvidence": {
+    "bundledGhidra": {
+      "status": "not-invoked",
+      "policy": "Production analysis uses the application-bundled Ghidra APIs; this record does not require GHIDRA_HOME or an external analyzeHeadless installation.",
+      "reference": "docs/bundled-ghidra.md"
+    },
+    "authenticatedOracle": {
+      "status": "not-invoked",
+      "policy": "The locked GCC oracle remains an input/reference boundary. No oracle execution, generated-source acceptance, or behavior equivalence claim is made here.",
+      "reference": "oracle/gcc/16.2.0/README.md"
+    },
+    "agentAndBuildExecution": "No ACP reconstruction agent, production compiler, linker, or archive admission was run for this record."
+  },
+  "localContractValidation": {
+    "status": "passed",
+    "command": "./gradlew --offline --no-daemon test --tests decompengine.project.StrictProjectBuildTest",
+    "scope": "local generated-C fixtures only",
+    "observed": [
+      "strict warnings-as-errors clean fixture build",
+      "clean archive extraction and rebuild",
+      "compiler warning failure attributed to its module",
+      "link failure attributed to its referencing module",
+      "ambient build controls and disabled warnings-as-errors rejected"
+    ],
+    "doesNotProve": [
+      "complete GCC reconstruction",
+      "production clean-tree compilation or linking",
+      "authenticated production compiler/runtime inputs",
+      "production archive qualification",
+      "behavior equivalence or release eligibility"
+    ]
+  },
+  "nextAdmission": {
+    "requires": [
+      "#47/#64 accepted source manifest, unresolved inventory, and per-module receipts",
+      "#46 ABI/interface facts bound to that source revision",
+      "fresh extraction of that exact source revision",
+      "the exact command and evidence fields above recorded from the real tree"
+    ],
+    "issueState": "#48 remains OPEN; #699 and #700 remain OPEN"
+  }
+}
