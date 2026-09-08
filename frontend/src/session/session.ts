@@ -1,6 +1,7 @@
 import { ApiClientError } from '../api/errors';
 import type { Bootstrap, Session } from '../api/generated';
 import { normalizeBasePath } from '../app/paths';
+import { createInvalidationChannel } from './invalidationChannel';
 import type { BootstrapFragment } from './fragment';
 
 export type SessionGateway = {
@@ -14,7 +15,7 @@ export type RuntimeSnapshot = Pick<Bootstrap, 'applicationBuildId' | 'uiBuildId'
 export type SessionState =
   | { status: 'public' | 'checking' | 'signing-out' }
   | { status: 'authenticated'; expiresAt: string; runtime: RuntimeSnapshot }
-  | { status: 'required'; reason: 'missing' | 'expired' | 'bootstrap-required' | 'bootstrap-expired' | 'invalid-link' | 'signed-out' }
+  | { status: 'required'; reason: 'missing' | 'expired' | 'bootstrap-required' | 'bootstrap-expired' | 'invalid-link' | 'signed-out' | 'session-changed' }
   | { status: 'unavailable'; reason: 'connection' | 'configuration' | 'logout-unconfirmed' | 'removal-failed' };
 
 /** Session/CSRF material stays in this page's closure and never enters UI snapshots. */
@@ -34,6 +35,18 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
   let controller: AbortController | null = null;
   let expiry: ReturnType<typeof setTimeout> | null = null;
   const listeners = new Set<(state: SessionState) => void>();
+  const invalidatedListeners = new Set<(remote: boolean) => void>();
+
+  function notifyInvalidated(remote: boolean) {
+    for (const listener of invalidatedListeners) listener(remote);
+  }
+
+  const invalidation = createInvalidationChannel(expectedBase, () => {
+    if (disposed || !initialized || !['authenticated', 'checking', 'signing-out'].includes(state.status)) return;
+    invalidatePending(); forget();
+    notifyInvalidated(true);
+    publish({ status: 'required', reason: 'session-changed' });
+  });
 
   function publish(next: SessionState) {
     if (disposed) return;
@@ -168,6 +181,10 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
       listeners.add(listener);
       return () => { listeners.delete(listener); };
     },
+    onInvalidated(listener: (remote: boolean) => void) {
+      invalidatedListeners.add(listener);
+      return () => { invalidatedListeners.delete(listener); };
+    },
     initialize(fragment: BootstrapFragment): Promise<void> {
       if (initialized) return pending ?? Promise.resolve();
       initialized = true;
@@ -183,14 +200,20 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
       publish({ status: 'signing-out' });
       return run(async (signal) => {
         await gateway.logout(token, signal);
-        if (!signal.aborted) publish({ status: 'required', reason: 'signed-out' });
+        if (!signal.aborted) {
+          publish({ status: 'required', reason: 'signed-out' });
+          notifyInvalidated(false);
+          invalidation.notify();
+        }
       }, 'logout');
     },
     dispose() {
       disposed = true;
+      invalidation.close();
       forget();
       invalidatePending();
       listeners.clear();
+      invalidatedListeners.clear();
     },
   };
 }
