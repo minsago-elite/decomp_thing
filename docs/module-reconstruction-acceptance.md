@@ -216,3 +216,18 @@ identity unchanged rather than silently clamping them. The admission test checks
 an increased context request, both default entry points, unchanged identities and
 explicit host authorization. Individual phases still need their own measured
 resource enforcement; admission alone does not prove complete phase budgeting.
+
+Optional `exploration.json` is checked before analysis starts. The service reads a
+stable regular file under a byte bound of the smaller of 16 MiB and four times the
+profile's reconstruction context character limit, decodes strict UTF-8, then checks
+the decoded string length against that character limit. It rejects excessive or
+malformed input rather than truncating it or loading an unbounded report. Missing
+exploration input remains optional, and admitted text is forwarded unchanged.
+This text is prompt context; it does not authenticate behavioral claims or create
+measured behavior evidence. Complete module prompts retain their separate budget
+check after interfaces and other context are assembled.
+
+The service tests verify Unicode context forwarding and rejection of character
+excess, byte excess and malformed UTF-8 before analyzer invocation, source-tree
+creation or progress publication. Prelaunch cancellation is also checked before
+creating the reconstruction output directory.

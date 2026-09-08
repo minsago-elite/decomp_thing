@@ -8,9 +8,11 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 
+import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
 import kotlin.io.path.readText
+import kotlin.io.path.writeText
 import kotlin.io.path.writeBytes
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -44,8 +46,16 @@ class ArchivalReconstructionTest {
                 phases += phase
             }
         }
-        val result = ArchivalReconstructionService(analyzer, profile = profile, progress = progress)
+        val exploration = "{\"note\":\"authored 관찰\"}"
+        temp.resolve("result").createDirectories().resolve("exploration.json").writeText(exploration)
+        var observed: String? = null
+        val reconstructor = ModuleReconstructor { request ->
+            observed = request.observedBehavior
+            EvidenceModuleReconstructor().reconstruct(request)
+        }
+        val result = ArchivalReconstructionService(analyzer, reconstructor, profile = profile, progress = progress)
             .reconstruct(binary, temp.resolve("result"))
+        assertEquals(exploration, observed)
         val audit = requireNotNull(result.bundle.audit)
         assertTrue(audit.unresolvedEntityIds.isNotEmpty())
         assertEquals(AgentWorkflowPhase.UNRESOLVED, phases.last())
@@ -120,6 +130,32 @@ class ArchivalReconstructionTest {
         assertEquals(contract, Json.parseToJsonElement(extracted.resolve("reports/build_contract.json").readText()).jsonObject)
         assertEquals(ArchivalProjectAuditor.audit(result.projectDir, profile).toJson(),
             ArchivalProjectAuditor.audit(extracted, profile).toJson())
+    }
+
+    @Test
+    fun `exploration input is bounded and decoded before analysis`() {
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val profile = ReconstructionProfile(base.schemaVersion, base.id, base.layout,
+            base.budgets.copy(reconstructionMaximumContextCharacters = 8), base.adapterConfiguration)
+        var calls = 0
+        val analyzer = ProgramModelAnalyzer { _, _ -> calls++; error("must not analyze") }
+        val cases = listOf(
+            "123456789".toByteArray() to IllegalArgumentException::class,
+            "x".repeat(33).toByteArray() to decompengine.repair.RepairBudgetExceededException::class,
+            byteArrayOf(0xc3.toByte(), 0x28) to java.nio.charset.CharacterCodingException::class,
+        )
+        for ((bytes, failureType) in cases) {
+            val output = createTempDirectory("exploration-preflight-")
+            output.resolve("exploration.json").writeBytes(bytes)
+            val failure = kotlin.test.assertFails {
+                ArchivalReconstructionService(analyzer, profile = profile).reconstruct(output.resolve("unused"), output)
+            }
+            assertTrue(failureType.isInstance(failure), "unexpected failure: $failure")
+            assertEquals(0, calls)
+            assertFalse(output.resolve("analysis").exists())
+            assertFalse(output.resolve("source-tree").exists())
+            assertFalse(output.resolve("reconstruction_progress.json").exists())
+        }
     }
 
     @Test
