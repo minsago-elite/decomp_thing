@@ -77,12 +77,12 @@ class ProfiledDoctorTest {
                 assertTrue(output.isDirectory())
                 assertEquals(listOf(
                     "Java", "C compiler", buildName, "binutils/readelf", "binutils/strings", "Python", "angr",
-                    "Ghidra", "C sanitizers", "bubblewrap", "output directory", "reconstruction profile",
+                    "Ghidra", "C sanitizers", "bubblewrap", "output directory", "reconstruction profile", "diagnostic limits",
                 ), report.checks.map { it.name })
                 for (name in listOf("C compiler", buildName, "C sanitizers", "output directory")) {
                     assertTrue(report.checks.single { it.name == name }.passed, name)
                 }
-                val identity = report.checks.last()
+                val identity = report.checks.single { it.name == "reconstruction profile" }
                 assertTrue(identity.passed)
                 assertEquals("Selected ${selected.id}; sha256=${selected.sha256}", identity.detail)
             }

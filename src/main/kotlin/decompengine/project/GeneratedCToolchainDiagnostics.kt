@@ -42,11 +42,15 @@ internal class GeneratedCToolchainDiagnostics(
         override val versionProbes: List<ToolchainVersionProbe>,
     ) : PreparedToolchainDiagnostics {
         override fun checkCapabilities(commandProbe: CommandProbe): List<DoctorCheck> =
-            listOf(sanitizerCheck(commandProbe))
+            checkCapabilities(commandProbe) {}
 
-        private fun sanitizerCheck(commandProbe: CommandProbe): DoctorCheck {
+        override fun checkCapabilities(commandProbe: CommandProbe, checkpoint: (String) -> Unit): List<DoctorCheck> =
+            listOf(sanitizerCheck(commandProbe, checkpoint))
+
+        private fun sanitizerCheck(commandProbe: CommandProbe, checkpoint: (String) -> Unit): DoctorCheck {
             requireNotInterrupted()
             val directory = try {
+                checkpoint("before capability probe preparation")
                 Files.createTempDirectory("llm-bin-patch-doctor-")
             } catch (failure: Exception) {
                 requireNotInterrupted(failure)
@@ -56,7 +60,7 @@ internal class GeneratedCToolchainDiagnostics(
             var result: DoctorCheck? = null
             var primaryFailure: Throwable? = null
             try {
-                result = compileAndRunProbe(commandProbe, directory)
+                result = compileAndRunProbe(commandProbe, directory, checkpoint)
             } catch (failure: Throwable) {
                 primaryFailure = failure
             } finally {
@@ -82,10 +86,12 @@ internal class GeneratedCToolchainDiagnostics(
             return checkNotNull(result)
         }
 
-        private fun compileAndRunProbe(commandProbe: CommandProbe, directory: Path): DoctorCheck {
+        private fun compileAndRunProbe(commandProbe: CommandProbe, directory: Path, checkpoint: (String) -> Unit): DoctorCheck {
+            checkpoint("before writing capability probe")
             val source = directory.resolve("probe.c")
             val binary = directory.resolve("probe")
             source.writeText("int main(void) { return 0; }\n")
+            checkpoint("after writing capability probe")
             requireNotInterrupted()
             val compile = commandProbe.run(
                 listOf(compilerDriver, "-std=c11", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
