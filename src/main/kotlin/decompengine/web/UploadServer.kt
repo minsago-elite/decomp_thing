@@ -36,6 +36,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
@@ -597,7 +598,18 @@ class UploadServer(
                         require(it.matches(Regex("runId=[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "Only an exact workflow attempt selection is supported" }
                         it.removePrefix("runId=")
                     }
+<<<<<<< HEAD
                     exchange.sendJson(200, readLegacyProgress(job.id, runId).toString())
+=======
+                    val snapshot = try {
+                        AgentProgressJournal.read(jobs.reportContext(job.id, runId).reportsDirectory)
+                    } catch (failure: IOException) {
+                        throw WebJobServiceException("JOB_STORAGE_UNAVAILABLE", "Persisted activity history is unavailable.", failure)
+                    } catch (failure: IllegalArgumentException) {
+                        throw WebJobServiceException("JOB_STORAGE_UNAVAILABLE", "Persisted activity history is invalid.", failure)
+                    }
+                    exchange.sendJson(200, snapshot?.toString() ?: "{\"schemaVersion\":1,\"displayOnly\":true,\"nextSequence\":0,\"queueDropped\":0,\"historyDropped\":0,\"truncated\":false,\"events\":[]}")
+>>>>>>> ad74d5d3 (fix(web): classify progress journal IO failures)
                 }
                 else -> legacyError(exchange, 404, "NOT_FOUND", "The requested route does not exist.") {
                     renderErrorPage(404, "Page not found", "The requested route does not exist.")
@@ -723,7 +735,11 @@ class UploadServer(
 
     /** A queued operation can be claimed once, either by a worker or by shutdown. */
     private fun readLegacyProgress(jobId: String, runId: String?): kotlinx.serialization.json.JsonObject {
-        val bytes = jobs.readProgressJournal(jobId, runId)
+        val bytes = try {
+            jobs.readProgressJournal(jobId, runId)
+        } catch (failure: IOException) {
+            throw WebJobServiceException("JOB_STORAGE_UNAVAILABLE", "Persisted activity history is unavailable.", failure)
+        }
         return try { legacyProgressPresentation(AgentProgressJournal.decode(bytes)) } catch (_: Exception) {
             throw WebJobServiceException("PROGRESS_UNAVAILABLE", "The retained progress journal is unavailable.")
         }
