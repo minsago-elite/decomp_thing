@@ -16,7 +16,7 @@ internal object AgentProgressJournalRetention {
     fun expiredSnapshot(attempt: WorkflowAttempt, bytes: ByteArray, now: Instant,
         retention: Duration = DEFAULT_TERMINAL_RETENTION): ByteArray? {
         require(!retention.isNegative && !retention.isZero) { "retention must be positive" }
-        if (!attempt.state.terminal || attempt.publicationPending) return null
+        if (!attempt.state.terminal || attempt.publicationPending || attempt.progressRetentionPinned) return null
         val endedAt = requireNotNull(attempt.endedAt) { "terminal attempt has no end time" }
         if (Duration.between(endedAt, now) < retention) return null
         val journal = AgentProgressJournal.decode(bytes)

@@ -74,6 +74,7 @@ data class WorkflowAttempt(
     val inputRevisionId: String?, val harnessCapabilityId: String?, val limits: WorkflowExecutionLimits,
     val terminalReason: WorkflowTerminalReason?, val usage: WorkflowUsage?, val candidate: WorkflowCandidate?,
     val acceptedRevision: WorkflowAcceptanceReference?,
+    val progressRetentionPinned: Boolean = false,
 ) {
     val publicationPending: Boolean get() = state == WorkflowRunState.COMPLETED && candidate != null && acceptedRevision == null
 }
@@ -132,7 +133,8 @@ class WorkflowAttemptStore private constructor(
         read(attempt)
     }
 
-    /** Explicit maintenance only: callers must supply protection from pins and active read leases.
+    /** Explicit maintenance only: durable progress pins are enforced here. Callers additionally
+     * supply protection from active read leases or broader retention policy.
      * No HTTP read or automatic sweep invokes this operation yet.
      */
     internal fun expireProgressJournal(jobId: String, runId: String, protectedFromRetention: Boolean,
@@ -140,12 +142,28 @@ class WorkflowAttemptStore private constructor(
         fault: (ProgressRetentionFaultPoint) -> Unit = {}): ProgressRetentionResult = withJob(jobId) { directory ->
         val attempt = available(jobId, directory).snapshot.attempts.singleOrNull { it.runId == runId }
             ?: fail("RUN_NOT_FOUND", "The requested attempt does not belong to this job.")
-        if (protectedFromRetention) ProgressRetentionResult.RETAINED else try {
+        if (protectedFromRetention || attempt.progressRetentionPinned) ProgressRetentionResult.RETAINED else try {
             AgentProgressJournalMaintenance.expire(root, attempt, clock.instant(), retention, fault)
         } catch (failure: Exception) {
             throw WorkflowStoreException("PROGRESS_RETENTION_FAILED",
                 "Progress retention did not finish. Preserve the journal and pending retention file, then retry maintenance with storage ownership.",
                 outcomeUnknown = true, cause = failure)
+        }
+    }
+
+    /** Retention policy is durable and versioned, separate from workflow execution/acceptance. */
+    internal fun setProgressRetentionPinned(jobId: String, runId: String, expectedRunVersion: String,
+        pinned: Boolean): WorkflowMutation = withJob(jobId) { directory ->
+        val current = available(jobId, directory).snapshot
+        requireRecovered(current, directory)
+        val old = current.attempts.singleOrNull { it.runId == runId }
+            ?: fail("RUN_NOT_FOUND", "The requested attempt does not belong to this job.")
+        checkVersion(old.version, expectedRunVersion)
+        if (old.progressRetentionPinned == pinned) WorkflowMutation(current, old) else {
+            val attempt = old.copy(version = newId("version"), progressRetentionPinned = pinned)
+            val updated = replace(current, attempt)
+            persist(directory, updated)
+            WorkflowMutation(updated, attempt)
         }
     }
 
@@ -512,13 +530,14 @@ class WorkflowAttemptStore private constructor(
             put("usage", a.usage?.let { u -> buildJsonObject { put("inputTokens", u.inputTokens?.toString()); put("outputTokens", u.outputTokens?.toString()); put("cachedInputTokens", u.cachedInputTokens?.toString()); put("toolCalls", u.toolCalls?.toString()); put("wallClockMs", u.wallClockMs?.toString()) } } ?: JsonNull)
             put("candidate", a.candidate?.let { c -> buildJsonObject { put("revisionId", c.revisionId); put("sourceSha256", c.sourceSha256) } } ?: JsonNull)
             put("acceptedRevision", a.acceptedRevision?.let(::encodeAcceptance) ?: JsonNull)
+            if (a.progressRetentionPinned) put("progressRetentionPinned", true)
         }
         private fun encodeAcceptance(a: WorkflowAcceptanceReference): JsonObject = buildJsonObject {
             put("jobId", a.jobId); put("runId", a.runId); put("revisionId", a.revisionId); put("sourceSha256", a.sourceSha256)
             put("graphNodeId", a.graphNodeId); put("artifactId", a.artifactId); put("artifactSha256", a.artifactSha256)
         }
         private fun parseAttempt(value: JsonElement): WorkflowAttempt {
-            val a = value.asObject().also { it.keysExactly("runId", "jobId", "workflow", "state", "version", "createdAt", "startedAt", "endedAt", "previousRunId", "inputRevisionId", "harnessCapabilityId", "limits", "terminalReason", "usage", "candidate", "acceptedRevision") }
+            val a = value.asObject().also { JsonObject(it - "progressRetentionPinned").keysExactly("runId", "jobId", "workflow", "state", "version", "createdAt", "startedAt", "endedAt", "previousRunId", "inputRevisionId", "harnessCapabilityId", "limits", "terminalReason", "usage", "candidate", "acceptedRevision") }
             val limits = a.getValue("limits").asObject().also { it.keysExactly("wallClockMs", "idleMs", "maxOutputBytes", "maxToolCalls") }
             val usage = a.optional("usage")?.asObject()?.also { it.keysExactly("inputTokens", "outputTokens", "cachedInputTokens", "toolCalls", "wallClockMs") }
             val candidate = a.optional("candidate")?.asObject()?.also { it.keysExactly("revisionId", "sourceSha256") }
@@ -526,7 +545,8 @@ class WorkflowAttemptStore private constructor(
                 Instant.parse(a.string("createdAt")), a.optionalString("startedAt")?.let(Instant::parse), a.optionalString("endedAt")?.let(Instant::parse), a.optionalString("previousRunId"), a.optionalString("inputRevisionId"), a.optionalString("harnessCapabilityId"),
                 WorkflowExecutionLimits(limits.uint("wallClockMs"), limits.uint("idleMs"), limits.uint("maxOutputBytes"), limits.uint("maxToolCalls")), a.optionalString("terminalReason")?.let(WorkflowTerminalReason::valueOf),
                 usage?.let { WorkflowUsage(it.optionalUInt("inputTokens"), it.optionalUInt("outputTokens"), it.optionalUInt("cachedInputTokens"), it.optionalUInt("toolCalls"), it.optionalUInt("wallClockMs")) },
-                candidate?.let { WorkflowCandidate(it.string("revisionId"), it.string("sourceSha256")) }, a.optional("acceptedRevision")?.let(::parseAcceptance))
+                candidate?.let { WorkflowCandidate(it.string("revisionId"), it.string("sourceSha256")) }, a.optional("acceptedRevision")?.let(::parseAcceptance),
+                if ("progressRetentionPinned" in a) a.boolean("progressRetentionPinned") else false)
         }
         private fun parseAcceptance(value: JsonElement): WorkflowAcceptanceReference {
             val a = value.asObject().also { it.keysExactly("jobId", "runId", "revisionId", "sourceSha256", "graphNodeId", "artifactId", "artifactSha256") }
