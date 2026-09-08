@@ -16,8 +16,12 @@ The existing isolated worker execution applies the resulting limits.
 Host admission remains a separate caller responsibility. The profile overload of
 `ReconstructionPipeline.generate` performs that admission before binding budgets;
 its [pipeline contract](profiled-reconstruction-pipeline.md) describes the full
-handoff. The wrapper still reads the whole input after export. Bounded metadata
-inspection and a shared elapsed deadline remain part of
+handoff. The wrapper now uses [bounded ELF inspection](bounded-elf-metadata.md),
+checks input identity against the exported model and shares its elapsed deadline
+across export and metadata. Selected resident-memory budgets also lower the
+metadata allocation model; a budget below its 8 MiB fixed reservation is rejected
+before binding. This does not bound the entire parent JVM or downstream reports;
+complete phase bounds remain part of
 [#84](https://github.com/minsago-elite/decomp_thing/issues/84).
 
 ## Focused verification
