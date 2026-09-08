@@ -25,6 +25,12 @@ does not create a session or send a model prompt. `doctor --tools-only` is expli
 resolve ACP configuration. The deprecated direct `GET /models` probe exists only behind exact
 `--harness legacy-openai` opt-in.
 
+Doctor's `--profile generated-c-make-v1|generated-c-ninja-v1` selects the compiler
+and build-tool diagnostics and works with tools-only mode. The default Make
+profile probes its configured `cc`; see
+[profile-selected diagnostics](docs/profiled-doctor-diagnostics.md) for API use
+and verification limits.
+
 ### Docker qualification profile
 
 Host-native execution under a dedicated service UID is the primary supported ACP deployment. Compose exposes an

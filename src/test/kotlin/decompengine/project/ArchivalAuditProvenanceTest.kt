@@ -11,6 +11,8 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
@@ -18,6 +20,53 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 class ArchivalAuditProvenanceTest {
+    @Test
+    fun `audit requires profile bounded numeric prompt metadata for accepted agent checkpoints`() {
+        val project = fixture(accepted = true)
+        val plan = Json.parseToJsonElement(project.resolve("reports/module_plan.json").readText()).jsonObject
+        val module = plan.getValue("modules").jsonArray.first().jsonObject
+        val id = module.getValue("id").jsonPrimitive.content
+        val path = "reports/modules/$id.json"
+        val checkpoint = Json.parseToJsonElement(project.resolve(path).readText()).jsonObject
+        val limit = GeneratedCMakeReconstructionProfile.descriptor.budgets.reconstructionMaximumContextCharacters
+        data class Case(val name: String, val characters: JsonElement?, val budget: JsonElement?, val valid: Boolean = false)
+        val cases = listOf(
+            Case("within bound", JsonPrimitive(1), JsonPrimitive(limit), true),
+            Case("exact bound", JsonPrimitive(limit), JsonPrimitive(limit), true),
+            Case("missing size", null, JsonPrimitive(limit)),
+            Case("missing budget", JsonPrimitive(1), null),
+            Case("null size", JsonNull, JsonPrimitive(limit)),
+            Case("null budget", JsonPrimitive(1), JsonNull),
+            Case("zero budget", JsonPrimitive(0), JsonPrimitive(0)),
+            Case("negative size", JsonPrimitive(-1), JsonPrimitive(limit)),
+            Case("negative budget", JsonPrimitive(0), JsonPrimitive(-1)),
+            Case("above profile", JsonPrimitive(1), JsonPrimitive(limit + 1)),
+            Case("size above budget", JsonPrimitive(2), JsonPrimitive(1)),
+            Case("string size", JsonPrimitive("1"), JsonPrimitive(limit)),
+            Case("string budget", JsonPrimitive(1), JsonPrimitive(limit.toString())),
+        )
+        // This exercises local audit metadata; the fixture contains no ACP release receipt.
+        for (case in cases) {
+            val changed = JsonObject(checkpoint.toMutableMap().apply {
+                put("reconstructorIdentity", JsonPrimitive("agent:local-audit-fixture"))
+                remove("promptCharacters")
+                remove("promptBudgetCharacters")
+                case.characters?.let { put("promptCharacters", it) }
+                case.budget?.let { put("promptBudgetCharacters", it) }
+            })
+            writeBoundFile(project, path, changed.toString())
+            val audit = ArchivalProjectAuditor.audit(project)
+            assertEquals(if (case.valid) emptySet() else setOf(id), audit.moduleCompilationEvidenceProblems.keys, case.name)
+            assertEquals(case.valid, id in audit.moduleCompilationEvidence, case.name)
+            assertEquals(
+                if (case.valid) emptyList() else module.getValue("functionIds").jsonArray.map { it.jsonPrimitive.content }.sorted(),
+                audit.unresolvedEntityIds,
+                case.name,
+            )
+            assertEquals(audit.moduleRevisionSha256.keys - setOf(id), audit.moduleCompilationEvidence.keys - setOf(id), case.name)
+        }
+    }
+
     @Test
     fun `audit retains exact accepted compiler records through archive extraction`() {
         val project = fixture(accepted = true)

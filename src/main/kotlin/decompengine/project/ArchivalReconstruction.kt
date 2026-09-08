@@ -1,9 +1,10 @@
 package decompengine.project
 
-import decompengine.analysis.GhidraAnalysisException
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowPhase
+import decompengine.analysis.AnalysisDeadline
 import decompengine.analysis.BundledGhidra
+import decompengine.analysis.GhidraAnalysisException
 import decompengine.analysis.GhidraInvocation
 import decompengine.analysis.GhidraPostScript
 import java.nio.file.Files
@@ -18,12 +19,16 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.io.path.createDirectories
 import kotlin.io.path.pathString
-import kotlin.io.path.readText
 import kotlin.io.path.writeBytes
 import kotlin.io.path.writeText
 
 fun interface ProgramModelAnalyzer {
     fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel
+}
+
+/** Binds requested export budgets without starting analysis or raising existing limits. */
+interface ExportBudgetedProgramModelAnalyzer : ProgramModelAnalyzer {
+    fun withExportBudgets(budgets: ReconstructionBudgets): ProgramModelAnalyzer
 }
 
 data class RecoveredProgramWithCallSites(
@@ -36,6 +41,7 @@ data class GhidraProgramModelExportLimits(
     val terminationGrace: Duration = Duration.ofSeconds(5),
     val maximumResidentBytes: Long = 4L * 1024 * 1024 * 1024,
     val maximumProgramModelBytes: Long = 512L * 1024 * 1024,
+    val maximumDiagnosticBytesPerStream: Int = 16 * 1024 * 1024,
 ) {
     init {
         require(!wallClockTimeout.isZero && !wallClockTimeout.isNegative && wallClockTimeout <= Duration.ofHours(24)) {
@@ -43,6 +49,9 @@ data class GhidraProgramModelExportLimits(
         }
         require(!terminationGrace.isNegative && terminationGrace <= Duration.ofSeconds(30)) {
             "Ghidra termination grace must be between zero and 30 seconds"
+        }
+        require(maximumDiagnosticBytesPerStream in 1..(16 * 1024 * 1024)) {
+            "Ghidra diagnostic stream limit must be positive and at most 16 MiB"
         }
         require(maximumResidentBytes > 0) { "Ghidra resident-memory limit must be positive" }
         require(maximumProgramModelBytes in 1..(512L * 1024 * 1024)) {
@@ -59,17 +68,25 @@ data class GhidraProgramModelExportLimits(
     }
 }
 
-class GhidraHeadlessProgramModelAnalyzer internal constructor(
-    private val commandFactory: (GhidraInvocation) -> List<String>,
-    private val limits: GhidraProgramModelExportLimits = GhidraProgramModelExportLimits(),
-    private val analysisToolSha256: String = UNAUTHENTICATED_ANALYSIS_TOOL_SHA256,
-    private val recoveryMode: GhidraProgramModelRecoveryMode = GhidraProgramModelRecoveryMode.FULL,
-) : ProgramModelAnalyzer {
+class GhidraHeadlessProgramModelAnalyzer private constructor(
+    private val commandFactory: (GhidraInvocation, (String) -> Unit) -> List<String>,
+    private val limits: GhidraProgramModelExportLimits,
+    private val analysisToolSha256: String,
+    private val recoveryMode: GhidraProgramModelRecoveryMode,
+) : ExportBudgetedProgramModelAnalyzer {
+    internal constructor(
+        commandFactory: (GhidraInvocation) -> List<String>,
+        limits: GhidraProgramModelExportLimits = GhidraProgramModelExportLimits(),
+        analysisToolSha256: String = UNAUTHENTICATED_ANALYSIS_TOOL_SHA256,
+        recoveryMode: GhidraProgramModelRecoveryMode = GhidraProgramModelRecoveryMode.FULL,
+    ) : this({ invocation, _ -> commandFactory(invocation) }, limits, analysisToolSha256, recoveryMode)
+
     constructor(
         limits: GhidraProgramModelExportLimits = GhidraProgramModelExportLimits(),
         analysisToolSha256: String = BundledGhidra.ARCHIVE_SHA256,
         recoveryMode: GhidraProgramModelRecoveryMode = GhidraProgramModelRecoveryMode.FULL,
-    ) : this({ BundledGhidra.locate().analysisCommand(it) }, limits, analysisToolSha256, recoveryMode)
+    ) : this({ invocation, checkpoint -> BundledGhidra.locate().analysisCommand(invocation, checkpoint) },
+        limits, analysisToolSha256, recoveryMode)
 
     init {
         require(analysisToolSha256.matches(Regex("[0-9a-f]{64}"))) {
@@ -77,11 +94,25 @@ class GhidraHeadlessProgramModelAnalyzer internal constructor(
         }
     }
 
+    override fun withExportBudgets(budgets: ReconstructionBudgets): GhidraHeadlessProgramModelAnalyzer =
+        GhidraHeadlessProgramModelAnalyzer(
+            commandFactory = commandFactory,
+            limits = limits.copy(
+                wallClockTimeout = minOf(limits.wallClockTimeout, Duration.ofMillis(budgets.exportWallClockMillis)),
+                maximumResidentBytes = minOf(limits.maximumResidentBytes, budgets.exportMaximumResidentBytes),
+            ),
+            analysisToolSha256 = analysisToolSha256,
+            recoveryMode = recoveryMode,
+        )
+
     override fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel =
-        analyzeInternal(binaryPath, workDir, false).first
+        analyzeInternal(binaryPath, workDir, false, null).first
+
+    internal fun analyzeWithDeadline(binaryPath: Path, workDir: Path, deadline: AnalysisDeadline): RecoveredProgramModel =
+        analyzeInternal(binaryPath, workDir, false, deadline).first
 
     fun analyzeWithCallSites(binaryPath: Path, workDir: Path): RecoveredProgramWithCallSites {
-        val (model, calls) = analyzeInternal(binaryPath, workDir, true)
+        val (model, calls) = analyzeInternal(binaryPath, workDir, true, null)
         return RecoveredProgramWithCallSites(model, checkNotNull(calls))
     }
 
@@ -89,13 +120,18 @@ class GhidraHeadlessProgramModelAnalyzer internal constructor(
         binaryPath: Path,
         workDir: Path,
         includeCallSites: Boolean,
+        parentDeadline: AnalysisDeadline?,
     ): Pair<RecoveredProgramModel, RecoveredCallSiteReceipt?> {
-        val startedNanos = System.nanoTime()
+        val deadline = AnalysisDeadline.start(limits.wallClockTimeout.toNanos(), "Ghidra program recovery", parentDeadline)
+        deadline.checkpoint("before export preparation")
         val reports = workDir.resolve("reports").createDirectories()
         val scripts = workDir.resolve("scripts").createDirectories()
+        deadline.checkpoint("before reading export scripts")
         val scriptBytes = javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java")
             ?.use { it.readBytes() } ?: error("bundled ExportProgramModel.java is missing")
+        deadline.checkpoint("after reading export script")
         scripts.resolve("ExportProgramModel.java").writeBytes(scriptBytes)
+        deadline.checkpoint("after writing export script")
         val exporterSha256 = sha256(scriptBytes)
         val output = reports.resolve("program_model.json")
         val callOutput = reports.resolve("program_model_calls.json")
@@ -104,7 +140,9 @@ class GhidraHeadlessProgramModelAnalyzer internal constructor(
             javaClass.getResourceAsStream("/ghidra_scripts/ExportRecoveredCallSites.java")
                 ?.use { it.readBytes() } ?: error("bundled ExportRecoveredCallSites.java is missing")
         } else null
+        deadline.checkpoint("after preparing call-site script")
         callScriptBytes?.let { scripts.resolve("ExportRecoveredCallSites.java").writeBytes(it) }
+        deadline.checkpoint("before creating export project")
         val project = workDir.resolve("ghidra_project").createDirectories()
         val postScripts = listOf(GhidraPostScript("ExportProgramModel.java", listOf(
             exporterSha256, analysisToolSha256, recoveryMode.wireName, output.toAbsolutePath().normalize().pathString,
@@ -114,63 +152,21 @@ class GhidraHeadlessProgramModelAnalyzer internal constructor(
                 callOutput.toAbsolutePath().normalize().pathString,
             )),
         )
-        val command = commandFactory(GhidraInvocation(project, "archival_reconstruction", binaryPath, scripts, postScripts))
-        val process = ProcessBuilder(command)
-            .directory(workDir.toFile())
-            .start()
-        val peakResidentBytes = AtomicLong(0)
-        val memoryExceeded = AtomicBoolean(false)
-        val memoryMonitor = CompletableFuture.runAsync {
-            while (process.isAlive) {
-                val observed = residentBytes(process)
-                peakResidentBytes.accumulateAndGet(observed, ::maxOf)
-                if (observed > limits.maximumResidentBytes) {
-                    memoryExceeded.set(true)
-                    terminateProcessTree(process, limits.terminationGrace)
-                    break
-                }
-                Thread.sleep(25)
-            }
-        }
-        val stdout = CompletableFuture.supplyAsync { process.inputStream.bufferedReader().readText() }
-        val stderr = CompletableFuture.supplyAsync { process.errorStream.bufferedReader().readText() }
-        val completed = process.waitFor(limits.wallClockTimeout.toMillis(), TimeUnit.MILLISECONDS)
-        if (!completed) {
-            terminateProcessTree(process, limits.terminationGrace)
-        }
-        val exitCode = if (completed) process.exitValue() else -1
-        reports.resolve("ghidra_stdout.log").writeText(stdout.join())
-        reports.resolve("ghidra_stderr.log").writeText(stderr.join())
-        memoryMonitor.join()
-        reports.resolve("ghidra_resource_usage.json").writeText(
-            "{\"maximumResidentBytesLimit\":${limits.maximumResidentBytes}," +
-                "\"maximumResidentBytesObserved\":${peakResidentBytes.get()}," +
-                "\"wallClockMillisLimit\":${limits.wallClockTimeout.toMillis()}}\n",
-        )
-        if (memoryExceeded.get()) {
-            throw GhidraAnalysisException(
-                "Ghidra program recovery exceeded ${limits.maximumResidentBytes} resident bytes; " +
-                    "rerun with the same output directory to resume durable function checkpoints",
-            )
-        }
-        if (!completed) {
-            throw GhidraAnalysisException(
-                "Ghidra program recovery exceeded ${limits.wallClockTimeout.toSeconds()} seconds; " +
-                    "rerun with the same output directory to resume durable function checkpoints",
-            )
-        }
+        deadline.checkpoint("before constructing export command")
+        val command = commandFactory(GhidraInvocation(project, "archival_reconstruction", binaryPath, scripts, postScripts), deadline::checkpoint)
+        deadline.checkpoint("after constructing export command")
+        val exitCode = executeExport(command, workDir, reports, deadline)
+        deadline.checkpoint("before export result validation")
         require(exitCode == 0 && Files.isRegularFile(output, LinkOption.NOFOLLOW_LINKS)) {
             "Ghidra program recovery failed with exit code $exitCode; see ${reports.resolve("ghidra_stderr.log")}"
         }
-        val modelBytes = readStableProgramModel(output)
-        val model = ProgramModelJson.readCanonical(modelBytes)
+        val modelBytes = readStableProgramModel(output, deadline)
+        val model = ProgramModelJson.readCanonical(modelBytes, deadline::checkpoint)
+        deadline.checkpoint("after canonical model validation")
         val calls = callScriptBytes?.let { script ->
             val callLimits = RecoveredCallSiteLimits()
             fun requireRemainingTime() {
-                check(!Thread.currentThread().isInterrupted) { "call-site export validation interrupted" }
-                check(System.nanoTime() - startedNanos < limits.wallClockTimeout.toNanos()) {
-                    "call-site export and validation exceeded the analysis wall-clock budget"
-                }
+                deadline.checkpoint("during call-site export validation")
             }
             requireRemainingTime()
             require(Files.isRegularFile(callOutput, LinkOption.NOFOLLOW_LINKS)) { "call-site export did not produce a regular file" }
@@ -193,21 +189,134 @@ class GhidraHeadlessProgramModelAnalyzer internal constructor(
                 callLimits,
             ) { requireRemainingTime() }.also { requireRemainingTime() }
         }
+        deadline.checkpoint("before returning exported model")
         return model to calls
     }
 
-    private fun readStableProgramModel(path: Path): ByteArray {
+    private fun executeExport(command: List<String>, workDir: Path, reports: Path, deadline: AnalysisDeadline): Int {
+        val remainingNanosAtLaunch = deadline.remainingNanos("before worker launch")
+        val process = ProcessBuilder(command).directory(workDir.toFile()).start()
+        val peakResidentBytes = AtomicLong(0)
+        val memoryExceeded = AtomicBoolean(false)
+        val diagnosticsExceeded = AtomicBoolean(false)
+        val tasks = ArrayList<CompletableFuture<*>>()
+        var primaryFailure: Throwable? = null
+        try {
+            deadline.checkpoint("after worker launch")
+            process.outputStream.close()
+            val memoryMonitor = CompletableFuture.runAsync {
+                while (process.isAlive) {
+                    val observed = residentBytes(process)
+                    peakResidentBytes.accumulateAndGet(observed, ::maxOf)
+                    if (observed > limits.maximumResidentBytes) {
+                        memoryExceeded.set(true)
+                        terminateProcessTree(process, limits.terminationGrace)
+                        break
+                    }
+                    Thread.sleep(25)
+                }
+            }.also(tasks::add)
+            fun capture(stream: java.io.InputStream): CompletableFuture<ByteArray> = CompletableFuture.supplyAsync {
+                val bytes = stream.readNBytes(limits.maximumDiagnosticBytesPerStream + 1)
+                if (bytes.size > limits.maximumDiagnosticBytesPerStream) {
+                    diagnosticsExceeded.set(true)
+                    terminateProcessTree(process, limits.terminationGrace)
+                    bytes.copyOf(limits.maximumDiagnosticBytesPerStream)
+                } else bytes
+            }.also(tasks::add)
+            val stdout = capture(process.inputStream)
+            val stderr = capture(process.errorStream)
+            val completed = process.waitFor(deadline.remainingNanosOrZero(), TimeUnit.NANOSECONDS)
+            if (!completed) terminateProcessTree(process, limits.terminationGrace)
+            // Timeout diagnostics retain their separate five-second drain allowance.
+            val drainDeadline = if (completed) deadline else AnalysisDeadline.start(
+                TimeUnit.SECONDS.toNanos(5), "Ghidra diagnostic drain",
+            )
+            fun <T> await(task: CompletableFuture<T>): T =
+                task.get(drainDeadline.remainingNanosOrZero(), TimeUnit.NANOSECONDS)
+            val stdoutBytes = await(stdout)
+            val stderrBytes = await(stderr)
+            await(memoryMonitor)
+            reports.resolve("ghidra_stdout.log").writeBytes(stdoutBytes)
+            reports.resolve("ghidra_stderr.log").writeBytes(stderrBytes)
+            reports.resolve("ghidra_resource_usage.json").writeText(
+                "{\"maximumResidentBytesLimit\":${limits.maximumResidentBytes}," +
+                    "\"maximumResidentBytesObserved\":${peakResidentBytes.get()}," +
+                    "\"wallClockMillisLimit\":${limits.wallClockTimeout.toMillis()}," +
+                    "\"parentWallClockMillisLimit\":${deadline.parentMaximumMillis}," +
+                    "\"remainingWallClockNanosAtLaunch\":$remainingNanosAtLaunch," +
+                    "\"maximumDiagnosticBytesPerStream\":${limits.maximumDiagnosticBytesPerStream}," +
+                    "\"stdoutBytesRetained\":${stdoutBytes.size},\"stderrBytesRetained\":${stderrBytes.size}," +
+                    "\"diagnosticLimitExceeded\":${diagnosticsExceeded.get()}}\n",
+            )
+            if (memoryExceeded.get()) throw GhidraAnalysisException(
+                "Ghidra program recovery exceeded ${limits.maximumResidentBytes} resident bytes; " +
+                    "rerun with the same output directory to resume durable function checkpoints",
+            )
+            if (diagnosticsExceeded.get()) throw GhidraAnalysisException(
+                "Ghidra program recovery exceeded ${limits.maximumDiagnosticBytesPerStream} diagnostic bytes per stream; " +
+                    "rerun with the same output directory to resume durable function checkpoints",
+            )
+            deadline.checkpoint("after export diagnostics")
+            if (!completed) throw java.util.concurrent.TimeoutException()
+            return process.exitValue()
+        } catch (failure: Throwable) {
+            val reported = if (failure is java.util.concurrent.TimeoutException) {
+                try {
+                    deadline.checkpoint("while waiting for export output")
+                    GhidraAnalysisException("Ghidra export diagnostic drain exceeded its allowance", failure)
+                } catch (checkpointFailure: Throwable) {
+                    checkpointFailure.addSuppressed(failure)
+                    checkpointFailure
+                }
+            } else failure
+            primaryFailure = reported
+            throw reported
+        } finally {
+            var cleanupFailure: Throwable? = null
+            fun cleanup(action: () -> Unit) {
+                try { action() } catch (failure: Throwable) {
+                    val previous = primaryFailure ?: cleanupFailure
+                    if (previous == null) cleanupFailure = failure else previous.addSuppressed(failure)
+                }
+            }
+            cleanup { terminateProcessTree(process, limits.terminationGrace) }
+            tasks.forEach { task -> cleanup { task.cancel(true) } }
+            cleanup { process.inputStream.close() }
+            cleanup { process.errorStream.close() }
+            cleanup { process.outputStream.close() }
+            cleanupFailure?.let { throw it }
+        }
+    }
+
+    private fun readStableProgramModel(path: Path, deadline: AnalysisDeadline): ByteArray {
+        deadline.checkpoint("before reading exported model")
         val before = Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
         require(before.isRegularFile && before.size() in 1..limits.maximumProgramModelBytes) {
             "Ghidra program model exceeds its authenticated parser bound"
         }
         require(before.size() <= Int.MAX_VALUE) { "Ghidra program model cannot be represented by the bounded parser" }
-        val bytes = Files.readAllBytes(path)
+        deadline.checkpoint("before allocating admitted model bytes")
+        val bytes = ByteArray(before.size().toInt())
+        deadline.checkpoint("after allocating admitted model bytes")
+        Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS).use { input ->
+            var offset = 0
+            while (offset < bytes.size) {
+                deadline.checkpoint("before reading model chunk")
+                val count = input.read(bytes, offset, minOf(64 * 1024, bytes.size - offset))
+                deadline.checkpoint("after reading model chunk")
+                require(count > 0) { "Ghidra program model changed while being read" }
+                offset += count
+            }
+            require(input.read() == -1) { "Ghidra program model changed while being read" }
+        }
+        deadline.checkpoint("after reading exported model")
         val after = Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
         require(
             after.isRegularFile && before.fileKey() == after.fileKey() && before.size() == after.size() &&
                 before.lastModifiedTime() == after.lastModifiedTime() && bytes.size.toLong() == before.size()
         ) { "Ghidra program model changed while being read" }
+        deadline.checkpoint("after validating exported model file")
         return bytes
     }
 
@@ -246,7 +355,11 @@ class GhidraHeadlessProgramModelAnalyzer internal constructor(
 
         fun bundled(
             profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
-        ): GhidraHeadlessProgramModelAnalyzer = GhidraHeadlessProgramModelAnalyzer(GhidraProgramModelExportLimits.from(profile))
+            hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+        ): GhidraHeadlessProgramModelAnalyzer {
+            hostSafetyLimits.requireAllows(profile.budgets)
+            return GhidraHeadlessProgramModelAnalyzer(GhidraProgramModelExportLimits.from(profile))
+        }
     }
 }
 
@@ -271,7 +384,7 @@ class ArchivalReconstructionService(
     private val analyzer: ProgramModelAnalyzer,
     private val reconstructor: ModuleReconstructor? = null,
     private val profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
-    hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits(profile.budgets),
+    private val hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
     private val progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
 ) {
     init {
@@ -281,7 +394,11 @@ class ArchivalReconstructionService(
     private val adapter = ReconstructionAdapters.resolve(profile)
 
     fun reconstruct(binaryPath: Path, outputDir: Path): ArchivalReconstructionResult {
+        if (Thread.interrupted()) throw InterruptedException("archival reconstruction cancelled")
         outputDir.createDirectories()
+        val observedBehavior = ReconstructionExplorationInput.read(
+            outputDir, profile.budgets.reconstructionMaximumContextCharacters,
+        )
         progress.phase(AgentWorkflowPhase.ANALYZING)
         val model = analyzer.analyze(binaryPath, outputDir.resolve("analysis"))
         val project = outputDir.resolve("source-tree")
@@ -289,18 +406,10 @@ class ArchivalReconstructionService(
         progressPath.writeText("{\"phase\":\"planning\",\"completed\":0,\"total\":0}\n")
         progress.phase(AgentWorkflowPhase.PLANNING)
         var moduleTotal = 0
-        val observedBehavior = outputDir.resolve("exploration.json").takeIf { Files.isRegularFile(it) }?.readText()
-        val planner = DeterministicModulePlanner(
-            maximumFunctionsPerModule = profile.budgets.maximumFunctionsPerModule,
-            layout = profile.layout,
-            maximumEntities = profile.budgets.plannerMaximumEntities,
-            maximumDependencyEdges = profile.budgets.plannerMaximumDependencyEdges,
-            maximumWorkUnits = profile.budgets.plannerMaximumWorkUnits,
-        )
         SourceTreeGenerator.generate(
             model,
             project,
-            planner = planner,
+            hostSafetyLimits = hostSafetyLimits,
             reconstructor = reconstructor,
             observedBehavior = observedBehavior,
             profile = profile,
@@ -321,9 +430,13 @@ class ArchivalReconstructionService(
             ),
             profile,
         )
-        progressPath.writeText("{\"phase\":\"complete\",\"completed\":$moduleTotal,\"total\":$moduleTotal}\n")
-        progress.phase(if (build.returnCode == 0) AgentWorkflowPhase.COMPLETED
-            else AgentWorkflowPhase.UNRESOLVED)
+        val unresolvedEntities = requireNotNull(bundle.audit).unresolvedEntityIds
+        val implementationStatus = if (unresolvedEntities.isEmpty()) "complete" else "unresolved"
+        progressPath.writeText(
+            "{\"phase\":\"$implementationStatus\",\"completed\":$moduleTotal,\"total\":$moduleTotal," +
+                "\"unresolvedEntityCount\":${unresolvedEntities.size}}\n",
+        )
+        progress.phase(if (unresolvedEntities.isEmpty()) AgentWorkflowPhase.COMPLETED else AgentWorkflowPhase.UNRESOLVED)
         outputDir.resolve("reconstruction.json").writeText(
             """
             {
@@ -333,11 +446,13 @@ class ArchivalReconstructionService(
               "archiveSha256": "${bundle.archiveSha256}",
               "profileId": "${profile.id}",
               "profileSha256": "${profile.sha256}",
-              "moduleCount": ${planner.plan(model).modules.size},
+              "moduleCount": $moduleTotal,
               "functionCount": ${model.functions.size},
               "globalCount": ${model.globals.size},
               "typeCount": ${model.types.size},
-              "buildExitCode": ${build.returnCode}
+              "buildExitCode": ${build.returnCode},
+              "implementationStatus": "$implementationStatus",
+              "unresolvedEntityCount": ${unresolvedEntities.size}
             }
             """.trimIndent() + "\n",
         )
