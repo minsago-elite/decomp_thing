@@ -81,6 +81,7 @@ object ArchivalProjectAuditor {
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
         requiredCorpusSha256: Set<String> = emptySet(),
     ): ArchivalAudit {
+        val compilationPolicy = ReconstructionCompilationPolicies.resolve(profile)
         val requiredCorpora = snapshotRequiredBehaviorCorpora(requiredCorpusSha256)
         val maximumFileBytes = minOf(profile.budgets.archiveMaximumFileBytes, Int.MAX_VALUE.toLong() - 1L)
         val manifestSnapshot = readStableRegularFile(projectDir, "source_tree_manifest.json", maximumFileBytes)
@@ -202,7 +203,7 @@ object ArchivalProjectAuditor {
                         require(it.jsonPrimitive.isString) { "compiler argument must be a string" }
                         it.jsonPrimitive.content
                     }
-                    require(command == GeneratedCModuleValidation.command(profile, source)) { "compiler command differs from the reconstruction profile" }
+                    require(command == compilationPolicy.command(profile, source)) { "compiler command differs from the reconstruction profile" }
                     require(compilation.keys == setOf("sourceSha256", "command", "outcome", "returnCode", "diagnosticsSha256", "diagnosticsBytes")) {
                         "compiler evidence has unsupported fields"
                     }

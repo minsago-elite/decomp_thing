@@ -366,7 +366,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 }
                 val command = value.requiredArray("command", "module compilation")
                     .map { it.requiredString("module compiler argument") }
-                require(command == GeneratedCModuleValidation.command(profile, source.path)) {
+                require(command == ReconstructionCompilationPolicies.resolve(profile).command(profile, source.path)) {
                     "module compiler command differs from its reconstruction profile: $moduleId"
                 }
                 val outcome = value.requiredString("outcome", "module compilation")

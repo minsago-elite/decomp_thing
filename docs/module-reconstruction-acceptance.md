@@ -118,3 +118,13 @@ owns the C function/global definition and placeholder checks and their lexical
 helpers. Orchestration retains invocation release, prompt budgets, prior issues,
 checkpoint acceptance and rollback. These checks remain the existing local
 acceptance policy; they do not certify behavioral equivalence or ABI correctness.
+
+`ModuleCompilationPolicy` is the local compilation contract. Application-owned
+`ReconstructionCompilationPolicies` selects it by registered profile ID; profile
+data cannot register implementation code. Prompt commands, generation, checkpoint
+reuse, fingerprint policy identity, archival audit and archive command checks use
+that selection. Generation rejects an unregistered profile before writing the
+project or dispatching reconstruction. The generated-C policy identity and
+compiler evidence encoding are unchanged. This contract supplies local compilation
+only; qualified runner/input/output receipts and complete alternate-profile
+routing remain required for production acceptance under #84.

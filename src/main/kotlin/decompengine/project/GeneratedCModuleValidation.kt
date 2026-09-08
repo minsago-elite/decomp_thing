@@ -1,6 +1,5 @@
 package decompengine.project
 
-import kotlinx.serialization.json.JsonPrimitive
 import java.io.ByteArrayOutputStream
 import java.nio.file.Path
 import java.util.concurrent.CompletableFuture
@@ -8,32 +7,12 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.io.path.readBytes
 
-/** Workflow-owned compiler evidence; ACP completion alone never establishes compilability. */
-internal data class ModuleCompilationEvidence(
-    val sourceSha256: String,
-    val command: List<String>,
-    val outcome: String,
-    val returnCode: Int?,
-    val diagnosticsSha256: String,
-    val diagnosticsBytes: Long,
-) {
-    val passed: Boolean get() = outcome == "passed" && returnCode == 0
-
-    fun toJson(): String = buildString {
-        append("{\"sourceSha256\":\"").append(sourceSha256).append("\",\"command\":[")
-        append(command.joinToString(",") { JsonPrimitive(it).toString() })
-        append("],\"outcome\":\"").append(outcome).append("\",\"returnCode\":")
-        append(returnCode ?: "null")
-        append(",\"diagnosticsSha256\":\"").append(diagnosticsSha256)
-        append("\",\"diagnosticsBytes\":").append(diagnosticsBytes).append('}')
-    }
-}
-
 /** Generated-C policy is kept beside the explicit generated-C profile. */
-internal object GeneratedCModuleValidation {
+internal object GeneratedCModuleValidation : ModuleCompilationPolicy {
     const val POLICY_ID = "generated-c-module-validation-v2"
+    override val id: String = POLICY_ID
 
-    fun command(profile: ReconstructionProfile, sourcePath: String): List<String> {
+    override fun command(profile: ReconstructionProfile, sourcePath: String): List<String> {
         val configuration = ProjectBuildConfiguration(
             compilerExecutable = profile.adapterConfiguration["compiler-driver"]?.singleOrNull()
                 ?: error("reconstruction profile must declare its compiler driver"),
@@ -44,7 +23,7 @@ internal object GeneratedCModuleValidation {
             listOf("-c", sourcePath, "-o", "/dev/null")
     }
 
-    fun validate(projectDir: Path, sourcePath: String, profile: ReconstructionProfile): ModuleCompilationEvidence {
+    override fun validate(projectDir: Path, sourcePath: String, profile: ReconstructionProfile): ModuleCompilationEvidence {
         if (Thread.interrupted()) throw InterruptedException("module compilation cancelled before launch")
         val command = command(profile, sourcePath)
         val source = projectDir.resolve(sourcePath)

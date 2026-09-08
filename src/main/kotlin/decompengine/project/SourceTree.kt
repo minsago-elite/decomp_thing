@@ -295,7 +295,7 @@ class BoundedLlmModuleReconstructor(
         val acceptance = """
             The workflow validates your exact source bytes against the returned change set and owned entity IDs.
             Preserve all required function and global definitions and use only declared shared interfaces.
-            Compiler gate (run by the workflow): ${GeneratedCModuleValidation.command(request.profile, target).joinToString(" ")}
+            Compiler gate (run by the workflow): ${ReconstructionCompilationPolicies.resolve(request.profile).command(request.profile, target).joinToString(" ")}
             Compiler warnings are errors. A completed agent turn is accepted only after policy and compiler validation.
             Full-project build and behavioral validation remain separate release gates.
         """.trimIndent()
@@ -637,6 +637,7 @@ object SourceTreeGenerator {
         progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
         onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
     ): SourceTreeManifest {
+        val compilationPolicy = ReconstructionCompilationPolicies.resolve(profile)
         val plan = planner.plan(model, overrides)
         val rendering = GeneratedCProjectRendering(model, plan)
         val typesHeader = rendering.renderTypesHeader()
@@ -702,6 +703,7 @@ object SourceTreeGenerator {
                 dependencyHeaders,
                 observedBehavior,
                 profile.sha256,
+                compilationPolicy.id,
             )
             val fingerprint = sha256(("transitive-interfaces-v2\n" + localFingerprint + "\n" +
                 interfaceFingerprints.getValue(module.id)).toByteArray())
@@ -738,7 +740,7 @@ object SourceTreeGenerator {
                     entityIds.size == entityIds.toSet().size &&
                     entityIds.toSet() == (module.functionIds + module.globalIds).toSet() &&
                     compilation?.passed == true &&
-                    compilation.command == GeneratedCModuleValidation.command(profile, module.sourcePath)
+                    compilation.command == compilationPolicy.command(profile, module.sourcePath)
             val verifiedPreviousAcceptance = recordedCheckpoint?.takeIf {
                 it.hasCurrentModuleAcceptance() && sourcePath.exists() && sha256(sourcePath.readBytes()) == it.sourceSha256 &&
                     it.hasCurrentExecutionEvidence(projectDir, configuredExecutionEvidencePath, false)
@@ -824,7 +826,7 @@ object SourceTreeGenerator {
                 val compilation = if (issues.isEmpty()) {
                     progress.phase(AgentWorkflowPhase.BUILD_VALIDATING, module.id)
                     val validation = try {
-                        GeneratedCModuleValidation.validate(projectDir, module.sourcePath, profile)
+                        compilationPolicy.validate(projectDir, module.sourcePath, profile)
                     } catch (failure: Exception) {
                         if (failure !is InterruptedException && !Thread.currentThread().isInterrupted) throw failure
                         // Restore durable state before reinstating cancellation, since file
@@ -1430,6 +1432,7 @@ object SourceTreeGenerator {
         dependencyHeaders: Map<String, String>,
         observedBehavior: String?,
         profileSha256: String,
+        compilerPolicyId: String,
     ): String {
         val selectedModel = model.copy(
             functions = module.functionIds.map { id -> model.functions.single { it.id == id } },
@@ -1447,7 +1450,7 @@ object SourceTreeGenerator {
             }),
             "observedBehavior" to (observedBehavior?.let { kotlinx.serialization.json.JsonPrimitive(it) } ?: JsonNull),
             "profileSha256" to kotlinx.serialization.json.JsonPrimitive(profileSha256),
-            "compilerPolicy" to kotlinx.serialization.json.JsonPrimitive(GeneratedCModuleValidation.POLICY_ID),
+            "compilerPolicy" to kotlinx.serialization.json.JsonPrimitive(compilerPolicyId),
         ))
         return sha256(inputs.toString().toByteArray(Charsets.UTF_8))
     }
