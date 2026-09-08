@@ -4,6 +4,7 @@ import java.nio.file.Path
 
 /** Generated-C/Make implementations selected together for the registered profile. */
 internal object GeneratedCReconstructionAdapter : ReconstructionAdapter {
+    override val diagnostics: ToolchainDiagnosticPolicy = GeneratedCToolchainDiagnostics("gnu-make", "Make")
     override val compilation: ModuleCompilationPolicy = GeneratedCModuleValidation
     override val archiveBuild: ArchiveBuildPolicy = GeneratedCArchiveBuildPolicy
     override val behaviorBuild: BehaviorBuildPolicy = GeneratedCBehaviorBuildPolicy

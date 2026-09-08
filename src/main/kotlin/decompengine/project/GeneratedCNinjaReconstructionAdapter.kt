@@ -3,6 +3,7 @@ package decompengine.project
 import java.nio.file.Path
 
 internal object GeneratedCNinjaReconstructionAdapter : ReconstructionAdapter by GeneratedCReconstructionAdapter {
+    override val diagnostics: ToolchainDiagnosticPolicy = GeneratedCToolchainDiagnostics("ninja", "Ninja")
     override val archiveBuild: ArchiveBuildPolicy = GeneratedCNinjaArchiveBuildPolicy
     override fun rendering(model: RecoveredProgramModel, plan: ModulePlan): ProjectRendering =
         GeneratedCNinjaProjectRendering(model, plan)

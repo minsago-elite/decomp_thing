@@ -7,6 +7,10 @@ import decompengine.acp.AcpAgentHarness
 import decompengine.acp.AcpPreflightWorkflow
 import decompengine.agent.AgentExecutionException
 import decompengine.analysis.BundledGhidra
+import decompengine.project.ReconstructionAdapters
+import decompengine.project.ReconstructionHostSafetyLimits
+import decompengine.project.ReconstructionProfile
+import decompengine.project.ReconstructionProfiles
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -18,7 +22,6 @@ import java.util.Locale
 import kotlin.io.path.createDirectories
 import kotlin.io.path.isDirectory
 import kotlin.io.path.pathString
-import kotlin.io.path.writeText
 
 data class DoctorOptions(
     val outputDir: Path,
@@ -61,20 +64,30 @@ class Doctor(
     private val commandProbe: CommandProbe = SystemCommandProbe,
     private val connectivityProbe: ConnectivityProbe = HttpConnectivityProbe(),
 ) {
-    fun inspect(options: DoctorOptions): DoctorReport {
+    fun inspect(options: DoctorOptions): DoctorReport = inspect(options, ReconstructionProfiles.default)
+
+    fun inspect(
+        options: DoctorOptions,
+        profile: ReconstructionProfile,
+        hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+    ): DoctorReport {
+        hostSafetyLimits.requireAllows(profile.budgets)
+        val diagnostics = ReconstructionAdapters.resolve(profile).diagnostics.prepare(profile)
         val checks = mutableListOf<DoctorCheck>()
         checks += executableCheck("Java", listOf("java", "-version"), "Install a Java 21 runtime and ensure java is on PATH.")
-        checks += executableCheck("GCC", listOf("gcc", "--version"), "Install GCC and ensure gcc is on PATH.")
-        checks += executableCheck("Make", listOf("make", "--version"), "Install Make and ensure make is on PATH.")
+        for (probe in diagnostics.versionProbes) {
+            checks += executableCheck(probe.name, probe.command, probe.remediation)
+        }
         checks += executableCheck("binutils/readelf", listOf("readelf", "--version"), "Install binutils and ensure readelf is on PATH.")
         checks += executableCheck("binutils/strings", listOf("strings", "--version"), "Install binutils and ensure strings is on PATH.")
         checks += executableCheck("Python", listOf("python3", "--version"), "Install Python 3 and ensure python3 is on PATH.")
         val angrPython = environment["ANGR_PYTHON"]?.takeIf(String::isNotBlank) ?: "python3"
         checks += executableCheck("angr", listOf(angrPython, "-c", "import angr"), "Install angr for the configured Python interpreter or set ANGR_PYTHON.")
         checks += ghidraCheck()
-        checks += sanitizerCheck()
+        checks += diagnostics.checkCapabilities(commandProbe)
         checks += bubblewrapCheck()
         checks += outputCheck(options.outputDir)
+        checks += DoctorCheck("reconstruction profile", true, "Selected ${profile.id}; sha256=${profile.sha256}")
         if (!options.toolsOnly) {
             val harnessSelection = runCatching {
                 AcpHarnessFactory.fromEnvironment(withHarnessOverride(options.harnessOverride))
@@ -191,32 +204,6 @@ class Doctor(
             },
             onFailure = { DoctorCheck("Ghidra", false, "Bundled Ghidra is unavailable; reinstall the complete application distribution. ${it.message}") },
         )
-    }
-
-    private fun sanitizerCheck(): DoctorCheck {
-        val directory = runCatching { Files.createTempDirectory("llm-bin-patch-doctor-") }.getOrElse {
-            return DoctorCheck("GCC sanitizers", false, "Could not create a temporary directory to test AddressSanitizer/UBSan: ${it.message}")
-        }
-        return try {
-            val source = directory.resolve("probe.c")
-            val binary = directory.resolve("probe")
-            source.writeText("int main(void) { return 0; }\n")
-            val compile = commandProbe.run(
-                listOf("gcc", "-std=c11", "-fsanitize=address,undefined", "-fno-omit-frame-pointer", source.pathString, "-o", binary.pathString),
-                directory,
-            )
-            if (compile.exitCode != 0) {
-                DoctorCheck("GCC sanitizers", false, "GCC could not link an AddressSanitizer/UBSan probe; install sanitizer runtime libraries. ${compile.output.firstLineOr("no compiler output")}")
-            } else {
-                val run = commandProbe.run(listOf(binary.pathString), directory)
-                if (run.exitCode == 0) DoctorCheck("GCC sanitizers", true, "AddressSanitizer and UBSan probe compiled and ran")
-                else DoctorCheck("GCC sanitizers", false, "The sanitizer probe exited ${run.exitCode}; verify sanitizer runtime libraries. ${run.output.firstLineOr("no output")}")
-            }
-        } catch (failure: Exception) {
-            DoctorCheck("GCC sanitizers", false, "Could not compile and run the sanitizer probe: ${failure.message}")
-        } finally {
-            directory.toFile().deleteRecursively()
-        }
     }
 
     private fun bubblewrapCheck(): DoctorCheck {
