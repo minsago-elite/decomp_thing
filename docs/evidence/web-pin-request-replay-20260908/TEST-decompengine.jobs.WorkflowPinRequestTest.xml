@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.jobs.WorkflowPinRequestTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-09-08T06:26:33.045Z" hostname="whatsername" time="1.056">
+  <properties/>
+  <testcase name="replay precedes CAS survives restart and returns original receipt with current attempt()" classname="decompengine.jobs.WorkflowPinRequestTest" time="0.004"/>
+  <testcase name="successful no-op is recorded once without changing run version and keys are actor scoped()" classname="decompengine.jobs.WorkflowPinRequestTest" time="0.001"/>
+  <testcase name="malformed or duplicate keyed receipts and unkeyed no-ops are rejected without rewriting()" classname="decompengine.jobs.WorkflowPinRequestTest" time="0.002"/>
+  <testcase name="request receipt and policy publish together across injected interruptions()" classname="decompengine.jobs.WorkflowPinRequestTest" time="0.005"/>
+  <testcase name="capacity preserves keyed receipts for full day and later eviction is explicit()" classname="decompengine.jobs.WorkflowPinRequestTest" time="1.038"/>
+  <testcase name="concurrent duplicate requests publish one receipt and another job has its own key scope()" classname="decompengine.jobs.WorkflowPinRequestTest" time="0.003"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

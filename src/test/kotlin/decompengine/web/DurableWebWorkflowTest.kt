@@ -455,6 +455,27 @@ class DurableWebWorkflowTest {
         }
     }
 
+    @Test fun `replayed pin receipt never rolls back the version used by a queued task`() = withRoot { root ->
+        val store = JobStore(root); val job = store.createFromUpload("replay-pin.elf", elfFixture())
+        val queued = mutableListOf<Runnable>(); var executions = 0
+        service(store, listOf(adapter { context ->
+            assertFalse(context.attempt.progressRetentionPinned); executions++; DurableWebWorkflowOutcome.Completed()
+        }), Executor(queued::add)).use { service ->
+            service.initializeExistingStorage()
+            val admission = assertIs<DurableWebWorkflowAdmission.Started>(service.startDurable(job.id, version(service, job.id), DurableWebWorkflowRequest(WorkflowKind.RECONSTRUCT)))
+            val before = service.getAttempt(job.id, admission.runId)
+            val actor = decompengine.jobs.WorkflowPinActor.browserSession("c".repeat(64))
+            val first = service.requestProgressRetentionPinned(job.id, admission.runId, before.version, true, actor, "queued_pin_request_01")
+            val unpinned = service.setProgressRetentionPinned(job.id, admission.runId, first.attempt.version, false)
+            val replay = service.requestProgressRetentionPinned(job.id, admission.runId, before.version, true, actor, "queued_pin_request_01")
+            assertTrue(replay.replayed); assertEquals(first.receipt, replay.receipt); assertEquals(unpinned, replay.attempt)
+            queued.single().run()
+            val done = service.getAttempt(job.id, admission.runId)
+            assertEquals(WorkflowRunState.COMPLETED, done.state); assertFalse(done.progressRetentionPinned)
+            assertEquals(1, executions)
+        }
+    }
+
     @Test fun `pinning running work preserves its immutable invocation context and final publication`() = withRoot { root ->
         val store = JobStore(root); val job = store.createFromUpload("running-pin.elf", elfFixture())
         val entered = CountDownLatch(1); val release = CountDownLatch(1)
