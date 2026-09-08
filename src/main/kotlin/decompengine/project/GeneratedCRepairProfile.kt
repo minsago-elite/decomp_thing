@@ -51,20 +51,11 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile by DescriptorGeneratedC
 }
 
 private class DescriptorGeneratedCRepairIndexProfile(private val profile: ReconstructionProfile) : RepairIndexProfile {
-    private val buildDefinition = profile.layout.declaration("build-definition").materialize()
+    private val sourcePolicy = GeneratedCRepairSourcePolicy(profile)
+    private val buildDefinition = sourcePolicy.buildDefinition
     private val sharedInterface = profile.layout.declaration("shared-interface").materialize()
     private val planRelative = profile.layout.declaration("module-plan-evidence").materialize()
     private val modelRelative = profile.layout.declaration("program-model-evidence").materialize()
-
-    init {
-        ReconstructionAdapters.resolve(profile)
-        require(Path.of(buildDefinition).nameCount == 1) {
-            "generated-C repair indexing currently requires a root-level build definition"
-        }
-        require(profile.layout.declarations.filter { ProjectFileRole.BUILD_INPUT in it.roles }.all {
-            it.pathTemplate == buildDefinition || it.pathTemplate.startsWith("src/") || it.pathTemplate.startsWith("include/")
-        }) { "generated-C repair build inputs must use the supported source roots" }
-    }
 
     override fun profileId(): String = profile.id
     private val configurationIdentity = sha256(
@@ -72,32 +63,16 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
     )
     override fun configurationSha256(): String = configurationIdentity
 
-    private fun isEditable(path: String): Boolean {
-        val declarations = profile.layout.declarations.filter { it.matches(path) }
-        require(declarations.size <= 1) { "repair path has ambiguous profile declarations: $path" }
-        val declaration = declarations.singleOrNull() ?: return false
-        return ProjectFileRole.BUILD_INPUT in declaration.roles &&
-            ProjectFileRole.EDITABLE in declaration.roles && declaration.contentKind == ProjectContentKind.UTF8_TEXT
-    }
-
     override fun authorizesRecoveryLayout(
         sourcePaths: List<String>,
         editablePaths: List<String>,
         budget: RepairResourceBudget,
-    ): Boolean {
-        if (sourcePaths.isEmpty() || sourcePaths.size > budget.maximumSourceFiles) return false
-        if (sourcePaths != sourcePaths.distinct().sorted() || editablePaths != editablePaths.distinct().sorted()) return false
-        if (sourcePaths.any { path ->
-                path != buildDefinition && !path.startsWith("src/") && !path.startsWith("include/") ||
-                    path.split('/').any { it.endsWith(".repair") }
-            }) return false
-        return editablePaths == sourcePaths.filter { isEditable(it) }
-    }
+    ): Boolean = sourcePolicy.authorizesRecoveryLayout(sourcePaths, editablePaths, budget)
 
     override fun resolve(projectRoot: Path, budget: RepairResourceBudget): RepairIndexLayout {
         val sourcePaths = discoverSourcePaths(projectRoot, budget)
         val editable = sourcePaths.filterTo(TreeSet()) {
-            isEditable(it)
+            sourcePolicy.isEditable(it)
         }
         require(editable.isNotEmpty()) { "generated C project has no editable source inputs" }
         val evidence = readIndexEvidence(projectRoot, sourcePaths.toSet(), budget)

@@ -45,12 +45,13 @@ internal class GeneratedCValidationSnapshot private constructor(
     val sourceFiles: List<JsonObject> get() = Collections.unmodifiableList(sourceManifest)
 
     fun populate(request: RepairCandidateValidationRequest) {
-        require(request.profileId == GeneratedCRepairIndexProfile.profileId())
+        GeneratedCValidationProfile.requireIdentity(request.profileId, request.profileSha256, request.budget)
+        val sourcePolicy = GeneratedCValidationProfile.sources
         val paths = ArrayList<String>()
         val revision = MessageDigest.getInstance("SHA-256")
         request.forEachCandidateSource { relative, bytes ->
             check()
-            require(relative == "Makefile" || relative.startsWith("src/") || relative.startsWith("include/")) {
+            require(sourcePolicy.admitsSourcePath(relative)) {
                 "candidate input is outside the registered generated-C source layout"
             }
             require(Path.of(relative).nameCount <= budget.maximumDiscoveryDepth)
@@ -66,13 +67,11 @@ internal class GeneratedCValidationSnapshot private constructor(
             revision.update("${relative.length}:$relative:${bytes.size}:${sha256(bytes)}\n".toByteArray(Charsets.UTF_8))
             writeSource(relative, bytes, executable = false)
             sourceManifest += JsonObject(mapOf(
-                "path" to JsonPrimitive(relative), "role" to JsonPrimitive(if (relative == "Makefile") "build-file" else "source"),
+                "path" to JsonPrimitive(relative), "role" to JsonPrimitive(if (relative == sourcePolicy.buildDefinition) "build-file" else "source"),
                 "mode" to JsonPrimitive(0x124), "bytes" to JsonPrimitive(bytes.size), "sha256" to JsonPrimitive(sha256(bytes)),
             ))
         }
-        require("Makefile" in paths && GeneratedCRepairIndexProfile.authorizesRecoveryLayout(
-            paths, paths.filter { it == "Makefile" || it.endsWith(".c") || it.endsWith(".h") }, budget,
-        )) { "candidate source layout is not authorized by the generated-C profile" }
+        GeneratedCValidationProfile.requireSourceLayout(paths, budget)
         require(revision.digest().joinToString("") { "%02x".format(it) } == request.sourceRevisionSha256) {
             "candidate revision changed during snapshot population"
         }
