@@ -232,6 +232,29 @@ No checked production report should be published until its recovered model and
 adapter replay receipt exist. An oracle derived from a rich binary is not a
 substitute for independently recovered evidence.
 
+## Current #40 coverage record
+
+This is the review status for the bounded #40 evidence slice on 2026-09-08;
+it does not close the tracker.
+
+| Area | Exact current coverage | State |
+| --- | --- | --- |
+| Generic structural contract | The four structural schemas, target/ABI descriptor, stable #39 boundary mapping, 20 closed dimensions, six outcome states, visible unknown/unobservable denominators, deterministic metrics, and bounded validation are implemented. | `contract-complete` |
+| Fixture scoring | The Python scorer and Kotlin `StructuralRecoveryV1` fixture path validate the generic contract and preserve fixture-only verification. The focused Kotlin structural suite contains 52 tests, with 0 failures and 0 skips at this checkpoint. | `fixture-validated` |
+| Replay receipt contract | Kotlin identity/model receipts bind exporter, loader/target, image base, input binary, output tree, execution, model, structural observation, and identity-map commitments with fail-closed mutation checks. | `replay-contract-complete` |
+| Authenticated production adapter | `StructuralReplayAdapterRegistry.production` is intentionally empty, and the fixture scorer rejects production-scoped reports. No production exporter/loader execution or host-owned output snapshot has been admitted. | `unavailable` |
+| GCC interfaces, calls, globals, and types | `oracle/gcc/16.2.0` contains the checked GCC function-boundary artifacts, but no checked production structural oracle, recovered structural model, identity-map replay, or structural score for these dimensions. | `unresolved` |
+| Byte-identical GCC structural regeneration | There is no production oracle/score pair available to regenerate or compare. | `unavailable` |
+
+The one actionable acceptance boundary for the next slice is #679: admit one
+authenticated stripped-GCC production replay input set through a host-owned
+adapter, retaining exporter, loader/target, image-base, input-binary, sandbox,
+output-tree, model, structural-observation, and identity-map evidence. The
+adapter must reject a caller-supplied JSON model that only repeats the expected
+binary hash. Until that boundary is met, all interface, call, global, and type
+measurements remain unresolved production evidence and the #40 tracker stays
+open.
+
 ## Determinism and resource limits
 
 Each input is a bounded regular-file snapshot, and scoring additionally enforces
