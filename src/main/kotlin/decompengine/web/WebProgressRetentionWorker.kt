@@ -13,8 +13,7 @@ internal class WebProgressRetentionWorker(intervalMs: Long, step: () -> Unit, st
     }) {
         override fun terminated() {
             // All work callbacks have left; remaining executor teardown cannot access storage.
-            finished = true
-            stopped()
+            try { stopped() } finally { finished = true }
         }
     }.apply { removeOnCancelPolicy = true }
     private val work = Runnable(step)
