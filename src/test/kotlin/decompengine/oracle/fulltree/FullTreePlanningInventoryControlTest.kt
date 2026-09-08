@@ -92,6 +92,54 @@ class FullTreePlanningInventoryControlTest {
         }
 
     @Test
+    fun `clang extractapi dispatch binds all six exact planning owners without an emitted denominator`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+
+        val modules = registry.requireOwnerModulesForShard("clang-lib-extractapi")
+        assertEquals(6, modules.size)
+        assertEquals(
+            listOf(
+                "source/clang/lib/ExtractAPI/API.cpp",
+                "source/clang/lib/ExtractAPI/APIIgnoresList.cpp",
+                "source/clang/lib/ExtractAPI/DeclarationFragments.cpp",
+                "source/clang/lib/ExtractAPI/ExtractAPIConsumer.cpp",
+                "source/clang/lib/ExtractAPI/Serialization/SymbolGraphSerializer.cpp",
+                "source/clang/lib/ExtractAPI/TypedefUnderlyingTypeResolver.cpp",
+            ),
+            modules.map { it.sourcePath },
+        )
+        assertEquals(
+            listOf(
+                "cu-d6c656c2b4dfd48b9f35c634322f6b7e",
+                "cu-0718b8055fb7b3600126d47a0a28b25c",
+                "cu-2625295803cf9e661bf0a36e7fc1a072",
+                "cu-9a1582e1eb470744d47ecc408fa9a7af",
+                "cu-0cca1fa31aa940b6294ad5ff2b2d05d8",
+                "cu-432f7b7c1a227aefe5cb9bc6a489bae8",
+            ),
+            modules.map { it.unitId },
+        )
+        assertTrue(modules.all { it.sourceKind == "handwritten" })
+        assertTrue(modules.all { it.moduleId == it.unitId && it.shardId == "clang-lib-extractapi" })
+        modules.forEach { module ->
+            assertEquals(module, registry.requireOwnerModule(module.unitId))
+        }
+        assertEquals(0, registry.sourceOnlyUnits.count { it.shardId == "clang-lib-extractapi" })
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("clang-lib-extractapi-missing")
+        }
+    }
+
+    @Test
     fun `shuffled stale forged and expanded planning documents fail closed`() =
         inControlTemporaryDirectory { directory ->
             val fixture = createFullTreeControlFixture(directory.resolve("fixture"))
