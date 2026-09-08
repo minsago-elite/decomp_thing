@@ -1034,14 +1034,16 @@ internal object KotlinSystemdCgroupCommandLauncher {
     ): KotlinSystemdCgroupCommandExecution {
         val cleanup = ContainedCommandCleanup()
         val secret = ByteArray(32).also(SECURE_RANDOM::nextBytes)
+        var priorControls: ContainedCommandPriorControls? = null
         try {
             require(unitName.matches(PRODUCTION_KOTLIN_BOOT_UNIT_NAME) && nonce.matches(SHA256))
             require(deploymentClosureSha256.matches(SHA256))
             require(controlDirectoryName == null || validContainedControlName(controlDirectoryName)) {
                 "contained command control directory must have a canonical execution name"
             }
-            val priorControls = ContainedCommandPriorControls(controlDirectoryName, readOnlyControlDirectories)
-            borrowed.withPinnedDescriptor(priorControls::verify)
+            val selectedPriorControls = ContainedCommandPriorControls(controlDirectoryName, readOnlyControlDirectories)
+            priorControls = selectedPriorControls
+            borrowed.withPinnedDescriptor(selectedPriorControls::verify)
             val writableRoot = borrowed.path
             val controlPath = controlDirectoryName?.let(writableRoot::resolve) ?: writableRoot
             require(expectedControlGroup.startsWith('/') && expectedControlGroup.substringAfterLast('/') == unitName)
@@ -1083,7 +1085,7 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 }
             }
             fun verifyInputs(label: String) {
-                borrowed.withPinnedDescriptor(priorControls::verify)
+                borrowed.withPinnedDescriptor(checkNotNull(priorControls)::verify)
                 runtime.verify(label)
                 additionalMounts.forEach { mount ->
                     require(calculateFullTreeObservationRuntimeManifestSha256(mount.source) == mount.expectedManifestSha256) {
@@ -1221,7 +1223,7 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 unit.killFrozenKeeperAndProveRemoved(effectiveResources, live)
                 unit.stopAndProveRemoved()
                 cleanup.closeAndProveAbsent()
-                borrowed.withPinnedDescriptor(priorControls::verify)
+                borrowed.withPinnedDescriptor(checkNotNull(priorControls)::verify)
                 val controlIdentity = if (controlDirectoryName == null) null else runTree.withPinnedDescriptor { LinuxFilesystemSyscalls.identity(it.fd) }
                 val result = JsonObject(mapOf(
                     "schemaVersion" to JsonPrimitive(1),
@@ -1253,6 +1255,8 @@ internal object KotlinSystemdCgroupCommandLauncher {
             }
         } catch (failure: Throwable) {
             runCatching { cleanup.closeAndProveAbsent() }.exceptionOrNull()?.takeIf { it !== failure }?.let(failure::addSuppressed)
+            priorControls?.let { controls -> runCatching { borrowed.withPinnedDescriptor(controls::verify) } }
+                ?.exceptionOrNull()?.takeIf { it !== failure }?.let(failure::addSuppressed)
             throw KotlinSystemdCgroupCommandExecutionException(failure, cleanup)
         } finally {
             secret.fill(0)
