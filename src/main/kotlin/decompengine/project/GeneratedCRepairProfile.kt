@@ -650,7 +650,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
                         }
                         entry.identity.isRegularFile -> {
                             if (!excludedAncestor && !relative.endsWith(".repair")) {
-                                if (paths.size >= budget.maximumSourceFiles) {
+                                if (relative !in paths && paths.size >= budget.maximumSourceFiles) {
                                     throw RepairBudgetExceededException(
                                         "generated C project has more than ${budget.maximumSourceFiles} source files",
                                     )
@@ -664,16 +664,38 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
             }
         }
 
+        val buildComponents = buildDefinition.split('/')
+        require(buildComponents.size <= budget.maximumDiscoveryDepth) {
+            "generated C build definition exceeds discovery depth ${budget.maximumDiscoveryDepth}"
+        }
+        fun discoverBuildDefinition(directory: LinuxDescriptor, component: Int, rootMount: Long) {
+            val name = buildComponents[component]
+            val relative = buildComponents.take(component + 1).joinToString("/")
+            val entry = LinuxFilesystemSyscalls.openPathAtOrNull(directory.fd, name) ?: return
+            entry.use {
+                countEntry(relative)
+                require(!entry.identity.isSymbolicLink && entry.identity.mountId == rootMount) {
+                    "generated C build definition rejects links or mounted entries: $relative"
+                }
+                if (component == buildComponents.lastIndex) {
+                    require(entry.identity.isRegularFile) { "generated C build definition is not a regular file" }
+                    paths += buildDefinition
+                } else {
+                    require(entry.identity.isDirectory) { "generated C build definition parent is not a directory: $relative" }
+                    countDirectory(relative, component + 1)
+                    LinuxFilesystemSyscalls.openDirectoryAt(directory.fd, name).use { child ->
+                        require(child.identity.key == entry.identity.key && child.identity.mountId == rootMount) {
+                            "generated C build definition parent changed identity: $relative"
+                        }
+                        discoverBuildDefinition(child, component + 1, rootMount)
+                    }
+                }
+            }
+        }
+
         openRepairRootDirectory(root).use { rootDescriptor ->
             val rootMount = rootDescriptor.identity.mountId
-            LinuxFilesystemSyscalls.openPathAtOrNull(rootDescriptor.fd, buildDefinition)?.use { makefile ->
-                countEntry(buildDefinition)
-                require(makefile.identity.isRegularFile && !makefile.identity.isSymbolicLink &&
-                    makefile.identity.mountId == rootMount) {
-                    "generated C build definition is not a regular contained file"
-                }
-                paths += buildDefinition
-            }
+            discoverBuildDefinition(rootDescriptor, 0, rootMount)
             listOf("include", "src").forEach { directoryName ->
                 val authorized = LinuxFilesystemSyscalls.openPathAtOrNull(rootDescriptor.fd, directoryName)
                     ?: return@forEach
