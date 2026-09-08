@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if (($# != 0)); then
-  echo "usage: scripts/ci-prepare-bundled-ghidra-runtime.sh" >&2
+if (($# > 1)) || [[ $# == 1 && "$1" != --application ]]; then
+  echo "usage: scripts/ci-prepare-bundled-ghidra-runtime.sh [--application]" >&2
   exit 64
 fi
 
@@ -20,16 +20,19 @@ if [[ ! -f "$GITHUB_ENV" || -L "$GITHUB_ENV" || ! -w "$GITHUB_ENV" ]]; then
 fi
 
 project_root="$(cd "$(dirname "$0")/.." && pwd -P)"
-target="/var/lib/decomp-ci-ghidra-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+deployment_kind=ghidra
+if [[ "${1:-}" == --application ]]; then deployment_kind=application; fi
+target="/var/lib/decomp-ci-${deployment_kind}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 "$project_root/gradlew" --no-daemon -p "$project_root" installDist
 source_bundle="$project_root/build/install/llm_bin_patch/libexec/ghidra"
+if [[ "$deployment_kind" == application ]]; then source_bundle="$project_root/build/install/llm_bin_patch"; fi
 
-sudo -n /usr/bin/python3 - "$source_bundle" "$target" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" <<'PY'
+sudo -n /usr/bin/python3 - "$source_bundle" "$target" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$deployment_kind" <<'PY'
 import os
 import stat
 import sys
 
-source, target, run_id, attempt = sys.argv[1:]
+source, target, run_id, attempt, deployment_kind = sys.argv[1:]
 directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 maximum_entries = 20_000
@@ -135,7 +138,8 @@ def copy_directory(source_descriptor, destination_descriptor, relative=""):
     require_trusted_directory(destination_descriptor)
 
 require(os.geteuid() == 0, "explicit CI provisioning requires root")
-require(target == f"/var/lib/decomp-ci-ghidra-{run_id}-{attempt}", "runtime provisioning target differs")
+require(deployment_kind in ("ghidra", "application"), "unsupported deployment kind")
+require(target == f"/var/lib/decomp-ci-{deployment_kind}-{run_id}-{attempt}", "runtime provisioning target differs")
 require(os.path.isabs(source) and os.path.realpath(source) == source, "installed source bundle is not canonical")
 filesystem_root = os.open("/", directory_flags)
 try:
@@ -192,5 +196,9 @@ finally:
     os.close(filesystem_root)
 PY
 
-printf 'DECOMP_TEST_BUNDLED_GHIDRA_ROOT=%s/bundle\n' "$target" >>"$GITHUB_ENV"
-printf 'DECOMP_REQUIRE_BUNDLED_GHIDRA_RUNTIME=true\n' >>"$GITHUB_ENV"
+if [[ "$deployment_kind" == application ]]; then
+  printf 'DECOMP_GCC_CLI_INSTALLATION=%s/bundle\n' "$target" >>"$GITHUB_ENV"
+else
+  printf 'DECOMP_TEST_BUNDLED_GHIDRA_ROOT=%s/bundle\n' "$target" >>"$GITHUB_ENV"
+  printf 'DECOMP_REQUIRE_BUNDLED_GHIDRA_RUNTIME=true\n' >>"$GITHUB_ENV"
+fi

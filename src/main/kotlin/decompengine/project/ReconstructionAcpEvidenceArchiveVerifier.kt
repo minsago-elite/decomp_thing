@@ -106,6 +106,17 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         val executionDeclaration = profile.layout.declarations
             .singleOrNull { it.id == "module-agent-execution-evidence" }
         val manifestByPath = manifest.files.associateBy(GeneratedFileEvidence::path)
+        val modelPath = profile.layout.declaration("program-model-evidence").materialize()
+        val modelBytes = readBoundedRegularFile(
+            projectDir, modelPath,
+            minOf(profile.budgets.archiveMaximumFileBytes, Int.MAX_VALUE.toLong() - 1L).toInt(),
+        )
+        requirePayloadIdentity(modelPath, modelBytes, payloadSha256, payloadSizes)
+        require(sha256(modelBytes) == manifestByPath.getValue(modelPath).sha256) {
+            "program model differs from its source manifest"
+        }
+        val model = ProgramModelJson.read(modelBytes.decodeToString(throwOnInvalidSequence = true))
+        require(model.inputSha256 == manifest.inputSha256) { "program model input differs from its source manifest" }
         val expectedExecutionPaths = linkedSetOf<String>()
         val acceptedContributions = mutableListOf<VerifiedCandidateAcpContribution>()
 
@@ -127,7 +138,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 require(sha256(checkpointBytes) == checkpointManifest.sha256) {
                     "agent evidence checkpoint differs from its source manifest: $checkpointPath"
                 }
-                val checkpoint = parseCheckpoint(checkpointBytes, moduleId, source, repairedSource, profile)
+                val checkpoint = parseCheckpoint(checkpointBytes, moduleId, source, repairedSource, profile, model.inputSha256, model.schemaVersion)
                 val receiptSource = repairedSource?.let { lineage ->
                     GeneratedFileEvidence(
                         path = source.path,
@@ -157,7 +168,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 require(source.entityIds.none(manifest.unresolvedImplementationIds::contains)) {
                     "agent-generated module is unresolved at the archive release gate: $moduleId"
                 }
-                require(checkpoint.schemaVersion in setOf(4L, 5L) &&
+                require(checkpoint.schemaVersion in setOf(4L, 5L, 6L) &&
                     checkpoint.executionEvidenceSchemaVersion == 2L &&
                     checkpoint.executionReleaseComplete == true &&
                     checkpoint.executionTerminalOutcome == "returned-completed"
@@ -286,16 +297,29 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         source: GeneratedFileEvidence,
         repairedSource: ArchivedRepairSourceLineage?,
         profile: ReconstructionProfile,
+        inputBinarySha256: String,
+        modelSchemaVersion: Int,
     ): ReconstructionCheckpoint {
         val root = strictObject(bytes, CHECKPOINT_JSON_LIMITS, "module checkpoint")
         val schemaVersion = root.requiredLong("schemaVersion", "module checkpoint")
-        require(schemaVersion in setOf(4L, 5L)) {
+        require(schemaVersion in setOf(4L, 5L, 6L)) {
             "unsupported module checkpoint schema for ACP archive evidence: $moduleId"
         }
         root.requireExactKeys(
-            if (schemaVersion == 5L) CHECKPOINT_V5_FIELDS else CHECKPOINT_V4_FIELDS,
+            when (schemaVersion) {
+                6L -> CHECKPOINT_V6_FIELDS
+                5L -> CHECKPOINT_V5_FIELDS
+                else -> CHECKPOINT_V4_FIELDS
+            },
             "module checkpoint",
         )
+        if (schemaVersion >= 6L) {
+            require(root.requiredString("inputBinarySha256", "module checkpoint") == inputBinarySha256 &&
+                root.requiredLong("modelSchemaVersion", "module checkpoint") == modelSchemaVersion.toLong() &&
+                root.requiredSha256("profileSha256", "module checkpoint") == profile.sha256) {
+                "module checkpoint input identity differs from the archived model or profile: $moduleId"
+            }
+        }
         root.requiredSha256("fingerprint", "module checkpoint")
         val sourceSha256 = root.requiredSha256("sourceSha256", "module checkpoint")
         val generator = root.requiredString("generator", "module checkpoint")
@@ -330,7 +354,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         }
         val accepted = root.requiredBoolean("accepted", "module checkpoint")
         root.requiredBoolean("retryable", "module checkpoint")
-        if (schemaVersion == 5L) {
+        if (schemaVersion >= 5L) {
             val compilationElement = root.getValue("compilation")
             val compilation = compilationElement.takeUnless { it is JsonNull }
                 ?.requiredObject("module compilation")
@@ -342,7 +366,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 }
                 val command = value.requiredArray("command", "module compilation")
                     .map { it.requiredString("module compiler argument") }
-                require(command == GeneratedCModuleValidation.command(profile, source.path)) {
+                require(command == ReconstructionCompilationPolicies.resolve(profile).command(profile, source.path)) {
                     "module compiler command differs from its reconstruction profile: $moduleId"
                 }
                 val outcome = value.requiredString("outcome", "module compilation")
@@ -1487,6 +1511,9 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         "executionReleaseComplete",
     )
     private val CHECKPOINT_V5_FIELDS = CHECKPOINT_V4_FIELDS + "compilation"
+    private val CHECKPOINT_V6_FIELDS = CHECKPOINT_V5_FIELDS + setOf(
+        "inputBinarySha256", "modelSchemaVersion", "profileSha256",
+    )
     private val COMPILATION_FIELDS = setOf(
         "sourceSha256", "command", "outcome", "returnCode", "diagnosticsSha256", "diagnosticsBytes",
     )
