@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "issue": 724,
+  "recordedAtUtc": "2026-09-08",
+  "scope": "Checked repository facts for the GCC 16.2.0 cc1/lto1 engine twins; this record does not claim production archive qualification.",
+  "provenance": {
+    "sourceCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+    "profile": {
+      "path": "oracle/gcc/16.2.0/compiler-engines.json",
+      "sha256": "e0ca60b7e856e9330e45fd58e61828313e8dd824413ee0df7ef76ee5d2b47bdc"
+    },
+    "sourceLock": {
+      "path": "oracle/gcc/16.2.0/source-lock.json",
+      "sha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc"
+    },
+    "toolchainReproduction": {
+      "path": "oracle/gcc/16.2.0/toolchain-reproduction.json",
+      "sha256": "5c2c159d7287305159a220a1260f6ff6bffe9ec78bb1cbe2fb24f85b68a7d4de"
+    }
+  },
+  "engines": [
+    {
+      "id": "cc1",
+      "buildRecord": {
+        "path": "oracle/gcc/16.2.0/cc1-build-record.json",
+        "sha256": "f6b2711d4f82562195acebe7250d7dc62eb9425af4f736736e0ea69b65103e8e"
+      },
+      "oracleManifest": {
+        "path": "oracle/gcc/16.2.0/cc1-oracle-manifest.json",
+        "sha256": "dbef520c025d268f5126229ace8ad5b08a15722573d45b5e1ab934611905abb4"
+      },
+      "artifacts": {
+        "full": {
+          "path": "oracle/gcc/16.2.0/artifacts/gcc-cc1.full",
+          "bytes": 374477144,
+          "sha256": "ba9b2f314bfb3d92a172e67f8ce993a2e98b9bc14aabf00ff6d58e4631037621"
+        },
+        "stripped": {
+          "path": "oracle/gcc/16.2.0/artifacts/gcc-cc1.stripped",
+          "bytes": 41935768,
+          "sha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+        }
+      },
+      "declaredReconstructionArchive": {
+        "path": "oracle/gcc/16.2.0/cc1-reconstruction.zip",
+        "status": "unresolved"
+      }
+    },
+    {
+      "id": "lto1",
+      "buildRecord": {
+        "path": "oracle/gcc/16.2.0/lto1-build-record.json",
+        "sha256": "581a983e307a0a02895f1e878659c7f7934045a7141ebe3821837145aa97c5a5"
+      },
+      "oracleManifest": {
+        "path": "oracle/gcc/16.2.0/lto1-oracle-manifest.json",
+        "sha256": "5f7e686168d6a6e35ef3719d077b0bfb246085c2d3738835be13eeed5e0d0a41"
+      },
+      "artifacts": {
+        "full": {
+          "path": "oracle/gcc/16.2.0/artifacts/gcc-lto1.full",
+          "bytes": 362827816,
+          "sha256": "255246e259b194e40fb3f053eafad5a9fdada983404bdae90fc1b9fddfa585e1"
+        },
+        "stripped": {
+          "path": "oracle/gcc/16.2.0/artifacts/gcc-lto1.stripped",
+          "bytes": 40497008,
+          "sha256": "35d73b94b8e33cd482095016de28ebaa4e71835720e39b7c5aa82206b562361f"
+        }
+      },
+      "declaredReconstructionArchive": {
+        "path": "oracle/gcc/16.2.0/lto1-reconstruction.zip",
+        "status": "unresolved"
+      }
+    }
+  ],
+  "contract": {
+    "declaredInputs": "The checked profile keeps cc1 and lto1 separate, derives each build record from the authenticated source/toolchain provenance, and binds each engine manifest to its own build record and artifact hashes.",
+    "productionGates": [
+      {
+        "gate": "Independent extraction, configure, compile, and link of each reconstructed source archive",
+        "status": "unavailable",
+        "gap": "The repository contains the retained engine twins and their manifests, but neither declared reconstruction archive is present."
+      },
+      {
+        "gate": "Repeated accepted-input reproduction of complete archive bytes",
+        "status": "unavailable",
+        "gap": "No reconstructed archive bytes or repeat-build receipt is retained for cc1 or lto1."
+      },
+      {
+        "gate": "Production qualification and release eligibility",
+        "status": "unavailable",
+        "gap": "Issues #724, #1052, and #1053 remain open; this record does not claim source generation, bundled-Ghidra execution, authenticated oracle completion, or release eligibility."
+      }
+    ],
+    "boundaries": {
+      "ghidra": "No external GHIDRA_HOME or analyzeHeadless path is introduced; the existing bundled Ghidra boundary remains required for any future production run.",
+      "oracle": "This is a provenance record over checked facts, not a new oracle authority.",
+      "unresolved": "Missing reconstruction archives and all dependent production gates remain explicitly unresolved."
+    }
+  }
+}
