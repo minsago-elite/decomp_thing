@@ -1,0 +1,80 @@
+package decompengine.project
+
+import java.nio.file.Files
+import java.util.concurrent.TimeUnit
+import kotlin.io.path.createTempDirectory
+import kotlin.io.path.exists
+import kotlin.io.path.readBytes
+import kotlin.io.path.readText
+import kotlin.io.path.writeText
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+import kotlin.test.assertFailsWith
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
+
+class GeneratedCNinjaIntegrationTest {
+    private fun model() = RecoveredProgramModel(
+        inputSha256 = "a".repeat(64),
+        functions = listOf(
+            RecoveredFunction("fn_1000", "parse_leaf", 0x1000UL, "int parse_leaf(void)",
+                "int parse_leaf(void) { return 3; }"),
+            RecoveredFunction("fn_2000", "decomp_engine_main", 0x2000UL, "int decomp_engine_main(void)",
+                "int decomp_engine_main(void) { return parse_leaf(); }", calls = setOf("fn_1000")),
+        ),
+    )
+
+    @Test
+    fun `Ninja profile generates validates archives extracts and rebuilds accepted modules without Make`() {
+        val temp = createTempDirectory("ninja-reconstruction-")
+        val profile = GeneratedCNinjaReconstructionProfile.descriptor
+        val analyzer = ProgramModelAnalyzer { _, _ -> model() }
+        val result = ArchivalReconstructionService(analyzer, RecoveredCModuleReconstructor(), profile)
+            .reconstruct(temp.resolve("authored-model-input"), temp.resolve("result"))
+        assertEquals("ninja", result.build.command.first())
+        assertFalse(result.projectDir.resolve("Makefile").exists())
+        assertTrue(result.projectDir.resolve("build.ninja").exists())
+        val audit = ArchivalProjectAuditor.audit(result.projectDir, profile)
+        assertTrue(audit.moduleCompilationEvidenceProblems.isEmpty())
+        assertEquals(2, audit.moduleCompilationEvidence.size)
+        assertTrue(audit.unresolvedEntityIds.isEmpty())
+        val contract = Json.parseToJsonElement(result.projectDir.resolve("reports/build_contract.json").readText()).jsonObject
+        val dependencies = contract.getValue("declaredDependencies").jsonArray.map { it.jsonPrimitive.content }
+        assertTrue("Ninja" in dependencies)
+        assertFalse(dependencies.any { "Make" in it })
+        assertTrue(result.projectDir.resolve("BUILDING.md").readText().contains("ninja -f build.ninja -j 4"))
+        val process = ProcessBuilder(result.projectDir.resolve("build/reconstructed").toString()).start()
+        try {
+            assertTrue(process.waitFor(5, TimeUnit.SECONDS))
+            assertEquals(3, process.exitValue())
+        } finally {
+            if (process.isAlive) process.destroyForcibly()
+        }
+        val extracted = temp.resolve("extracted")
+        ArchivalBundleVerifier.extractAndVerifySnapshot(result.bundle.archivePath.readBytes(), extracted,
+            ArchivalBundleLimits(), profile, 2048)
+        assertFalse(extracted.resolve("Makefile").exists())
+        assertFalse(extracted.resolve("build/reconstructed").exists())
+        val rebuilt = ReconstructionAdapters.resolve(profile).build(extracted, profile)
+        assertEquals(result.build.command, rebuilt.command)
+        assertEquals(0, rebuilt.returnCode)
+        assertEquals(sha256(result.projectDir.resolve("build/reconstructed").readBytes()),
+            sha256(extracted.resolve("build/reconstructed").readBytes()))
+        assertEquals(audit.toJson(), ArchivalProjectAuditor.audit(extracted, profile).toJson())
+        assertEquals(contract, Json.parseToJsonElement(extracted.resolve("reports/build_contract.json").readText()).jsonObject)
+    }
+
+    @Test
+    fun `Ninja build rejects an unowned source before accepting an artifact`() {
+        val profile = GeneratedCNinjaReconstructionProfile.descriptor
+        val project = createTempDirectory("ninja-unowned-source-")
+        SourceTreeGenerator.generate(model(), project, reconstructor = RecoveredCModuleReconstructor(), profile = profile)
+        project.resolve("src/unowned.c").writeText("int unrelated(void) { return 9; }\n")
+        assertFailsWith<BuildException> { ReconstructionAdapters.resolve(profile).build(project, profile) }
+        assertFalse(Files.exists(project.resolve("build/reconstructed")))
+    }
+}

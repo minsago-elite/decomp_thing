@@ -138,7 +138,7 @@ orchestration. Explicit caller reconstructors are retained. The public
 `EvidenceModuleReconstructor` and `RecoveredCModuleReconstructor` compatibility
 names now reside with the generated-C implementation. Full-project build/archive
 routing and language-specific prompt/request assumptions remain to be migrated;
-only the generated-C/Make adapter is registered today.
+generated-C/Make and generated-C/Ninja adapters are registered.
 
 Archival reconstruction resolves its adapter before analysis or output creation
 and delegates the full-project build to that adapter. The generated-C adapter
@@ -174,4 +174,5 @@ use the same profile-selected input policy, including that build definition.
 Default-layout commands and source-hash encoding remain unchanged. The service
 fixture also relocates the build definition to `config/rebuild.mk`, verifies its
 retained source-input digest and completes strict extraction and rebuilding.
-This remains a Make build; alternate build systems are still unimplemented.
+That relocation fixture remains a Make build. The separate generated-C/Ninja
+profile provides a non-Make build path; see [its qualification](generated-c-ninja.md).

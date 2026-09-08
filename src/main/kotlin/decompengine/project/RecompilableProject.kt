@@ -229,7 +229,7 @@ internal fun generatedCUnplannedModuleId(path: String): String =
             path.toByteArray(Charsets.UTF_8).joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
     }
 
-object MakeProjectBuilder {
+internal object GeneratedCProjectBuilder {
     private data class BuildOwner(
         val id: String,
         val sourcePath: String,
@@ -241,6 +241,7 @@ object MakeProjectBuilder {
         projectDir: Path,
         configuration: ProjectBuildConfiguration = ProjectBuildConfiguration(),
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+        invocation: GeneratedCBuildInvocation = GeneratedCBuildInvocation.make(configuration),
     ): BuildReport {
         require(configuration.buildDefinition == profile.layout.declaration("build-definition").materialize()) {
             "build definition differs from the selected profile"
@@ -258,8 +259,8 @@ object MakeProjectBuilder {
         val reportsDir = projectRoot.resolve("reports").createDirectories()
         val diagnosticsDir = reportsDir.resolve("build/modules").createDirectories()
         val owners = discoverOwners(projectRoot)
-        val command = configuration.command()
-        writeBuildInstructions(projectRoot, configuration)
+        val command = invocation.command
+        writeBuildInstructions(projectRoot, invocation)
         val sourceRevisionBeforeBuild = captureBuildSourceRevision(projectRoot, profile)
         val processBuilder = ProcessBuilder(command)
             .directory(projectRoot.toFile())
@@ -318,6 +319,7 @@ object MakeProjectBuilder {
             reportsDir.resolve("build_contract.json"),
             renderBuildContract(
                 configuration,
+                invocation,
                 command,
                 owners,
                 failedOwners,
@@ -507,6 +509,7 @@ object MakeProjectBuilder {
 
     private fun renderBuildContract(
         configuration: ProjectBuildConfiguration,
+        invocation: GeneratedCBuildInvocation,
         command: List<String>,
         owners: List<BuildOwner>,
         failedOwners: List<String>,
@@ -523,9 +526,9 @@ object MakeProjectBuilder {
         append("\n  \"maximumOutputBytes\": ").append(configuration.maximumOutputBytes).append(',')
         append("\n  \"warningsAsErrors\": true,")
         append("\n  \"reproduciblePathMapping\": true,")
-        append("\n  \"declaredDependencies\": [\"GNU Make\",\"C compiler (")
-            .append(configuration.compilerExecutable.escapeJson())
-            .append(")\",\"POSIX shell\",\"POSIX find\",\"POSIX mkdir\",\"POSIX rm\"],")
+        append("\n  \"declaredDependencies\": [")
+        append(invocation.dependencies.joinToString(",") { kotlinx.serialization.json.JsonPrimitive(it).toString() })
+        append("],")
         append("\n  \"apiCredentialsRequired\": false,")
         append("\n  \"analysisCachesRequired\": false,")
         append("\n  \"returnCode\": ").append(returnCode).append(',')
@@ -548,8 +551,8 @@ object MakeProjectBuilder {
         append("]\n}\n")
     }
 
-    private fun writeBuildInstructions(projectDir: Path, configuration: ProjectBuildConfiguration) {
-        val command = configuration.command().joinToString(" ", transform = ::shellDisplay)
+    private fun writeBuildInstructions(projectDir: Path, invocation: GeneratedCBuildInvocation) {
+        val command = invocation.command.joinToString(" ", transform = ::shellDisplay)
         writeProjectEvidenceAtomically(
             projectDir.resolve("BUILDING.md"),
             """
@@ -561,7 +564,7 @@ object MakeProjectBuilder {
             $command
             ```
 
-            The build requires GNU Make, the configured C compiler `${configuration.compilerExecutable}`, a POSIX shell, and the POSIX `find`, `mkdir`, and `rm` utilities. `-Werror` is mandatory. The generated Makefile maps file, macro, and debug paths to a project-relative root so identical accepted source revisions do not retain workstation paths. The build does not require analysis caches, network access, or API credentials. Per-module compiler diagnostics are written under `reports/build/modules/`; `reports/build_contract.json` maps every source to its owning module.
+            ${invocation.instructions}
             """.trimIndent() + "\n",
         )
     }
