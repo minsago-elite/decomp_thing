@@ -60,6 +60,12 @@ class BuiltinCapturedContextToolsTest {
         assertEquals(first["sha256"], second["sha256"])
         assertEquals(JsonNull, second["nextOffset"])
         assertTrue(tools.execute(call("read_evidence", mapOf("id" to JsonPrimitive("trace")), 4096), control(request)).failed)
+
+        val bounded = BuiltinCapturedContextTools(request, emptyList(), 1024, 10)
+        val boundedPage = Json.parseToJsonElement(bounded.execute(call("read_evidence", mapOf("id" to JsonPrimitive("trace"))), control(request)).content).jsonObject
+        assertTrue(boundedPage.getValue("text").jsonPrimitive.content.length < 4095)
+        assertTrue(boundedPage.getValue("nextOffset").jsonPrimitive.int > 0)
+        assertTrue(bounded.execute(call("read_evidence", mapOf("id" to JsonPrimitive("trace"))), control(request)).content.toByteArray().size <= 1024)
     }
 
     @Test fun `invalid paths offsets and unknown evidence fail without host lookup`() {
@@ -76,9 +82,9 @@ class BuiltinCapturedContextToolsTest {
     @Test fun `serialized output and audit bounds are enforced before success`() {
         val request = request(listOf(AgentContextInput("large", "a".repeat(500))))
         val bounded = BuiltinCapturedContextTools(request, emptyList(), 64, 10)
-        assertEquals(ModelFailureKind.RESOURCE_EXHAUSTED, assertFailsWith<ModelProviderException> {
-            bounded.execute(call("read_evidence", mapOf("id" to JsonPrimitive("large"))), control(request))
-        }.kind)
+        val tooSmall = bounded.execute(call("read_evidence", mapOf("id" to JsonPrimitive("large"))), control(request))
+        assertTrue(tooSmall.failed)
+        assertTrue(tooSmall.content.contains("result limit"))
         val audit = BuiltinCapturedContextTools(request, emptyList(), 8192, 1)
         audit.execute(call("list_evidence"), control(request))
         assertFailsWith<ModelProviderException> { audit.execute(call("list_evidence"), control(request)) }

@@ -130,6 +130,11 @@ class BuiltinAgentHarnessTest {
             .executeReceipt(request(context = context)) {}
         assertEquals(BuiltinStop.EXHAUSTED, evidence(receipt).stop)
         assertEquals(0, evidence(receipt).modelCalls)
+        var opened = false
+        val preflight = BuiltinAgentHarness(provider, { _, _ -> opened = true; error("tools must not open") },
+            BuiltinLoopLimits(maxContextBytes = 1000, maxToolResultBytes = 1000, maximumEvidenceBytes = 1000))
+        preflight.executeReceipt(request(context = context)) {}
+        assertFalse(opened)
         for (req in listOf(request(AgentExecutionLimits(maxOutputBytes = 3)), request(AgentExecutionLimits(maxInputTokens = 1)))) {
             val exhausted = harness(script(response("too much output")), Session()).executeReceipt(req) {}
             assertEquals(BuiltinStop.EXHAUSTED, evidence(exhausted).stop)
@@ -210,6 +215,17 @@ class BuiltinAgentHarnessTest {
         assertEquals(1, receipt.requireResult().changes.size)
     }
 
+    @Test fun `failed plain invocations retain final candidate evidence`() {
+        val tools = Session()
+        var calls = 0
+        val receipt = harness(ModelProvider { _, _ ->
+            if (++calls == 1) response(calls = listOf(call()))
+            else throw ModelProviderException(ModelFailureKind.TRANSPORT)
+        }, tools).executeReceipt(request()) {}
+        assertEquals(BuiltinStop.PROVIDER_FAILED, evidence(receipt).stop)
+        assertEquals(1, evidence(receipt).candidateChanges.size)
+    }
+
     private inner class Session(
         val allowed: Boolean = true,
         val validation: BuiltinCompletion = BuiltinCompletion.VALIDATED,
@@ -232,6 +248,8 @@ class BuiltinAgentHarnessTest {
             return BuiltinToolResult("edited", failTool)
         }
         override fun changes(control: BuiltinExecutionControl): List<AgentFileChange> = if (text == "old") emptyList() else
+            listOf(AgentFileChange(path, AgentFileChangeKind.MODIFIED, "a".repeat(64), "b".repeat(64), text.length.toLong()))
+        override fun finalChanges(): List<AgentFileChange> = if (text == "old") emptyList() else
             listOf(AgentFileChange(path, AgentFileChangeKind.MODIFIED, "a".repeat(64), "b".repeat(64), text.length.toLong()))
         override fun validateCompletion(control: BuiltinExecutionControl) = validation
         override fun close() { closed = true; if (failClose) error("fixture cleanup failure") }

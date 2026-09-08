@@ -103,7 +103,22 @@ internal class BuiltinCapturedContextTools(
         var end = minOf(item.content.length, offset + PAGE_CHARACTERS)
         if (end < item.content.length && item.content[end - 1].isHighSurrogate()) end--
         control.checkpoint()
-        return json { out ->
+        var encoded: ByteArray? = null
+        while (end > offset) {
+            if (end < item.content.length && item.content[end - 1].isHighSurrogate()) end--
+            try {
+                encoded = evidencePage(item, offset, end)
+                break
+            } catch (failure: ModelProviderException) {
+                if (failure.kind != ModelFailureKind.RESOURCE_EXHAUSTED) throw failure
+                end = previousCodePointBoundary(item.content, end, offset)
+            }
+        }
+        if (encoded == null) return BuiltinToolResult("evidence page exceeds the configured result limit", failed = true)
+        return BuiltinToolResult(encoded.decodeToString())
+    }
+
+    private fun evidencePage(item: AgentContextInput, offset: Int, end: Int) = boundedProviderJson(maximumResultBytes) { out ->
             out.writeStartObject(); out.writeStringField("id", item.id); out.writeStringField("mediaType", item.mediaType)
             out.writeFieldName("description"); item.description?.let(out::writeString) ?: out.writeNull()
             out.writeStringField("source", "immutable-request-context"); out.writeStringField("sha256", hash(item.content))
@@ -111,8 +126,12 @@ internal class BuiltinCapturedContextTools(
             out.writeFieldName("nextOffset"); if (end < item.content.length) out.writeNumber(end) else out.writeNull()
             out.writeEndObject()
         }
-    }
 
+    private fun previousCodePointBoundary(value: String, end: Int, minimum: Int): Int {
+        var candidate = end - 1
+        if (candidate > minimum && value[candidate - 1].isHighSurrogate() && value[candidate].isLowSurrogate()) candidate--
+        return candidate.coerceAtLeast(minimum)
+    }
     private fun json(write: (com.fasterxml.jackson.core.JsonGenerator) -> Unit) =
         BuiltinToolResult(boundedProviderJson(maximumResultBytes, write).decodeToString())
     private fun schema(properties: Map<String, JsonObject>) = buildJsonObject {

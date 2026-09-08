@@ -71,6 +71,17 @@ class BuiltinInvocationArchiveTest {
         assertEquals(checkpointHash(bytes), document.sha256)
     }
 
+    @Test fun `failed archive binds failure classification to terminal evidence`() {
+        val invocation = invocation(ending = "failed")
+        val document = capture(invocation)
+        val receipt = root(document).getValue("receipt").jsonObject
+        assertEquals("PROTOCOL", receipt.getValue("failureKind").jsonPrimitive.content)
+        val forged = JsonObject(root(document) + ("receipt" to JsonObject(receipt + ("failureKind" to JsonPrimitive("AUTHENTICATION")))))
+        assertFailsWith<BuiltinJournalException> {
+            verifyBuiltinInvocationArchive(encode(forged), invocation.identity, commitment(invocation))
+        }
+    }
+
     @Test fun `failed and refused turns retain final candidate hashes independently of their result change sets`() {
         for (ending in listOf("failed", "refused")) {
             val invocation = invocation(ending, ending)

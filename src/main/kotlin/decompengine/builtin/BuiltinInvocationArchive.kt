@@ -96,7 +96,11 @@ internal class BuiltinInvocationArchiveDocument private constructor(raw: ByteArr
             check(journal.complete == evidence.complete && journal.indeterminate == evidence.indeterminate)
             check(journal.complete) // Suspended checkpoints remain private recovery evidence, not terminal invocation artifacts.
             val returned = (receipt.outcome as? AgentExecutionOutcome.Returned)?.result
-            val candidates = (provider as? BuiltinCapturedExecutionEvidence)?.candidateChanges ?: returned?.changes.orEmpty()
+            val candidates = when (provider) {
+                is BuiltinCapturedExecutionEvidence -> provider.candidateChanges
+                is BuiltinLoopEvidence -> provider.candidateChanges
+                else -> returned?.changes.orEmpty()
+            }
             if (returned != null) check(builtinChangeJson(returned.changes) == builtinChangeJson(candidates))
             val outcome = when (val value = receipt.outcome) {
                 is AgentExecutionOutcome.Returned -> "returned-${value.result.stopReason.name}"
@@ -107,6 +111,7 @@ internal class BuiltinInvocationArchiveDocument private constructor(raw: ByteArr
                 put("identity", identity.json()); put("releaseQualified", false)
                 putJsonObject("receipt") {
                     put("outcome", outcome); put("stop", loop.stop.name); put("cleanupComplete", loop.cleanupComplete)
+                    put("failureKind", (receipt.outcome as? AgentExecutionOutcome.Failed)?.failure?.kind?.name)
                     put("modelCalls", loop.modelCalls); put("toolCalls", loop.toolCalls)
                     put("inputTokens", loop.inputTokens); put("outputTokens", loop.outputTokens); put("estimated", loop.estimatedUsage)
                     put("candidateChanges", builtinChangeJson(candidates))
@@ -165,9 +170,10 @@ internal fun verifyBuiltinInvocationArchive(bytes: ByteArray, identity: BuiltinI
     }
     val receipt = root.getValue("receipt").jsonObject
     check(receipt.keys == setOf("outcome", "stop", "cleanupComplete", "modelCalls", "toolCalls", "inputTokens", "outputTokens",
-        "estimated", "candidateChanges", "toolAudit", "resultChangesSha256", "journalComplete", "indeterminate"))
+        "estimated", "candidateChanges", "toolAudit", "resultChangesSha256", "journalComplete", "indeterminate", "failureKind"))
     val stop = BuiltinStop.valueOf(receipt.getValue("stop").jsonPrimitive.content)
     val outcome = receipt.getValue("outcome").jsonPrimitive.content
+    val failureKind = receipt.getValue("failureKind").jsonPrimitive.contentOrNull
     val expectedStop = when (stop) {
         BuiltinStop.COMPLETED, BuiltinStop.VALIDATION_REQUIRED -> AgentStopReason.COMPLETED
         BuiltinStop.NO_CHANGE -> AgentStopReason.NO_CHANGES
@@ -176,8 +182,13 @@ internal fun verifyBuiltinInvocationArchive(bytes: ByteArray, identity: BuiltinI
         BuiltinStop.EXHAUSTED -> AgentStopReason.LIMIT_EXHAUSTED
         else -> null
     }
-    if (expectedStop != null) check(outcome == "returned-${expectedStop.name}")
-    else check(outcome in AgentFailureKind.entries.map { "failed-${it.name}" })
+    if (expectedStop != null) {
+        check(outcome == "returned-${expectedStop.name}")
+        check(failureKind == null)
+    } else {
+        check(outcome in AgentFailureKind.entries.map { "failed-${it.name}" })
+        check(failureKind == outcome.removePrefix("failed-"))
+    }
     val cleanup = receipt.getValue("cleanupComplete").jsonPrimitive.boolean
     check(receipt.getValue("journalComplete") == JsonPrimitive(inspection.complete))
     check(receipt.getValue("indeterminate") == JsonPrimitive(inspection.indeterminate))
@@ -207,6 +218,7 @@ internal fun verifyBuiltinInvocationArchive(bytes: ByteArray, identity: BuiltinI
     check(resultDigest.matches(Regex("[a-f0-9]{64}")))
     val terminal = inspection.records.last().getValue("payload").jsonObject
     check(terminal["stop"] == JsonPrimitive(stop.name) && terminal["cleanupComplete"] == JsonPrimitive(cleanup))
+    check(terminal["failureKind"] == receipt["failureKind"])
     check(terminal["state"] == JsonPrimitive(BuiltinLoopState.TERMINATED.name))
     check(terminal["candidateChanges"] == changes)
     check(terminal["toolAudit"] == receipt["toolAudit"])
