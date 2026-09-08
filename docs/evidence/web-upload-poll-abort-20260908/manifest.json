@@ -1,0 +1,18 @@
+{
+  "sourceCommit": "b6b7391b",
+  "masterIncluded": "1c999572",
+  "verification": {
+    "frontendTests": 392,
+    "failures": 0,
+    "lint": "passed",
+    "typecheck": "passed",
+    "frontendBuild": "passed",
+    "regressionsFailedBeforeFix": 3
+  },
+  "scope": "Queued progress-client callback cleanup after unmount, session expiry and explicit stop with an inert upload promise ignoring abort.",
+  "limits": [
+    "Does not establish network activity after abort; real client already rejects aborted signals.",
+    "Does not prove sole cause of the intermittent upload failure retained in parent #1067.",
+    "No JVM or packaged-browser rerun."
+  ]
+}

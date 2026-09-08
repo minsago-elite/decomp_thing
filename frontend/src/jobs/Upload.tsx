@@ -98,7 +98,10 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
     setPhase('pending'); setMessage(''); setProgress(null);
     const uploadId = crypto.randomUUID().replaceAll('-', '');
     let pollTimer: ReturnType<typeof setTimeout>;
+    const stopPolling = () => { clearTimeout(pollTimer); };
+    controller.signal.addEventListener('abort', stopPolling, { once: true });
     const poll = async () => {
+      if (!live.current || controller.signal.aborted) return;
       try {
         const response = await client.get('uploadProgress', `/uploads/${uploadId}`, { signal: controller.signal });
         if (live.current && !controller.signal.aborted && response.data.uploadId === uploadId) setProgress(response.data);
@@ -115,7 +118,7 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
     } catch (error) {
       if (!live.current) return;
       setPhase('retry'); setMessage(failureMessage(error));
-    } finally { clearTimeout(pollTimer); controller.abort(); if (active.current === controller) active.current = null; }
+    } finally { stopPolling(); controller.abort(); controller.signal.removeEventListener('abort', stopPolling); if (active.current === controller) active.current = null; }
   }
   function discard() {
     if (active.current) return;

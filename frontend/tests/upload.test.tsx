@@ -195,3 +195,22 @@ it.each(['timer', 'SESSION_REQUIRED', 'SESSION_EXPIRED'])('stops an active uploa
     expect(transport.upload.mock.calls[1]![1].idempotencyKey).toBe(options.idempotencyKey);
   }
 });
+
+it.each(['unmount', 'session', 'stop'])('does not enter a queued progress read after %s even when the upload ignores abort', async cause => {
+  vi.useFakeTimers();
+  transport.upload.mockImplementation(() => new Promise(() => undefined));
+  transport.get.mockImplementation(() => new Promise(() => undefined));
+  const { session, view } = await mount();
+  select(); fireEvent.click(screen.getByRole('button', { name: 'Upload binary' }));
+  expect(transport.get).not.toHaveBeenCalled();
+  await act(async () => {
+    if (cause === 'unmount') view.unmount();
+    else if (cause === 'session') session.observeRequestFailure()(new ApiClientError('http_error', { status: 401, serverCode: 'SESSION_EXPIRED' }));
+    else fireEvent.click(screen.getByRole('button', { name: 'Stop transfer' }));
+    await Promise.resolve();
+  });
+  expect(transport.upload.mock.calls[0]![1].signal?.aborted).toBe(true);
+  await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+  expect(transport.get).not.toHaveBeenCalled();
+  expect(transport.upload).toHaveBeenCalledOnce(); expect(transport.route).not.toHaveBeenCalled();
+});

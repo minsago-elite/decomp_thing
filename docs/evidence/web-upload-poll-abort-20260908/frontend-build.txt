@@ -1,0 +1,25 @@
+
+> decomp-workbench@0.1.0 build
+> node scripts/check-toolchain.mjs && node ../scripts/generate-web-api.mjs --check && tsc --noEmit && vite build && node scripts/bundle-report.mjs
+
+Web API generated contracts verified (8389f4f81ef9)
+vite v8.2.2 building client environment for production...
+transforming...
+✓ 59 modules transformed.
+rendering chunks...
+computing gzip size...
+../build/frontend/dist/assets/mark-DPpOXuhp.svg         0.28 kB │ gzip:  0.20 kB
+../build/frontend/dist/index.html                       0.84 kB │ gzip:  0.49 kB
+../build/frontend/dist/.vite/manifest.json              1.30 kB │ gzip:  0.35 kB
+../build/frontend/dist/assets/index-DmsUN96c.css        5.27 kB │ gzip:  1.75 kB
+../build/frontend/dist/assets/Job-BQAAoepR.js           2.51 kB │ gzip:  1.19 kB
+../build/frontend/dist/assets/RunHistory-Bremrf_j.js    3.02 kB │ gzip:  1.49 kB
+../build/frontend/dist/assets/Runtime-Cq_f-Ql1.js       5.33 kB │ gzip:  1.82 kB
+../build/frontend/dist/assets/Run-CWEE_0Js.js          29.50 kB │ gzip:  9.31 kB
+../build/frontend/dist/assets/index-DUBDbHm3.js       107.21 kB │ gzip: 31.30 kB
+
+✓ built in 297ms
+Initial JavaScript: 107210 raw / 31059 gzip bytes (limit 51200)
+Initial CSS: 5278 raw / 1746 gzip bytes (limit 10240)
+Production module owners: application, preact, preact-iso
+Bundle report: build/frontend/bundle-report.json
