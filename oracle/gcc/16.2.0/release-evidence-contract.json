@@ -1,0 +1,121 @@
+{
+  "schemaVersion": 1,
+  "id": "gcc-16-2-0-fidelity-release-evidence-contract",
+  "scope": "production",
+  "contract": {
+    "state": "closed-bounded",
+    "releaseEligible": false,
+    "blockedBy": [
+      "missing-authenticated-structural-replay",
+      "missing-candidate-archive",
+      "missing-candidate-behavior-comparisons",
+      "missing-independent-repetition"
+    ],
+    "failClosedStates": [
+      "missing",
+      "stale",
+      "untrusted",
+      "failed",
+      "unresolved",
+      "reference-only"
+    ]
+  },
+  "provenance": {
+    "oracle": {
+      "id": "gcc-driver-16.2.0",
+      "sourceRevision": "78d4ac73dd391005b895a6148cd9831e28e1208b",
+      "sourceLock": {
+        "path": "source-lock.json",
+        "sha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc"
+      },
+      "buildRecord": {
+        "path": "build-record.json",
+        "sha256": "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637",
+        "toolchainImageDigest": "sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248"
+      },
+      "artifactManifest": {
+        "path": "oracle-manifest.json",
+        "sha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9",
+        "strippedArtifactSha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4",
+        "executableLoadSha256": "0c2639a4c2e662205c79515424f1d4b28fb2d6602324ce10c0b575ca3d312499"
+      }
+    },
+    "checkedInputs": [
+      {
+        "path": "function-recovery-oracle.json",
+        "sha256": "b49b8a72a96580bd8727d9dc530753f40f78185a656f472ebe83a7a1f6fc9aae",
+        "status": "available-oracle-input"
+      },
+      {
+        "path": "behavior-corpus.json",
+        "sha256": "bcc1a14ca8c54f94106c943f0bc5698cb9af3151b7bf20a49ae3c8828baaad0e",
+        "status": "reference-only"
+      },
+      {
+        "path": "behavior-corpus-evidence.json",
+        "sha256": "9dcf787aea232615a1ff8721144b86bc1f5e9a2a7068fa9e9280db0bc4ad6803",
+        "status": "reference-only"
+      }
+    ]
+  },
+  "structuralThresholds": [
+    {
+      "id": "function-start-precision",
+      "minimum": 0.95,
+      "status": "unavailable"
+    },
+    {
+      "id": "function-start-recall",
+      "minimum": 0.95,
+      "status": "unavailable"
+    },
+    {
+      "id": "surviving-symbol-identity",
+      "minimum": 1.0,
+      "status": "unavailable"
+    },
+    {
+      "id": "call-edge-precision",
+      "minimum": 0.9,
+      "status": "unavailable"
+    },
+    {
+      "id": "call-edge-recall",
+      "minimum": 0.9,
+      "status": "unavailable"
+    }
+  ],
+  "behavior": {
+    "caseCount": 14,
+    "caseIds": [
+      "assembly-file",
+      "compile-file",
+      "compile-stdin",
+      "diagnostic-invalid-input",
+      "diagnostic-invalid-option",
+      "environment-search-path",
+      "help-driver",
+      "linking",
+      "metadata-dumpmachine",
+      "metadata-dumpversion",
+      "metadata-version",
+      "preprocess-file",
+      "preprocess-stdin",
+      "response-file"
+    ],
+    "referenceResult": "reference-only",
+    "candidateComparison": "unavailable",
+    "mandatoryWorkflowGaps": [
+      "real-preprocessing-and-dependency-observations",
+      "real-compile-link-and-produced-program-observations"
+    ]
+  },
+  "productionGates": {
+    "authenticatedStructuralReplay": "unavailable",
+    "candidateSourceAndBuildArchive": "unavailable",
+    "candidateBehaviorComparison": "unavailable",
+    "independentRepeatedRuns": "unavailable",
+    "bundledGhidraIsolatedExecution": "required-but-unavailable",
+    "oracleAuthority": "authenticated-checked-inputs-only"
+  }
+}
