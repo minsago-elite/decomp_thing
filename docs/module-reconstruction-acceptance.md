@@ -76,3 +76,9 @@ Existing fingerprints use the historical encoding and therefore miss the new
 cache key once; regeneration produces the new key. Unchanged current inputs still
 reuse accepted checkpoints. This input binding does not make observed-behavior
 prose a validated measurement or establish production executable identity.
+
+Each module's confidence `revisionEvidence` exposes `inputBinarySha256`,
+`modelSchemaVersion` and `inputFingerprintProvider` beside `inputFingerprint`.
+These identify the selected model input and fingerprint encoding without requiring
+a reader to infer them from a hash. They are model-bound local attribution fields,
+not a new claim of authenticated binary execution or behavioral coverage.

@@ -389,6 +389,9 @@ class SourceTreeTest {
             val checkpoint = Json.parseToJsonElement(checkpointText).jsonObject
             assertEquals(sha256(checkpointText.toByteArray()), revision.getValue("checkpointSha256").jsonPrimitive.content)
             assertEquals(checkpoint.getValue("fingerprint"), revision.getValue("inputFingerprint"))
+            assertEquals("module-reconstruction-input-v2", revision.getValue("inputFingerprintProvider").jsonPrimitive.content)
+            assertEquals(recovered.inputSha256, revision.getValue("inputBinarySha256").jsonPrimitive.content)
+            assertEquals(recovered.schemaVersion.toString(), revision.getValue("modelSchemaVersion").jsonPrimitive.content)
             val source = project.resolve(revision.getValue("sourcePath").jsonPrimitive.content).readText()
             assertEquals(sha256(source.toByteArray()), revision.getValue("sourceSha256").jsonPrimitive.content)
             assertEquals("true", revision.getValue("acceptedImplementation").jsonPrimitive.content)

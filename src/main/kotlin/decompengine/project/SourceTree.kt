@@ -624,6 +624,8 @@ internal fun boundedCheckpointExecutionEvidenceSha256(
 internal const val MAXIMUM_CHECKPOINT_EXECUTION_EVIDENCE_BYTES: Int = 64 * 1024 * 1024
 
 object SourceTreeGenerator {
+    private const val INPUT_FINGERPRINT_PROVIDER = "module-reconstruction-input-v2"
+
     fun generate(
         model: RecoveredProgramModel,
         projectDir: Path,
@@ -920,6 +922,9 @@ object SourceTreeGenerator {
                 append("{\"sourcePath\":\"").append(module.sourcePath.jsonEscape()).append("\",")
                 append("\"sourceSha256\":\"").append(checkpoint.sourceSha256).append("\",")
                 append("\"inputFingerprint\":\"").append(checkpoint.fingerprint).append("\",")
+                append("\"inputFingerprintProvider\":\"").append(INPUT_FINGERPRINT_PROVIDER).append("\",")
+                append("\"inputBinarySha256\":\"").append(model.inputSha256.jsonEscape()).append("\",")
+                append("\"modelSchemaVersion\":").append(model.schemaVersion).append(',')
                 append("\"checkpointPath\":\"").append(checkpointEvidencePath.jsonEscape()).append("\",")
                 append("\"checkpointSha256\":\"").append(sha256(checkpointText.toByteArray())).append("\",")
                 append("\"acceptedImplementation\":").append(checkpoint.accepted).append(',')
@@ -1718,7 +1723,7 @@ object SourceTreeGenerator {
             types = module.typeIds.map { id -> model.types.single { it.id == id } },
         )
         val inputs = kotlinx.serialization.json.JsonObject(linkedMapOf(
-            "provider" to kotlinx.serialization.json.JsonPrimitive("module-reconstruction-input-v2"),
+            "provider" to kotlinx.serialization.json.JsonPrimitive(INPUT_FINGERPRINT_PROVIDER),
             "model" to Json.parseToJsonElement(selectedModel.toJson()),
             "sharedHeader" to kotlinx.serialization.json.JsonPrimitive(sharedHeader),
             "moduleHeader" to kotlinx.serialization.json.JsonPrimitive(moduleHeader),
