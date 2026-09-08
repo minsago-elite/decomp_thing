@@ -109,6 +109,12 @@ GNU Make build definition. It indexes model functions/globals and computes
 cross-module call visibility once per plan, then renders each module's declared
 entities in plan order. `GeneratedCDeclarations` holds the existing C declaration
 normalization policy. This extraction preserves current generated-C semantics;
-entrypoint rendering, candidate validation and full alternate-profile routing
-remain separate migration work under #84. Declaration normalization does not
+full alternate-profile routing remains separate migration work under #84. Declaration normalization does not
 establish recovered ABI accuracy.
+
+The generated-C renderer also selects and renders the synthetic entrypoint and
+returns its entity attribution to orchestration. `GeneratedCCandidateValidation`
+owns the C function/global definition and placeholder checks and their lexical
+helpers. Orchestration retains invocation release, prompt budgets, prior issues,
+checkpoint acceptance and rollback. These checks remain the existing local
+acceptance policy; they do not certify behavioral equivalence or ABI correctness.

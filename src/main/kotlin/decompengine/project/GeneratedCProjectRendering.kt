@@ -13,6 +13,28 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
         }.toSet()
     }
 
+    fun renderEntrypoint(): GeneratedCEntrypoint? {
+        if (model.functions.any { safeCName(it.name) == "main" }) return null
+        val entry = model.functions.firstOrNull { safeCName(it.name) == "decomp_engine_main" }
+            ?: model.functions.firstOrNull { safeCName(it.name) in setOf("entry", "recovered__start") }
+            ?: model.functions.minByOrNull { it.address }
+        val entryBody = entry?.let {
+            if (normalizedPrototype(it).startsWith("void ")) "${safeCName(it.name)}();\n    return 0;"
+            else "return ${safeCName(it.name)}();"
+        } ?: "return 0;"
+        val mainSource = """
+                #include "decomp_types.h"
+                ${entry?.let { "extern ${normalizedPrototype(it)};" } ?: ""}
+
+                int main(int argc, char **argv) {
+                    (void)argc;
+                    (void)argv;
+                    $entryBody
+                }
+        """.trimIndent() + "\n"
+        return GeneratedCEntrypoint(mainSource, listOfNotNull(entry?.id))
+    }
+
     fun renderTypesHeader(): String = buildString {
         append("#ifndef DECOMP_TYPES_H\n#define DECOMP_TYPES_H\n\n#include <stddef.h>\n#include <stdint.h>\n\n")
         model.types.sortedBy { it.id }.forEach { type ->
@@ -84,3 +106,5 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
     }
 
 }
+
+internal data class GeneratedCEntrypoint(val source: String, val entityIds: List<String>)
