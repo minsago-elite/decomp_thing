@@ -375,8 +375,15 @@ class AgentProgressJournal(
             require(firstRetained == 0L || historyDropped > 0) {
                 "progress snapshot classifies the initial admitted event as queue loss"
             }
-            // The small startup record fits the minimum snapshot budget and cannot alone be evicted.
-            require(retainedCount > 0 || historyDropped != 1L) {
+            val expiredAt = result["retentionExpiredAt"]?.let {
+                val value = it.jsonPrimitive
+                require(value.isString && value.content.length <= 40)
+                require(Instant.parse(value.content).toString() == value.content) { "invalid retention expiry time" }
+                require(retainedCount == 0L) { "expired journal still contains records" }
+                value.content
+            }
+            // Size eviction cannot remove the startup record alone; explicit timed expiry can.
+            require(retainedCount > 0 || historyDropped != 1L || expiredAt != null) {
                 "progress snapshot contains an impossible single-event history eviction"
             }
             result["omittedSequenceRanges"]?.let { ranges ->
