@@ -102,7 +102,8 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
         timer = setTimeout(() => { void poll(); }, 2500);
       } catch (failure: unknown) {
         if (controller.signal.aborted) return;
-        const unsupported = readingStream && failure instanceof ApiClientError && [406, 415, 501].includes(failure.status ?? 0);
+        const unsupported = readingStream && failure instanceof ApiClientError && ([406, 415, 501].includes(failure.status ?? 0)
+          || (failure.status === 429 && failure.serverCode === 'STREAM_LIMIT'));
         if (unsupported) {
           fallback.current = true; setPeriodic(true); readingStream = false;
           void poll();

@@ -143,3 +143,16 @@ it.each(['hidden', 'offline'])('cancels an active stream when the browser become
   expect(fetcher).toHaveBeenCalledOnce();
   expect(screen.getAllByRole('listitem')).toHaveLength(1);
 });
+
+it('uses polling when the server explicitly reports exhausted stream capacity', async () => {
+  const error = fixture<{ error: { code: string } }>('error-validation');
+  error.error.code = 'STREAM_LIMIT';
+  fetcher.mockResolvedValueOnce(new Response(JSON.stringify(error), { status: 429,
+    headers: { 'Content-Type': 'application/json', 'X-Request-ID': 'request_example_1' } }));
+  transport.get.mockResolvedValueOnce({ data: { items: [], nextCursor: page.data.nextCursor, hasMore: false } });
+  await start();
+  expect(screen.getByRole('status').textContent).toContain('Using periodic refresh');
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(transport.get.mock.calls.at(-1)![1]).toContain('transport=poll');
+  expect(fetcher).toHaveBeenCalledOnce();
+});
