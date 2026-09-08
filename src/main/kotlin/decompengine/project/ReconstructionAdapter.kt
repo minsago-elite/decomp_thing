@@ -5,6 +5,7 @@ import java.nio.file.Path
 /** Local generation policy; production execution authority is a separate contract. */
 internal interface ReconstructionAdapter {
     val compilation: ModuleCompilationPolicy
+    val archiveBuild: ArchiveBuildPolicy
     fun build(projectDir: Path, profile: ReconstructionProfile): BuildReport
     fun rendering(model: RecoveredProgramModel, plan: ModulePlan): ProjectRendering
     fun defaultReconstructor(): ModuleReconstructor
@@ -28,4 +29,13 @@ internal object ReconstructionAdapters {
         GeneratedCMakeReconstructionProfile.PROFILE_ID -> GeneratedCReconstructionAdapter
         else -> throw IllegalArgumentException("no reconstruction adapter registered for profile: ${profile.id}")
     }
+}
+
+/** Build-system-specific evidence requirements inside the shared archive transport. */
+internal interface ArchiveBuildPolicy {
+    val requiredPaths: Set<String>
+    val rebuildInstructions: String
+    fun validate(projectDir: Path, requireArtifact: Boolean)
+    fun sourceRevision(projectDir: Path): BuildSourceRevision
+    fun isBuildInput(relativePath: String): Boolean
 }
