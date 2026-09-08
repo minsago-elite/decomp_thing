@@ -1,0 +1,13 @@
+
+> decomp-workbench@0.1.0 test
+> node scripts/check-toolchain.mjs && vitest run --run tests/upload.test.tsx
+
+
+ RUN  v4.1.11 /home/june/decomp_thing/frontend
+
+
+ Test Files  1 passed (1)
+      Tests  15 passed (15)
+   Start at  19:11:10
+   Duration  969ms (transform 245ms, setup 58ms, import 260ms, tests 243ms, environment 334ms)
+

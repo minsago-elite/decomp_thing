@@ -1,0 +1,41 @@
+
+> decomp-workbench@0.1.0 test
+> node scripts/check-toolchain.mjs && vitest run --run tests/cancellation-session.test.tsx
+
+
+ RUN  v4.1.11 /home/june/decomp_thing/frontend
+
+ ❯ tests/cancellation-session.test.tsx (4 tests | 1 failed) 224ms
+   × refreshing details invalidates old cancellation eligibility even when the attempt has now completed 31ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/cancellation-session.test.tsx > refreshing details invalidates old cancellation eligibility even when the attempt has now completed
+AssertionError: expected <button type="button"></button> to be null
+
+- Expected:
+null
+
++ Received:
+<button
+  type="button"
+>
+  Request cancellation
+</button>
+
+ ❯ tests/cancellation-session.test.tsx:143:76
+    141|     refreshed = true; fireEvent.click(screen.getByRole('button', { nam…
+    142|     await screen.findByText('9007199254740993');
+    143|     expect(screen.queryByRole('button', { name: 'Request cancellation'…
+       |                                                                            ^
+    144|     expect(screen.queryByText(/This attempt is eligible/)).toBeNull();
+    145|     expect(fetcher.mock.calls.filter(call => call[1]?.method === 'PUT'…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 3 passed (4)
+   Start at  19:08:58
+   Duration  967ms (transform 286ms, setup 60ms, import 293ms, tests 224ms, environment 315ms)
+

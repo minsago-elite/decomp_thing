@@ -1,0 +1,30 @@
+
+> decomp-workbench@0.1.0 test
+> node scripts/check-toolchain.mjs && vitest run
+
+
+ RUN  v4.1.11 /home/june/decomp_thing/frontend
+
+ ❯ tests/upload.test.tsx (15 tests | 1 failed) 816ms
+   × stops an active upload and progress read on SESSION_EXPIRED without replaying its intent 154ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/upload.test.tsx > stops an active upload and progress read on SESSION_EXPIRED without replaying its intent
+AssertionError: expected "vi.fn()" to be called once, but got 2 times
+ ❯ tests/upload.test.tsx:186:25
+    184|   expect(screen.getByText(/Selected: binary.elf/)).toBeTruthy();
+    185|   await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    186|   expect(transport.get).toHaveBeenCalledOnce();
+       |                         ^
+    187|   expect(transport.upload).toHaveBeenCalledOnce();
+    188|   expect(transport.route).not.toHaveBeenCalled();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 27 passed (28)
+      Tests  1 failed | 388 passed (389)
+   Start at  19:10:27
+   Duration  3.42s (transform 8.07s, setup 3.21s, import 10.99s, tests 12.46s, environment 20.00s)
+
