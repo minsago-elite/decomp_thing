@@ -31,6 +31,7 @@ class GccBundledCliQualificationTest {
             require(path.isAbsolute && path.normalize() == path && path.toRealPath() == path) { "$name must be canonical" }
             return path
         }
+        val installation = configured("DECOMP_GCC_CLI_INSTALLATION")
         val profile = configured("DECOMP_GCC_CLI_PROFILE")
         val archive = configured("DECOMP_GCC_CLI_ARCHIVE")
         val binary = configured("DECOMP_GCC_CLI_${engine.uppercase()}_BINARY")
@@ -55,7 +56,7 @@ class GccBundledCliQualificationTest {
                 "--output", output.toString(), "--scratch", scratch.toString()) +
                 if (index == 0) emptyList() else listOf("--resume-after-checkpoint", "512")
             val launchEvidence = Files.createDirectory(destination.resolve(if (index == 0) "fresh-launcher" else "resumed-launcher"), PRIVATE_DIRECTORY)
-            assertEquals(0, invokeInstalledGccCli(arguments, launchEvidence, 2700),
+            assertEquals(0, invokeInstalledGccCli(arguments, launchEvidence, 2700, installation),
                 "installed CLI failed; inspect retained launcher output")
             retainAndCheck(output, scratch, profile, arguments, resumed = index != 0)
         }

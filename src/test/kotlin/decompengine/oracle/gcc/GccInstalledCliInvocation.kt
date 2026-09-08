@@ -13,9 +13,12 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
 /** Test orchestration only; the CLI's production controller remains the authority. */
-internal fun invokeInstalledGccCli(arguments: List<String>, evidence: Path, timeoutSeconds: Long): Int {
+internal fun invokeInstalledGccCli(arguments: List<String>, evidence: Path, timeoutSeconds: Long,
+    installation: Path = Path.of(System.getProperty("user.dir"), "build/install/llm_bin_patch"),
+): Int {
     require(timeoutSeconds in 1..2700)
-    val launcher = Path.of(System.getProperty("user.dir"), "build/install/llm_bin_patch/bin/llm_bin_patch").toRealPath()
+    require(installation.isAbsolute && installation.normalize() == installation && installation.toRealPath() == installation)
+    val launcher = installation.resolve("bin/llm_bin_patch").toRealPath()
     require(Files.isExecutable(launcher))
     val launcherBytes = Files.newInputStream(launcher).use { it.readNBytes(256 * 1024 + 1) }
     require(launcherBytes.size <= 256 * 1024)

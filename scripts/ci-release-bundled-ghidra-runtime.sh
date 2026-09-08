@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if (($# != 0)); then
-  echo "usage: scripts/ci-release-bundled-ghidra-runtime.sh" >&2
+if (($# > 1)) || [[ $# == 1 && "$1" != --application ]]; then
+  echo "usage: scripts/ci-release-bundled-ghidra-runtime.sh [--application]" >&2
   exit 64
 fi
 
@@ -13,19 +13,22 @@ if [[ ! "$GITHUB_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ||
   echo "bundled Ghidra release requires bounded positive GitHub run identities" >&2
   exit 1
 fi
-target="/var/lib/decomp-ci-ghidra-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-if [[ -n "${DECOMP_TEST_BUNDLED_GHIDRA_ROOT:-}" &&
-  "$DECOMP_TEST_BUNDLED_GHIDRA_ROOT" != "$target/bundle" ]]; then
+deployment_kind=ghidra
+if [[ "${1:-}" == --application ]]; then deployment_kind=application; fi
+target="/var/lib/decomp-ci-${deployment_kind}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+selected_root="${DECOMP_TEST_BUNDLED_GHIDRA_ROOT:-}"
+if [[ "$deployment_kind" == application ]]; then selected_root="${DECOMP_GCC_CLI_INSTALLATION:-}"; fi
+if [[ -n "$selected_root" && "$selected_root" != "$target/bundle" ]]; then
   echo "bundled Ghidra release refuses an unexpected runtime target" >&2
   exit 1
 fi
 
-sudo -n /usr/bin/python3 - "$target" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" <<'PY'
+sudo -n /usr/bin/python3 - "$target" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$deployment_kind" <<'PY'
 import os
 import stat
 import sys
 
-target, run_id, attempt = sys.argv[1:]
+target, run_id, attempt, deployment_kind = sys.argv[1:]
 directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 marker_name = ".decomp-ci-bundled-ghidra-owner-v1"
 records = {}
@@ -128,7 +131,8 @@ def remove_contents(directory, relative=""):
             os.unlink(name, dir_fd=directory)
 
 require(os.geteuid() == 0, "explicit CI runtime release requires root")
-require(target == f"/var/lib/decomp-ci-ghidra-{run_id}-{attempt}", "runtime cleanup target differs")
+require(deployment_kind in ("ghidra", "application"), "unsupported deployment kind")
+require(target == f"/var/lib/decomp-ci-{deployment_kind}-{run_id}-{attempt}", "runtime cleanup target differs")
 filesystem_root = os.open("/", directory_flags)
 try:
     require_trusted_directory(filesystem_root)

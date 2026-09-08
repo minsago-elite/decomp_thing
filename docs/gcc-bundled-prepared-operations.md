@@ -64,6 +64,8 @@ The runner does not invoke the broad CI script or vulnerability-reproduction tes
 
 Supply canonical paths in these environment variables:
 
+- `DECOMP_GCC_CLI_INSTALLATION`: the canonical complete installed application root,
+  including its launcher, JARs, worker references and bundled Ghidra runtime.
 - `DECOMP_GCC_CLI_PROFILE` and `DECOMP_GCC_CLI_ARCHIVE`: the retained compiler-engine
   profile and matching Ghidra provenance archive.
 - `DECOMP_GCC_CLI_CC1_BINARY` and `DECOMP_GCC_CLI_LTO1_BINARY`: genuine stripped
@@ -99,9 +101,22 @@ the exact profile paths and loop-device detachment. These helpers do not replace
 Kotlin lifecycle validation or establish crash recovery. Their privileged engine
 mount paths still require provisioned-host qualification.
 
+The trusted provisioner can stage the complete installation with
+`bash scripts/ci-prepare-bundled-ghidra-runtime.sh --application`. This copies
+`installDist` into a distinct root-owned deployment and publishes
+`DECOMP_GCC_CLI_INSTALLATION` for subsequent steps. It uses the same bounded,
+descriptor-relative copy and ownership marker as the Ghidra-only fixture mode.
+The installed CLI resolves its references relative to this complete installation;
+the Ghidra-only fixture environment variable does not redirect it.
+
+After confirmed worker absence, the matching trusted teardown command is
+`bash scripts/ci-release-bundled-ghidra-runtime.sh --application`. It requires the
+same run identity and checks the exact application target and ownership marker.
+The application mode's privileged copy/release still requires host qualification.
+
 Provision the reviewed root-owned JVM/system libraries, native helpers and bundled
 Ghidra runtime required by the existing contained tests. The qualification invokes
-the installed `bin/llm_bin_patch` command as a separate process, using the packaged
+`$DECOMP_GCC_CLI_INSTALLATION/bin/llm_bin_patch` as a separate process, using the packaged
 deployment references and the test JVM’s selected JDK. Each leg retains launcher
 argv, script digest, selected Java heap, bounded stdout/stderr and exit status in a
 sibling evidence directory. The outer harness allows 45 minutes and at most 64 KiB
