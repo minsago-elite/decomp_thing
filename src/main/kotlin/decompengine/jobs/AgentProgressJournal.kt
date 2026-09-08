@@ -43,8 +43,7 @@ class AgentProgressJournal(
     private var historyDropped = 0L
     private var closed = false
     private var dirty = false
-    private val lockChannel: FileChannel
-    private val writerLock: java.nio.channels.FileLock
+    private val writerLease: AgentProgressJournalLease
     private val writer: Thread
 
     init {
@@ -52,13 +51,9 @@ class AgentProgressJournal(
         require(maximumEvents in 1..1024 && maximumQueuedEvents in 1..1024)
         require(maximumSnapshotBytes in 4096..MAXIMUM_READ_BYTES)
         Files.createDirectories(reportsDirectory)
-        lockChannel = FileChannel.open(reportsDirectory.resolve("agent-progress.lock"), CREATE, WRITE, NOFOLLOW_LINKS)
-        writerLock = try {
-            requireNotNull(lockChannel.tryLock()) { "another workflow owns the progress journal" }
-        } catch (problem: Throwable) {
-            lockChannel.close()
-            throw problem
-        }
+        writerLease = requireNotNull(AgentProgressJournalLease.tryAcquire(reportsDirectory) {
+            FileChannel.open(reportsDirectory.resolve("agent-progress.lock"), CREATE, WRITE, NOFOLLOW_LINKS)
+        }) { "another workflow owns the progress journal" }
         try {
             val previous = read(reportsDirectory)
             if (previous != null) {
@@ -71,8 +66,7 @@ class AgentProgressJournal(
             writer = Thread(::writeLoop, "decomp-progress-$workflow").apply { isDaemon = true; start() }
             enqueue("run_started") { put("status", "running") }
         } catch (problem: Throwable) {
-            writerLock.release()
-            lockChannel.close()
+            writerLease.close()
             throw problem
         }
     }
@@ -309,8 +303,7 @@ class AgentProgressJournal(
         writer.join(5_000)
         // Do not release a lock while a live writer could still publish a snapshot.
         check(!writer.isAlive) { "progress writer did not stop within five seconds" }
-        if (writerLock.isValid) writerLock.release()
-        if (lockChannel.isOpen) lockChannel.close()
+        writerLease.close()
         failure.get()?.let { throw IllegalStateException("progress journal persistence failed", it) }
     }
 

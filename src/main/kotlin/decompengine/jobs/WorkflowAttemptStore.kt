@@ -132,6 +132,23 @@ class WorkflowAttemptStore private constructor(
         read(attempt)
     }
 
+    /** Explicit maintenance only: callers must supply protection from pins and active read leases.
+     * No HTTP read or automatic sweep invokes this operation yet.
+     */
+    internal fun expireProgressJournal(jobId: String, runId: String, protectedFromRetention: Boolean,
+        retention: java.time.Duration = AgentProgressJournalRetention.DEFAULT_TERMINAL_RETENTION,
+        fault: (ProgressRetentionFaultPoint) -> Unit = {}): ProgressRetentionResult = withJob(jobId) { directory ->
+        val attempt = available(jobId, directory).snapshot.attempts.singleOrNull { it.runId == runId }
+            ?: fail("RUN_NOT_FOUND", "The requested attempt does not belong to this job.")
+        if (protectedFromRetention) ProgressRetentionResult.RETAINED else try {
+            AgentProgressJournalMaintenance.expire(root, attempt, clock.instant(), retention, fault)
+        } catch (failure: Exception) {
+            throw WorkflowStoreException("PROGRESS_RETENTION_FAILED",
+                "Progress retention did not finish. Preserve the journal and pending retention file, then retry maintenance with storage ownership.",
+                outcomeUnknown = true, cause = failure)
+        }
+    }
+
     fun create(jobId: String, expectedJobVersion: String, request: NewWorkflowAttempt): WorkflowMutation = withJob(jobId) { directory ->
         val current = available(jobId, directory).snapshot
         checkVersion(current.version, expectedJobVersion)
