@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.web.WebAttemptCancellationTest" tests="8" skipped="0" failures="0" errors="0" timestamp="2026-09-08T10:27:01.654Z" hostname="whatsername" time="8.011">
+  <properties/>
+  <testcase name="uncertain running cancellation retains ownership and never publishes a later completion()" classname="decompengine.web.WebAttemptCancellationTest" time="2.462"/>
+  <testcase name="queued cancellation prevents execution even when an external executor later dispatches it()" classname="decompengine.web.WebAttemptCancellationTest" time="2.692"/>
+  <testcase name="queued and running cancellation preserve prior accepted references and diagnostic bytes across reopen()" classname="decompengine.web.WebAttemptCancellationTest" time="2.125"/>
+  <testcase name="running receipt replay never repeats interruption or rolls back a newer pin version()" classname="decompengine.web.WebAttemptCancellationTest" time="0.142"/>
+  <testcase name="failed cancellation publication distinguishes unchanged state from uncertain publication()" classname="decompengine.web.WebAttemptCancellationTest" time="0.163"/>
+  <testcase name="service replay returns the recorded acknowledgement without touching a newer queued attempt()" classname="decompengine.web.WebAttemptCancellationTest" time="0.12"/>
+  <testcase name="uncertain service receipt publication prevents dispatch and replays after reopening()" classname="decompengine.web.WebAttemptCancellationTest" time="0.086"/>
+  <testcase name="running cancellation is durable before signalling and remains pending until the worker exits()" classname="decompengine.web.WebAttemptCancellationTest" time="0.208"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

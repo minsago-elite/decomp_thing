@@ -14,7 +14,7 @@ import kotlin.io.path.readBytes
 import kotlin.test.*
 
 class WebCancellationControllerTest {
-    private class Fixture(val execute: (DurableWebWorkflowContext) -> DurableWebWorkflowOutcome = { error("Unexpected fixture execution") }) : AutoCloseable {
+    private class Fixture(seedAccepted: Boolean = false, val execute: (DurableWebWorkflowContext) -> DurableWebWorkflowOutcome = { error("Unexpected fixture execution") }) : AutoCloseable {
         val root = Files.createTempDirectory("web-cancel-http-")
         val store = JobStore(root)
         val job = store.createFromUpload("inert.elf", elfFixture())
@@ -36,13 +36,30 @@ class WebCancellationControllerTest {
         val resources = WebStreamResources()
         val workers = Executors.newFixedThreadPool(2)
         val client = HttpClient.newHttpClient()
+        val prior: WorkflowAttempt?
         val run: WorkflowAttempt
         val path: String
         val cookie: String
         val csrf: String
         init {
             service.initializeExistingStorage()
-            val snapshot = (owner.inspect(job.id) as WorkflowJobInspection.Available).snapshot
+            prior = if (seedAccepted) {
+                val initial = snapshot()
+                val queued = owner.create(job.id, initial.version, NewWorkflowAttempt(WorkflowKind.RECONSTRUCT,
+                    WorkflowExecutionLimits(60000u, 15000u, 1048576u, 16u)))
+                val running = owner.transition(job.id, queued.attempt.runId, queued.attempt.version, WorkflowTransition.Start)
+                val completed = owner.transition(job.id, running.attempt.runId, running.attempt.version,
+                    WorkflowTransition.Finish(WorkflowRunState.COMPLETED, WorkflowTerminalReason.COMPLETED,
+                        WorkflowCandidate("revision_retained_http", "ab".repeat(32))))
+                val reference = WorkflowAcceptanceReference(job.id, completed.attempt.runId, "revision_retained_http",
+                    "ab".repeat(32), "graph_http_fixture", "acceptance_http_fixture", "cd".repeat(32))
+                owner.recordAcceptedRevision(job.id, completed.attempt.runId, completed.snapshot.version,
+                    completed.attempt.version, reference).attempt.also {
+                    Files.writeString(store.runReportsDirectory(job.id, it.runId, create = true).resolve("diagnostic.txt"),
+                        "Retained inert HTTP diagnostic")
+                }
+            } else null
+            val snapshot = snapshot()
             val started = assertIs<DurableWebWorkflowAdmission.Started>(service.startDurable(job.id, snapshot.version, DurableWebWorkflowRequest(WorkflowKind.RECONSTRUCT)))
             run = service.getAttempt(job.id, started.runId)
             path = "/workbench/api/v1/jobs/${job.id}/runs/${run.runId}/cancellation"
@@ -197,12 +214,23 @@ class WebCancellationControllerTest {
         val entered = java.util.concurrent.CountDownLatch(1)
         val release = java.util.concurrent.CountDownLatch(1)
         val signals = java.util.concurrent.atomic.AtomicInteger()
-        Fixture {
+        Fixture(seedAccepted = true) {
             entered.countDown()
             while (release.count != 0L) try { release.await() } catch (_: InterruptedException) { /* Test worker remains live until explicitly released. */ }
             if (!completes) throw InterruptedException("Owned fixture confirms cancellation exit")
             DurableWebWorkflowOutcome.Completed()
         }.use { f ->
+            val prior = assertNotNull(f.prior)
+            val reference = assertNotNull(prior.acceptedRevision)
+            val diagnostic = f.store.runReportsDirectory(f.job.id, prior.runId).resolve("diagnostic.txt")
+            val diagnosticBytes = diagnostic.readBytes()
+            fun preserved(snapshot: WorkflowJobSnapshot = f.snapshot()) {
+                assertEquals(reference, snapshot.acceptedRevision)
+                assertEquals(prior, snapshot.attempts.single { it.runId == prior.runId })
+                assertNull(snapshot.attempts.single { it.runId == f.run.runId }.acceptedRevision)
+                assertContentEquals(diagnosticBytes, diagnostic.readBytes())
+            }
+            preserved()
             val worker = object : Thread(f.pending.single(), "owned-http-cancellation-fixture") {
                 override fun interrupt() { signals.incrementAndGet(); super.interrupt() }
             }
@@ -231,6 +259,7 @@ class WebCancellationControllerTest {
                     assertEquals(JsonPrimitive("cancelling"), it.getValue("current").jsonObject["state"])
                 }
                 assertEquals(1, signals.get()); assertTrue(worker.isAlive)
+                preserved()
                 val waiting = policy(f.send(headers = mapOf("Cookie" to f.cookie)), false, "CANCELLATION_PENDING")
                 val pinned = f.service.setProgressRetentionPinned(f.job.id, f.run.runId, waiting.getValue("version").jsonPrimitive.content, true)
                 val pinnedBytes = f.root.resolve("${f.job.id}/workflow-state.json").readBytes()
@@ -243,6 +272,7 @@ class WebCancellationControllerTest {
                 val terminal = policy(f.send(headers = mapOf("Cookie" to f.cookie)), false, "ATTEMPT_TERMINAL")
                 assertEquals(JsonPrimitive(if (completes) "completed" else "cancelled"), terminal["state"])
                 assertEquals(JsonPrimitive("not-evaluated"), terminal["acceptance"])
+                preserved()
                 val next = assertIs<DurableWebWorkflowAdmission.Started>(f.service.startDurable(f.job.id, f.snapshot().version,
                     DurableWebWorkflowRequest(WorkflowKind.RECONSTRUCT)))
                 val beforeReplay = f.root.resolve("${f.job.id}/workflow-state.json").readBytes()
@@ -252,6 +282,11 @@ class WebCancellationControllerTest {
                 assertEquals(WorkflowRunState.QUEUED, f.service.getAttempt(f.job.id, next.runId).state)
                 assertEquals(1, signals.get())
                 assertContentEquals(beforeReplay, f.root.resolve("${f.job.id}/workflow-state.json").readBytes())
+                preserved()
+                f.service.close()
+                WorkflowAttemptStore.open(f.root).use { reopened ->
+                    preserved(assertIs<WorkflowJobInspection.Available>(reopened.recoverAfterRestart(f.job.id)).snapshot)
+                }
             } finally { release.countDown(); worker.join(5000); assertFalse(worker.isAlive) }
         }
     }

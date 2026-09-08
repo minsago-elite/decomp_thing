@@ -1,0 +1,24 @@
+{
+  "sourceCommit": "8930dc02",
+  "masterIncluded": "1c999572",
+  "verification": {
+    "tests": 15,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "files": {
+    "jvm-build.txt": "21d09136d321541f736ef2f6052ce1943959c917ad735d98a9ca19f894069bf4",
+    "http-tests.xml": "fab211d9db064cbadade5286ef520f71bfee2e88ea410318021a9c3ecba3f47a",
+    "service-tests.xml": "97b2c298f7e71735769d785350375faeecc8ef35d625114d209f9ac27c83ddb5"
+  },
+  "scope": [
+    "Both real-HTTP running cancellation outcomes preserve a synthetic prior accepted reference, original attempt and diagnostic bytes.",
+    "Preservation asserted during pending cancellation, after worker exit, after replay alongside a newer queued attempt and after service close/store reopen."
+  ],
+  "limits": [
+    "Trusted store fixture supplies the accepted reference; original acceptance attestation is not validated.",
+    "No production adapter/native workflow or running-worker browser qualification.",
+    "Test-only change; frontend/browser not rerun."
+  ]
+}
