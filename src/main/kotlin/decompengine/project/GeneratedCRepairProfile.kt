@@ -43,16 +43,42 @@ import kotlin.io.path.pathString
  * Adapter for generated C/Make projects. All C syntax, suffix, directory, build-evidence, and entry
  * symbol conventions live here rather than in the reusable repair/revision implementation.
  */
-object GeneratedCRepairIndexProfile : RepairIndexProfile {
-    override fun profileId(): String = GeneratedCMakeReconstructionProfile.PROFILE_ID
+object GeneratedCRepairIndexProfile : RepairIndexProfile by DescriptorGeneratedCRepairIndexProfile(
+    GeneratedCMakeReconstructionProfile.descriptor,
+) {
+    /** Index policy only; production runtime admission and qualification remain separate. */
+    fun forProfile(profile: ReconstructionProfile): RepairIndexProfile = DescriptorGeneratedCRepairIndexProfile(profile)
+}
 
-    // Version the repair interpretation separately from the reconstruction descriptor. Retained
-    // graphs with the historical ID-only fingerprint must not acquire new recovery semantics.
+private class DescriptorGeneratedCRepairIndexProfile(private val profile: ReconstructionProfile) : RepairIndexProfile {
+    private val buildDefinition = profile.layout.declaration("build-definition").materialize()
+    private val sharedInterface = profile.layout.declaration("shared-interface").materialize()
+    private val planRelative = profile.layout.declaration("module-plan-evidence").materialize()
+    private val modelRelative = profile.layout.declaration("program-model-evidence").materialize()
+
+    init {
+        ReconstructionAdapters.resolve(profile)
+        require(Path.of(buildDefinition).nameCount == 1) {
+            "generated-C repair indexing currently requires a root-level build definition"
+        }
+        require(profile.layout.declarations.filter { ProjectFileRole.BUILD_INPUT in it.roles }.all {
+            it.pathTemplate == buildDefinition || it.pathTemplate.startsWith("src/") || it.pathTemplate.startsWith("include/")
+        }) { "generated-C repair build inputs must use the supported source roots" }
+    }
+
+    override fun profileId(): String = profile.id
     private val configurationIdentity = sha256(
-        ("generated-c-repair-index-v2\n" + GeneratedCMakeReconstructionProfile.descriptor.sha256 + "\n")
-            .toByteArray(Charsets.UTF_8),
+        ("generated-c-repair-index-v3\n" + profile.sha256 + "\n").toByteArray(Charsets.UTF_8),
     )
     override fun configurationSha256(): String = configurationIdentity
+
+    private fun isEditable(path: String): Boolean {
+        val declarations = profile.layout.declarations.filter { it.matches(path) }
+        require(declarations.size <= 1) { "repair path has ambiguous profile declarations: $path" }
+        val declaration = declarations.singleOrNull() ?: return false
+        return ProjectFileRole.BUILD_INPUT in declaration.roles &&
+            ProjectFileRole.EDITABLE in declaration.roles && declaration.contentKind == ProjectContentKind.UTF8_TEXT
+    }
 
     override fun authorizesRecoveryLayout(
         sourcePaths: List<String>,
@@ -62,24 +88,22 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
         if (sourcePaths.isEmpty() || sourcePaths.size > budget.maximumSourceFiles) return false
         if (sourcePaths != sourcePaths.distinct().sorted() || editablePaths != editablePaths.distinct().sorted()) return false
         if (sourcePaths.any { path ->
-                path != MAKEFILE && !path.startsWith("src/") && !path.startsWith("include/") ||
+                path != buildDefinition && !path.startsWith("src/") && !path.startsWith("include/") ||
                     path.split('/').any { it.endsWith(".repair") }
             }) return false
-        return editablePaths == sourcePaths.filter { it == MAKEFILE || it.endsWith(".c") || it.endsWith(".h") }
+        return editablePaths == sourcePaths.filter { isEditable(it) }
     }
 
     override fun resolve(projectRoot: Path, budget: RepairResourceBudget): RepairIndexLayout {
         val sourcePaths = discoverSourcePaths(projectRoot, budget)
         val editable = sourcePaths.filterTo(TreeSet()) {
-            it == MAKEFILE || it.endsWith(".c") || it.endsWith(".h")
+            isEditable(it)
         }
         require(editable.isNotEmpty()) { "generated C project has no editable source inputs" }
-        val evidence = readIndexEvidence(projectRoot, sourcePaths.toSet(), editable, budget)
+        val evidence = readIndexEvidence(projectRoot, sourcePaths.toSet(), budget)
         val modules = evidence.modules.map { module ->
-            val sourceParent = Path.of(module.sourcePath).parent?.pathString?.replace('\\', '/').orEmpty()
-            val internal = listOf(
-                listOf(sourceParent, "${module.id}_internal.h").filter { it.isNotEmpty() }.joinToString("/"),
-            ).filter { it in sourcePaths }.sorted()
+            val internal = listOf(profile.layout.declaration("module-private-interface")
+                .materialize(mapOf("module" to module.id))).filter { it in sourcePaths }
             RepairModuleEvidence(
                 id = module.id,
                 ownedPaths = (listOf(module.sourcePath, module.headerPath) + internal)
@@ -119,7 +143,7 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
             "generated C module ownership does not exactly match program-model entities"
         }
         val explicitlyOwnedPaths = modules.flatMapTo(hashSetOf()) { it.ownedPaths }
-        val shared = listOf(MAKEFILE, TYPES_HEADER).filter { it in sourcePaths }.sorted()
+        val shared = listOf(buildDefinition, sharedInterface).filter { it in sourcePaths }.sorted()
         val sharedSet = shared.toHashSet()
         val fallbackModules = TreeMap<String, String>()
         sourcePaths.filter { it !in explicitlyOwnedPaths && it !in sharedSet }.forEach { path ->
@@ -140,7 +164,7 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
                 .distinct()
                 .sorted(),
             behaviorRootEntityIds = evidence.functions.filter {
-                it.name in setOf("_start", "decomp_engine_main", "entry", "main")
+                it.name in profile.adapterConfiguration.getValue("entry-symbol-candidates")
             }.map { it.id }.sorted(),
         )
     }
@@ -234,11 +258,8 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
     private fun readIndexEvidence(
         root: Path,
         sourcePaths: Set<String>,
-        editablePaths: Set<String>,
         budget: RepairResourceBudget,
     ): GeneratedCIndexEvidence {
-        val planRelative = "reports/module_plan.json"
-        val modelRelative = "reports/program_model.json"
         val planBytes = readOptionalEvidence(root, planRelative, budget.maximumIndexEvidenceBytes)
         val remaining = budget.maximumIndexEvidenceBytes - (planBytes?.size?.toLong() ?: 0L)
         val modelBytes = readOptionalEvidence(root, modelRelative, remaining)
@@ -417,11 +438,15 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
         }.also { parsed ->
             requireUniqueValues(parsed.map { it.id }, "generated C module IDs")
             parsed.forEach { module ->
-                require(module.sourcePath in sourcePaths && module.sourcePath in editablePaths) {
-                    "generated C module source is not an editable discovered input: ${module.sourcePath}"
+                require(module.sourcePath in sourcePaths &&
+                    module.sourcePath == profile.layout.declaration("module-implementation")
+                        .materialize(mapOf("module" to module.id))) {
+                    "generated C module source is not its declared discovered input: ${module.sourcePath}"
                 }
-                require(module.headerPath in sourcePaths) {
-                    "generated C module header is not a discovered input: ${module.headerPath}"
+                require(module.headerPath in sourcePaths &&
+                    module.headerPath == profile.layout.declaration("module-interface")
+                        .materialize(mapOf("module" to module.id))) {
+                    "generated C module header is not its declared discovered input: ${module.headerPath}"
                 }
             }
         }
@@ -666,13 +691,13 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
 
         openRepairRootDirectory(root).use { rootDescriptor ->
             val rootMount = rootDescriptor.identity.mountId
-            LinuxFilesystemSyscalls.openPathAtOrNull(rootDescriptor.fd, MAKEFILE)?.use { makefile ->
-                countEntry(MAKEFILE)
+            LinuxFilesystemSyscalls.openPathAtOrNull(rootDescriptor.fd, buildDefinition)?.use { makefile ->
+                countEntry(buildDefinition)
                 require(makefile.identity.isRegularFile && !makefile.identity.isSymbolicLink &&
                     makefile.identity.mountId == rootMount) {
-                    "generated C Makefile is not a regular contained file"
+                    "generated C build definition is not a regular contained file"
                 }
-                paths += MAKEFILE
+                paths += buildDefinition
             }
             listOf("include", "src").forEach { directoryName ->
                 val authorized = LinuxFilesystemSyscalls.openPathAtOrNull(rootDescriptor.fd, directoryName)
@@ -754,13 +779,11 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
         return value
     }
 
-    private const val LEGACY_PLAN_SCHEMA_VERSION = 1
-    private const val PLAN_SCHEMA_VERSION = 2
-    private const val BUILD_CONTRACT_SCHEMA_VERSION = 2
-    private const val MAXIMUM_EVIDENCE_IDENTIFIER_CHARACTERS = 4_096
-    private const val MAXIMUM_EVIDENCE_TEXT_CHARACTERS = 16 * 1024 * 1024
-    private const val MAKEFILE = "Makefile"
-    private const val TYPES_HEADER = "include/decomp_types.h"
+    private val LEGACY_PLAN_SCHEMA_VERSION = 1
+    private val PLAN_SCHEMA_VERSION = 2
+    private val BUILD_CONTRACT_SCHEMA_VERSION = 2
+    private val MAXIMUM_EVIDENCE_IDENTIFIER_CHARACTERS = 4_096
+    private val MAXIMUM_EVIDENCE_TEXT_CHARACTERS = 16 * 1024 * 1024
     private val SHARED_BUILD_OWNERS = setOf("link", "project")
     private val PLAN_ROOT_KEYS = setOf("schemaVersion", "modules", "dependencyCycles")
     private val LEGACY_PLAN_MODULE_KEYS = setOf(
