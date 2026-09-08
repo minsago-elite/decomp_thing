@@ -12,7 +12,7 @@ import decompengine.mvp.BinaryRunnerService
 import decompengine.acp.AcpHarnessFactory
 import decompengine.acp.AcpPreflightWorkflow
 import decompengine.project.GeneratedCMakeReconstructionProfile
-import decompengine.project.GeneratedCNinjaReconstructionProfile
+import decompengine.project.ReconstructionProfiles
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.EvidenceModuleReconstructor
@@ -82,10 +82,10 @@ private fun runReconstruct(args: List<String>) {
             }
             "--profile" -> {
                 if (index + 1 >= args.size) reconstructUsageError("--profile requires a registered profile ID")
-                profile = when (args[index + 1]) {
-                    GeneratedCMakeReconstructionProfile.PROFILE_ID -> GeneratedCMakeReconstructionProfile.descriptor
-                    GeneratedCNinjaReconstructionProfile.PROFILE_ID -> GeneratedCNinjaReconstructionProfile.descriptor
-                    else -> reconstructUsageError("unsupported reconstruction profile: ${args[index + 1]}")
+                profile = try {
+                    ReconstructionProfiles.named(args[index + 1])
+                } catch (failure: IllegalArgumentException) {
+                    reconstructUsageError(failure.message ?: "unsupported reconstruction profile")
                 }
                 index += 2
             }

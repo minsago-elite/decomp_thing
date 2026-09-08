@@ -22,7 +22,7 @@ import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.EvidenceModuleReconstructor
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.project.ModuleReconstructor
-import decompengine.project.GeneratedCMakeReconstructionProfile
+import decompengine.project.ReconstructionProfiles
 import decompengine.project.ReconstructionProfile
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -170,7 +170,7 @@ class UploadServer(
     private val analyzer: JobAnalyzer = AutomaticJobAnalyzer(),
     private val reconstructor: JobReconstructor = SourceTreeJobReconstructor(),
     executor: Executor? = null,
-    sourceProfiles: List<ReconstructionProfile> = listOf(GeneratedCMakeReconstructionProfile.descriptor),
+    sourceProfiles: List<ReconstructionProfile> = ReconstructionProfiles.builtIn,
     sensitiveValues: Collection<String> = System.getenv().values,
     listenBacklog: Int = 64,
 ) {
