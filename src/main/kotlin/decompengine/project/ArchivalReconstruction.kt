@@ -18,7 +18,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.io.path.createDirectories
 import kotlin.io.path.pathString
-import kotlin.io.path.readText
 import kotlin.io.path.writeBytes
 import kotlin.io.path.writeText
 
@@ -300,7 +299,11 @@ class GhidraHeadlessProgramModelAnalyzer internal constructor(
 
         fun bundled(
             profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
-        ): GhidraHeadlessProgramModelAnalyzer = GhidraHeadlessProgramModelAnalyzer(GhidraProgramModelExportLimits.from(profile))
+            hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+        ): GhidraHeadlessProgramModelAnalyzer {
+            hostSafetyLimits.requireAllows(profile.budgets)
+            return GhidraHeadlessProgramModelAnalyzer(GhidraProgramModelExportLimits.from(profile))
+        }
     }
 }
 
@@ -325,7 +328,7 @@ class ArchivalReconstructionService(
     private val analyzer: ProgramModelAnalyzer,
     private val reconstructor: ModuleReconstructor? = null,
     private val profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
-    hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits(profile.budgets),
+    hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
     private val progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
 ) {
     init {
@@ -335,7 +338,11 @@ class ArchivalReconstructionService(
     private val adapter = ReconstructionAdapters.resolve(profile)
 
     fun reconstruct(binaryPath: Path, outputDir: Path): ArchivalReconstructionResult {
+        if (Thread.interrupted()) throw InterruptedException("archival reconstruction cancelled")
         outputDir.createDirectories()
+        val observedBehavior = ReconstructionExplorationInput.read(
+            outputDir, profile.budgets.reconstructionMaximumContextCharacters,
+        )
         progress.phase(AgentWorkflowPhase.ANALYZING)
         val model = analyzer.analyze(binaryPath, outputDir.resolve("analysis"))
         val project = outputDir.resolve("source-tree")
@@ -343,7 +350,6 @@ class ArchivalReconstructionService(
         progressPath.writeText("{\"phase\":\"planning\",\"completed\":0,\"total\":0}\n")
         progress.phase(AgentWorkflowPhase.PLANNING)
         var moduleTotal = 0
-        val observedBehavior = outputDir.resolve("exploration.json").takeIf { Files.isRegularFile(it) }?.readText()
         val planner = DeterministicModulePlanner(
             maximumFunctionsPerModule = profile.budgets.maximumFunctionsPerModule,
             layout = profile.layout,
@@ -375,9 +381,13 @@ class ArchivalReconstructionService(
             ),
             profile,
         )
-        progressPath.writeText("{\"phase\":\"complete\",\"completed\":$moduleTotal,\"total\":$moduleTotal}\n")
-        progress.phase(if (build.returnCode == 0) AgentWorkflowPhase.COMPLETED
-            else AgentWorkflowPhase.UNRESOLVED)
+        val unresolvedEntities = requireNotNull(bundle.audit).unresolvedEntityIds
+        val implementationStatus = if (unresolvedEntities.isEmpty()) "complete" else "unresolved"
+        progressPath.writeText(
+            "{\"phase\":\"$implementationStatus\",\"completed\":$moduleTotal,\"total\":$moduleTotal," +
+                "\"unresolvedEntityCount\":${unresolvedEntities.size}}\n",
+        )
+        progress.phase(if (unresolvedEntities.isEmpty()) AgentWorkflowPhase.COMPLETED else AgentWorkflowPhase.UNRESOLVED)
         outputDir.resolve("reconstruction.json").writeText(
             """
             {
@@ -387,11 +397,13 @@ class ArchivalReconstructionService(
               "archiveSha256": "${bundle.archiveSha256}",
               "profileId": "${profile.id}",
               "profileSha256": "${profile.sha256}",
-              "moduleCount": ${planner.plan(model).modules.size},
+              "moduleCount": $moduleTotal,
               "functionCount": ${model.functions.size},
               "globalCount": ${model.globals.size},
               "typeCount": ${model.types.size},
-              "buildExitCode": ${build.returnCode}
+              "buildExitCode": ${build.returnCode},
+              "implementationStatus": "$implementationStatus",
+              "unresolvedEntityCount": ${unresolvedEntities.size}
             }
             """.trimIndent() + "\n",
         )

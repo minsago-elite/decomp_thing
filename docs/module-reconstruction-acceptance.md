@@ -184,3 +184,64 @@ the plan to `reports/planning/modules.json`, compares planned IDs with build own
 and requires identical build contracts after archive extraction and rebuilding.
 This covers build ownership; the separate generated-C repair index still has
 its own default report-path assumptions.
+
+The archival reconstruction service derives its final implementation status from
+the audit produced during packaging. A successful build with any audited unresolved
+entity ends with the `UNRESOLVED` progress phase; its progress file uses `unresolved`.
+`reconstruction.json` records `implementationStatus` and `unresolvedEntityCount`
+alongside the independent build exit code. When the audited unresolved inventory is
+empty, the local implementation workflow uses `complete` / `COMPLETED`. This status
+does not assert calibrated recovery accuracy, behavior equivalence, production
+containment or release eligibility. Archives remain available for unresolved trees.
+
+The packager returns the audit with its bundle result so the service uses the same
+assessment without repeating the audit or reparsing its report. The service also
+uses the module count observed during generation rather than planning a second time
+for its final summary. Focused Make/Ninja service tests cover a buildable placeholder
+tree remaining unresolved and an accepted authored implementation reaching local
+completion, including the persisted summary and progress fields.
+
+`ArchivalReconstructionService` and the bundled model-analyzer factory default to
+`ReconstructionHostSafetyLimits.DEFAULT`, an independent immutable host policy.
+The service no longer copies the requested profile's budgets into its own admission
+ceiling. The default limits cover export time/memory, planner work and cardinality,
+module/context size, build time/output and archive inventory/bytes; their initial
+values admit both built-in profiles without changing either descriptor digest.
+Requests exceeding a default ceiling are rejected before analysis or reconstruction.
+
+A JVM host that explicitly authorizes different limits can pass the same
+`ReconstructionHostSafetyLimits` to `GhidraHeadlessProgramModelAnalyzer.bundled`
+and `ArchivalReconstructionService`. This leaves requested budgets and profile
+identity unchanged rather than silently clamping them. The admission test checks
+an increased context request, both default entry points, unchanged identities and
+explicit host authorization. Individual phases still need their own measured
+resource enforcement; admission alone does not prove complete phase budgeting.
+
+Optional `exploration.json` is checked before analysis starts. The service reads a
+stable regular file under a byte bound of the smaller of 16 MiB and four times the
+profile's reconstruction context character limit, decodes strict UTF-8, then checks
+the decoded string length against that character limit. It rejects excessive or
+malformed input rather than truncating it or loading an unbounded report. Missing
+exploration input remains optional, and admitted text is forwarded unchanged.
+This text is prompt context; it does not authenticate behavioral claims or create
+measured behavior evidence. Complete module prompts retain their separate budget
+check after interfaces and other context are assembled.
+
+The service tests verify Unicode context forwarding and rejection of character
+excess, byte excess and malformed UTF-8 before analyzer invocation, source-tree
+creation or progress publication. Prelaunch cancellation is also checked before
+creating the reconstruction output directory.
+
+Generated-C module objectives and recovered function/global prompt formatting now
+belong to `GeneratedCModulePrompt`, selected through `ReconstructionAdapter`.
+Make and Ninja share that C-specific implementation. `BoundedLlmModuleReconstructor`
+retains the workflow-owned target/role checks, context-size gate, workspace rules,
+receipt capture, exact-change validation and rollback. Moving prompt formatting does
+not grant the adapter acceptance or filesystem authority.
+
+`ModulePromptCompatibilityTest` records an authored prompt from the pre-extraction
+production path and verifies its unchanged 5,515-character length and SHA-256 for
+both built-in profiles. Its deliberately oversized context is rejected before any
+agent invocation. This is prompt-byte and budget-gate compatibility evidence, not a
+live ACP interoperability result. Legacy request field names and the remaining
+profile-budget/neutrality migration are separate work.
