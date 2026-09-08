@@ -4423,7 +4423,7 @@ private class TrustedObservationBoundary(
                 mount.source.resolve(mount.destination.relativize(input)) == input
             }
         }
-        requireSyntheticMountPlan(mounts, mountedInputs, writableRoot)
+        requireSyntheticMountPlan(mounts, mountedInputs, runDirectory)
         mounts.forEachIndexed { index, mount ->
             require(!pathsOverlap(mount.source, writableRoot)) { "contained command runtime source overlaps writable output" }
             require(mounts.drop(index + 1).none { pathsOverlap(mount.destination, it.destination) }) {
