@@ -508,6 +508,45 @@ class BehaviorEvidenceTest {
     }
 
     @Test
+    fun `valid foreign revision report alongside a passing report remains unresolved`() {
+        val fixture = fixture()
+        val current = fixture.evaluate()
+        val foreign = fixture()
+        val foreignReport = foreign.evaluate()
+        val foreignRecord = BehaviorEvidence.decode(foreignReport.reportPath.readBytes())
+        val foreignRevision = foreignRecord.getValue("projectRevision").jsonObject
+        val alteredSourceInputs = JsonArray(foreignRevision.getValue("sourceInputs").jsonArray.mapIndexed { index, element ->
+            if (index != 0) element else JsonObject(element.jsonObject + mapOf(
+                "bytes" to JsonPrimitive(0),
+                "sha256" to JsonPrimitive("0".repeat(64)),
+            ))
+        })
+        val sourceRevision = OracleArtifacts.sha256(alteredSourceInputs.joinToString("") { element ->
+            val input = element.jsonObject
+            "${input.string("path").length}:${input.string("path")}:${input.count("bytes")}:${input.string("sha256")}\n"
+        }.toByteArray(Charsets.UTF_8))
+        val alteredRevision = JsonObject(foreignRevision + mapOf(
+            "sourceInputs" to alteredSourceInputs,
+            "sourceRevisionSha256" to JsonPrimitive(sourceRevision),
+        ))
+        val alteredRecord = JsonObject(foreignRecord + ("projectRevision" to alteredRevision))
+        val rehashed = JsonObject(alteredRecord + ("reportSha256" to JsonPrimitive(
+            OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(alteredRecord - "reportSha256"))),
+        )))
+        val foreignPath = fixture.project.resolve("reports/foreign.behavior.json")
+        Files.write(foreignPath, OracleJson.canonicalBytes(rehashed))
+        BehaviorEvidence.decode(foreignPath.readBytes())
+
+        val audit = ArchivalProjectAuditor.audit(fixture.project)
+        assertEquals(2, audit.behaviorReportCount)
+        assertEquals(null, audit.behaviorMatched)
+        assertTrue("reports/foreign.behavior.json" in audit.behaviorEvidenceProblems)
+        assertTrue("reports/foreign.behavior.json" in audit.unresolvedBehaviorReportIds)
+        assertEquals(listOf("reports/${current.reportPath.fileName}"), audit.projectBehaviorReportIds)
+        assertFalse(audit.sandboxReported)
+    }
+
+    @Test
     fun `rehashed flags corpus and unknown fields are rejected independently of the self hash`() {
         val fixture = fixture()
         val report = fixture.evaluate()
