@@ -48,6 +48,40 @@ class ArchivalReconstructionTest {
     }
 
     @Test
+    fun `service archives declared report paths and rebuilds the extracted project`() {
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val relocated = mapOf(
+            "program-model-evidence" to "reports/inputs/model.json",
+            "confidence-evidence" to "reports/assessment/confidence.json",
+            "toolchain-evidence" to "reports/environment/tools.json",
+            "unresolved-evidence" to "reports/assessment/unresolved.md",
+        )
+        val layout = ProjectLayoutProfile(base.layout.schemaVersion, base.layout.declarations.map { declaration ->
+            ProjectFileDeclaration(declaration.id, relocated[declaration.id] ?: declaration.pathTemplate,
+                declaration.roles, declaration.contentKind)
+        })
+        val profile = ReconstructionProfile(base.schemaVersion, base.id, layout, base.budgets, base.adapterConfiguration)
+        val temp = createTempDirectory("declared-archive-reports-")
+        val input = temp.resolve("input.bin").also { it.writeBytes(byteArrayOf(4, 5, 6)) }
+        val analyzer = ProgramModelAnalyzer { _, _ -> RecoveredProgramModel(
+            inputSha256 = sha256(input.toFile().readBytes()),
+            functions = listOf(RecoveredFunction("fn_1000", "decomp_engine_main", 0x1000UL, "int decomp_engine_main(void)")),
+        ) }
+        val result = ArchivalReconstructionService(analyzer, profile = profile).reconstruct(input, temp.resolve("result"))
+        for ((id, path) in relocated) {
+            assertTrue(result.projectDir.resolve(path).exists(), id)
+            assertFalse(result.projectDir.resolve(base.layout.declaration(id).materialize()).exists(), id)
+        }
+        val extracted = temp.resolve("extracted")
+        ArchivalBundleVerifier.extractAndVerifySnapshot(result.bundle.archivePath.toFile().readBytes(), extracted,
+            ArchivalBundleLimits(), profile, 2048)
+        for (path in relocated.values) assertEquals(result.projectDir.resolve(path).readText(), extracted.resolve(path).readText())
+        assertEquals(0, ReconstructionAdapters.resolve(profile).build(extracted, profile).returnCode)
+        assertEquals(ArchivalProjectAuditor.audit(result.projectDir, profile).toJson(),
+            ArchivalProjectAuditor.audit(extracted, profile).toJson())
+    }
+
+    @Test
     fun `service rejects unsupported profiles before analysis or output writes`() {
         val base = GeneratedCMakeReconstructionProfile.descriptor
         val profile = ReconstructionProfile(base.schemaVersion, "unsupported-service-v1", base.layout,

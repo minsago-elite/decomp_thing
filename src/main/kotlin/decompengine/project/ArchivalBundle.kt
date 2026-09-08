@@ -89,7 +89,7 @@ object ArchivalPackager {
         require(!Files.isSymbolicLink(archivePath) && !Files.isSymbolicLink(archiveDestination)) {
             "archive output must not be a symbolic link: $archivePath"
         }
-        archiveBuild.validate(projectDir, requireArtifact = true)
+        archiveBuild.validate(projectDir, profile, requireArtifact = true)
         val audit = ArchivalProjectAuditor.audit(projectDir, profile, requiredCorpora)
         require(audit.provenanceComplete) { "archive project has incomplete model or source provenance" }
         require(requiredCorpora.isEmpty() || audit.behaviorMatched == true) {
@@ -354,12 +354,13 @@ object ArchivalBundleVerifier {
                 require(digestFile(staging.resolve(relative)) == hash) { "archive payload hash mismatch: $relative" }
             }
             if (strictControlJson) {
-                for (relative in listOf("source_tree_manifest.json", "reports/build_contract.json", "reports/program_model.json")) {
+                for (relative in listOf("source_tree_manifest.json", "reports/build_contract.json",
+                    profile.layout.declaration("program-model-evidence").materialize())) {
                     val snapshot = decompengine.repair.readStableRegularFile(staging, relative, 4L * 1024 * 1024)
                     decompengine.oracle.core.OracleJson.parse(snapshot.bytes)
                 }
             }
-            ReconstructionAdapters.resolve(profile).archiveBuild.validate(staging, requireArtifact = false)
+            ReconstructionAdapters.resolve(profile).archiveBuild.validate(staging, profile, requireArtifact = false)
             val payload = expected.map { (relative, hash) ->
                 val path = staging.resolve(relative)
                 ArchivePayload(relative, path, Files.size(path), hash, 0)
@@ -400,7 +401,7 @@ private fun validateSourceManifest(
     expectedProfile: ReconstructionProfile,
 ): VerifiedCandidateArchiveSourceLineage {
     val archiveBuild = ReconstructionAdapters.resolve(expectedProfile).archiveBuild
-    archiveBuild.requiredPaths.forEach { relative ->
+    archiveBuild.requiredPaths(expectedProfile).forEach { relative ->
         require(relative in payload) {
             "archive payload is missing required evidence: $relative"
         }
@@ -410,7 +411,8 @@ private fun validateSourceManifest(
     require(oracleSha256.matches(Regex("[a-f0-9]{64}"))) {
         "source tree manifest has an invalid oracle SHA-256"
     }
-    val modelOracleSha256 = Json.parseToJsonElement(projectDir.resolve("reports/program_model.json").readText())
+    val modelPath = expectedProfile.layout.declaration("program-model-evidence").materialize()
+    val modelOracleSha256 = Json.parseToJsonElement(projectDir.resolve(modelPath).readText())
         .jsonObject["inputSha256"]?.jsonPrimitive?.contentOrNull
         ?: error("program model is missing its oracle identity")
     require(modelOracleSha256 == oracleSha256) {

@@ -157,3 +157,12 @@ retained source-bound contract without requiring the omitted binary artifact.
 Shared ZIP/path/hash checks and authenticated ACP lineage verification remain in
 the archive layer. Model/report path assumptions and other archive consumers still
 require migration before alternate-profile support is complete.
+
+Archive model reads and strict control-JSON checks use the profile's declared
+`program-model-evidence` path. Required generation reports likewise resolve their
+layout declarations rather than assuming the default filenames. The service
+regression relocates model, confidence, toolchain and unresolved reports, requires
+that the old paths are absent, then performs strict extraction, clean rebuilding
+and audit comparison. This proves those report paths are selectable within the
+generated-C/Make profile; source/build layout and alternate-language support remain
+separate requirements.
