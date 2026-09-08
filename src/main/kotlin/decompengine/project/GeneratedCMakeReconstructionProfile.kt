@@ -89,6 +89,15 @@ object GeneratedCMakeReconstructionProfile {
         ),
     )
 
+    internal fun supports(profile: ReconstructionProfile): Boolean {
+        val configuration = profile.adapterConfiguration
+        val isBenchmarkVariant = profile.id.startsWith("$PROFILE_ID-") &&
+            configuration["benchmark-profile-id"]?.singleOrNull() != null
+        return (profile.id == PROFILE_ID || profile.id == "audit-role-fixture-v1" || isBenchmarkVariant) &&
+            configuration["build-system"] == descriptor.adapterConfiguration["build-system"] &&
+            configuration["source-language"] == descriptor.adapterConfiguration["source-language"]
+    }
+
     private fun textFile(
         id: String,
         pathTemplate: String,
