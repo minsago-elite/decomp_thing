@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "kind": "gcc-driver-authenticated-receipt-slice-v1",
+  "issue": 696,
+  "recordedAtUtc": "2026-09-08T13:51:11Z",
+  "sourceBaseCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "status": "unresolved",
+  "scope": "Checked repository evidence and acceptance contract only; no production reconstruction run was performed.",
+  "oracle": {
+    "id": "gcc-driver-16.2.0",
+    "sourceRevision": "78d4ac73dd391005b895a6148cd9831e28e1208b",
+    "sourceLockPath": "oracle/gcc/16.2.0/source-lock.json",
+    "sourceLockSha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc",
+    "artifactManifestPath": "oracle/gcc/16.2.0/oracle-manifest.json",
+    "artifactManifestSha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9",
+    "functionRecoveryOraclePath": "oracle/gcc/16.2.0/function-recovery-oracle.json",
+    "functionRecoveryOracleSha256": "b49b8a72a96580bd8727d9dc530753f40f78185a656f472ebe83a7a1f6fc9aae",
+    "functionEntityCount": 12844,
+    "globalEntityCount": null,
+    "moduleCount": null
+  },
+  "acceptanceContract": {
+    "entityAccounting": {
+      "status": "unavailable",
+      "required": "Account for every planner-owned function and global exactly once.",
+      "observed": "The checked function-recovery oracle contains function entities, but no authenticated planner-owned function/global/module plan is checked in."
+    },
+    "receiptInventory": {
+      "status": "unavailable",
+      "required": "One bounded per-module receipt row, with accepted or unresolved status for each owned entity.",
+      "path": null,
+      "moduleRowCount": null,
+      "entityRowCount": null,
+      "acceptedEntityCount": null,
+      "unresolvedEntityCount": null
+    },
+    "productionRun": {
+      "status": "unavailable",
+      "runIdentity": null,
+      "reconstructionAgentIdentity": null,
+      "authenticatedReceiptCommitment": null
+    }
+  },
+  "productionGates": [
+    {
+      "gate": "complete-authenticated-driver-plan",
+      "status": "unavailable",
+      "reason": "No checked-in authenticated planner output binds the complete function/global/module population."
+    },
+    {
+      "gate": "configured-authenticated-reconstruction-agent-run",
+      "status": "unavailable",
+      "reason": "The repository contains no production run identity or authenticated agent result for the complete GCC driver."
+    },
+    {
+      "gate": "bounded-per-module-acceptance-receipts",
+      "status": "unavailable",
+      "reason": "No production receipt inventory exists from which accepted or unresolved entity outcomes can be accounted."
+    },
+    {
+      "gate": "complete-driver-interruption-resume-proof",
+      "status": "unavailable",
+      "reason": "No complete-driver production interruption/resume run or unchanged accepted-hash evidence is checked in."
+    },
+    {
+      "gate": "clean-build-and-release-qualification",
+      "status": "unavailable",
+      "reason": "The authenticated oracle pair is an input boundary; it does not establish a reconstructed source tree, clean rebuild, behavior fidelity, or release eligibility."
+    }
+  ],
+  "boundaryRules": {
+    "bundledGhidra": "Production analysis must use the application-bundled Ghidra Java APIs and isolated worker; GHIDRA_HOME and external analyzeHeadless installations are not evidence.",
+    "authenticatedOracle": "The source lock and oracle artifacts are read-only authenticated inputs. Reconstructed output and agent text do not inherit oracle provenance.",
+    "unresolvedEntities": "Missing plan, run, receipt, or acceptance evidence remains unresolved; no entity is accepted by inference from the oracle inventory."
+  }
+}
