@@ -26,11 +26,13 @@ class GeneratedCToolchainEvidenceTest {
         val base = GeneratedCMakeReconstructionProfile.descriptor
         val profile = ReconstructionProfile(base.schemaVersion, base.id, base.layout, base.budgets,
             base.adapterConfiguration +
-            ("compiler-driver" to listOf("/usr/bin/printf")))
+            ("compiler-driver" to listOf("/usr/bin/printf")) +
+            ("build-executable" to listOf("/usr/bin/printf")))
         val report = Json.parseToJsonElement(GeneratedCToolchainEvidence.render(profile)).jsonObject
         assertEquals("/usr/bin/printf", report.getValue("compilerCommand").jsonPrimitive.content)
         assertTrue(report.getValue("compilerVersion").jsonPrimitive.content.startsWith("printf"))
-        assertTrue(report.getValue("make").jsonPrimitive.content.startsWith("GNU Make"))
+        assertEquals("/usr/bin/printf", report.getValue("buildCommand").jsonPrimitive.content)
+        assertTrue(report.getValue("buildVersion").jsonPrimitive.content.startsWith("printf"))
     }
 
     @Test

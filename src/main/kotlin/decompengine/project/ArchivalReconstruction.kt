@@ -269,7 +269,7 @@ data class ArchivalReconstructionResult(
 
 class ArchivalReconstructionService(
     private val analyzer: ProgramModelAnalyzer,
-    private val reconstructor: ModuleReconstructor = EvidenceModuleReconstructor(),
+    private val reconstructor: ModuleReconstructor? = null,
     private val profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
     hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits(profile.budgets),
     private val progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
@@ -277,6 +277,8 @@ class ArchivalReconstructionService(
     init {
         hostSafetyLimits.requireAllows(profile.budgets)
     }
+
+    private val adapter = ReconstructionAdapters.resolve(profile)
 
     fun reconstruct(binaryPath: Path, outputDir: Path): ArchivalReconstructionResult {
         outputDir.createDirectories()
@@ -308,16 +310,7 @@ class ArchivalReconstructionService(
             progressPath.writeText("{\"phase\":\"modules\",\"completed\":$completed,\"total\":$total,\"module\":\"$module\"}\n")
         }
         progress.phase(AgentWorkflowPhase.BUILD_VALIDATING)
-        val build = MakeProjectBuilder.build(
-            project,
-            ProjectBuildConfiguration(
-                makeExecutable = profile.adapterConfiguration["build-executable"]?.singleOrNull() ?: "make",
-                compilerExecutable = profile.adapterConfiguration["compiler-driver"]?.singleOrNull() ?: "gcc",
-                cFlags = profile.adapterConfiguration["compiler-flags"] ?: ProjectBuildConfiguration().cFlags,
-                wallClockTimeoutMillis = profile.budgets.buildWallClockMillis,
-                maximumOutputBytes = profile.budgets.buildMaximumOutputBytes,
-            ),
-        )
+        val build = adapter.build(project, profile)
         val bundle = ArchivalPackager.create(
             project,
             outputDir.resolve("source-tree.zip"),
