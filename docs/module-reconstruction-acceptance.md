@@ -103,3 +103,12 @@ by the existing build-process cleanup. Failed, oversized, timed-out or invalid
 UTF-8 observations are reported as `unavailable`; caller cancellation propagates.
 `compilerCommand` and `compilerVersion` replace the historical hardcoded `gcc`
 field. These local version strings do not authenticate executable identity.
+
+`GeneratedCProjectRendering` owns shared, public and private C interfaces and the
+GNU Make build definition. It indexes model functions/globals and computes
+cross-module call visibility once per plan, then renders each module's declared
+entities in plan order. `GeneratedCDeclarations` holds the existing C declaration
+normalization policy. This extraction preserves current generated-C semantics;
+entrypoint rendering, candidate validation and full alternate-profile routing
+remain separate migration work under #84. Declaration normalization does not
+establish recovered ABI accuracy.

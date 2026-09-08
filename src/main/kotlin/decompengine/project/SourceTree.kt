@@ -638,12 +638,13 @@ object SourceTreeGenerator {
         onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
     ): SourceTreeManifest {
         val plan = planner.plan(model, overrides)
-        val typesHeader = renderTypesHeader(model)
+        val rendering = GeneratedCProjectRendering(model, plan)
+        val typesHeader = rendering.renderTypesHeader()
         val typesHeaderPath = profile.layout.declaration("shared-interface").materialize()
         val typesHeaderFile = projectDir.resolve(typesHeaderPath)
         typesHeaderFile.parent.createDirectories()
         typesHeaderFile.writeText(typesHeader)
-        val headers = plan.modules.associate { module -> module.id to renderModuleHeader(module, model, plan) }
+        val headers = plan.modules.associate { module -> module.id to rendering.renderModuleHeader(module) }
         val moduleById = plan.modules.associateBy { it.id }
         val functionById = model.functions.associateBy { it.id }
         val functionOwners = plan.modules.flatMap { module -> module.functionIds.map { it to module.id } }.toMap()
@@ -656,7 +657,7 @@ object SourceTreeGenerator {
         }
         val headerHashes = headers.mapValues { sha256(it.value.toByteArray()) }
         val interfaceFingerprints = moduleInterfaceFingerprints(dependenciesByModule, headerHashes)
-        val privateHeaders = plan.modules.associate { module -> module.id to renderPrivateHeader(module, model, plan) }
+        val privateHeaders = plan.modules.associate { module -> module.id to rendering.renderPrivateHeader(module) }
         headers.forEach { (id, content) ->
             val path = profile.layout.declaration("module-interface").materialize(mapOf("module" to id))
             val file = projectDir.resolve(path)
@@ -988,7 +989,7 @@ object SourceTreeGenerator {
                 false
             }
         }.map { it.path }.sorted()
-        val makefile = renderMakefile(sourcePaths, profile)
+        val makefile = rendering.renderMakefile(sourcePaths, profile)
         val makefilePath = profile.layout.declaration("build-definition").materialize()
         val makefileFile = projectDir.resolve(makefilePath)
         makefileFile.parent.createDirectories()
@@ -1025,80 +1026,6 @@ object SourceTreeGenerator {
         )
         projectDir.resolve("source_tree_manifest.json").writeText(manifest.toJson())
         return manifest
-    }
-
-    private fun renderTypesHeader(model: RecoveredProgramModel): String = buildString {
-        append("#ifndef DECOMP_TYPES_H\n#define DECOMP_TYPES_H\n\n#include <stddef.h>\n#include <stdint.h>\n\n")
-        model.types.sortedBy { it.id }.forEach { type ->
-            append("/* ${type.id}; status=${type.status.name.lowercase()}")
-            type.sourceAddress?.let { append("; @ 0x${it.toString(16)}") }
-            append(" */\n").append(type.declaration.trim()).append("\n\n")
-        }
-        append("#endif\n")
-    }
-
-    private fun renderModuleHeader(module: PlannedModule, model: RecoveredProgramModel, plan: ModulePlan): String = buildString {
-        val guard = "DECOMP_MODULE_${module.id.uppercase()}_H"
-        append("#ifndef $guard\n#define $guard\n\n#include \"decomp_types.h\"\n\n")
-        module.globalIds.map { id -> model.globals.single { it.id == id } }.forEach { global ->
-            append(globalDeclaration(global, external = true)).append(" /* ${global.id} @ 0x${global.address.toString(16)} */\n")
-        }
-        if (module.globalIds.isNotEmpty()) append('\n')
-        val owner = plan.modules.flatMap { candidate -> candidate.functionIds.map { it to candidate.id } }.toMap()
-        val externallyCalled = model.functions.flatMap { caller -> caller.calls.filter { called -> owner[called] != owner[caller.id] } }.toSet()
-        module.functionIds.map { id -> model.functions.single { it.id == id } }
-            .filter { it.id in externallyCalled || safeCName(it.name) in setOf("main", "decomp_engine_main") }
-            .forEach { function ->
-            append(normalizedPrototype(function)).append("; /* ${function.id} @ 0x${function.address.toString(16)} */\n")
-        }
-        append("\n#endif\n")
-    }
-
-    private fun renderPrivateHeader(module: PlannedModule, model: RecoveredProgramModel, plan: ModulePlan): String = buildString {
-        val guard = "DECOMP_MODULE_${module.id.uppercase()}_INTERNAL_H"
-        val owner = plan.modules.flatMap { candidate -> candidate.functionIds.map { it to candidate.id } }.toMap()
-        val externallyCalled = model.functions.flatMap { caller -> caller.calls.filter { called -> owner[called] != owner[caller.id] } }.toSet()
-        append("#ifndef $guard\n#define $guard\n\n#include \"modules/${module.id}.h\"\n\n")
-        module.functionIds.map { id -> model.functions.single { it.id == id } }
-            .filterNot { it.id in externallyCalled || safeCName(it.name) in setOf("main", "decomp_engine_main") }
-            .forEach { function -> append(normalizedPrototype(function)).append("; /* private ${function.id} @ 0x${function.address.toString(16)} */\n") }
-        append("\n#endif\n")
-    }
-
-    private fun renderMakefile(sources: List<String>, profile: ReconstructionProfile): String {
-        val cflags = profile.adapterConfiguration["compiler-flags"]?.joinToString(" ")
-            ?: "-std=c11 -g -Wall -Wextra -Werror -Iinclude"
-        val cc = profile.adapterConfiguration["compiler-driver"]?.firstOrNull() ?: "gcc"
-        return listOf(
-            "CC ?= $cc",
-            "CFLAGS ?= $cflags",
-        "REPRODUCIBLE_CFLAGS := \"-ffile-prefix-map=${'$'}${'$'}PWD=.\" \"-fdebug-prefix-map=${'$'}${'$'}PWD=.\" \"-fmacro-prefix-map=${'$'}${'$'}PWD=.\"",
-        "TARGET ?= build/reconstructed",
-        "SOURCES := ${sources.joinToString(" ")}",
-        "ACTUAL_SOURCES := ${'$'}(sort ${'$'}(shell find src -type f -name '*.c'))",
-        "EXPECTED_SOURCES := ${'$'}(sort ${'$'}(SOURCES))",
-        "ifneq (${'$'}(ACTUAL_SOURCES),${'$'}(EXPECTED_SOURCES))",
-        "${'$'}(error source tree contains missing or unowned C files; expected '${'$'}(EXPECTED_SOURCES)', found '${'$'}(ACTUAL_SOURCES)')",
-        "endif",
-        "OBJECTS := ${'$'}(SOURCES:src/%.c=build/%.o)",
-        "",
-        "all: ${'$'}(TARGET)",
-        "",
-        "${'$'}(TARGET): ${'$'}(OBJECTS)",
-        "\t@echo \"[link] ${'$'}@\"",
-        "\t@${'$'}(CC) ${'$'}(CFLAGS) ${'$'}(REPRODUCIBLE_CFLAGS) ${'$'}(OBJECTS) -o ${'$'}@",
-        "",
-        "build/%.o: src/%.c",
-        "\t@mkdir -p ${'$'}(dir ${'$'}@)",
-        "\t@echo \"[compile] ${'$'}< -> ${'$'}@\"",
-        "\t@${'$'}(CC) ${'$'}(CFLAGS) ${'$'}(REPRODUCIBLE_CFLAGS) -MMD -MP -c ${'$'}< -o ${'$'}@",
-        "",
-        "clean:",
-        "\trm -rf build",
-        "",
-        "-include ${'$'}(OBJECTS:.o=.d)",
-        ".PHONY: all clean",
-    ).joinToString("\n", postfix = "\n")
     }
 
     private fun evidence(
@@ -1859,58 +1786,6 @@ object SourceTreeGenerator {
                 }
             }
         }
-    }
-}
-
-internal fun normalizedPrototype(function: RecoveredFunction): String {
-    val raw = normalizeGhidraTypes(function.prototype.trim().removeSuffix(";"))
-    val name = safeCName(function.name)
-    if (name == "main") return "int main(int argc, char **argv)"
-    val rawReturn = raw.substringBefore(function.name).trim()
-    val decompiledReturn = function.decompiledC?.trimStart()?.substringBefore(function.name)?.trim()?.substringAfterLast('\n')?.trim()
-    val returnType = decompiledReturn?.takeIf(::portableReturnType) ?: rawReturn.takeIf(::portableReturnType) ?: "int"
-    return "$returnType $name(void)"
-}
-
-private fun portableReturnType(value: String): Boolean = value.matches(
-    Regex("(void|char|short|int|long|float|double|size_t|u?int(8|16|32|64)_t)(\\s+long|\\s*\\*)*"),
-)
-
-private fun globalDeclaration(global: RecoveredGlobal, external: Boolean): String {
-    val type = normalizeGhidraTypes(global.type.trim())
-    val name = safeCName(global.name)
-    val array = Regex("^(.+)\\[(\\d+)]$").matchEntire(type)
-    val declaration = if (array == null) "$type $name" else "${array.groupValues[1]} $name[${array.groupValues[2]}]"
-    if (external) return "extern $declaration;"
-    val rawInitializer = global.initializer?.trim()?.split(Regex("\\s+"), limit = 2)?.first()
-    val aggregate = array != null || !portableReturnType(type.removeSuffix(" *").trim())
-    val initializer = when {
-        '*' in type -> "0"
-        aggregate -> rawInitializer?.takeIf { (it.startsWith('"') && it.endsWith('"')) || (it.startsWith('{') && it.endsWith('}')) } ?: "{0}"
-        rawInitializer?.matches(Regex("[0-9a-fA-F]+h")) == true -> "0x${rawInitializer.dropLast(1)}"
-        else -> rawInitializer?.takeIf {
-        it.matches(Regex("[-+]?(0x[0-9a-fA-F]+|0|[1-9][0-9]*)([uUlLfF]|[uU][lL])?")) ||
-            (it.startsWith('"') && it.endsWith('"')) || (it.startsWith('{') && it.endsWith('}'))
-        } ?: if (aggregate) "{0}" else "0"
-    }
-    return "$declaration = $initializer;"
-}
-
-private fun normalizeGhidraTypes(value: String): String = value
-    .replace(Regex("\\bundefined8\\b"), "uint64_t")
-    .replace(Regex("\\bundefined4\\b"), "uint32_t")
-    .replace(Regex("\\bundefined2\\b"), "uint16_t")
-    .replace(Regex("\\bundefined1\\b|\\bundefined\\b|\\bbyte\\b"), "uint8_t")
-    .replace(Regex("\\blonglong\\b"), "long long")
-    .replace(Regex("\\bpointer\\b"), "void *")
-
-internal fun safeCName(name: String): String {
-    val sanitized = name.replace(Regex("[^A-Za-z0-9_]+"), "_").ifBlank { "recovered" }
-    val collision = sanitized in setOf("_init", "_fini", "_start", "stdin", "stdout", "stderr") || sanitized.startsWith("__")
-    return when {
-        sanitized.first().isDigit() -> "fn_$sanitized"
-        collision -> "recovered_$sanitized"
-        else -> sanitized
     }
 }
 
