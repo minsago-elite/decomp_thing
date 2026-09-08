@@ -1,0 +1,114 @@
+{
+  "evidenceId": "gcc-surviving-symbol-identity-v1",
+  "issue": 690,
+  "recordedOn": "2026-09-08",
+  "status": "unresolved",
+  "scope": "retained #39 GCC function oracle population",
+  "authority": "artifact-verified-oracle-population",
+  "productionVerified": false,
+  "sources": {
+    "artifactManifest": {
+      "path": "oracle/gcc/16.2.0/oracle-manifest.json",
+      "sha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9"
+    },
+    "richArtifactSha256": "8009c7cfc4f66017aa932d86a6d4ec7f374e6ab7a01b3ef5ab3d2fcc78c2378b",
+    "strippedArtifactSha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4",
+    "functionOracle": {
+      "path": "oracle/gcc/16.2.0/function-recovery-oracle.json",
+      "sha256": "b49b8a72a96580bd8727d9dc530753f40f78185a656f472ebe83a7a1f6fc9aae"
+    },
+    "exclusions": {
+      "path": "oracle/gcc/16.2.0/function-recovery-exclusions.json",
+      "sha256": "71039d9d5462c54b920d3ebe2cd2aff855faf211389a4e86bab3158bca742031"
+    }
+  },
+  "population": {
+    "oracleRecords": 12844,
+    "scoreableStarts": 3284,
+    "strippedSurvivingAliases": 6,
+    "selection": "scoreable aliases with availability.stripped=surviving",
+    "identityMatching": "selected oracle function identity and RVA; names are evidence, not a rematching key"
+  },
+  "survivingSymbols": [
+    {
+      "oracleFunctionId": "function-rva-0xeb7d2",
+      "rva": "0xeb7d2",
+      "name": "_obstack_begin",
+      "evidence": [
+        "rich:.debug_info:die=0x8347ae:DW_AT_name@0x8347ae",
+        "rich:section[39]=.symtab:symbol[1587]",
+        "rich:section[5]=.dynsym:symbol[150]",
+        "stripped:section[5]=.dynsym:symbol[150]"
+      ]
+    },
+    {
+      "oracleFunctionId": "function-rva-0xeb7ed",
+      "rva": "0xeb7ed",
+      "name": "_obstack_begin_1",
+      "evidence": [
+        "rich:.debug_info:die=0x8346fa:DW_AT_name@0x8346fa",
+        "rich:section[39]=.symtab:symbol[4087]",
+        "rich:section[5]=.dynsym:symbol[160]",
+        "stripped:section[5]=.dynsym:symbol[160]"
+      ]
+    },
+    {
+      "oracleFunctionId": "function-rva-0xeb80c",
+      "rva": "0xeb80c",
+      "name": "_obstack_newchunk",
+      "evidence": [
+        "rich:.debug_info:die=0x8345e2:DW_AT_name@0x8345e2",
+        "rich:section[39]=.symtab:symbol[2172]",
+        "rich:section[5]=.dynsym:symbol[162]",
+        "stripped:section[5]=.dynsym:symbol[162]"
+      ]
+    },
+    {
+      "oracleFunctionId": "function-rva-0xeb900",
+      "rva": "0xeb900",
+      "name": "_obstack_allocated_p",
+      "evidence": [
+        "rich:.debug_info:die=0x834586:DW_AT_name@0x834586",
+        "rich:section[39]=.symtab:symbol[1670]",
+        "rich:section[5]=.dynsym:symbol[157]",
+        "stripped:section[5]=.dynsym:symbol[157]"
+      ]
+    },
+    {
+      "oracleFunctionId": "function-rva-0xeb92d",
+      "rva": "0xeb92d",
+      "name": "_obstack_free",
+      "evidence": [
+        "rich:.debug_info:die=0x8344fa:DW_AT_name@0x8344fa",
+        "rich:section[39]=.symtab:symbol[2801]",
+        "rich:section[5]=.dynsym:symbol[154]",
+        "stripped:section[5]=.dynsym:symbol[154]"
+      ]
+    },
+    {
+      "oracleFunctionId": "function-rva-0xeb9ac",
+      "rva": "0xeb9ac",
+      "name": "_obstack_memory_used",
+      "evidence": [
+        "rich:.debug_info:die=0x83449d:DW_AT_name@0x83449d",
+        "rich:section[39]=.symtab:symbol[2369]",
+        "rich:section[5]=.dynsym:symbol[149]",
+        "stripped:section[5]=.dynsym:symbol[149]"
+      ]
+    }
+  ],
+  "verification": {
+    "oraclePopulationEnumerated": true,
+    "recoveredIdentityVerification": "unavailable",
+    "unavailableProductionGates": [
+      "No authenticated bundled-Ghidra exporter/loader replay receipt is retained for the recovered GCC model.",
+      "No retained authenticated rich/stripped production model and verifier-authorized identity score is available.",
+      "The existing schema-v1 scorer reports productionVerified=false; fixture or model-unattested facts cannot establish 100% recovery."
+    ],
+    "isolation": {
+      "requiredAnalyzer": "bundled Ghidra Java APIs in the isolated worker",
+      "requiresGHIDRA_HOME": false,
+      "allowsExternalAnalyzeHeadless": false
+    }
+  }
+}
