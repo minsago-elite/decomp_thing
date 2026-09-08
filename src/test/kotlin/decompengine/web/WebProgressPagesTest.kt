@@ -4,10 +4,10 @@ import kotlinx.serialization.json.*
 import kotlin.test.*
 
 class WebProgressPagesTest {
-    private fun journal(sequences: List<Long>, next: Long = (sequences.lastOrNull() ?: -1) + 1, text: String = "fixture"): ByteArray {
+    private fun journal(sequences: List<Long>, next: Long = (sequences.lastOrNull() ?: -1) + 1, text: String = "fixture", history: Long? = null): ByteArray {
         // Omissions must be accounted exactly: history eviction covers a prefix, queue drops cover the rest.
         // Empty snapshots cannot classify the initial admitted event as queue loss or single-event eviction.
-        val historyDropped = if (sequences.isEmpty() && next >= 2) 2L else sequences.firstOrNull() ?: 0L
+        val historyDropped = history ?: if (sequences.isEmpty() && next >= 2) 2L else sequences.firstOrNull() ?: 0L
         val queueDropped = next - sequences.size - historyDropped
         return buildJsonObject {
             put("schemaVersion", 1); put("displayOnly", true); put("nextSequence", next)
@@ -140,9 +140,41 @@ class WebProgressPagesTest {
         val pages = WebProgressPages()
         val failure = assertFailsWith<WebAccessDenied> { page(pages, journal(emptyList(), next = 3)) }
         val recovery = assertNotNull(failure.eventGap)
-        for (key in listOf("requestedCursor", "oldestCursor", "latestCursor")) assertEquals(JsonNull, recovery[key])
+        for (key in listOf("requestedCursor", "oldestCursor")) assertEquals(JsonNull, recovery[key])
+        assertNotNull(recovery.getValue("latestCursor").jsonPrimitive.contentOrNull)
         val invalid = assertFailsWith<WebAccessDenied> { page(pages, journal(listOf(0)), "after=malformed") }
         assertEquals(400, invalid.status); assertNull(invalid.eventGap)
+    }
+
+    @Test fun `empty retained snapshot acknowledges omissions and reaches subsequent publication`() {
+        val pages = WebProgressPages()
+        val empty = journal(emptyList(), next = 3)
+        val boundary = pages.boundary("owner", "job", "attempt", empty)
+        assertEquals("2", boundary.throughSequence); assertNull(boundary.oldestCursor)
+        val token = assertNotNull(boundary.throughCursor)
+        assertTrue(token.length <= 128)
+        assertTrue(sequences(page(pages, empty, "after=$token")).isEmpty())
+        val appended = journal(listOf(3, 4), history = 2)
+        assertEquals(listOf("3", "4"), sequences(page(pages, appended, "after=$token")))
+        assertEquals(listOf("3", "4"), sequences(page(pages, appended, "after=$token"))) // retry is reachable, not acknowledged by the server
+        val laterLoss = journal(emptyList(), next = 4)
+        assertEquals("EVENT_GAP", assertFailsWith<WebAccessDenied> { page(pages, laterLoss, "after=$token") }.code)
+        val fresh = pages.boundary("owner", "job", "attempt", laterLoss).throughCursor!!
+        assertTrue(sequences(page(pages, laterLoss, "after=$fresh")).isEmpty())
+    }
+
+    @Test fun `empty cutover rejects counter regression resurrected rows foreign binding and tampering`() {
+        val pages = WebProgressPages(); val empty = journal(emptyList(), next = 3)
+        val token = pages.boundary("owner", "job", "attempt", empty).throughCursor!!
+        for (changed in listOf(journal(emptyList(), next = 3, history = 3), journal(listOf(0, 1, 2, 3)))) {
+            assertEquals("EVENT_GAP", assertFailsWith<WebAccessDenied> { page(pages, changed, "after=$token") }.code)
+        }
+        assertEquals("INVALID_CURSOR", assertFailsWith<WebAccessDenied> { pages.page("other", "job", "attempt", empty, "after=$token") }.code)
+        val tampered = token.dropLast(1) + if (token.last() == '0') '1' else '0'
+        assertEquals("INVALID_CURSOR", assertFailsWith<WebAccessDenied> { page(pages, empty, "after=$tampered") }.code)
+        assertEquals("EVENT_GAP", assertFailsWith<WebAccessDenied> { page(WebProgressPages(), empty, "after=$token") }.code)
+        val initial = pages.boundary("owner", "job", "attempt", journal(emptyList()))
+        assertNull(initial.throughCursor); assertNull(initial.throughSequence)
     }
 
 }

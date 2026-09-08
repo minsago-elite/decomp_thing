@@ -18,7 +18,7 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       requireValue((code === 'EVENT_GAP') === (recovery !== undefined));
       if (recovery) {
         requireValue(!retryable && retryAfterMs === null);
-        requireValue((recovery.oldestCursor === null) === (recovery.latestCursor === null));
+        requireValue(recovery.oldestCursor === null || recovery.latestCursor !== null);
         checkHref(recovery.snapshotHref, { kind: 'snapshot', jobId: recovery.jobId, runId: recovery.runId });
       }
       break;
@@ -91,7 +91,7 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
         const next = BigInt(nextSequence), count = BigInt(retainedEventCount);
         requireValue(count <= 1024n && count + BigInt(queueDropped) + BigInt(historyDropped) <= next);
         requireValue((count === 0n) === (document.data.oldestCursor === null));
-        requireValue((count === 0n) === (document.data.throughSequence === null));
+        requireValue((next === 0n) === (document.data.throughSequence === null));
         if (document.data.throughSequence !== null) requireValue(BigInt(document.data.throughSequence) + 1n === next);
       }
       break;

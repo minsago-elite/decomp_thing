@@ -337,6 +337,18 @@
     {
       "file": "fixtures/invalid-event-gap-retryable.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/snapshot-empty-cutover.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/error-event-gap-empty-cutover.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-empty-cutover-missing-watermark.json",
+      "valid": false
     }
   ]
 }

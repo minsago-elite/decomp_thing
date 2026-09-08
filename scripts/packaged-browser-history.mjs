@@ -249,6 +249,40 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.deepEqual(await evaluate(tab, activityRows), Array.from({ length: 6 }, (_, index) => `Sequence ${index + 200}`));
   await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Read fresh activity history').click()`);
   await ready(tab, `(${activityRows}).length === 200 && !document.querySelector('[role="alert"]')`, 'explicit Activity gap recovery');
+  // Fully evicted history must still supply an acknowledged snapshot watermark.
+  const emptyJournal = { ...JSON.parse(fixture.progress), events: [], historyDropped: 205, truncated: true };
+  const emptyPublication = fixture.progressPath + '.browser-empty-publication';
+  const streamsBeforeEmpty = activityStreams;
+  try {
+    await fs.writeFile(emptyPublication, JSON.stringify(emptyJournal), { flag: 'wx', mode: 0o600 });
+    await fs.rename(emptyPublication, fixture.progressPath);
+    await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Read fresh activity history').click()`);
+    await ready(tab, `(${activityRows}).length === 0 && document.body.innerText.includes('Retained at snapshot: 0.') && document.body.innerText.includes('Last activity received:') && !document.querySelector('[role="alert"]')`, 'empty retained snapshot avoids a reset loop');
+    const emptySnapshot = await evaluate(tab, `(async () => (await (await fetch('${progressEndpoint}/snapshot', { credentials: 'same-origin' })).json()).data)()`);
+    assert.equal(emptySnapshot.oldestCursor, null);
+    assert.equal(emptySnapshot.throughSequence, '204');
+    assert.ok(emptySnapshot.throughCursor);
+    const emptyStreamDeadline = Date.now() + 10000;
+    while (activityStreams <= streamsBeforeEmpty) {
+      assert.ok(Date.now() < emptyStreamDeadline, 'Empty cutover did not open SSE');
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    const pollsBeforeEmptyAppend = activityPolls;
+    const resumedJournal = { ...emptyJournal, nextSequence: 206,
+      events: [{ ...JSON.parse(fixture.progress).events[0], sequence: 205 }] };
+    await fs.writeFile(emptyPublication, JSON.stringify(resumedJournal), { flag: 'wx', mode: 0o600 });
+    await fs.rename(emptyPublication, fixture.progressPath);
+    await ready(tab, `(${activityRows}).length === 1 && (${activityRows})[0] === 'Sequence 205'`, 'SSE resumes after an empty cutover');
+    assert.equal(activityPolls, pollsBeforeEmptyAppend);
+    assert.equal(await evaluate(tab, `document.body.innerText.includes('Synthetic private content')`), false);
+    await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Pause activity').click()`);
+    await ready(tab, `document.body.innerText.includes('Activity paused.')`, 'pause empty-cutover stream');
+  } finally {
+    await fs.rm(emptyPublication, { force: true });
+    await fs.writeFile(emptyPublication, fixture.progress, { flag: 'wx', mode: 0o600 });
+    await fs.rename(emptyPublication, fixture.progressPath);
+  }
+  assert.equal(await fs.readFile(fixture.progressPath, 'utf8'), fixture.progress);
   const accessibility = await cdp.call('Accessibility.getFullAXTree', {}, tab.sessionId);
   assert.ok(accessibility.nodes.some(node => node.role?.value === 'status' && node.properties?.some(property => property.name === 'live' && property.value.value === 'polite')));
   assert.equal(await evaluate(tab, `document.querySelector('ol[aria-label="Activity observations"]').closest('[aria-live], [role="status"], [role="log"]') === null`), true);
@@ -279,7 +313,7 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.deepEqual(tab.exceptions, []);
   for (const [name, bytes] of Object.entries(fixture.retained)) assert.deepEqual(await fs.readFile(join(fixture.directory, name)), Buffer.from(bytes));
   assert.deepEqual((await fs.readdir(fixture.directory)).sort(), [...Object.keys(fixture.retained), 'reports'].sort());
-  return { activityUi: { expiredCursorShowsGap: true, explicitGapRecovery: true, appendedObservationViaSseWithoutPolling: true, appendedFixtureRestored: true, pausedReceiptAgeAdvances: true, receiptAgeIsNotSourceAge: true, exactObservedUsage: true, explicitUsageUnitsAndProvenance: true, durationWithoutRounding: true, missingPricingBasis: true, backgroundSuspendsReads: true, offlineSuspendsReads: true, recoveryReconcilesSnapshot: true, recoveryPreservesRows: true, lastReceivedTime: true, categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, nativeEventSourceMatchesPolling: true, targetPollingQuery: true, cursorAliasPreservesPage: true, privateProseAbsentFromResponses: true, privatePathsAbsentFromResponses: true, presentationOmissionsCounted: true, progressBytesRestoredAfterControlledAppend: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
+  return { activityUi: { emptyCutoverSnapshotAndSseResume: true, emptyCutoverFixtureRestored: true, expiredCursorShowsGap: true, explicitGapRecovery: true, appendedObservationViaSseWithoutPolling: true, appendedFixtureRestored: true, pausedReceiptAgeAdvances: true, receiptAgeIsNotSourceAge: true, exactObservedUsage: true, explicitUsageUnitsAndProvenance: true, durationWithoutRounding: true, missingPricingBasis: true, backgroundSuspendsReads: true, offlineSuspendsReads: true, recoveryReconcilesSnapshot: true, recoveryPreservesRows: true, lastReceivedTime: true, categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, nativeEventSourceMatchesPolling: true, targetPollingQuery: true, cursorAliasPreservesPage: true, privateProseAbsentFromResponses: true, privatePathsAbsentFromResponses: true, presentationOmissionsCounted: true, progressBytesRestoredAfterControlledAppend: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
     earlierAttemptReload: true, previousInterruptedAttempt: true, exactUnsignedUsage: true,
     unacceptedCandidate: true, explorationSummary: true, nativeReportDownload: true, downloadedBytesMatch: true, reportBytesUnchanged: true, retainedBytesUnchanged: true, mutationRequests: 0, executionStarted: false };
 }

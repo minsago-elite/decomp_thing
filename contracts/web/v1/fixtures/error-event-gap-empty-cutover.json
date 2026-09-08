@@ -11,9 +11,9 @@
     "recovery": {
       "jobId": "1234567890abcdef1234567890abcdef",
       "runId": "run_example_1",
-      "requestedCursor": "cursor_evicted",
-      "oldestCursor": "cursor_oldest",
-      "latestCursor": null,
+      "requestedCursor": null,
+      "oldestCursor": null,
+      "latestCursor": "cursor_empty_cutover",
       "snapshotHref": "/api/v1/jobs/1234567890abcdef1234567890abcdef/runs/run_example_1/snapshot"
     }
   }

@@ -17,10 +17,12 @@ internal class WebProgressPages {
     fun boundary(owner: String, jobId: String, runId: String, bytes: ByteArray): Boundary {
         val journal = decode(bytes)
         val records = journal.getValue("events").jsonArray.map { it.jsonObject }
-        return Boundary(records.lastOrNull()?.let { token(owner, jobId, runId, it, "s", journal.getValue("nextSequence").jsonPrimitive.long - 1) },
-            records.lastOrNull()?.let { (journal.getValue("nextSequence").jsonPrimitive.long - 1).toString() },
+        val next = journal.getValue("nextSequence").jsonPrimitive.long
+        val through = if (next == 0L) null else records.lastOrNull()?.let { token(owner, jobId, runId, it, "s", next - 1) }
+            ?: emptyToken(owner, jobId, runId, next - 1, journal)
+        return Boundary(through, if (next == 0L) null else (next - 1).toString(),
             records.firstOrNull()?.let { token(owner, jobId, runId, it, "b") },
-            journal.getValue("nextSequence").jsonPrimitive.content, journal.getValue("queueDropped").jsonPrimitive.content,
+            next.toString(), journal.getValue("queueDropped").jsonPrimitive.content,
             journal.getValue("historyDropped").jsonPrimitive.content, records.size.toString())
     }
 
@@ -44,21 +46,32 @@ internal class WebProgressPages {
         val start = if (cursor == null) 0 else {
             val parts = cursor.split('_')
             if (parts.size != 7 || parts[0] != "p1" || !parts[1].matches(Regex("[a-f0-9]{16}")) ||
-                parts[2] !in setOf("a", "b", "s") || !parts[3].matches(Regex("0|[1-9][0-9]{0,18}")) ||
+                parts[2] !in setOf("a", "b", "s", "e") || !parts[3].matches(Regex("0|[1-9][0-9]{0,18}")) ||
                 !parts[4].matches(Regex("0|[1-9][0-9]{0,18}")) ||
                 !parts[5].matches(Regex("[a-f0-9]{32}")) || !parts[6].matches(Regex("[a-f0-9]{32}"))) invalid()
             if (parts[1] != epoch) gap()
             val signed = parts.take(6).joinToString("_")
             if (!MessageDigest.isEqual(signature(owner, jobId, runId, signed).toByteArray(), parts[6].toByteArray())) invalid()
             val sequence = parts[3].toLongOrNull() ?: invalid()
-            val index = records.indexOfFirst { it.getValue("sequence").jsonPrimitive.long == sequence }
-            if (index < 0 || digest(records[index]) != parts[5]) gap()
             val position = parts[4].toLongOrNull() ?: invalid()
             if (position < sequence || (parts[2] != "s" && position != sequence) || position == Long.MAX_VALUE) invalid()
             expected = position + if (parts[2] == "b") 0 else 1
-            if (parts[2] == "s") records.indexOfFirst { it.getValue("sequence").jsonPrimitive.long >= expected }
-                .let { if (it < 0) records.size else it }
-            else index + if (parts[2] == "a") 1 else 0
+            if (parts[2] == "e") {
+                // Empty cutovers authenticate cumulative omission counters instead of an absent event.
+                val queue = parts[5].take(16).toLongOrNull(16) ?: invalid()
+                val history = parts[5].takeLast(16).toLongOrNull(16) ?: invalid()
+                if (queue > expected || history != expected - queue) invalid()
+                if (journal.getValue("queueDropped").jsonPrimitive.long < queue ||
+                    journal.getValue("historyDropped").jsonPrimitive.long < history ||
+                    records.any { it.getValue("sequence").jsonPrimitive.long < expected }) gap()
+                0
+            } else {
+                val index = records.indexOfFirst { it.getValue("sequence").jsonPrimitive.long == sequence }
+                if (index < 0 || digest(records[index]) != parts[5]) gap()
+                if (parts[2] == "s") records.indexOfFirst { it.getValue("sequence").jsonPrimitive.long >= expected }
+                    .let { if (it < 0) records.size else it }
+                else index + if (parts[2] == "a") 1 else 0
+            }
         }
         val items = mutableListOf<JsonObject>()
         var nextCursor = cursor
@@ -93,6 +106,13 @@ internal class WebProgressPages {
         catch (_: Exception) { unavailable() }
     private fun token(owner: String, jobId: String, runId: String, record: JsonObject, mode: String, position: Long = record.getValue("sequence").jsonPrimitive.long): String {
         val prefix = "p1_${epoch}_${mode}_${record.getValue("sequence").jsonPrimitive.content}_${position}_${digest(record)}"
+        return "${prefix}_${signature(owner, jobId, runId, prefix)}"
+    }
+    private fun emptyToken(owner: String, jobId: String, runId: String, position: Long, journal: JsonObject): String {
+        val counters = listOf("queueDropped", "historyDropped").joinToString("") {
+            journal.getValue(it).jsonPrimitive.long.toString(16).padStart(16, '0')
+        }
+        val prefix = "p1_${epoch}_e_${position}_${position}_$counters"
         return "${prefix}_${signature(owner, jobId, runId, prefix)}"
     }
     private fun signature(owner: String, jobId: String, runId: String, prefix: String): String {

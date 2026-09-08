@@ -30,7 +30,7 @@ def check_semantics(document: dict) -> None:
         if recovery is not None:
             if error["retryable"] or error["retryAfterMs"] is not None:
                 raise ValueError("event gaps require reconciliation, not blind retry")
-            if (recovery["oldestCursor"] is None) != (recovery["latestCursor"] is None):
+            if recovery["oldestCursor"] is not None and recovery["latestCursor"] is None:
                 raise ValueError("event gap boundary is incomplete")
             suffix = "/api/v1/jobs/" + recovery["jobId"] + "/runs/" + recovery["runId"] + "/snapshot"
             if not re.fullmatch(r"(?:/[A-Za-z0-9_-]+)*" + re.escape(suffix), recovery["snapshotHref"]):
@@ -84,7 +84,7 @@ def check_semantics(document: dict) -> None:
             count, next_sequence = int(progress["retainedEventCount"]), int(progress["nextSequence"])
             if count > 1024 or count + int(progress["queueDropped"]) + int(progress["historyDropped"]) > next_sequence:
                 raise ValueError("snapshot progress counters exceed the boundary")
-            if (count == 0) != (data["oldestCursor"] is None) or (count == 0) != (data["throughSequence"] is None):
+            if (count == 0) != (data["oldestCursor"] is None) or (next_sequence == 0) != (data["throughSequence"] is None):
                 raise ValueError("snapshot retained records and cursors disagree")
             if data["throughSequence"] is not None and int(data["throughSequence"]) + 1 != next_sequence:
                 raise ValueError("snapshot progress boundary disagrees with next sequence")

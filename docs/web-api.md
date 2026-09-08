@@ -492,7 +492,7 @@ Retry-After; clients can keep using bounded polling.
 
 Before headers, polling and SSE return 410 `EVENT_GAP`. Its `error.recovery` contains the selected
 jobId/runId, requestedCursor (nullable for an unanchored request), oldestCursor/latestCursor
-(both null for empty retention) and a deployment-bound snapshotHref. These cursors describe
+(oldest null for empty retention; latest may carry an omission watermark) and a deployment-bound snapshotHref. These cursors describe
 the same retained bytes that detected the gap. Recovery requires a fresh snapshot, not blind retry. After headers, loss of a non-null acknowledged
 cursor produces a `retention.gap` control event with no SSE id, null cursor/sequence and
 requested/oldest/latest positions plus snapshotHref, then closes. A missing journal, lost
