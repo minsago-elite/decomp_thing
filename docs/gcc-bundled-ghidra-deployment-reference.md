@@ -138,3 +138,9 @@ The production application does not run sudo, provision copies, create mounts,
 change quotas or make the mandatory noexec output lease executable. Passing
 structural tests or a non-authoritative packaged Ghidra probe is not evidence
 that the required hosted BOOT lifecycle or later contained analysis has passed.
+
+The provisioner walks `/`, `/var`, and `/var/lib` through no-follow directory
+descriptors and requires root ownership with no group/other writes at each step.
+This matches the CI oracle JDK location: hosted `/opt` failed the same trust
+check in run 33955958408 before Kotlin tests began. Preparation and release
+use the same run/attempt-specific path and retain the inode-bound marker checks.
