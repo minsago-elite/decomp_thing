@@ -1,0 +1,110 @@
+{
+  "schemaVersion": 1,
+  "issue": 982,
+  "recordedAtUtc": "2026-09-08T12:18:15Z",
+  "status": "implementation-evidence-only",
+  "scope": "Read-only source and fixture audit of the current bundled GCC planner and CLI publication path. This record does not qualify a real compiler-engine operation.",
+  "sourceCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "profile": {
+    "path": "oracle/gcc/16.2.0/compiler-engines.json",
+    "sha256": "e0ca60b7e856e9330e45fd58e61828313e8dd824413ee0df7ef76ee5d2b47bdc",
+    "benchmark": "gcc-compiler-engines-16.2.0",
+    "budgets": {
+      "exportWallClockSeconds": 1800,
+      "exportMaximumResidentBytes": 17179869184,
+      "plannerMaximumEntities": 500000,
+      "plannerMaximumDependencyEdges": 8000000,
+      "plannerMaximumWorkUnits": 200000000
+    }
+  },
+  "code": [
+    {
+      "path": "src/main/kotlin/decompengine/oracle/gcc/GccCompilerEngineProfile.kt",
+      "sha256": "ef5e8231d7038e7174273b642bdc81d0368b7cabe777df948837858465aadaab",
+      "lines": "31-43,151-162,201-210",
+      "observation": "Parses and carries the profile export wall/RSS and planner entity/edge/work ceilings into the derived reconstruction policy."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/oracle/gcc/GccRetainedCompilerEngineProfile.kt",
+      "sha256": "c627a6b5dbcd35ae3e71742b06e709d6e2c517b770222ac3d43eb7f95844e663",
+      "lines": "42-73",
+      "observation": "Rejects an operation whose wall or resident-memory budget exceeds the retained benchmark profile before execution authorization."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationCoordinator.kt",
+      "sha256": "4ab8bc5bd7aaaddccd92a8317ecd2a9c79d86d794098623e58de6bae4df091a8",
+      "lines": "301-393,396-440,443-465,554-571",
+      "observation": "Uses one operation deadline for export, planner execution, planner capture, and publication checks; launches the planner with the operation RSS/PID/file resources; publishes a 256 KiB-bounded result pointer and retains failed cleanup ownership."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/oracle/gcc/GccBundledPlannerWorker.kt",
+      "sha256": "be7cca1c7280659d1ed52b7424a2a9d2d22946bf780340fdb9e4fa7b913a0104",
+      "lines": "26-72,134-172,175-193",
+      "observation": "Binds planner limits to the request, rejects an oversized plan, and uses CREATE_NEW for plan and metadata files while preserving partial output."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/oracle/gcc/GccBundledPlannerOutputCapture.kt",
+      "sha256": "ebfcf82277689c99dc499caf75a1263cb45ddc9b9c20707fcb14ffa374b12931",
+      "lines": "21-69",
+      "observation": "Reads only the bounded plan, metadata, stdout, and stderr files after checking the retained run/control/report identities and exact directory membership."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationJournal.kt",
+      "sha256": "317c527fb09cf3def169f1d8c2ba4dc725ab264b1bb737e38c08f569ea6aa1f7",
+      "lines": "250-334",
+      "observation": "Binds planner requests and assessments to operation, profile, model, output-lineage, and planner byte ceilings before durable publication."
+    }
+  ],
+  "fixtures": [
+    {
+      "path": "oracle/gcc/compiler-engine-plan-evidence.schema.json",
+      "sha256": "17ce76c928336a61a47eacdb4f716e658f689046d5f7da58471ee3087d15f208",
+      "coverage": "Non-authoritative plan assessment shape; it does not certify live resource use or release eligibility."
+    },
+    {
+      "path": "src/test/kotlin/decompengine/oracle/gcc/GccBundledPlannerWorkerTest.kt",
+      "sha256": "b7ecc056eb825975f0825dbc91e6ccb502b14c4dfc76d192e934cc7331602140",
+      "cases": [
+        "worker JVM derives deterministic ownership from a retained profile request",
+        "worker rejects wrong bindings and exceeded limits before publishing a plan",
+        "worker preserves declared layouts and does not overwrite partial output records"
+      ],
+      "limitation": "The worker fixture explicitly uses synthetic assessments and does not authenticate a real export or containment run."
+    },
+    {
+      "path": "src/test/kotlin/decompengine/oracle/gcc/GccBundledPlannerOutputCaptureTest.kt",
+      "sha256": "a6205dc156d3195e9f9e62eddfcb55249ff9c810ca02f9fe9b5ac2b5546cb683",
+      "cases": [
+        "capture returns descriptor checked bytes with linked assessment and bounded logs",
+        "capture rejects missing extra linked and writable output without changing source bytes",
+        "capture denies replaced control identity and renamed run path"
+      ]
+    },
+    {
+      "path": "src/test/kotlin/decompengine/oracle/gcc/GccBundledOperationCoordinatorTest.kt",
+      "sha256": "f544d7f4098a31fb81fa8687919ed7946a4ee9de30b1857739470a91ce5fb0dd",
+      "cases": [
+        "intent admits only fresh named engines bounded whole-second budgets and finite disk policy",
+        "version two intent binds complete planner policy and independently retains it",
+        "ordinary scratch denial retains only durable intent evidence and never claims a lease"
+      ]
+    }
+  ],
+  "sourceConfirmed": [
+    "The retained profile is the source of both export ceilings and planner complexity ceilings.",
+    "Planner START, execution, bounded output capture, and CLI result publication are sequenced by the same owner and operation deadline.",
+    "Planner bytes, planner metadata, command logs, and the CLI result pointer have explicit byte bounds and exact lineage checks.",
+    "The current CLI result remains complete=false and releaseEligible=false; failed contained-command cleanup retains the operation until absence is proved."
+  ],
+  "unverified": [
+    "No real cc1 or lto1 export, planner, or CLI publication was run for this record.",
+    "No forced planner failure or publication failure demonstrated cleanup completion, absence proof, or retained-residue recovery.",
+    "No whole-parent wall-clock or RSS measurement covers export, planner execution, output capture, and publication together.",
+    "The bounded publication API and post-publication deadline checks do not constitute a measured hard publication wall/RSS bound.",
+    "No provisioned Ghidra deployment, compiler artifact, hosted CLI, cold recovery, or release-eligibility qualification was performed."
+  ],
+  "validation": {
+    "testsRun": [],
+    "decision": "Remaining tests intentionally skipped at user request; this record must not be read as passed runtime qualification."
+  }
+}
