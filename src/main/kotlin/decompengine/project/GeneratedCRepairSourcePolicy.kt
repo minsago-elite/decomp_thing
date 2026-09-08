@@ -1,7 +1,6 @@
 package decompengine.project
 
 import decompengine.repair.RepairResourceBudget
-import java.nio.file.Path
 
 /** Content-independent source authorization shared by indexing, recovery and validation staging. */
 internal class GeneratedCRepairSourcePolicy(private val profile: ReconstructionProfile) {
@@ -9,9 +8,6 @@ internal class GeneratedCRepairSourcePolicy(private val profile: ReconstructionP
 
     init {
         ReconstructionAdapters.resolve(profile)
-        require(Path.of(buildDefinition).nameCount == 1) {
-            "generated-C repair indexing currently requires a root-level build definition"
-        }
         require(profile.layout.declarations.filter { ProjectFileRole.BUILD_INPUT in it.roles }.all {
             it.pathTemplate == buildDefinition || it.pathTemplate.startsWith("src/") || it.pathTemplate.startsWith("include/")
         }) { "generated-C repair build inputs must use the supported source roots" }

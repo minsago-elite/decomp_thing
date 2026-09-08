@@ -28,9 +28,11 @@ source into a separate new workspace with a new graph. This does not import or c
 of the historical accepted lineage. A qualified graph migration remains separate work.
 `GeneratedCRepairIndexProfile.forProfile(descriptor)` selects an index policy for registered
 Make and Ninja reconstruction descriptors. The compatibility singleton selects the built-in Make
-descriptor. Discovery retains descriptor-bound traversal of `src/` and `include/` and currently
-requires a root-level build definition. Nested build definitions and other source roots are rejected
-at construction. Evidence paths, shared/private interfaces and entry candidates follow the selected
+descriptor. Discovery retains descriptor-bound traversal of `src/` and `include/`. Nested build
+definitions are opened one component at a time under pinned parent descriptors, with regular-file,
+directory-identity and mount checks. Each visited build-definition ancestor consumes discovery
+entry/directory budget, and the complete path must fit the discovery-depth limit. Other source
+roots remain unsupported. Evidence paths, shared/private interfaces and entry candidates follow the selected
 descriptor. Declared module source/header paths must agree with the plan's module ID.
 
 Only declared UTF-8 build inputs with the EDITABLE role grant writes. Undeclared auxiliary inputs
@@ -335,3 +337,8 @@ DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1 ./gradlew test \
 The C compiler/behavior strategy in these fixtures remains explicitly test-only and non-release.
 This gate does not supply the missing production C validation provider, replace independent-agent
 interoperability evidence, or certify behavior-invalid intermediate revisions as accepted repairs.
+
+The local profile-index fixture places Make and Ninja definitions beneath `config/build/`,
+relocates model/plan evidence, and verifies pending graph recovery and unchanged permissions.
+A separate authored inventory fixture checks ancestor entry/directory charging and path-depth
+rejection. These are local index/recovery checks, not a qualification of production staging.
