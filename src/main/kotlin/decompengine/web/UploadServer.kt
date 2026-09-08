@@ -15,6 +15,8 @@ import decompengine.jobs.InvalidUploadException
 import decompengine.jobs.Job
 import decompengine.jobs.JobStore
 import decompengine.jobs.JobStoreException
+import decompengine.jobs.WorkflowAttemptStore
+import decompengine.jobs.UploadPublicationUncertainException
 import decompengine.jobs.AgentProgressJournal
 import decompengine.jobs.ProgressRedactor
 import decompengine.jobs.BestEffortProgressJournal
@@ -175,10 +177,17 @@ class UploadServer(
     devFrontendOrigin: String? = null,
     sourceProfiles: List<ReconstructionProfile> = listOf(GeneratedCMakeReconstructionProfile.descriptor),
     sensitiveValues: Collection<String> = System.getenv().values,
-    listenBacklog: Int = 64,
+    private val listenBacklog: Int = 64,
+    private val authenticationInspector: (decompengine.agent.AgentCancellation) -> decompengine.acp.AcpAuthenticationInventory = defaultWebAuthenticationInspector(),
 ) {
     init { require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" } }
     private val diagnosticRedactor = ProgressRedactor(sensitiveValues)
+    private val authenticationInspectionLock = Any()
+    private var authenticationInspectionId: String? = null
+    private val authenticationInspectionCancellation = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val authenticationInspectionResult = java.util.concurrent.atomic.AtomicReference(
+        "{\"status\":\"idle\",\"loginSupported\":false}")
+    private val authenticationInspectionWorker = java.util.concurrent.atomic.AtomicReference<Thread>()
     // Verify trusted application bytes before binding a listening socket.
     private val spaAssets = when (uiMode) {
         WebUiMode.SPA -> {
@@ -197,9 +206,17 @@ class UploadServer(
             null
         }
     }
+    // Acquire cooperative ownership before binding so a refused contender never occupies a listener.
+    private val ownership: WebJobStoreOwnership = WebJobStoreOwnership.acquire(dataDir.toAbsolutePath().normalize())
     private val server = HttpServer.create(InetSocketAddress(host, port), listenBacklog)
     private val store = JobStore(dataDir)
-    private val jobs = WebJobService(store, analyzer, reconstructor, executor, shutdownTimeoutMs = 5000, failureDiagnostic = { diagnostic(it, "Background operation failed") })
+    private val jobs = WebJobService(store, analyzer, reconstructor, executor,
+        attemptStoreFactory = { root ->
+            // Storage creation is the upgrade point: claim the cross-JVM web lock as the root appears.
+            ownership.ensureLockFile()
+            WorkflowAttemptStore.open(root)
+        },
+        shutdownTimeoutMs = 5000, failureDiagnostic = { diagnostic(it, "Background operation failed") })
     private val sourceEvidence = WebSourceEvidence(store, sourceProfiles, jobs::readArtifact)
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
     private val access = spaAssets?.let {
@@ -215,6 +232,11 @@ class UploadServer(
     private val requestDeadlines = ScheduledThreadPoolExecutor(1) { task ->
         Thread(task, "decomp-web-deadline").apply { isDaemon = true }
     }.apply { removeOnCancelPolicy = true }
+    private val lifecycleLock = Any()
+    private var stopping = false
+    private var started = false
+    private var activeRequests = 0
+    private val stopRequested = java.util.concurrent.atomic.AtomicBoolean(false)
     val serverPort: Int get() = server.address.port
     val browserOrigin: String = devFrontendOrigin ?: webOrigin(host, serverPort)
 
@@ -222,6 +244,13 @@ class UploadServer(
     fun issueBrowserBootstrap(): WebBootstrapToken = checkNotNull(access) { "Browser sessions require --ui spa" }.issueBootstrap()
 
     init {
+        jobs.onQuiescent = {
+            try {
+                releaseOwnershipIfIdle()
+            } catch (_: Exception) {
+                System.err.println("Web request cleanup did not release store ownership; recovery is required")
+            }
+        }
         try {
             jobs.initializeExistingStorage()
         } catch (failure: Throwable) {
@@ -230,6 +259,7 @@ class UploadServer(
             requestDeadlines.shutdownNow()
             access?.close()
             jobs.close()
+            ownership.close()
             throw failure
         }
         server.executor = requestExecutor
@@ -241,19 +271,228 @@ class UploadServer(
         }
     }
 
-    fun start() = server.start()
+    fun start() {
+        var cleanupRequired = false
+        try {
+            synchronized(lifecycleLock) {
+                check(!started && !stopping) { "Web server cannot be started again" }
+                cleanupRequired = true
+                try {
+                    // Recovery never rewrites historical metadata here; startup must not report
+                    // success when a cancellation signal or a late interrupt preceded the listener.
+                    check(!stopRequested.get() && !Thread.currentThread().isInterrupted) { "Web server startup cancelled" }
+                    server.start()
+                    started = true
+                } catch (failure: Exception) {
+                    // Close admission before releasing the lock to perform failed-start cleanup.
+                    stopping = true
+                    throw failure
+                }
+            }
+        } catch (failure: Exception) {
+            // A queued handler may need lifecycleLock while the dispatcher is stopped.
+            // Unwind startup's outer lock before performing listener/worker cleanup.
+            if (cleanupRequired) {
+                try { stop() } catch (cleanup: Exception) { failure.addSuppressed(cleanup) }
+            }
+            throw failure
+        }
+    }
+
+    /** Publish cancellation before waiting for lifecycle work; stop completes resource cleanup. */
+    internal fun requestStop() {
+        stopRequested.set(true)
+        authenticationInspectionCancellation.set(true)
+        jobs.beginShutdown()
+    }
+
+    /** Latch that resolves once requestStop has published its signal; test evidence helper. */
+    internal fun requestStopSignalled(): java.util.concurrent.CountDownLatch {
+        val latch = java.util.concurrent.CountDownLatch(1)
+        Thread({
+            while (!stopRequested.get()) Thread.sleep(10)
+            latch.countDown()
+        }, "stop-signal-probe").apply { isDaemon = true; start() }
+        return latch
+    }
 
     fun stop(delaySeconds: Int = 0) {
         require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
+        // Signal recovery and the job service even while start or a queued callback holds
+        // lifecycleLock through filesystem operations: no queued operation may begin and no
+        // completion may be published after the stop signal is observable.
+        stopRequested.set(true)
         jobs.beginShutdown()
+        val callerWasInterrupted = Thread.currentThread().isInterrupted
+        val inspection = synchronized(lifecycleLock) {
+            stopping = true
+            // JDK HttpServer.stop does not release a bound listener before start. Start its
+            // dispatcher only after closing request admission, then close it below. This also
+            // covers failed ownership/recovery admission and explicit stop-before-start.
+            if (!started) {
+                server.start()
+                started = true
+            }
+            authenticationInspectionCancellation.set(true)
+            authenticationInspectionWorker.get()
+        }
         server.stop(delaySeconds)
         requestExecutor.shutdownNow()
         requestDeadlines.shutdownNow()
         access?.close()
         jobs.close()
+        var inspectionWaitInterrupted = false
+        try {
+            check(inspection === null || inspection !== Thread.currentThread()) { "Inspection cannot await its own shutdown" }
+            // The provider owns its cleanup deadlines. Do not truncate them with a web timeout,
+            // including when the shutdown caller is interrupted while cleanup is still running.
+            while (inspection?.isAlive == true) {
+                try { inspection.join() } catch (_: InterruptedException) { inspectionWaitInterrupted = true }
+            }
+        } catch (exception: Exception) {
+            if (exception is InterruptedException) Thread.currentThread().interrupt()
+        }
+        if (inspectionWaitInterrupted) Thread.currentThread().interrupt()
+        if (!releaseOwnershipIfIdle()) throw IllegalStateException("HTTP requests remain active after server stop")
+    }
+
+    /** Admission covers the whole handler, including upload publication and error handling. */
+    internal fun withActiveRequest(action: () -> Unit): Boolean {
+        synchronized(lifecycleLock) {
+            if (stopping || stopRequested.get()) return false
+            activeRequests++
+            // stop() publishes stopRequested outside lifecycleLock, so a handler that read
+            // the flag before the signal must still be refused when the signal preceded this
+            // reservation instead of staying admitted past the stop request.
+            if (stopRequested.get()) {
+                activeRequests--
+                return false
+            }
+        }
+        try {
+            action()
+            return true
+        } finally {
+            synchronized(lifecycleLock) { activeRequests-- }
+            try {
+                releaseOwnershipIfIdle()
+            } catch (_: Exception) {
+                System.err.println("Web request cleanup did not release store ownership; recovery is required")
+            }
+        }
+    }
+
+    private fun releaseOwnershipIfIdle(): Boolean {
+        // Sample service quiescence before taking the lifecycle lock; stopping closes the service to new work.
+        val jobsIdle = jobs.isIdle()
+        return synchronized(lifecycleLock) {
+            if (stopping && activeRequests == 0 && jobsIdle) {
+                ownership.close()
+                true
+            } else false
+        }
     }
 
     private fun route(exchange: HttpExchange) {
+        if (!withActiveRequest { routeAdmitted(exchange) }) exchange.close()
+    }
+
+    private fun handleAuthenticationInspection(exchange: HttpExchange) {
+        if (exchange.requestHeaders.getFirst("X-Decomp-Operator-Action") != "inspect-auth") {
+            exchange.sendJson(400, "{\"error\":\"Explicit operator inspection is required.\"}")
+            return
+        }
+        val admission = synchronized(authenticationInspectionLock) {
+            if (authenticationInspectionResult.get() == AUTH_INSPECTION_RUNNING) {
+                409 to authenticationInspectionSnapshot()
+            } else {
+                authenticationInspectionId = java.util.UUID.randomUUID().toString()
+                authenticationInspectionResult.set(AUTH_INSPECTION_RUNNING)
+                try {
+                    synchronized(lifecycleLock) {
+                        authenticationInspectionCancellation.set(false)
+                        // requestStop signals outside this lock; never clear its signal after checking it.
+                        check(!stopping && !stopRequested.get()) { "Server is stopping" }
+                        val worker = Thread({
+                            var result = AUTH_INSPECTION_FAILED
+                            try {
+                                withActiveRequest { result = inspectAuthenticationMethods() }
+                            } catch (_: Exception) {
+                                result = AUTH_INSPECTION_FAILED
+                            } finally {
+                                synchronized(authenticationInspectionLock) {
+                                    authenticationInspectionResult.set(result)
+                                }
+                            }
+                        }, "decomp-web-auth-inspection").apply { isDaemon = true }
+                        authenticationInspectionWorker.set(worker)
+                        worker.start()
+                    }
+                    202 to authenticationInspectionSnapshot(AUTH_INSPECTION_RUNNING)
+                } catch (_: Exception) {
+                    authenticationInspectionResult.set(AUTH_INSPECTION_FAILED)
+                    503 to authenticationInspectionSnapshot()
+                }
+            }
+        }
+        exchange.sendJson(admission.first, admission.second)
+    }
+
+    private fun authenticationInspectionSnapshot(result: String? = null): String = synchronized(authenticationInspectionLock) {
+        // Every payload here is an internally serialized object; identity is an application-generated UUID.
+        (result ?: authenticationInspectionResult.get()).dropLast(1) +
+            ",\"inspectionId\":" + (authenticationInspectionId?.let { "\"$it\"" } ?: "null") + "}"
+    }
+
+    private fun inspectAuthenticationMethods(): String = try {
+        val inventory = authenticationInspector(decompengine.agent.AgentCancellation {
+            stopRequested.get() || authenticationInspectionCancellation.get()
+        })
+        buildJsonObject {
+            put("status", "ready")
+            put("inventoryCommitment", inventory.commitment)
+            put("inventoryFormat", inventory.commitmentFormat)
+            put("inventoryScope", inventory.commitmentScope)
+            put("logoutAdvertised", inventory.logoutAdvertised)
+            put("logoutSupported", inventory.logoutSupported)
+            put("loginSupported", false)
+            put("methods", kotlinx.serialization.json.buildJsonArray {
+                inventory.methods.forEach { method -> add(buildJsonObject {
+                    put("idPreview", diagnosticRedactor.text(method.idPreview, 128))
+                    put("namePreview", diagnosticRedactor.text(method.namePreview, 128))
+                    put("descriptionPreview", diagnosticRedactor.text(method.descriptionPreview.orEmpty(), 256))
+                    put("variant", method.variant)
+                    put("loginSupported", false)
+                }) }
+            })
+        }.toString()
+    } catch (_: decompengine.acp.AcpPreflightCancelledException) { AUTH_INSPECTION_CANCELLED }
+      catch (_: Exception) { AUTH_INSPECTION_FAILED }
+
+    private fun handleAuthenticationCancellation(exchange: HttpExchange) {
+        if (exchange.requestHeaders.getFirst("X-Decomp-Operator-Action") != "cancel-auth-inspection") {
+            exchange.sendJson(400, "{\"error\":\"Explicit operator cancellation is required.\"}")
+            return
+        }
+        val requestedId = exchange.requestHeaders["X-Decomp-Inspection-Id"]?.singleOrNull()
+        val response = synchronized(authenticationInspectionLock) {
+            when {
+                authenticationInspectionResult.get() != AUTH_INSPECTION_RUNNING ->
+                    409 to "{\"error\":\"No authentication inspection is running.\"}"
+                requestedId == null ->
+                    400 to "{\"error\":\"An exact inspection identity is required.\"}"
+                requestedId != authenticationInspectionId ->
+                    409 to "{\"error\":\"The selected inspection is no longer running.\"}"
+                else -> {
+                    authenticationInspectionCancellation.set(true)
+                    202 to authenticationInspectionSnapshot("{\"status\":\"cancellation-requested\",\"loginSupported\":false}")
+                }
+            }
+        }
+        exchange.sendJson(response.first, response.second)
+    }
+
+    private fun routeAdmitted(exchange: HttpExchange) {
         spaAssets?.let { assets ->
             try {
                 if (api?.route(exchange) == true) return
@@ -271,6 +510,14 @@ class UploadServer(
                     renderJobDashboard(exchange)
                 exchange.requestMethod == "GET" && segments == listOf("assets", "app.css") ->
                     exchange.sendBytes(200, APP_CSS.toByteArray(), "text/css; charset=utf-8", cache = true)
+                exchange.requestMethod == "GET" && segments == listOf("api", "recovery") ->
+                    exchange.sendJson(200, store.recoveryInventory().toJson().toString())
+                exchange.requestMethod == "POST" && segments == listOf("api", "operator", "auth-methods", "cancel") ->
+                    handleAuthenticationCancellation(exchange)
+                exchange.requestMethod == "GET" && segments == listOf("api", "operator", "auth-methods") ->
+                    exchange.sendJson(200, authenticationInspectionSnapshot())
+                exchange.requestMethod == "POST" && segments == listOf("api", "operator", "auth-methods") ->
+                    handleAuthenticationInspection(exchange)
                 exchange.requestMethod == "POST" && segments == listOf("jobs") -> handlePostJob(exchange)
                 exchange.requestMethod == "GET" && segments.size == 2 && segments[0] == "jobs" ->
                     handleJob(exchange, decode(segments[1]))
@@ -312,6 +559,7 @@ class UploadServer(
         exchange.sendHtml(200, renderDashboard(
             inspections.filterIsInstance<WebJobInspection.Available>().map { it.presentation.job },
             inspections.filterIsInstance<WebJobInspection.Unavailable>().map { it.diagnostic },
+            store.recoveryInventory(),
         ))
     }
 
@@ -347,15 +595,7 @@ class UploadServer(
 
     private fun handlePostJob(exchange: HttpExchange) {
         try {
-            val declaredLength = exchange.requestHeaders.getFirst("Content-Length")?.toLongOrNull()
-            require(declaredLength == null || declaredLength <= MAX_UPLOAD_BYTES) { "upload exceeds the 32 MiB limit" }
-            val contentType = exchange.requestHeaders.getFirst("Content-Type") ?: ""
-            val job = jobs.uploadMultipart(exchange.requestBody, contentType)
-            if ((exchange.requestHeaders.getFirst("Accept") ?: "").contains("application/json")) {
-                exchange.sendJson(201, encodeJob(job))
-            } else {
-                exchange.redirect("/jobs/${job.id}")
-            }
+            handleUploadRequest(exchange, jobs)
         } catch (exception: InvalidUploadException) {
             exchange.sendHtml(400, renderErrorPage(400, "Unsupported binary", diagnostic(exception, "Upload a Linux ELF binary.")))
         }
@@ -440,20 +680,44 @@ class UploadServer(
         exchange.sendBytes(200, artifact.bytes, contentType(name))
     }
 
-    private fun encodeJob(job: Job): String =
-        Json.encodeToString(JsonElement.serializer(), job.toJson())
-
     private fun decode(value: String): String = URLDecoder.decode(value, StandardCharsets.UTF_8)
 
     private companion object {
-        const val MAX_UPLOAD_BYTES = 32L * 1024 * 1024
         const val MAX_ARTIFACT_BYTES = 64L * 1024 * 1024
     }
 }
 
+private const val MAX_UPLOAD_BYTES = 32L * 1024 * 1024
+
+private fun encodeJob(job: Job): String = Json.encodeToString(JsonElement.serializer(), job.toJson())
+
 private fun webOrigin(host: String, port: Int): String {
     val authority = if (':' in host && !host.startsWith('[')) "[$host]" else host
     return "http://$authority:$port"
+}
+
+/** Shared HTTP upload handler; the server owns admission and general error redaction around it. */
+internal fun handleUploadRequest(exchange: HttpExchange, jobs: WebJobService) {
+    try {
+        val declaredLength = exchange.requestHeaders.getFirst("Content-Length")?.toLongOrNull()
+        require(declaredLength == null || declaredLength <= MAX_UPLOAD_BYTES) { "upload exceeds the 32 MiB limit" }
+        val contentType = exchange.requestHeaders.getFirst("Content-Type") ?: ""
+        val job = jobs.uploadMultipart(exchange.requestBody, contentType)
+        if ((exchange.requestHeaders.getFirst("Accept") ?: "").contains("application/json")) {
+            exchange.sendJson(201, encodeJob(job))
+        } else {
+            exchange.redirect("/jobs/${job.id}")
+        }
+    } catch (exception: WebJobServiceException) {
+        val uncertain = exception.cause as? decompengine.jobs.UploadPublicationUncertain
+        if (exception.code != "RECOVERY_REQUIRED" || uncertain == null) throw exception
+        exchange.responseHeaders.set("Location", "/jobs/${uncertain.jobId}")
+        if ((exchange.requestHeaders.getFirst("Accept") ?: "").contains("application/json")) {
+            exchange.sendJson(409, uploadPublicationProblem(uncertain.jobId).toString())
+        } else {
+            exchange.sendHtml(409, renderUploadPublicationUncertainPage(uncertain.jobId))
+        }
+    }
 }
 
 /** CLI lifecycle: allow owned workers to record interruption before the JVM exits. */
@@ -536,3 +800,9 @@ private fun contentType(path: Path): String = when (path.fileName.toString().sub
     "log", "txt", "c", "h", "md" -> "text/plain; charset=utf-8"
     else -> "application/octet-stream"
 }
+
+private const val AUTH_INSPECTION_FAILED = "{\"status\":\"failed\",\"loginSupported\":false,\"error\":\"Authentication inspection is unavailable. Check ACP configuration and cleanup.\"}"
+
+private const val AUTH_INSPECTION_RUNNING = "{\"status\":\"inspecting\",\"loginSupported\":false}"
+
+private const val AUTH_INSPECTION_CANCELLED = "{\"status\":\"cancelled\",\"loginSupported\":false}"

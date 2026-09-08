@@ -158,6 +158,9 @@ internal class GccBundledPreparedOperation internal constructor(
                         descriptor, directories.getValue("reports"), intent.artifacts,
                     )
                     trigger.requireUnchangedStoppedPrefix(retained.assessment, prefix)
+                    GccBundledAnalysisStateCapture.requireUnchanged(
+                        descriptor, directories.getValue("state"), retained.analysisState, analysisStateLimits(),
+                    )
                 }
             }
             inputs.verify("after retained GCC checkpoint revalidation")

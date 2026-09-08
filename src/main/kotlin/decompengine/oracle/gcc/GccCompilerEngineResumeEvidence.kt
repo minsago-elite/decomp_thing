@@ -725,6 +725,7 @@ internal class GccInterruptedPrefixAssessment internal constructor(
     val functionCount: Long,
     val completed: Long,
     val observedBatchCount: Long,
+    val batchCommitmentSha256: String,
     val declaredInventorySha256: String,
     val partial: Long,
     val failed: Long,
@@ -817,6 +818,7 @@ private fun validateInterruptedPrefix(
     }
     val declaredInventory = inventorySha256
         ?: resumeValidationFailure("interrupted prefix has no inventory binding")
+    val batchCommitment = batchCommitmentSha256(batches, run.batches)
     requireArtifact(run.state, ParsedArtifact(state.artifactBytes, state.artifactSha256), "interrupted exporter state")
     requireArtifact(
         run.progress,
@@ -856,6 +858,7 @@ private fun validateInterruptedPrefix(
             functionCount = state.functionCount,
             completed = progress.completed,
             observedBatchCount = observedBatchCount,
+            batchCommitmentSha256 = batchCommitment,
             declaredInventorySha256 = declaredInventory,
             partial = partial,
             failed = failed,

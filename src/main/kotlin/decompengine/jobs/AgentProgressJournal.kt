@@ -301,6 +301,7 @@ class AgentProgressJournal(
         put("historyDropped", historyDropped)
         put("truncated", queueDropped > 0 || historyDropped > 0)
         put("events", JsonArray(retained.toList()))
+        put("omittedSequenceRanges", omissionRanges(retained.toList(), sequence))
     }
 
     override fun close() {
@@ -344,15 +345,64 @@ class AgentProgressJournal(
             require(result.getValue("events").jsonArray.size <= 1024)
             val next = result.getValue("nextSequence").jsonPrimitive.long
             require(next >= 0 && next < Long.MAX_VALUE)
-            require(result.getValue("queueDropped").jsonPrimitive.long >= 0)
-            require(result.getValue("historyDropped").jsonPrimitive.long >= 0)
+            val queueDropped = result.getValue("queueDropped").jsonPrimitive.long
+            val historyDropped = result.getValue("historyDropped").jsonPrimitive.long
+            val retainedCount = result.getValue("events").jsonArray.size.toLong()
+            // Subtract only after checking bounds, so hostile counters cannot overflow a sum.
+            require(queueDropped in 0..next && historyDropped in 0..(next - queueDropped)) {
+                "progress snapshot contains invalid omission counts"
+            }
+            require(next - queueDropped - historyDropped == retainedCount) {
+                "progress snapshot does not account for every sequence"
+            }
+            require(result.getValue("truncated").jsonPrimitive.boolean == (queueDropped > 0 || historyDropped > 0)) {
+                "progress snapshot contains an inconsistent truncation marker"
+            }
             var previous = -1L
             result.getValue("events").jsonArray.forEach {
                 val sequence = it.jsonObject.getValue("sequence").jsonPrimitive.long
                 require(sequence > previous && sequence < next) { "progress snapshot contains unordered events" }
                 previous = sequence
             }
+            // History eviction removes a prefix of admitted events. Any later gaps
+            // must therefore be queue drops, never history drops.
+            val firstRetained = result.getValue("events").jsonArray.firstOrNull()
+                ?.jsonObject?.getValue("sequence")?.jsonPrimitive?.long ?: next
+            require(historyDropped <= firstRetained) {
+                "progress snapshot history omissions exceed the evicted prefix"
+            }
+            // Sequence zero is admitted to an initially empty queue. Losing it requires eviction.
+            require(firstRetained == 0L || historyDropped > 0) {
+                "progress snapshot classifies the initial admitted event as queue loss"
+            }
+            // The small startup record fits the minimum snapshot budget and cannot alone be evicted.
+            require(retainedCount > 0 || historyDropped != 1L) {
+                "progress snapshot contains an impossible single-event history eviction"
+            }
+            result["omittedSequenceRanges"]?.let { ranges ->
+                require(ranges == omissionRanges(result.getValue("events").jsonArray.map { it.jsonObject }, next)) {
+                    "progress snapshot contains inconsistent omission ranges"
+                }
+            }
             return result
+        }
+
+        // The complement of at most 1024 retained sequences has at most 1025 ranges.
+        // Decimal strings preserve exact 64-bit boundaries in browser JSON consumers.
+        private fun omissionRanges(events: List<JsonObject>, next: Long): JsonArray = buildJsonArray {
+            var cursor = 0L
+            fun gap(endExclusive: Long) {
+                if (cursor < endExclusive) add(buildJsonObject {
+                    put("startInclusive", cursor.toString())
+                    put("endExclusive", endExclusive.toString())
+                })
+            }
+            events.forEach { event ->
+                val retainedSequence = event.getValue("sequence").jsonPrimitive.long
+                gap(retainedSequence)
+                cursor = retainedSequence + 1
+            }
+            gap(next)
         }
 
         private fun digest(text: String): String = MessageDigest.getInstance("SHA-256")
@@ -361,23 +411,59 @@ class AgentProgressJournal(
 }
 
 /** Bounded previews only; invocation artifacts continue to retain content commitments. */
-internal class ProgressRedactor(values: Collection<String>) {
-    private val secrets = values.filter { it.isNotBlank() }.distinct().sortedByDescending(String::length)
+internal class ProgressRedactor(values: Collection<String>, additionalValues: Collection<String> = emptyList()) {
+    private val removableControls = Regex("[\\p{Cntrl}&&[^\\n\\t]]")
+    private val secrets: List<String>
     init {
-        require(secrets.size <= 4096 && secrets.sumOf { it.length.toLong() } <= 1024 * 1024) {
+        val primary = values.filter { it.isNotBlank() }.distinct()
+        require(primary.size <= 4096 && primary.sumOf { it.length.toLong() } <= 1024 * 1024) {
             "progress redaction values exceed the configured limit"
         }
+        // Separate space for a full bounded session preference set (model, mode, 64 ID/value pairs).
+        require(additionalValues.size <= 130 && additionalValues.all { it.length <= 256 }) {
+            "additional redaction values exceed the configured limit"
+        }
+        secrets = (primary + additionalValues.filter { it.isNotEmpty() })
+            .map { it.replace(removableControls, "") }.filter { it.isNotEmpty() }
+            .distinct().sortedByDescending(String::length)
     }
 
+    /** True when any configured secret survives into the given formatted output. */
+    fun leaks(text: String): Boolean = secrets.any { text.contains(it) }
+
     fun text(value: String, maximumCharacters: Int = 512): String {
+        require(maximumCharacters >= 0)
         // Do not take a raw prefix: that can expose a partial configured secret.
         if (value.length > 16_384) return "[oversized text omitted]"
-        var safe = value
+        var safe = value.replace(removableControls, "")
+        // Replacing one secret can synthesize another ("fooX" with the secrets "foo" and
+        // "[redacted]X"); repeat replacement passes until the output is stable and omit
+        // any result that still contains a secret.
+        for (pass in 1..REDACTION_PASSES) {
+            val next = redact(safe)
+            if (next == safe) break
+            safe = next
+            if (safe.length > 16_384) return "[oversized text omitted]"
+        }
+        if (safe.length > maximumCharacters) {
+            var end = maximumCharacters
+            if (end > 0 && safe[end - 1].isHighSurrogate() && safe[end].isLowSurrogate()) end--
+            safe = safe.take(end) + "… [preview truncated]"
+        }
+        if (leaks(safe)) return "[unredactable text omitted]"
+        return safe
+    }
+
+    private fun redact(source: String): String {
+        var safe = source
         secrets.forEach { safe = safe.replace(it, "[redacted]") }
         safe = safe.replace(Regex("(?i)(bearer\\s+)[^\\s,;]+"), "$1[redacted]")
-            .replace(Regex("(?i)((?:api[_-]?key|access[_-]?token|password|secret|authorization)\\s*[:=]\\s*)[^\\s,;]+"), "$1[redacted]")
-            .replace(Regex("(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]+"), "[redacted]")
-            .replace(Regex("[\\p{Cntrl}&&[^\\n\\t]]"), "")
-        return if (safe.length <= maximumCharacters) safe else safe.take(maximumCharacters) + "… [preview truncated]"
+        safe = safe.replace(Regex("(?i)((?:api[_-]?key|access[_-]?token|password|secret|authorization)\\s*[:=]\\s*)[^\\s,;]+"), "$1[redacted]")
+        safe = safe.replace(Regex("(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]+"), "[redacted]")
+        return safe
+    }
+
+    private companion object {
+        const val REDACTION_PASSES = 8
     }
 }
