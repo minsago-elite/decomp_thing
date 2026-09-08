@@ -61,7 +61,7 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
       // Never regress the acknowledged cursor when a stream replays a retained duplicate.
       const acknowledged = items.length > 0 && added.length === 0 ? previous.cursor : cursor ?? previous.cursor;
       position.current = { initialized: true, cursor: acknowledged, rows: next, last };
-      setRows(next); setLastRead({ at: new Date().toISOString(), monotonicMs: performance.now() }); setRetry(0); failures.current = 0;
+      setRows(next); setLastRead({ at: new Date().toISOString(), monotonicMs: performance.now(), wallClockMs: Date.now() }); setRetry(0); failures.current = 0;
       if (next.length === capacity) { setFollowing(false); return false; }
       return true;
     };

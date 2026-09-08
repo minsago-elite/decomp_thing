@@ -29,6 +29,7 @@ data class ArchivalAudit(
     val unresolvedBehaviorReportIds: List<String>,
     val behaviorEvidenceProblems: Map<String, String> = emptyMap(),
     val projectBehaviorReportIds: List<String> = emptyList(),
+    internal val behaviorReportSha256: Map<String, String> = emptyMap(),
 ) {
     val provenanceComplete: Boolean get() = missingModelProvenance.isEmpty() && missingSourceProvenance.isEmpty()
     val universalEquivalenceClaim: Boolean = false
@@ -190,6 +191,7 @@ object ArchivalProjectAuditor {
                 require(behaviorBytes <= profile.budgets.archiveMaximumTotalBytes - totalBytes) {
                     "behavior report bytes exceed the remaining aggregate bound"
                 }
+                behaviorHashes[relative] = snapshot.sha256
                 val record = BehaviorEvidence.decode(snapshot.bytes)
                 val current = currentProjectRecord
                 if (current == null) {
@@ -203,7 +205,6 @@ object ArchivalProjectAuditor {
                 val identifier = record.string("id")
                 require(reportIds.add(identifier)) { "behavior report ID is duplicated" }
                 verifiedBehavior[relative] = record.boolean("matches")
-                behaviorHashes[relative] = snapshot.sha256
             } catch (failure: Exception) {
                 if (failure is InterruptedException) throw failure
                 problems[relative] = failure.message.orEmpty().take(512).ifEmpty { failure.javaClass.simpleName }
@@ -233,6 +234,7 @@ object ArchivalProjectAuditor {
             unresolvedBehaviorReportIds = unresolvedBehavior.sorted(),
             behaviorEvidenceProblems = problems,
             projectBehaviorReportIds = verifiedBehavior.keys.sorted(),
+            behaviorReportSha256 = behaviorHashes.toMap(),
         )
         require(readStableRegularFile(projectDir, "source_tree_manifest.json", maximumFileBytes).sha256 == manifestSnapshot.sha256) {
             "audit manifest changed during verification"
