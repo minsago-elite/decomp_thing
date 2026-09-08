@@ -15,23 +15,16 @@ import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.EvidenceModuleReconstructor
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
-import decompengine.project.GhidraProgramModelExportLimits
-import decompengine.project.GhidraProgramModelRecoveryMode
 import decompengine.project.ModuleReconstructor
 import decompengine.agent.AgentHarness
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowPhase
 import decompengine.jobs.BestEffortProgressJournal
 import decompengine.jobs.ProgressRedactor
-import decompengine.oracle.gcc.GccCompilerEnginePlanningService
-import decompengine.oracle.gcc.GccCompilerEngineProfiles
-import decompengine.oracle.gcc.authenticateGhidraInstallation
-import decompengine.analysis.BundledGhidra
 import decompengine.repair.RepairRuntimeConfiguration
 import decompengine.repair.SecureRepairRuntime
 import decompengine.validation.ProcessInput
 import decompengine.web.UploadServer
-import decompengine.web.WebUiMode
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Locale
@@ -56,67 +49,19 @@ fun main(args: Array<String>) {
 }
 
 private fun runGccEnginePlan(args: List<String>) {
-    var engineId: String? = null
-    var binary: Path? = null
-    var profilePath: Path? = null
-    var ghidraArchive: Path? = null
-    var output: Path? = null
-    var index = 0
-    while (index < args.size) {
-        when (args[index]) {
-            "--profile" -> {
-                if (index + 1 >= args.size) gccEnginePlanUsageError("--profile requires a file")
-                profilePath = Path.of(args[index + 1]); index += 2
-            }
-            "--ghidra-archive" -> {
-                if (index + 1 >= args.size) gccEnginePlanUsageError("--ghidra-archive requires a file")
-                ghidraArchive = Path.of(args[index + 1]); index += 2
-            }
-            "--output" -> {
-                if (index + 1 >= args.size) gccEnginePlanUsageError("--output requires a directory")
-                output = Path.of(args[index + 1]); index += 2
-            }
-            else -> {
-                if (args[index].startsWith("-")) gccEnginePlanUsageError("unexpected argument: ${args[index]}")
-                if (engineId == null) engineId = args[index]
-                else if (binary == null) binary = Path.of(args[index])
-                else gccEnginePlanUsageError("unexpected argument: ${args[index]}")
-                index++
-            }
-        }
+    val options = try {
+        decompengine.oracle.gcc.GccBundledCliOptions.parse(args)
+    } catch (failure: IllegalArgumentException) {
+        System.err.println(failure.message)
+        System.err.println("usage: llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> " +
+            "--profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount> " +
+            "[--resume-after-checkpoint <multiple-of-512>]")
+        kotlin.system.exitProcess(2)
     }
-    if (engineId == null || binary == null || profilePath == null ||
-        ghidraArchive == null || output == null
-    ) {
-        gccEnginePlanUsageError("gcc-engine-plan requires an engine, binary, profile, Ghidra provenance archive, and output")
-    }
-    val suite = GccCompilerEngineProfiles.load(profilePath)
-    val authenticatedGhidra = suite.analysis.authenticateGhidraInstallation(ghidraArchive, BundledGhidra.locate().release)
-    val reconstructionProfile = suite.reconstructionProfile()
-    val analyzer = GhidraHeadlessProgramModelAnalyzer(
-        GhidraProgramModelExportLimits.from(reconstructionProfile),
-        authenticatedGhidra.archiveSha256,
-        GhidraProgramModelRecoveryMode.fromWireName(suite.analysis.exporterMode),
-    )
-    val result = GccCompilerEnginePlanningService.diagnostic(analyzer).plan(suite, engineId, binary, output)
-    println("engine: ${result.engineId}")
-    println("program model: ${result.programModelPath}")
-    println("program model sha256: ${result.programModelSha256}")
-    println("module plan: ${result.modulePlanPath}")
-    println("module plan sha256: ${result.modulePlanSha256}")
-    println("non-authoritative assessment: ${result.assessmentPath}")
-    println("assessment sha256: ${result.assessmentSha256}")
-    println("wall clock milliseconds: ${result.wallClockMillis}")
-    println("maximum resident bytes observed: ${result.maximumResidentBytesObserved}")
-}
-
-private fun gccEnginePlanUsageError(message: String): Nothing {
-    System.err.println(message)
-    System.err.println(
-        "usage: llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> " +
-            "--ghidra-archive <file> --output <directory>",
-    )
-    kotlin.system.exitProcess(2)
+    val result = decompengine.oracle.gcc.GccBundledCliCommand.run(options, args)
+    println("engine: ${options.engineId}")
+    println("operation result: $result")
+    println("Model and plan paths and their digests are recorded in the result; scratch is retained.")
 }
 
 private fun runReconstruct(args: List<String>) {
@@ -177,6 +122,7 @@ private fun runReconstruct(args: List<String>) {
         println("source tree: ${result.projectDir}")
         println("archive: ${result.bundle.archivePath}")
         println("archive sha256: ${result.bundle.archiveSha256}")
+        println("recovery accuracy: unassessed; see the source tree's confidence and unresolved reports")
     }
 }
 
@@ -257,7 +203,7 @@ private fun runExplore(args: List<String>) {
     val report = AutomaticExplorer().explore(binary, seeds, reports)
     println(
         "exploration generated ${report.candidates.size} input(s), discovered " +
-            "${report.coverage.newSignatures.size} new output signature(s), confidence=${"%.4f".format(Locale.ROOT, report.confidence.score)}",
+            "${report.coverage.newSignatures.size} new output signature(s), uncalibrated exploration heuristic=${"%.4f".format(Locale.ROOT, report.confidence.score)}",
     )
     println("report: ${report.reportPath}")
 }
@@ -523,12 +469,8 @@ private fun runWeb(args: List<String>) {
     var port = 8000
     var listenBacklog = 64
     var dataDir = Path.of(".decomp_engine/jobs")
-    var uiMode = WebUiMode.LEGACY
-    var basePath = "/"
-    var devFrontendOrigin: String? = null
     var index = 0
     while (index < args.size) {
-        require(index + 1 < args.size) { "${args[index]} requires a value; see llm_bin_patch --help" }
         when (args[index]) {
             "--host" -> {
                 host = args[index + 1]
@@ -547,40 +489,12 @@ private fun runWeb(args: List<String>) {
                 dataDir = Path.of(args[index + 1])
                 index += 2
             }
-            "--ui" -> {
-                uiMode = when (args[index + 1]) {
-                    "legacy" -> WebUiMode.LEGACY
-                    "spa" -> WebUiMode.SPA
-                    else -> error("--ui must be legacy or spa")
-                }
-                index += 2
-            }
-            "--base-path" -> {
-                basePath = args[index + 1]
-                index += 2
-            }
-            "--dev-frontend-origin" -> {
-                devFrontendOrigin = args[index + 1]
-                index += 2
-            }
             else -> error("unknown web argument: ${args[index]}")
         }
     }
-    require(port in 0..65535) { "--port must be between 0 and 65535 (0 selects an available port)" }
-    val server = try {
-        UploadServer(host, port, dataDir, uiMode = uiMode, basePath = basePath, devFrontendOrigin = devFrontendOrigin, listenBacklog = listenBacklog)
-    } catch (_: java.net.BindException) {
-        System.err.println("Cannot bind web server to $host:$port. Check --host or choose an unused --port.")
-        kotlin.system.exitProcess(2)
-    }
+    val server = UploadServer(host, port, dataDir, listenBacklog = listenBacklog)
     decompengine.web.startWebServerWithShutdownHook(server)
-    val urlHost = if (':' in host && !host.startsWith('[')) "[$host]" else host
-    println("Serving decomp_engine ${uiMode.name.lowercase()} UI on http://$urlHost:${server.serverPort}$basePath")
-    if (uiMode == WebUiMode.SPA) {
-        val bootstrap = server.issueBrowserBootstrap()
-        // This is an explicit local operator handoff, not a request/access log.
-        println("Open local browser session (expires ${bootstrap.expiresAt}): ${server.browserOrigin}${basePath}#bootstrap=${bootstrap.token}")
-    }
+    println("Serving decomp_engine upload UI on http://$host:${server.serverPort}")
 }
 
 private fun printHelp() {
@@ -594,8 +508,8 @@ private fun printHelp() {
           llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness acp|legacy-openai]
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
           llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]
-          llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <directory>
-          llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173]
+          llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
+          llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs]
 
         Agent harness selection for doctor, patch, reconstruction, and repair:
           --harness acp            use the ACP agent provisioned by ACP_CONFIG_FILE (default)
@@ -603,7 +517,10 @@ private fun printHelp() {
           Doctor performs an initialize-only ACP v1 preflight for all workflows by default.
           Doctor's --tools-only mode is agent-free and cannot be combined with agent selectors.
           Reconstruction's --evidence-only mode is agent-free and cannot be combined with --harness.
-          gcc-engine-plan emits only a schema-v2 non-authoritative Kotlin/JVM diagnostic; it is not oracle or release evidence.
+          gcc-engine-plan requires contained execution and retains scratch plus linked evidence; results remain incomplete and release-ineligible.
+          --resume-after-checkpoint <multiple-of-512> interrupts and resumes within this process; it is not cold recovery.
+          Scratch defaults: 8 GiB available / 64 GiB maximum filesystem, 32768 available / 1000000 maximum inodes.
+          Override with --scratch-min-bytes, --scratch-max-bytes, --scratch-min-inodes, --scratch-max-inodes.
           ACP remains read-only and never receives oracle write, validation, scoring, or certification authority.
         """.trimIndent(),
     )

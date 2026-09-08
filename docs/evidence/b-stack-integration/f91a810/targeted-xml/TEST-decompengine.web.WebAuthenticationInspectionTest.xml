@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.web.WebAuthenticationInspectionTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-09-05T16:06:18.569Z" hostname="whatsername" time="5.873">
+  <properties/>
+  <testcase name="shutdown waits past five seconds and preserves caller interruption and ownership()" classname="decompengine.web.WebAuthenticationInspectionTest" time="5.707"/>
+  <testcase name="slow inspection leaves HTTP responsive and rejects concurrent admission()" classname="decompengine.web.WebAuthenticationInspectionTest" time="0.015"/>
+  <testcase name="failed inspection hides raw errors and permits another explicit attempt()" classname="decompengine.web.WebAuthenticationInspectionTest" time="0.007"/>
+  <testcase name="web inspection is explicit and returns only redacted previews()" classname="decompengine.web.WebAuthenticationInspectionTest" time="0.01"/>
+  <testcase name="explicit cancellation reaches the current inspector and publishes only its terminal result()" classname="decompengine.web.WebAuthenticationInspectionTest" time="0.021"/>
+  <testcase name="shutdown waits for cancelled inspection cleanup before returning()" classname="decompengine.web.WebAuthenticationInspectionTest" time="0.11"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

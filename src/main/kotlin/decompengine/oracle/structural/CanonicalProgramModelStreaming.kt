@@ -139,6 +139,8 @@ private class TypedReader(
 ) {
     private val budget = ModelBudget(limits)
 
+    private var schemaVersion = 1
+
     fun readModel(): RecoveredProgramModel {
         requireToken(parser.nextToken(), JsonToken.START_OBJECT, "program model root must be an object")
         budget.chargeNode("root object")
@@ -146,7 +148,8 @@ private class TypedReader(
         expectField("schemaVersion")
         requireToken(parser.nextToken(), JsonToken.VALUE_NUMBER_INT, "program model schemaVersion must be an integer")
         budget.chargeNode("schemaVersion")
-        if (parser.text != "1") modelFail("program model schemaVersion must be exactly 1")
+        if (parser.text !in setOf("1", "2")) modelFail("program model schemaVersion must be 1 or 2")
+        schemaVersion = parser.text.toInt()
 
         expectField("inputSha256")
         val inputSha256 = readString(
@@ -165,7 +168,7 @@ private class TypedReader(
         requireToken(parser.nextToken(), JsonToken.END_OBJECT, "program model has missing or extra root fields")
         if (parser.nextToken() != null) modelFail("program model has trailing JSON content")
         return try {
-            RecoveredProgramModel(1, inputSha256, functions, globals, types)
+            RecoveredProgramModel(schemaVersion, inputSha256, functions, globals, types)
         } catch (failure: IllegalArgumentException) {
             throw StructuralRecoveryV1Exception("program model entity identities are invalid", failure)
         }
@@ -201,8 +204,7 @@ private class TypedReader(
                 limits.maximumPrototypeCodePoints,
                 allowEmpty = true,
             )
-            expectField("status")
-            val status = readStatus("program model function status")
+            val status = readExtractionStatus("program model function status")
             expectField("calls")
             val calls = readStringSet("program model function calls", limits.maximumIdentifierCodePoints)
             expectField("referencedGlobals")
@@ -258,8 +260,7 @@ private class TypedReader(
             val type = readString("program model global type", limits.maximumTextCodePoints, allowEmpty = true)
             expectField("initializer")
             val initializer = readNullableString("program model global initializer", limits.maximumTextCodePoints)
-            expectField("status")
-            val status = readStatus("program model global status")
+            val status = readExtractionStatus("program model global status")
             requireToken(parser.nextToken(), JsonToken.END_OBJECT, "program model global has missing or extra fields")
             result += RecoveredGlobal(id, name, address, type, initializer, status)
         }
@@ -288,8 +289,7 @@ private class TypedReader(
             val declaration = readString("program model type declaration", limits.maximumTextCodePoints, allowEmpty = true)
             expectField("sourceAddress")
             val sourceAddress = readNullableAddress("program model type sourceAddress")
-            expectField("status")
-            val status = readStatus("program model type status")
+            val status = readExtractionStatus("program model type status")
             requireToken(parser.nextToken(), JsonToken.END_OBJECT, "program model type has missing or extra fields")
             result += RecoveredType(id, declaration, sourceAddress, status)
         }
@@ -343,6 +343,18 @@ private class TypedReader(
         }
         JsonToken.VALUE_STRING -> readCurrentString(label, maximumCodePoints, allowEmpty = true)
         else -> modelFail("$label must be a string or null")
+    }
+
+    private fun readExtractionStatus(label: String): RecoveryStatus {
+        expectField(if (schemaVersion == 1) "status" else "extractionStatus")
+        val status = readStatus(label)
+        if (schemaVersion == 2) {
+            expectField("recoveryAssessment")
+            if (readString("recovery assessment", MAXIMUM_STATUS_CODE_POINTS, allowEmpty = false) != "unassessed") {
+                modelFail("an extracted model cannot supply a scored recovery assessment")
+            }
+        }
+        return status
     }
 
     private fun readStatus(label: String): RecoveryStatus {
@@ -483,8 +495,11 @@ private class ExactCanonicalModelComparator(private val expected: ByteArray) {
             jsonString("0x${function.address.toString(16)}")
             ascii(",\n      \"prototype\": ")
             jsonString(function.prototype)
-            ascii(",\n      \"status\": ")
+            ascii(",\n      ")
+            jsonString(if (model.schemaVersion == 1) "status" else "extractionStatus")
+            ascii(": ")
             jsonString(function.status.name.lowercase(Locale.ROOT))
+            if (model.schemaVersion == 2) ascii(",\n      \"recoveryAssessment\": \"unassessed\"")
             ascii(",\n      \"calls\": [")
             stringSet(function.calls)
             ascii("],\n      \"referencedGlobals\": [")
@@ -509,8 +524,11 @@ private class ExactCanonicalModelComparator(private val expected: ByteArray) {
             jsonString(global.type)
             ascii(",\n      \"initializer\": ")
             nullableString(global.initializer)
-            ascii(",\n      \"status\": ")
+            ascii(",\n      ")
+            jsonString(if (model.schemaVersion == 1) "status" else "extractionStatus")
+            ascii(": ")
             jsonString(global.status.name.lowercase(Locale.ROOT))
+            if (model.schemaVersion == 2) ascii(",\n      \"recoveryAssessment\": \"unassessed\"")
             ascii("\n    }")
         }
         ascii("\n  ],\n  \"types\": [")
@@ -523,8 +541,11 @@ private class ExactCanonicalModelComparator(private val expected: ByteArray) {
             jsonString(type.declaration)
             ascii(",\n      \"sourceAddress\": ")
             if (type.sourceAddress == null) ascii("null") else jsonString("0x${type.sourceAddress.toString(16)}")
-            ascii(",\n      \"status\": ")
+            ascii(",\n      ")
+            jsonString(if (model.schemaVersion == 1) "status" else "extractionStatus")
+            ascii(": ")
             jsonString(type.status.name.lowercase(Locale.ROOT))
+            if (model.schemaVersion == 2) ascii(",\n      \"recoveryAssessment\": \"unassessed\"")
             ascii("\n    }")
         }
         ascii("\n  ]\n}\n")

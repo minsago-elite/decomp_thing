@@ -1,0 +1,5 @@
+This directory preserves the original clean-commit recovery verification manifest and all 13 matching JUnit XML reports. The manifest identifies commit `0cd6f6acc4243ce6b3aa828a09cb0b28d238e010`, the exact command, environment, suite counts and report hashes. It records 100 tests with no failures, errors or skips.
+
+Absolute paths in the manifest describe the originating run; they are not portable prerequisites. Reproduce the selected verification from that source commit with `python3 scripts/verify-web-job-recovery.py`, which creates fresh local evidence. These retained results do not verify later commits or the integration with current master. They do not establish full CI, B-series release qualification, power-loss behavior or safe reclamation.
+
+The XML files are byte-identical to the reports hashed by the original manifest. Generated HTML, transient process fixtures and binary Gradle reports are omitted; the retained XML contains the individual test outcomes and no captured stdout or stderr.

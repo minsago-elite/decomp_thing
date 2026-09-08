@@ -35,10 +35,16 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
   let controller: AbortController | null = null;
   let expiry: ReturnType<typeof setTimeout> | null = null;
   const listeners = new Set<(state: SessionState) => void>();
+  const invalidatedListeners = new Set<(remote: boolean) => void>();
+
+  function notifyInvalidated(remote: boolean) {
+    for (const listener of invalidatedListeners) listener(remote);
+  }
 
   const invalidation = createInvalidationChannel(expectedBase, () => {
     if (disposed || !initialized || !['authenticated', 'checking', 'signing-out'].includes(state.status)) return;
     invalidatePending(); forget();
+    notifyInvalidated(true);
     publish({ status: 'required', reason: 'session-changed' });
   });
 
@@ -175,6 +181,10 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
       listeners.add(listener);
       return () => { listeners.delete(listener); };
     },
+    onInvalidated(listener: (remote: boolean) => void) {
+      invalidatedListeners.add(listener);
+      return () => { invalidatedListeners.delete(listener); };
+    },
     initialize(fragment: BootstrapFragment): Promise<void> {
       if (initialized) return pending ?? Promise.resolve();
       initialized = true;
@@ -192,6 +202,7 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
         await gateway.logout(token, signal);
         if (!signal.aborted) {
           publish({ status: 'required', reason: 'signed-out' });
+          notifyInvalidated(false);
           invalidation.notify();
         }
       }, 'logout');
@@ -202,6 +213,7 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
       forget();
       invalidatePending();
       listeners.clear();
+      invalidatedListeners.clear();
     },
   };
 }
