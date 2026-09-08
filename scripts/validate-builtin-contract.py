@@ -11,15 +11,15 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parent.parent
 EXPECTED = {
     "decompengine.agent.AgentExecutionContractTest": 8,
-    "decompengine.builtin.BuiltinAgentHarnessTest": 14,
+    "decompengine.builtin.BuiltinAgentHarnessTest": 15,
     "decompengine.builtin.BuiltinFilesystemToolsTest": 7,
     "decompengine.builtin.BuiltinCapturedContextToolsTest": 6,
     "decompengine.builtin.BuiltinContextPackageTest": 5,
     "decompengine.builtin.BuiltinJournalTest": 11,
-    "decompengine.builtin.BuiltinCheckpointTest": 10,
+    "decompengine.builtin.BuiltinCheckpointTest": 11,
     "decompengine.builtin.BuiltinCapturedResumeTest": 8,
     "decompengine.builtin.BuiltinSourceStoreTest": 9,
-    "decompengine.builtin.BuiltinInvocationArchiveTest": 7,
+    "decompengine.builtin.BuiltinInvocationArchiveTest": 8,
     "decompengine.builtin.BuiltinTerminalToolsTest": 7,
     "decompengine.builtin.provider.OpenAiCompatibleModelProviderTest": 23,
 }

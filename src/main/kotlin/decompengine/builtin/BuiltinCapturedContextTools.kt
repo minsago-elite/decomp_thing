@@ -4,6 +4,7 @@ import decompengine.agent.*
 import decompengine.builtin.provider.*
 import kotlinx.serialization.json.*
 import java.nio.file.Path
+import java.nio.file.InvalidPathException
 import java.security.MessageDigest
 import java.util.Collections
 
@@ -50,7 +51,9 @@ internal class BuiltinCapturedContextTools(
         val prefix = arguments.getValue("path").jsonPrimitive.content
         val offset = arguments.getValue("offset").jsonPrimitive.int
         if (prefix.isNotEmpty()) {
-            val path = Path.of(prefix)
+            val path = try { Path.of(prefix) } catch (_: InvalidPathException) {
+                return BuiltinToolResult("invalid captured directory", failed = true)
+            }
             if (path.isAbsolute || path.normalize().toString() != prefix || path.startsWith(".."))
                 return BuiltinToolResult("invalid captured directory", failed = true)
         }
@@ -79,19 +82,30 @@ internal class BuiltinCapturedContextTools(
         val offset = arguments.getValue("offset").jsonPrimitive.int
         val items = evidence.values.sortedBy { it.id }
         if (offset !in 0..items.size) return BuiltinToolResult("invalid evidence page offset", failed = true)
-        val page = items.drop(offset).take(PAGE_ENTRIES)
-        return json { out ->
-            out.writeStartObject(); out.writeArrayFieldStart("evidence")
-            page.forEach { item ->
-                control.checkpoint()
-                out.writeStartObject(); out.writeStringField("id", item.id); out.writeStringField("mediaType", item.mediaType)
-                out.writeFieldName("description"); item.description?.let(out::writeString) ?: out.writeNull()
-                out.writeStringField("sha256", hash(item.content)); out.writeNumberField("utf8Bytes", item.content.toByteArray().size); out.writeEndObject()
+        var end = minOf(items.size, offset + PAGE_ENTRIES)
+        var encoded: ByteArray? = null
+        while (end > offset) {
+            try {
+                encoded = boundedProviderJson(maximumResultBytes) { out ->
+                    out.writeStartObject(); out.writeArrayFieldStart("evidence")
+                    items.subList(offset, end).forEach { item ->
+                        control.checkpoint()
+                        out.writeStartObject(); out.writeStringField("id", item.id); out.writeStringField("mediaType", item.mediaType)
+                        out.writeFieldName("description"); item.description?.let(out::writeString) ?: out.writeNull()
+                        out.writeStringField("sha256", hash(item.content)); out.writeNumberField("utf8Bytes", item.content.toByteArray().size); out.writeEndObject()
+                    }
+                    out.writeEndArray(); out.writeNumberField("totalEntries", items.size)
+                    out.writeFieldName("nextOffset"); if (end < items.size) out.writeNumber(end) else out.writeNull()
+                    out.writeEndObject()
+                }
+                break
+            } catch (failure: ModelProviderException) {
+                if (failure.kind != ModelFailureKind.RESOURCE_EXHAUSTED) throw failure
+                end--
             }
-            out.writeEndArray(); out.writeNumberField("totalEntries", items.size)
-            out.writeFieldName("nextOffset"); if (offset + page.size < items.size) out.writeNumber(offset + page.size) else out.writeNull()
-            out.writeEndObject()
         }
+        return encoded?.let { BuiltinToolResult(it.decodeToString()) }
+            ?: BuiltinToolResult("evidence page exceeds the configured result limit", failed = true)
     }
 
     private fun readEvidence(arguments: JsonObject, control: BuiltinExecutionControl): BuiltinToolResult {
@@ -141,5 +155,5 @@ internal class BuiltinCapturedContextTools(
     }
     private fun offsetSchema() = buildJsonObject { put("type", "integer"); put("minimum", 0); put("maximum", Int.MAX_VALUE) }
     private fun hash(value: String) = MessageDigest.getInstance("SHA-256").digest(value.toByteArray()).joinToString("") { "%02x".format(it) }
-    private companion object { const val PAGE_ENTRIES = 64; const val PAGE_CHARACTERS = 4096 }
+    private companion object { const val PAGE_ENTRIES = 64; const val PAGE_CHARACTERS = 196_608 }
 }
