@@ -42,5 +42,5 @@ internal fun acceptsWebMediaType(exchange: HttpExchange, mediaType: String, expl
     }
     val specificity = ranges.maxOfOrNull { it.first }
     val accepted = specificity != null && ranges.filter { it.first == specificity }.any { it.second > 0 }
-    return accepted && (!explicit || specificity != null && specificity >= 2)
+    return accepted && (!explicit || specificity >= 2)
 }
