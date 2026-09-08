@@ -9,6 +9,7 @@ import decompengine.oracle.core.OracleJson
 import decompengine.project.ArchivalBundleLimits
 import decompengine.project.ArchivalBundleVerifier
 import decompengine.project.ReconstructionAdapters
+import decompengine.project.checkedTransportLayout
 import decompengine.project.requireNormalizedProjectPath
 import decompengine.repair.StableRegularFile
 import decompengine.repair.readStableRegularFile
@@ -34,12 +35,14 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
         require(expectedSha256 == null || archive.sha256 == expectedSha256) { "archive differs from the displayed verified digest" }
         val input = identity(store.readInput(jobId))
         val source = sources.read(jobId).revision()
-        val buildPolicy = ReconstructionAdapters.resolve(source.profile).behaviorBuild
+        val adapter = ReconstructionAdapters.resolve(source.profile)
+        val buildPolicy = adapter.behaviorBuild
+        val transport = adapter.archiveBuild.checkedTransportLayout(source.profile)
         val layout = buildPolicy.layout(source.profile)
         requireNormalizedProjectPath(layout.contractPath, "archive build contract path")
         requireNormalizedProjectPath(layout.artifactPath, "archive build artifact path")
         require(layout.contractPath != layout.artifactPath) { "archive build evidence paths are duplicated" }
-        val inventory = store.sourceArchiveInventory(jobId)
+        val inventory = store.sourceArchiveInventory(jobId, transport)
         val temporary = Files.createTempDirectory("decomp-web-archive-")
         try {
             val extractedRoot = temporary.resolve("payload")
@@ -82,7 +85,7 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
             current.forEach { (relative, snapshot) ->
                 requireSame(snapshot, store.readArtifact(jobId, "reports/source-tree/$relative", MAXIMUM_FILE_BYTES))
             }
-            require(inventory == store.sourceArchiveInventory(jobId)) { "archive source inventory changed during verification" }
+            require(inventory == store.sourceArchiveInventory(jobId, transport)) { "archive source inventory changed during verification" }
             require(source.manifestDocument == sources.read(jobId).manifestDocument) { "archive source revision changed during verification" }
             requireSame(executable, store.readArtifact(jobId, "reports/source-tree/${layout.artifactPath}", MAXIMUM_BYTES))
             requireSame(input, store.readInput(jobId))
