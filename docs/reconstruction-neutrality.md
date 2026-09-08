@@ -61,6 +61,15 @@ current adapters still use their existing output/control locations; alternate
 inventory-root fixtures establish transport behavior, not an end-to-end proof
 of a backend with relocated artifacts.
 
+Archive output omissions and strict build-control JSON locations come from
+`ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
+and web inventory consume an immutable copy. Preflight retains entry accounting,
+portable-path checks and link checks for omitted output trees. Source/hash
+manifests, required evidence and declared payload paths remain protected. The
+current adapters still use their existing output/control locations; alternate
+inventory-root fixtures establish transport behavior, not an end-to-end proof
+of a backend with relocated artifacts.
+
 ## Scope and limits
 
 The inventory includes tracked files and nonignored untracked files. Ordinary
