@@ -18,7 +18,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.io.path.createDirectories
 import kotlin.io.path.pathString
-import kotlin.io.path.readText
 import kotlin.io.path.writeBytes
 import kotlin.io.path.writeText
 
@@ -339,7 +338,11 @@ class ArchivalReconstructionService(
     private val adapter = ReconstructionAdapters.resolve(profile)
 
     fun reconstruct(binaryPath: Path, outputDir: Path): ArchivalReconstructionResult {
+        if (Thread.interrupted()) throw InterruptedException("archival reconstruction cancelled")
         outputDir.createDirectories()
+        val observedBehavior = ReconstructionExplorationInput.read(
+            outputDir, profile.budgets.reconstructionMaximumContextCharacters,
+        )
         progress.phase(AgentWorkflowPhase.ANALYZING)
         val model = analyzer.analyze(binaryPath, outputDir.resolve("analysis"))
         val project = outputDir.resolve("source-tree")
@@ -347,7 +350,6 @@ class ArchivalReconstructionService(
         progressPath.writeText("{\"phase\":\"planning\",\"completed\":0,\"total\":0}\n")
         progress.phase(AgentWorkflowPhase.PLANNING)
         var moduleTotal = 0
-        val observedBehavior = outputDir.resolve("exploration.json").takeIf { Files.isRegularFile(it) }?.readText()
         val planner = DeterministicModulePlanner(
             maximumFunctionsPerModule = profile.budgets.maximumFunctionsPerModule,
             layout = profile.layout,
