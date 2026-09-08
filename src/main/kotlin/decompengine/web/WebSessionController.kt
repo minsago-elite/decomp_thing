@@ -20,7 +20,6 @@ internal class WebSessionController(private val access: LocalWebAccess) {
                 sendWebApiResponse(exchange, 200, "session", buildJsonObject {
                     put("csrfToken", credentials.csrfToken)
                     put("expiresAt", credentials.session.expiresAt.toString())
-                    put("idleExpiresAt", credentials.session.idleExpiresAt.toString())
                 })
             }
             "DELETE" -> {
