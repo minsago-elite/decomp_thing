@@ -357,7 +357,7 @@ class WebJobService(
      */
     @Synchronized
     internal fun setProgressRetentionPinned(jobId: String, runId: String, expectedRunVersion: String,
-        pinned: Boolean): WorkflowAttempt {
+        pinned: Boolean, actor: decompengine.jobs.WorkflowPinActor = decompengine.jobs.WorkflowPinActor.INTERNAL): WorkflowAttempt {
         requireInitializedRead()
         if (stopping) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
         requirePublicationAvailable()
@@ -365,7 +365,7 @@ class WebJobService(
         val owner = attempts ?: throw WebJobServiceException("JOB_NOT_FOUND", "The requested job is unavailable.")
         val task = (active[jobId] as? DurableTask)?.takeIf { it.attempt.runId == runId }
         return try {
-            owner.setProgressRetentionPinned(jobId, runId, expectedRunVersion, pinned).attempt.also { updated ->
+            owner.setProgressRetentionPinned(jobId, runId, expectedRunVersion, pinned, actor).attempt.also { updated ->
                 task?.attempt = updated
             }
         } catch (failure: Throwable) {

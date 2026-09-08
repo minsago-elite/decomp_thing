@@ -90,6 +90,7 @@ data class LegacyJobRecord(val jobId: String, val displayFilename: String, val c
 data class WorkflowJobSnapshot(
     val jobId: String, val version: String, val legacy: LegacyWorkflowObservation, val attempts: List<WorkflowAttempt>,
     val acceptedRevision: WorkflowAcceptanceReference?,
+    val pinAudit: WorkflowPinAudit = WorkflowPinAudit.EMPTY,
 ) {
     val latestRun: WorkflowAttempt? get() = attempts.lastOrNull()
 }
@@ -153,7 +154,7 @@ class WorkflowAttemptStore private constructor(
 
     /** Retention policy is durable and versioned, separate from workflow execution/acceptance. */
     internal fun setProgressRetentionPinned(jobId: String, runId: String, expectedRunVersion: String,
-        pinned: Boolean): WorkflowMutation = withJob(jobId) { directory ->
+        pinned: Boolean, actor: WorkflowPinActor = WorkflowPinActor.INTERNAL): WorkflowMutation = withJob(jobId) { directory ->
         val current = available(jobId, directory).snapshot
         requireRecovered(current, directory)
         val old = current.attempts.singleOrNull { it.runId == runId }
@@ -161,7 +162,7 @@ class WorkflowAttemptStore private constructor(
         checkVersion(old.version, expectedRunVersion)
         if (old.progressRetentionPinned == pinned) WorkflowMutation(current, old) else {
             val attempt = old.copy(version = newId("version"), progressRetentionPinned = pinned)
-            val updated = replace(current, attempt)
+            val updated = replace(current, attempt).copy(pinAudit = current.pinAudit.append(clock.instant(), actor, old, attempt))
             persist(directory, updated)
             WorkflowMutation(updated, attempt)
         }
@@ -397,13 +398,14 @@ class WorkflowAttemptStore private constructor(
     private fun parseState(bytes: ByteArray, jobId: String): WorkflowJobSnapshot = try {
         val root = OracleJson.parse(bytes, JSON_LIMITS).asObject()
         if (root.number("schemaVersion").intOrNull != 1) fail("UNSUPPORTED_WORKFLOW_SCHEMA", "This workflow storage version is unsupported; use a compatible application or restore a backup.")
-        root.keysExactly("schemaVersion", "jobId", "version", "legacy", "attempts", "acceptedRevision")
+        JsonObject(root - "pinAudit").keysExactly("schemaVersion", "jobId", "version", "legacy", "attempts", "acceptedRevision")
         require(root.string("jobId") == jobId)
         val legacy = root.getValue("legacy").asObject().also { it.keysExactly("originalJobSha256", "status", "recoveredInterrupted") }
         val attempts = root.getValue("attempts") as? JsonArray ?: error("invalid attempts")
         require(attempts.size <= MAX_ATTEMPTS)
         WorkflowJobSnapshot(jobId, root.string("version"), LegacyWorkflowObservation(legacy.string("originalJobSha256"), legacy.string("status"), legacy.boolean("recoveredInterrupted")),
-            immutable(attempts.map(::parseAttempt)), root.optional("acceptedRevision")?.let(::parseAcceptance)).also(::validateSnapshot)
+            immutable(attempts.map(::parseAttempt)), root.optional("acceptedRevision")?.let(::parseAcceptance),
+            if ("pinAudit" in root) WorkflowPinAudit.decode(root.getValue("pinAudit")) else WorkflowPinAudit.EMPTY).also(::validateSnapshot)
     } catch (failure: WorkflowStoreException) {
         if (failure.code == "UNSUPPORTED_WORKFLOW_SCHEMA") throw failure
         throw WorkflowStoreException("CORRUPT_WORKFLOW_STATE", "The workflow state has inconsistent lifecycle records; preserve it and restore a verified backup.", cause = failure)
@@ -485,6 +487,7 @@ class WorkflowAttemptStore private constructor(
             if (!valid) fail("INVALID_TRANSITION", "The terminal state and reason are inconsistent.")
         }
         private fun validateSnapshot(snapshot: WorkflowJobSnapshot) {
+            snapshot.pinAudit.validateTargets(snapshot.attempts)
             requireJobId(snapshot.jobId); requireId(snapshot.version); requireSha(snapshot.legacy.originalJobSha256)
             require(snapshot.legacy.status in LEGACY_STATUSES && snapshot.attempts.size <= MAX_ATTEMPTS)
             require(!snapshot.legacy.recoveredInterrupted || snapshot.legacy.status in setOf("queued", "analyzing"))
@@ -519,6 +522,7 @@ class WorkflowAttemptStore private constructor(
             put("schemaVersion", 1); put("jobId", snapshot.jobId); put("version", snapshot.version)
             put("legacy", buildJsonObject { put("originalJobSha256", snapshot.legacy.originalJobSha256); put("status", snapshot.legacy.status); put("recoveredInterrupted", snapshot.legacy.recoveredInterrupted) })
             put("attempts", JsonArray(snapshot.attempts.map(::encodeAttempt)))
+            if (snapshot.pinAudit.entries.isNotEmpty()) put("pinAudit", snapshot.pinAudit.encode())
             put("acceptedRevision", snapshot.acceptedRevision?.let(::encodeAcceptance) ?: JsonNull)
         }
         private fun encodeAttempt(a: WorkflowAttempt): JsonObject = buildJsonObject {
