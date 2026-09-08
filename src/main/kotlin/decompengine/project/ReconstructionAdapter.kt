@@ -1,11 +1,14 @@
 package decompengine.project
 
 import java.nio.file.Path
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 
 /** Local generation policy; production execution authority is a separate contract. */
 internal interface ReconstructionAdapter {
     val compilation: ModuleCompilationPolicy
     val archiveBuild: ArchiveBuildPolicy
+    val behaviorBuild: BehaviorBuildPolicy
     fun build(projectDir: Path, profile: ReconstructionProfile): BuildReport
     fun rendering(model: RecoveredProgramModel, plan: ModulePlan): ProjectRendering
     fun modulePrompt(request: ModuleReconstructionRequest): ModulePromptContent
@@ -43,3 +46,22 @@ internal interface ArchiveBuildPolicy {
     fun sourceRevision(projectDir: Path, profile: ReconstructionProfile): BuildSourceRevision
     fun isBuildInput(profile: ReconstructionProfile, relativePath: String): Boolean
 }
+
+/** Application-owned build evidence policy; capture retains its own read and inventory bounds. */
+internal interface BehaviorBuildPolicy {
+    fun layout(profile: ReconstructionProfile): BehaviorBuildLayout
+    fun parseContract(contract: JsonObject, profile: ReconstructionProfile): BehaviorBuildContract
+}
+
+internal data class BehaviorBuildLayout(
+    val contractPath: String,
+    val artifactPath: String,
+    val standaloneInputs: List<String>,
+    val sourceRoots: List<String>,
+)
+
+internal data class BehaviorBuildContract(
+    val sourceRevisionSha256: String,
+    val sourceInputs: JsonArray,
+    val artifact: JsonObject,
+)
