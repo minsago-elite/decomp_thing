@@ -2,6 +2,7 @@ package decompengine.project
 
 import decompengine.agent.AgentWorkflowProgress
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.io.path.createTempDirectory
@@ -107,6 +108,87 @@ class SourceGenerationHostAdmissionTest {
             assertEquals(digest, summary.getValue("profileSha256").jsonPrimitive.content)
             assertEquals("unresolved", summary.getValue("implementationStatus").jsonPrimitive.content)
             assertEquals(digest, profile.sha256)
+        }
+    }
+
+    @Test
+    fun `source generation retains exact profile host and module outcome evidence`() {
+        for (base in ReconstructionProfiles.builtIn) {
+            val profile = raisedContextProfile(base)
+            val host = ReconstructionHostSafetyLimits(profile.budgets)
+            val project = createTempDirectory("source-budget-evidence-")
+            SourceTreeGenerator.generate(
+                model(),
+                project,
+                hostSafetyLimits = host,
+                profile = profile,
+                reconstructor = ModuleReconstructor { request ->
+                    EvidenceModuleReconstructor().reconstruct(request).copy(
+                        promptCharacters = 8,
+                        promptBudgetCharacters = profile.budgets.reconstructionMaximumContextCharacters,
+                    )
+                },
+            )
+
+            val report = Json.parseToJsonElement(
+                project.resolve("reports/confidence.json").readText(),
+            ).jsonObject
+            val evidence = report.getValue("sourceGenerationBudgetEvidence").jsonObject
+            val selectedProfile = evidence.getValue("selectedProfile").jsonObject
+            assertEquals(profile.id, selectedProfile.getValue("id").jsonPrimitive.content)
+            assertEquals(profile.sha256, selectedProfile.getValue("sha256").jsonPrimitive.content)
+            assertEquals(
+                Json.parseToJsonElement(profile.canonicalJson()),
+                selectedProfile.getValue("descriptor"),
+            )
+            assertEquals(
+                Json.parseToJsonElement(host.maximum.canonicalJson()),
+                evidence.getValue("hostSafetyLimits").jsonObject.getValue("budgets"),
+            )
+            assertEquals("true", evidence.getValue("admission").jsonObject.getValue("profileWithinHost").jsonPrimitive.content)
+            val outcome = evidence.getValue("outcome").jsonObject
+            assertEquals("1", outcome.getValue("plannedModules").jsonPrimitive.content)
+            assertEquals("1", outcome.getValue("completedModules").jsonPrimitive.content)
+            assertEquals("0", outcome.getValue("acceptedModules").jsonPrimitive.content)
+            assertEquals("1", outcome.getValue("unresolvedModules").jsonPrimitive.content)
+            val module = evidence.getValue("modules").jsonArray.single().jsonObject
+            assertEquals("unresolved", module.getValue("outcome").jsonPrimitive.content)
+            assertEquals("8", module.getValue("promptCharacters").jsonPrimitive.content)
+            assertEquals(
+                profile.budgets.reconstructionMaximumContextCharacters.toString(),
+                module.getValue("promptBudgetCharacters").jsonPrimitive.content,
+            )
+        }
+    }
+
+    @Test
+    fun `source generation rejects prompt budget metadata beyond profile for custom reconstructors`() {
+        for (base in ReconstructionProfiles.builtIn) {
+            val profile = profile(base, base.budgets.copy(reconstructionMaximumContextCharacters = 4_096))
+            val project = createTempDirectory("source-custom-budget-")
+            val manifest = SourceTreeGenerator.generate(
+                model(),
+                project,
+                profile = profile,
+                reconstructor = ModuleReconstructor { request ->
+                    EvidenceModuleReconstructor().reconstruct(request).copy(
+                        generator = "authored",
+                        promptCharacters = 10,
+                        promptBudgetCharacters = 4_097,
+                    )
+                },
+            )
+
+            assertEquals(listOf("fn_host"), manifest.unresolvedImplementationIds)
+            val module = DeterministicModulePlanner(layout = profile.layout).plan(model()).modules.single()
+            val checkpoint = Json.parseToJsonElement(project.resolve(
+                profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id)),
+            ).readText()).jsonObject
+            assertEquals("custom", checkpoint.getValue("reconstructorIdentity").jsonPrimitive.content)
+            assertEquals("false", checkpoint.getValue("accepted").jsonPrimitive.content)
+            assertTrue(checkpoint.getValue("issues").jsonArray.any {
+                it.jsonObject.getValue("code").jsonPrimitive.content == "prompt-budget-invalid"
+            })
         }
     }
 
