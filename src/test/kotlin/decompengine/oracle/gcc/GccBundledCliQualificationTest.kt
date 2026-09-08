@@ -50,6 +50,7 @@ class GccBundledCliQualificationTest {
         require((allMounts + listOf(binary, profile, archive)).none { it.startsWith(evidenceRoot) || evidenceRoot.startsWith(it) })
         val destination = Files.createTempDirectory(evidenceRoot, "$engine-")
         println("Real-engine CLI qualification evidence retained at $destination")
+        val launcherRecords = mutableListOf<Pair<Path, List<String>>>()
         val outputs = listOf(freshScratch, resumedScratch).mapIndexed { index, scratch ->
             val output = Files.createDirectory(destination.resolve(if (index == 0) "fresh" else "resumed"), PRIVATE_DIRECTORY)
             val arguments = listOf(engine, binary.toString(), "--profile", profile.toString(), "--ghidra-archive", archive.toString(),
@@ -58,12 +59,16 @@ class GccBundledCliQualificationTest {
             val launchEvidence = Files.createDirectory(destination.resolve(if (index == 0) "fresh-launcher" else "resumed-launcher"), PRIVATE_DIRECTORY)
             assertEquals(0, invokeInstalledGccCli(arguments, launchEvidence, 2700, installation),
                 "installed CLI failed; inspect retained launcher output")
+            launcherRecords += launchEvidence to arguments
             retainAndCheck(output, scratch, profile, arguments, resumed = index != 0)
         }
         assertEquals(-1L, Files.mismatch(outputs[0].first, outputs[1].first), "fresh/resumed model bytes differ")
         assertEquals(-1L, Files.mismatch(outputs[0].second, outputs[1].second), "fresh/resumed planner bytes differ")
         publish(destination.resolve("comparison.json"), OracleJson.canonicalBytes(JsonObject(mapOf(
-            "provider" to JsonPrimitive("gcc-real-engine-cli-comparison-v1"), "engine" to JsonPrimitive(engine),
+            "provider" to JsonPrimitive("gcc-real-engine-cli-comparison-v2"), "engine" to JsonPrimitive(engine),
+            "launcherEvidence" to JsonArray(launcherRecords.map { (directory, arguments) ->
+                verifyInstalledCliEvidence(directory, arguments, installation, 0)
+            }),
             "modelByteIdentical" to JsonPrimitive(true), "planByteIdentical" to JsonPrimitive(true),
             "benchmarkAccepted" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
             "entryPoint" to JsonPrimitive("installed bin/llm_bin_patch subprocess"),

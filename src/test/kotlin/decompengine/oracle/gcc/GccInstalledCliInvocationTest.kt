@@ -2,6 +2,8 @@ package decompengine.oracle.gcc
 
 import decompengine.oracle.core.OracleJson
 import java.nio.file.Files
+import java.nio.file.Path
+import kotlin.test.assertFails
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -17,5 +19,16 @@ class GccInstalledCliInvocationTest {
         val result = OracleJson.parseCanonical(Files.readAllBytes(evidence.resolve("launcher-result.json"))).jsonObject
         assertEquals("false", result.getValue("productionVerified").jsonPrimitive.content)
         assertEquals("2", result.getValue("exitCode").jsonPrimitive.content)
+        val installation = Path.of(System.getProperty("user.dir"), "build/install/llm_bin_patch")
+        val args = listOf("invalid-engine", "unused")
+        val checked = verifyInstalledCliEvidence(evidence, args, installation, 2)
+        assertEquals("false", checked.getValue("productionVerified").jsonPrimitive.content)
+        assertFails { verifyInstalledCliEvidence(evidence, listOf("cc1", "unused"), installation, 2) }
+        val stderr = evidence.resolve("launcher-stderr.bin")
+        val prior = Files.readAllBytes(stderr)
+        Files.write(stderr, prior + byteArrayOf(10))
+        assertFails { verifyInstalledCliEvidence(evidence, args, installation, 2) }
+        Files.write(stderr, prior)
+        assertEquals(checked, verifyInstalledCliEvidence(evidence, args, installation, 2))
     }
 }

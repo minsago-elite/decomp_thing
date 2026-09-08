@@ -119,7 +119,11 @@ Ghidra runtime required by the existing contained tests. The qualification invok
 `$DECOMP_GCC_CLI_INSTALLATION/bin/llm_bin_patch` as a separate process, using the packaged
 deployment references and the test JVM’s selected JDK. Each leg retains launcher
 argv, script digest, selected Java heap, bounded stdout/stderr and exit status in a
-sibling evidence directory. The outer harness allows 45 minutes and at most 64 KiB
+sibling evidence directory. Launcher result version 2 commits both stream digests
+and byte counts plus the invocation digest. Before comparison publication the
+harness rechecks those files, exact argv, launcher digest and Java selection;
+comparison version 2 retains both launcher result and invocation digests. These
+checks remain local test observations, not production provenance. The outer harness allows 45 minutes and at most 64 KiB
 per stream; exceeding either bound fails qualification and retains scratch for
 trusted recovery. It does not certify cgroup absence after a harness failure.
 
