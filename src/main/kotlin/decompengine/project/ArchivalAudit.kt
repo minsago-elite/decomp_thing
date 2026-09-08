@@ -17,6 +17,84 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 
+data class ArchivePublicationLimits(
+    val maximumEntries: Int,
+    val maximumFileBytes: Long,
+    val maximumTotalBytes: Long,
+) {
+    init {
+        require(maximumEntries > 0) { "archive publication entry limit must be positive" }
+        require(maximumFileBytes > 0) { "archive publication file limit must be positive" }
+        require(maximumTotalBytes >= maximumFileBytes) {
+            "archive publication total limit must be at least the file limit"
+        }
+    }
+
+    internal fun toJson(): String = """
+        {"maximumEntries":$maximumEntries,"maximumFileBytes":$maximumFileBytes,"maximumTotalBytes":$maximumTotalBytes}
+    """.trimIndent()
+
+    companion object {
+        fun from(limits: ArchivalBundleLimits): ArchivePublicationLimits = ArchivePublicationLimits(
+            limits.maximumEntries, limits.maximumFileBytes, limits.maximumTotalBytes,
+        )
+
+        fun from(budgets: ReconstructionBudgets): ArchivePublicationLimits = ArchivePublicationLimits(
+            budgets.archiveMaximumEntries, budgets.archiveMaximumFileBytes, budgets.archiveMaximumTotalBytes,
+        )
+    }
+}
+
+data class ArchivePublicationEvidence(
+    val profileId: String,
+    val profileSha256: String,
+    val profileLimits: ArchivePublicationLimits,
+    val hostLimits: ArchivePublicationLimits,
+    val effectiveLimits: ArchivePublicationLimits,
+    val outcome: String,
+) {
+    init {
+        require(profileId.isNotBlank()) { "archive publication profile ID must not be blank" }
+        require(profileSha256.matches(Regex("[0-9a-f]{64}"))) {
+            "archive publication profile digest is invalid"
+        }
+        require(outcome.isNotBlank()) { "archive publication outcome must not be blank" }
+        require(effectiveLimits.maximumEntries <= profileLimits.maximumEntries)
+        require(effectiveLimits.maximumFileBytes <= profileLimits.maximumFileBytes)
+        require(effectiveLimits.maximumTotalBytes <= profileLimits.maximumTotalBytes)
+        require(effectiveLimits.maximumEntries <= hostLimits.maximumEntries)
+        require(effectiveLimits.maximumFileBytes <= hostLimits.maximumFileBytes)
+        require(effectiveLimits.maximumTotalBytes <= hostLimits.maximumTotalBytes)
+    }
+
+    internal fun toJson(): String = """
+        {
+          "profileId": ${JsonPrimitive(profileId)},
+          "profileSha256": "$profileSha256",
+          "profileLimits": ${profileLimits.toJson()},
+          "hostLimits": ${hostLimits.toJson()},
+          "effectiveLimits": ${effectiveLimits.toJson()},
+          "outcome": ${JsonPrimitive(outcome)}
+        }
+    """.trimIndent()
+
+    companion object {
+        fun forProfile(
+            profile: ReconstructionProfile,
+            hostSafetyLimits: ReconstructionHostSafetyLimits,
+            effectiveLimits: ArchivalBundleLimits,
+            outcome: String,
+        ): ArchivePublicationEvidence = ArchivePublicationEvidence(
+            profileId = profile.id,
+            profileSha256 = profile.sha256,
+            profileLimits = ArchivePublicationLimits.from(profile.budgets),
+            hostLimits = ArchivePublicationLimits.from(hostSafetyLimits.maximum),
+            effectiveLimits = ArchivePublicationLimits.from(effectiveLimits),
+            outcome = outcome,
+        )
+    }
+}
+
 data class ArchivalAudit(
     val entityCount: Int,
     val missingModelProvenance: List<String>,
@@ -35,6 +113,7 @@ data class ArchivalAudit(
     val observedPortableCorpusSha256: List<String> = emptyList(),
     val recoveryAssessment: JsonObject? = null,
     val moduleCompilationEvidence: Map<String, JsonObject> = emptyMap(),
+    val archivePublication: ArchivePublicationEvidence? = null,
 ) {
     val provenanceComplete: Boolean get() = missingModelProvenance.isEmpty() && missingSourceProvenance.isEmpty()
     val universalEquivalenceClaim: Boolean = false
@@ -62,6 +141,7 @@ data class ArchivalAudit(
           "isolationAssurance": "local requests only; no retained production containment evidence",
           "behaviorEvidenceProblems": {${behaviorEvidenceProblems.toSortedMap().entries.joinToString(",") { (path, problem) -> "${JsonPrimitive(path)}:${JsonPrimitive(problem)}" }}},
           "unresolvedBehaviorReportIds": [${unresolvedBehaviorReportIds.sorted().joinToString(",") { JsonPrimitive(it).toString() }}],
+          "archivePublication": ${archivePublication?.toJson() ?: "null"},
           "universalEquivalenceClaim": false,
           "limitation": "Extraction, compilation and local behavior observations do not establish calibrated recovery accuracy; untested behavior remains unresolved."
         }
@@ -76,11 +156,22 @@ internal fun snapshotRequiredBehaviorCorpora(required: Set<String>): Set<String>
 }
 
 object ArchivalProjectAuditor {
+    @JvmOverloads
     fun audit(
         projectDir: Path,
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
         requiredCorpusSha256: Set<String> = emptySet(),
+        hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+        publication: ArchivePublicationEvidence? = null,
     ): ArchivalAudit {
+        hostSafetyLimits.requireAllows(profile.budgets)
+        val effectiveLimits = ArchivalBundleLimits().constrainedTo(profile)
+        val publicationEvidence = publication ?: ArchivePublicationEvidence.forProfile(
+            profile, hostSafetyLimits, effectiveLimits, "audited",
+        )
+        require(publicationEvidence.profileId == profile.id && publicationEvidence.profileSha256 == profile.sha256) {
+            "archive publication evidence does not match the selected profile"
+        }
         val compilationPolicy = ReconstructionCompilationPolicies.resolve(profile)
         val requiredCorpora = snapshotRequiredBehaviorCorpora(requiredCorpusSha256)
         val maximumFileBytes = minOf(profile.budgets.archiveMaximumFileBytes, Int.MAX_VALUE.toLong() - 1L)
@@ -352,6 +443,7 @@ object ArchivalProjectAuditor {
             requiredCorpusSha256 = requiredCorpora.sorted(),
             observedPortableCorpusSha256 = observedCorpora.toList(),
             recoveryAssessment = model.unassessedRecoveryAssessment(sha256(modelText.toByteArray(Charsets.UTF_8))),
+            archivePublication = publicationEvidence,
         )
         require(readStableRegularFile(projectDir, "source_tree_manifest.json", maximumFileBytes).sha256 == manifestSnapshot.sha256) {
             "audit manifest changed during verification"

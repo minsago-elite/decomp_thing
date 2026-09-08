@@ -428,7 +428,8 @@ class ArchivalReconstructionService(
                 maximumFileBytes = profile.budgets.archiveMaximumFileBytes,
                 maximumTotalBytes = profile.budgets.archiveMaximumTotalBytes,
             ),
-            profile,
+            profile = profile,
+            hostSafetyLimits = hostSafetyLimits,
         )
         val unresolvedEntities = requireNotNull(bundle.audit).unresolvedEntityIds
         val implementationStatus = if (unresolvedEntities.isEmpty()) "complete" else "unresolved"
@@ -446,6 +447,7 @@ class ArchivalReconstructionService(
               "archiveSha256": "${bundle.archiveSha256}",
               "profileId": "${profile.id}",
               "profileSha256": "${profile.sha256}",
+              "archivePublication": ${bundle.publication?.toJson() ?: "null"},
               "moduleCount": $moduleTotal,
               "functionCount": ${model.functions.size},
               "globalCount": ${model.globals.size},

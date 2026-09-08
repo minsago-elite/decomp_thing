@@ -1,6 +1,10 @@
 package decompengine.project
 
 import decompengine.oracle.fulltree.StableControlFile
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.io.InputStream
 import java.lang.reflect.Modifier
 import java.nio.file.Files
@@ -16,6 +20,7 @@ import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class ArchivalBundleTest {
@@ -260,6 +265,86 @@ class ArchivalBundleTest {
 
         assertTrue(failure.message.orEmpty().contains("must be empty"))
         assertEquals("keep", sentinel.readText())
+    }
+
+    @Test
+    fun `direct archive publication admits host ceilings before touching the project`() {
+        val temp = createTempDirectory("archive-host-admission-")
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val host = ReconstructionHostSafetyLimits.DEFAULT
+        val profile = ReconstructionProfile(
+            base.schemaVersion,
+            base.id,
+            base.layout,
+            base.budgets.copy(archiveMaximumEntries = host.maximum.archiveMaximumEntries + 1),
+            base.adapterConfiguration,
+        )
+        val archive = temp.resolve("rejected.zip")
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ArchivalPackager.create(temp.resolve("missing-project"), archive, profile = profile)
+        }
+
+        assertTrue(failure.message.orEmpty().contains("archive entry budget exceeds the host safety limit"))
+        assertTrue(!archive.exists())
+    }
+
+    @Test
+    fun `profile archive exhaustion rejects direct publication`() {
+        val temp = createTempDirectory("archive-profile-exhaustion-")
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val profile = ReconstructionProfile(
+            base.schemaVersion,
+            base.id,
+            base.layout,
+            base.budgets.copy(archiveMaximumEntries = 1, archiveMaximumFileBytes = 4_096, archiveMaximumTotalBytes = 4_096),
+            base.adapterConfiguration,
+        )
+        val project = temp.resolve("project")
+        SourceTreeGenerator.generate(model(2), project, profile = profile)
+        ReconstructionAdapters.resolve(profile).build(project, profile)
+        val archive = temp.resolve("rejected.zip")
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ArchivalPackager.create(project, archive, profile = profile)
+        }
+
+        assertTrue(failure.message.orEmpty().contains("filesystem entries") || failure.message.orEmpty().contains("file-count"))
+        assertTrue(!archive.exists())
+    }
+
+    @Test
+    fun `published archive retains profile host and effective limit commitments`() {
+        val temp = createTempDirectory("archive-publication-evidence-")
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val profile = ReconstructionProfile(
+            base.schemaVersion,
+            base.id,
+            base.layout,
+            base.budgets.copy(
+                archiveMaximumEntries = 10_000,
+                archiveMaximumFileBytes = 8L * 1024 * 1024,
+                archiveMaximumTotalBytes = 64L * 1024 * 1024,
+            ),
+            base.adapterConfiguration,
+        )
+        val project = temp.resolve("project")
+        SourceTreeGenerator.generate(model(2), project, profile = profile)
+        ReconstructionAdapters.resolve(profile).build(project, profile)
+        val bundle = ArchivalPackager.create(project, temp.resolve("published.zip"), profile = profile)
+        val publication = assertNotNull(bundle.publication)
+        val audit = Json.parseToJsonElement(project.resolve("reports/archival_audit.json").readText()).jsonObject
+            .getValue("archivePublication").jsonObject
+
+        assertEquals("published", publication.outcome)
+        assertEquals("prepared", audit.getValue("outcome").jsonPrimitive.content)
+        assertEquals(profile.id, publication.profileId)
+        assertEquals(profile.sha256, publication.profileSha256)
+        assertEquals(profile.budgets.archiveMaximumEntries, publication.profileLimits.maximumEntries)
+        assertEquals(profile.budgets.archiveMaximumFileBytes, publication.profileLimits.maximumFileBytes)
+        assertEquals(profile.budgets.archiveMaximumTotalBytes, publication.profileLimits.maximumTotalBytes)
+        assertEquals(publication.effectiveLimits.maximumEntries, audit.getValue("effectiveLimits").jsonObject
+            .getValue("maximumEntries").jsonPrimitive.int)
     }
 
     @Test
