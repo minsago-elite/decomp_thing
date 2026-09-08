@@ -51,3 +51,11 @@ This is a local non-Make profile demonstration. It does not qualify production
 compiler/runtime containment, authenticated ACP execution, a GCC reconstruction,
 or calibrated recovery accuracy. Other #84 criteria, including independent role
 permission proof and the repository-wide neutrality gate, remain open.
+
+Ninja archive validation recomputes the expected command and dependency list from
+the selected profile and recorded parallelism. Parallelism and time/output budgets
+must be numeric and within supported/profile bounds; duplicate JSON keys are
+rejected. A build record from another tool or configuration cannot qualify solely
+by retaining successful status flags. These are consistency checks on retained
+local evidence, not compiler/runtime authentication or independent verification
+of every operation performed by an edited build definition.
