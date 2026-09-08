@@ -1,0 +1,58 @@
+{
+  "evidenceId": "gcc-function-start-threshold-v1",
+  "issue": 689,
+  "recordedOn": "2026-09-08",
+  "status": "unresolved",
+  "scope": "retained #39 boundary measurement facts",
+  "authority": "artifact-verified-model-unattested",
+  "productionVerified": false,
+  "sources": {
+    "artifactManifest": {
+      "path": "oracle/gcc/16.2.0/oracle-manifest.json",
+      "sha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9"
+    },
+    "richArtifactSha256": "8009c7cfc4f66017aa932d86a6d4ec7f374e6ab7a01b3ef5ab3d2fcc78c2378b",
+    "strippedArtifactSha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4",
+    "functionOracle": {
+      "path": "oracle/gcc/16.2.0/function-recovery-oracle.json",
+      "sha256": "b49b8a72a96580bd8727d9dc530753f40f78185a656f472ebe83a7a1f6fc9aae"
+    },
+    "exclusions": {
+      "path": "oracle/gcc/16.2.0/function-recovery-exclusions.json",
+      "sha256": "71039d9d5462c54b920d3ebe2cd2aff855faf211389a4e86bab3158bca742031"
+    },
+    "historicalScoreReport": {
+      "documentedIn": "docs/gcc-function-recovery-scoring.md",
+      "reportedSha256": "5acc1f525e203c51689946b30f8073373d2707e62cb6ee4e394173ae28369a71"
+    }
+  },
+  "population": {
+    "oracleRecords": 12844,
+    "scoreableStarts": 3284,
+    "compilerGeneratedExclusions": 140,
+    "inlineOnlyExclusions": 9420,
+    "exclusionsRemainMachineReadable": true
+  },
+  "retainedMeasurement": {
+    "rich": {
+      "precision": {"numerator": 3283, "denominator": 3288},
+      "recall": {"numerator": 3283, "denominator": 3284}
+    },
+    "stripped": {
+      "precision": {"numerator": 3268, "denominator": 3272},
+      "recall": {"numerator": 3268, "denominator": 3284}
+    },
+    "qualificationThreshold": {"numerator": 95, "denominator": 100},
+    "measurementIsProductionQualification": false
+  },
+  "unavailableProductionGates": [
+    "Authenticated GCC production exporter, bundled-Ghidra loader, and replay receipt bound to the input binary and output model.",
+    "Retained authenticated rich/stripped production model inputs and a verifier-authorized score report.",
+    "A production verification path that can change the schema-v1 result from productionVerified=false."
+  ],
+  "isolation": {
+    "requiredAnalyzer": "bundled Ghidra Java APIs in the isolated worker",
+    "requiresGHIDRA_HOME": false,
+    "allowsExternalAnalyzeHeadless": false
+  }
+}
