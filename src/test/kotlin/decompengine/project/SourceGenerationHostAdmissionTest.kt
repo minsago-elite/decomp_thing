@@ -161,6 +161,37 @@ class SourceGenerationHostAdmissionTest {
         }
     }
 
+    @Test
+    fun `source generation rejects prompt budget metadata beyond profile for custom reconstructors`() {
+        for (base in ReconstructionProfiles.builtIn) {
+            val profile = profile(base, base.budgets.copy(reconstructionMaximumContextCharacters = 4_096))
+            val project = createTempDirectory("source-custom-budget-")
+            val manifest = SourceTreeGenerator.generate(
+                model(),
+                project,
+                profile = profile,
+                reconstructor = ModuleReconstructor { request ->
+                    EvidenceModuleReconstructor().reconstruct(request).copy(
+                        generator = "authored",
+                        promptCharacters = 10,
+                        promptBudgetCharacters = 4_097,
+                    )
+                },
+            )
+
+            assertEquals(listOf("fn_host"), manifest.unresolvedImplementationIds)
+            val module = DeterministicModulePlanner(layout = profile.layout).plan(model()).modules.single()
+            val checkpoint = Json.parseToJsonElement(project.resolve(
+                profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id)),
+            ).readText()).jsonObject
+            assertEquals("custom", checkpoint.getValue("reconstructorIdentity").jsonPrimitive.content)
+            assertEquals("false", checkpoint.getValue("accepted").jsonPrimitive.content)
+            assertTrue(checkpoint.getValue("issues").jsonArray.any {
+                it.jsonObject.getValue("code").jsonPrimitive.content == "prompt-budget-invalid"
+            })
+        }
+    }
+
     private fun raisedContextProfile(base: ReconstructionProfile) = profile(base,
         base.budgets.copy(reconstructionMaximumContextCharacters = 120_001))
 

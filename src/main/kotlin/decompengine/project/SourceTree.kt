@@ -1320,7 +1320,8 @@ object SourceTreeGenerator {
         if (source.isBlank() && entityIds.isNotEmpty()) {
             issues += ModuleReconstructionIssue("empty-source", "module source is empty", entityIds)
         }
-        if (moduleClaimsAgentExecution(reconstructed.generator, reconstructorIdentity)) {
+        val claimsAgentExecution = moduleClaimsAgentExecution(reconstructed.generator, reconstructorIdentity)
+        if (claimsAgentExecution) {
             if (reconstructed.source != source) {
                 issues += ModuleReconstructionIssue(
                     "agent-source-normalization-changed-bytes",
@@ -1335,8 +1336,10 @@ object SourceTreeGenerator {
                     entityIds,
                 )
             }
-            val promptCharacters = reconstructed.promptCharacters
-            val promptBudget = reconstructed.promptBudgetCharacters
+        }
+        val promptCharacters = reconstructed.promptCharacters
+        val promptBudget = reconstructed.promptBudgetCharacters
+        if (claimsAgentExecution || promptCharacters != null || promptBudget != null) {
             when {
                 promptCharacters == null || promptBudget == null -> issues += ModuleReconstructionIssue(
                     "prompt-budget-unattributed",
