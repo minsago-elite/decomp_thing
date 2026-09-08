@@ -10,4 +10,8 @@ A running worker remains cancelling until its adapter exits. Its cancellation ac
 
 A known pre-rename publication failure leaves the attempt and worker unchanged. An uncertain publication blocks further mutations and prevents the old task from publishing another outcome; storage must be reopened to reconcile. There is no automatic retry of a state publication. The operation does not publish acceptance or delete diagnostics.
 
-This is service-layer implementation only. No HTTP route, browser control, durable command/idempotency receipt or production adapter registration is introduced here. Those remain necessary for #485/#180 completion, together with full accepted-revision and HTTP/session/race qualification. No production workflow capability is enabled by this change.
+This is service-layer implementation only. No HTTP route, browser control, durable command/idempotency receipt or production adapter registration is introduced here. Those remain necessary for #485/#180 completion, together with HTTP/session/race qualification against registered production adapters. No production workflow capability is enabled by this change.
+
+Additional service tests preserve an existing synthetic accepted reference, its original attempt record, and diagnostic bytes across both queued and running cancellation and a subsequent store reopen. They do not establish the correctness of the underlying acceptance attestation; the fixture supplies that reference through the trusted store API.
+
+An uncertain running cancellation test injects failure after rename, verifies that cancellation is not signalled, and confirms shutdown retains ownership while the worker remains live. When the worker later returns, it cannot overwrite uncertain metadata with completion. Reopening reconciles the abandoned attempt as interrupted. These tests qualify the internal state/ownership boundary; HTTP command replay and UI controls remain open.
