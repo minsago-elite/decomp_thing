@@ -46,7 +46,7 @@ data class ProjectBuildConfiguration(
     val buildDefinition: String = "Makefile",
 ) {
     init {
-        requireNormalizedProjectPath(buildDefinition, "build definition")
+        validateBuildDefinitionPath(buildDefinition)
         require(makeExecutable.isNotBlank() && '\n' !in makeExecutable && '\r' !in makeExecutable) {
             "make executable must be a non-blank single-line value"
         }
@@ -125,6 +125,27 @@ internal fun captureBuildSourceRevision(
         sha256(canonical.toByteArray(Charsets.UTF_8)),
         Collections.unmodifiableList(inputs.toList()),
     )
+}
+
+internal fun validateBuildDefinitionPath(buildDefinition: String): String {
+    require(buildDefinition != "-") { "build definition must name a project file" }
+    validateRelativePath(buildDefinition)
+    val lower = buildDefinition.lowercase(java.util.Locale.ROOT)
+    require(
+        buildDefinition != "BUILDING.md" && buildDefinition != "ARCHIVE_README.md" &&
+            buildDefinition != "ARCHIVE_MANIFEST.sha256" && buildDefinition != "source_tree_manifest.json" &&
+            !lower.startsWith("reports/") && buildDefinition != "build/reconstructed" &&
+            !(lower.startsWith("src/") && lower.endsWith(".c")),
+    ) { "build definition collides with generated output or source ownership: $buildDefinition" }
+    val segments = lower.split('/')
+    val name = segments.last()
+    val credentialShaped = name == ".env" || name.startsWith(".env.") ||
+        name in setOf(".netrc", ".npmrc", ".pypirc", "id_rsa", "id_ed25519") ||
+        name.endsWith(".pem") || name.endsWith(".p12") || name.endsWith(".pfx") || name.endsWith(".key")
+    require(segments.none { it in setOf(".git", ".gradle", ".ghidra", ".idea", ".codex", "__pycache__") } && !credentialShaped) {
+        "build definition is not an archive-safe project path: $buildDefinition"
+    }
+    return buildDefinition
 }
 
 private fun sha256File(path: Path, expectedBytes: Long): String {
@@ -251,10 +272,19 @@ object MakeProjectBuilder {
             "generated project path cannot be encoded safely in GCC reproducible-prefix mappings: $projectRoot"
         }
         validateBuildProjectTree(projectRoot)
-        if (!projectRoot.resolve(configuration.buildDefinition).exists()) {
+        val buildDefinitionPath = projectRoot.resolve(configuration.buildDefinition)
+        if (!buildDefinitionPath.exists()) {
             throw BuildException("generated project is missing ${configuration.buildDefinition}")
         }
+        require(Files.isRegularFile(buildDefinitionPath, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(buildDefinitionPath)) {
+            "generated build definition is not a regular file: ${configuration.buildDefinition}"
+        }
+        val preservedBuildDefinition = Files.readAllBytes(buildDefinitionPath)
         resetBuildDirectory(projectRoot.resolve("build"))
+        if (configuration.buildDefinition.startsWith("build/")) {
+            buildDefinitionPath.parent.createDirectories()
+            Files.write(buildDefinitionPath, preservedBuildDefinition)
+        }
         val reportsDir = projectRoot.resolve("reports").createDirectories()
         val diagnosticsDir = reportsDir.resolve("build/modules").createDirectories()
         val owners = discoverOwners(projectRoot)
