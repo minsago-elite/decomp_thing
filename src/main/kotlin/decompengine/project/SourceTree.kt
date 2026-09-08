@@ -517,7 +517,7 @@ object SourceTreeGenerator {
     fun generate(
         model: RecoveredProgramModel,
         projectDir: Path,
-        planner: DeterministicModulePlanner = DeterministicModulePlanner(),
+        planner: DeterministicModulePlanner? = null,
         reconstructor: ModuleReconstructor? = null,
         overrides: Map<String, String> = emptyMap(),
         observedBehavior: String? = null,
@@ -528,7 +528,8 @@ object SourceTreeGenerator {
         val adapter = ReconstructionAdapters.resolve(profile)
         val selectedReconstructor = reconstructor ?: adapter.defaultReconstructor()
         val compilationPolicy = adapter.compilation
-        val plan = planner.plan(model, overrides)
+        val selectedPlanner = planner?.withProfileBounds(profile) ?: DeterministicModulePlanner.forProfile(profile)
+        val plan = selectedPlanner.plan(model, overrides)
         val rendering = adapter.rendering(model, plan)
         val typesHeader = rendering.sharedInterface()
         val typesHeaderPath = profile.layout.declaration("shared-interface").materialize()

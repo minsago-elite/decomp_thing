@@ -344,17 +344,9 @@ class ArchivalReconstructionService(
         progressPath.writeText("{\"phase\":\"planning\",\"completed\":0,\"total\":0}\n")
         progress.phase(AgentWorkflowPhase.PLANNING)
         var moduleTotal = 0
-        val planner = DeterministicModulePlanner(
-            maximumFunctionsPerModule = profile.budgets.maximumFunctionsPerModule,
-            layout = profile.layout,
-            maximumEntities = profile.budgets.plannerMaximumEntities,
-            maximumDependencyEdges = profile.budgets.plannerMaximumDependencyEdges,
-            maximumWorkUnits = profile.budgets.plannerMaximumWorkUnits,
-        )
         SourceTreeGenerator.generate(
             model,
             project,
-            planner = planner,
             reconstructor = reconstructor,
             observedBehavior = observedBehavior,
             profile = profile,
