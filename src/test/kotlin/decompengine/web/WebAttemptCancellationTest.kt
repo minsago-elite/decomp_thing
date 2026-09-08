@@ -121,6 +121,105 @@ class WebAttemptCancellationTest {
         }
     }
 
+    @Test fun `queued and running cancellation preserve prior accepted references and diagnostic bytes across reopen`() = fixture { root ->
+        for (running in listOf(false, true)) {
+            val store = JobStore(root)
+            val job = store.createFromUpload("preserved.elf", elfFixture())
+            lateinit var prior: WorkflowAttempt
+            WorkflowAttemptStore.open(root).use { owner ->
+                val initial = (owner.inspect(job.id) as WorkflowJobInspection.Available).snapshot
+                val queued = owner.create(job.id, initial.version, NewWorkflowAttempt(WorkflowKind.RECONSTRUCT,
+                    WorkflowExecutionLimits(60_000u, 15_000u, 1_048_576u, 16u)))
+                val started = owner.transition(job.id, queued.attempt.runId, queued.attempt.version, WorkflowTransition.Start)
+                val completed = owner.transition(job.id, started.attempt.runId, started.attempt.version,
+                    WorkflowTransition.Finish(WorkflowRunState.COMPLETED, WorkflowTerminalReason.COMPLETED,
+                        WorkflowCandidate("revision_retained", "ab".repeat(32))))
+                val reference = WorkflowAcceptanceReference(job.id, completed.attempt.runId, "revision_retained",
+                    "ab".repeat(32), "graph_fixture", "acceptance_fixture", "cd".repeat(32))
+                prior = owner.recordAcceptedRevision(job.id, completed.attempt.runId, completed.snapshot.version,
+                    completed.attempt.version, reference).attempt
+            }
+            val diagnostic = store.runReportsDirectory(job.id, prior.runId, create = true).resolve("diagnostic.txt")
+            java.nio.file.Files.writeString(diagnostic, "Retained inert diagnostic")
+            val bytes = diagnostic.readBytes()
+            val pending = mutableListOf<Runnable>()
+            val entered = CountDownLatch(1)
+            val executor = Executors.newSingleThreadExecutor()
+            val service = service(store, Executor { pending += it }) {
+                entered.countDown()
+                CountDownLatch(1).await()
+                error("Interrupted fixture must not return normally")
+            }
+            lateinit var runId: String
+            try {
+                service.initializeExistingStorage()
+                val queued = start(service, job.id); runId = queued.runId
+                if (running) { executor.execute(pending.single()); assertTrue(entered.await(5, TimeUnit.SECONDS)) }
+                val current = service.getAttempt(job.id, runId)
+                val ack = service.cancelDurable(job.id, runId, current.version)
+                assertEquals(if (running) WorkflowRunState.CANCELLING else WorkflowRunState.CANCELLED, ack.state)
+                executor.shutdown(); assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS))
+                val snapshot = (service.inspectDurableJob(job.id) as WorkflowJobInspection.Available).snapshot
+                assertEquals(prior.acceptedRevision, snapshot.acceptedRevision)
+                assertEquals(prior, snapshot.attempts.single { it.runId == prior.runId })
+                assertEquals(WorkflowRunState.CANCELLED, snapshot.attempts.single { it.runId == runId }.state)
+                assertNull(snapshot.attempts.single { it.runId == runId }.acceptedRevision)
+                assertContentEquals(bytes, diagnostic.readBytes())
+            } finally { executor.shutdownNow(); executor.awaitTermination(5, TimeUnit.SECONDS); service.close() }
+            WorkflowAttemptStore.open(root).use { owner ->
+                val snapshot = (owner.recoverAfterRestart(job.id) as WorkflowJobInspection.Available).snapshot
+                assertEquals(prior.acceptedRevision, snapshot.acceptedRevision)
+                assertEquals(prior, snapshot.attempts.single { it.runId == prior.runId })
+                assertEquals(WorkflowRunState.CANCELLED, snapshot.attempts.single { it.runId == runId }.state)
+                assertContentEquals(bytes, diagnostic.readBytes())
+            }
+        }
+    }
+
+    @Test fun `uncertain running cancellation retains ownership and never publishes a later completion`() = fixture { root ->
+        val store = JobStore(root)
+        val job = store.createFromUpload("uncertain.elf", elfFixture())
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val fail = AtomicBoolean(false)
+        val interruptions = java.util.concurrent.atomic.AtomicInteger()
+        val observed = java.util.concurrent.atomic.AtomicReference<Throwable>()
+        val executor = Executors.newSingleThreadExecutor()
+        val service = WebJobService(store, JobAnalyzer { _, _ -> }, JobReconstructor { _, _ -> },
+            Executor { task -> executor.execute { try { task.run() } catch (failure: Throwable) { observed.set(failure) } } },
+            shutdownTimeoutMs = 20,
+            durableAdapters = listOf(adapter {
+                entered.countDown()
+                while (release.count != 0L) try { release.await() } catch (_: InterruptedException) { interruptions.incrementAndGet() }
+                DurableWebWorkflowOutcome.Completed()
+            }), attemptStoreFactory = { path -> WorkflowAttemptStore.open(path, Clock.systemUTC(), WorkflowStoreFaultInjector {
+                if (fail.get() && it == WorkflowStoreFaultPoint.AFTER_RENAME) throw IOException("owned uncertain cancellation")
+            }) })
+        try {
+            service.initializeExistingStorage()
+            val queued = start(service, job.id)
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            val running = service.getAttempt(job.id, queued.runId)
+            fail.set(true)
+            assertEquals("RECOVERY_REQUIRED", assertFailsWith<WebJobServiceException> {
+                service.cancelDurable(job.id, running.runId, running.version)
+            }.code)
+            assertEquals(0, interruptions.get(), "Uncertain publication must not signal cancellation")
+            val bytes = root.resolve("${job.id}/workflow-state.json").readBytes()
+            assertEquals("SHUTDOWN_INCOMPLETE", assertFailsWith<WebJobServiceException> { service.close() }.code)
+            assertEquals("OWNERSHIP_CONFLICT", assertFailsWith<WorkflowStoreException> { WorkflowAttemptStore.open(root) }.code)
+            release.countDown(); executor.shutdown(); assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS))
+            assertEquals("RECOVERY_REQUIRED", assertIs<WebJobServiceException>(observed.get()).code)
+            assertContentEquals(bytes, root.resolve("${job.id}/workflow-state.json").readBytes())
+            assertTrue(service.isIdle())
+        } finally { release.countDown(); executor.shutdownNow(); executor.awaitTermination(5, TimeUnit.SECONDS); service.close() }
+        WorkflowAttemptStore.open(root).use { owner ->
+            val snapshot = (owner.recoverAfterRestart(job.id) as WorkflowJobInspection.Available).snapshot
+            assertEquals(WorkflowRunState.INTERRUPTED, snapshot.latestRun!!.state)
+            assertNull(snapshot.acceptedRevision)
+        }
+    }
+
     private fun start(service: WebJobService, jobId: String): WorkflowAttempt {
         val version = (service.inspectDurableJob(jobId) as WorkflowJobInspection.Available).snapshot.version
         val started = assertIs<DurableWebWorkflowAdmission.Started>(service.startDurable(jobId, version, DurableWebWorkflowRequest(WorkflowKind.RECONSTRUCT)))
