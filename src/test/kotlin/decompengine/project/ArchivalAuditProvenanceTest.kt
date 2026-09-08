@@ -350,13 +350,24 @@ class ArchivalAuditProvenanceTest {
         val audit = ArchivalAudit(
             1, listOf(identifier), listOf(identifier), listOf(identifier), 0, null, false,
             emptySet(), mapOf(identifier to "a".repeat(64)), listOf(identifier),
+            moduleBehaviorEvidence = listOf(JsonObject(mapOf(
+                "moduleId" to JsonPrimitive(identifier),
+                "sourceRevisionSha256" to JsonPrimitive("a".repeat(64)),
+                "status" to JsonPrimitive("unknown"),
+                "coverage" to JsonNull,
+                "outputAgreement" to JsonNull,
+            ))),
         )
         val document = Json.parseToJsonElement(audit.toJson()).jsonObject
         for (field in listOf("missingModelProvenance", "missingSourceProvenance", "unresolvedEntityIds", "unresolvedBehaviorReportIds")) {
             assertEquals(identifier, document.getValue(field).jsonArray.single().jsonPrimitive.content)
         }
         assertEquals(identifier, document.getValue("moduleSourceRevisions").jsonArray.single().jsonObject.getValue("moduleId").jsonPrimitive.content)
-        assertTrue(document.getValue("moduleBehaviorEvidence").jsonArray.isEmpty())
+        val behavior = document.getValue("moduleBehaviorEvidence").jsonArray.single().jsonObject
+        assertEquals(identifier, behavior.getValue("moduleId").jsonPrimitive.content)
+        assertEquals("unknown", behavior.getValue("status").jsonPrimitive.content)
+        assertEquals(JsonNull, behavior.getValue("coverage"))
+        assertEquals(JsonNull, behavior.getValue("outputAgreement"))
     }
 
     private fun fixture(accepted: Boolean = false): Path {

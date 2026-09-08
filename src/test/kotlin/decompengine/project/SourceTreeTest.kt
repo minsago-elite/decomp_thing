@@ -324,7 +324,18 @@ class SourceTreeTest {
             assertTrue("no-behavior-evidence" in audit.behaviorEvidenceProblems)
             val document = Json.parseToJsonElement(audit.toJson()).jsonObject
             assertEquals("not-observed", document.getValue("moduleExecutionCoverage").jsonPrimitive.content)
-            assertTrue(document.getValue("moduleBehaviorEvidence").jsonArray.isEmpty())
+            val moduleBehavior = document.getValue("moduleBehaviorEvidence").jsonArray
+            assertEquals(expectedRevisions.keys, moduleBehavior.map { it.jsonObject.getValue("moduleId").jsonPrimitive.content }.toSet())
+            moduleBehavior.forEach { element ->
+                val evidence = element.jsonObject
+                val moduleId = evidence.getValue("moduleId").jsonPrimitive.content
+                assertEquals(expectedRevisions.getValue(moduleId), evidence.getValue("sourceRevisionSha256").jsonPrimitive.content)
+                assertEquals("unknown", evidence.getValue("status").jsonPrimitive.content)
+                assertEquals("no revision-bound behavioral measurements attached", evidence.getValue("reason").jsonPrimitive.content)
+                assertEquals(JsonNull, evidence.getValue("coverage"))
+                assertEquals(JsonNull, evidence.getValue("outputAgreement"))
+                assertEquals("unknown", evidence.getValue("unobservedBehavior").jsonPrimitive.content)
+            }
         }
         verifyAudit(project)
         val archive = project.parent.resolve(project.fileName.toString() + ".zip")

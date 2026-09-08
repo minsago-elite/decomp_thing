@@ -146,8 +146,10 @@ collection cannot produce a pass. Deleted report collections produce an explicit
 
 Current module hashes are emitted as `moduleSourceRevisions`. Qualified report
 paths appear separately in `projectBehaviorReportIds`. `moduleBehaviorEvidence`
-stays empty and `moduleExecutionCoverage` is `not-observed`, because a project
-comparison does not establish which individual modules executed.
+contains one source-revision-bound record per planned module, with `status` set
+to `unknown` and null coverage/output agreement when the project comparison does
+not establish which individual module executed. `moduleExecutionCoverage` remains
+`not-observed`; a project comparison does not become module execution evidence.
 
 For an accepted module, the audit requires its manifest-bound checkpoint to use
 compiler acceptance schema 6, contain no reconstruction issues, and record exactly
