@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { ApiClientError, createApiClient } from '../api/client';
-import { createEventStream } from '../api/eventStream';
+import { usePrivateTransport } from '../session/PrivateTransport';
+import { useEffect, useRef, useState } from 'preact/hooks';
+import { ApiClientError } from '../api/client';
 import type { Snapshot, WebEvent } from '../api/generated';
 import { ActivityReceiptAge } from './ActivityReceiptAge';
 import type { ActivityReceiptTime } from './ActivityReceiptAge';
@@ -12,8 +12,7 @@ const capacity = 200;
 
 /** Retained journal observations are display evidence, never acceptance receipts. */
 export function Activity({ jobId, runId, basePath }: { jobId: string; runId: string; basePath: string }) {
-  const client = useMemo(() => createApiClient({ basePath }), [basePath]);
-  const stream = useMemo(() => createEventStream({ basePath }), [basePath]);
+  const { client, stream } = usePrivateTransport(basePath);
   const fallback = useRef(false);
   const streamFailures = useRef(0);
   const [periodic, setPeriodic] = useState(false);

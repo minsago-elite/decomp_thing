@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'preact/hooks';
+import { usePrivateTransport } from '../session/PrivateTransport';
+import { useEffect, useState } from 'preact/hooks';
 import type { Run as RunData } from '../api/generated';
-import { ApiClientError, createApiClient } from '../api/client';
+import { ApiClientError } from '../api/client';
 import { jobPath, runPath } from '../app/paths';
 import type { BrowserSession } from '../session/session';
 import { Activity } from '../jobs/Activity';
@@ -9,7 +10,7 @@ import { ExplorationEvidence } from '../jobs/ExplorationEvidence';
 import { useSession } from '../session/useSession';
 
 function Details({ jobId, runId, basePath, session }: { jobId: string; runId: string; basePath: string; session: BrowserSession }) {
-  const client = useMemo(() => createApiClient({ basePath }), [basePath]);
+  const { client } = usePrivateTransport(basePath);
   const [run, setRun] = useState<RunData | null>(null);
   const [error, setError] = useState('');
   const [refresh, setRefresh] = useState(0);

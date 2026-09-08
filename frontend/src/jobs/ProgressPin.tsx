@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { ApiClientError, createApiClient } from '../api/client';
+import { usePrivateTransport } from '../session/PrivateTransport';
+import { useEffect, useRef, useState } from 'preact/hooks';
+import { ApiClientError } from '../api/client';
 import type { ProgressPin as Policy } from '../api/generated';
 import type { BrowserSession } from '../session/session';
 import { useBrowserAvailability } from '../session/useBrowserAvailability';
@@ -8,7 +9,7 @@ import { useBrowserAvailability } from '../session/useBrowserAvailability';
 export function ProgressPin({ jobId, runId, basePath, session }: {
   jobId: string; runId: string; basePath: string; session: Pick<BrowserSession, 'csrf'>;
 }) {
-  const client = useMemo(() => createApiClient({ basePath }), [basePath]);
+  const { client } = usePrivateTransport(basePath);
   const availability = useBrowserAvailability();
   const active = useRef<AbortController | null>(null);
   const [policy, setPolicy] = useState<Policy | null>(null);
