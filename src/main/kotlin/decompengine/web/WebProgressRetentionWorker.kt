@@ -1,5 +1,6 @@
 package decompengine.web
 
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 
@@ -7,14 +8,21 @@ import java.util.concurrent.TimeUnit
 internal class WebProgressRetentionWorker(intervalMs: Long, step: () -> Unit, stopped: () -> Unit) {
     @Volatile private var started = false
     @Volatile private var finished = false
+    private val notified = CountDownLatch(1)
     private val interval = intervalMs.also { require(it in 1..3_600_000) }
     private val executor = object : ScheduledThreadPoolExecutor(1, { task ->
-        Thread(task, "decomp-web-progress-retention").apply { isDaemon = true }
+        Thread({
+            try { task.run() }
+            finally {
+                // Worker.run has released the executor's main lock. Never acquire service/storage
+                // monitors from terminated(), which executes while that lock is still held.
+                if (finished) try { stopped() } finally { notified.countDown() }
+            }
+        }, "decomp-web-progress-retention").apply { isDaemon = true }
     }) {
         override fun terminated() {
-            // All work callbacks have left; remaining executor teardown cannot access storage.
+            // All work callbacks have left; notify the owner only after releasing executor locks.
             finished = true
-            stopped()
         }
     }.apply { removeOnCancelPolicy = true }
     private val work = Runnable(step)
@@ -26,7 +34,7 @@ internal class WebProgressRetentionWorker(intervalMs: Long, step: () -> Unit, st
         executor.scheduleWithFixedDelay(work, interval, interval, TimeUnit.MILLISECONDS)
     }
     fun stop() { executor.shutdownNow() }
-    fun awaitStopped(nanos: Long) { if (nanos > 0) executor.awaitTermination(nanos, TimeUnit.NANOSECONDS) }
+    fun awaitStopped(nanos: Long) { if (started && nanos > 0) notified.await(nanos, TimeUnit.NANOSECONDS) }
     val isIdle: Boolean get() = !started || finished
 }
 

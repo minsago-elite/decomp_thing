@@ -704,3 +704,11 @@ Known pre-publication failures leave the old pin and task version usable. Uncert
 Tests use inert adapter callbacks to exercise queued/running pin changes, stable invocation context, final lifecycle publication, stale-version rejection, no-op byte preservation, failures before/after rename, queued revocation and running ownership retention through shutdown. These callbacks do not analyze binaries or invoke providers/native workflows.
 
 All 280 selected JVM tests pass. The [retained manifest and durable workflow results](evidence/web-service-pin-coordination-20260908/manifest.json) identify the tested source and evidence hash. Frontend/package/browser checks were not repeated for this internal command; no public route or default behavior changes.
+
+## Retention-worker termination lock ordering
+
+The first broad pin-audit run exposed a JVM-reported deadlock in periodic service shutdown. `WebJobService.close` held its monitor while calling `shutdownNow`; the retention executor's `terminated` hook held the executor main lock while invoking the owner callback, which needed that same service monitor. A repeated stop could therefore wait forever instead of respecting the shutdown deadline.
+
+The termination hook now only marks completed work. The existing worker thread invokes the owner callback after its executor runnable returns and releases executor locks. A latch lets bounded shutdown await completion of that notification. No extra thread, shared pool or queued notification is introduced. Storage ownership still outlives every maintenance work callback; the notification can release ownership after work is quiescent.
+
+A controlled regression holds owner notification open and requires a second stop to return. It fails with `TimeoutException` against the prior worker and passes with the fix. The originally deadlocked JVM was terminated only after `jcmd Thread.print` explicitly reported the lock cycle; its interrupted test run is not counted as passing verification.
