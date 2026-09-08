@@ -28,7 +28,8 @@ internal object AgentProgressJournalMaintenance {
     fun expire(root: Path, attempt: WorkflowAttempt, now: Instant, retention: Duration,
         fault: (ProgressRetentionFaultPoint) -> Unit = {}): ProgressRetentionResult {
         require(!retention.isZero && !retention.isNegative)
-        if (!attempt.state.terminal) return ProgressRetentionResult.RETAINED
+        if (!attempt.state.terminal || attempt.publicationPending || attempt.progressRetentionPinned ||
+            Duration.between(requireNotNull(attempt.endedAt), now) < retention) return ProgressRetentionResult.RETAINED
         require(attempt.jobId.matches(Regex("[a-f0-9]{32}")))
         require(attempt.runId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")))
         Fs.requireSupported(root)
@@ -49,9 +50,7 @@ internal object AgentProgressJournalMaintenance {
                 try {
                     reopened += Fs.openRoot(root)
                     for (part in parts) reopened += Fs.openDirectoryAt(reopened.last().fd, part)
-                    require(reopened.map { it.identity }.zip(directories.map { it.identity }).all { (actual, expected) ->
-                        sameStableIdentity(actual, expected)
-                    }) { "retention directory changed" }
+                    require(reopened.map { it.identity } == directories.map { it.identity }) { "retention directory changed" }
                 } finally { reopened.asReversed().forEach { it.close() } }
             }
             val lease = AgentProgressJournalLease.tryAcquire(Fs.descriptorPath(directory)) {
@@ -62,6 +61,7 @@ internal object AgentProgressJournalMaintenance {
                     lock = requireNotNull(Fs.openRegularFileAtOrNull(directory.fd, LOCK_FILE))
                 }
                 lock.use {
+                    require(it.identity.linkCount == 1) { "retention lock has multiple names" }
                     FileChannel.open(Fs.descriptorPath(it), WRITE)
                 }
             } ?: return ProgressRetentionResult.WRITER_ACTIVE
@@ -78,22 +78,17 @@ internal object AgentProgressJournalMaintenance {
                     val pendingTime = expiryTime(pending.bytes)
                     when {
                         currentTime != null && pendingTime == null -> {
-                            require(matches(attempt, pending.bytes, current.bytes, currentTime))
+                            require(currentTime <= now && matches(attempt, pending.bytes, current.bytes, currentTime, retention))
                             finish(directory, current, pending, ::validateDirectories, fault)
                             return ProgressRetentionResult.EXPIRED
                         }
                         currentTime == null && pendingTime != null -> {
-                            require(matches(attempt, current.bytes, pending.bytes, pendingTime))
+                            require(pendingTime <= now && matches(attempt, current.bytes, pending.bytes, pendingTime, retention))
                             publish(directory, current, pending, ::validateDirectories, fault)
                             return ProgressRetentionResult.EXPIRED
                         }
                         else -> error("ambiguous progress retention publication")
                     }
-                }
-                if (attempt.publicationPending ||
-                    Duration.between(requireNotNull(attempt.endedAt), now) < retention) {
-                    Fs.synchronize(directory)
-                    return ProgressRetentionResult.RETAINED
                 }
                 val replacement = AgentProgressJournalRetention.expiredSnapshot(attempt, current.bytes, now, retention)
                     ?: run { Fs.synchronize(directory); return ProgressRetentionResult.RETAINED }
@@ -126,8 +121,7 @@ internal object AgentProgressJournalMaintenance {
                 val bytes = Fs.read(readable, AgentProgressJournal.MAXIMUM_READ_BYTES) {}
                 val after = Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
                 require(before.size() == bytes.size.toLong() && before.size() == after.size() &&
-                    before.lastModifiedTime() == after.lastModifiedTime() &&
-                    sameStableIdentity(Fs.identity(readable.fd), authorized.identity))
+                    before.lastModifiedTime() == after.lastModifiedTime() && Fs.identity(readable.fd) == authorized.identity)
                 AgentProgressJournal.decode(bytes)
                 Captured(bytes, authorized.identity)
             }
@@ -135,24 +129,12 @@ internal object AgentProgressJournalMaintenance {
     }
     private fun requireCurrent(directory: LinuxDescriptor, name: String, expected: Captured) {
         val actual = requireNotNull(read(directory, name))
-        require(sameStableIdentity(actual.identity, expected.identity) && actual.bytes.contentEquals(expected.bytes)) {
-            "retention journal changed"
-        }
+        require(actual.identity == expected.identity && actual.bytes.contentEquals(expected.bytes)) { "retention journal changed" }
     }
-    private fun sameStableIdentity(actual: LinuxFileIdentity, expected: LinuxFileIdentity): Boolean =
-        actual.key == expected.key && actual.mode == expected.mode && actual.uid == expected.uid &&
-            actual.gid == expected.gid && actual.mountId == expected.mountId &&
-            actual.isRegularFile == expected.isRegularFile && actual.isDirectory == expected.isDirectory &&
-            actual.isSymbolicLink == expected.isSymbolicLink
     private fun expiryTime(bytes: ByteArray): Instant? = AgentProgressJournal.decode(bytes)["retentionExpiredAt"]
         ?.jsonPrimitive?.content?.let(Instant::parse)
-    private fun matches(attempt: WorkflowAttempt, original: ByteArray, expired: ByteArray, time: Instant): Boolean {
-        val endedAt = requireNotNull(attempt.endedAt)
-        val recordedRetention = Duration.between(endedAt, time)
-        return !recordedRetention.isNegative && !recordedRetention.isZero &&
-            AgentProgressJournalRetention.expiredSnapshot(attempt, original, time, recordedRetention)
-                ?.contentEquals(expired) == true
-    }
+    private fun matches(attempt: WorkflowAttempt, original: ByteArray, expired: ByteArray, time: Instant, retention: Duration) =
+        AgentProgressJournalRetention.expiredSnapshot(attempt, original, time, retention)?.contentEquals(expired) == true
 
     private fun publish(directory: LinuxDescriptor, original: Captured, prepared: Captured,
         validate: () -> Unit, fault: (ProgressRetentionFaultPoint) -> Unit) {

@@ -269,7 +269,8 @@ class WebJobService(
     }
 
     /** Explicit maintenance, serialized with bounded artifact capture and service shutdown.
-     * The caller must hold the policy decision protecting persistent pins/read leases stable.
+     * Durable progress pins are enforced by the store; callers keep any additional protection
+     * decision (such as read leases or broader job policy) stable through this call.
      * No request handler or automatic scheduler invokes this until that policy is integrated.
      */
     @Synchronized
