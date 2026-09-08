@@ -39,6 +39,15 @@ owned context. Recovery derives the same editability set without consulting cand
 This is index policy admission, not production runtime registration: the validation provider and
 snapshot boundary still admit only their fixed Make contract and remain unqualified.
 
+For that fixed Make registration, validation staging shares `GeneratedCRepairSourcePolicy` with
+the index and recovery path. It checks the exact descriptor/policy fingerprint before copying
+candidate bytes, and derives editable paths from the same role/content rules. An undeclared C
+auxiliary input remains read-only context rather than becoming editable because of its suffix.
+The validation entry point also checks the identity before loading runtime configuration, after
+the unchanged production-qualification guard. Local policy tests cover a changed descriptor under
+the same ID, Ninja's different ID, and the historical ID-only fingerprint. These checks do not
+exercise quota-backed snapshot creation or qualify production validation.
+
 Production validation is a mandatory capability, not a weak default. Both
 `RepairValidationStrategy` and the generated-C `GeneratedCRepairValidationBoundary` expose immutable
 `STRICT_CONTAINED` versus `TEST_ONLY_HOST_PROCESS` assurance; the public loop rejects anything but
