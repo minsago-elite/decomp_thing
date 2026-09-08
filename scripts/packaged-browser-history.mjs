@@ -46,9 +46,13 @@ export async function seedHistory(root) {
   const progressPath = join(reportDirectory, 'agent-progress.json');
   const progress = JSON.stringify({ schemaVersion: 1, displayOnly: true, nextSequence: 205, queueDropped: 0, historyDropped: 0, truncated: false,
     events: Array.from({ length: 205 }, (_, sequence) => ({ sequence, runId: 'writer_fixture_progress', workflow: 'reconstruct', time: at,
-      taskId: sequence % 2 ? 'task_odd' : 'task_even', sessionIdSha256: 'a'.repeat(64), kind: sequence === 1 ? 'message' : sequence === 202 ? 'context_usage' : sequence === 203 ? 'agent_finished' : 'workflow_phase',
+      taskId: sequence % 2 ? 'task_odd' : 'task_even', sessionIdSha256: 'a'.repeat(64), kind: sequence === 1 ? 'plan' : sequence === 2 ? 'file_change' : sequence === 202 ? 'context_usage' : sequence === 203 ? 'agent_finished' : 'workflow_phase',
       ...(sequence === 202 ? { contextUsedTokens: '9007199254740993', contextWindowTokens: '18446744073709551615' } : {}),
-      ...(sequence === 203 ? { stopReason: 'limit_exhausted', wallClock: 'PT1H2M3.000000001S' } : {}), ...(sequence === 1 ? { role: 'thought', entries: [{ idSha256: 'b'.repeat(64), status: 'pending', text: 'Synthetic private plan' }] } : { phase: 'planning' }), path: '/Synthetic-private-root/input', text: `Synthetic private content ${sequence}`, inputTokens: '18446744073709551615' })) });
+      ...(sequence === 203 ? { stopReason: 'limit_exhausted', wallClock: 'PT1H2M3.000000001S' } : {}),
+      ...(sequence === 1 ? { entryCount: 1, entriesTruncated: false, entries: [{ idSha256: 'b'.repeat(64), status: 'pending', text: 'Synthetic private plan' }] } : {}),
+      ...(sequence === 2 ? { path: '/Synthetic-private-root/input', change: 'modified', afterSha256: 'c'.repeat(64) } : {}),
+      ...(sequence !== 1 && sequence !== 2 ? { phase: 'planning', path: '/Synthetic-private-root/input', text: `Synthetic private content ${sequence}` } : {}),
+      inputTokens: '18446744073709551615' })) });
   await fs.writeFile(progressPath, progress, { flag: 'wx', mode: 0o600 });
   return { jobId, directory, retained, count: attempts.length, reportPath, exploration, progressPath, progress };
 }
@@ -93,8 +97,22 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
     assert.equal(event.payload.fields.text, undefined);
     assert.equal(event.payload.fields.entries, undefined);
     assert.equal(event.payload.fields.path, undefined);
-    assert.equal(event.payload.fields.textOmitted, true);
-    assert.equal(event.payload.omittedFieldCount, event.sequence === '1' ? '3' : '2');
+    if (event.sequence === '1') {
+      assert.equal(event.payload.observationKind, 'plan');
+      assert.equal(event.payload.fields.entriesTruncated, false);
+      assert.equal(event.payload.fields.entryCount, '1');
+      assert.equal(event.payload.fields.textOmitted, undefined);
+      assert.equal(event.payload.omittedFieldCount, '1');
+    } else if (event.sequence === '2') {
+      assert.equal(event.payload.observationKind, 'file_change');
+      assert.equal(event.payload.fields.change, 'modified');
+      assert.equal(event.payload.fields.afterSha256, 'c'.repeat(64));
+      assert.equal(event.payload.fields.textOmitted, undefined);
+      assert.equal(event.payload.omittedFieldCount, '1');
+    } else {
+      assert.equal(event.payload.fields.textOmitted, true);
+      assert.equal(event.payload.omittedFieldCount, '2');
+    }
   }
   assert.ok(!JSON.stringify(polling).includes('Synthetic private'));
   assert.ok(!JSON.stringify(polling).includes('Synthetic-private-root'));
