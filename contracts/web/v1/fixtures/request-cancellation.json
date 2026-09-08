@@ -1,0 +1,7 @@
+{
+  "apiVersion": 1,
+  "kind": "cancellationRequest",
+  "data": {
+    "action": "cancel"
+  }
+}
