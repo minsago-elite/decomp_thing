@@ -16,7 +16,9 @@ internal object GeneratedCReconstructionAdapter : ReconstructionAdapter {
             cFlags = profile.adapterConfiguration["compiler-flags"] ?: ProjectBuildConfiguration().cFlags,
             wallClockTimeoutMillis = profile.budgets.buildWallClockMillis,
             maximumOutputBytes = profile.budgets.buildMaximumOutputBytes,
+            buildDefinition = profile.layout.declaration("build-definition").materialize(),
         ),
+        profile,
     )
     override fun defaultReconstructor(): ModuleReconstructor = EvidenceModuleReconstructor()
     override fun assess(module: PlannedModule, model: RecoveredProgramModel, generator: String, source: String): List<ModuleReconstructionIssue> =

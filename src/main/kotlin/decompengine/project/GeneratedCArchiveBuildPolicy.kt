@@ -69,7 +69,7 @@ internal object GeneratedCArchiveBuildPolicy : ArchiveBuildPolicy {
         require(recordedInputs == recordedInputs.sortedBy { it.path } && recordedInputs.map { it.path }.distinct().size == recordedInputs.size) {
             "archive build source inputs must be unique and sorted"
         }
-        val observedRevision = sourceRevision(projectDir)
+        val observedRevision = sourceRevision(projectDir, profile)
         require(recordedInputs == observedRevision.inputs) { "archive build contract does not match the current source inputs" }
         val recordedRevision = contract["sourceRevisionSha256"]?.jsonPrimitive?.content
         require(recordedRevision == observedRevision.sha256) {
@@ -110,7 +110,7 @@ internal object GeneratedCArchiveBuildPolicy : ArchiveBuildPolicy {
         }
     }
 
-    override fun sourceRevision(projectDir: Path): BuildSourceRevision = captureBuildSourceRevision(projectDir)
-    override fun isBuildInput(relativePath: String): Boolean =
-        relativePath == "Makefile" || relativePath.startsWith("src/") || relativePath.startsWith("include/")
+    override fun sourceRevision(projectDir: Path, profile: ReconstructionProfile): BuildSourceRevision = captureBuildSourceRevision(projectDir, profile)
+    override fun isBuildInput(profile: ReconstructionProfile, relativePath: String): Boolean =
+        relativePath == profile.layout.declaration("build-definition").materialize() || relativePath.startsWith("src/") || relativePath.startsWith("include/")
 }

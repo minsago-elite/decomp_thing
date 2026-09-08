@@ -166,3 +166,12 @@ that the old paths are absent, then performs strict extraction, clean rebuilding
 and audit comparison. This proves those report paths are selectable within the
 generated-C/Make profile; source/build layout and alternate-language support remain
 separate requirements.
+
+The generated-C builder selects the declared build-definition path, adds Make's
+`-f` argument when it differs from `Makefile`, and requires the build configuration
+to agree with the profile. Build source capture and archive payload comparison
+use the same profile-selected input policy, including that build definition.
+Default-layout commands and source-hash encoding remain unchanged. The service
+fixture also relocates the build definition to `config/rebuild.mk`, verifies its
+retained source-input digest and completes strict extraction and rebuilding.
+This remains a Make build; alternate build systems are still unimplemented.
