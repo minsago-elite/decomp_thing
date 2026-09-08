@@ -19,6 +19,8 @@ internal object ReconstructionCompilationPolicies {
         fun declarationShape(candidate: ReconstructionProfile) = candidate.layout.declarations.map { declaration ->
             Triple(declaration.id, declaration.roles, declaration.contentKind)
         }
+        if (profile.id == GeneratedCMakeReconstructionProfile.PROFILE_ID ||
+            profile.id == GeneratedCNinjaReconstructionProfile.PROFILE_ID) return GeneratedCModuleValidation
         if (profile.schemaVersion == registered.schemaVersion &&
             declarationShape(profile) == declarationShape(registered) &&
             registered.adapterConfiguration.keys.all { it in profile.adapterConfiguration.keys } &&

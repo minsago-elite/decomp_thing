@@ -328,7 +328,7 @@ class ArchivalReconstructionService(
     private val analyzer: ProgramModelAnalyzer,
     private val reconstructor: ModuleReconstructor? = null,
     private val profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
-    hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+    private val hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
     private val progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
 ) {
     init {
@@ -350,17 +350,10 @@ class ArchivalReconstructionService(
         progressPath.writeText("{\"phase\":\"planning\",\"completed\":0,\"total\":0}\n")
         progress.phase(AgentWorkflowPhase.PLANNING)
         var moduleTotal = 0
-        val planner = DeterministicModulePlanner(
-            maximumFunctionsPerModule = profile.budgets.maximumFunctionsPerModule,
-            layout = profile.layout,
-            maximumEntities = profile.budgets.plannerMaximumEntities,
-            maximumDependencyEdges = profile.budgets.plannerMaximumDependencyEdges,
-            maximumWorkUnits = profile.budgets.plannerMaximumWorkUnits,
-        )
         SourceTreeGenerator.generate(
             model,
             project,
-            planner = planner,
+            hostSafetyLimits = hostSafetyLimits,
             reconstructor = reconstructor,
             observedBehavior = observedBehavior,
             profile = profile,
