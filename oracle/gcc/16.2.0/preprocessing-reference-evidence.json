@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "issue": 709,
+  "status": "incomplete",
+  "scope": "driver-orchestration-evidence",
+  "provenance": {
+    "corpus": "oracle/gcc/16.2.0/behavior-corpus.json",
+    "corpusSha256": "bcc1a14ca8c54f94106c943f0bc5698cb9af3151b7bf20a49ae3c8828baaad0e",
+    "evidence": "oracle/gcc/16.2.0/behavior-corpus-evidence.json",
+    "oracleBoundary": "checked corpus and evidence only; no host GCC or candidate output"
+  },
+  "case": {
+    "id": "preprocess-file",
+    "arguments": ["-B/workspace/tools/", "-E", "source.c"],
+    "source": {
+      "path": "source.c",
+      "bytes": 29,
+      "sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949"
+    },
+    "frontend": {
+      "path": "tools/cc1",
+      "bytes": 1023,
+      "sha256": "847484f59a66b70de4cac77751e4f712672cf52ee0b037b07a2413a7547ae2cb",
+      "kind": "deterministic-companion-program"
+    },
+    "observed": {
+      "exitCode": 0,
+      "stdout": {
+        "bytes": 18,
+        "sha256": "b8a1f8e4208ed2055f683bd08a081ad8b794b7f88145b0a35d0693f18b04d178",
+        "base64": "TU9DSy1QUkVQUk9DRVNTRUQK"
+      },
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "base64": ""
+      },
+      "artifacts": []
+    }
+  },
+  "productionGap": {
+    "realFrontendReference": "unavailable",
+    "authenticatedCandidateComparison": "unavailable",
+    "requiredNextCases": [
+      "include-search",
+      "macro-definition-undefinition",
+      "language-selection",
+      "preprocess-stdin"
+    ],
+    "reason": "The checked case uses the staged deterministic companion tools/cc1 and therefore cannot establish GCC frontend semantics, independently captured diagnostics, or produced artifacts."
+  },
+  "analysisBoundary": "No Ghidra analysis is part of this record; bundled Ghidra isolation and the authenticated oracle boundary remain unchanged, and no GHIDRA_HOME fallback is introduced."
+}
