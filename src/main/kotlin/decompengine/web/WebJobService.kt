@@ -67,6 +67,7 @@ class WebJobService(
     /** Internal seam for deterministic publication-failure fixtures; production code never reassigns this. */
     internal var uploadPublisher = decompengine.jobs.StagedJobUpload(store.storageRoot)
     /** Test-only observation point after the durable progress bytes have been captured. */
+    @Volatile
     internal var progressSnapshotReadHook: (() -> Unit)? = null
     private val publicationFailures = mutableMapOf<String, WebJobDiagnostic>()
     private var attempts: WorkflowAttemptStore? = null

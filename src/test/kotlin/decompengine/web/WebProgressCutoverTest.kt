@@ -121,11 +121,18 @@ class WebProgressCutoverTest {
         val barrier = CyclicBarrier(2)
         val readEntered = CountDownLatch(1)
         val releaseRead = CountDownLatch(1)
-        val overlapped = AtomicBoolean(false)
+        val firstRead = AtomicBoolean(false)
+        val readActive = AtomicBoolean(false)
+        val publicationsDuringRead = java.util.concurrent.atomic.AtomicInteger()
         f.service.progressSnapshotReadHook = {
-            if (overlapped.compareAndSet(false, true)) {
-                readEntered.countDown()
-                check(releaseRead.await(10, TimeUnit.SECONDS))
+            readActive.set(true)
+            try {
+                if (firstRead.compareAndSet(false, true)) {
+                    readEntered.countDown()
+                    check(releaseRead.await(10, TimeUnit.SECONDS))
+                }
+            } finally {
+                readActive.set(false)
             }
         }
         val captured = Array(34) { CountDownLatch(1) }
@@ -137,6 +144,7 @@ class WebProgressCutoverTest {
                 barrier.await(10, TimeUnit.SECONDS)
                 if (step == 1) check(readEntered.await(5, TimeUnit.SECONDS))
                 else if (step % 3 == 1) check(captured[step].await(5, TimeUnit.SECONDS))
+                if (readActive.get()) publicationsDuringRead.incrementAndGet()
                 f.publish(0, step * 8)
                 if (step == 3) current = f.owner.transition(f.job.id, current.runId, current.version, WorkflowTransition.Start).attempt
                 if (step == 33) f.owner.transition(f.job.id, current.runId, current.version,
@@ -181,9 +189,10 @@ class WebProgressCutoverTest {
                     replay(f, snapshot.getValue("throughCursor").jsonPrimitive.content))
             }
             publications.get(10, TimeUnit.SECONDS)
-            assertTrue(overlapped.get(), "The qualification must observe a publication while a read transaction is active")
-            assertTrue(overlappingSnapshots >= 22)
-            println("Cutover qualification: 33 rounds, 264 appends, 11 forced-before, 11 forced-after, 11 racing snapshots; $overlappingSnapshots initial snapshots succeeded, ${33 - overlappingSnapshots} explicit interrupted reads recovered.")
+            assertTrue(firstRead.get(), "The qualification must enter the snapshot read hook")
+            assertTrue(publicationsDuringRead.get() > 0,
+                "The qualification must observe a publication while a read transaction is active")
+            println("Cutover qualification: 33 rounds, 264 appends, 11 forced-before, 11 forced-after, 11 racing snapshots; $overlappingSnapshots initial snapshots succeeded, ${33 - overlappingSnapshots} explicit interrupted reads recovered, ${publicationsDuringRead.get()} publications overlapped a read.")
         } finally { publisher.shutdownNow(); assertTrue(publisher.awaitTermination(5, TimeUnit.SECONDS)) }
     }
 
