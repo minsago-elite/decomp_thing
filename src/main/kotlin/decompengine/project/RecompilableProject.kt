@@ -14,7 +14,8 @@ import java.nio.file.Path
 import java.security.MessageDigest
 import java.util.Collections
 import java.util.concurrent.CompletableFuture
-import java.util.concurrent.CompletionException
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
@@ -264,6 +265,7 @@ internal object GeneratedCProjectBuilder {
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
         invocation: GeneratedCBuildInvocation = GeneratedCBuildInvocation.make(configuration),
     ): BuildReport {
+        if (Thread.interrupted()) throw InterruptedException("generated project build cancelled")
         require(configuration.buildDefinition == profile.layout.declaration("build-definition").materialize()) {
             "build definition differs from the selected profile"
         }
@@ -297,38 +299,7 @@ internal object GeneratedCProjectBuilder {
             .redirectErrorStream(true)
         sanitizeBuildEnvironment(processBuilder.environment())
         processBuilder.environment()["PWD"] = projectRoot.toString()
-        val process = processBuilder.start()
-        val outputFuture = CompletableFuture.supplyAsync {
-            val output = java.io.ByteArrayOutputStream()
-            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-            process.inputStream.use { input ->
-                while (true) {
-                    val count = input.read(buffer)
-                    if (count < 0) break
-                    if (output.size().toLong() + count > configuration.maximumOutputBytes) {
-                        terminateBuildProcess(process, configuration.terminationGraceMillis)
-                        throw BuildException(
-                            "build output exceeds ${configuration.maximumOutputBytes} bytes",
-                        )
-                    }
-                    output.write(buffer, 0, count)
-                }
-            }
-            output.toString(Charsets.UTF_8)
-        }
-        val completed = process.waitFor(configuration.wallClockTimeoutMillis, TimeUnit.MILLISECONDS)
-        if (!completed) {
-            terminateBuildProcess(process, configuration.terminationGraceMillis)
-        }
-        val output = try {
-            outputFuture.join()
-        } catch (failure: CompletionException) {
-            throw (failure.cause ?: failure)
-        }
-        if (!completed) {
-            throw BuildException("generated project build exceeded ${configuration.wallClockTimeoutMillis} milliseconds")
-        }
-        val returnCode = process.exitValue()
+        val (returnCode, output) = executeBuild(processBuilder, configuration)
         val sourceRevisionAfterBuild = captureBuildSourceRevision(projectRoot, profile)
         val sourceStableDuringBuild = sourceRevisionBeforeBuild == sourceRevisionAfterBuild
         val artifact = projectRoot.resolve("build/reconstructed").takeIf {
@@ -379,6 +350,67 @@ internal object GeneratedCProjectBuilder {
             failedOwners = failedOwners,
             command = command,
         )
+    }
+
+    private fun executeBuild(
+        builder: ProcessBuilder,
+        configuration: ProjectBuildConfiguration,
+    ): Pair<Int, String> {
+        if (Thread.interrupted()) throw InterruptedException("generated project build cancelled")
+        val started = System.nanoTime()
+        val budget = TimeUnit.MILLISECONDS.toNanos(configuration.wallClockTimeoutMillis)
+        fun remaining(): Long = maxOf(0L, budget - (System.nanoTime() - started))
+        val process = builder.start()
+        var reader: CompletableFuture<String>? = null
+        var primaryFailure: Throwable? = null
+        try {
+            process.outputStream.close()
+            val outputFuture = CompletableFuture.supplyAsync {
+                val output = java.io.ByteArrayOutputStream()
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                process.inputStream.use { input ->
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        if (output.size().toLong() + count > configuration.maximumOutputBytes) {
+                            throw BuildException("build output exceeds ${configuration.maximumOutputBytes} bytes")
+                        }
+                        output.write(buffer, 0, count)
+                    }
+                }
+                output.toString(Charsets.UTF_8)
+            }
+            reader = outputFuture
+            val output = outputFuture.get(remaining(), TimeUnit.NANOSECONDS)
+            if (!process.waitFor(remaining(), TimeUnit.NANOSECONDS)) throw TimeoutException()
+            return process.exitValue() to output
+        } catch (failure: Throwable) {
+            val reported = when (failure) {
+                is ExecutionException -> failure.cause ?: failure
+                is TimeoutException -> BuildException(
+                    "generated project build exceeded ${configuration.wallClockTimeoutMillis} milliseconds",
+                )
+                else -> failure
+            }
+            primaryFailure = reported
+            throw reported
+        } finally {
+            var cleanupFailure: Throwable? = null
+            fun cleanup(action: () -> Unit) {
+                try {
+                    action()
+                } catch (failure: Throwable) {
+                    val previous = primaryFailure ?: cleanupFailure
+                    if (previous == null) cleanupFailure = failure else previous.addSuppressed(failure)
+                }
+            }
+            cleanup { terminateBuildProcess(process, configuration.terminationGraceMillis) }
+            cleanup { reader?.cancel(true) }
+            cleanup { process.inputStream.close() }
+            cleanup { process.outputStream.close() }
+            cleanup { process.errorStream.close() }
+            cleanupFailure?.let { throw it }
+        }
     }
 
     internal fun terminateBuildProcess(process: Process, graceMillis: Long) {
