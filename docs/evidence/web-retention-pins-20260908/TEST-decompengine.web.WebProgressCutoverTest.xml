@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.web.WebProgressCutoverTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-09-08T05:32:08.032Z" hostname="whatsername" time="9.124">
+  <properties/>
+  <testcase name="atomic eviction during SSE gives a gap and fresh snapshot resumes later publication()" classname="decompengine.web.WebProgressCutoverTest" time="2.301"/>
+  <testcase name="racing HTTP snapshots and atomic publication have exact bounded replay cutovers()" classname="decompengine.web.WebProgressCutoverTest" time="5.563"/>
+  <testcase name="service retention rejects foreign attempts and shutdown without touching history()" classname="decompengine.web.WebProgressCutoverTest" time="0.013"/>
+  <testcase name="owned terminal expiry reaches SSE and polling with recoverable empty snapshots()" classname="decompengine.web.WebProgressCutoverTest" time="1.245"/>
+  <system-out><![CDATA[Cutover qualification: 33 rounds, 264 appends, 11 forced-before, 11 forced-after, 11 racing snapshots; 33 initial snapshots succeeded, 0 explicit interrupted reads recovered.
+]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
