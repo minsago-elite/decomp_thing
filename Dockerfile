@@ -21,10 +21,18 @@ RUN apt-get update \
 FROM toolchain AS build
 
 WORKDIR /workspace
+COPY scripts/install-frontend-node.sh scripts/frontend-node-sha256.txt ./scripts/
+COPY .node-version ./
+COPY frontend/package.json ./frontend/package.json
+RUN bash scripts/install-frontend-node.sh /opt/frontend-node
+ENV PATH="/opt/frontend-node/bin:${PATH}"
 COPY . .
 RUN --mount=type=cache,target=/root/.gradle ./gradlew --no-daemon installDist
 
 FROM toolchain AS runtime
+
+# Node/npm belong only to the build stage, never the application runtime.
+RUN ! command -v node && ! command -v npm && test ! -e /opt/frontend-node
 
 ARG APP_UID=1000
 ARG APP_GID=1000

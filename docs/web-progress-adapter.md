@@ -1,0 +1,357 @@
+# Persisted progress adapter boundary
+
+D4.1 (#174) consumes the display journal owned by #69. This document records the
+adapter boundary; GitHub issues remain the source of implementation status.
+
+`AgentProgressJournal.read(Path)` now delegates validation to
+`AgentProgressJournal.decode(ByteArray)`. File callers retain the existing
+no-follow regular-file check and bounded read. The decoder accepts at most 2 MiB,
+uses strict JSON limits (including duplicate rejection), permits at most 1,024
+retained events, and preserves signed-64-bit sequence values without a floating
+point conversion. Ordering, next-sequence and nonnegative omission counters use
+the same checks as the existing reader. Decoding retained bytes never reopens a
+path. It is a display-journal decoder, not a full event-payload schema validator,
+redaction proof, workflow-state authority or guarantee of complete history.
+
+The versioned web adapter must obtain bytes through `WebJobService.readArtifact`
+for the selected job/attempt's fixed `reports/runs/<attempt>/agent-progress.json`
+path. It must not call the path reader on a browser-supplied path or downgrade a
+failed storage read to an empty history. Existing artifact limits, root ownership
+and authenticated attempt selection remain the storage/access authority.
+
+The upstream journal and web event schema are not interchangeable. The journal
+has writer-restart `runId`, optional durable `workflowRunId` correlation, task and
+request commitments, observation kinds, numeric sequence/drop counters and
+bounded redacted previews. Before the observation variant below, the web schema defined only agent
+messages, run state, evidence availability and retention gaps. Journal observations cannot
+be relabeled as authoritative run-state transitions or acceptance evidence to
+fit that schema. A versioned observation representation and exact decimal-text
+sequence projection are required before exposing those records to the typed UI.
+
+Replay also needs an explicit retention boundary. The existing 256-event default
+journal can omit queued/history records; a returned list is not evidence that
+all intervening sequences exist. The adapter must preserve omission information,
+bind cursors to the exact job/attempt, distinguish reset from continuation, and
+return an explicit gap when it cannot serve the requested history. A missing or
+invalid journal cannot establish that no events occurred. Snapshot/run-state
+cutover, polling/SSE resources and correlation must be qualified against the
+owning #174 acceptance criteria before any live-stream capability is advertised.
+
+Verification for the decoder extraction exercises persisted bytes after the
+source file is removed, exact large sequences, explicit omission counters,
+oversized input, malformed/duplicate JSON, duplicate/out-of-range sequences,
+invalid display metadata and excessive event count. The extraction does not
+add a versioned HTTP route or change the existing legacy event endpoint.
+
+The selected journal/decoder and JVM web suites passed 148 tests with zero
+failures/errors. Frontend tests and packaged browser qualification were not
+rerun because this extraction changes neither UI nor HTTP behavior. The broader
+#174 stream/replay criteria remain unverified and open.
+
+## Versioned observation event
+
+The shared v1 contract now defines `workflow.observation`. Its ordinary event
+binding carries the selected web job/attempt, cursor and decimal-text sequence.
+`agentSequence` may carry an exact producer sequence; `agentInvocationId` is
+null because a journal request commitment is not an invocation identity. The
+payload has fixed `authority: observations`, the separate writer ID, workflow,
+observation kind, bounded known fields and an exact omitted-field count.
+
+Known fields preserve available task/turn/workflow-run/session/tool/permission
+and revision commitments, bounded redacted display strings, boolean omission
+flags, exact usage/count strings and at most eight bounded plan entries. A
+producer's reported accepted phase or source commitment remains a display
+observation; it cannot acquire the `run.state` acceptance semantics. Fields not
+represented by this contract must be counted as omitted by the adapter. That
+count concerns payload fields, not dropped events; journal queue/history gaps
+still require the separate replay/retention protocol.
+
+Shared fixtures cover observation/poll envelopes, large exact counts, separate
+writer/attempt identities, reported acceptance without authority, bounded plans
+and explicit omissions. Negative fixtures reject alternate authority, numeric
+counts, absent omission accounting, untyped text objects and excess plan items.
+The typed client generation includes the new branch. Existing clients that do
+not know this branch retain their explicit unsupported-contract behavior.
+
+The mapper and HTTP adapter below implement producer projection and bounded
+JSON snapshot/replay reads for this schema. The UI activity view, SSE and broader
+concurrency/retention qualification remain open.
+
+Contract verification passed 36 valid and 26 invalid fixtures. All 210 frontend
+tests, lint, generated-type drift checks and the typechecked bundle passed.
+JVM and browser tests were not rerun for this schema-only checkpoint; those are
+required when the producer and HTTP/UI adapters land.
+
+## Journal-to-observation mapping
+
+`webProgressObservation` now maps one decoded journal record to the shared
+`workflow.observation` shape. The caller supplies the authenticated job/attempt
+and replay cursor; those are never taken from the writer's `runId`. Writer,
+workflow and kind are validated independently. Sequence and usage values are
+canonical unsigned decimal strings, preserving exact integers without floating
+point conversion. Timestamp text is normalized to a supported UTC instant.
+
+The mapper copies only known typed fields and bounded plan entries. Unknown
+root fields contribute to `omittedFieldCount`; neither their names nor values
+are copied. Invalid known fields fail rather than being silently coerced or
+counted as omitted. It bounds source field count and serialized output to 64 KiB.
+That is a per-event ceiling; the future page adapter still needs its own total
+response-byte budget. It does not mint replay cursors or establish storage/session
+authority by itself.
+
+Integration with the actual writer exposed an initial schema bound mismatch:
+`ProgressRedactor` appends a 21-character marker after taking a 512-character
+preview (160 for plan text). The corresponding contract and mapper bounds are
+now 533 and 181, preserving the original producer text and marker. A shared
+fixture and actual persisted journal test cover this case.
+
+Tests compare exact output with the shared observation and truncated-plan
+fixtures, reject invalid known field types/counts/commitments, count unknown
+fields without leaking their content, and map actual persisted writer records
+while retaining distinct attempt/writer identities. This completes the producer
+projection function; authenticated reads, replay/cutover/gaps and HTTP/UI
+integration remain required under #174.
+
+Final verification passed 153 journal/web JVM tests, 211 frontend tests,
+37 valid and 26 invalid contract fixtures, lint and the typechecked bundle.
+Browser qualification was not rerun because this mapper is not yet attached to
+an HTTP route or UI view.
+
+## Bounded replay core
+
+`WebProgressPages` now provides bounded polling and snapshot-boundary calculation
+from checked journal bytes. It retains only a process-local signing key/epoch,
+not per-client queues or event caches. A page decodes at most 2 MiB / 1,024 source
+records and returns at most 200 observations, splitting below the one-MiB
+response ceiling. Byte-driven splits retain the exact last returned cursor.
+
+Opaque cursors bind session/job/attempt, process epoch, an exact retained record
+fingerprint and position. An ordinary cursor resumes after that record; the
+oldest boundary permits explicit selection before the first retained record.
+A fresh snapshot cutover cursor additionally acknowledges the journal's observed
+next-sequence boundary, including trailing omissions. This avoids repeatedly
+resetting at a terminal queue drop while preserving the omission counters for
+the snapshot response. It does not certify that omitted events were delivered.
+
+Missing/changed anchors, sequence holes, trailing omissions and process restart
+return `410 PROGRESS_GAP`; malformed/tampered/cross-binding cursors return
+`400 INVALID_CURSOR`. Invalid journals return a bounded `503 PROGRESS_UNAVAILABLE`
+message. A gap discards the prospective page rather than returning silently
+partial history. Snapshot-boundary results retain next-sequence and queue/history
+omission counters for the forthcoming HTTP snapshot adapter. A journal with no
+retained records has no anchor cursor; its counters must still be shown, and no
+resume proof may be invented for that empty retained history.
+
+Tests cover append/replay/idle polls, cross-binding/tamper/restart rejection,
+missing/changed/interior/trailing gaps, explicit oldest-history selection,
+snapshot cutover across trailing omissions, near-maximum sequence cursor length,
+byte-limited page reachability and malformed inputs. This core does not perform
+HTTP authorization, read storage paths, connect workflow snapshots atomically,
+or provide SSE. Those integration boundaries remain open under #174.
+
+Verification passed 160 journal/web JVM tests with zero failures/errors and
+`git diff --check`. Frontend/browser suites were not rerun because the new replay
+core has no HTTP/UI connection yet. The existing typed frontend build and asset
+checks ran as part of the JVM build dependency chain.
+
+## Authenticated JSON snapshot and polling endpoints
+
+The versioned API now exposes read-only `GET /api/v1/jobs/J/runs/R/snapshot` and
+`GET /api/v1/jobs/J/runs/R/events?cursor=...&limit=...`, including nested base paths.
+Both require the existing local session/origin policy and JSON Accept rules.
+The server resolves the exact durable attempt, reads its fixed journal artifact
+through the checked descriptor boundary, and rejects a changed attempt version
+after the read with `409 PROGRESS_CHANGED`. Missing/inaccessible journal bytes
+return `503 PROGRESS_UNAVAILABLE`, never an invented empty history. The reader's
+missing-target exception needed explicit mapping; the HTTP regression caught
+and fixed an initial generic 500 response for that case.
+
+Snapshots include the authoritative run presentation and separate display
+progress metadata: next sequence, queue/history omission counts and retained
+record count. This optional v1 field preserves old snapshot fixture compatibility;
+new endpoint responses always supply it. Consumers must not interpret its absence
+as complete history. Counter/cursor consistency checks run in the typed client
+and shared verifier. Snapshot run state remains independent of journal claims.
+The version check covers a stable attempt observation around a stable journal
+file read; it is not a transaction between workflow state and journal publication.
+
+Use `oldestCursor` to explicitly read retained history and `throughCursor` to
+resume after the snapshot cutover. Gaps return `410 PROGRESS_GAP`; clients must
+read a fresh snapshot and visibly acknowledge lost history before resuming.
+Polling is ordinary bounded HTTP with no retained stream/queue. Bootstrap now
+reports the implemented source-journal read ceilings (1,024 events / 2 MiB);
+pages remain capped at 200 events / below one MiB. A zero terminal-retention
+window advertises no guaranteed time retention. These limits do not claim the
+larger D0 target workload or timed retention policy is complete.
+
+Actual HTTP tests exercise unauthenticated/foreign-origin/method/Accept denial,
+wrong-job and cross-session cursor rejection, snapshot/oldest/paged/idle reads,
+new writer continuation, explicit retention gap and omission counters, missing
+journals and byte preservation without workflow execution. 161 JVM tests,
+214 frontend tests, 38 valid/28 invalid shared fixtures, lint and typechecked
+`distZip` passed. The packaged history fixture now includes an inert progress
+journal and checks snapshot/two-page/idle reads with exact large token counts.
+
+The packaged polling journey passed with the pinned browser:
+[`web-progress-http-20260905.json`](evidence/web-progress-http-20260905.json).
+It reads the new endpoints from an authenticated browser tab, verifies the exact
+attempt/writer distinction and unsigned usage value, and confirms journal bytes
+are unchanged. Chrome used test-only `--no-sandbox`. That checkpoint qualified endpoint reads
+only. It did not establish automatic reconnection, SSE, long-lived slow-client
+behavior or full #174 completion. The later activity UI checkpoint follows.
+
+
+## Retained activity UI and bounded continuation
+
+Attempt pages now offer opt-in polling with pause/resume. The view reads an
+identity-bound snapshot, starts at its oldest retained cursor, and follows the
+journal with one read at a time and a 2.5-second delay between reads. Attempt
+state and acceptance are explicitly labeled as values at the snapshot; observed
+phases never override them. Exact queue/history omission counts remain visible.
+Missing counts do not imply complete history, and no percentage is inferred.
+
+The display holds at most 200 observations. Reaching that bound pauses reads and
+changes the same focused control to **Continue activity on next page**. Explicit
+continuation replaces the displayed rows while retaining the cursor and last
+observation for cross-page sequence checks. It does not restart at the oldest
+record. Pause/resume keeps the current page. Conflicting replay, noncontiguous
+continuation and incorrect attempt binding fail closed. Retention gaps require
+an explicit fresh-history read; this replaces the old position and snapshot.
+Unmount cancels reads and timers; session denial clears retained activity.
+
+All message text remains withheld because the journal lacks an explicit public
+visibility guarantee. This includes thought, system, assistant and unknown
+roles. Current rows show observation metadata and available task/revision IDs;
+public messages, plans/tool summaries, durable evidence links and full stage
+presentation remain part of #175. A missing task/revision is labeled rather
+than guessed. The list is outside a live region; a short polite status reports
+following/paused state and the bounded row count.
+
+The packaged history journey uses 205 inert persisted observations, including a
+thought-role message, without starting a workflow. It proves exact 200/5 page
+ordering, native Enter activation, focus preservation, no requests during a
+three-second pause or after route departure, resumed idle polling without
+repeated rows, text withholding and a polite accessibility-tree status. Journal,
+report and installation bytes remain unchanged. Evidence:
+[`web-activity-ui-20260905.json`](evidence/web-activity-ui-20260905.json), UI build
+`f39cdd2f9270c3a4291c61e4fd2f0c743f53978e021f7cdbc6b36774893f5b9e`.
+Chrome used test-only `--no-sandbox`; the packaged application ran without Node
+or npm on its PATH. Shutdown and owned-work cleanup were confirmed.
+
+222 frontend tests, lint and typechecked `distZip` passed. Focused tests also
+cover a gap across the display boundary and activity cleanup on explicit
+session logout. The first browser attempt failed because the driver omitted
+the Enter character; correcting that input produced the retained passing run.
+Manual screen-reader behavior, live producer scenarios, restart/reconnect,
+multiple tabs and long-running qualification remain outstanding. This scoped
+evidence does not close #174 or #175.
+
+## Activity filters and correlation references
+
+The activity page offers category and task-reference filters over its current
+bounded page. Categories separate stage observations, message metadata, plan
+metadata, tools/changes and other observations. Task matching is a literal,
+case-sensitive substring of the recorded task ID or digest. Filters make no
+requests, do not move the cursor, and do not discard nonmatching rows. Clearing
+filters restores those rows. A no-match result explicitly says that other
+retained pages have not been searched. Filter choices are local to the mounted
+attempt view; they are not saved across reloads.
+
+Each row links to its exact attempt under the configured deployment prefix.
+Expandable correlation details expose recorded task/session/revision digests,
+turn and request references, and a tool-call digest. Missing references are
+labeled; unavailable evidence pages are not invented. Observed status and plan
+entry counts remain observation metadata. Missing plan counts or entry metadata
+read **Not recorded**, not zero. Message and plan text remain withheld pending a
+producer public-visibility contract.
+
+The packaged history journey additionally verifies local category/task filtering,
+no additional polling requests while filtering a paused page, restoration of all
+200 rows, exact attempt links, expandable correlation references and 320-pixel
+reflow. Existing page continuation, pause/resume, focus, text withholding and
+byte-preservation checks remain in the same journey. The retained report is
+[`web-activity-filters-20260905.json`](evidence/web-activity-filters-20260905.json).
+225 frontend tests, lint and typechecked distribution build passed. This extends
+#175 fixture evidence without claiming complete stage views, public provider
+messages, durable task/session/revision evidence pages or full accessibility
+qualification.
+
+## Activity connection recovery
+
+A shared browser-availability hook suspends activity reads when the browser
+reports offline or the document becomes hidden. It unregisters its listeners on
+unmount. Suspension cancels the current read/timer but keeps the bounded page,
+filters and cursor. Returning online or visible reads a new identity-checked
+snapshot before continuing from the retained cursor. Obsolete responses are
+ignored after cancellation. None of these transitions controls server work.
+
+Network errors, timeouts and HTTP 502/504 trigger at most four automatic retries
+with exponential delays of 1, 2, 4 and 8 seconds, each jittered by ±20%. Each
+retry reconciles a new snapshot. A successful event-page read resets the retry
+budget; exhaustion stops reading until explicit fresh-history recovery. Session
+401 and access 403 are distinct non-retry failures and clear retained content.
+Protocol/identity errors and retention gaps are not automatically retried.
+
+The view distinguishes paused, background-suspended, browser-reported offline,
+reconnecting, exhausted and session/access-denied states. It displays the browser
+UTC time of the last successfully received activity page outside the live region.
+That timestamp is a receipt time, not an assertion about the source journal's
+freshness. The latest snapshot remains labeled separately from observation rows.
+A retention gap may result from restart or eviction; this implementation does
+not infer which occurred or automatically discard history to conceal the gap.
+
+231 frontend tests, lint and typechecked `distZip` passed. Six focused connection
+tests cover visibility/offline suspension, cursor/selection preservation,
+reconciliation, bounded retries, session/access denial and late-response rejection.
+The packaged browser uses actual tab foreground/background changes and CDP
+network offline/online emulation. It verifies no reads in three-second suspended
+windows, exactly one fresh snapshot for each resumption and retention of the
+same five rows. Existing pause, pagination, focus, filters and fixture byte
+preservation checks also pass. Evidence:
+[`web-activity-connection-20260905.json`](evidence/web-activity-connection-20260905.json).
+The application used inert observations only; Chrome ran with test-only
+`--no-sandbox`, and shutdown/owned-work cleanup were confirmed.
+
+This is the activity observer portion of #179. A shared connection state machine
+across every private view, a distinct authenticated server-restart signal,
+conflicting multi-tab workflow controls, full restart scenarios and long-running
+qualification remain open. This checkpoint does not close #179 or D4.
+
+## Reported usage and agent outcomes
+
+The activity category **Usage and agent outcomes** selects `context_usage` and
+`agent_finished` observations. Expand a row to inspect exact context occupancy,
+input/output/cached-input tokens, tool-call counts, or its reported stop reason
+and failure classification. These values remain scoped to the individual report
+or receipt; the client does not sum them into attempt totals, derive progress
+percentages, or infer a stop/acceptance decision. Completed, cancelled,
+limit-exhausted, timeout, resource-exhausted, process-crash and transport values
+remain distinct. Unknown future classifications remain recorded text.
+
+Each panel identifies the report/receipt source and writer, journal recording
+time, and the absence of a provider measurement timestamp. Recording time is not
+substituted for measurement time. Missing counters stay **Not reported**; real
+zero remains zero. Supported nonnegative producer duration text (`PT` with hours,
+minutes and/or seconds, up to nine fractional digits) is converted to decimal
+seconds using integer arithmetic. Unsupported or truncated duration text is
+explicitly unavailable, not zero. Large token counters are rendered from their
+exact decimal strings. Attempt limits and receipt usage also carry source labels
+on the attempt page, and tool-call limits have explicit count units.
+
+No monetary estimate is shown because this observation contract supplies no
+configured pricing/version basis. Queue position and worker resource metrics are
+explicitly unavailable here. This does not implement queue/worker summaries or
+close #181; those remain planned work together with broader usage provenance and
+measurement-time support.
+
+250 frontend tests, lint, 161 targeted web/journal JVM tests and typechecked
+`distZip` passed. Tests cover absent, partial, zero and maximum unsigned counters,
+unknown and distinct outcome classifications, exact duration conversion, no
+invented percentages/totals and missing pricing information. The packaged browser
+opens two inert usage observations on the second activity page and checks exact
+large values, nanosecond precision in decimal seconds, units, source/timestamp
+limitations and cursor preservation. Existing pagination, filters, connection,
+focus and byte-preservation checks also pass. Evidence:
+[`web-observed-usage-20260905.json`](evidence/web-observed-usage-20260905.json).
+No workflow ran. Chrome used test-only `--no-sandbox`; shutdown and owned-work
+cleanup were confirmed.

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.acp.AcpV1WireContractGoldenTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-09-05T16:06:17.723Z" hostname="whatsername" time="0.028">
+  <properties/>
+  <testcase name="environment terminal and unknown authentication advertisements retain their distinct payloads()" classname="decompengine.acp.AcpV1WireContractGoldenTest" time="0.0"/>
+  <testcase name="golden fixture is explicitly versioned for the stable protocol()" classname="decompengine.acp.AcpV1WireContractGoldenTest" time="0.0"/>
+  <testcase name="sdk serializers match every versioned v1 golden message()" classname="decompengine.acp.AcpV1WireContractGoldenTest" time="0.025"/>
+  <testcase name="authentication selection and logout advertisement are distinct typed v1 fields()" classname="decompengine.acp.AcpV1WireContractGoldenTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

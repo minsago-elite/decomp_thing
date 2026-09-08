@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.acp.AcpAuthenticationInventoryTest" tests="9" skipped="0" failures="0" errors="0" timestamp="2026-09-05T18:47:30.085Z" hostname="whatsername" time="0.106">
+  <properties/>
+  <testcase name="long private fragments are withheld at every alignment in operator previews()" classname="decompengine.acp.AcpAuthenticationInventoryTest" time="0.046"/>
+  <testcase name="control normalization precedes literal and credential preview redaction()" classname="decompengine.acp.AcpAuthenticationInventoryTest" time="0.006"/>
+  <testcase name="replacement-marker matches cannot cause unbounded intermediate preview growth()" classname="decompengine.acp.AcpAuthenticationInventoryTest" time="0.003"/>
+  <testcase name="operator inventory preserves exact IDs but redacts display previews()" classname="decompengine.acp.AcpAuthenticationInventoryTest" time="0.006"/>
+  <testcase name="unknown authentication variants stay unsupported()" classname="decompengine.acp.AcpAuthenticationInventoryTest" time="0.001"/>
+  <testcase name="ambiguous and excessive advertisements fail with fixed diagnostics()" classname="decompengine.acp.AcpAuthenticationInventoryTest" time="0.0"/>
+  <testcase name="empty and changed inventories have deterministic commitments()" classname="decompengine.acp.AcpAuthenticationInventoryTest" time="0.001"/>
+  <testcase name="preview truncation preserves supplementary Unicode boundaries()" classname="decompengine.acp.AcpAuthenticationInventoryTest" time="0.002"/>
+  <testcase name="fragment filtering retains unrelated text at the full private value budget()" classname="decompengine.acp.AcpAuthenticationInventoryTest" time="0.029"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

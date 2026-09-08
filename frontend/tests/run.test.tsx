@@ -1,0 +1,131 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact';
+import { beforeEach, expect, it, vi } from 'vitest';
+import type * as ClientModule from '../src/api/client';
+import type { Bootstrap, Run, Report } from '../src/api/generated';
+import { App } from '../src/app/App';
+import { createBrowserSession } from '../src/session/session';
+
+const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal: AbortSignal }) => Promise<unknown>>() }));
+vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>(), createApiClient: () => transport }));
+const sample = (JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/run-completed-unaccepted.json'), 'utf8')) as { data: Run }).data;
+const bootstrap = (JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap }).data;
+beforeEach(() => { transport.get.mockReset(); });
+
+async function session() {
+  const value = createBrowserSession({
+    bootstrap: () => Promise.resolve({ ...bootstrap, basePath: '/nested/', sessionExpiresAt: new Date(Date.now() + 60000).toISOString() }),
+    exchange: vi.fn(), logout: () => Promise.resolve(),
+  }, '/nested');
+  await value.initialize({ kind: 'absent' });
+  return value;
+}
+
+it('pins attempt identity and shows completed candidate separately from acceptance and missing usage', async () => {
+  const auth = await session();
+  const run = { ...sample, previousRunId: 'run_previous' };
+  transport.get.mockResolvedValue({ data: run });
+  history.replaceState(null, '', `/nested/jobs/${run.jobId}/runs/${run.runId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect(await screen.findByText('not-evaluated')).toBeTruthy();
+    expect(screen.getByText('9007199254740993')).toBeTruthy();
+    expect(screen.getAllByText('Not reported').length).toBeGreaterThan(0);
+    expect(screen.getByRole('link', { name: 'Open previous attempt' }).getAttribute('href')).toBe(`/nested/jobs/${run.jobId}/runs/run_previous`);
+    expect(document.title).toBe('Workflow attempt · Decomp Workbench');
+    expect(transport.get).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    expect(await screen.findByText('Connect a local session to view this attempt.')).toBeTruthy();
+    expect(screen.queryByText('9007199254740993')).toBeNull();
+  } finally { auth.dispose(); }
+});
+
+it('aborts obsolete attempt reads and refuses a response for another job', async () => {
+  const auth = await session();
+  let finish: (value: unknown) => void = () => undefined;
+  transport.get.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs/${sample.runId}`);
+  try {
+    const view = render(<App basePath="/nested" session={auth} />);
+    await waitFor(() => expect(transport.get).toHaveBeenCalledOnce());
+    const signal = transport.get.mock.calls[0]![2].signal;
+    view.unmount();
+    expect(signal.aborted).toBe(true);
+    await act(async () => { finish({ data: sample }); await Promise.resolve(); });
+    expect(screen.queryByText('9007199254740993')).toBeNull();
+    transport.get.mockResolvedValue({ data: { ...sample, jobId: 'b'.repeat(32) } });
+    render(<App basePath="/nested" session={auth} />);
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'The response does not belong to the requested job and attempt.');
+    expect(screen.queryByText('9007199254740993')).toBeNull();
+  } finally { auth.dispose(); }
+});
+
+it('pages history with URL continuation and restores the first page through browser history', async () => {
+  const auth = await session();
+  transport.get.mockImplementation((_kind, path) => Promise.resolve({ data: {
+    jobId: sample.jobId,
+    items: [{ ...sample, runId: path.includes('cursor=') ? 'run_earlier' : 'run_latest' }],
+    page: { limit: 50, snapshotVersion: 'version_1', nextCursor: path.includes('cursor=') ? null : 'cursor_page_2' },
+  } }));
+  history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect(await screen.findByRole('link', { name: 'reconstruct: run_latest' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Next attempts' }));
+    expect(await screen.findByRole('link', { name: 'reconstruct: run_earlier' })).toBeTruthy();
+    expect(location.search).toBe('?cursor=cursor_page_2');
+    expect(screen.queryByRole('link', { name: 'reconstruct: run_latest' })).toBeNull();
+    expect(transport.get.mock.calls.at(-1)?.[1]).toContain('limit=50&cursor=cursor_page_2');
+    history.back();
+    expect(await screen.findByRole('link', { name: 'reconstruct: run_latest' })).toBeTruthy();
+    expect(location.search).toBe('');
+  } finally { auth.dispose(); }
+});
+
+it('reads exploration evidence only on request and preserves producer limitations', async () => {
+  const { ExplorationEvidence } = await import('../src/jobs/ExplorationEvidence');
+  const data = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/report-exploration.json'), 'utf8')) as { data: Report };
+  transport.get.mockResolvedValue(data);
+  const view = render(<ExplorationEvidence jobId={data.data.binding.jobId} runId={data.data.binding.runId!} basePath="/nested" />);
+  expect(transport.get).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Read exploration evidence' }));
+  expect(await screen.findByText('Observed sample breadth is not a proof of equivalence.')).toBeTruthy();
+  expect(screen.getByText('Producer reports network isolation')).toBeTruthy();
+  expect(screen.getByRole('link', { name: 'Download observed exploration JSON' }).getAttribute('href')).toBe(data.data.sourceArtifact!.contentHref);
+  expect(screen.getByRole('link', { name: 'Download observed exploration JSON' }).getAttribute('download')).toBe('exploration.json');
+  expect(screen.getByText('Exploration observations do not establish accepted reconstruction.')).toBeTruthy();
+  expect(transport.get.mock.calls[0]?.[1]).toBe(`/jobs/${data.data.binding.jobId}/runs/${data.data.binding.runId}/reports/exploration`);
+  const signal = transport.get.mock.calls[0]![2].signal;
+  view.unmount(); expect(signal.aborted).toBe(true);
+});
+
+it('refuses evidence for another attempt without presenting its summary', async () => {
+  const { ExplorationEvidence } = await import('../src/jobs/ExplorationEvidence');
+  const data = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/report-exploration.json'), 'utf8')) as { data: Report };
+  transport.get.mockResolvedValue(data);
+  render(<ExplorationEvidence jobId={data.data.binding.jobId} runId="run_other" basePath="/nested" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Read exploration evidence' }));
+  expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'The report does not belong to the requested attempt.');
+  expect(screen.queryByText('Producer confidence score')).toBeNull();
+});
+
+
+it('clears activity and cancels its reads on explicit session logout', async () => {
+  const auth = await session();
+  const snapshot = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/snapshot-progress-omissions.json'), 'utf8')) as unknown;
+  const events = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/events-observation-poll.json'), 'utf8')) as unknown;
+  transport.get.mockImplementation(kind => Promise.resolve(kind === 'run' ? { data: sample } : kind === 'snapshot' ? snapshot : events));
+  history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs/${sample.runId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Follow activity' }));
+    expect(await screen.findByText('Sequence 9007199254740993')).toBeTruthy();
+    const signal = transport.get.mock.calls.find(call => call[0] === 'events')![2].signal;
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    expect(await screen.findByText('Connect a local session to view this attempt.')).toBeTruthy();
+    expect(screen.queryByText('Sequence 9007199254740993')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Pause activity' })).toBeNull();
+    expect(signal.aborted).toBe(true);
+  } finally { auth.dispose(); }
+});

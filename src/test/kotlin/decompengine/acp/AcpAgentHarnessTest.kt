@@ -132,7 +132,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(66, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(70, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
@@ -268,6 +268,10 @@ class AcpAgentHarnessTest {
         )
 
         val cases = listOf(
+            RejectedPreference("cross preference overlap", "session-preferences-cross-preferences",
+                AcpSessionPreferences(modelId = "model-secret-canary", modeId = "mode-secret-canary", configOptions = listOf(
+                    AcpSessionConfigPreference("option-secret-canary", AcpSessionConfigValue.Select("value-secret-canary")))),
+                "secret-canary"),
             RejectedPreference(
                 "unknown model",
                 "session-preferences",
@@ -344,9 +348,15 @@ class AcpAgentHarnessTest {
                 )),
                 "not-present",
             ),
+            RejectedPreference(
+                "preview label collides with the configured identifier",
+                "session-preferences",
+                AcpSessionPreferences(modelId = "Advertised choice previews"),
+                "Advertised choice previews",
+            ),
         )
 
-        cases.forEach { case ->
+        (cases + cases.drop(1).take(4).map { it.copy(mode = "session-preferences-overlapping-choices") }).forEach { case ->
             val fixture = fixture(genericContract = true)
             val harness = harness(
                 mode = case.mode,
@@ -360,6 +370,17 @@ class AcpAgentHarnessTest {
             }
 
             assertEquals(AgentFailureKind.CONFIGURATION, failure.failure.kind, case.label)
+            val advertisedPreview = when (case.label) {
+                "unknown model" -> "model-safe"
+                "unknown mode" -> "mode-safe"
+                "unknown option" -> "reasoning"
+                "unknown select value" -> "high"
+                else -> null
+            }
+            advertisedPreview?.let {
+                assertTrue(failure.failure.message.contains("Advertised choice previews:"), case.label)
+                assertTrue(failure.failure.message.contains(it), case.label)
+            }
             assertEquals("original artifact\n", fixture.source.readText(), case.label)
             assertTrue(events.isEmpty(), case.label)
             val invocation = assertIs<AcpInvocationEvidenceSnapshot>(failure.receipt?.providerEvidence)
@@ -1465,6 +1486,89 @@ class AcpAgentHarnessTest {
         } finally {
             executor.shutdownNow()
         }
+    }
+
+    @Test
+    fun `workspace snapshot limit rejects oversized input before launching an agent`() {
+        val fixture = fixture()
+        fixture.source.writeText("x".repeat(8 * 1024 * 1024 + 1))
+        val receipt = harness("success").executeReceipt(fixture.request)
+        val failure = assertIs<AgentExecutionOutcome.Failed>(receipt.outcome).failure
+        assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, failure.kind)
+        assertEquals("initial-workspace-snapshot", failure.details["phase"])
+        assertEquals("file-bytes", failure.details["limit"])
+        val evidence = assertIs<AcpInvocationEvidenceSnapshot>(receipt.providerEvidence)
+        assertEquals(AcpExecutionLifecyclePhase.WORKSPACE_SNAPSHOT, evidence.phaseReached)
+        assertEquals(AcpExecutionCleanupDisposition.NOT_REQUIRED, evidence.cleanupDisposition)
+        assertNull(evidence.diagnostics)
+        assertNull(evidence.completeExecutionEvidence)
+    }
+
+    @Test
+    fun `completed agent turn cannot return changes when final snapshot exceeds its limit`() {
+        val fixture = fixture(genericContract = true, wallMillis = 15_000)
+        val injected = java.util.concurrent.atomic.AtomicBoolean(false)
+        val injection = AgentCancellation {
+            val duringSnapshot = Thread.currentThread().stackTrace.any { frame ->
+                frame.className == WorkspaceSnapshotBudget::class.java.name && frame.methodName == "checkpoint"
+            }
+            if (!injected.get() && duringSnapshot && fixture.source.readText() == "updated artifact\n" &&
+                injected.compareAndSet(false, true)) {
+                fixture.source.writeText("x".repeat(8 * 1024 * 1024 + 1))
+            }
+            false
+        }
+        val receipt = harness("missing-usage").executeReceipt(fixture.request.withCancellation(injection))
+        assertTrue(injected.get(), "fixture did not reach the post-cleanup boundary")
+        val failure = assertIs<AgentExecutionOutcome.Failed>(receipt.outcome).failure
+        assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, failure.kind)
+        assertEquals("final-workspace-snapshot", failure.details["phase"])
+        assertEquals("file-bytes", failure.details["limit"])
+        assertNotNull(failure.session)
+        assertEquals(8L * 1024 * 1024 + 1, java.nio.file.Files.size(fixture.source))
+        val evidence = assertIs<AcpInvocationEvidenceSnapshot>(receipt.providerEvidence)
+        assertEquals(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT, evidence.phaseReached)
+        assertEquals(AcpExecutionCleanupDisposition.VERIFIED, evidence.cleanupDisposition)
+        assertNull(evidence.completeExecutionEvidence)
+        val diagnostics = assertNotNull(evidence.diagnostics)
+        assertTrue(diagnostics.remainingProcessIds.isEmpty())
+        assertTrue(diagnostics.sandboxCleanupVerified)
+        assertProcessStopped(diagnostics.pid)
+    }
+
+    @Test
+    fun `final metadata rejection retains session and cleanup evidence`() {
+        val fixture = fixture(genericContract = true, wallMillis = 15_000)
+        val injected = java.util.concurrent.atomic.AtomicBoolean(false)
+        val injection = AgentCancellation {
+            val duringSnapshot = Thread.currentThread().stackTrace.any { frame ->
+                frame.className == WorkspaceSnapshotBudget::class.java.name && frame.methodName == "checkpoint"
+            }
+            if (!injected.get() && duringSnapshot && fixture.source.readText() == "updated artifact\n" &&
+                injected.compareAndSet(false, true)) {
+                val permissions = java.nio.file.Files.getPosixFilePermissions(fixture.source).toMutableSet()
+                val execute = java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE
+                if (!permissions.add(execute)) permissions.remove(execute)
+                java.nio.file.Files.setPosixFilePermissions(fixture.source, permissions)
+            }
+            false
+        }
+        val receipt = harness("missing-usage").executeReceipt(fixture.request.withCancellation(injection))
+        assertTrue(injected.get(), "fixture did not reach the post-cleanup boundary")
+        val failure = assertIs<AgentExecutionOutcome.Failed>(receipt.outcome).failure
+        assertEquals(AgentFailureKind.WORKSPACE_VIOLATION, failure.kind)
+        assertEquals("final-workspace-snapshot", failure.details["phase"])
+        assertEquals("file-metadata-changed", failure.details["reason"])
+        assertNotNull(failure.session)
+        assertEquals("updated artifact\n", fixture.source.readText())
+        val evidence = assertIs<AcpInvocationEvidenceSnapshot>(receipt.providerEvidence)
+        assertEquals(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT, evidence.phaseReached)
+        assertEquals(AcpExecutionCleanupDisposition.VERIFIED, evidence.cleanupDisposition)
+        assertNull(evidence.completeExecutionEvidence)
+        val diagnostics = assertNotNull(evidence.diagnostics)
+        assertTrue(diagnostics.remainingProcessIds.isEmpty())
+        assertTrue(diagnostics.sandboxCleanupVerified)
+        assertProcessStopped(diagnostics.pid)
     }
 
     @Test

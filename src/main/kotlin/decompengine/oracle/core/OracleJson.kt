@@ -340,6 +340,9 @@ private class CanonicalEncoder(private val limits: StrictJsonLimits) {
             output.writeAscii("{}")
             return
         }
+        if (nodes > limits.maximumNodes - value.size) {
+            throw StrictJsonException("JSON value exceeds the configured node limit")
+        }
         output.writeAscii("{\n")
         val entries = value.entries.sortedWith { left, right -> compareByCodePoint(left.key, right.key) }
         entries.forEachIndexed { index, entry ->

@@ -1,0 +1,51 @@
+{
+  "apiVersion": 1,
+  "kind": "report",
+  "requestId": "request_example_1",
+  "data": {
+    "reportId": "report_example_1",
+    "binding": {
+      "jobId": "1234567890abcdef1234567890abcdef",
+      "runId": "run_example_1",
+      "revisionId": "revision_example_1"
+    },
+    "reportType": "exploration",
+    "adapterVersion": 1,
+    "producerSchemaVersion": null,
+    "state": "partial",
+    "authority": "observations",
+    "sourceArtifact": {
+      "artifactId": "artifact_example_1",
+      "binding": {
+        "jobId": "1234567890abcdef1234567890abcdef",
+        "runId": "run_example_1",
+        "revisionId": "revision_example_1"
+      },
+      "displayName": "validation.json",
+      "mediaType": "application/json",
+      "sizeBytes": "2048",
+      "sha256": "abababababababababababababababababababababababababababababababab",
+      "contentHref": "/api/v1/jobs/1234567890abcdef1234567890abcdef/artifacts/artifact_example_1/content",
+      "role": "raw-evidence",
+      "derivedFromArtifactId": null
+    },
+    "acceptance": "unknown",
+    "acceptanceArtifactId": null,
+    "limitations": [
+      "Synthetic partial evidence state."
+    ],
+    "summary": {
+      "candidateCount": "4",
+      "expandedOutputSignatures": "2",
+      "confidence": {
+        "score": 0.25,
+        "inputCount": "4",
+        "sourceCount": "1",
+        "outputSignatureCount": "2",
+        "newOutputSignatureCount": "1",
+        "sandboxed": true,
+        "networkIsolated": true
+      }
+    }
+  }
+}

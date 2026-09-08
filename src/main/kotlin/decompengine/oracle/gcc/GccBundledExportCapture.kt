@@ -90,6 +90,22 @@ internal object GccBundledExportCapture {
         expectedReports: LinuxFileIdentity,
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
         limits: GccResumeByteValidationLimits = GccResumeByteValidationLimits(),
+    ): GccExportProgressAssessment? {
+        var attempts = 0
+        while (true) {
+            try {
+                return observeProgressOnce(run, expectedReports, artifacts, limits)
+            } catch (failure: IllegalArgumentException) {
+                if (!isProgressIdentityDrift(failure) || ++attempts >= MAX_PROGRESS_OBSERVATION_RETRIES) throw failure
+            }
+        }
+    }
+
+    private fun observeProgressOnce(
+        run: LinuxDescriptor,
+        expectedReports: LinuxFileIdentity,
+        artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
+        limits: GccResumeByteValidationLimits,
     ): GccExportProgressAssessment? = LinuxFilesystemSyscalls.openDirectoryAt(run.fd, "reports").use { reports ->
         require(reports.identity.copy(linkCount = expectedReports.linkCount) == expectedReports) {
             "GCC progress reports directory changed identity"
@@ -110,6 +126,11 @@ internal object GccBundledExportCapture {
             observation
         }
     }
+
+    private fun isProgressIdentityDrift(failure: IllegalArgumentException): Boolean =
+        failure.message?.startsWith("GCC export file changed during capture: program_model.json.progress.json") == true
+
+    private const val MAX_PROGRESS_OBSERVATION_RETRIES = 3
 
     private fun <T> captureFiles(
         run: LinuxDescriptor,
