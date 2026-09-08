@@ -54,8 +54,9 @@ class GccBundledCliQualificationTest {
             val arguments = listOf(engine, binary.toString(), "--profile", profile.toString(), "--ghidra-archive", archive.toString(),
                 "--output", output.toString(), "--scratch", scratch.toString()) +
                 if (index == 0) emptyList() else listOf("--resume-after-checkpoint", "512")
-            // Invoke the normal CLI entry point with production inputs; no authored intent or analyzer seam.
-            decompengine.main((listOf("gcc-engine-plan") + arguments).toTypedArray())
+            val launchEvidence = Files.createDirectory(destination.resolve(if (index == 0) "fresh-launcher" else "resumed-launcher"), PRIVATE_DIRECTORY)
+            assertEquals(0, invokeInstalledGccCli(arguments, launchEvidence, 2700),
+                "installed CLI failed; inspect retained launcher output")
             retainAndCheck(output, scratch, profile, arguments, resumed = index != 0)
         }
         assertEquals(-1L, Files.mismatch(outputs[0].first, outputs[1].first), "fresh/resumed model bytes differ")
@@ -64,9 +65,9 @@ class GccBundledCliQualificationTest {
             "provider" to JsonPrimitive("gcc-real-engine-cli-comparison-v1"), "engine" to JsonPrimitive(engine),
             "modelByteIdentical" to JsonPrimitive(true), "planByteIdentical" to JsonPrimitive(true),
             "benchmarkAccepted" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
-            "entryPoint" to JsonPrimitive("decompengine.MainKt.main in the Gradle test JVM"),
-            "testJvmMaximumHeapBytes" to JsonPrimitive(Runtime.getRuntime().maxMemory()),
-            "limitation" to JsonPrimitive("does not qualify installed launcher, cold recovery, or whole-operation resource accounting"),
+            "entryPoint" to JsonPrimitive("installed bin/llm_bin_patch subprocess"),
+            "cliJvmMaximumHeapSelection" to JsonPrimitive("8g"),
+            "limitation" to JsonPrimitive("does not qualify cold recovery or whole-operation resource accounting"),
         ))))
     }
 
