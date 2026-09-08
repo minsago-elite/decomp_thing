@@ -7,6 +7,7 @@ import decompengine.jobs.WorkflowExecutionLimits
 import decompengine.jobs.WorkflowJobSnapshot
 import decompengine.jobs.WorkflowKind
 import decompengine.jobs.WorkflowStoreDiagnostic
+import decompengine.jobs.WorkflowStoreException
 import decompengine.jobs.WorkflowTerminalReason
 import decompengine.jobs.WorkflowUsage
 import java.nio.file.Path
