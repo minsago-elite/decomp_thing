@@ -448,7 +448,7 @@ The retained [packaged browser report](evidence/web-progress-privacy-browser-202
 qualifies the current v1 omission behavior with inert data. The fixture contains 205 observations
 with private prose/paths and one private plan. Actual browser reads inspect the first two and
 next 50 events, requiring absence of prose, plan entries and paths, `textOmitted: true`, and
-exact omission counts (three for the plan-bearing record, two otherwise). The UI separately
+exact omission counts (one for the plan and file-change records, two otherwise). The UI separately
 traverses all 205 observations as 200/5 pages and retains its text-withholding behavior.
 
 The full history journey also passed exact usage rendering, keyboard/focus continuation,
