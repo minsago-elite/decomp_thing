@@ -105,6 +105,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET J/runs`, `GET R` | `200 runs`, `200 run` | Bounded attempts or durable attempt snapshot; #160 |
 | `GET R/progress-pin` | `200 progressPin`, strong run ETag | Current per-attempt journal pin; #172 |
 | `PUT R/progress-pin` | `200 progressPin`, original result on keyed replay | Strict `progressPinRequest`, session/Origin/CSRF, run If-Match and idempotency; #172/#177 |
+| `GET R/cancellation` | `200 cancellationPolicy`, current run ETag | Read-only owned-task eligibility and bounded reason; #485/#180 |
 | `PUT R/cancellation` | `200 cancellation`, original acknowledgement plus current run | Strict `cancellationRequest`, session/Origin/CSRF, run If-Match and actor-scoped idempotency; #485/#180 |
 | `POST J/runs` | `202 run`, `Location: R` | `workflowStart` request, capability/limits/input checks, job If-Match; #163 |
 | `POST R/cancel` | `202 run` or `200 run` if already terminal | Idempotent recorded intent, run If-Match; #163 |

@@ -9,10 +9,22 @@ import kotlinx.serialization.json.*
 /** Cancellation authority and actor attribution come only from the authenticated request. */
 internal class WebCancellationController(private val access: LocalWebAccess, private val jobs: WebJobService) {
     fun handle(exchange: HttpExchange, jobId: String, runId: String) {
-        val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.jsonMutation("PUT")))
+        val read = exchange.requestMethod == "GET"
+        val session = checkNotNull(access.authorize(exchange, if (read) WebEndpointPolicy.privateRead() else WebEndpointPolicy.jsonMutation("PUT")))
         requireNoWebApiQuery(exchange); requireJsonAccept(exchange)
         if (!jobId.matches(Regex("[0-9a-f]{32}")) || !runId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")))
             throw WebAccessDenied(404, "NOT_FOUND", "The requested attempt is unavailable.")
+        if (read) {
+            if (exchange.requestHeaders.keys.any { it.startsWith("If-", true) })
+                throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "Read current cancellation eligibility without conditional headers.")
+            val policy = jobs.cancellationEligibility(jobId, runId)
+            exchange.responseHeaders.set("ETag", "\"${policy.attempt.version}\"")
+            sendWebApiResponse(exchange, 200, "cancellationPolicy", buildJsonObject {
+                put("current", webRun(policy.attempt)); put("eligible", policy.eligible)
+                put("reasonCode", policy.reasonCode?.let(::JsonPrimitive) ?: JsonNull)
+            })
+            return
+        }
         val match = header(exchange, "If-Match")
             ?: throw WebAccessDenied(428, "PRECONDITION_REQUIRED", "Cancellation requires the current run version in If-Match.")
         if (!match.matches(Regex("\"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\"")))
