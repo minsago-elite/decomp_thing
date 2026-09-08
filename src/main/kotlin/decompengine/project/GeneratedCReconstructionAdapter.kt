@@ -20,6 +20,7 @@ internal object GeneratedCReconstructionAdapter : ReconstructionAdapter {
         ),
         profile,
     )
+    override fun modulePrompt(request: ModuleReconstructionRequest): ModulePromptContent = GeneratedCModulePrompt.render(request)
     override fun defaultReconstructor(): ModuleReconstructor = EvidenceModuleReconstructor()
     override fun assess(module: PlannedModule, model: RecoveredProgramModel, generator: String, source: String): List<ModuleReconstructionIssue> =
         GeneratedCCandidateValidation.assess(module, model, generator, source)

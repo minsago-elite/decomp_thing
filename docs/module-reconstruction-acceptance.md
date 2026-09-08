@@ -231,3 +231,17 @@ The service tests verify Unicode context forwarding and rejection of character
 excess, byte excess and malformed UTF-8 before analyzer invocation, source-tree
 creation or progress publication. Prelaunch cancellation is also checked before
 creating the reconstruction output directory.
+
+Generated-C module objectives and recovered function/global prompt formatting now
+belong to `GeneratedCModulePrompt`, selected through `ReconstructionAdapter`.
+Make and Ninja share that C-specific implementation. `BoundedLlmModuleReconstructor`
+retains the workflow-owned target/role checks, context-size gate, workspace rules,
+receipt capture, exact-change validation and rollback. Moving prompt formatting does
+not grant the adapter acceptance or filesystem authority.
+
+`ModulePromptCompatibilityTest` records an authored prompt from the pre-extraction
+production path and verifies its unchanged 5,515-character length and SHA-256 for
+both built-in profiles. Its deliberately oversized context is rejected before any
+agent invocation. This is prompt-byte and budget-gate compatibility evidence, not a
+live ACP interoperability result. Legacy request field names and the remaining
+profile-budget/neutrality migration are separate work.

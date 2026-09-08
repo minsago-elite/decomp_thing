@@ -8,10 +8,13 @@ internal interface ReconstructionAdapter {
     val archiveBuild: ArchiveBuildPolicy
     fun build(projectDir: Path, profile: ReconstructionProfile): BuildReport
     fun rendering(model: RecoveredProgramModel, plan: ModulePlan): ProjectRendering
+    fun modulePrompt(request: ModuleReconstructionRequest): ModulePromptContent
     fun defaultReconstructor(): ModuleReconstructor
     fun assess(module: PlannedModule, model: RecoveredProgramModel, generator: String, source: String): List<ModuleReconstructionIssue>
     fun toolchainEvidence(profile: ReconstructionProfile): String
 }
+
+internal data class ModulePromptContent(val objective: String, val evidence: String)
 
 internal interface ProjectRendering {
     fun sharedInterface(): String
