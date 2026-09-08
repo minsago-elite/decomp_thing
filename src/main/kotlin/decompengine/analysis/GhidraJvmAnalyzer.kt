@@ -55,16 +55,18 @@ class GhidraJvmAnalyzer private constructor(
     }
 
     fun analyze(binaryPath: Path, outputDir: Path): GhidraAnalysis {
-        val startedNanos = System.nanoTime()
-        fun checkpoint(stage: String) {
-            if (Thread.currentThread().isInterrupted) throw InterruptedException("analysis cancelled $stage")
-            if (System.nanoTime() - startedNanos >= TimeUnit.MILLISECONDS.toNanos(metadataLimits.maximumWallClockMillis)) {
-                throw GhidraAnalysisException("analysis and metadata exceeded ${metadataLimits.maximumWallClockMillis} milliseconds $stage")
-            }
-        }
+        val deadline = AnalysisDeadline.start(
+            TimeUnit.MILLISECONDS.toNanos(metadataLimits.maximumWallClockMillis), "analysis and metadata",
+        )
+        fun checkpoint(stage: String) = deadline.checkpoint(stage)
         checkpoint("before analysis")
         val reportsDir = outputDir.resolve("reports").createDirectories()
-        val programModel = analyzer.analyze(binaryPath, outputDir)
+        checkpoint("before export")
+        val programModel = if (analyzer is GhidraHeadlessProgramModelAnalyzer) {
+            analyzer.analyzeWithDeadline(binaryPath, outputDir, deadline)
+        } else {
+            analyzer.analyze(binaryPath, outputDir)
+        }
         checkpoint("after export")
         val inspection = try {
             BoundedElfMetadataReader.read(binaryPath, metadataLimits, ::checkpoint)
