@@ -135,4 +135,58 @@ class WebCancellationControllerTest {
         error(f.send("PUT", "{\"action\":\"cancel\"}", f.headers()), 401)
         assertContentEquals(bytes, f.root.resolve("${f.job.id}/workflow-state.json").readBytes())
     }
+
+    private fun policy(response: HttpResponse<String>, eligible: Boolean, reason: String?): JsonObject {
+        assertEquals(200, response.statusCode(), response.body())
+        val envelope = Json.parseToJsonElement(response.body()).jsonObject
+        assertEquals(JsonPrimitive("cancellationPolicy"), envelope["kind"])
+        val data = envelope.getValue("data").jsonObject
+        assertEquals(setOf("current", "eligible", "reasonCode"), data.keys)
+        assertEquals(JsonPrimitive(eligible), data["eligible"])
+        assertEquals(reason?.let(::JsonPrimitive) ?: JsonNull, data["reasonCode"])
+        val current = data.getValue("current").jsonObject
+        assertEquals("\"${current.getValue("version").jsonPrimitive.content}\"", response.headers().firstValue("ETag").orElseThrow())
+        return current
+    }
+
+    @Test fun `authenticated policy reads do not publish commands and terminal attempts are ineligible`() = Fixture().use { f ->
+        val bytes = f.root.resolve("${f.job.id}/workflow-state.json").readBytes()
+        error(f.send(), 401)
+        val current = policy(f.send(headers = mapOf("Cookie" to f.cookie)), true, null)
+        assertEquals(JsonPrimitive(f.run.runId), current["runId"])
+        assertEquals(JsonPrimitive(f.run.version), current["version"])
+        error(f.send(headers = mapOf("Cookie" to f.cookie, "If-Match" to "\"${f.run.version}\"")), 400)
+        assertContentEquals(bytes, f.root.resolve("${f.job.id}/workflow-state.json").readBytes())
+        data(f.send("PUT", "{\"action\":\"cancel\"}", f.headers()))
+        val cancelled = f.root.resolve("${f.job.id}/workflow-state.json").readBytes()
+        policy(f.send(headers = mapOf("Cookie" to f.cookie)), false, "ATTEMPT_TERMINAL")
+        assertContentEquals(cancelled, f.root.resolve("${f.job.id}/workflow-state.json").readBytes())
+    }
+
+    @Test fun `policy distinguishes unowned work and receipt capacity without leaking other attempt data`() = Fixture().use { f ->
+        val other = f.store.createFromUpload("orphan.elf", elfFixture())
+        val snapshot = (f.owner.inspect(other.id) as WorkflowJobInspection.Available).snapshot
+        val orphan = f.owner.create(other.id, snapshot.version, NewWorkflowAttempt(WorkflowKind.RECONSTRUCT,
+            WorkflowExecutionLimits(60000u, 15000u, 1048576u, 16u))).attempt
+        val orphanPath = f.path.replace(f.job.id, other.id).replace(f.run.runId, orphan.runId)
+        val orphanBytes = f.root.resolve("${other.id}/workflow-state.json").readBytes()
+        policy(f.send(headers = mapOf("Cookie" to f.cookie), target = orphanPath), false, "NO_OWNED_WORKER")
+        assertContentEquals(orphanBytes, f.root.resolve("${other.id}/workflow-state.json").readBytes())
+        val terminal = f.service.cancelDurable(f.job.id, f.run.runId, f.run.version)
+        val actor = WorkflowCancellationActor.browserSession("a".repeat(64))
+        repeat(WorkflowCancellationReceipts.MAX_ENTRIES) { index ->
+            f.owner.requestCancellation(f.job.id, terminal.runId, terminal.version, actor, "policy_capacity_key_$index")
+        }
+        val started = assertIs<DurableWebWorkflowAdmission.Started>(f.service.startDurable(f.job.id, f.snapshot().version,
+            DurableWebWorkflowRequest(WorkflowKind.RECONSTRUCT)))
+        val next = f.service.getAttempt(f.job.id, started.runId)
+        val nextPath = f.path.replace(f.run.runId, next.runId)
+        val bytes = f.root.resolve("${f.job.id}/workflow-state.json").readBytes()
+        val response = f.send(headers = mapOf("Cookie" to f.cookie), target = nextPath)
+        policy(response, false, "CANCELLATION_RECEIPT_CAPACITY")
+        assertFalse(response.body().contains(orphan.runId)); assertFalse(response.body().contains("actorDigest"))
+        error(f.send("PUT", "{\"action\":\"cancel\"}", f.headers(next.version), nextPath), 429, "CANCELLATION_RECEIPT_CAPACITY")
+        assertContentEquals(bytes, f.root.resolve("${f.job.id}/workflow-state.json").readBytes())
+    }
+
 }
