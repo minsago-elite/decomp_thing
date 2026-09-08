@@ -1,7 +1,7 @@
 package decompengine.project
 
 /** Generated-C declarations and GNU Make policy; no benchmark-specific assumptions. */
-internal class GeneratedCProjectRendering(private val model: RecoveredProgramModel, plan: ModulePlan) {
+internal class GeneratedCProjectRendering(private val model: RecoveredProgramModel, plan: ModulePlan) : ProjectRendering {
     private val functions = model.functions.associateBy { it.id }
     private val globals = model.globals.associateBy { it.id }
     private val externallyCalled: Set<String>
@@ -13,7 +13,7 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
         }.toSet()
     }
 
-    fun renderEntrypoint(): GeneratedCEntrypoint? {
+    override fun entrypoint(): RenderedEntrypoint? {
         if (model.functions.any { safeCName(it.name) == "main" }) return null
         val entry = model.functions.firstOrNull { safeCName(it.name) == "decomp_engine_main" }
             ?: model.functions.firstOrNull { safeCName(it.name) in setOf("entry", "recovered__start") }
@@ -32,10 +32,10 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
                     $entryBody
                 }
         """.trimIndent() + "\n"
-        return GeneratedCEntrypoint(mainSource, listOfNotNull(entry?.id))
+        return RenderedEntrypoint(mainSource, listOfNotNull(entry?.id))
     }
 
-    fun renderTypesHeader(): String = buildString {
+    override fun sharedInterface(): String = buildString {
         append("#ifndef DECOMP_TYPES_H\n#define DECOMP_TYPES_H\n\n#include <stddef.h>\n#include <stdint.h>\n\n")
         model.types.sortedBy { it.id }.forEach { type ->
             append("/* ${type.id}; status=${type.status.name.lowercase()}")
@@ -45,7 +45,7 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
         append("#endif\n")
     }
 
-    fun renderModuleHeader(module: PlannedModule): String = buildString {
+    override fun moduleInterface(module: PlannedModule): String = buildString {
         val guard = "DECOMP_MODULE_${module.id.uppercase()}_H"
         append("#ifndef $guard\n#define $guard\n\n#include \"decomp_types.h\"\n\n")
         module.globalIds.map { id -> globals.getValue(id) }.forEach { global ->
@@ -60,7 +60,7 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
         append("\n#endif\n")
     }
 
-    fun renderPrivateHeader(module: PlannedModule): String = buildString {
+    override fun privateInterface(module: PlannedModule): String = buildString {
         val guard = "DECOMP_MODULE_${module.id.uppercase()}_INTERNAL_H"
         append("#ifndef $guard\n#define $guard\n\n#include \"modules/${module.id}.h\"\n\n")
         module.functionIds.map { id -> functions.getValue(id) }
@@ -69,7 +69,7 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
         append("\n#endif\n")
     }
 
-    fun renderMakefile(sources: List<String>, profile: ReconstructionProfile): String {
+    override fun buildDefinition(sources: List<String>, profile: ReconstructionProfile): String {
         val cflags = profile.adapterConfiguration["compiler-flags"]?.joinToString(" ")
             ?: "-std=c11 -g -Wall -Wextra -Werror -Iinclude"
         val cc = profile.adapterConfiguration["compiler-driver"]?.firstOrNull() ?: "gcc"
@@ -106,5 +106,3 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
     }
 
 }
-
-internal data class GeneratedCEntrypoint(val source: String, val entityIds: List<String>)

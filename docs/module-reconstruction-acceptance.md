@@ -128,3 +128,14 @@ project or dispatching reconstruction. The generated-C policy identity and
 compiler evidence encoding are unchanged. This contract supplies local compilation
 only; qualified runner/input/output receipts and complete alternate-profile
 routing remain required for production acceptance under #84.
+
+`ReconstructionAdapters` selects local generation behavior and compilation together
+by profile ID. The workflow obtains interface/entrypoint/build-definition rendering,
+default and failed-attempt fallback reconstruction, candidate assessment and
+toolchain reporting from that adapter. `ProjectRendering` exchanges source text
+and entity attribution; file publication and checkpoint transactions remain in
+orchestration. Explicit caller reconstructors are retained. The public
+`EvidenceModuleReconstructor` and `RecoveredCModuleReconstructor` compatibility
+names now reside with the generated-C implementation. Full-project build/archive
+routing and language-specific prompt/request assumptions remain to be migrated;
+only the generated-C/Make adapter is registered today.
