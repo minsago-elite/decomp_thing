@@ -1,0 +1,20 @@
+# Activity interaction qualification
+
+Tracking: [#175](https://github.com/minsago-elite/decomp_thing/issues/175). This is an evidence assessment of the implemented observation view, not a replacement roadmap or a claim that D4 is complete. GitHub retains the authoritative issue status.
+
+| Acceptance criterion | Assessment | Evidence and limit |
+| --- | --- | --- |
+| Waiting/running/blocked/validating/accepted/rollback/failure stage distinctions | Incomplete | Activity labels observed phases/status and the captured attempt snapshot. It does not implement the complete stage view or qualify complete/failed/rollback producer scenarios. |
+| Identity deduplication and ordering across replay/reconnect | Verified in the current stack | Activity checks job/run binding, identical replay, contiguous sequences and display-page boundaries. Stream tests cover catch-up replay, leased reconnect, conflicting replay, bounded continuation and gaps. Connection tests preserve the cursor across hidden/offline recovery. The additional wire-order regression proves that schema projection normalizes object fields before duplicate comparison. |
+| Task/session/attempt/revision evidence links and missing correlation | Partial | Exact attempt links and explicit missing references are implemented. Task/session/revision digests are displayed, but their evidence pages are explicitly unavailable. |
+| Provider-supported public messages; no private reasoning requirement | Partial | Private/uncertified prose is withheld, including thought/system roles. This protects privacy but does not implement the intended certified public-message surface. |
+| Pause without losing position; new activity preserves keyboard focus | Verified in the current stack | Poll/stream tests check pause/resume cursors and focus, including continuation after the 200-row boundary. The retained packaged browser checks native keyboard activation, preserved focus, no paused polling, duplicate-free resume and navigation cancellation. |
+| Authoritative progress denominators or meaningful stage/count descriptions | Partial qualification | Current rows label observed phases and exact counts without inventing workflow completion percentages. Full stage/progress scenarios still need qualification alongside the missing stage view; this audit does not mark that broader criterion complete. |
+
+The relevant implementation is [Activity](../frontend/src/jobs/Activity.tsx), with [schema projection](../frontend/src/api/validate.ts) on both decoded polling and SSE inputs. Object fields are collected in schema order, while array order and values are preserved. An initial concern that reordered object members might be treated as a conflict was disproved by this decoder behavior. No runtime comparison change was needed or retained.
+
+The new regression sends a semantically identical event with different envelope/nested field order through the stream decoder, verifies one displayed copy, accepts the next contiguous event and resumes from its cursor. Existing tests separately reject conflicting content and discontinuous sequences. This tests normalized wire input rather than assuming raw JSON property order is stable.
+
+The [production-retention browser report](evidence/web-production-retention-20260908/browser.json) is applicable because this checkpoint changes no application or browser-driver implementation. Its activity assertions include pause/resume, keyboard/focus, 200/5 paging, stream append, explicit gap recovery, hidden/offline suspension and bounded polite status announcements. These are browser/accessibility-tree checks, not manual assistive-technology qualification or proof of every producer's stage semantics.
+
+All 343 frontend tests, lint and generated/type checks pass in the audit run. The retained audit evidence records the test selection and prior browser report hash. JVM, distribution and browser runs were not repeated for this test/documentation-only checkpoint. The issue remains open for its other criteria and full verification scope; verified behavior in a stacked PR does not claim the stack has merged into master.
