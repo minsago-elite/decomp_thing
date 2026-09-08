@@ -35,7 +35,7 @@ function Details({ jobId, runId, basePath, session }: { jobId: string; runId: st
     {loading && <p role="status">Loading attempt…</p>}
     {error && <p role="alert">{error}</p>}
     <button type="button" disabled={loading} onClick={() => setRefresh(value => value + 1)}>Refresh attempt</button>
-    <CancellationControls key={`cancel/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} onCurrent={current => {
+    <CancellationControls key={`cancel/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} detailRefresh={refresh} onCurrent={current => {
       detailRead.current?.abort(); setRun(current); setError(''); setLoading(false);
     }} />
     {run && <>

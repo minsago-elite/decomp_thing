@@ -1,0 +1,21 @@
+{
+  "sourceCommit": "2b7d72b0",
+  "verification": {
+    "initialFullSuite": "389 passed before test URL helper lint cleanup",
+    "finalFullSuite": {
+      "tests": 389,
+      "passed": 388,
+      "failed": 1
+    },
+    "failure": "Existing upload SESSION_EXPIRED test observed two progress GETs instead of one. Isolated upload suite passed; queued poll after abort is being investigated separately.",
+    "cancellationIntegrationTests": 5,
+    "lint": "passed",
+    "typecheck": "passed",
+    "frontendProductionBuild": "passed"
+  },
+  "limits": [
+    "Injected HTTP responses through real client/session/decoder/view, not a packaged browser or real server restart.",
+    "No JVM rerun. Full-suite intermittent upload failure remains open at this checkpoint."
+  ],
+  "commitContextCorrection": "Implementation commit recorded prior 389-test pass; the final rerun instead had 388 passes and the retained upload failure."
+}
