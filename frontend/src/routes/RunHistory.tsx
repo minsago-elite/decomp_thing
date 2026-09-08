@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { usePrivateTransport } from '../session/PrivateTransport';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso/router';
-import { ApiClientError, createApiClient } from '../api/client';
+import { ApiClientError } from '../api/client';
 import type { Runs } from '../api/generated';
 import { jobPath, runPath } from '../app/paths';
 import type { BrowserSession } from '../session/session';
@@ -11,7 +12,7 @@ function History({ jobId, basePath }: { jobId: string; basePath: string }) {
   const cursor = location.query.cursor;
   const validQuery = Object.keys(location.query).every(key => key === 'cursor') &&
     (cursor === undefined || /^[A-Za-z0-9_-]{1,128}$/.test(cursor));
-  const client = useMemo(() => createApiClient({ basePath }), [basePath]);
+  const { client } = usePrivateTransport(basePath);
   const [data, setData] = useState<Runs | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');

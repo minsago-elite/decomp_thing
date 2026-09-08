@@ -109,11 +109,14 @@ forced-interruption/resume fidelity still required by #137.
 The Kotlin CI lane runs `scripts/ci-prepare-bundled-ghidra-runtime.sh` before JVM
 checks. It builds `installDist` and makes a bounded descriptor-relative copy of
 `build/install/llm_bin_patch/libexec/ghidra` into the unoccupied executable path
-`/opt/decomp-ci-ghidra-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/bundle`. This uses the
+`/var/lib/decomp-ci-ghidra-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/bundle`. This uses the
 application build's already bundled dependency, not an external Ghidra installer
 or runtime download. It exports `DECOMP_TEST_BUNDLED_GHIDRA_ROOT` and sets
 `DECOMP_REQUIRE_BUNDLED_GHIDRA_RUNTIME=true`, so the hosted qualification cannot
-silently skip a missing required runtime.
+silently skip a missing required runtime. Setup and cleanup open `/`, `var` and
+`lib` without following links and require every ancestor to be root-owned and
+non-writable by group/others. This avoids relying on the hosted runner’s `/opt`
+ownership or changing its permissions.
 
 The always-run `scripts/ci-release-bundled-ghidra-runtime.sh` independently derives
 that exact run/attempt path and verifies a root-owned marker bound to its device
@@ -122,8 +125,22 @@ types and modes and rejects mounts under the target. Legitimate interrupted-copy
 0600/0700 residue is supported; an unexpected, replaced or unmarked target is
 refused rather than inferred to be disposable.
 
+`python3 scripts/test-ci-bundled-runtime.py` checks the actual embedded Python
+copy/release bodies with inert files inside a disposable bubblewrap user namespace.
+It covers writable `/opt`, trusted-ancestor rejection, linked-parent rejection,
+marker mismatch, interrupted-copy cleanup and exact target binding. Run the driver
+as an ordinary Linux user; it changes no host runtime directories and executes no
+Ghidra application. The Kotlin CI job runs it before provisioning. This check does
+not qualify the full application bundle, host sudo setup or native analysis.
+
 Privilege use is confined to these explicit CI provisioning/cleanup scripts.
 The production application does not run sudo, provision copies, create mounts,
 change quotas or make the mandatory noexec output lease executable. Passing
 structural tests or a non-authoritative packaged Ghidra probe is not evidence
 that the required hosted BOOT lifecycle or later contained analysis has passed.
+
+The provisioner walks `/`, `/var`, and `/var/lib` through no-follow directory
+descriptors and requires root ownership with no group/other writes at each step.
+This matches the CI oracle JDK location: hosted `/opt` failed the same trust
+check in run 33955958408 before Kotlin tests began. Preparation and release
+use the same run/attempt-specific path and retain the inode-bound marker checks.

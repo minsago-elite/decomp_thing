@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.web.WebProgressPinControllerTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-09-08T06:37:22.590Z" hostname="whatsername" time="2.372">
+  <properties/>
+  <testcase name="production server exposes pin policy under its prefix and persists browser attribution()" classname="decompengine.web.WebProgressPinControllerTest" time="0.098"/>
+  <testcase name="authorization and strict request validation precede any pin publication()" classname="decompengine.web.WebProgressPinControllerTest" time="0.757"/>
+  <testcase name="authenticated pin and replay expose original result while GET exposes current policy()" classname="decompengine.web.WebProgressPinControllerTest" time="0.36"/>
+  <testcase name="receipt capacity is explicit and failed publication cannot claim success()" classname="decompengine.web.WebProgressPinControllerTest" time="1.157"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

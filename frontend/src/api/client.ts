@@ -1,3 +1,4 @@
+import { boundedBody } from './body';
 import { apiPath, normalizeBasePath } from '../app/paths';
 import { decodeContract, encodeRequest } from './decode';
 import { ApiClientError } from './errors';
@@ -14,44 +15,12 @@ export interface MutationOptions extends RequestOptions {
 }
 interface ClientOptions {
   basePath: string;
+  observeFailure?: () => (error: ApiClientError) => void;
   fetch?: typeof globalThis.fetch;
   timeoutMs?: number;
   maxResponseBytes?: number;
 }
 const requestIdPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
-
-async function boundedBody(response: Response, maxBytes: number, signal: AbortSignal): Promise<string> {
-  const declared = response.headers.get('Content-Length');
-  if (declared !== null && (!/^(0|[1-9][0-9]*)$/.test(declared) || BigInt(declared) > BigInt(maxBytes))) {
-    void response.body?.cancel().catch(() => undefined);
-    throw new ApiClientError('response_too_large');
-  }
-  if (!response.body) return '';
-  const reader = response.body.getReader();
-  const cancel = () => { void reader.cancel().catch(() => undefined); };
-  signal.addEventListener('abort', cancel, { once: true });
-  if (signal.aborted) cancel();
-  const decoder = new TextDecoder('utf-8', { fatal: true });
-  let bytes = 0;
-  const parts: string[] = [];
-  try {
-    while (true) {
-      const next = await reader.read();
-      if (next.done) break;
-      bytes += next.value.byteLength;
-      if (bytes > maxBytes) throw new ApiClientError('response_too_large');
-      try { parts.push(decoder.decode(next.value, { stream: true })); } catch { throw new ApiClientError('invalid_json'); }
-    }
-    try { parts.push(decoder.decode()); } catch { throw new ApiClientError('invalid_json'); }
-    return parts.join('');
-  } catch (error) {
-    cancel();
-    throw error;
-  } finally {
-    signal.removeEventListener('abort', cancel);
-    reader.releaseLock();
-  }
-}
 
 /** Same-origin v1 transport. Each call performs exactly one fetch, including mutations. */
 export function createApiClient(options: ClientOptions) {
@@ -62,7 +31,7 @@ export function createApiClient(options: ClientOptions) {
     || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_JSON_BYTES) throw new ApiClientError('invalid_request');
   const fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
 
-  async function request<K extends ResponseKind>(kind: K | null, path: string, method: 'GET' | 'POST' | 'DELETE', body: string | FormData | undefined, settings: MutationOptions, session = false, upload = false): Promise<ResponseOf<K> | undefined> {
+  async function request<K extends ResponseKind>(kind: K | null, path: string, method: 'GET' | 'POST' | 'PUT' | 'DELETE', body: string | FormData | undefined, settings: MutationOptions, session = false, upload = false): Promise<ResponseOf<K> | undefined> {
     let url: string;
     try { url = apiPath(basePath, path); } catch { throw new ApiClientError('invalid_request'); }
     if (session && path !== '/session') throw new ApiClientError('invalid_request');
@@ -86,6 +55,7 @@ export function createApiClient(options: ClientOptions) {
       if (!/^[a-f0-9]{32}$/.test(settings.uploadId)) throw new ApiClientError('invalid_request');
       headers.set('X-Upload-ID', settings.uploadId);
     }
+    const observeFailure = options.observeFailure?.();
     const controller = new AbortController();
     let timedOut = false;
     const abort = () => { controller.abort(); };
@@ -126,11 +96,13 @@ export function createApiClient(options: ClientOptions) {
       controller.abort();
       if (response?.body && !response.body.locked) void response.body.cancel().catch(() => undefined);
       const source = error instanceof ApiClientError ? error : new ApiClientError('network_error');
-      throw new ApiClientError(source.code, {
+      const failure = new ApiClientError(source.code, {
         ...(response === undefined ? {} : { status: response.status }),
         ...(requestId === undefined ? {} : { requestId }),
         ...(source.serverCode === undefined ? {} : { serverCode: source.serverCode }),
       });
+      observeFailure?.(failure);
+      throw failure;
     } finally {
       clearTimeout(timer);
       settings.signal?.removeEventListener('abort', abort);
@@ -144,6 +116,9 @@ export function createApiClient(options: ClientOptions) {
     async post<K extends ResponseKind, Q extends RequestKind>(kind: K, path: string, requestKind: Q, data: RequestData<Q>, settings: MutationOptions = {}): Promise<ResponseOf<K>> {
       const session = requestKind === 'sessionStartRequest';
       return await request(kind, path, 'POST', encodeRequest(requestKind, data), settings, session) as ResponseOf<K>;
+    },
+    async put<K extends ResponseKind, Q extends RequestKind>(kind: K, path: string, requestKind: Q, data: RequestData<Q>, settings: MutationOptions = {}): Promise<ResponseOf<K>> {
+      return await request(kind, path, 'PUT', encodeRequest(requestKind, data), settings) as ResponseOf<K>;
     },
     async upload(file: File, settings: MutationOptions): Promise<ResponseOf<'job'>> {
       const body = new FormData();

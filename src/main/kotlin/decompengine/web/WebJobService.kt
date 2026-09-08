@@ -46,6 +46,7 @@ class WebJobService(
     private val shutdownTimeoutMs: Long = 1000,
     maximumRetainedStorageBytes: Long = WebUploadStorage.DEFAULT_MAXIMUM_BYTES,
     private val failureDiagnostic: (Exception) -> String = { "Workflow failed; inspect its available diagnostics before retrying" },
+    progressRetentionIntervalMs: Long? = null,
 ) : AutoCloseable {
     private data class Registration(val adapter: DurableWebWorkflowAdapter, val limits: decompengine.jobs.WorkflowExecutionLimits)
     private val registrations = durableAdapters.associate { it.workflow to Registration(it, it.limits) }.also {
@@ -71,6 +72,64 @@ class WebJobService(
     private var initialized = false
     private var stopping = false
     private var closed = false
+    private val retentionJobs = java.util.ArrayDeque<String>()
+    private val retentionRuns = java.util.ArrayDeque<Pair<String, String>>()
+    private var retentionCycleActive = false
+    private var retentionStatus = WebProgressRetentionStatus(progressRetentionIntervalMs != null, 0, 0, 0, null)
+    private val retentionWorker = progressRetentionIntervalMs?.let { interval ->
+        WebProgressRetentionWorker(interval, ::runProgressRetentionBatch) {
+            synchronized(this) { releaseIfQuiescent() }
+        }
+    }
+
+    @Synchronized internal fun progressRetentionStatus(): WebProgressRetentionStatus = retentionStatus
+
+    /** At most 32 discovery/attempt units per tick. Release the service monitor between each unit. */
+    private fun runProgressRetentionBatch() {
+        repeat(32) {
+            val continueBatch = synchronized(this) {
+                if (!initialized || closed || stopping || attempts == null || publicationFailures.isNotEmpty() || uploads.isNotEmpty())
+                    return@synchronized false
+                try {
+                    if (retentionRuns.isNotEmpty()) {
+                        val (jobId, runId) = retentionRuns.removeFirst()
+                        val result = expireProgressJournal(jobId, runId, protectedFromRetention = false)
+                        retentionStatus = retentionStatus.copy(examined = incrementRetentionCount(retentionStatus.examined),
+                            expired = if (result == decompengine.jobs.ProgressRetentionResult.EXPIRED) incrementRetentionCount(retentionStatus.expired) else retentionStatus.expired)
+                        true
+                    } else {
+                        if (retentionJobs.isEmpty()) {
+                            if (retentionCycleActive) { retentionCycleActive = false; return@synchronized false }
+                            retentionJobs.addAll(store.jobIds())
+                            retentionCycleActive = true
+                            if (retentionJobs.isEmpty()) { retentionCycleActive = false; return@synchronized false }
+                        }
+                        val jobId = retentionJobs.removeFirst()
+                        val inspection = inspectStoredJob(attempts!!, jobId)
+                        if (inspection is WorkflowJobInspection.Available) {
+                            // One bounded attempt inventory at a time; each decision is revalidated on execution.
+                            retentionRuns.addAll(inspection.snapshot.attempts.map { jobId to it.runId })
+                        } else recordRetentionFailure("JOB_RECORD_UNAVAILABLE")
+                        true
+                    }
+                } catch (failure: Exception) {
+                    val code = when (failure) {
+                        is WebJobServiceException -> failure.code
+                        is WorkflowStoreException -> failure.code
+                        else -> "RETENTION_UNAVAILABLE"
+                    }
+                    recordRetentionFailure(code)
+                    retentionCycleActive // A failed root inventory must wait for the next tick.
+                }
+            }
+            if (!continueBatch || Thread.currentThread().isInterrupted) return
+        }
+    }
+    private fun incrementRetentionCount(value: Long) = if (value == Long.MAX_VALUE) value else value + 1
+    private fun recordRetentionFailure(code: String) {
+        retentionStatus = retentionStatus.copy(failures = incrementRetentionCount(retentionStatus.failures),
+            lastFailureCode = code.takeIf { it.matches(Regex("[A-Z][A-Z0-9_]{0,63}")) } ?: "RETENTION_UNAVAILABLE")
+    }
 
     /** Aggregate executor telemetry only; independent readings are approximate, never admission authority. */
     @Synchronized
@@ -82,10 +141,10 @@ class WebJobService(
             pool.queue.size, configuredQueueCapacity)
     }
 
-    @Synchronized fun beginShutdown() { stopping = true }
+    @Synchronized fun beginShutdown() { stopping = true; retentionWorker?.stop() }
 
     /** True when the service is closed and no workflows or uploads remain; ownership-handoff evidence. */
-    internal fun isIdle(): Boolean = synchronized(this) { closed && active.isEmpty() && uploads.isEmpty() }
+    internal fun isIdle(): Boolean = synchronized(this) { closed && active.isEmpty() && uploads.isEmpty() && retentionWorker?.isIdle != false }
 
     /** Invoked whenever quiescence is (re)established after close; used to release outer ownership. */
     internal var onQuiescent: (() -> Unit)? = null
@@ -96,6 +155,7 @@ class WebJobService(
         if (initialized) return
         if (Files.exists(store.storageRoot, NOFOLLOW_LINKS)) acquireAndRecover()
         initialized = true
+        if (!stopping) retentionWorker?.start()
     }
 
     private fun acquireAndRecover(): WorkflowAttemptStore {
@@ -254,6 +314,82 @@ class WebJobService(
         }
     }
 
+    /** Hold durable run state stable across the checked atomic journal read, not HTTP delivery. */
+    @Synchronized
+    internal fun readProgressSnapshot(jobId: String, runId: String): Pair<WorkflowAttempt, ByteArray> {
+        getAttempt(jobId, runId) // Enforce initialization and publication-failure admission first.
+        val owner = attempts ?: throw WebJobServiceException("JOB_NOT_FOUND", "The requested job is unavailable.")
+        return try {
+            owner.withAttemptSnapshot(jobId, runId) { attempt ->
+                attempt to readProgressJournal(jobId, attempt.runId)
+            }
+        } catch (failure: WorkflowStoreException) {
+            throw WebJobServiceException(failure.code, "The requested progress snapshot is unavailable.")
+        }
+    }
+
+    /** Explicit maintenance, serialized with bounded artifact capture and service shutdown.
+     * Durable progress pins are enforced by the store; callers keep any additional protection
+     * decision (such as read leases or broader job policy) stable through this call.
+     * No request handler or automatic scheduler invokes this until that policy is integrated.
+     */
+    @Synchronized
+    internal fun expireProgressJournal(jobId: String, runId: String, protectedFromRetention: Boolean,
+        retention: java.time.Duration = decompengine.jobs.AgentProgressJournalRetention.DEFAULT_TERMINAL_RETENTION,
+    ): decompengine.jobs.ProgressRetentionResult {
+        requireInitializedRead()
+        if (stopping) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
+        requirePublicationAvailable()
+        getAttempt(jobId, runId)
+        // Terminal metadata can precede worker exit; keep all artifacts until work really releases.
+        if (protectedFromRetention || active.containsKey(jobId) || uploads.isNotEmpty())
+            return decompengine.jobs.ProgressRetentionResult.RETAINED
+        val owner = attempts ?: throw WebJobServiceException("JOB_NOT_FOUND", "The requested job is unavailable.")
+        return try { owner.expireProgressJournal(jobId, runId, protectedFromRetention = false, retention = retention) }
+        catch (failure: WorkflowStoreException) {
+            throw WebJobServiceException(failure.code,
+                "Progress retention did not finish. Preserve its journal and pending retention file, then retry maintenance with storage ownership.", failure)
+        }
+    }
+
+    /** Internal command boundary. Coordinate policy publication with the owned task's version. */
+    @Synchronized
+    internal fun setProgressRetentionPinned(jobId: String, runId: String, expectedRunVersion: String,
+        pinned: Boolean, actor: decompengine.jobs.WorkflowPinActor = decompengine.jobs.WorkflowPinActor.INTERNAL): WorkflowAttempt =
+        coordinatePinPublication(jobId, runId, { owner -> owner.setProgressRetentionPinned(jobId, runId, expectedRunVersion, pinned, actor).attempt }, { it })
+
+    @Synchronized
+    internal fun requestProgressRetentionPinned(jobId: String, runId: String, expectedRunVersion: String,
+        pinned: Boolean, actor: decompengine.jobs.WorkflowPinActor, requestKey: String): decompengine.jobs.WorkflowPinRequestResult =
+        coordinatePinPublication(jobId, runId, { owner -> owner.requestProgressRetentionPinned(jobId, runId, expectedRunVersion, pinned, actor, requestKey) }, { it.attempt })
+
+    /** Called only under the service monitor. A replay's original response version must never
+     * replace the current version used by a queued/running task's next lifecycle transition.
+     */
+    private fun <T> coordinatePinPublication(jobId: String, runId: String, command: (WorkflowAttemptStore) -> T,
+        currentAttempt: (T) -> WorkflowAttempt): T {
+        requireInitializedRead()
+        if (stopping) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
+        requirePublicationAvailable()
+        getAttempt(jobId, runId)
+        val owner = attempts ?: throw WebJobServiceException("JOB_NOT_FOUND", "The requested job is unavailable.")
+        val task = (active[jobId] as? DurableTask)?.takeIf { it.attempt.runId == runId }
+        return try {
+            command(owner).also { result -> task?.attempt = currentAttempt(result) }
+        } catch (failure: Throwable) {
+            if (failure is WorkflowStoreException && !failure.outcomeUnknown) {
+                throw WebJobServiceException(failure.code, "The progress retention pin request was not applied. Refresh the attempt before retrying.", failure)
+            }
+            val diagnostic = WebJobDiagnostic(jobId, "RECOVERY_REQUIRED",
+                "Retention pin publication is uncertain. Reopen storage before making further changes.")
+            publicationFailures[jobId] = diagnostic
+            val unavailable = WebJobServiceException(diagnostic.code, diagnostic.message, failure)
+            task?.failPublication(unavailable)
+            if (failure !is Exception) throw failure
+            throw unavailable
+        }
+    }
+
     @Synchronized
     fun resolveArtifact(jobId: String, relativePath: String): Path {
         requireInitializedRead()
@@ -376,6 +512,7 @@ class WebJobService(
             if (closed) return
             stopping = true
             closed = true
+            retentionWorker?.stop()
             ownedExecutor?.shutdownNow()
             active.values.filter { !it.started }.toList().forEach { task ->
                 try { task.stopPending() } catch (failure: Throwable) {
@@ -395,10 +532,11 @@ class WebJobService(
             val remaining = deadline - System.nanoTime()
             if (remaining > 0 && worker !== Thread.currentThread()) finished.await(remaining, TimeUnit.NANOSECONDS)
         }
+        retentionWorker?.awaitStopped(deadline - System.nanoTime())
         synchronized(this) {
             releaseIfQuiescent()
-            if (active.isNotEmpty() || uploads.isNotEmpty()) {
-                val failure = WebJobServiceException("SHUTDOWN_INCOMPLETE", "A workflow has not stopped; storage ownership is retained until it exits.")
+            if (active.isNotEmpty() || uploads.isNotEmpty() || retentionWorker?.isIdle == false) {
+                val failure = WebJobServiceException("SHUTDOWN_INCOMPLETE", "Owned work has not stopped; storage ownership is retained until it exits.")
                 if (problem == null) problem = failure else problem.addSuppressed(failure)
             }
         }
@@ -406,7 +544,7 @@ class WebJobService(
     }
 
     private fun releaseIfQuiescent() {
-        if (closed && active.isEmpty() && uploads.isEmpty()) {
+        if (closed && active.isEmpty() && uploads.isEmpty() && retentionWorker?.isIdle != false) {
             val restoreInterrupt = Thread.interrupted()
             try { attempts?.close(); attempts = null }
             finally { if (restoreInterrupt) Thread.currentThread().interrupt() }
@@ -465,17 +603,21 @@ class WebJobService(
 
     private inner class DurableTask(val job: Job, var attempt: WorkflowAttempt, val adapter: DurableWebWorkflowAdapter) : OwnedTask(job.id) {
         private var publicationFailure: WebJobServiceException? = null
+        fun failPublication(failure: WebJobServiceException) {
+            publicationFailure = failure
+            if (!started) { terminal = true; release() }
+        }
         override fun run() {
             try {
-                val reports = synchronized(this@WebJobService) {
+                val context = synchronized(this@WebJobService) {
                     if (terminal || active[jobId] !== this) return
                     if (closed || stopping) { stopPending(); return }
                     started = true
                     worker = Thread.currentThread()
                     attempt = checkNotNull(attempts).transition(jobId, attempt.runId, attempt.version, WorkflowTransition.Start).attempt
-                    store.runReportsDirectory(jobId, attempt.runId, create = true)
+                    DurableWebWorkflowContext(job, attempt, store.runReportsDirectory(jobId, attempt.runId, create = true))
                 }
-                val outcome = adapter.execute(DurableWebWorkflowContext(job, attempt, reports))
+                val outcome = adapter.execute(context)
                 synchronized(this@WebJobService) {
                     if (closed || stopping || Thread.currentThread().isInterrupted) finish(interrupted())
                     else finish(when (outcome) {

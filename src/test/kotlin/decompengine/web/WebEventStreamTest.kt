@@ -3,8 +3,11 @@ package decompengine.web
 import com.sun.net.httpserver.HttpServer
 import kotlinx.serialization.json.*
 import java.io.BufferedReader
+import java.io.EOFException
+import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.URI
+import java.net.Socket
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
@@ -13,10 +16,11 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.*
 
 class WebEventStreamTest {
-    private class Fixture(lifetimeMs: Long = 5000) : AutoCloseable {
+    private class Fixture(lifetimeMs: Long = 5000, source: (() -> ByteArray)? = null) : AutoCloseable {
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         val origin = "http://127.0.0.1:${server.address.port}"
         val access = LocalWebAccess(LocalWebAccessConfiguration(origin))
@@ -24,7 +28,7 @@ class WebEventStreamTest {
         val pages = WebProgressPages()
         val bytes = AtomicReference(journal(listOf(0, 1)))
         val httpWorker = Executors.newSingleThreadExecutor()
-        val stream = WebEventStream(access, resources, pages, { _, _ -> bytes.get() }, pollMs = 20, heartbeatMs = 40)
+        val stream = WebEventStream(access, resources, pages, { _, _ -> source?.invoke() ?: bytes.get() }, pollMs = 20, heartbeatMs = 40)
         val sessions = WebSessionController(access)
         val client = HttpClient.newHttpClient()
         val cookie: String
@@ -62,7 +66,8 @@ class WebEventStreamTest {
             return client.send(builder.build(), HttpResponse.BodyHandlers.ofInputStream()).also(::assertNoWebCors)
         }
         override fun close() {
-            resources.shutdown(); server.stop(0); resources.shutdown(); access.close(); httpWorker.shutdownNow()
+            resources.shutdown(); server.stop(0); assertTrue(resources.shutdown()); access.close(); httpWorker.shutdownNow()
+            assertTrue(httpWorker.awaitTermination(3, TimeUnit.SECONDS)); client.close()
         }
     }
     private fun frame(reader: BufferedReader): Map<String, String> = CompletableFuture.supplyAsync {
@@ -76,8 +81,14 @@ class WebEventStreamTest {
         result
     }.get(3, TimeUnit.SECONDS)
     private fun eof(reader: BufferedReader) = CompletableFuture.supplyAsync {
-        while (reader.readLine() != null) { }
-        true
+        try {
+            while (reader.readLine() != null) { }
+            true
+        } catch (failure: IOException) {
+            // Lease/logout cancellation can end inside HTTP chunk framing, after valid SSE records.
+            if (generateSequence<Throwable>(failure) { it.cause }.none { it is EOFException }) throw failure
+            true
+        }
     }.get(3, TimeUnit.SECONDS)
 
     @Test fun `real SSE framing shares polling cursors and Last Event ID resumes after an acknowledged event`() = Fixture().use { f ->
@@ -147,7 +158,12 @@ class WebEventStreamTest {
             assertTrue(eof(reader))
             val reconnect = f.open(headers = mapOf("Last-Event-ID" to first.getValue("id")))
             assertEquals(410, reconnect.statusCode())
-            assertTrue(reconnect.body().use { it.readBytes().decodeToString() }.contains("PROGRESS_GAP"))
+            val error = Json.parseToJsonElement(reconnect.body().use { it.readBytes().decodeToString() }).jsonObject.getValue("error").jsonObject
+            assertEquals("EVENT_GAP", error.getValue("code").jsonPrimitive.content)
+            assertEquals("application/json; charset=utf-8", reconnect.headers().firstValue("Content-Type").orElseThrow())
+            val recovery = error.getValue("recovery").jsonObject
+            val control = body.getValue("payload").jsonObject
+            for (key in listOf("requestedCursor", "oldestCursor", "latestCursor", "snapshotHref")) assertEquals(control[key], recovery[key])
         }
     }
 
@@ -172,6 +188,58 @@ class WebEventStreamTest {
         val frame = webSseFrame(event("cursor_fixture")).decodeToString()
         assertEquals(1, frame.lineSequence().count { it.startsWith("data:") })
         assertFailsWith<IllegalArgumentException> { webSseFrame(event("bad\nid: other")) }
+    }
+
+    @Test fun `a non-reading socket parks only its stream writer and lease releases capacity`() {
+        val writer = AtomicReference<Thread>()
+        val reads = AtomicInteger()
+        val labels = listOf("taskId", "workflowRunId", "revisionId", "phase", "status", "stopReason",
+            "failureKind", "role", "decision", "change", "wallClock", "reportedCostAmount", "reportedCostCurrency")
+        val source = {
+            writer.set(Thread.currentThread())
+            // At most 64 expanding source windows, then a fixed tail: total offered data is bounded.
+            val step = reads.getAndIncrement().coerceAtMost(63)
+            val first = maxOf(0, step * 50 - 1)
+            val last = (step + 2) * 50 - 1
+            val base = Json.parseToJsonElement(journal((first..last).toList()).decodeToString()).jsonObject
+            JsonObject(base + ("events" to JsonArray(base.getValue("events").jsonArray.map { event ->
+                JsonObject(event.jsonObject + labels.associateWith { JsonPrimitive("x".repeat(533)) })
+            }))).toString().toByteArray().also { assertTrue(it.size <= 2 * 1024 * 1024) }
+        }
+        Fixture(lifetimeMs = 6000, source = source).use { f ->
+            Socket().use { peer ->
+                peer.receiveBufferSize = 1024
+                peer.connect(InetSocketAddress("127.0.0.1", f.server.address.port), 2000)
+                peer.getOutputStream().write(("GET /events HTTP/1.1\r\nHost: 127.0.0.1:${f.server.address.port}\r\n" +
+                    "Cookie: ${f.cookie}\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n").toByteArray())
+                peer.getOutputStream().flush()
+                // Deliberately never read from this owned loopback peer. Observe an actual parked socket write.
+                val blockedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4)
+                var parkedWrite = false
+                while (System.nanoTime() < blockedDeadline) {
+                    val thread = writer.get()
+                    if (thread != null && thread.state in setOf(Thread.State.WAITING, Thread.State.TIMED_WAITING) &&
+                        thread.stackTrace.any { it.className == "sun.nio.ch.SocketChannelImpl" && it.methodName.contains("write", ignoreCase = true) }) {
+                        parkedWrite = true; break
+                    }
+                    Thread.sleep(10)
+                }
+                assertTrue(parkedWrite, "Expected a parked socket writer within the bounded fixture lease; reads=${reads.get()}, state=${writer.get()?.state}")
+                assertEquals(1, f.resources.snapshot().active)
+                val health = f.client.send(HttpRequest.newBuilder(URI("${f.origin}/health")).timeout(Duration.ofSeconds(2)).build(), HttpResponse.BodyHandlers.ofString())
+                assertEquals(204, health.statusCode()) // The fixture has only one ordinary HTTP worker.
+                val poll = f.client.send(HttpRequest.newBuilder(URI("${f.origin}/poll")).timeout(Duration.ofSeconds(2))
+                    .header("Cookie", f.cookie).build(), HttpResponse.BodyHandlers.ofString())
+                assertEquals(200, poll.statusCode()); assertNoWebCors(poll)
+                assertEquals(1, f.resources.snapshot().active, "Ordinary reads must finish while the slow stream is still charged")
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8)
+                while (f.resources.snapshot().active != 0 && System.nanoTime() < deadline) Thread.sleep(10)
+                assertEquals(0, f.resources.snapshot().active, "Lease must release the connection while its peer is still open and unread")
+                assertEquals(0, f.resources.snapshot().cleanupFailures)
+                assertTrue(f.resources.shutdown())
+                println("Slow-socket qualification: one unread loopback peer, observed parked SocketChannel write, health and authenticated polling remained available, lease released capacity with zero cleanup failures; source reads=${reads.get()}.")
+            }
+        }
     }
 
     companion object {

@@ -13,6 +13,16 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
     try { validateResourceHref(basePath, href, resource); } catch { throw new ApiClientError('invalid_response'); }
   }
   switch (document.kind) {
+    case 'error': {
+      const { code, recovery, retryable, retryAfterMs } = document.error;
+      requireValue((code === 'EVENT_GAP') === (recovery !== undefined));
+      if (recovery) {
+        requireValue(!retryable && retryAfterMs === null);
+        requireValue(recovery.oldestCursor === null || recovery.latestCursor !== null);
+        checkHref(recovery.snapshotHref, { kind: 'snapshot', jobId: recovery.jobId, runId: recovery.runId });
+      }
+      break;
+    }
     case 'uploadProgress': {
       const progress = document.data;
       requireValue(BigInt(progress.receivedBytes) <= 33554433n);
@@ -32,6 +42,9 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       break;
     }
     case 'bootstrap': {
+      const retention = document.data.runtime.progressRetention;
+      if (retention && (BigInt(retention.expired) > BigInt(retention.examined)
+        || ((BigInt(retention.failures) === 0n) !== (retention.lastFailureCode === null)))) throw new ApiClientError('invalid_response');
       const scheduler = document.data.runtime.scheduler;
       if (scheduler?.state === 'available') {
         requireValue(BigInt(scheduler.activeWorkers) <= BigInt(scheduler.workerLimit));
@@ -81,7 +94,7 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
         const next = BigInt(nextSequence), count = BigInt(retainedEventCount);
         requireValue(count <= 1024n && count + BigInt(queueDropped) + BigInt(historyDropped) <= next);
         requireValue((count === 0n) === (document.data.oldestCursor === null));
-        requireValue((count === 0n) === (document.data.throughSequence === null));
+        requireValue((next === 0n) === (document.data.throughSequence === null));
         if (document.data.throughSequence !== null) requireValue(BigInt(document.data.throughSequence) + 1n === next);
       }
       break;

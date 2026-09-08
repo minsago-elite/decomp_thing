@@ -102,6 +102,9 @@ private class GccCompilerEnginePlanningDiagnosticImpl(
             if (model.inputSha256 != artifact.sha256) {
                 throw GccCompilerEnginePlanningException("GCC $engineId program model does not bind the authenticated input")
             }
+            if (model.schemaVersion != 2) {
+                throw GccCompilerEnginePlanningException("exporter version 10 requires program model schema 2")
+            }
             requireWithinBudgets(started, suite, monitor, "export")
 
             val profile = suite.reconstructionProfile()

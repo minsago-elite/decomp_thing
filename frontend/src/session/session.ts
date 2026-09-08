@@ -35,10 +35,16 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
   let controller: AbortController | null = null;
   let expiry: ReturnType<typeof setTimeout> | null = null;
   const listeners = new Set<(state: SessionState) => void>();
+  const invalidatedListeners = new Set<(remote: boolean) => void>();
+
+  function notifyInvalidated(remote: boolean) {
+    for (const listener of invalidatedListeners) listener(remote);
+  }
 
   const invalidation = createInvalidationChannel(expectedBase, () => {
     if (disposed || !initialized || !['authenticated', 'checking', 'signing-out'].includes(state.status)) return;
     invalidatePending(); forget();
+    notifyInvalidated(true);
     publish({ status: 'required', reason: 'session-changed' });
   });
 
@@ -171,9 +177,26 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
   }
   return {
     snapshot: () => state,
+    /** Bind denial handling to the session generation that issued the request. */
+    observeRequestFailure() {
+      const issuedGeneration = generation;
+      const issuedAuthenticated = state.status === 'authenticated';
+      return (error: ApiClientError) => {
+        if (disposed || !issuedAuthenticated || generation !== issuedGeneration || state.status !== 'authenticated'
+          || error.code !== 'http_error' || error.status !== 401
+          || !['SESSION_REQUIRED', 'SESSION_EXPIRED'].includes(error.serverCode ?? '')) return;
+        invalidatePending();
+        forget();
+        publish({ status: 'required', reason: error.serverCode === 'SESSION_EXPIRED' ? 'expired' : 'missing' });
+      };
+    },
     subscribe(listener: (state: SessionState) => void) {
       listeners.add(listener);
       return () => { listeners.delete(listener); };
+    },
+    onInvalidated(listener: (remote: boolean) => void) {
+      invalidatedListeners.add(listener);
+      return () => { invalidatedListeners.delete(listener); };
     },
     initialize(fragment: BootstrapFragment): Promise<void> {
       if (initialized) return pending ?? Promise.resolve();
@@ -192,6 +215,7 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
         await gateway.logout(token, signal);
         if (!signal.aborted) {
           publish({ status: 'required', reason: 'signed-out' });
+          notifyInvalidated(false);
           invalidation.notify();
         }
       }, 'logout');
@@ -202,6 +226,7 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
       forget();
       invalidatePending();
       listeners.clear();
+      invalidatedListeners.clear();
     },
   };
 }

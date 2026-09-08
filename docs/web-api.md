@@ -103,6 +103,8 @@ internal storage optimization and must not merge identity, permissions or histor
 | `PATCH J` | `200 job` | Allowlisted label/archive metadata, If-Match and idempotency; #173 |
 | `DELETE J` | `202 operation` | Reviewed retention/deletion policy and If-Match; #172 |
 | `GET J/runs`, `GET R` | `200 runs`, `200 run` | Bounded attempts or durable attempt snapshot; #160 |
+| `GET R/progress-pin` | `200 progressPin`, strong run ETag | Current per-attempt journal pin; #172 |
+| `PUT R/progress-pin` | `200 progressPin`, original result on keyed replay | Strict `progressPinRequest`, session/Origin/CSRF, run If-Match and idempotency; #172/#177 |
 | `POST J/runs` | `202 run`, `Location: R` | `workflowStart` request, capability/limits/input checks, job If-Match; #163 |
 | `POST R/cancel` | `202 run` or `200 run` if already terminal | Idempotent recorded intent, run If-Match; #163 |
 | `POST R/recover` | `202 run`, `Location` of a new attempt | Explicit `retry` or capability-gated `resume`; If-Match; #163 |
@@ -146,7 +148,8 @@ absence of a total never prevents page navigation.
 Errors carry `code`, safe `message`, `retryable`, optional field-level `details` and
 `retryAfterMs`; the correlation ID connects to redacted server logs. A detail contains a JSON
 pointer plus stable code/message and never the rejected value. Resource existence is disclosed
-only after session authorization. Raw exceptions, commands, environment, paths and credentials
+only after session authorization. EVENT_GAP additionally carries typed recovery metadata for
+the selected resource and a fresh snapshot URL. Raw exceptions, commands, environment, paths and credentials
 are never browser diagnostics.
 
 | Status | Stable examples | Client action |
@@ -296,6 +299,7 @@ sanitized derivatives have separate identity, digest and provenance.
 
 | DTO fields | Authoritative current source or explicit implementation owner |
 | --- | --- |
+| `progressPin.jobId/runId/version/pinned` | Selected durable `WorkflowAttempt` for GET; atomic `WorkflowPinAuditEntry` original result for PUT/replay. No actor, key digest or receipt internals are public. |
 | `job.jobId`, display filename, timestamps | `Jobs.kt: Job.id/filename/createdAt/updatedAt`; never expose `binaryPath` |
 | `job.sizeBytes`, `binary.*` | `Job.sizeBytes` to decimal string; `ElfMetadata` names/format and unsigned `entryPoint` to hex. V1 must not reuse lossy/signed `Job.toJson()` numerics |
 | `job.version/status/latestRunId/acceptedRevisionId` | #160 durable adapter/registry. Legacy `Job.status` is only historical workflow status; it cannot establish an attempt or acceptance |
@@ -442,11 +446,11 @@ The activity client uses this target polling spelling. The existing `cursor` par
 remains an alias for `after`; specifying both, duplicates, unknown fields or a transport
 other than `poll` is rejected. Omitting transport retains JSON polling compatibility.
 `Last-Event-ID` is rejected on polling rather than silently losing its resume position.
-JSON polling remains the activity client transport. An explicit positive `Accept: text/event-stream`
+Activity catches up a bounded polling page, then follows SSE with bounded reconnect and polling fallback. An explicit positive `Accept: text/event-stream`
 on the same endpoint now selects SSE when `transport=poll` is absent. Snapshot `progress` metadata
 makes queue/history omissions and retained-record counts explicit. Missing
 journals fail with `PROGRESS_UNAVAILABLE`; replay gaps require a fresh snapshot
-via `PROGRESS_GAP`. See [the implemented boundary and qualification limits](web-progress-adapter.md).
+via `EVENT_GAP` with typed recovery metadata. See [the implemented boundary and qualification limits](web-progress-adapter.md).
 
 ### Current scheduler snapshot
 
@@ -489,14 +493,29 @@ two per session. There is no per-client event queue; each replay page retains it
 connection termination does not change workflow state. Admission failures use 429 and
 Retry-After; clients can keep using bounded polling.
 
-Before headers, the current adapter preserves polling's 410 `PROGRESS_GAP` response rather
-than the target design's `EVENT_GAP` spelling. After headers, loss of a non-null acknowledged
+Before headers, polling and SSE return 410 `EVENT_GAP`. Its `error.recovery` contains the selected
+jobId/runId, requestedCursor (nullable for an unanchored request), oldestCursor/latestCursor
+(oldest null for empty retention; latest may carry an omission watermark) and a deployment-bound snapshotHref. These cursors describe
+the same retained bytes that detected the gap. Recovery requires a fresh snapshot, not blind retry. After headers, loss of a non-null acknowledged
 cursor produces a `retention.gap` control event with no SSE id, null cursor/sequence and
 requested/oldest/latest positions plus snapshotHref, then closes. A missing journal, lost
 session or other post-header failure closes the transport; it is not a workflow verdict.
 If no cursor has ever existed, the connection closes and the subsequent initial request
 reports the gap rather than inventing an anchor.
 
-The production UI still uses polling; automatic SSE selection/reconnect/fallback in that
-client is not implemented. Full slow-socket qualification, transactional snapshot cutover,
-timed retention and target gap-error detail convergence remain outstanding under #174.
+Activity uses SSE after bounded polling catch-up, with bounded reconnect and polling fallback.
+Run state now stays locked during bounded journal capture, with locks released before HTTP delivery.
+Controlled authenticated HTTP snapshot/replay and SSE eviction/resume checks now cover concurrent
+cutover. Slow-socket qualification and timed retention remain outstanding under #174.
+
+## Implemented progress-pin policy endpoint
+
+`GET` and `PUT /api/v1/jobs/{jobId}/runs/{runId}/progress-pin` are available under the configured deployment prefix. This pin protects only the selected persisted progress journal. It does not pin the full job, source revisions, reports or downloaded evidence. Unpinning neither resets the retention deadline nor restores removed history; SPA periodic progress maintenance is enabled by default; legacy mode keeps it disabled.
+
+GET requires a local session and returns `{jobId, runId, version, pinned}` in a `progressPin` envelope, with an ETag for the current run version and `Cache-Control: no-store`. Conditional read headers are rejected. The `progressPinRequest` wire body for PUT is exactly `{pinned: boolean}`, at most 1024 bytes, with duplicate JSON keys and unknown fields rejected. Authorization precedes body parsing. PUT requires the existing same-origin JSON mutation policy, cookie session, CSRF token, one strong If-Match version and one 16–128 character idempotency key. Caller-supplied actors, query parameters and extra conditional headers are rejected.
+
+Successful changes and no-ops use the durable receipts described in [pin audit/replay](web-pin-audit.md). An exact replay returns the original pin/version and ETag with `Idempotency-Replayed: true`; it may describe an earlier result than a subsequent GET. It never rolls current policy or an owned task backward. Reconcile with GET before a new action. Missing If-Match returns 428, stale fresh requests 412 VERSION_CONFLICT, reused keys with different intent 409 IDEMPOTENCY_CONFLICT, and protected receipt capacity 429 PIN_RECEIPT_CAPACITY. Uncertain publication returns an unavailable/recovery response, not success.
+
+The generated `progressPin`/`progressPinRequest` contracts and the client's guarded `put` method support this endpoint. The client performs one request without automatically retrying ambiguous mutations. The authenticated attempt page now provides explicit read/pin/unpin controls with fresh-read reconciliation. Audit presentation and denied/failed-request audit coverage remain unfinished; successful policy receipts alone do not complete #177.
+
+Private bootstrap now includes an optional `runtime.progressRetention` sample with enabled configuration, sample time, completed attempt checks, expired journals, failed checks and the last diagnostic code. Runtime displays this process-local sample from the last session check without launching another probe. The SPA `terminalEventRetentionMs` value is 86400000: the threshold for timed expiry, not a guarantee against earlier size/count eviction or a maximum scan delay. See [production retention](web-progress-adapter.md#spa-production-retention-and-sampled-status).

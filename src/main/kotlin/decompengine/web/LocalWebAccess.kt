@@ -106,7 +106,10 @@ class WebAccessDenied internal constructor(
     message: String,
     val allowedMethods: Set<String> = emptySet(),
     internal val clearCookie: Boolean = false,
-) : RuntimeException(message)
+    internal val eventGap: JsonObject? = null,
+) : RuntimeException(message) {
+    init { require(eventGap == null || (status == 410 && code == "EVENT_GAP")) }
+}
 
 /** These return values deliberately redact their printable representation. Never serialize them wholesale. */
 class WebBootstrapToken internal constructor(val token: String, val expiresAt: Instant) {
@@ -275,6 +278,7 @@ class LocalWebAccess(
             put("error", buildJsonObject {
                 put("code", failure.code)
                 put("message", failure.message)
+                failure.eventGap?.let { put("recovery", it) }
                 put("retryable", failure.status == 429)
                 put("details", JsonArray(emptyList()))
                 put("retryAfterMs", if (failure.status == 429) JsonPrimitiveRetry else JsonNull)

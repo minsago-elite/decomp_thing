@@ -1,0 +1,27 @@
+{
+  "status": "passed-with-unresolved-intermittent-browser-failure",
+  "featureCommit": "a800c265d69e7d01868c4b0f712bb4361c228219",
+  "masterMergeCommit": "56c47a7e",
+  "verification": {
+    "frontendTests": 349,
+    "frontendFailures": 0,
+    "focusedTestsAfterLintCorrection": 23,
+    "lint": "passed",
+    "typecheckedBundle": "passed",
+    "distZip": "passed",
+    "postMergeSelectedJvmTests": 298,
+    "postMergeJvmFailures": 0
+  },
+  "files": {
+    "browser-first-failed.json": "c92dcc2bb3f5a5a67cb3ac4e557d4766e60cb84f9bc523a9629aea36ce0dddd4",
+    "browser.json": "1f976882b5143682d7d6e4bcc224f2188bbca9ae5c412934f41ee017a3e76210",
+    "session-tests.json": "f1275fd3b0b4688144e8e8c08d1bfab2d3766b8926c3059cee1fbbccceee204a"
+  },
+  "browserScope": "Same pre-master-merge application archive for both runs; second run adds only failure-path driver diagnostics. Post-merge JVM code verified separately by selected tests.",
+  "limitations": [
+    "First packaged browser run timed out at appended SSE observation; root cause unresolved. Second run against the identical archive passed all history assertions.",
+    "Browser journey is regression coverage; shared rejection itself is qualified by mocked-transport/component tests, not a real-browser server-revocation scenario.",
+    "No native analysis or workflow ran. Chrome used test-only --no-sandbox. Both browser runs confirmed shutdown and cleanup.",
+    "Explicit restart signaling and complete multi-tab workflow/connection requirements remain open."
+  ]
+}

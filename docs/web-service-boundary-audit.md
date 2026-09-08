@@ -167,3 +167,13 @@ remain open.
 The existing [public SPA journey](evidence/web-legacy-driver-public-20260905.json) also passed
 against the same archive after the launcher change, including packaged home/Runtime and
 explicit chunk-error recovery. The upgrade-driver unit tests and script syntax checks passed.
+
+## Bounded admitted-request drain during shutdown
+
+After closing admission and stopping the HTTP executor, `UploadServer.stop` now waits for admitted handlers to finish before its final ownership check. A one-shot drain signal is completed under the lifecycle lock when the active count reaches zero. No new request can enter after the stop signal, so completion cannot become false again. The wait holds no lifecycle lock, allowing handler cleanup and ownership release to proceed.
+
+The default final request-drain budget is one second, configurable through the constructor from zero to five seconds. It is a budget for this final drain, not a bound on the entire workflow/provider shutdown sequence. A handler that outlives the budget still produces the existing explicit incomplete-shutdown error, and storage ownership stays held until actual quiescence. Later cleanup permits a retry. An interrupted caller still receives a bounded drain opportunity and has its interrupt flag restored.
+
+Three controlled admission fixtures cover a held handler, an interrupted stop caller, and a handler exceeding the drain deadline. They require ownership rejection while work remains, successful replacement after cleanup, closed request admission and interrupt preservation. They do not execute workflows or use external targets. This addresses the immediate ownership-check race that can explain the #224 timing-dependent failure; the original report did not identify which HTTP handler was still active.
+
+All 273 selected JVM tests pass, including the previously failing ownership/shutdown test. The [retained manifest and shutdown/server results](evidence/web-http-shutdown-drain-20260908/manifest.json) identify the tested source and hashes. Frontend/package/browser checks were not repeated for this server-lifetime change.

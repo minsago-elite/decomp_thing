@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.web.WebEventStreamTest" tests="7" skipped="0" failures="0" errors="0" timestamp="2026-09-08T04:43:20.360Z" hostname="whatsername" time="7.009">
+  <properties/>
+  <testcase name="two idle streams do not occupy the sole HTTP worker and logout closes both()" classname="decompengine.web.WebEventStreamTest" time="0.292"/>
+  <testcase name="retention loss emits an unnumbered gap then closes and reconnect gets HTTP gap()" classname="decompengine.web.WebEventStreamTest" time="0.123"/>
+  <testcase name="a non-reading socket parks only its stream writer and lease releases capacity()" classname="decompengine.web.WebEventStreamTest" time="6.009"/>
+  <testcase name="real SSE framing shares polling cursors and Last Event ID resumes after an acknowledged event()" classname="decompengine.web.WebEventStreamTest" time="0.052"/>
+  <testcase name="heartbeat comments have no event identity and the lease closes an idle connection()" classname="decompengine.web.WebEventStreamTest" time="0.507"/>
+  <testcase name="denied and ambiguous resume requests never admit a stream()" classname="decompengine.web.WebEventStreamTest" time="0.008"/>
+  <testcase name="SSE line fields are bounded and cannot inject extra fields()" classname="decompengine.web.WebEventStreamTest" time="0.005"/>
+  <system-out><![CDATA[Slow-socket qualification: one unread loopback peer, observed parked SocketChannel write, health and authenticated polling remained available, lease released capacity with zero cleanup failures; source reads=3.
+]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

@@ -68,7 +68,9 @@ object ArchivalPackager {
         archivePath: Path,
         limits: ArchivalBundleLimits = ArchivalBundleLimits(),
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+        requiredCorpusSha256: Set<String> = emptySet(),
     ): ArchivalBundle {
+        val requiredCorpora = snapshotRequiredBehaviorCorpora(requiredCorpusSha256)
         require(!Files.isSymbolicLink(projectDir)) { "archive project root must not be a symbolic link" }
         require(projectDir.resolve("source_tree_manifest.json").isRegularFile(LinkOption.NOFOLLOW_LINKS)) {
             "project is missing source_tree_manifest.json"
@@ -91,8 +93,11 @@ object ArchivalPackager {
             "archive output must not be a symbolic link: $archivePath"
         }
         validateSuccessfulBuild(projectDir)
-        val audit = ArchivalProjectAuditor.audit(projectDir, profile)
+        val audit = ArchivalProjectAuditor.audit(projectDir, profile, requiredCorpora)
         require(audit.provenanceComplete) { "archive project has incomplete model or source provenance" }
+        require(requiredCorpora.isEmpty() || audit.behaviorMatched == true) {
+            "archive project does not satisfy the required behavior corpora"
+        }
         val readme = projectDir.resolve("ARCHIVE_README.md")
         writeProjectEvidenceAtomically(
             readme,
@@ -107,6 +112,12 @@ object ArchivalPackager {
         )
         val payload = collectPayload(projectDir, archiveDestination, limits)
         validateSourceManifest(projectDir, payload.associateBy { it.relativePath }, profile)
+        val archivedBehaviorHashes = payload.asSequence()
+            .filter { it.relativePath.endsWith(".behavior.json") }
+            .associate { it.relativePath to it.sha256 }
+        require(archivedBehaviorHashes == audit.behaviorReportSha256) {
+            "behavior report bytes changed between audit and archive capture"
+        }
         val payloadBytes = payload.fold(0L) { total, item -> Math.addExact(total, item.size) }
         val hashManifestBytes = payload.fold(0L) { total, item ->
             Math.addExact(total, 67L + item.relativePath.toByteArray(Charsets.UTF_8).size)

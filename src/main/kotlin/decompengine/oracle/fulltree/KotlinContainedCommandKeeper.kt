@@ -90,12 +90,25 @@ internal object KotlinContainedCommandKeeper {
                                 val stdoutReader = readers.submit { stdout.capture(process.inputStream) }
                                 val stderrReader = readers.submit { stderr.capture(process.errorStream) }
                                 var status = "EXITED"
+                                var forcibleTerminationConfirmed = false
                                 while (process.isAlive) {
                                     stdout.requireHealthy()
                                     stderr.requireHealthy()
                                     if (stdout.exceeded.get() || stderr.exceeded.get()) {
                                         status = "OUTPUT_LIMIT"
                                         break
+                                    }
+                                    if (request.allowInterruption) {
+                                        val interrupt = readFile(root, KotlinContainedCommandProtocol.INTERRUPT_FILE,
+                                            KotlinContainedCommandProtocol.MAXIMUM_PROTOCOL_BYTES)
+                                        if (interrupt != null) {
+                                            KotlinContainedCommandProtocol.requireInterrupt(interrupt, bootstrap, request, keeperPid)
+                                            // Only report interruption after observing the exact child still live.
+                                            if (process.isAlive) {
+                                                status = "INTERRUPTED"
+                                                break
+                                            }
+                                        }
                                     }
                                     if (System.nanoTime() - started >= TimeUnit.SECONDS.toNanos(request.maximumWallSeconds)) {
                                         status = "TIMED_OUT"
@@ -106,6 +119,10 @@ internal object KotlinContainedCommandKeeper {
                                 if (process.isAlive) {
                                     process.destroyForcibly()
                                     require(process.waitFor(5L, TimeUnit.SECONDS)) { "contained command child survived its bounded kill" }
+                                    forcibleTerminationConfirmed = true
+                                }
+                                require(status != "INTERRUPTED" || forcibleTerminationConfirmed) {
+                                    "contained command was not forcibly terminated after interruption"
                                 }
                                 stdoutReader.get(5L, TimeUnit.SECONDS)
                                 stderrReader.get(5L, TimeUnit.SECONDS)

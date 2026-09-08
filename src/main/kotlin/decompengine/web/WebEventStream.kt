@@ -47,7 +47,7 @@ internal class WebEventStream(
                     val bytes = read(jobId, runId)
                     latestBytes = bytes
                     val raw = "limit=${query.limit}" + (cursor?.let { "&cursor=$it" } ?: "")
-                    val page = pages.page(session.sessionId, jobId, runId, bytes, raw)
+                    val page = pages.page(session.sessionId, jobId, runId, bytes, raw, snapshotHref)
                     if (exchange.responseCode == -1) {
                         authorize()
                         webApiHeaders(exchange, UUID.randomUUID().toString())
@@ -69,7 +69,7 @@ internal class WebEventStream(
                 }
             } catch (failure: WebAccessDenied) {
                 if (exchange.responseCode == -1) access.sendDenied(exchange, failure)
-                else if (failure.code == "PROGRESS_GAP" && cursor != null && latestBytes != null) {
+                else if (failure.code == "EVENT_GAP" && cursor != null && latestBytes != null) {
                     // No id on a gap: it must never advance the browser's acknowledged position.
                     authorize()
                     val boundary = pages.boundary(session.sessionId, jobId, runId, latestBytes)
