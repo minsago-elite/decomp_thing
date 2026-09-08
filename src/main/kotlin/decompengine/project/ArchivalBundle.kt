@@ -31,6 +31,7 @@ data class ArchivalBundle(
     val archivePath: Path,
     val archiveSha256: String,
     val payloadFiles: List<String>,
+    val audit: ArchivalAudit? = null,
 )
 
 data class ArchivalBundleLimits(
@@ -161,7 +162,7 @@ object ArchivalPackager {
         } finally {
             Files.deleteIfExists(temporaryArchive)
         }
-        return ArchivalBundle(archivePath, digestFile(archiveDestination), payload.map { it.relativePath })
+        return ArchivalBundle(archivePath, digestFile(archiveDestination), payload.map { it.relativePath }, audit)
     }
 
     private fun collectPayload(

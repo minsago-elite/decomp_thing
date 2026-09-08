@@ -1,5 +1,8 @@
 package decompengine.project
 
+import decompengine.agent.AgentWorkflowProgress
+import decompengine.agent.AgentWorkflowPhase
+
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonArray
@@ -35,7 +38,22 @@ class ArchivalReconstructionTest {
                 "build-executable" to listOf("/usr/bin/make"),
                 "compiler-driver" to listOf("/usr/bin/cc"),
             ))
-        val result = ArchivalReconstructionService(analyzer, profile = profile).reconstruct(binary, temp.resolve("result"))
+        val phases = mutableListOf<AgentWorkflowPhase>()
+        val progress = object : AgentWorkflowProgress by AgentWorkflowProgress.NONE {
+            override fun phase(phase: AgentWorkflowPhase, taskId: String?, acceptedRevisionSha256: String?) {
+                phases += phase
+            }
+        }
+        val result = ArchivalReconstructionService(analyzer, profile = profile, progress = progress)
+            .reconstruct(binary, temp.resolve("result"))
+        val audit = requireNotNull(result.bundle.audit)
+        assertTrue(audit.unresolvedEntityIds.isNotEmpty())
+        assertEquals(AgentWorkflowPhase.UNRESOLVED, phases.last())
+        val summary = Json.parseToJsonElement(temp.resolve("result/reconstruction.json").readText()).jsonObject
+        assertEquals("unresolved", summary.getValue("implementationStatus").jsonPrimitive.content)
+        assertEquals(audit.unresolvedEntityIds.size.toString(), summary.getValue("unresolvedEntityCount").jsonPrimitive.content)
+        val savedProgress = Json.parseToJsonElement(temp.resolve("result/reconstruction_progress.json").readText()).jsonObject
+        assertEquals("unresolved", savedProgress.getValue("phase").jsonPrimitive.content)
 
         assertEquals(0, result.build.returnCode)
         assertEquals("/usr/bin/make", result.build.command.first())
