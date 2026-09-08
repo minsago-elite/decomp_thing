@@ -1,8 +1,11 @@
 package decompengine.project
 
+import java.nio.file.Path
+
 /** Local generation policy; production execution authority is a separate contract. */
 internal interface ReconstructionAdapter {
     val compilation: ModuleCompilationPolicy
+    fun build(projectDir: Path, profile: ReconstructionProfile): BuildReport
     fun rendering(model: RecoveredProgramModel, plan: ModulePlan): ProjectRendering
     fun defaultReconstructor(): ModuleReconstructor
     fun assess(module: PlannedModule, model: RecoveredProgramModel, generator: String, source: String): List<ModuleReconstructionIssue>

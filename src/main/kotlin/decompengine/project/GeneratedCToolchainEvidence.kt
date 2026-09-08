@@ -9,6 +9,7 @@ import kotlinx.serialization.json.JsonPrimitive
 internal object GeneratedCToolchainEvidence {
     fun render(profile: ReconstructionProfile): String {
         val compiler = profile.adapterConfiguration.getValue("compiler-driver").single()
+        val build = profile.adapterConfiguration["build-executable"]?.singleOrNull() ?: "make"
         val millis = minOf(profile.budgets.buildWallClockMillis, 2_000L)
         val bytes = minOf(profile.budgets.buildMaximumOutputBytes, 16_384L).toInt()
         return JsonObject(linkedMapOf(
@@ -16,7 +17,8 @@ internal object GeneratedCToolchainEvidence {
             "javaVersion" to JsonPrimitive(System.getProperty("java.version")),
             "compilerCommand" to JsonPrimitive(compiler),
             "compilerVersion" to JsonPrimitive(probe(listOf(compiler, "--version"), millis, bytes)),
-            "make" to JsonPrimitive(probe(listOf("make", "--version"), millis, bytes)),
+            "buildCommand" to JsonPrimitive(build),
+            "buildVersion" to JsonPrimitive(probe(listOf(build, "--version"), millis, bytes)),
             "note" to JsonPrimitive("Local bounded version observations; executable identity is not authenticated. LLM model and prompt hashes are recorded per generated module when applicable."),
         )).toString() + "\n"
     }
