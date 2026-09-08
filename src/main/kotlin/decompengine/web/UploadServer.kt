@@ -178,12 +178,8 @@ class UploadServer(
     sensitiveValues: Collection<String> = System.getenv().values,
     private val listenBacklog: Int = 64,
     private val authenticationInspector: (decompengine.agent.AgentCancellation) -> decompengine.acp.AcpAuthenticationInventory = defaultWebAuthenticationInspector(),
-    private val requestShutdownTimeoutMs: Long = 1000,
 ) {
-    init {
-        require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" }
-        require(requestShutdownTimeoutMs in 0..5000) { "HTTP request shutdown wait must be between zero and five seconds" }
-    }
+    init { require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" } }
     private val diagnosticRedactor = ProgressRedactor(sensitiveValues)
     private val authenticationInspectionLock = Any()
     private var authenticationInspectionId: String? = null
@@ -215,7 +211,12 @@ class UploadServer(
     }
     // Acquire cooperative ownership before binding so a refused contender never occupies a listener.
     private val ownership: WebJobStoreOwnership = WebJobStoreOwnership.acquire(dataDir.toAbsolutePath().normalize())
-    private val server = HttpServer.create(InetSocketAddress(host, port), listenBacklog)
+    private val server: HttpServer = try {
+        HttpServer.create(InetSocketAddress(host, port), listenBacklog)
+    } catch (failure: Throwable) {
+        ownership.close()
+        throw failure
+    }
     private val store = JobStore(dataDir)
     private val jobs = WebJobService(store, analyzer, reconstructor, executor,
         attemptStoreFactory = { root ->
@@ -223,7 +224,6 @@ class UploadServer(
             ownership.ensureLockFile()
             WorkflowAttemptStore.open(root)
         },
-        progressRetentionIntervalMs = if (uiMode == WebUiMode.SPA) 1000 else null,
         shutdownTimeoutMs = 5000, failureDiagnostic = { diagnostic(it, "Background operation failed") })
     private val sourceEvidence = WebSourceEvidence(store, sourceProfiles, jobs::readArtifact)
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
@@ -244,7 +244,6 @@ class UploadServer(
     private var stopping = false
     private var started = false
     private var activeRequests = 0
-    private val requestsDrained = java.util.concurrent.CountDownLatch(1)
     private val stopRequested = java.util.concurrent.atomic.AtomicBoolean(false)
     val serverPort: Int get() = server.address.port
     val browserOrigin: String = devFrontendOrigin ?: webOrigin(host, serverPort)
@@ -330,55 +329,57 @@ class UploadServer(
 
     fun stop(delaySeconds: Int = 0) {
         require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
+        val callerWasInterrupted = Thread.interrupted()
+        var interruptedDuringShutdown = callerWasInterrupted
         // Signal recovery and the job service even while start or a queued callback holds
         // lifecycleLock through filesystem operations: no queued operation may begin and no
         // completion may be published after the stop signal is observable.
-        stopRequested.set(true)
-        jobs.beginShutdown()
-        val callerWasInterrupted = Thread.currentThread().isInterrupted
-        val inspection = synchronized(lifecycleLock) {
-            stopping = true
-            if (activeRequests == 0) requestsDrained.countDown()
-            // JDK HttpServer.stop does not release a bound listener before start. Start its
-            // dispatcher only after closing request admission, then close it below. This also
-            // covers failed ownership/recovery admission and explicit stop-before-start.
-            if (!started) {
-                server.start()
-                started = true
-            }
-            authenticationInspectionCancellation.set(true)
-            authenticationInspectionWorker.get()
-        }
-        val streamsClosed = streamResources.shutdown()
-        server.stop(delaySeconds)
-        if (!streamsClosed && !streamResources.shutdown()) System.err.println("Event stream shutdown did not complete cleanly.")
-        requestExecutor.shutdownNow()
-        requestDeadlines.shutdownNow()
-        access.close()
-        jobs.close()
-        var inspectionWaitInterrupted = false
         try {
-            check(inspection === null || inspection !== Thread.currentThread()) { "Inspection cannot await its own shutdown" }
-            // The provider owns its cleanup deadlines. Do not truncate them with a web timeout,
-            // including when the shutdown caller is interrupted while cleanup is still running.
-            while (inspection?.isAlive == true) {
-                try { inspection.join() } catch (_: InterruptedException) { inspectionWaitInterrupted = true }
+            stopRequested.set(true)
+            jobs.beginShutdown()
+            val inspection = synchronized(lifecycleLock) {
+                stopping = true
+                // JDK HttpServer.stop does not release a bound listener before start. Start its
+                // dispatcher only after closing request admission, then close it below. This also
+                // covers failed ownership/recovery admission and explicit stop-before-start.
+                if (!started) {
+                    server.start()
+                    started = true
+                }
+                authenticationInspectionCancellation.set(true)
+                authenticationInspectionWorker.get()
             }
-        } catch (exception: Exception) {
-            if (exception is InterruptedException) Thread.currentThread().interrupt()
+            val streamsClosed = streamResources.shutdown()
+            server.stop(delaySeconds)
+            if (!streamsClosed && !streamResources.shutdown()) System.err.println("Event stream shutdown did not complete cleanly.")
+            requestExecutor.shutdownNow()
+            requestDeadlines.shutdownNow()
+            access.close()
+            jobs.close()
+            var inspectionWaitInterrupted = false
+            try {
+                check(inspection === null || inspection !== Thread.currentThread()) { "Inspection cannot await its own shutdown" }
+                // The provider owns its cleanup deadlines. Do not truncate them with a web timeout,
+                // including when the shutdown caller is interrupted while cleanup is still running.
+                while (inspection?.isAlive == true) {
+                    try { inspection.join() } catch (_: InterruptedException) {
+                        inspectionWaitInterrupted = true
+                        interruptedDuringShutdown = true
+                        Thread.interrupted()
+                    }
+                }
+            } catch (exception: Exception) {
+                if (exception is InterruptedException) {
+                    inspectionWaitInterrupted = true
+                    interruptedDuringShutdown = true
+                    Thread.interrupted()
+                }
+            }
+            if (inspectionWaitInterrupted) Thread.interrupted()
+            if (!releaseOwnershipIfIdle()) throw IllegalStateException("HTTP requests remain active after server stop")
+        } finally {
+            if (interruptedDuringShutdown) Thread.currentThread().interrupt()
         }
-        // Interrupting the executor does not mean admitted handlers have finished their finally blocks.
-        // Admission is closed, so reaching zero here is permanent. Never hold lifecycleLock while waiting.
-        var requestWaitInterrupted = false
-        val requestDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(requestShutdownTimeoutMs)
-        while (requestsDrained.count != 0L) {
-            val remaining = requestDeadline - System.nanoTime()
-            if (remaining <= 0) break
-            try { requestsDrained.await(remaining, TimeUnit.NANOSECONDS) }
-            catch (_: InterruptedException) { requestWaitInterrupted = true }
-        }
-        if (callerWasInterrupted || inspectionWaitInterrupted || requestWaitInterrupted) Thread.currentThread().interrupt()
-        if (!releaseOwnershipIfIdle()) throw IllegalStateException("HTTP requests remain active after server stop")
     }
 
     /** Admission covers the whole handler, including upload publication and error handling. */
@@ -398,10 +399,7 @@ class UploadServer(
             action()
             return true
         } finally {
-            synchronized(lifecycleLock) {
-                activeRequests--
-                if (stopping && activeRequests == 0) requestsDrained.countDown()
-            }
+            synchronized(lifecycleLock) { activeRequests-- }
             try {
                 releaseOwnershipIfIdle()
             } catch (_: Exception) {
@@ -545,7 +543,6 @@ class UploadServer(
                 sendWebApiResponse(exchange, 200, "session", buildJsonObject {
                     put("csrfToken", credentials.csrfToken)
                     put("expiresAt", credentials.session.expiresAt.toString())
-                    put("idleExpiresAt", credentials.session.idleExpiresAt.toString())
                 })
                 return
             }
@@ -555,7 +552,7 @@ class UploadServer(
             val mutation = exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")
             val policy = when {
                 publicPage -> WebEndpointPolicy.publicRead()
-                legacyJsonRead -> WebEndpointPolicy.privateRead(allowHead = true)
+                legacyJsonRead -> WebEndpointPolicy.privateRead()
                 mutation && segments == listOf("jobs") && exchange.requestMethod == "POST" -> WebEndpointPolicy.multipartUpload()
                 mutation -> WebEndpointPolicy.jsonMutation(exchange.requestMethod)
                 else -> WebEndpointPolicy.privateRead(allowHead = true)
@@ -567,9 +564,9 @@ class UploadServer(
             }
             if (legacyJsonRead) requireJsonAccept(exchange)
             when {
-                exchange.requestMethod in setOf("GET", "HEAD") && segments.isEmpty() ->
+                exchange.requestMethod == "GET" && segments.isEmpty() ->
                     renderJobDashboard(exchange)
-                exchange.requestMethod in setOf("GET", "HEAD") && segments == listOf("assets", "app.css") ->
+                exchange.requestMethod == "GET" && segments == listOf("assets", "app.css") ->
                     exchange.sendBytes(200, APP_CSS.toByteArray(), "text/css; charset=utf-8", cache = true)
                 exchange.requestMethod == "GET" && segments == listOf("api", "recovery") ->
                     exchange.sendJson(200, store.recoveryInventory().toJson().toString())
@@ -580,19 +577,19 @@ class UploadServer(
                 exchange.requestMethod == "POST" && segments == listOf("api", "operator", "auth-methods") ->
                     handleAuthenticationInspection(exchange)
                 exchange.requestMethod == "POST" && segments == listOf("jobs") -> handlePostJob(exchange)
-                exchange.requestMethod in setOf("GET", "HEAD") && segments.size == 2 && segments[0] == "jobs" ->
+                exchange.requestMethod == "GET" && segments.size == 2 && segments[0] == "jobs" ->
                     handleJob(exchange, decode(segments[1]))
                 exchange.requestMethod == "POST" && segments.size == 3 && segments[0] == "jobs" && segments[2] == "explore" ->
                     handleExplore(exchange, decode(segments[1]))
                 exchange.requestMethod == "POST" && segments.size == 3 && segments[0] == "jobs" && segments[2] == "reconstruct" ->
                     handleReconstruct(exchange, decode(segments[1]))
-                exchange.requestMethod in setOf("GET", "HEAD") && segments.size >= 4 && segments[0] == "jobs" && segments[2] == "source" ->
+                exchange.requestMethod == "GET" && segments.size >= 4 && segments[0] == "jobs" && segments[2] == "source" ->
                     handleSource(exchange, decode(segments[1]), segments.drop(3).joinToString("/").let(::decode))
-                exchange.requestMethod in setOf("GET", "HEAD") && segments.size >= 4 && segments[0] == "jobs" && segments[2] == "artifacts" ->
+                exchange.requestMethod == "GET" && segments.size >= 4 && segments[0] == "jobs" && segments[2] == "artifacts" ->
                     handleArtifact(exchange, decode(segments[1]), segments.drop(3).joinToString("/").let(::decode))
-                exchange.requestMethod in setOf("GET", "HEAD") && segments.size == 3 && segments[0] == "api" && segments[1] == "jobs" ->
+                exchange.requestMethod == "GET" && segments.size == 3 && segments[0] == "api" && segments[1] == "jobs" ->
                     exchange.sendJson(200, encodeJob(jobs.get(decode(segments[2]))))
-                exchange.requestMethod in setOf("GET", "HEAD") && segments.size == 4 && segments[0] == "api" && segments[1] == "jobs" && segments[3] == "events" -> {
+                exchange.requestMethod == "GET" && segments.size == 4 && segments[0] == "api" && segments[1] == "jobs" && segments[3] == "events" -> {
                     val job = jobs.get(decode(segments[2]))
                     val runId = exchange.requestURI.rawQuery?.let {
                         require(it.matches(Regex("runId=[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "Only an exact workflow attempt selection is supported" }
@@ -621,10 +618,9 @@ class UploadServer(
             }
         } catch (exception: WebJobServiceException) {
             val status = if (exception.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else 503
-            val code = if (status == 404 || exception.code in setOf("PROGRESS_UNAVAILABLE", "UPLOAD_CAPACITY")) exception.code else "JOB_STORAGE_UNAVAILABLE"
+            val code = if (status == 404 || exception.code == "PROGRESS_UNAVAILABLE") exception.code else "JOB_STORAGE_UNAVAILABLE"
             legacyError(exchange, status, code, when (code) {
                 "PROGRESS_UNAVAILABLE" -> "The retained progress journal is unavailable. Missing data does not establish an empty history."
-                "UPLOAD_CAPACITY" -> "Upload capacity is temporarily unavailable. Retry shortly."
                 "JOB_STORAGE_UNAVAILABLE" -> "Job storage is unavailable. Inspect storage before retrying."
                 else -> "The requested job or attempt is unavailable."
             }) {
@@ -907,7 +903,6 @@ private fun HttpExchange.sendBytes(
         "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'",
     )
     responseHeaders.add("Cache-Control", if (cache) "public, max-age=3600" else "no-store")
-    responseHeaders.add("Content-Length", body.size.toString())
     if (requestMethod == "HEAD") {
         sendResponseHeaders(status, -1)
         close()
