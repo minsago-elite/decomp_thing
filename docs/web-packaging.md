@@ -158,6 +158,11 @@ and stop automatic requests. No production deadline or clock is changed and no
 response is intercepted. Use the same command options as `session`, replacing
 `--mode session` with `--mode idle-expiry`. A running heartbeat is not a passing
 qualification report; completion also requires confirmed shutdown and cleanup.
+The [2026-09-08 retained result](evidence/web-packaged-idle-expiry-20260908/manifest.json)
+passed the real idle interval, actual server rejection, distinct notice, private-state
+cleanup and no-follow-up checks, with shutdown and owned-work cleanup confirmed.
+This qualifies idle expiry after an explicit read on a terminal fixture, not expiry
+during an active upload/stream or the eight-hour absolute deadline.
 
 `upgrade` keeps one browser tab and the previous entry module alive while replacing
 the owned previous JVM with the current ZIP on exactly the same origin and
