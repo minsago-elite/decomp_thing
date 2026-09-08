@@ -1,0 +1,121 @@
+{
+  "schemaVersion": 1,
+  "issue": 980,
+  "recordedAtUtc": "2026-09-08T12:22:50Z",
+  "status": "implementation-evidence-only",
+  "scope": "Bounded source and fixture audit for binding captured GCC models and deterministic plans to the exact planner policy. This record does not qualify a real compiler-engine operation or production release.",
+  "sourceCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "sourceSha256": {
+    "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationIntent.kt": "8952e2153a3cca29cedd8e0c68d7bdaca0894a9371796abdcb43a3f7b669aa19",
+    "src/main/kotlin/decompengine/oracle/gcc/GccRetainedCompilerEngineProfile.kt": "c627a6b5dbcd35ae3e71742b06e709d6e2c517b770222ac3d43eb7f95844e663",
+    "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationCoordinator.kt": "4ab8bc5bd7aaaddccd92a8317ecd2a9c79d86d794098623e58de6bae4df091a8",
+    "src/main/kotlin/decompengine/oracle/gcc/GccBundledPlannerWorker.kt": "be7cca1c7280659d1ed52b7424a2a9d2d22946bf780340fdb9e4fa7b913a0104",
+    "src/main/kotlin/decompengine/oracle/gcc/GccBundledPlannerOutputAssessment.kt": "128725ade8ca4e54a64dde71ca4bf8dce0e5bedcc197ab8813e57ac4b33fda31",
+    "src/main/kotlin/decompengine/oracle/gcc/GccBundledPlannerOutputCapture.kt": "ebfcf82277689c99dc499caf75a1263cb45ddc9b9c20707fcb14ffa374b12931",
+    "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationJournal.kt": "317c527fb09cf3def169f1d8c2ba4dc725ab264b1bb737e38c08f569ea6aa1f7"
+  },
+  "sourceObservations": [
+    {
+      "criterion": "The version-2 operation binds the retained planner policy before execution",
+      "status": "present-in-current-code",
+      "references": [
+        "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationIntent.kt:21-23,55-114",
+        "src/main/kotlin/decompengine/oracle/gcc/GccRetainedCompilerEngineProfile.kt:21-74,122-139"
+      ],
+      "detail": "The canonical intent carries plannerProfile and its request hash. The retained policy includes the profile closure, planner identity/version, reconstruction layout and limits, and guarded input digests; reopening the profile revalidates those bytes, the selected engine artifacts, and operation budgets."
+    },
+    {
+      "criterion": "The planner request and durable journal chain retain policy, model, and operation lineage before planner START",
+      "status": "present-in-current-code",
+      "references": [
+        "src/main/kotlin/decompengine/oracle/gcc/GccBundledPlannerWorker.kt:25-91",
+        "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationJournal.kt:243-335",
+        "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationCoordinator.kt:362-386"
+      ],
+      "detail": "The request binds model bytes/hash, authenticated engine input hash, operation request hash, profile policy hash, layout, and planner limits. Journal preparation checks those bindings, and the owner records attachment and START authorization before execution and assessment records."
+    },
+    {
+      "criterion": "Plans are derived from the owner's captured model and exact function/global/type ownership",
+      "status": "present-in-current-code",
+      "references": [
+        "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationCoordinator.kt:301-342",
+        "src/main/kotlin/decompengine/oracle/gcc/GccBundledPlannerWorker.kt:134-172",
+        "src/main/kotlin/decompengine/oracle/gcc/GccBundledPlannerOutputAssessment.kt:21-55"
+      ],
+      "detail": "plan() requires this owner's completed export and rechecks the captured model before planner START. The worker stable-reads the bound model path, derives the plan itself, and the assessment checks model identity, counts, exact ModulePlan ownership, and bounded work. The request has no caller-supplied plan bytes."
+    },
+    {
+      "criterion": "Captured planner output remains tied to retained descriptor identities and the durable assessment",
+      "status": "present-in-current-code",
+      "references": [
+        "src/main/kotlin/decompengine/oracle/gcc/GccBundledPlannerOutputCapture.kt:21-69",
+        "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationCoordinator.kt:376-388"
+      ],
+      "detail": "Output capture requires process absence, the expected run/control/report identities, exact directory membership, bounded files, and a successful byte assessment before the owner retains the plan and assessment receipt."
+    }
+  ],
+  "fixtures": [
+    {
+      "path": "src/test/kotlin/decompengine/oracle/gcc/GccBundledPlannerWorkerTest.kt",
+      "sha256": "b7ecc056eb825975f0825dbc91e6ccb502b14c4dfc76d192e934cc7331602140",
+      "declaredCoverage": [
+        "synthetic captured model produces the deterministic plan and exact ownership check",
+        "wrong model/input/count/work/plan bindings are rejected before publication",
+        "partial output is preserved and repeated publication cannot overwrite it"
+      ],
+      "limitation": "The test explicitly uses synthetic assessments; it does not authenticate a real export or containment run."
+    },
+    {
+      "path": "src/test/kotlin/decompengine/oracle/gcc/GccBundledOperationCoordinatorTest.kt",
+      "sha256": "f544d7f4098a31fb81fa8687919ed7946a4ee9de30b1857739470a91ce5fb0dd",
+      "declaredCoverage": [
+        "version-2 intent retains the complete planner policy",
+        "changed artifact identities, budgets, profile roots, and engine identity are rejected"
+      ],
+      "limitation": "The binding test uses copied profile inputs and does not establish a live contained planner execution."
+    },
+    {
+      "path": "src/test/kotlin/decompengine/oracle/gcc/GccBundledOperationJournalTest.kt",
+      "sha256": "685931e2fd074b6ee12e5b8b41e8bb5da43d7f2f968c07aac99fcabeeb291d94",
+      "declaredCoverage": [
+        "ordered planner records retain previous-record hashes and false completion flags",
+        "request policy/model/path/limit mutations and assessment lineage mutations are rejected"
+      ],
+      "limitation": "The journal fixture is record-only and uses authored placeholder payloads."
+    },
+    {
+      "path": "src/test/kotlin/decompengine/oracle/gcc/GccBundledCliQualificationTest.kt",
+      "sha256": "8a4991cff779a9ef16c403c88ec6b6fe1df16090fa3d4d1d21e59a33114312b7",
+      "declaredCoverage": "Opt-in installed cc1/lto1 fresh and same-owner resume comparison of model and plan bytes, with linked journal checks.",
+      "limitation": "This fixture requires separately provisioned installation, profile, binaries, Ghidra archive, four scratch mounts, and an evidence root; no such qualification run is claimed here."
+    },
+    {
+      "path": "oracle/gcc/16.2.0/compiler-engines.json",
+      "sha256": "e0ca60b7e856e9330e45fd58e61828313e8dd824413ee0df7ef76ee5d2b47bdc",
+      "companionSchema": {
+        "path": "oracle/gcc/compiler-engines.schema.json",
+        "sha256": "2dca9dda70f95641c5cafd3dae0edc382a3d1b783daed94bfb74ed439932264b"
+      },
+      "limitation": "These are the current profile fixtures inspected by the tests; they are not evidence that a real engine was executed."
+    }
+  ],
+  "unverifiedCriteria": [
+    "No tests were executed for this record, so the listed fixture coverage is declared source coverage rather than a passing result.",
+    "No provisioned cc1 or lto1 fresh/resume run produced retained model, plan, policy, and journal bytes for this record.",
+    "No later-invocation or cold-recovery run proves live-owner absence before reusing a checkpoint, and no stale-input mutation was exercised end to end.",
+    "The byte assessment is explicitly non-authoritative; whole-operation resource accounting, production benchmark acceptance, and release eligibility remain unqualified."
+  ],
+  "validation": {
+    "mode": "source-and-fixture-audit-only",
+    "testsExecuted": [],
+    "checks": ["jq parse", "git diff --check"],
+    "decision": "Tests intentionally skipped per task instruction; this record must not be read as runtime or production qualification."
+  },
+  "disposition": {
+    "implementationStatus": "planner policy, captured-model, deterministic-plan, and journal lineage checks are present in the current contained path",
+    "evidenceStatus": "bounded and incomplete",
+    "complete": false,
+    "benchmarkAccepted": false,
+    "releaseEligible": false
+  }
+}
