@@ -227,12 +227,16 @@ class WebProgressCutoverTest {
             val started = f.owner.transition(f.job.id, f.run.runId, f.run.version, WorkflowTransition.Start).attempt
             val finished = f.owner.transition(f.job.id, f.run.runId, started.version,
                 WorkflowTransition.Finish(WorkflowRunState.COMPLETED, WorkflowTerminalReason.NO_CHANGES)).attempt
-            val metadata = Files.readAllBytes(f.root.resolve("${f.job.id}/workflow-state.json"))
             val original = Files.readAllBytes(f.journal)
             now = now.plus(Duration.ofHours(24)).minusNanos(1)
             assertEquals(ProgressRetentionResult.RETAINED, f.service.expireProgressJournal(f.job.id, f.run.runId, false))
             now = now.plusNanos(1)
             assertEquals(ProgressRetentionResult.RETAINED, f.service.expireProgressJournal(f.job.id, f.run.runId, true))
+            val pinned = f.owner.setProgressRetentionPinned(f.job.id, f.run.runId, finished.version, true).attempt
+            assertEquals(ProgressRetentionResult.RETAINED, f.service.expireProgressJournal(f.job.id, f.run.runId, false))
+            val unpinned = f.owner.setProgressRetentionPinned(f.job.id, f.run.runId, pinned.version, false).attempt
+            assertEquals(finished.copy(version = unpinned.version), unpinned)
+            val metadata = Files.readAllBytes(f.root.resolve("${f.job.id}/workflow-state.json"))
             assertContentEquals(original, Files.readAllBytes(f.journal))
             val cursor = data(f.get("/snapshot")).getValue("throughCursor").jsonPrimitive.content
             val readerWorker = Executors.newSingleThreadExecutor()
@@ -260,7 +264,7 @@ class WebProgressCutoverTest {
                 val freshCursor = fresh.getValue("throughCursor").jsonPrimitive.content
                 assertTrue(replay(f, freshCursor).isEmpty())
                 assertEquals(ProgressRetentionResult.RETAINED, f.service.expireProgressJournal(f.job.id, f.run.runId, false))
-                assertEquals(finished, f.service.getAttempt(f.job.id, f.run.runId))
+                assertEquals(unpinned, f.service.getAttempt(f.job.id, f.run.runId))
                 assertContentEquals(metadata, Files.readAllBytes(f.root.resolve("${f.job.id}/workflow-state.json")))
             } finally { readerWorker.shutdownNow(); assertTrue(readerWorker.awaitTermination(5, TimeUnit.SECONDS)) }
         }
