@@ -13,8 +13,8 @@ const reasons = {
   NO_OWNED_WORKER: 'The server does not own a worker for this attempt. Cancellation is unavailable.',
   CANCELLATION_RECEIPT_CAPACITY: 'Cancellation request history is full. New requests are unavailable; a retained request can still be retried.',
 };
-export function CancellationControls({ jobId, runId, basePath, session, onCurrent }: {
-  jobId: string; runId: string; basePath: string; session: Pick<BrowserSession, 'csrf'>; onCurrent?: (run: Run) => void;
+export function CancellationControls({ jobId, runId, basePath, session, onCurrent, detailRefresh = 0 }: {
+  jobId: string; runId: string; basePath: string; session: Pick<BrowserSession, 'csrf'>; onCurrent?: (run: Run) => void; detailRefresh?: number;
 }) {
   const { client } = usePrivateTransport(basePath);
   const recovery = useMemo(() => createCancellationRecovery(basePath), [basePath]);
@@ -32,7 +32,7 @@ export function CancellationControls({ jobId, runId, basePath, session, onCurren
     setPolicy(null); setBusy(false); setRetained(recovery.read());
     setMessage('Read cancellation status before choosing an action.');
     return () => { active.current?.abort(); active.current = null; };
-  }, [client, recovery, jobId, runId, available]);
+  }, [client, recovery, jobId, runId, available, detailRefresh]);
   function verify(run: Run) {
     if (run.jobId !== jobId || run.runId !== runId) throw new Error('Unexpected attempt.');
   }
