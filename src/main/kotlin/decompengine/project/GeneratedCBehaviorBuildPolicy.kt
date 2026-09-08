@@ -8,7 +8,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 
-/** Generated-C build records and input layout used by local behavior evidence capture. */
+/** Generated-C build records and layout used by behavior capture and archive presentation. */
 internal object GeneratedCBehaviorBuildPolicy : BehaviorBuildPolicy {
     override fun layout(profile: ReconstructionProfile): BehaviorBuildLayout = BehaviorBuildLayout(
         contractPath = "reports/build_contract.json",

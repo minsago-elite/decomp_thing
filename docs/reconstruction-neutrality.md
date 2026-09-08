@@ -60,8 +60,7 @@ ordinary directory ancestors.
 
 The initial repository run fails on remaining policy and ownership migrations.
 Examples include direct Make dispatch in `ReconstructionPipeline`, Doctor/MVP
-compiler assumptions, repair runtime policy,
-web artifact paths, benchmark scripts/tests/workflows, and retained historical
+compiler assumptions, repair runtime policy, benchmark scripts/tests/workflows, and retained historical
 benchmark identities in LLVM reference evidence. Retained evidence must not be
 rewritten merely to satisfy the scanner.
 
