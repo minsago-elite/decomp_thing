@@ -444,9 +444,9 @@ remain outstanding; this change does not claim that all possible journal data is
 
 ### Packaged privacy qualification
 
-The retained [packaged browser report](evidence/web-progress-privacy-browser-20260905.json)
+The retained [packaged browser report](evidence/web-progress-privacy-browser-20260908.json)
 qualifies the current v1 omission behavior with inert data. The fixture contains 205 observations
-with private prose/paths and one private plan. Actual browser reads inspect the first two and
+with private prose/paths, one private plan and one file-change observation. Actual browser reads inspect the first two and
 next 50 events, requiring absence of prose, plan entries and paths, `textOmitted: true`, and
 exact omission counts (one for the plan and file-change records, two otherwise). The UI separately
 traverses all 205 observations as 200/5 pages and retains its text-withholding behavior.
@@ -454,8 +454,8 @@ traverses all 205 observations as 200/5 pages and retains its text-withholding b
 The full history journey also passed exact usage rendering, keyboard/focus continuation,
 pause/age updates, background/offline recovery, native report download, cross-tab session
 invalidation and unchanged journal/report/installation bytes. The archive was built from
-application commit `253a0b6`; its SHA-256 is
-`92daaa7adfda05238421fb2b3f1f4eb28ac9327d1369c6ae42966a03f6c7c882`.
+application commit `d13bc7b1`; its SHA-256 is
+`3ea35e8e65b2d5b986eaa405ab5721ab57412d4c5d85751612b833f0c74c3981`.
 The report records the JAR/UI/Chrome identities, read-only installation, absent Node/npm on
 the application PATH and confirmed cleanup. Chrome used test-only `--no-sandbox`.
 No uploaded binary, native analysis or live agent ran. This covers the embedded SPA on the
