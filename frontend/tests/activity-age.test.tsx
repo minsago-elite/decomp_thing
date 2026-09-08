@@ -57,7 +57,7 @@ it('reconciles a suspended interval when the browser monotonic clock pauses', as
   clock = 1000;
   vi.setSystemTime(1000);
   view.rerender(<ActivityReceiptAge receipt={receipt} visible={false} />);
-  clock = 2000;
+  clock = 1000;
   vi.setSystemTime(3602000);
   view.rerender(<ActivityReceiptAge receipt={receipt} visible />);
   await act(async () => { await Promise.resolve(); });
