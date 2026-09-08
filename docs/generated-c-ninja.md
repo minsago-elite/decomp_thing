@@ -2,7 +2,8 @@
 
 `GeneratedCNinjaReconstructionProfile.descriptor` selects the registered
 `generated-c-ninja-v1` profile through `ArchivalReconstructionService`. The existing
-service API accepts it as the `profile` argument. CLI defaults remain unchanged.
+service API accepts it as the `profile` argument. The CLI accepts
+`--profile generated-c-ninja-v1`; omitting `--profile` retains generated-C/Make.
 
 This profile emits `build.ninja` and invokes Ninja directly. It shares C interface
 rendering, candidate checks and per-module compiler validation with the Make
@@ -19,8 +20,21 @@ Ninja command and dependencies. Ninja logs live under the excluded `build/` tree
 The public `MakeProjectBuilder` remains a compatibility entry point for Make.
 
 Local requirements are Ninja (tested with 1.13.2), the configured C compiler,
-a POSIX shell, and `find`, `sort` and `tr`. The profile can be used through the JVM
-service API; this change does not add a CLI profile selector.
+a POSIX shell, and `find`, `sort` and `tr`. For an agent-free exploratory build:
+
+```sh
+llm_bin_patch reconstruct ./program --output ./reconstruction --profile generated-c-ninja-v1 --evidence-only
+```
+
+Evidence-only mode emits explicitly unresolved placeholders. Profile selection
+also works with the existing configured reconstruction harness. Unknown profile
+IDs and missing profile values are usage errors detected before progress output
+or harness setup. Only the two built-in profile IDs are accepted; this option does
+not load arbitrary profile files. Binary analysis still uses bundled Ghidra.
+
+Installed-launcher tests cover argument validation and absence of output side
+effects. The end-to-end profile proof below starts from an authored model; it does
+not claim a live binary-analysis CLI qualification.
 
 `GeneratedCNinjaIntegrationTest` supplies an authored two-module C model, accepts
 both modules through the compiler gate, builds with Ninja and checks the fixture's
