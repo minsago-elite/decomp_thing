@@ -579,3 +579,9 @@ bind the selected job/attempt, deduplicate events or implement reconnect/fallbac
 remain the stream consumer's responsibility; the activity UI still polls. Tests exercise
 the actual decoder with shared event fixtures, byte-by-byte Unicode, all line endings,
 multiline JSON, gaps, malformed framing, ignored-field budgets and interrupted records.
+
+## Single browser stream connection
+
+PR #399 adds `createEventStream`: one same-origin cookie-authenticated fetch with a bounded Last-Event-ID resume header, selected job/run checks and the incremental decoder above. It shares the existing bounded JSON body reader for HTTP errors and preserves only validated correlation/error metadata. Each connection has a 45-second absolute deadline; abort, early consumer return, retention gap and late fetch completion cancel its source. No reconnect or cursor acknowledgement occurs inside this transport.
+
+301 frontend tests, lint and the typechecked production build pass. Tests include late uncooperative fetch completion, cancellation during a pending read or suspended yield, early exit, HTTP error/correlation handling, oversized frames and selected-run binding. Server and packaged-browser checks were not repeated for this unused client layer. Activity still polls; consuming this stream with snapshot reconciliation, duplicate/order checks and bounded reconnect/fallback remains necessary for #174.
