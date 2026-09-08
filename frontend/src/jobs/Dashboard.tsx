@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { createApiClient, ApiClientError } from '../api/client';
+import { usePrivateTransport } from '../session/PrivateTransport';
+import { useEffect, useRef, useState } from 'preact/hooks';
+import { ApiClientError } from '../api/client';
 import type { Jobs } from '../api/generated';
 import { jobPath } from '../app/paths';
 import { DEFAULT_FILTERS, JOB_STATUSES, JobFilterError, filterSearch, jobFilters } from './query';
@@ -27,7 +28,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
   }, [validationError]);
   const results = useRef<HTMLHeadingElement>(null);
   const moveFocus = useRef(false);
-  const client = useMemo(() => createApiClient({ basePath }), [basePath]);
+  const { client } = usePrivateTransport(basePath);
   // Only one extra bounded page is retained; continuation pages stay server-backed.
   const firstPage = useRef<{ selection: typeof selection; refresh: number; client: typeof client; data: Jobs } | null>(null);
   const cursor = cursors[pageIndex] ?? null;

@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useState } from 'preact/hooks';
-import { createApiClient } from '../api/client';
+import { usePrivateTransport } from '../session/PrivateTransport';
+import { useEffect, useState } from 'preact/hooks';
 import type { Report } from '../api/generated';
 
 export function ExplorationEvidence({ jobId, runId, basePath }: { jobId: string; runId: string; basePath: string }) {
-  const client = useMemo(() => createApiClient({ basePath }), [basePath]);
+  const { client } = usePrivateTransport(basePath);
   const [request, setRequest] = useState(0);
   const [report, setReport] = useState<Report | null>(null);
   const [loading, setLoading] = useState(false);

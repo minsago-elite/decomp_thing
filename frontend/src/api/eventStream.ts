@@ -8,6 +8,7 @@ import { createSseDecoder } from './sse';
 
 interface StreamOptions {
   basePath: string;
+  observeFailure?: () => (error: ApiClientError) => void;
   fetch?: typeof globalThis.fetch;
   timeoutMs?: number;
 }
@@ -32,6 +33,7 @@ export function createEventStream(options: StreamOptions) {
     const url = apiPath(basePath, `/jobs/${selection.jobId}/runs/${selection.runId}/events`);
     const headers = new Headers({ Accept: 'text/event-stream' });
     if (selection.after !== undefined) headers.set('Last-Event-ID', selection.after);
+    const observeFailure = options.observeFailure?.();
     const controller = new AbortController();
     let timedOut = false;
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -97,11 +99,13 @@ export function createEventStream(options: StreamOptions) {
       }
     } catch (error) {
       const source = error instanceof ApiClientError ? error : new ApiClientError('network_error');
-      throw new ApiClientError(source.code, {
+      const failure = new ApiClientError(source.code, {
         ...(response ? { status: response.status } : {}),
         ...(requestId ? { requestId } : {}),
         ...(source.serverCode ? { serverCode: source.serverCode } : {}),
       });
+      observeFailure?.(failure);
+      throw failure;
     } finally {
       clearTimeout(timer);
       selection.signal?.removeEventListener('abort', stop);
