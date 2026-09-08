@@ -14,7 +14,7 @@ export type RuntimeSnapshot = Pick<Bootstrap, 'applicationBuildId' | 'uiBuildId'
 
 export type SessionState =
   | { status: 'public' | 'checking' | 'signing-out' }
-  | { status: 'authenticated'; expiresAt: string; runtime: RuntimeSnapshot }
+  | { status: 'authenticated'; expiresAt: string; runtime: RuntimeSnapshot; serverChanged?: true }
   | { status: 'required'; reason: 'missing' | 'expired' | 'bootstrap-required' | 'bootstrap-expired' | 'invalid-link' | 'signed-out' | 'session-changed' }
   | { status: 'unavailable'; reason: 'connection' | 'configuration' | 'logout-unconfirmed' | 'removal-failed' };
 
@@ -23,6 +23,7 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
   const expectedBase = normalizeBasePath(basePath);
   let state: SessionState = { status: 'public' };
   let csrfToken: string | null = null;
+  let lastServerInstanceId: string | null = null;
   let initialized = false;
   let disposed = false;
   let fragmentBlocked = false;
@@ -86,7 +87,11 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
         readiness: bootstrap.readiness, capabilities: structuredClone(bootstrap.capabilities),
         limits: { ...bootstrap.limits }, runtime: { ...bootstrap.runtime },
       };
-      publish({ status: 'authenticated', expiresAt: bootstrap.sessionExpiresAt, runtime });
+      const instance = bootstrap.serverInstanceId ?? null;
+      const serverChanged = instance !== null && lastServerInstanceId !== null && instance !== lastServerInstanceId;
+      lastServerInstanceId = instance;
+      publish({ status: 'authenticated', expiresAt: bootstrap.sessionExpiresAt, runtime,
+        ...(serverChanged ? { serverChanged: true as const } : {}), });
       expiry = setTimeout(() => {
         forget();
         publish({ status: 'required', reason: 'expired' });
@@ -222,6 +227,7 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
     },
     dispose() {
       disposed = true;
+      lastServerInstanceId = null;
       invalidation.close();
       forget();
       invalidatePending();

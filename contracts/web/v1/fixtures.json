@@ -377,6 +377,14 @@
     {
       "file": "fixtures/invalid-retention-error.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/bootstrap-server-instance.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-bootstrap-server-instance.json",
+      "valid": false
     }
   ]
 }
