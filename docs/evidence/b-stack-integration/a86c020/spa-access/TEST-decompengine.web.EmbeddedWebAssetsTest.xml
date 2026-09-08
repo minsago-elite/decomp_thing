@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.web.EmbeddedWebAssetsTest" tests="11" skipped="0" failures="0" errors="0" timestamp="2026-09-05T17:45:26.107Z" hostname="whatsername" time="1.112">
+  <properties/>
+  <testcase name="only exact public paths are served and method failures are JSON()" classname="decompengine.web.EmbeddedWebAssetsTest" time="0.602"/>
+  <testcase name="shell supports nested base path with manifest links and no executable inline bootstrap()" classname="decompengine.web.EmbeddedWebAssetsTest" time="0.104"/>
+  <testcase name="empty assets have an explicit zero content length()" classname="decompengine.web.EmbeddedWebAssetsTest" time="0.004"/>
+  <testcase name="oversized manifest and dishonest size are rejected with streams closed()" classname="decompengine.web.EmbeddedWebAssetsTest" time="0.003"/>
+  <testcase name="unexpected missing resource replaces successful asset headers with a complete error()" classname="decompengine.web.EmbeddedWebAssetsTest" time="0.004"/>
+  <testcase name="head and conditional reads have metadata and no body()" classname="decompengine.web.EmbeddedWebAssetsTest" time="0.054"/>
+  <testcase name="class directory and jar resources serve exactly the inventoried bytes()" classname="decompengine.web.EmbeddedWebAssetsTest" time="0.28"/>
+  <testcase name="large assets use bounded read buffers and release streams on disconnect()" classname="decompengine.web.EmbeddedWebAssetsTest" time="0.035"/>
+  <testcase name="startup validates vite static dynamic and auxiliary references()" classname="decompengine.web.EmbeddedWebAssetsTest" time="0.003"/>
+  <testcase name="generated production inventory loads from the runtime classpath()" classname="decompengine.web.EmbeddedWebAssetsTest" time="0.005"/>
+  <testcase name="startup rejects absent corrupted and inconsistent inventory resources()" classname="decompengine.web.EmbeddedWebAssetsTest" time="0.008"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

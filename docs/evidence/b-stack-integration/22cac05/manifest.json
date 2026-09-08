@@ -1,0 +1,42 @@
+{
+  "verifiedSourceCommit": "22cac05f497bb0b7ebae5b2dfb045e5698df3d31",
+  "runBeforeCommit": true,
+  "sourceUnchangedBetweenRunAndCommit": true,
+  "suites": {
+    "decompengine.jobs.JobRecoveryInventoryTest": {
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "3c35c9468f13a65be1375dcb7f1623b7d7240e65128a66d44b1ccc9ddd0e101e"
+    },
+    "decompengine.jobs.StagedJobUploadTest": {
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "f877166fc0dcc19f5296ace2b1812dde4761c49cd22c0e255e4f83bd99c39810"
+    },
+    "decompengine.jobs.UploadStagingRecoveryTest": {
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "53332fbc517465b0b3f1763d902ae429f04ebad606054f3328875b7791ef95a5"
+    },
+    "decompengine.web.StreamingUploadServiceTest": {
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "42b1d0eefe5c928c800b800a030a1dcdf317873e95e2407d8e563d6cba1319d6"
+    },
+    "decompengine.web.WebJobServiceTest": {
+      "tests": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "62203e0491edc2ea3b37534b970b482fc2e67fb9f3ab01da1d9d5ae3c3a15908"
+    }
+  }
+}

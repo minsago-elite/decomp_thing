@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.jobs.UploadStagingRecoveryTest" tests="5" skipped="0" failures="0" errors="0" timestamp="2026-09-05T17:55:10.414Z" hostname="whatsername" time="9.84">
+  <properties/>
+  <testcase name="cleanup removes only private staging and leaves published jobs and unrelated hidden entries()" classname="decompengine.jobs.UploadStagingRecoveryTest" time="2.559"/>
+  <testcase name="killed publisher cleanup preserves post-rename receipt and never recovers partial jobs()" classname="decompengine.jobs.UploadStagingRecoveryTest" time="7.231"/>
+  <testcase name="ambiguous historical stages retain all bytes across repeated recovery()" classname="decompengine.jobs.UploadStagingRecoveryTest" time="0.027"/>
+  <testcase name="unexpected entries links and permissions refuse cleanup without touching retained data()" classname="decompengine.jobs.UploadStagingRecoveryTest" time="0.01"/>
+  <testcase name="too many orphan candidates are rejected before cleanup()" classname="decompengine.jobs.UploadStagingRecoveryTest" time="0.009"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

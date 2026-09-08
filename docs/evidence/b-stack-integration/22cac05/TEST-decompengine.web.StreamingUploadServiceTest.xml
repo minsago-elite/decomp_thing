@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.web.StreamingUploadServiceTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-09-05T17:55:20.254Z" hostname="whatsername" time="0.276">
+  <properties/>
+  <testcase name="shutdown retains root ownership until an unresponsive upload stream actually exits()" classname="decompengine.web.StreamingUploadServiceTest" time="0.01"/>
+  <testcase name="two streamed uploads allow status reads and reject extra admission without execution()" classname="decompengine.web.StreamingUploadServiceTest" time="0.159"/>
+  <testcase name="active workflow denies upload before consuming bytes()" classname="decompengine.web.StreamingUploadServiceTest" time="0.106"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
