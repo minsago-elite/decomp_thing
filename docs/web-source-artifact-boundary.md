@@ -74,3 +74,10 @@ Verification is a local point-in-time observation, not an immutable cross-file
 transaction or exclusion of same-UID replace-and-restore interference. It does not
 establish behavioral equivalence, retained execution or runtime-library closure,
 production oracle authority, or release eligibility.
+
+The durable web service also applies archive verification within a selected
+`reports/runs/<runId>` namespace. Source manifests, the complete descriptor-bound
+inventory, payload files, build contract, executable and archive rechecks all use the
+same prefix. Service-mediated reads validate attempt ownership. Archive links retain
+that prefix and pin the verified digest; a later attempt does not redirect an older
+attempt's archive request into the root reports directory.

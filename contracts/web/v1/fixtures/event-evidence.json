@@ -1,0 +1,17 @@
+{
+  "apiVersion": 1,
+  "kind": "event",
+  "type": "evidence.available",
+  "jobId": "1234567890abcdef1234567890abcdef",
+  "runId": "run_example_1",
+  "cursor": "cursor_example_3",
+  "sequence": "3",
+  "occurredAt": "2026-09-05T00:00:00Z",
+  "originRequestId": "request_example_1",
+  "agentInvocationId": null,
+  "agentSequence": null,
+  "payload": {
+    "artifactId": "artifact_example_1",
+    "revisionId": "revision_example_1"
+  }
+}

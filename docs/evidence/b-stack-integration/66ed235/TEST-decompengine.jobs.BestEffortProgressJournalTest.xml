@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.jobs.BestEffortProgressJournalTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-09-05T16:46:23.898Z" hostname="whatsername" time="0.04">
+  <properties/>
+  <testcase name="interrupted close preserves interruption and releases writer()" classname="decompengine.jobs.BestEffortProgressJournalTest" time="0.015"/>
+  <testcase name="failed observer disables further callbacks and releases writer()" classname="decompengine.jobs.BestEffortProgressJournalTest" time="0.014"/>
+  <testcase name="busy journal preserves workflow failure and existing owner()" classname="decompengine.jobs.BestEffortProgressJournalTest" time="0.01"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[Progress reporting is unavailable; workflow results remain authoritative.
+Progress reporting is unavailable; workflow results remain authoritative.
+]]></system-err>
+</testsuite>

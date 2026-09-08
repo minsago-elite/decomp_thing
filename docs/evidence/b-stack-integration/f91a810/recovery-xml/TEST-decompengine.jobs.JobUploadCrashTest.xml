@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.jobs.JobUploadCrashTest" tests="14" skipped="0" failures="0" errors="0" timestamp="2026-09-05T16:04:51.490Z" hostname="whatsername" time="1.626">
+  <properties/>
+  <testcase name="death after input force keeps the upload private()" classname="decompengine.jobs.JobUploadCrashTest" time="0.105"/>
+  <testcase name="death after store force leaves a complete job()" classname="decompengine.jobs.JobUploadCrashTest" time="0.118"/>
+  <testcase name="death before store force leaves a complete job()" classname="decompengine.jobs.JobUploadCrashTest" time="0.115"/>
+  <testcase name="death before stage force keeps the upload private()" classname="decompengine.jobs.JobUploadCrashTest" time="0.108"/>
+  <testcase name="death before metadata write keeps the upload private()" classname="decompengine.jobs.JobUploadCrashTest" time="0.108"/>
+  <testcase name="death after partial input keeps the upload private()" classname="decompengine.jobs.JobUploadCrashTest" time="0.102"/>
+  <testcase name="death after metadata replacement keeps the upload private()" classname="decompengine.jobs.JobUploadCrashTest" time="0.143"/>
+  <testcase name="death after upload rename leaves a complete job()" classname="decompengine.jobs.JobUploadCrashTest" time="0.123"/>
+  <testcase name="death after stage force keeps the upload private()" classname="decompengine.jobs.JobUploadCrashTest" time="0.115"/>
+  <testcase name="death before input write keeps the upload private()" classname="decompengine.jobs.JobUploadCrashTest" time="0.102"/>
+  <testcase name="death before input force keeps the upload private()" classname="decompengine.jobs.JobUploadCrashTest" time="0.101"/>
+  <testcase name="death after metadata force keeps the upload private()" classname="decompengine.jobs.JobUploadCrashTest" time="0.129"/>
+  <testcase name="death after partial metadata keeps the upload private()" classname="decompengine.jobs.JobUploadCrashTest" time="0.113"/>
+  <testcase name="death before upload rename keeps the upload private()" classname="decompengine.jobs.JobUploadCrashTest" time="0.14"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

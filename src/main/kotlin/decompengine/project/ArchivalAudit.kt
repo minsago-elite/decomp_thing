@@ -33,6 +33,7 @@ data class ArchivalAudit(
     val requiredCorpusSha256: List<String> = emptyList(),
     val observedPortableCorpusSha256: List<String> = emptyList(),
     val recoveryAssessment: JsonObject? = null,
+    internal val behaviorReportSha256: Map<String, String> = emptyMap(),
 ) {
     val provenanceComplete: Boolean get() = missingModelProvenance.isEmpty() && missingSourceProvenance.isEmpty()
     val universalEquivalenceClaim: Boolean = false
@@ -312,6 +313,7 @@ object ArchivalProjectAuditor {
             requiredCorpusSha256 = requiredCorpora.sorted(),
             observedPortableCorpusSha256 = observedCorpora.toList(),
             recoveryAssessment = model.unassessedRecoveryAssessment(sha256(modelText.toByteArray(Charsets.UTF_8))),
+            behaviorReportSha256 = behaviorHashes.toMap(),
         )
         require(readStableRegularFile(projectDir, "source_tree_manifest.json", maximumFileBytes).sha256 == manifestSnapshot.sha256) {
             "audit manifest changed during verification"

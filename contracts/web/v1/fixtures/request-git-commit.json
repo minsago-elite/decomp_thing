@@ -1,0 +1,19 @@
+{
+  "apiVersion": 1,
+  "kind": "gitCommitRequest",
+  "data": {
+    "action": "git.commit",
+    "worktreeId": "worktree_example_1",
+    "guards": {
+      "repositoryVersion": "repo_version_1",
+      "worktreeVersion": "worktree_version_1",
+      "expectedHeadObjectId": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "expectedRefId": "ref_main",
+      "expectedRefObjectId": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+    },
+    "selectedFileIds": [
+      "file_example_1"
+    ],
+    "message": "Record reviewed synthetic source changes"
+  }
+}

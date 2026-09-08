@@ -1,6 +1,7 @@
 package decompengine.web
 
 import decompengine.jobs.Job
+import decompengine.jobs.JobRecoveryInventory
 import decompengine.jobs.AgentProgressJournal
 import decompengine.jobs.toJson
 import kotlinx.serialization.json.Json
@@ -22,7 +23,8 @@ import kotlin.io.path.name
 import kotlin.io.path.readText
 import kotlin.math.roundToInt
 
-fun renderDashboard(jobs: List<Job>): String = page(
+fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = emptyList(),
+    recovery: JobRecoveryInventory = JobRecoveryInventory(0, 0, 0, 0, 0, inventoryComplete = true)): String = page(
     title = "Binary workbench",
     body = """
       <header class="hero shell">
@@ -53,13 +55,135 @@ fun renderDashboard(jobs: List<Job>): String = page(
           <div class="section-heading compact">
             <span class="step">02</span>
             <div><p class="kicker">Workspace</p><h2 id="jobs-title">Recent jobs</h2></div>
-            <span class="count">${jobs.size}</span>
+            <span class="count">${jobs.size + diagnostics.size}</span>
           </div>
           ${renderJobList(jobs)}
+          ${diagnostics.joinToString("") { diagnostic -> "<div class=\"job-row\"><span class=\"job-copy\"><strong>Unavailable job ${diagnostic.jobId.escapeHtml()}</strong><small>${diagnostic.code.escapeHtml()}: ${diagnostic.message.escapeHtml()}</small></span></div>" }}
+          ${renderRecoveryInventory(recovery)}
+          <section aria-labelledby="auth-inspection-title">
+            <h3 id="auth-inspection-title">Agent authentication</h3>
+            <p>Inspect advertised methods. Login is not yet supported.</p>
+            <button class="button secondary" type="button" id="inspect-auth-methods">Inspect authentication methods</button>
+            <button class="button secondary" type="button" id="cancel-auth-inspection" disabled>Cancel inspection</button>
+            <p id="auth-inspection-status" role="status"></p>
+            <ol id="auth-method-list"></ol>
+          </section>
         </section>
       </main>
     """.trimIndent(),
     script = """
+      const authButton = document.querySelector('#inspect-auth-methods');
+      const cancelAuthButton = document.querySelector('#cancel-auth-inspection');
+      let authInspectionGeneration = 0;
+      let authInspectionId = null;
+      const validInspectionId = id => typeof id === 'string' && /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id);
+      cancelAuthButton.addEventListener('click', async () => {
+        cancelAuthButton.disabled = true;
+        const generation = authInspectionGeneration;
+        const inspectionId = authInspectionId;
+        if (!validInspectionId(inspectionId)) return;
+        const showCancellationStatus = (text, retry = false) => {
+          if (generation === authInspectionGeneration && authButton.disabled) {
+            document.querySelector('#auth-inspection-status').textContent = text;
+            if (retry) cancelAuthButton.disabled = false;
+          }
+        };
+        try {
+          const response = await fetch('/api/operator/auth-methods/cancel', {
+            method: 'POST', headers: {'X-Decomp-Operator-Action': 'cancel-auth-inspection', 'X-Decomp-Inspection-Id': inspectionId}
+          });
+          showCancellationStatus(response.ok ? 'Cancellation requested; waiting for cleanup.'
+            : 'Cancellation request failed; inspection status is still being checked.', !response.ok);
+        } catch (_) {
+          showCancellationStatus('Cancellation request failed; inspection status is still being checked.', true);
+        }
+      });
+      authButton.addEventListener('click', async () => {
+        authInspectionGeneration++;
+        authInspectionId = null;
+        authButton.disabled = true;
+        const status = document.querySelector('#auth-inspection-status');
+        const list = document.querySelector('#auth-method-list');
+        list.replaceChildren();
+        status.textContent = 'Inspecting advertised methods…';
+        try {
+          try {
+            const response = await fetch('/api/operator/auth-methods', {
+              method: 'POST', cache: 'no-store', headers: {'X-Decomp-Operator-Action': 'inspect-auth'}
+            });
+            if (response.status !== 202 && response.status !== 409) throw new Error('unavailable');
+            // A 409 attaches to the current inspection. Polling can recover a missing acknowledgement.
+            try {
+              const admitted = await response.json();
+              if (validInspectionId(admitted.inspectionId)) authInspectionId = admitted.inspectionId;
+            } catch (_) { }
+          } catch (_) {
+            status.textContent = 'Admission response was lost; checking inspection status…';
+          }
+          let inventory = {status: 'inspecting'};
+          cancelAuthButton.disabled = !validInspectionId(authInspectionId);
+          while (inventory.status === 'inspecting') {
+            await new Promise(resolve => setTimeout(resolve, 300));
+            try {
+              const update = await fetch('/api/operator/auth-methods', {cache: 'no-store'});
+              if (!update.ok) throw new Error('unavailable');
+              const observed = await update.json();
+              if (!observed || !['idle', 'inspecting', 'ready', 'failed', 'cancelled'].includes(observed.status))
+                throw new Error('unavailable');
+              if (validInspectionId(observed.inspectionId) && authInspectionId &&
+                  observed.inspectionId !== authInspectionId) {
+                status.textContent = 'This inspection is no longer active; start a new inspection.';
+                return;
+              }
+              if (observed.status === 'inspecting') {
+                if (!validInspectionId(observed.inspectionId)) throw new Error('unavailable');
+                if (!authInspectionId) {
+                  authInspectionId = observed.inspectionId;
+                  cancelAuthButton.disabled = false;
+                  status.textContent = 'Inspecting advertised methods…';
+                }
+              }
+              inventory = observed;
+              if (inventory.status === 'inspecting' && status.textContent.startsWith(
+                  'Inspection status is unavailable; retrying.'))
+                status.textContent = 'Inspecting advertised methods…';
+            } catch (_) {
+              status.textContent = validInspectionId(authInspectionId)
+                ? 'Inspection status is unavailable; retrying. Cancellation remains available.'
+                : 'Inspection status is unavailable; retrying.';
+              cancelAuthButton.disabled = !validInspectionId(authInspectionId);
+            }
+          }
+          if (inventory.status === 'cancelled') {
+            status.textContent = 'Inspection cancelled; no login attempted.';
+            return;
+          }
+          if (inventory.status !== 'ready') throw new Error('unavailable');
+          for (const method of inventory.methods) {
+            const item = document.createElement('li');
+            item.textContent = [method.idPreview, method.variant, method.namePreview, method.descriptionPreview]
+              .filter(Boolean).join(' · ');
+            list.append(item);
+          }
+          if (inventory.logoutAdvertised) {
+            const item = document.createElement('li');
+            item.textContent = inventory.logoutSupported
+              ? 'Logout advertised · logout capability reported by the agent'
+              : 'Logout advertised · logout remains unsupported here';
+            list.append(item);
+          }
+          status.textContent = inventory.methods.length
+            ? 'Advertised method previews. Login is unsupported; no login attempted.'
+            : (inventory.logoutAdvertised
+              ? 'No authentication methods advertised; the agent advertised logout. Login is unsupported; no login attempted.'
+              : 'No authentication methods advertised; no login attempted.');
+        } catch (_) {
+          status.textContent = 'Authentication inspection is unavailable. Check ACP configuration and cleanup.';
+        } finally {
+          authButton.disabled = false;
+          cancelAuthButton.disabled = true;
+        }
+      });
       const input = document.querySelector('#binary');
       const name = document.querySelector('#file-name');
       input?.addEventListener('change', () => {
@@ -68,14 +192,36 @@ fun renderDashboard(jobs: List<Job>): String = page(
     """.trimIndent(),
 )
 
-fun renderJob(job: Job, sourceTree: SourceTreeView? = null, sourceTreeUnavailable: Boolean = false): String {
+private fun renderRecoveryInventory(inventory: JobRecoveryInventory): String {
+    if (inventory.inventoryComplete && inventory.retainedUploadStages == 0 && inventory.retainedMetadataFiles == 0) return ""
+    val qualifier = if (inventory.inventoryComplete) "Observed" else "At least"
+    val coverage = if (inventory.inventoryComplete) {
+        "The scoped scan finished. Files may still belong to active work."
+    } else {
+        "Inspection is incomplete. More files or bytes may remain beyond this summary."
+    }
+    return """
+        <section class="recovery-note" aria-labelledby="recovery-title">
+          <h3 id="recovery-title">Retained recovery files</h3>
+          <p>$qualifier ${inventory.retainedUploadStages} upload stages and ${inventory.retainedMetadataFiles} metadata temporary files; ${inventory.observedBytes} observed bytes.</p>
+          <p>$coverage No files were deleted. This summary does not establish that cleanup is safe.</p>
+          <a href="/api/recovery">View recovery summary</a>
+        </section>
+    """.trimIndent()
+}
+
+fun renderJob(job: Job, reportContext: WebReportContext? = null,
+    diagnostics: List<decompengine.jobs.WorkflowStoreDiagnostic> = emptyList(),
+    sourceTree: SourceTreeView? = null, sourceTreeUnavailable: Boolean = false): String {
+    val reports = reportsFor(job, reportContext)
     val active = job.status in setOf("queued", "analyzing")
     val metadata = job.metadata.toJson().entries.joinToString("") { (key, value) ->
         "<div class=\"datum\"><dt>${key.replace('_', ' ').title().escapeHtml()}</dt><dd>${value.toString().trim('"').escapeHtml()}</dd></div>"
     }
-    val jobDir = job.binaryPath.parent
-    val artifacts = listArtifacts(jobDir)
-    val action = if (active) {
+    val artifacts = listArtifacts(reports.reportsDirectory)
+    val action = if (reports.runId != null) {
+        "<span class=\"status-note\">Legacy workflow actions are unavailable for jobs with durable attempts.</span>"
+    } else if (active) {
         "<button class=\"button primary\" disabled>Analysis in progress <span class=\"spinner\"></span></button>"
     } else {
         val label = if (job.status == "complete") "Run exploration again" else "Start automatic exploration"
@@ -88,7 +234,7 @@ fun renderJob(job: Job, sourceTree: SourceTreeView? = null, sourceTreeUnavailabl
         const initialStatus = ${jsString(job.status)};
         const poll = async () => {
           try {
-            const eventsResponse = await fetch('/api/jobs/${job.id}/events', {cache: 'no-store'});
+            const eventsResponse = await fetch('/api/jobs/${job.id}/events${reports.runId?.let { "?runId=$it" }.orEmpty()}', {cache: 'no-store'});
             if (eventsResponse.ok) {
               const snapshot = await eventsResponse.json();
               const list = document.querySelector('#agent-event-list');
@@ -108,8 +254,12 @@ fun renderJob(job: Job, sourceTree: SourceTreeView? = null, sourceTreeUnavailabl
                     .map(([key, label]) => label + ': ' + event[key])].filter(value => value !== '').join(' · ');
                 list.append(item);
               }
-              document.querySelector('#agent-event-gap').textContent = snapshot.truncated
-                ? 'Earlier events were omitted from this bounded view. Inspect the invocation receipts for retained evidence.' : '';
+              document.querySelector('#agent-event-gap').textContent = [
+                snapshot.truncated ? 'Some progress events were not retained.' : '',
+                snapshot.events.length > 30 ? 'Showing the latest 30 of ' + snapshot.events.length + ' retained events.' : ''
+              ].filter(Boolean).join(' ');
+            } else {
+              document.querySelector('#agent-event-gap').textContent = 'Progress history is unavailable; retrying.';
             }
             const response = await fetch('/api/jobs/${job.id}', {cache: 'no-store'});
             if (!response.ok) return;
@@ -140,6 +290,8 @@ fun renderJob(job: Job, sourceTree: SourceTreeView? = null, sourceTreeUnavailabl
               </div>
             </section>
             ${job.statusMessage?.let { "<div class=\"status-note ${job.status.escapeHtml()}\"><span></span>${it.escapeHtml()}</div>" }.orEmpty()}
+            ${reports.runId?.let { "<p class=\"status-note\">Reports for workflow attempt ${it.escapeHtml()}. Completion does not establish acceptance.</p>" }.orEmpty()}
+            ${diagnostics.joinToString("") { "<p class=\"status-note\">${it.code.escapeHtml()}: ${it.message.escapeHtml()}</p>" }}
             <div class="job-grid">
               <section class="panel overview-panel">
                 <div class="section-heading compact"><span class="step">01</span><div><p class="kicker">Binary profile</p><h2>ELF metadata</h2></div></div>
@@ -160,22 +312,24 @@ fun renderJob(job: Job, sourceTree: SourceTreeView? = null, sourceTreeUnavailabl
                 </ol>
               </section>
             </div>
-            ${renderExploration(job)}
-            ${renderReconstructionProgress(job)}
-            ${renderAgentProgress(job)}
-            ${sourceTree?.let { renderSourceTree(job, it) }.orEmpty()}
+            ${renderExploration(job, reports)}
+            ${renderReconstructionProgress(job, reports)}
+            ${renderAgentProgress(reports)}
+            ${sourceTree?.let { renderSourceTree(job, it, reports) }.orEmpty()}
             ${if (sourceTreeUnavailable) "<section class=\"panel\"><p>Source-tree evidence is unavailable or has not been generated for this revision.</p></section>" else ""}
-            ${renderRepairHistory(job)}
-            ${renderArtifacts(job, artifacts)}
+            ${renderRepairHistory(job, reports)}
+            ${renderArtifacts(job, artifacts, reports)}
           </main>
         """.trimIndent(),
         script = script,
     )
 }
 
-private fun renderAgentProgress(job: Job): String {
-    val snapshot = runCatching { AgentProgressJournal.read(job.binaryPath.parent.resolve("reports")) }.getOrNull()
-    val events = snapshot?.get("events")?.jsonArray.orEmpty().takeLast(30)
+private fun renderAgentProgress(reports: WebReportContext): String {
+    val loaded = runCatching { AgentProgressJournal.read(reports.reportsDirectory) }
+    val snapshot = loaded.getOrNull()
+    val retained = snapshot?.get("events")?.jsonArray.orEmpty()
+    val events = retained.takeLast(30)
     val rows = events.joinToString("") { item ->
         val event = item.jsonObject
         val summary = listOf(event.text("sequence"), event.text("workflowRunId"), event.text("taskId"), event.text("revisionId"),
@@ -192,8 +346,10 @@ private fun renderAgentProgress(job: Job): String {
             .filter(String::isNotBlank).joinToString(" · ")
         "<li>${summary.escapeHtml()}</li>"
     }
-    val gap = if (snapshot?.get("truncated")?.toString() == "true")
-        "Earlier events were omitted from this bounded view. Inspect the invocation receipts for retained evidence." else ""
+    val gap = if (loaded.isFailure) "Progress history is unavailable." else listOfNotNull(
+        "Some progress events were not retained.".takeIf { snapshot?.get("truncated")?.toString() == "true" },
+        "Showing the latest 30 of ${retained.size} retained events.".takeIf { retained.size > 30 },
+    ).joinToString(" ")
     return """
         <section class="panel agent-progress" aria-labelledby="agent-progress-title">
           <h2 id="agent-progress-title">Agent progress</h2>
@@ -208,10 +364,12 @@ fun renderSourceFile(
     job: Job,
     relativePath: String,
     source: String,
+    reportContext: WebReportContext? = null,
     manifest: JsonObject? = null,
     confidence: JsonObject? = null,
     currentBuildVerified: Boolean = false,
 ): String {
+    val reports = reportsFor(job, reportContext)
     val fileEvidence = manifest?.get("files")?.jsonArray?.mapNotNull { it as? JsonObject }
         ?.firstOrNull { it.text("path") == relativePath }
     val generator = fileEvidence?.text("generator").orEmpty()
@@ -235,7 +393,7 @@ fun renderSourceFile(
         body = """
       <main class="shell source-shell">
         <a class="back-link" href="/jobs/${job.id}">← ${job.filename.escapeHtml()}</a>
-        <section class="source-heading"><div><p class="kicker">Generated source</p><h1>${relativePath.escapeHtml()}</h1></div><a class="button secondary" href="${artifactHref(job, "reports/source-tree/$relativePath")}">Download</a></section>
+        <section class="source-heading"><div><p class="kicker">Generated source</p><h1>${relativePath.escapeHtml()}</h1></div><a class="button secondary" href="${artifactHref(job, "${reports.artifactPrefix}/source-tree/$relativePath")}">Download</a></section>
         $provenance
         <p class="tree-note">${if (currentBuildVerified) "Current build identity verified against the archive and this source revision." else "Current build verification is unavailable for this source revision."} Compilation does not imply behavioral equivalence.</p>
         <pre class="source-view"><code>${source.escapeHtml()}</code></pre>
@@ -252,6 +410,26 @@ fun renderErrorPage(status: Int, title: String, message: String): String = page(
         <h1>${title.escapeHtml()}</h1>
         <p>${message.escapeHtml()}</p>
         <a class="button primary" href="/">Return to workbench</a>
+      </main>
+    """.trimIndent(),
+)
+
+internal fun uploadPublicationProblem(jobId: String) = kotlinx.serialization.json.buildJsonObject {
+    put("error", kotlinx.serialization.json.JsonPrimitive("upload_publication_uncertain"))
+    put("job_id", kotlinx.serialization.json.JsonPrimitive(jobId))
+    put("job_url", kotlinx.serialization.json.JsonPrimitive("/jobs/$jobId"))
+    put("retry_upload", kotlinx.serialization.json.JsonPrimitive(false))
+}
+
+internal fun renderUploadPublicationUncertainPage(jobId: String): String = page(
+    title = "Upload requires review",
+    body = """
+      <main class="shell error-shell">
+        <p class="error-code">409</p>
+        <h1>Upload requires review</h1>
+        <p>The upload may have been saved, but its completion could not be confirmed. Check the job before uploading again.</p>
+        <a class="button primary" href="/jobs/${URLEncoder.encode(jobId, StandardCharsets.UTF_8).escapeHtml()}">Check job</a>
+        <a href="/">Return to workbench</a>
       </main>
     """.trimIndent(),
 )
@@ -274,8 +452,8 @@ private fun renderJobList(jobs: List<Job>): String {
     } + "</div>"
 }
 
-private fun renderExploration(job: Job): String {
-    val reportPath = job.binaryPath.parent.resolve("reports/exploration.json")
+private fun renderExploration(job: Job, reports: WebReportContext): String {
+    val reportPath = reports.reportsDirectory.resolve("exploration.json")
     if (!reportPath.exists()) return """
         <section class="panel evidence-panel pending-evidence">
           <div class="section-heading compact"><span class="step">03</span><div><p class="kicker">Evidence</p><h2>Exploration report</h2></div></div>
@@ -303,7 +481,7 @@ private fun renderExploration(job: Job): String {
     }
     return """
       <section class="panel evidence-panel">
-        <div class="section-heading compact"><span class="step">03</span><div><p class="kicker">Evidence</p><h2>Exploration report</h2></div><a class="text-link" href="${artifactHref(job, "reports/exploration.json")}">Download JSON ↓</a></div>
+        <div class="section-heading compact"><span class="step">03</span><div><p class="kicker">Evidence</p><h2>Exploration report</h2></div><a class="text-link" href="${artifactHref(job, "${reports.artifactPrefix}/exploration.json")}">Download JSON ↓</a></div>
         <div class="metric-grid">
           ${metric("Exploration heuristic", score?.let { "%.3f".format(java.util.Locale.ROOT, it) } ?: "Unavailable", "Uncalibrated")}
           ${metric("Candidates", root.number("candidateCount"), "Generated inputs")}
@@ -318,8 +496,8 @@ private fun renderExploration(job: Job): String {
     """.trimIndent()
 }
 
-fun renderRepairHistory(job: Job): String {
-    val historyPath = job.binaryPath.parent.resolve("reports/repair_history.json")
+fun renderRepairHistory(job: Job, reportContext: WebReportContext? = null): String {
+    val historyPath = reportsFor(job, reportContext).reportsDirectory.resolve("repair_history.json")
     if (!historyPath.exists()) return ""
     val payload = runCatching { Json.parseToJsonElement(historyPath.readText()).jsonObject }.getOrNull()
         ?: return "<section class=\"panel history-panel\"><h2>Repair history</h2><p>Repair history could not be loaded.</p></section>"
@@ -353,11 +531,11 @@ private fun renderEvidence(label: String, evidence: JsonObject?): String {
     return "<p class=\"evidence-line\"><b>$label:</b><span>${kind.escapeHtml()} — ${summary.escapeHtml()}</span>${if (artifact.isBlank()) "" else "<code>${artifact.escapeHtml()}</code>"}</p>"
 }
 
-private fun renderArtifacts(job: Job, artifacts: List<Path>): String {
+private fun renderArtifacts(job: Job, artifacts: List<Path>, reports: WebReportContext): String {
     if (artifacts.isEmpty()) return ""
-    val root = job.binaryPath.parent
+    val root = reports.reportsDirectory
     val links = artifacts.joinToString("") { artifact ->
-        val relative = root.relativize(artifact).toString()
+        val relative = reports.artifactPrefix + "/" + root.relativize(artifact).toString().replace('\\', '/')
         "<a class=\"artifact-row\" href=\"${artifactHref(job, relative)}\"><span class=\"artifact-icon\">${artifact.fileName.toString().substringAfterLast('.', "FILE").uppercase().take(4)}</span><span><strong>${artifact.name.escapeHtml()}</strong><small>${relative.escapeHtml()} · ${runCatching { formatBytes(Files.size(artifact).toInt()) }.getOrDefault("unknown")}</small></span><span>↓</span></a>"
     }
     return """
@@ -368,13 +546,13 @@ private fun renderArtifacts(job: Job, artifacts: List<Path>): String {
     """.trimIndent()
 }
 
-private fun renderSourceTree(job: Job, source: SourceTreeView): String {
+private fun renderSourceTree(job: Job, source: SourceTreeView, reports: WebReportContext): String {
     val files = source.files
     val rows = files.joinToString("") { entry ->
         val relative = entry.path
         val depth = relative.count { it == '/' }
         val kind = entry.roles.first().wireName.uppercase().take(4)
-        "<li style=\"--depth:$depth\"><a href=\"/jobs/${job.id}/source/${encodePath(relative)}\"><span>$kind</span><code>${relative.escapeHtml()}</code><i>→</i></a></li>"
+        "<li style=\"--depth:$depth\"><a href=\"/jobs/${job.id}/source/${encodePath(relative)}${reports.runId?.let { "?runId=$it" }.orEmpty()}\"><span>$kind</span><code>${relative.escapeHtml()}</code><i>→</i></a></li>"
     }
     val confidence = runCatching {
         source.confidence?.get("projectScore")?.jsonPrimitive?.doubleOrNull?.takeIf { it.isFinite() && it in 0.0..1.0 }
@@ -385,14 +563,14 @@ private fun renderSourceTree(job: Job, source: SourceTreeView): String {
         <p class="tree-note">${files.size} readable project files. Structural heuristic scores are uncalibrated. Recovery accuracy and behavioral equivalence are not established by these scores.</p>
         <ul class="source-tree">$rows</ul>
         ${source.archiveSha256?.let { digest ->
-            "<a class=\"button primary archive-download\" href=\"${artifactHref(job, "reports/source-tree.zip")}?sha256=${digest.escapeHtml()}\">Download verified source archive ↓</a><p class=\"tree-note\">SHA-256: <code>${digest.escapeHtml()}</code>. Verified payload and current source/build identity; not behavioral equivalence or release certification.</p>"
+            "<a class=\"button primary archive-download\" href=\"${artifactHref(job, "${reports.artifactPrefix}/source-tree.zip")}?sha256=${digest.escapeHtml()}\">Download verified source archive ↓</a><p class=\"tree-note\">SHA-256: <code>${digest.escapeHtml()}</code>. Verified payload and current source/build identity; not behavioral equivalence or release certification.</p>"
         } ?: "<p class=\"tree-note\">Archive verification is unavailable for the current source/build revision.</p>"}
       </section>
     """.trimIndent()
 }
 
-private fun renderReconstructionProgress(job: Job): String {
-    val path = job.binaryPath.parent.resolve("reports/reconstruction_progress.json")
+private fun renderReconstructionProgress(job: Job, reports: WebReportContext): String {
+    val path = reports.reportsDirectory.resolve("reconstruction_progress.json")
     if (!path.exists()) return ""
     val progress = runCatching { Json.parseToJsonElement(path.readText()).jsonObject }.getOrNull() ?: return ""
     val phase = progress.text("phase")
@@ -407,6 +585,9 @@ private fun renderReconstructionProgress(job: Job): String {
     """.trimIndent()
 }
 
+private fun reportsFor(job: Job, supplied: WebReportContext?): WebReportContext =
+    supplied ?: WebReportContext(job.binaryPath.parent.resolve("reports"))
+
 private fun listArtifacts(jobDir: Path): List<Path> {
     if (!jobDir.exists()) return emptyList()
     val artifacts = mutableListOf<Path>()
@@ -416,14 +597,14 @@ private fun listArtifacts(jobDir: Path): List<Path> {
             require(++entries <= 10_000 && jobDir.relativize(directory).nameCount <= 32) {
                 "report listing exceeds its traversal bound"
             }
-            return if (directory == jobDir.resolve("reports/source-tree")) {
+            return if (directory == jobDir.resolve("source-tree") || directory == jobDir.resolve("runs")) {
                 java.nio.file.FileVisitResult.SKIP_SUBTREE
             } else java.nio.file.FileVisitResult.CONTINUE
         }
 
         override fun visitFile(file: Path, attributes: java.nio.file.attribute.BasicFileAttributes): java.nio.file.FileVisitResult {
             require(++entries <= 10_000) { "report listing exceeds its entry bound" }
-            if (attributes.isRegularFile && file.startsWith(jobDir.resolve("reports"))) artifacts.add(file)
+            if (attributes.isRegularFile) artifacts.add(file)
             return java.nio.file.FileVisitResult.CONTINUE
         }
     })
@@ -545,6 +726,9 @@ h1 em { color: var(--acid); font-style: normal; }
 .guardrails { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 18px; }
 .guardrails span, .source-tag { padding: 5px 8px; background: #222a26; border-radius: 4px; color: var(--muted); font: 700 10px ui-monospace, monospace; letter-spacing: .05em; text-transform: uppercase; }
 .job-list { margin: 0 -8px; }
+.recovery-note { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); font-size: 13px; }
+.recovery-note h3 { margin: 0 0 8px; }
+.recovery-note p { color: var(--muted); line-height: 1.5; }
 .job-row { display: flex; align-items: center; gap: 13px; padding: 15px 10px; text-decoration: none; border-bottom: 1px solid var(--line); border-radius: 7px; transition: .15s ease; }
 .job-row:last-child { border-bottom: 0; }
 .job-row:hover { background: #202722; }
