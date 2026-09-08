@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "identities": [
+    {
+      "name": "gcc-16.2.0-driver-full",
+      "sha256": "8009c7cfc4f66017aa932d86a6d4ec7f374e6ab7a01b3ef5ab3d2fcc78c2378b"
+    },
+    {
+      "name": "gcc-16.2.0-driver-stripped",
+      "sha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4"
+    },
+    {
+      "name": "gcc-16.2.0-driver-executable-load",
+      "sha256": "0c2639a4c2e662205c79515424f1d4b28fb2d6602324ce10c0b575ca3d312499"
+    },
+    {
+      "name": "gcc-16.2.0-cc1-full",
+      "sha256": "ba9b2f314bfb3d92a172e67f8ce993a2e98b9bc14aabf00ff6d58e4631037621"
+    },
+    {
+      "name": "gcc-16.2.0-cc1-stripped",
+      "sha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+    },
+    {
+      "name": "gcc-16.2.0-cc1-executable-load",
+      "sha256": "3e1f9fa39d929d53b3f5f782318559994f5d10985f5b12d0d83f68d07de2f730"
+    },
+    {
+      "name": "gcc-16.2.0-lto1-full",
+      "sha256": "255246e259b194e40fb3f053eafad5a9fdada983404bdae90fc1b9fddfa585e1"
+    },
+    {
+      "name": "gcc-16.2.0-lto1-stripped",
+      "sha256": "35d73b94b8e33cd482095016de28ebaa4e71835720e39b7c5aa82206b562361f"
+    },
+    {
+      "name": "gcc-16.2.0-lto1-executable-load",
+      "sha256": "ba655af0c4c8a85d442fdda11a00f2f087c663c1eed91714429658e9cc50f523"
+    },
+    {
+      "name": "gcc-16.2.0-recorded-origin-image",
+      "sha256": "510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248"
+    },
+    {
+      "name": "gcc-16.2.0-reproduced-image",
+      "sha256": "807f16e03368e1e0ff3c904f21f1a13c260d78a8b7226a52284a2ee68a4d1511"
+    }
+  ]
+}

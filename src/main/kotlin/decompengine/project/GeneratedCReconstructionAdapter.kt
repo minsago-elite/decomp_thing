@@ -4,8 +4,10 @@ import java.nio.file.Path
 
 /** Generated-C/Make implementations selected together for the registered profile. */
 internal object GeneratedCReconstructionAdapter : ReconstructionAdapter {
+    override val diagnostics: ToolchainDiagnosticPolicy = GeneratedCToolchainDiagnostics("gnu-make", "Make")
     override val compilation: ModuleCompilationPolicy = GeneratedCModuleValidation
     override val archiveBuild: ArchiveBuildPolicy = GeneratedCArchiveBuildPolicy
+    override val behaviorBuild: BehaviorBuildPolicy = GeneratedCBehaviorBuildPolicy
     override fun rendering(model: RecoveredProgramModel, plan: ModulePlan): ProjectRendering =
         GeneratedCProjectRendering(model, plan)
     override fun build(projectDir: Path, profile: ReconstructionProfile): BuildReport = MakeProjectBuilder.build(
@@ -20,6 +22,7 @@ internal object GeneratedCReconstructionAdapter : ReconstructionAdapter {
         ),
         profile,
     )
+    override fun modulePrompt(request: ModuleReconstructionRequest): ModulePromptContent = GeneratedCModulePrompt.render(request)
     override fun defaultReconstructor(): ModuleReconstructor = EvidenceModuleReconstructor()
     override fun assess(module: PlannedModule, model: RecoveredProgramModel, generator: String, source: String): List<ModuleReconstructionIssue> =
         GeneratedCCandidateValidation.assess(module, model, generator, source)
