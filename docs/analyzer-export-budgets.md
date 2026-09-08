@@ -20,8 +20,9 @@ handoff. The wrapper now uses [bounded ELF inspection](bounded-elf-metadata.md),
 checks input identity against the exported model and shares its elapsed deadline
 across export and metadata. Selected resident-memory budgets also lower the
 metadata allocation model; a budget below its 8 MiB fixed reservation is rejected
-before binding. This does not bound the entire parent JVM or downstream reports;
-complete phase bounds remain part of
+before binding. The summary and supplemental reports have separate
+[streaming publication bounds](bounded-report-publication.md). These limits do
+not bound the entire parent JVM; complete phase bounds remain part of
 [#84](https://github.com/minsago-elite/decomp_thing/issues/84).
 
 ## Focused verification

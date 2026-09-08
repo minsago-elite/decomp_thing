@@ -86,8 +86,9 @@ metadata windows while authentication still hashes the whole file. The 1 GiB
 ceiling preserves admitted scale; these fixtures do not qualify production-sized
 artifacts or whole-parent resource use.
 
-Downstream unresolved-symbol and generated-file reports still render complete
-strings. Their independent streaming, byte limits and publication behavior remain
-[#84](https://github.com/minsago-elite/decomp_thing/issues/84) work. This change does
-not establish complete phase resource bounds, production execution authority or
-release qualification.
+The analyzer summary and downstream unresolved-symbol/generated-file reports now
+use [bounded streaming and per-file atomic publication](bounded-report-publication.md).
+Their independent limits do not establish complete phase resource bounds,
+whole-parent RSS, production execution authority or release qualification; those
+remaining criteria stay open in
+[#84](https://github.com/minsago-elite/decomp_thing/issues/84).

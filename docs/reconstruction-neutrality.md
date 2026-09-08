@@ -88,6 +88,15 @@ current adapters still use their existing output/control locations; alternate
 inventory-root fixtures establish transport behavior, not an end-to-end proof
 of a backend with relocated artifacts.
 
+Archive output omissions and strict build-control JSON locations come from
+`ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
+and web inventory consume an immutable copy. Preflight retains entry accounting,
+portable-path checks and link checks for omitted output trees. Source/hash
+manifests, required evidence and declared payload paths remain protected. The
+current adapters still use their existing output/control locations; alternate
+inventory-root fixtures establish transport behavior, not an end-to-end proof
+of a backend with relocated artifacts.
+
 ## Scope and limits
 
 The inventory includes tracked files and nonignored untracked files. Ordinary
@@ -118,8 +127,9 @@ output, then forwards that profile and host policy through generation. Two exact
 single-occurrence allowances preserve the old generator and pipeline defaults;
 they do not exempt build dispatch. The analyzer now reads ELF metadata through
 bounded positional windows and checks it against the exported model's input
-identity. Downstream report rendering and complete phase resource bounds remain
-unfinished.
+identity. The analyzer summary and supplemental reports now use
+[bounded streaming publication](bounded-report-publication.md); complete phase
+resource bounds and other report consumers remain unfinished.
 
 Passing the authored scanner tests verifies its detection and exemption
 behavior. It does not make the repository scan pass or complete #84. Current
