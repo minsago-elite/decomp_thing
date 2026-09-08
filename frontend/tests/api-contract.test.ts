@@ -18,7 +18,11 @@ describe('generated v1 contract pipeline', () => {
   for (const record of manifest.fixtures) {
     it(`${record.valid ? 'accepts' : 'rejects'} shared ${record.file}`, () => {
       const text = readFileSync(resolve(root, record.file), 'utf8');
-      if (record.valid) expect(decodeContract(text, { mode: 'producer' })).toBeDefined();
+      if (record.valid) {
+        const decoded = decodeContract(text, { mode: 'producer' });
+        expect(JSON.parse(JSON.stringify(decoded))).toEqual(JSON.parse(text));
+        expect(decodeContract(JSON.stringify(decoded))).toEqual(decoded);
+      }
       else expect(() => decodeContract(text, { mode: 'producer' })).toThrow(ApiClientError);
     });
   }
@@ -41,6 +45,20 @@ describe('generated v1 contract pipeline', () => {
     expect(result).toEqual(original);
     const event = decodeContract(fixture('event-message-lossless'));
     expect(JSON.parse(JSON.stringify(event))).toEqual(JSON.parse(fixture('event-message-lossless')));
+  });
+  it('discards additive nested report claims without promoting partial observations to acceptance', () => {
+    const original = decodeResponse(fixture('report-partial'), 'report');
+    const artifact = original.data.sourceArtifact;
+    if (!artifact) throw Error('Expected report artifact fixture');
+    const extended = { ...original, futureAccepted: true, data: { ...original.data,
+      futureAccepted: true, binding: { ...original.data.binding, futureRevision: 'unreviewed' },
+      sourceArtifact: { ...artifact, futureAccepted: true, binding: { ...artifact.binding, futureRevision: 'unreviewed' } },
+    } };
+    const text = JSON.stringify(extended);
+    expect(decodeResponse(text, 'report')).toEqual(original);
+    expect(decodeResponse(text, 'report').data.acceptance).toBe('unknown');
+    expect(decodeResponse(text, 'report').data.authority).toBe('observations');
+    expect(() => decodeContract(text, { mode: 'producer' })).toThrow(ApiClientError);
   });
   it('rejects unknown request fields and encodes only the real HTTP body', () => {
     const document = decodeContract(fixture('request-session'));
