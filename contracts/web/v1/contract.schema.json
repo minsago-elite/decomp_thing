@@ -2007,6 +2007,9 @@
               "type": "null"
             }
           ]
+        },
+        "recovery": {
+          "$ref": "#/definitions/eventGapRecovery"
         }
       },
       "required": [
@@ -2634,6 +2637,61 @@
           "additionalProperties": false
         }
       ]
+    },
+    "eventGapRecovery": {
+      "type": "object",
+      "properties": {
+        "jobId": {
+          "$ref": "#/definitions/id"
+        },
+        "runId": {
+          "$ref": "#/definitions/id"
+        },
+        "requestedCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/cursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "oldestCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/cursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "latestCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/cursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "snapshotHref": {
+          "type": "string",
+          "maxLength": 1024,
+          "pattern": "^/"
+        }
+      },
+      "required": [
+        "jobId",
+        "runId",
+        "requestedCursor",
+        "oldestCursor",
+        "latestCursor",
+        "snapshotHref"
+      ],
+      "additionalProperties": false
     }
   },
   "oneOf": [

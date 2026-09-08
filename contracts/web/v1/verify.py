@@ -8,6 +8,7 @@ requirements/oracle-generation.txt. This is not an HTTP or runtime conformance t
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 import sys
 
@@ -21,7 +22,20 @@ def check_semantics(document: dict) -> None:
     """Check relationships JSON Schema cannot express with portable draft-07."""
     kind = document["kind"]
     data = document.get("data", {})
-    if kind == "uploadProgress":
+    if kind == "error":
+        error = document["error"]
+        recovery = error.get("recovery")
+        if (error["code"] == "EVENT_GAP") != (recovery is not None):
+            raise ValueError("event gap recovery must accompany only EVENT_GAP")
+        if recovery is not None:
+            if error["retryable"] or error["retryAfterMs"] is not None:
+                raise ValueError("event gaps require reconciliation, not blind retry")
+            if (recovery["oldestCursor"] is None) != (recovery["latestCursor"] is None):
+                raise ValueError("event gap boundary is incomplete")
+            suffix = "/api/v1/jobs/" + recovery["jobId"] + "/runs/" + recovery["runId"] + "/snapshot"
+            if not re.fullmatch(r"(?:/[A-Za-z0-9_-]+)*" + re.escape(suffix), recovery["snapshotHref"]):
+                raise ValueError("event gap snapshot belongs to another resource")
+    elif kind == "uploadProgress":
         if int(data["receivedBytes"]) > 33554433 or (data["totalBytes"] is not None and int(data["totalBytes"]) > 33554432):
             raise ValueError("upload progress exceeds the request ceiling")
         if (data["state"] == "published") != (data["jobId"] is not None):

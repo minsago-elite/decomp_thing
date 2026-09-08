@@ -146,7 +146,8 @@ absence of a total never prevents page navigation.
 Errors carry `code`, safe `message`, `retryable`, optional field-level `details` and
 `retryAfterMs`; the correlation ID connects to redacted server logs. A detail contains a JSON
 pointer plus stable code/message and never the rejected value. Resource existence is disclosed
-only after session authorization. Raw exceptions, commands, environment, paths and credentials
+only after session authorization. EVENT_GAP additionally carries typed recovery metadata for
+the selected resource and a fresh snapshot URL. Raw exceptions, commands, environment, paths and credentials
 are never browser diagnostics.
 
 | Status | Stable examples | Client action |
@@ -442,11 +443,11 @@ The activity client uses this target polling spelling. The existing `cursor` par
 remains an alias for `after`; specifying both, duplicates, unknown fields or a transport
 other than `poll` is rejected. Omitting transport retains JSON polling compatibility.
 `Last-Event-ID` is rejected on polling rather than silently losing its resume position.
-JSON polling remains the activity client transport. An explicit positive `Accept: text/event-stream`
+Activity catches up a bounded polling page, then follows SSE with bounded reconnect and polling fallback. An explicit positive `Accept: text/event-stream`
 on the same endpoint now selects SSE when `transport=poll` is absent. Snapshot `progress` metadata
 makes queue/history omissions and retained-record counts explicit. Missing
 journals fail with `PROGRESS_UNAVAILABLE`; replay gaps require a fresh snapshot
-via `PROGRESS_GAP`. See [the implemented boundary and qualification limits](web-progress-adapter.md).
+via `EVENT_GAP` with typed recovery metadata. See [the implemented boundary and qualification limits](web-progress-adapter.md).
 
 ### Current scheduler snapshot
 
@@ -489,14 +490,16 @@ two per session. There is no per-client event queue; each replay page retains it
 connection termination does not change workflow state. Admission failures use 429 and
 Retry-After; clients can keep using bounded polling.
 
-Before headers, the current adapter preserves polling's 410 `PROGRESS_GAP` response rather
-than the target design's `EVENT_GAP` spelling. After headers, loss of a non-null acknowledged
+Before headers, polling and SSE return 410 `EVENT_GAP`. Its `error.recovery` contains the selected
+jobId/runId, requestedCursor (nullable for an unanchored request), oldestCursor/latestCursor
+(both null for empty retention) and a deployment-bound snapshotHref. These cursors describe
+the same retained bytes that detected the gap. Recovery requires a fresh snapshot, not blind retry. After headers, loss of a non-null acknowledged
 cursor produces a `retention.gap` control event with no SSE id, null cursor/sequence and
 requested/oldest/latest positions plus snapshotHref, then closes. A missing journal, lost
 session or other post-header failure closes the transport; it is not a workflow verdict.
 If no cursor has ever existed, the connection closes and the subsequent initial request
 reports the gap rather than inventing an anchor.
 
-The production UI still uses polling; automatic SSE selection/reconnect/fallback in that
-client is not implemented. Full slow-socket qualification, transactional snapshot cutover,
-timed retention and target gap-error detail convergence remain outstanding under #174.
+Activity uses SSE after bounded polling catch-up, with bounded reconnect and polling fallback.
+Full slow-socket qualification, transactional snapshot cutover and timed retention remain
+outstanding under #174.

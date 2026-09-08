@@ -134,7 +134,7 @@ resetting at a terminal queue drop while preserving the omission counters for
 the snapshot response. It does not certify that omitted events were delivered.
 
 Missing/changed anchors, sequence holes, trailing omissions and process restart
-return `410 PROGRESS_GAP`; malformed/tampered/cross-binding cursors return
+return `410 EVENT_GAP`; malformed/tampered/cross-binding cursors return
 `400 INVALID_CURSOR`. Invalid journals return a bounded `503 PROGRESS_UNAVAILABLE`
 message. A gap discards the prospective page rather than returning silently
 partial history. Snapshot-boundary results retain next-sequence and queue/history
@@ -176,7 +176,7 @@ The version check covers a stable attempt observation around a stable journal
 file read; it is not a transaction between workflow state and journal publication.
 
 Use `oldestCursor` to explicitly read retained history and `throughCursor` to
-resume after the snapshot cutover. Gaps return `410 PROGRESS_GAP`; clients must
+resume after the snapshot cutover. Gaps return `410 EVENT_GAP`; clients must
 read a fresh snapshot and visibly acknowledge lost history before resuming.
 Polling is ordinary bounded HTTP with no retained stream/queue. Bootstrap now
 reports the implemented source-journal read ceilings (1,024 events / 2 MiB);
@@ -593,3 +593,7 @@ Activity first catches up one bounded polling page, then consumes SSE from its a
 This wires the client into Activity; it does not make the guarded snapshot/journal reads transactional or establish timed retention and slow-socket stress qualification. Browser qualification appends one inert observation to its owned journal, requires receipt over an already-open stream without another poll, then restores the original bytes. It does not execute a workflow.
 
 Verification for this integration: 312 frontend tests, lint, typechecked production build and distZip pass. The retained [packaged browser report](evidence/web-activity-stream-browser-20260908.json) confirms appended Activity delivery over SSE without another poll, restored fixture bytes, normal history/privacy/recovery checks and shutdown/owned cleanup. It records the final source and artifact identities and test-only Chrome --no-sandbox. JVM tests were not repeated for this frontend-only runtime change.
+
+## Typed HTTP event-gap recovery
+
+Polling and pre-header SSE gaps now use `410 EVENT_GAP` with `error.recovery`: selected job/run, requested cursor (nullable for an initial unanchored gap), oldest/latest cursors and a deployment-bound snapshot URL. The boundary is derived from the same retained bytes that detected the gap. Empty retention supplies null oldest/latest positions. Invalid cursors remain 400 without recovery metadata; ordinary errors cannot carry gap recovery. The shared schema and semantic checks reject foreign snapshot links, partial boundaries and blind-retry flags. Activity recognizes EVENT_GAP and the older PROGRESS_GAP spelling, and preserves explicit fresh-history recovery. In-stream gaps remain unnumbered controls.

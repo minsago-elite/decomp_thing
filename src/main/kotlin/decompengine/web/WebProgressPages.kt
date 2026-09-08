@@ -24,10 +24,22 @@ internal class WebProgressPages {
             journal.getValue("historyDropped").jsonPrimitive.content, records.size.toString())
     }
 
-    fun page(owner: String, jobId: String, runId: String, bytes: ByteArray, rawQuery: String?): JsonObject {
+    fun page(owner: String, jobId: String, runId: String, bytes: ByteArray, rawQuery: String?,
+        snapshotHref: String = "/api/v1/jobs/$jobId/runs/$runId/snapshot"): JsonObject {
         val (query, cursor) = WebProgressQuery.parse(rawQuery)
         val journal = decode(bytes)
         val records = journal.getValue("events").jsonArray.map { it.jsonObject }
+        fun gap(): Nothing {
+            val retained = boundary(owner, jobId, runId, bytes)
+            throw WebAccessDenied(410, "EVENT_GAP", "Progress history changed or contains omitted events. Read a fresh snapshot before resuming.",
+                eventGap = buildJsonObject {
+                    put("jobId", jobId); put("runId", runId)
+                    put("requestedCursor", cursor?.let(::JsonPrimitive) ?: JsonNull)
+                    put("oldestCursor", retained.oldestCursor?.let(::JsonPrimitive) ?: JsonNull)
+                    put("latestCursor", retained.throughCursor?.let(::JsonPrimitive) ?: JsonNull)
+                    put("snapshotHref", snapshotHref)
+                })
+        }
         var expected = 0L
         val start = if (cursor == null) 0 else {
             val parts = cursor.split('_')
@@ -92,6 +104,5 @@ internal class WebProgressPages {
         .digest(record.toString().toByteArray(Charsets.UTF_8)).take(16).toByteArray().hex()
     private fun ByteArray.hex() = joinToString("") { "%02x".format(it) }
     private fun invalid(): Nothing = throw WebAccessDenied(400, "INVALID_CURSOR", "Use a progress cursor from this session, job and attempt.")
-    private fun gap(): Nothing = throw WebAccessDenied(410, "PROGRESS_GAP", "Progress history changed or contains omitted events. Read a fresh snapshot before resuming.")
     private fun unavailable(): Nothing = throw WebAccessDenied(503, "PROGRESS_UNAVAILABLE", "The retained progress journal could not be read completely.")
 }

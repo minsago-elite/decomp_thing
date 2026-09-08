@@ -47,7 +47,7 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
       const added: WebEvent[] = [];
       let last = previous.last;
       for (const event of items) {
-        if (event.type === 'retention.gap') throw new ApiClientError('http_error', { status: 410, serverCode: 'PROGRESS_GAP' });
+        if (event.type === 'retention.gap') throw new ApiClientError('http_error', { status: 410, serverCode: 'EVENT_GAP' });
         if (event.jobId !== jobId || event.runId !== runId || event.sequence === null || event.cursor === null) throw new Error('binding');
         const duplicate = [...previous.rows, ...added, ...(previous.last ? [previous.last] : [])].find(row => row.cursor === event.cursor || row.sequence === event.sequence);
         if (duplicate) {
@@ -127,7 +127,7 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
           : failure instanceof ApiClientError && failure.status === 403
           ? 'Activity access was denied. Check the local session and server.'
           : transient ? 'Activity reconnect attempts were exhausted. Displayed observations may be stale; read a fresh history to retry.'
-          : failure instanceof ApiClientError && failure.serverCode === 'PROGRESS_GAP'
+          : failure instanceof ApiClientError && ['EVENT_GAP', 'PROGRESS_GAP'].includes(failure.serverCode ?? '')
           ? 'Retained history has a gap. Read a fresh history to establish a new position.'
           : 'Activity could not be verified. Displayed observations may be stale; read a fresh history or check the local session.');
         setFollowing(false);

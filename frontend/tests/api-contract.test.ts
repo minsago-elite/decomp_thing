@@ -141,3 +141,14 @@ describe('workflow observation authority', () => {
     expect(event.payload.omittedFieldCount).toBe('0');
   });
 });
+
+it('binds HTTP gap recovery to the configured deployment and selected snapshot resource', () => {
+  const original = decodeContract(fixture('error-event-gap'));
+  if (original.kind !== 'error' || !original.error.recovery) throw Error('Invalid gap fixture');
+  const nested = { ...original, error: { ...original.error, recovery: {
+    ...original.error.recovery, snapshotHref: '/nested' + original.error.recovery.snapshotHref,
+  } } };
+  expect(decodeContract(JSON.stringify(nested), { basePath: '/nested' })).toEqual(nested);
+  expect(() => decodeContract(JSON.stringify(nested))).toThrow(ApiClientError);
+  expect(() => decodeContract(JSON.stringify(original), { basePath: '/nested' })).toThrow(ApiClientError);
+});

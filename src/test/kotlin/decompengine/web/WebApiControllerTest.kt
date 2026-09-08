@@ -203,8 +203,15 @@ class WebApiControllerTest {
                     })
                 },
             )).toString())
-            assertError(request(server, "$path/events?cursor=$firstCursor", headers = headers), 410, "PROGRESS_GAP")
+            val gapResponse = request(server, "$path/events?cursor=$firstCursor", headers = headers)
+            assertError(gapResponse, 410, "EVENT_GAP")
+            val recovery = Json.parseToJsonElement(gapResponse.body()).jsonObject.getValue("error").jsonObject.getValue("recovery").jsonObject
+            assertEquals(firstCursor, recovery.getValue("requestedCursor").jsonPrimitive.content)
+            assertEquals("$path/snapshot", recovery.getValue("snapshotHref").jsonPrimitive.content)
+            assertEquals(job.id, recovery.getValue("jobId").jsonPrimitive.content)
             val fresh = assertEnvelope(request(server, "$path/snapshot", headers = headers), 200, "snapshot")
+            assertEquals(fresh.getValue("oldestCursor"), recovery.getValue("oldestCursor"))
+            assertEquals(fresh.getValue("throughCursor"), recovery.getValue("latestCursor"))
             assertEquals("1", fresh.getValue("progress").jsonObject.getValue("historyDropped").jsonPrimitive.content)
             assertEquals("2", fresh.getValue("progress").jsonObject.getValue("retainedEventCount").jsonPrimitive.content)
             Files.delete(journalFile)
@@ -510,7 +517,8 @@ class WebApiControllerTest {
         val schema = Json.parseToJsonElement(Files.readString(Path.of("contracts/web/v1/contract.schema.json"))).jsonObject
         if (kind == "error") {
             val error = body.getValue("error").jsonObject
-            assertEquals(setOf("code", "message", "retryable", "details", "retryAfterMs"), error.keys)
+            assertEquals(setOf("code", "message", "retryable", "details", "retryAfterMs") +
+                if (error.getValue("code").jsonPrimitive.content == "EVENT_GAP") setOf("recovery") else emptySet(), error.keys)
             return error
         }
         val data = body.getValue("data").jsonObject

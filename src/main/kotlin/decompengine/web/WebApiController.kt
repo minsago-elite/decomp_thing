@@ -139,7 +139,7 @@ internal class WebApiController(
                                 put("retainedEventCount", boundary.retainedEventCount)
                             })
                         })
-                    } else sendWebApiResponse(exchange, 200, "events", progressPages.page(session.sessionId, parts[1], parts[3], bytes, exchange.requestURI.rawQuery))
+                    } else sendWebApiResponse(exchange, 200, "events", progressPages.page(session.sessionId, parts[1], parts[3], bytes, exchange.requestURI.rawQuery, "${prefix}jobs/${parts[1]}/runs/${parts[3]}/snapshot"))
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/reports/exploration")) -> {
                     access.authorize(exchange, WebEndpointPolicy.privateRead())

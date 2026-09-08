@@ -147,7 +147,12 @@ class WebEventStreamTest {
             assertTrue(eof(reader))
             val reconnect = f.open(headers = mapOf("Last-Event-ID" to first.getValue("id")))
             assertEquals(410, reconnect.statusCode())
-            assertTrue(reconnect.body().use { it.readBytes().decodeToString() }.contains("PROGRESS_GAP"))
+            val error = Json.parseToJsonElement(reconnect.body().use { it.readBytes().decodeToString() }).jsonObject.getValue("error").jsonObject
+            assertEquals("EVENT_GAP", error.getValue("code").jsonPrimitive.content)
+            assertEquals("application/json; charset=utf-8", reconnect.headers().firstValue("Content-Type").orElseThrow())
+            val recovery = error.getValue("recovery").jsonObject
+            val control = body.getValue("payload").jsonObject
+            for (key in listOf("requestedCursor", "oldestCursor", "latestCursor", "snapshotHref")) assertEquals(control[key], recovery[key])
         }
     }
 
