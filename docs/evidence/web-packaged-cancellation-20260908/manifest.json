@@ -1,0 +1,61 @@
+{
+  "applicationSourceCommit": "11f049bb",
+  "driverCommit": "5825f2cb",
+  "masterIncluded": "1c999572",
+  "archiveSha256": "256b2394f2c099ea9d1d00ecd8f00b2a3d27a9a1ad5986f2b082548f72068f30",
+  "buildId": "403a7c0a878ca999841b8c2645d73a83caf7e3d86f1b884fdb501b07ee559d0a",
+  "verification": {
+    "distZip": "passed",
+    "packagedHistoryBrowser": "passed",
+    "cancellationReplay": {
+      "initialIntentTestSeeded": true,
+      "terminalAttemptOnly": true,
+      "actualReceiptPublication": true,
+      "responseDeliberatelyLost": true,
+      "explicitReplayAfterReload": true,
+      "sameKeyAndVersion": true,
+      "replayHeader": true,
+      "automaticMutations": 0,
+      "terminalAcknowledgement": "completed",
+      "attemptRecordsUnchanged": true,
+      "acceptedReferenceUnchanged": true,
+      "diagnosticsUnchanged": true,
+      "replayPreservesDurableBytes": true,
+      "browserStorageEntries": 0,
+      "workflowExecution": false
+    },
+    "gracefulServerRestart": {
+      "stoppedDuringStream": true,
+      "reconnectingPreservesRows": true,
+      "explicitPauseDuringOutage": true,
+      "priorSessionRejected": true,
+      "automaticRequestsAfterRejection": 0,
+      "freshExplicitSignIn": true,
+      "changedInstanceNotice": true,
+      "documentReloadsDuringSignIn": 0,
+      "attemptFactsPreserved": true,
+      "retainedPages": [
+        200,
+        5
+      ],
+      "workflowBytesUnchanged": true,
+      "progressBytesUnchanged": true,
+      "workflowMutations": 0,
+      "sessionExchangeRequests": 1,
+      "storageEntries": 0
+    },
+    "shutdownConfirmed": true,
+    "workCleanupConfirmed": true
+  },
+  "files": {
+    "browser.json": "1da35b9882281aa50f2633d8b0ed35eb3e8e9fdd7dcca8cf00cbe137fabb9a3a",
+    "distribution-build.txt": "f1ef2e56bd0892acf76fba21e9c1d8d04f2b4bb8fc6e1356f15e4c8917b8b6df"
+  },
+  "limits": [
+    "Initial recovery intent is test-seeded on a completed inert attempt. Real receipt response is then deliberately lost after publication.",
+    "No running workflow, cancel/complete race or hung production worker is exercised. Production adapters remain unregistered.",
+    "Accepted reference is null in the packaged fixture. Non-null preservation is separate service-test evidence.",
+    "Graceful restart preserves the new receipt bytes but does not qualify replay by a new browser-session actor.",
+    "Test-only Chrome --no-sandbox; no new JVM unit suite for this driver-only change."
+  ]
+}

@@ -12,6 +12,7 @@ import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyUpgrade } from './packaged-browser-upgrade.mjs';
 import { qualifyServerRestart } from './packaged-browser-restart.mjs';
+import { qualifyCancellationReplay } from './packaged-browser-cancellation.mjs';
 import { qualifyIdleExpiry } from './packaged-browser-idle-expiry.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
@@ -684,6 +685,7 @@ try {
     if (scaleFixture) report.scale = await qualifyScale({ fixture: scaleFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
     if (historyFixture) {
       report.populatedHistory = await qualifyHistory({ fixture: historyFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
+      report.cancellationReplay = await qualifyCancellationReplay({ fixture: historyFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
       report.jobDataCreated = true;
     }
     if (values.mode === 'upload') {
