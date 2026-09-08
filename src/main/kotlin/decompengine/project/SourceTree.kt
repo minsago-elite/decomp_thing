@@ -80,8 +80,11 @@ data class ModuleReconstructionIssue(
 fun interface ModuleReconstructor {
     fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule
 
-    /** Stable identity used only to resume a deliberate unresolved result from the same strategy. */
+    /** Stable strategy identity used when resuming checkpoints. */
     fun cacheIdentity(): String = "custom"
+
+    /** Profile-bound strategies include their effective limits in checkpoint identity. */
+    fun cacheIdentity(profile: ReconstructionProfile): String = cacheIdentity()
 
     /** Agent-backed strategies may resume only checkpoints carrying authenticated execution evidence. */
     fun requiresExecutionEvidenceForCheckpointReuse(): Boolean = false
@@ -114,9 +117,16 @@ class BoundedLlmModuleReconstructor(
 
     init { require(maximumContextCharacters >= 4_096) }
 
-    override fun cacheIdentity(): String =
-        "agent:${harness.implementationIdentifier() ?: "unspecified"}:context-$maximumContextCharacters:" +
+    override fun cacheIdentity(): String = cacheIdentity(maximumContextCharacters)
+
+    override fun cacheIdentity(profile: ReconstructionProfile): String = cacheIdentity(contextBudget(profile))
+
+    private fun cacheIdentity(contextCharacters: Int): String =
+        "agent:${harness.implementationIdentifier() ?: "unspecified"}:context-$contextCharacters:" +
             "factory-${harnessProvenanceSha256 ?: "unbound"}:v2"
+
+    private fun contextBudget(profile: ReconstructionProfile): Int =
+        minOf(maximumContextCharacters, profile.budgets.reconstructionMaximumContextCharacters)
 
     override fun requiresExecutionEvidenceForCheckpointReuse(): Boolean = true
 
@@ -199,11 +209,12 @@ class BoundedLlmModuleReconstructor(
             }
         }
         val contextSize = promptEvidence.length
-        if (contextSize > maximumContextCharacters) {
+        val contextBudget = contextBudget(request.profile)
+        if (contextSize > contextBudget) {
             throw ModuleContextBudgetExceededException(
                 request.module.id,
                 contextSize,
-                maximumContextCharacters,
+                contextBudget,
                 sha256(promptEvidence.toByteArray()),
             )
         }
@@ -259,7 +270,7 @@ class BoundedLlmModuleReconstructor(
                     invocationEvidence,
                     promptSha256,
                     contextSize,
-                    maximumContextCharacters,
+                    contextBudget,
                 )
             }
             require(execution.stopReason == AgentStopReason.COMPLETED) {
@@ -285,7 +296,7 @@ class BoundedLlmModuleReconstructor(
                 generator = "agent:${harness.implementationIdentifier() ?: "unspecified"}",
                 promptSha256 = promptSha256,
                 promptCharacters = contextSize,
-                promptBudgetCharacters = maximumContextCharacters,
+                promptBudgetCharacters = contextBudget,
                 agentExecutionEvidence = invocationEvidence,
             )
         } catch (failure: Exception) {
@@ -302,7 +313,7 @@ class BoundedLlmModuleReconstructor(
                 evidence = requireNotNull(invocationEvidence),
                 promptSha256 = promptSha256,
                 promptCharacters = contextSize,
-                promptBudgetCharacters = maximumContextCharacters,
+                promptBudgetCharacters = contextBudget,
                 cause = failure,
             )
         }
@@ -616,6 +627,8 @@ object SourceTreeGenerator {
                 schemaVersion == 6 && inputBinarySha256 == model.inputSha256 &&
                     modelSchemaVersion == model.schemaVersion && profileSha256 == profile.sha256 &&
                     accepted && issues.isEmpty() &&
+                    (!moduleClaimsAgentExecution(generator, reconstructorIdentity) ||
+                        modulePromptBudgetIsValid(promptCharacters?.toLong(), promptBudgetCharacters?.toLong(), profile)) &&
                     entityIds.size == entityIds.toSet().size &&
                     entityIds.toSet() == (module.functionIds + module.globalIds).toSet() &&
                     compilation?.passed == true &&
@@ -638,7 +651,7 @@ object SourceTreeGenerator {
                 sessionEvidenceFingerprint = fingerprint,
                 acceptedSourceSha256 = verifiedPreviousAcceptance?.sourceSha256,
             )
-            val cacheIdentity = selectedReconstructor.cacheIdentity()
+            val cacheIdentity = selectedReconstructor.cacheIdentity(profile)
             val cached = recordedCheckpoint?.takeIf { checkpoint ->
                 checkpoint.schemaVersion == 6 && checkpoint.inputBinarySha256 == model.inputSha256 &&
                     checkpoint.modelSchemaVersion == model.schemaVersion && checkpoint.profileSha256 == profile.sha256 &&
@@ -700,7 +713,7 @@ object SourceTreeGenerator {
                 val executionEvidence = attempted.agentExecutionEvidence?.let(::persistExecutionEvidence)
                     ?: persistedExecutionEvidence
                 progress.phase(AgentWorkflowPhase.POLICY_CHECKING, module.id)
-                val issues = assessReconstruction(adapter, module, model, attempted, normalizedSource).toMutableList()
+                val issues = assessReconstruction(adapter, profile, module, model, attempted, normalizedSource, cacheIdentity).toMutableList()
                 writeAtomically(sourcePath, normalizedSource)
                 val compilation = if (issues.isEmpty()) {
                     progress.phase(AgentWorkflowPhase.BUILD_VALIDATING, module.id)
@@ -985,7 +998,7 @@ object SourceTreeGenerator {
             evidenceRequired: Boolean,
         ): Boolean {
             val checkpointClaimsAgentExecution =
-                generator.startsWith("agent:") || reconstructorIdentity.startsWith("agent:")
+                moduleClaimsAgentExecution(generator, reconstructorIdentity)
             val evidencePath = executionEvidencePath
                 ?: return !evidenceRequired && !checkpointClaimsAgentExecution
 
@@ -1058,6 +1071,11 @@ object SourceTreeGenerator {
                 require(root.getValue("inputBinarySha256").jsonPrimitive.isString)
                 require(root.getValue("profileSha256").jsonPrimitive.isString)
                 require(!root.getValue("modelSchemaVersion").jsonPrimitive.isString)
+                for (field in listOf("promptCharacters", "promptBudgetCharacters")) {
+                    root[field]?.takeUnless { it is JsonNull }?.jsonPrimitive?.let { value ->
+                        require(!value.isString && value.intOrNull != null) { "$field must be an integer" }
+                    }
+                }
             }
             fun optionalString(name: String): String? = root[name]?.let { value ->
                 if (value is JsonNull) null else value.jsonPrimitive.content
@@ -1223,7 +1241,8 @@ object SourceTreeGenerator {
             else -> "${failure::class.simpleName ?: "Exception"} during module reconstruction"
         }
         return fallback.copy(
-            generator = "unresolved:$reconstructorIdentity",
+            generator = if (failure is ModuleContextBudgetExceededException) "unresolved:profile-budget"
+                else "unresolved:$reconstructorIdentity",
             promptSha256 = agentOutcome?.promptSha256
                 ?: (failure as? ModuleContextBudgetExceededException)?.promptSha256
                 ?: fallback.promptSha256,
@@ -1239,17 +1258,19 @@ object SourceTreeGenerator {
 
     private fun assessReconstruction(
         adapter: ReconstructionAdapter,
+        profile: ReconstructionProfile,
         module: PlannedModule,
         model: RecoveredProgramModel,
         reconstructed: ReconstructedModule,
         source: String,
+        reconstructorIdentity: String,
     ): List<ModuleReconstructionIssue> {
         val entityIds = module.functionIds + module.globalIds
         val issues = reconstructed.issues.toMutableList()
         if (source.isBlank() && entityIds.isNotEmpty()) {
             issues += ModuleReconstructionIssue("empty-source", "module source is empty", entityIds)
         }
-        if (reconstructed.generator.startsWith("agent:")) {
+        if (moduleClaimsAgentExecution(reconstructed.generator, reconstructorIdentity)) {
             if (reconstructed.source != source) {
                 issues += ModuleReconstructionIssue(
                     "agent-source-normalization-changed-bytes",
@@ -1277,6 +1298,12 @@ object SourceTreeGenerator {
                     "agent prompt used $promptCharacters characters with a $promptBudget character budget",
                     entityIds,
                 )
+                !modulePromptBudgetIsValid(promptCharacters.toLong(), promptBudget.toLong(), profile) ->
+                    issues += ModuleReconstructionIssue(
+                        "prompt-budget-invalid",
+                        "agent prompt size or budget is outside the selected reconstruction profile",
+                        entityIds,
+                    )
             }
         }
         issues += adapter.assess(module, model, reconstructed.generator, source)
