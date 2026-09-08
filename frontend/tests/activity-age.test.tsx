@@ -64,6 +64,18 @@ it('reconciles a suspended interval when the browser monotonic clock pauses', as
   expect(screen.getByText(/about 1 hour ago/)).toBeTruthy();
 });
 
+it('reconciles sleep that begins between visible age samples', async () => {
+  vi.setSystemTime(0);
+  render(<ActivityReceiptAge receipt={receipt} visible />);
+  clock = 5000;
+  vi.setSystemTime(5000);
+  await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+  clock = 5000;
+  vi.setSystemTime(3605000);
+  await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+  expect(screen.getByText(/about 1 hour ago/)).toBeTruthy();
+});
+
 it('resets the receipt age when a new verified page arrives', async () => {
   const view = render(<ActivityReceiptAge receipt={receipt} visible />);
   await tick(60000);
