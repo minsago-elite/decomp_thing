@@ -11,6 +11,8 @@ import { seedScale, qualifyScale } from './packaged-browser-scale.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyUpgrade } from './packaged-browser-upgrade.mjs';
+import { qualifyServerRestart } from './packaged-browser-restart.mjs';
+import { qualifyIdleExpiry } from './packaged-browser-idle-expiry.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -27,8 +29,9 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|history|scale|proxy|upgrade|legacy] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|history|scale|proxy|upgrade|legacy|idle-expiry] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
   console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
+  console.log('idle-expiry: opt-in 30-minute real-time production idle expiry with an inert retained attempt; no clock or response interception.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
   console.log('upgrade requires --previous-archive and distinct manifest builds with the old Runtime chunk absent from --archive. Its previous extraction is always removed before the current extraction, even with --keep-workdir.');
   console.log('Reports/screenshots stay in build/. Owned extraction/profile/socket directories are removed after confirmed shutdown unless --keep-workdir is set. Proxy requires npm ci --ignore-scripts under the pinned Node beforehand.');
@@ -41,7 +44,7 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
 }
-assert.ok(['public', 'session', 'upload', 'history', 'scale', 'proxy', 'upgrade', 'legacy'].includes(values.mode), '--mode must be public, session, upload, history, scale, proxy, upgrade or legacy');
+assert.ok(['public', 'session', 'upload', 'history', 'scale', 'proxy', 'upgrade', 'legacy', 'idle-expiry'].includes(values.mode), '--mode must be public, session, upload, history, scale, proxy, upgrade, legacy or idle-expiry');
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
@@ -297,7 +300,7 @@ try {
   recordInstallation(installation);
   const { manifest, data } = installation;
   const legacyFixture = values.mode === 'legacy' ? await seedLegacy(data) : null;
-  const historyFixture = values.mode === 'history' ? await seedHistory(data) : null;
+  const historyFixture = ['history', 'idle-expiry'].includes(values.mode) ? await seedHistory(data) : null;
   const scaleFixture = values.mode === 'scale' ? await seedScale(data) : null;
   const populated = !!(historyFixture || scaleFixture);
   const libraryText = historyFixture ? 'synthetic-history.elf' : scaleFixture ? 'synthetic-project-09999.elf' : 'No uploaded jobs yet.';
@@ -338,6 +341,22 @@ try {
     const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find(part => part.startsWith(origin + '/login#bootstrap=')), 'legacy local bootstrap handoff');
     report.legacy = await qualifyLegacy({ fixture: legacyFixture, origin, bootstrapUrl, tab, cdp, evaluate, ready, makeTarget });
     report.requests.legacy = tab.requests;
+  }
+  if (values.mode === 'idle-expiry') {
+    const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find(part => part.startsWith(browserOrigin + '/nested/#bootstrap=')), 'idle-expiry bootstrap handoff');
+    sensitiveValues.push(new URL(bootstrapUrl).hash.slice('#bootstrap='.length));
+    const qualified = await qualifyIdleExpiry({ fixture: historyFixture, bootstrapUrl, browserOrigin,
+      makeTarget, cdp, evaluate, ready, evidenceDirectory: root,
+      checkLive: () => {
+        for (const child of [application, browser]) {
+          assert.equal(child.exitCode, null, 'Idle-expiry owned process exited');
+          assert.equal(child.signalCode, null, 'Idle-expiry owned process was signalled');
+          if (launchErrors.has(child)) throw launchErrors.get(child);
+        }
+      },
+    });
+    report.idleExpiry = qualified.result;
+    report.requests.idleExpiry = qualified.requests;
   }
   if (values.mode === 'upgrade') {
     const previous = installation;
@@ -672,6 +691,28 @@ try {
       report.uploadFailures = await qualifyUploadFailures({ makeTarget, cdp, evaluate, ready, browserOrigin, data });
       report.measuredUpload = await qualifyMeasuredUpload({ makeTarget, cdp, evaluate, ready, waitFor, browserOrigin, data });
       report.jobDataCreated = true;
+    }
+
+    if (historyFixture) {
+      report.serverRestart = await qualifyServerRestart({ fixture: historyFixture, makeTarget, cdp, evaluate, ready, browserOrigin,
+        stopServer: async () => {
+          const previous = application;
+          assert.equal(previous.exitCode, null, 'Restart qualification requires a live server before SIGTERM');
+          assert.equal(previous.signalCode, null, 'Restart qualification requires an unsignalled server before SIGTERM');
+          await stop(previous);
+          assert.notEqual(previous.signalCode, 'SIGKILL', 'Restart qualification requires graceful server shutdown');
+        },
+        startServer: async () => {
+          const restartedOrigin = await launchApplication(installation, new URL(browserOrigin).port);
+          assert.equal(restartedOrigin, browserOrigin);
+          const handoff = await waitFor(() => applicationOutput.split(/\s+/).find(part => part.startsWith(browserOrigin + '/nested/#bootstrap=')), 'restarted server bootstrap handoff');
+          sensitiveValues.push(new URL(handoff).hash.slice('#bootstrap='.length));
+          return handoff;
+        },
+      });
+      // The restart tab established a new cookie; this existing tab explicitly reloads its session/CSRF snapshot.
+      await cdp.call('Page.reload', {}, authenticated.sessionId);
+      await ready(authenticated, `document.querySelector('#server-runtime-title') !== null`, 'Runtime session after server restart');
     }
 
     // A tab without peer notifications must still reconcile a server rejection.

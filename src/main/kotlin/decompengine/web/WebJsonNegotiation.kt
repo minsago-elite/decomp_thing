@@ -16,7 +16,7 @@ internal fun acceptsWebMediaType(exchange: HttpExchange, mediaType: String, expl
     }
     val ranges = values.single().split(',').mapNotNull { entry ->
         val parts = entry.trim().lowercase().split(';').map(String::trim)
-        val specificity = when (parts[0]) {
+        val baseSpecificity = when (parts[0]) {
             mediaType -> 2
             mediaType.substringBefore('/') + "/*" -> 1
             "*/*" -> 0
@@ -24,9 +24,10 @@ internal fun acceptsWebMediaType(exchange: HttpExchange, mediaType: String, expl
         }
         var quality = 1.0
         var qualitySeen = false
+        var mediaParameterCount = 0
         for (parameter in parts.drop(1)) {
             when {
-                parameter == "charset=utf-8" || parameter == "charset=\"utf-8\"" -> Unit
+                parameter == "charset=utf-8" || parameter == "charset=\"utf-8\"" -> mediaParameterCount++
                 parameter.startsWith("q=") && !qualitySeen -> {
                     if (!parameter.matches(Regex("q=(?:0(?:\\.[0-9]{0,3})?|1(?:\\.0{0,3})?)"))) {
                         return@mapNotNull null
@@ -37,9 +38,9 @@ internal fun acceptsWebMediaType(exchange: HttpExchange, mediaType: String, expl
                 else -> return@mapNotNull null
             }
         }
-        specificity to quality
+        (baseSpecificity + if (baseSpecificity == 2) mediaParameterCount else 0) to quality
     }
     val specificity = ranges.maxOfOrNull { it.first }
     val accepted = specificity != null && ranges.filter { it.first == specificity }.any { it.second > 0 }
-    return accepted && (!explicit || specificity == 2)
+    return accepted && (!explicit || specificity >= 2)
 }

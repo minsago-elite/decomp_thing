@@ -1,0 +1,15 @@
+# Durable cancellation acknowledgements
+
+Tracking: [D2 cancellation #485](https://github.com/minsago-elite/decomp_thing/issues/485), supporting [D4 controls #180](https://github.com/minsago-elite/decomp_thing/issues/180).
+
+The workflow store can atomically retain a cancellation acknowledgement alongside the transition to cancelling. The receipt records a domain-separated actor digest and request-key digest, the selected run, expected and applied versions, acknowledged state, and recording time. Raw session identities and request keys are not persisted. Attribution does not authorize a request.
+
+Replay lookup precedes the version check and is scoped to the job, attempt and actor. An identical request returns the original receipt plus the current attempt, without rewriting storage. A reused key with a changed expected version conflicts. A receipt saying cancelling is not evidence that the attempt is still cancelling: it may now be cancelled, completed, or interrupted after restart. Callers must present the current state separately.
+
+New commands require the current version. Queued/running attempts become cancelling; already cancelling or terminal attempts retain their state and version while recording the acknowledgement. The job retains at most 256 cancellation receipts. New keys are refused at capacity; old keys remain replayable and are never silently evicted. Receipt reclamation is not implemented.
+
+The optional `cancellationReceipts` field is absent from older state and omitted when empty. Once receipts are stored, older readers that reject unknown fields will refuse that state; this does not claim downgrade compatibility. New readers validate the closed receipt structure and target identities. Publication uses the existing atomic workflow-state replacement, so uncertain outcomes must be reconciled by reopening the store before replay.
+
+`WebJobService.requestDurableCancellation` now coordinates receipt publication with the selected owned task under the service monitor. It adopts the current attempt returned by the store, never the receipt's historical version, and signals only when that task has not already received cancellation. A queued task can therefore return an original cancelling acknowledgement alongside its now-cancelled current state. Replaying an old terminal attempt cannot signal the newer task for the same job. Uncertain publication retains the existing recovery-required behavior.
+
+The [authenticated cancellation HTTP adapter](web-cancellation-http.md) now authorizes before deriving the actor or looking up any receipt. Browser controls remain open. Store/service replay after reopen reuses the same supplied actor identity; a fresh browser session has a different identity and is not automatically entitled to the prior session's receipt. This does not restore an invalidated cookie or claim cross-session receipt access. Browser integration and broader HTTP/production qualification remain open.

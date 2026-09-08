@@ -170,3 +170,24 @@ it('uploads browser multipart once with CSRF and retained intent but no resource
   await expect(client.upload(file, {})).rejects.toMatchObject({ code: 'invalid_request' });
   expect(fetcher).toHaveBeenCalledOnce();
 });
+
+it('sends one version-bound cancellation and keeps acknowledgement separate from current state', async () => {
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response('cancellation-replayed'));
+  const client = createApiClient({ basePath: '/workbench', fetch: fetcher });
+  const settings = { csrfToken: 'a'.repeat(43), idempotencyKey: 'cancel_intent_example_1', ifMatch: '"run_version_0"' };
+  const result = await client.put('cancellation', '/jobs/job_fixture/runs/run_fixture/cancellation',
+    'cancellationRequest', { action: 'cancel' }, settings);
+  expect(result.data.acknowledgement.state).toBe('cancelling');
+  expect(result.data.current.state).toBe('completed');
+  expect(result.data.replayed).toBe(true);
+  expect(fetcher).toHaveBeenCalledOnce();
+  const init = fetcher.mock.calls[0]?.[1];
+  expect(init?.method).toBe('PUT'); expect(init?.body).toBe('{"action":"cancel"}');
+  const headers = new Headers(init?.headers);
+  expect(headers.get('If-Match')).toBe(settings.ifMatch);
+  expect(headers.get('Idempotency-Key')).toBe(settings.idempotencyKey);
+  fetcher.mockRejectedValueOnce(new Error('inert lost acknowledgement'));
+  await expect(client.put('cancellation', '/jobs/job_fixture/runs/run_fixture/cancellation',
+    'cancellationRequest', { action: 'cancel' }, settings)).rejects.toMatchObject({ code: 'network_error' });
+  expect(fetcher).toHaveBeenCalledTimes(2);
+});

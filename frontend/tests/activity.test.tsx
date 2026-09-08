@@ -168,3 +168,24 @@ it('does not infer an empty plan when entry metadata is absent', async () => {
   mount(); fireEvent.click(screen.getByRole('button', { name: 'Follow activity' }));
   expect(await screen.findByText('Plan entries reported: Not recorded. Retained entry metadata: Not recorded.')).toBeTruthy();
 });
+
+it('withholds unpriced receipt costs throughout activity rows without inventing totals', async () => {
+  const page = structuredClone(events);
+  page.data.items = ['agent_finished', 'context_usage', 'message'].map((observationKind, index) => ({
+    ...page.data.items[0]!, sequence: String(index), cursor: `cursor_${index}`,
+    payload: { ...page.data.items[0]!.payload, observationKind, fields: {
+      reportedCostAmount: '987654321.125', reportedCostCurrency: 'USD',
+      inputTokens: '18446744073709551615', contextUsedTokens: '9007199254740993',
+    } },
+  }));
+  page.data.nextCursor = 'cursor_2';
+  transport.get.mockResolvedValueOnce(snapshot).mockResolvedValueOnce(page);
+  mount(); fireEvent.click(screen.getByRole('button', { name: 'Follow activity' }));
+  await waitFor(() => expect(screen.getAllByRole('listitem')).toHaveLength(3));
+  expect(screen.getAllByText(/Cost estimate unavailable: no configured pricing basis is supplied/)).toHaveLength(2);
+  expect(screen.getByText('18446744073709551615')).toBeTruthy();
+  expect(screen.getByText('9007199254740993')).toBeTruthy();
+  expect(document.body.textContent).not.toContain('987654321.125');
+  expect(document.body.textContent).not.toContain('USD');
+  expect(document.body.textContent).not.toMatch(/\$[0-9]/);
+});

@@ -1,0 +1,52 @@
+> Task :checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :compileKotlin UP-TO-DATE
+> Task :compileJava UP-TO-DATE
+
+> Task :verifyFrontendToolchain
+
+> decomp-workbench@0.1.0 toolchain
+> node scripts/check-toolchain.mjs
+
+
+> Task :frontendInstall UP-TO-DATE
+> Task :frontendBuild UP-TO-DATE
+> Task :generateFrontendAssetManifest UP-TO-DATE
+
+> Task :verifyFrontendAssets
+{"buildId":"1bbcbd3f337cfe18f03ac83ca2df89922ff6bb6fdeb82d2f346db5f3529fcc05","files":9,"totalBytes":146503,"verified":true}
+
+> Task :stageFrontend UP-TO-DATE
+> Task :processResources UP-TO-DATE
+> Task :classes UP-TO-DATE
+> Task :jar UP-TO-DATE
+> Task :compileTestKotlin UP-TO-DATE
+> Task :compileTestJava NO-SOURCE
+> Task :buildAcpGateHelper
+> Task :verifyAcpGateHelper
+> Task :generateAcpGateHelperChecksum UP-TO-DATE
+> Task :ghidra-bridge:fetchGhidra
+> Task :ghidra-bridge:unpackGhidra UP-TO-DATE
+> Task :ghidra-bridge:compileJava UP-TO-DATE
+> Task :ghidra-bridge:processResources NO-SOURCE
+> Task :ghidra-bridge:classes UP-TO-DATE
+> Task :ghidra-bridge:jar UP-TO-DATE
+> Task :ghidra-bridge:stageBundle UP-TO-DATE
+> Task :generateGccBundledGhidraReference UP-TO-DATE
+> Task :stageKotlinBootRuntime UP-TO-DATE
+> Task :generateKotlinBootClasspathReference UP-TO-DATE
+> Task :buildLlvmBehaviorHelper
+> Task :verifyLlvmBehaviorHelper
+> Task :generateLlvmBehaviorHelperChecksum UP-TO-DATE
+> Task :generateLlvmHostedWorkerClasspathReference UP-TO-DATE
+> Task :stageOracleNativeLibraries UP-TO-DATE
+> Task :processTestResources UP-TO-DATE
+> Task :testClasses UP-TO-DATE
+> Task :test
+> Task :ghidra-bridge:compileTestJava NO-SOURCE
+> Task :ghidra-bridge:processTestResources NO-SOURCE
+> Task :ghidra-bridge:testClasses UP-TO-DATE
+> Task :ghidra-bridge:test NO-SOURCE
+
+BUILD SUCCESSFUL in 3m
+29 actionable tasks: 8 executed, 21 up-to-date
+Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.6.1/userguide/configuration_cache_enabling.html

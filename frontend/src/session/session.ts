@@ -62,6 +62,7 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
   function failed(error: unknown, logout = false) {
     forget();
     const code = error instanceof ApiClientError ? error.serverCode : undefined;
+    if (code === 'SESSION_REQUIRED' || code === 'SESSION_EXPIRED') notifyInvalidated(false);
     if (code === 'SESSION_REQUIRED') publish({ status: 'required', reason: 'missing' });
     else if (code === 'SESSION_EXPIRED') publish({ status: 'required', reason: 'expired' });
     else if (code === 'BOOTSTRAP_REQUIRED') publish({ status: 'required', reason: 'bootstrap-required' });
@@ -77,6 +78,7 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
       publish({ status: 'unavailable', reason: 'configuration' });
     } else if (remaining <= 0) {
       forget();
+      notifyInvalidated(false);
       publish({ status: 'required', reason: 'expired' });
     } else {
       forget();
@@ -93,7 +95,9 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
       publish({ status: 'authenticated', expiresAt: bootstrap.sessionExpiresAt, runtime,
         ...(serverChanged ? { serverChanged: true as const } : {}), });
       expiry = setTimeout(() => {
+        invalidatePending();
         forget();
+        notifyInvalidated(false);
         publish({ status: 'required', reason: 'expired' });
       }, Math.min(remaining, 2_147_483_647));
     }
@@ -192,6 +196,7 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
           || !['SESSION_REQUIRED', 'SESSION_EXPIRED'].includes(error.serverCode ?? '')) return;
         invalidatePending();
         forget();
+        notifyInvalidated(false);
         publish({ status: 'required', reason: error.serverCode === 'SESSION_EXPIRED' ? 'expired' : 'missing' });
       };
     },
