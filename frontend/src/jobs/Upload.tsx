@@ -62,6 +62,9 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
     window.addEventListener('beforeunload', warn);
     return () => { window.removeEventListener('beforeunload', warn); };
   }, [phase]);
+  useEffect(() => {
+    if (phase === 'pending' && state?.status !== 'authenticated') active.current?.abort();
+  }, [phase, state?.status]);
 
   function select(files: FileList | null) {
     if (active.current || (phase === 'retry' && attempt) || retained.kind === 'blocked') return;
