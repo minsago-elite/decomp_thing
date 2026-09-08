@@ -166,8 +166,13 @@ object ArchivalProjectAuditor {
                     val checkpointText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
                     UniqueJsonObjectKeyValidator(checkpointText).validate()
                     val checkpoint = Json.parseToJsonElement(checkpointText).jsonObject
-                    require(checkpoint.getValue("schemaVersion") == JsonPrimitive(5)) {
+                    require(checkpoint.getValue("schemaVersion") == JsonPrimitive(6)) {
                         "module checkpoint lacks the supported compiler acceptance schema"
+                    }
+                    require(checkpoint.string("inputBinarySha256") == model.inputSha256 &&
+                        checkpoint.getValue("modelSchemaVersion") == JsonPrimitive(model.schemaVersion) &&
+                        checkpoint.string("profileSha256") == profile.sha256) {
+                        "module checkpoint input identity differs from the audited model or profile"
                     }
                     require(checkpoint.boolean("accepted")) { "module checkpoint does not record acceptance" }
                     require(checkpoint.getValue("issues").jsonArray.isEmpty()) {

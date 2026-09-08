@@ -15,11 +15,15 @@ The compiler uses the profile's driver and flags, including mandatory `-Werror`,
 and compiles the module to `/dev/null`. Its execution uses the profile's time and
 output limits and the same environment sanitation as the full-project builder.
 
-New module checkpoints use schema 5. Their compilation record binds the command,
+New module checkpoints use schema 6. They retain the selected input-binary identity,
+model schema version and profile SHA-256 alongside the module fingerprint.
+Cache reuse, rollback acceptance and archival audit require these identities to
+match the current model and profile. Their compilation record binds the command,
 source SHA-256, outcome, return code, and diagnostic digest and byte count. The
 archive verifier checks a successful record against the source and declared
-profile. Historically verified schema-4 archives remain readable; generation
-regenerates schema-4 checkpoints so new accepted revisions pass the compiler gate.
+profile. The archive reader accepts historical schema-4 and schema-5 records, but current
+audit treats their acceptance as unresolved. Generation regenerates those
+checkpoints to retain input identities and pass the current compiler gate.
 Full-project linking and behavior validation remain required by their respective
 archive and release workflows.
 

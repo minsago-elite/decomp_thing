@@ -801,7 +801,8 @@ class SourceTreeTest {
 
     @Test
     fun `contradictory accepted checkpoints are neither reused nor offered as rollback baselines`() {
-        for (change in listOf("command", "owners", "duplicate", "status", "issues", "schema")) {
+        for (change in listOf("command", "owners", "duplicate", "status", "issues", "schema",
+            "unbound-schema", "binary", "model-schema", "profile", "string-schema")) {
             val project = createTempDirectory("source-checkpoint-acceptance-")
             val input = oneModuleModel()
             SourceTreeGenerator.generate(input, project, reconstructor = validReconstructor())
@@ -809,6 +810,11 @@ class SourceTreeTest {
             val checkpoint = Json.parseToJsonElement(path.readText()).jsonObject
             val statuses = checkpoint.getValue("entityStatuses").jsonArray
             val changed = when (change) {
+                "unbound-schema" -> JsonObject(checkpoint + ("schemaVersion" to JsonPrimitive(5)))
+                "binary" -> JsonObject(checkpoint + ("inputBinarySha256" to JsonPrimitive("other-input")))
+                "model-schema" -> JsonObject(checkpoint + ("modelSchemaVersion" to JsonPrimitive(99)))
+                "string-schema" -> JsonObject(checkpoint + ("modelSchemaVersion" to JsonPrimitive(input.schemaVersion.toString())))
+                "profile" -> JsonObject(checkpoint + ("profileSha256" to JsonPrimitive("0".repeat(64))))
                 "command" -> JsonObject(checkpoint + ("compilation" to JsonObject(
                     checkpoint.getValue("compilation").jsonObject + ("command" to JsonArray(listOf(JsonPrimitive("other-compiler")))))))
                 "owners" -> JsonObject(checkpoint + ("entityStatuses" to JsonArray(emptyList())))
@@ -843,13 +849,13 @@ class SourceTreeTest {
         val input = oneModuleModel()
         SourceTreeGenerator.generate(input, project, reconstructor = validReconstructor())
         val checkpoint = project.resolve("reports/modules/parse.json")
-        checkpoint.writeText(checkpoint.readText().replace("\"schemaVersion\": 5", "\"schemaVersion\": 4"))
+        checkpoint.writeText(checkpoint.readText().replace("\"schemaVersion\": 6", "\"schemaVersion\": 4"))
         var calls = 0
 
         SourceTreeGenerator.generate(input, project, reconstructor = validReconstructor { calls++ })
 
         assertEquals(1, calls)
-        assertTrue(checkpoint.readText().contains("\"schemaVersion\": 5"))
+        assertTrue(checkpoint.readText().contains("\"schemaVersion\": 6"))
         assertTrue(checkpoint.readText().contains("\"outcome\":\"passed\""))
     }
 

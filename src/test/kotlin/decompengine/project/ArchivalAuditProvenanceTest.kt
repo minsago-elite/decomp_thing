@@ -77,7 +77,7 @@ class ArchivalAuditProvenanceTest {
 
     @Test
     fun `accepted flags cannot hide missing or mismatched compiler evidence`() {
-        for (change in listOf("missing", "foreign-source", "failed", "foreign-command", "old-schema", "future-schema",
+        for (change in listOf("missing", "foreign-source", "failed", "foreign-command", "old-schema", "future-schema", "unbound-schema", "foreign-binary", "foreign-model-schema", "foreign-profile",
             "foreign-entity", "missing-entity", "duplicate-entity", "unresolved-entity", "unresolved-issue")) {
             val project = fixture(accepted = true)
             assertTrue(ArchivalProjectAuditor.audit(project).moduleCompilationEvidenceProblems.isEmpty())
@@ -93,7 +93,11 @@ class ArchivalAuditProvenanceTest {
                 "foreign-source" -> checkpoint.withField("compilation", compilation.withField("sourceSha256", JsonPrimitive("0".repeat(64))))
                 "failed" -> checkpoint.withField("compilation", compilation.withField("outcome", JsonPrimitive("failed")))
                 "old-schema" -> checkpoint.withField("schemaVersion", JsonPrimitive(4))
-                "future-schema" -> checkpoint.withField("schemaVersion", JsonPrimitive(6))
+                "future-schema" -> checkpoint.withField("schemaVersion", JsonPrimitive(7))
+                "unbound-schema" -> checkpoint.withField("schemaVersion", JsonPrimitive(5))
+                "foreign-binary" -> checkpoint.withField("inputBinarySha256", JsonPrimitive("foreign-input"))
+                "foreign-model-schema" -> checkpoint.withField("modelSchemaVersion", JsonPrimitive(99))
+                "foreign-profile" -> checkpoint.withField("profileSha256", JsonPrimitive("0".repeat(64)))
                 "foreign-entity" -> checkpoint.withField("entityStatuses", JsonArray(listOf(
                     statuses.first().jsonObject.withField("id", JsonPrimitive("foreign-entity")))))
                 "missing-entity" -> checkpoint.withField("entityStatuses", JsonArray(emptyList()))

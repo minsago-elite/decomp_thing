@@ -731,7 +731,9 @@ object SourceTreeGenerator {
             }
             val recordedCheckpoint = readCheckpoint(checkpointPath)
             fun ModuleCheckpoint.hasCurrentModuleAcceptance(): Boolean =
-                schemaVersion == 5 && accepted && issues.isEmpty() &&
+                schemaVersion == 6 && inputBinarySha256 == model.inputSha256 &&
+                    modelSchemaVersion == model.schemaVersion && profileSha256 == profile.sha256 &&
+                    accepted && issues.isEmpty() &&
                     entityIds.size == entityIds.toSet().size &&
                     entityIds.toSet() == (module.functionIds + module.globalIds).toSet() &&
                     compilation?.passed == true &&
@@ -756,7 +758,9 @@ object SourceTreeGenerator {
             )
             val cacheIdentity = reconstructor.cacheIdentity()
             val cached = recordedCheckpoint?.takeIf { checkpoint ->
-                checkpoint.schemaVersion == 5 && checkpoint.fingerprint == fingerprint &&
+                checkpoint.schemaVersion == 6 && checkpoint.inputBinarySha256 == model.inputSha256 &&
+                    checkpoint.modelSchemaVersion == model.schemaVersion && checkpoint.profileSha256 == profile.sha256 &&
+                    checkpoint.fingerprint == fingerprint &&
                     sourcePath.exists() &&
                     sha256(sourcePath.readBytes()) == checkpoint.sourceSha256 &&
                     checkpoint.reconstructorIdentity == cacheIdentity &&
@@ -850,6 +854,9 @@ object SourceTreeGenerator {
                 val accepted = issues.isEmpty()
                 val normalizedSourceSha256 = sha256(normalizedSource.toByteArray())
                 val candidateCheckpoint = ModuleCheckpoint(
+                    inputBinarySha256 = model.inputSha256,
+                    modelSchemaVersion = model.schemaVersion,
+                    profileSha256 = profile.sha256,
                     fingerprint = fingerprint,
                     sourceSha256 = normalizedSourceSha256,
                     generator = attempted.generator,
@@ -1117,7 +1124,7 @@ object SourceTreeGenerator {
     }
 
     private data class ModuleCheckpoint(
-        val schemaVersion: Int = 5,
+        val schemaVersion: Int = 6,
         val fingerprint: String,
         val sourceSha256: String,
         val generator: String,
@@ -1136,9 +1143,14 @@ object SourceTreeGenerator {
         val executionTerminalOutcome: String? = null,
         val executionReleaseComplete: Boolean? = null,
         val compilation: ModuleCompilationEvidence? = null,
+        val inputBinarySha256: String? = null,
+        val modelSchemaVersion: Int? = null,
+        val profileSha256: String? = null,
     ) {
         init {
-            require(schemaVersion in 2..5) { "unsupported module checkpoint schemaVersion: $schemaVersion" }
+            require(schemaVersion < 6 || (inputBinarySha256 != null && modelSchemaVersion in setOf(1, 2) &&
+                profileSha256?.matches(Regex("[0-9a-f]{64}")) == true)) { "module checkpoint lacks input identity" }
+            require(schemaVersion in 2..6) { "unsupported module checkpoint schemaVersion: $schemaVersion" }
             require(schemaVersion < 5 || !accepted ||
                 (compilation?.passed == true && compilation.sourceSha256 == sourceSha256)
             ) { "accepted module checkpoint lacks successful compilation of its exact source bytes" }
@@ -1217,6 +1229,11 @@ object SourceTreeGenerator {
                 append("\n  \"executionReleaseComplete\": ")
                 append(executionReleaseComplete ?: "null").append(',')
             }
+            if (schemaVersion >= 6) {
+                append("\n  \"inputBinarySha256\": ").append(kotlinx.serialization.json.JsonPrimitive(inputBinarySha256)).append(',')
+                append("\n  \"modelSchemaVersion\": ").append(modelSchemaVersion).append(',')
+                append("\n  \"profileSha256\": ").append(kotlinx.serialization.json.JsonPrimitive(profileSha256)).append(',')
+            }
             append("\n  \"accepted\": ").append(accepted).append(',')
             if (schemaVersion >= 5) {
                 append("\n  \"compilation\": ").append(compilation?.toJson() ?: "null").append(',')
@@ -1244,12 +1261,21 @@ object SourceTreeGenerator {
         return runCatching {
             val root = Json.parseToJsonElement(path.readText()).jsonObject
             val schemaVersion = root["schemaVersion"]?.jsonPrimitive?.intOrNull ?: return null
-            if (schemaVersion !in setOf(2, 3, 4, 5)) return null
+            if (schemaVersion !in setOf(2, 3, 4, 5, 6)) return null
+            if (schemaVersion >= 6) {
+                require(root.getValue("schemaVersion") == kotlinx.serialization.json.JsonPrimitive(6))
+                require(root.getValue("inputBinarySha256").jsonPrimitive.isString)
+                require(root.getValue("profileSha256").jsonPrimitive.isString)
+                require(!root.getValue("modelSchemaVersion").jsonPrimitive.isString)
+            }
             fun optionalString(name: String): String? = root[name]?.let { value ->
                 if (value is JsonNull) null else value.jsonPrimitive.content
             }
             ModuleCheckpoint(
                 schemaVersion = schemaVersion,
+                inputBinarySha256 = if (schemaVersion >= 6) optionalString("inputBinarySha256") else null,
+                modelSchemaVersion = if (schemaVersion >= 6) root["modelSchemaVersion"]?.jsonPrimitive?.intOrNull else null,
+                profileSha256 = if (schemaVersion >= 6) optionalString("profileSha256") else null,
                 fingerprint = root.getValue("fingerprint").jsonPrimitive.content,
                 sourceSha256 = root.getValue("sourceSha256").jsonPrimitive.content,
                 generator = root.getValue("generator").jsonPrimitive.content,
