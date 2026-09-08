@@ -9,6 +9,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -33,6 +34,7 @@ data class ArchivalAudit(
     val requiredCorpusSha256: List<String> = emptyList(),
     val observedPortableCorpusSha256: List<String> = emptyList(),
     val recoveryAssessment: JsonObject? = null,
+    val moduleCompilationEvidence: Map<String, JsonObject> = emptyMap(),
 ) {
     val provenanceComplete: Boolean get() = missingModelProvenance.isEmpty() && missingSourceProvenance.isEmpty()
     val universalEquivalenceClaim: Boolean = false
@@ -54,6 +56,7 @@ data class ArchivalAudit(
           "moduleSourceRevisions": [${moduleRevisionSha256.toSortedMap().entries.joinToString(",") { (id, hash) -> "{\"moduleId\":${JsonPrimitive(id)},\"sourceRevisionSha256\":${JsonPrimitive(hash)}}" }}],
           "moduleBehaviorEvidence": [],
           "moduleCompilationEvidenceProblems": {${moduleCompilationEvidenceProblems.toSortedMap().entries.joinToString(",") { (id, problem) -> "${JsonPrimitive(id)}:${JsonPrimitive(problem)}" }}},
+          "moduleCompilationEvidence": ${JsonObject(moduleCompilationEvidence.toSortedMap())},
           "moduleExecutionCoverage": "not-observed",
           "projectBehaviorReportIds": [${projectBehaviorReportIds.sorted().joinToString(",") { JsonPrimitive(it).toString() }}],
           "isolationAssurance": "local requests only; no retained production containment evidence",
@@ -122,6 +125,7 @@ object ArchivalProjectAuditor {
         val moduleRevisions = linkedMapOf<String, String>()
         val implementationOwners = mutableSetOf<String>()
         val compilationProblems = linkedMapOf<String, String>()
+        val compilationEvidence = linkedMapOf<String, JsonObject>()
         val compilationUnresolved = mutableSetOf<String>()
         for (element in planJson.getValue("modules").jsonArray) {
             val module = element.jsonObject
@@ -199,6 +203,26 @@ object ArchivalProjectAuditor {
                         it.jsonPrimitive.content
                     }
                     require(command == GeneratedCModuleValidation.command(profile, source)) { "compiler command differs from the reconstruction profile" }
+                    require(compilation.keys == setOf("sourceSha256", "command", "outcome", "returnCode", "diagnosticsSha256", "diagnosticsBytes")) {
+                        "compiler evidence has unsupported fields"
+                    }
+                    require(compilation.string("diagnosticsSha256").matches(Regex("[0-9a-f]{64}"))) {
+                        "compiler diagnostic commitment is invalid"
+                    }
+                    val diagnosticBytes = compilation.getValue("diagnosticsBytes").jsonPrimitive
+                    require(!diagnosticBytes.isString && diagnosticBytes.longOrNull?.let {
+                        it in 0..profile.budgets.buildMaximumOutputBytes
+                    } == true) { "compiler diagnostic byte count is invalid" }
+                    compilationEvidence[identifier] = JsonObject(linkedMapOf(
+                        "sourcePath" to JsonPrimitive(source),
+                        "sourceSha256" to JsonPrimitive(hashes.getValue(source)),
+                        "checkpointPath" to JsonPrimitive(checkpointPath),
+                        "checkpointSha256" to JsonPrimitive(snapshot.sha256),
+                        "inputBinarySha256" to JsonPrimitive(model.inputSha256),
+                        "modelSchemaVersion" to JsonPrimitive(model.schemaVersion),
+                        "profileSha256" to JsonPrimitive(profile.sha256),
+                        "compilation" to compilation,
+                    ))
                 } catch (failure: Exception) {
                     if (failure is InterruptedException) throw failure
                     compilationProblems[identifier] = failure.message.orEmpty().take(512).ifEmpty { failure.javaClass.simpleName }
@@ -314,6 +338,7 @@ object ArchivalProjectAuditor {
             behaviorEvidenceProblems = problems,
             projectBehaviorReportIds = verifiedBehavior.keys.sorted(),
             moduleCompilationEvidenceProblems = compilationProblems,
+            moduleCompilationEvidence = compilationEvidence,
             requiredCorpusSha256 = requiredCorpora.sorted(),
             observedPortableCorpusSha256 = observedCorpora.toList(),
             recoveryAssessment = model.unassessedRecoveryAssessment(sha256(modelText.toByteArray(Charsets.UTF_8))),

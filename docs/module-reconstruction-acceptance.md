@@ -86,3 +86,12 @@ Each module's confidence `revisionEvidence` exposes `inputBinarySha256`,
 These identify the selected model input and fingerprint encoding without requiring
 a reader to infer them from a hash. They are model-bound local attribution fields,
 not a new claim of authenticated binary execution or behavioral coverage.
+
+Archival audit exposes `moduleCompilationEvidence`, keyed by module ID, for
+accepted revisions that pass its compiler-record checks. Each record retains the
+source path and digest, checkpoint path and digest, binary/model/profile identities
+and compiler record. For sources marked accepted, invalid or historical
+checkpoint records appear in `moduleCompilationEvidenceProblems` instead.
+Unaccepted sources have no accepted compiler record. Diagnostic commitments and counts
+are format-checked and bounded; retained hashes do not independently authenticate
+the compiler or prove that diagnostic bytes were replayed.
