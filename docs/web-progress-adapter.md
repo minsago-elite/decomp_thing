@@ -160,8 +160,8 @@ The versioned API now exposes read-only `GET /api/v1/jobs/J/runs/R/snapshot` and
 `GET /api/v1/jobs/J/runs/R/events?cursor=...&limit=...`, including nested base paths.
 Both require the existing local session/origin policy and JSON Accept rules.
 The server resolves the exact durable attempt, reads its fixed journal artifact
-through the checked descriptor boundary, and rejects a changed attempt version
-after the read with `409 PROGRESS_CHANGED`. Missing/inaccessible journal bytes
+through the checked descriptor boundary while holding the durable attempt store read transaction.
+Lifecycle publication cannot interleave with that local evidence capture. Missing/inaccessible journal bytes
 return `503 PROGRESS_UNAVAILABLE`, never an invented empty history. The reader's
 missing-target exception needed explicit mapping; the HTTP regression caught
 and fixed an initial generic 500 response for that case.
@@ -172,8 +172,9 @@ record count. This optional v1 field preserves old snapshot fixture compatibilit
 new endpoint responses always supply it. Consumers must not interpret its absence
 as complete history. Counter/cursor consistency checks run in the typed client
 and shared verifier. Snapshot run state remains independent of journal claims.
-The version check covers a stable attempt observation around a stable journal
-file read; it is not a transaction between workflow state and journal publication.
+The read transaction holds run state stable while the checked descriptor captures one atomic
+journal publication. Its immutable attempt and captured bytes define the snapshot watermark;
+the store lock is released before decoding, serialization or network delivery.
 
 Use `oldestCursor` to explicitly read retained history and `throughCursor` to
 resume after the snapshot cutover. Gaps return `410 EVENT_GAP`; clients must
@@ -599,3 +600,9 @@ Verification for this integration: 312 frontend tests, lint, typechecked product
 Polling and pre-header SSE gaps now use `410 EVENT_GAP` with `error.recovery`: selected job/run, requested cursor (nullable for an initial unanchored gap), oldest/latest cursors and a deployment-bound snapshot URL. The boundary is derived from the same retained bytes that detected the gap. Empty retention supplies null oldest/latest positions. Invalid cursors remain 400 without recovery metadata; ordinary errors cannot carry gap recovery. The shared schema and semantic checks reject foreign snapshot links, partial boundaries and blind-retry flags. Activity recognizes EVENT_GAP and the older PROGRESS_GAP spelling, and preserves explicit fresh-history recovery. In-stream gaps remain unnumbered controls.
 
 Verification: 231 JVM web/journal tests, 321 frontend tests, lint, typechecked build, distZip and 44 valid/36 invalid shared fixtures pass. The [retained packaged report](evidence/web-event-gap-browser-20260908.json) confirms the visible expired-cursor gap, preserved rows, explicit fresh-history recovery, restored fixture bytes and shutdown/owned cleanup. Snapshot/journal transactionality, timed retention and slow-socket stress remain unproven.
+
+## Durable attempt read transaction
+
+`WorkflowAttemptStore.withAttemptSnapshot` holds the existing job stripe and ownership read lock while the service captures bounded local journal bytes. `WebJobService.readProgressSnapshot` preserves initialization/publication-failure admission and the authenticated fixed-artifact boundary. Snapshot, polling and SSE share this reader. Durable lifecycle/acceptance publication and ownership release cannot interleave with evidence capture; no lock is held during HTTP serialization, socket writes, heartbeat waits or reconnect delays.
+
+The journal writer continues atomic file publication independently. The captured publication and the stable attempt coexist during the read; subsequent appends are addressed by the existing watermark cursor, and eviction produces EVENT_GAP. This is a read transaction, not a new writer journal or a second workflow authority. Concurrency tests cover a competing lifecycle transition, close waiting for capture, callback failure releasing the lock and foreign-run rejection. Full concurrent snapshot/replay stress and timed retention remain to be qualified under #174.

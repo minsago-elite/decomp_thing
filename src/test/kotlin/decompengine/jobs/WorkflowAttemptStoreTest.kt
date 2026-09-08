@@ -295,6 +295,85 @@ class WorkflowAttemptStoreTest {
         }
     }
 
+    @Test
+    fun `attempt read transaction excludes lifecycle publication through local evidence capture`() = withRoot { root ->
+        val job = upload(root)
+        WorkflowAttemptStore.open(root, CLOCK).use { store ->
+            val queued = store.create(job, store.available(job).snapshot.version, NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, LIMITS)).attempt
+            val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            val mutationStarted = CountDownLatch(1); val mutationDone = CountDownLatch(1)
+            val executor = Executors.newFixedThreadPool(2)
+            try {
+                val read = executor.submit<WorkflowAttempt> {
+                    store.withAttemptSnapshot(job, queued.runId) { attempt ->
+                        entered.countDown(); check(release.await(5, TimeUnit.SECONDS))
+                        // The local evidence is captured before the durable state lock is released.
+                        assertTrue(stateJson(root, job).readText().contains(queued.version))
+                        attempt
+                    }
+                }
+                assertTrue(entered.await(5, TimeUnit.SECONDS))
+                val mutation = executor.submit<WorkflowMutation> {
+                    mutationStarted.countDown()
+                    try { store.transition(job, queued.runId, queued.version, WorkflowTransition.Start) }
+                    finally { mutationDone.countDown() }
+                }
+                assertTrue(mutationStarted.await(5, TimeUnit.SECONDS))
+                assertFalse(mutationDone.await(100, TimeUnit.MILLISECONDS))
+                release.countDown()
+                assertEquals(queued, read.get(5, TimeUnit.SECONDS))
+                val running = mutation.get(5, TimeUnit.SECONDS).attempt
+                assertEquals(WorkflowRunState.RUNNING, running.state)
+                assertNotEquals(queued.version, running.version)
+                assertEquals(running, store.withAttemptSnapshot(job, queued.runId) { it })
+            } finally { release.countDown(); executor.shutdownNow() }
+        }
+    }
+
+    @Test
+    fun `failed snapshot callback releases transaction and foreign run never invokes callback`() = withRoot { root ->
+        val job = upload(root)
+        WorkflowAttemptStore.open(root, CLOCK).use { store ->
+            val queued = store.create(job, store.available(job).snapshot.version, NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, LIMITS)).attempt
+            assertFailsWith<IOException> { store.withAttemptSnapshot(job, queued.runId) { throw IOException("inert read failure") } }
+            var called = false
+            assertCode("RUN_NOT_FOUND") { store.withAttemptSnapshot(job, "run_missing") { called = true } }
+            assertFalse(called)
+            val executor = Executors.newSingleThreadExecutor()
+            try {
+                val result = executor.submit<WorkflowMutation> { store.transition(job, queued.runId, queued.version, WorkflowTransition.Start) }
+                assertEquals(WorkflowRunState.RUNNING, result.get(5, TimeUnit.SECONDS).attempt.state)
+            } finally { executor.shutdownNow() }
+        }
+    }
+
+    @Test
+    fun `storage close waits for an active snapshot and rejects reads after ownership release`() = withRoot { root ->
+        val job = upload(root)
+        val store = WorkflowAttemptStore.open(root, CLOCK)
+        val queued = store.create(job, store.available(job).snapshot.version, NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, LIMITS)).attempt
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        val closeStarted = CountDownLatch(1); val closeDone = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(2)
+        try {
+            val read = executor.submit<WorkflowAttempt> { store.withAttemptSnapshot(job, queued.runId) {
+                entered.countDown(); check(release.await(5, TimeUnit.SECONDS)); it
+            } }
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            val closing = executor.submit {
+                closeStarted.countDown()
+                try { store.close() } finally { closeDone.countDown() }
+            }
+            assertTrue(closeStarted.await(5, TimeUnit.SECONDS))
+            assertFalse(closeDone.await(100, TimeUnit.MILLISECONDS))
+            release.countDown()
+            assertEquals(queued, read.get(5, TimeUnit.SECONDS))
+            closing.get(5, TimeUnit.SECONDS)
+            assertCode("STORE_CLOSED") { store.withAttemptSnapshot(job, queued.runId) { error("must not execute") } }
+            WorkflowAttemptStore.open(root, CLOCK).use { assertEquals(queued, it.withAttemptSnapshot(job, queued.runId) { attempt -> attempt }) }
+        } finally { release.countDown(); executor.shutdownNow(); store.close() }
+    }
+
     private fun completeCandidate(store: WorkflowAttemptStore, job: String): WorkflowMutation {
         val queued = store.create(job, store.available(job).snapshot.version, NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, LIMITS))
         val running = store.transition(job, queued.attempt.runId, queued.attempt.version, WorkflowTransition.Start)

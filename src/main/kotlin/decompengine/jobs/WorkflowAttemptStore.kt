@@ -123,6 +123,15 @@ class WorkflowAttemptStore private constructor(
 
     fun inspect(jobId: String): WorkflowJobInspection = withJob(jobId) { directory -> inspectLocked(jobId, directory) }
 
+    /** Read-side transaction: callers may read bounded local evidence, never wait on network delivery.
+     * Lifecycle publication and close cannot interleave until the callback has returned.
+     */
+    internal fun <T> withAttemptSnapshot(jobId: String, runId: String, read: (WorkflowAttempt) -> T): T = withJob(jobId) { directory ->
+        val attempt = available(jobId, directory).snapshot.attempts.singleOrNull { it.runId == runId }
+            ?: fail("RUN_NOT_FOUND", "The requested attempt does not belong to this job.")
+        read(attempt)
+    }
+
     fun create(jobId: String, expectedJobVersion: String, request: NewWorkflowAttempt): WorkflowMutation = withJob(jobId) { directory ->
         val current = available(jobId, directory).snapshot
         checkVersion(current.version, expectedJobVersion)

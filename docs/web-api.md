@@ -501,5 +501,6 @@ If no cursor has ever existed, the connection closes and the subsequent initial 
 reports the gap rather than inventing an anchor.
 
 Activity uses SSE after bounded polling catch-up, with bounded reconnect and polling fallback.
-Full slow-socket qualification, transactional snapshot cutover and timed retention remain
+Run state now stays locked during bounded journal capture, with locks released before HTTP delivery.
+Full concurrent snapshot/replay stress, slow-socket qualification and timed retention remain
 outstanding under #174.

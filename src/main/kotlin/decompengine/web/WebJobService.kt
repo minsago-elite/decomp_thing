@@ -254,6 +254,20 @@ class WebJobService(
         }
     }
 
+    /** Hold durable run state stable across the checked atomic journal read, not HTTP delivery. */
+    @Synchronized
+    internal fun readProgressSnapshot(jobId: String, runId: String): Pair<WorkflowAttempt, ByteArray> {
+        getAttempt(jobId, runId) // Enforce initialization and publication-failure admission first.
+        val owner = attempts ?: throw WebJobServiceException("JOB_NOT_FOUND", "The requested job is unavailable.")
+        return try {
+            owner.withAttemptSnapshot(jobId, runId) { attempt ->
+                attempt to readProgressJournal(jobId, attempt.runId)
+            }
+        } catch (failure: WorkflowStoreException) {
+            throw WebJobServiceException(failure.code, "The requested progress snapshot is unavailable.")
+        }
+    }
+
     @Synchronized
     fun resolveArtifact(jobId: String, relativePath: String): Path {
         requireInitializedRead()
