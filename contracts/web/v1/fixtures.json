@@ -365,6 +365,18 @@
     {
       "file": "fixtures/invalid-progress-pin-actor.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/bootstrap-retention.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-retention-accounting.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-retention-error.json",
+      "valid": false
     }
   ]
 }

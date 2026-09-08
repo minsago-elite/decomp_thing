@@ -53,6 +53,10 @@ def check_semantics(document: dict) -> None:
         if len(identities) != len(set(identities)):
             raise ValueError("a job appears more than once in a page")
     elif kind == "bootstrap":
+        retention = data["runtime"].get("progressRetention")
+        if retention is not None:
+            if int(retention["expired"]) > int(retention["examined"]) or ((int(retention["failures"]) == 0) != (retention["lastFailureCode"] is None)):
+                raise ValueError("retention counters are inconsistent")
         scheduler = data["runtime"].get("scheduler")
         if scheduler is not None and scheduler["state"] == "available":
             if int(scheduler["activeWorkers"]) > int(scheduler["workerLimit"]) or int(scheduler["queuedTasks"]) > int(scheduler["queueCapacity"]):

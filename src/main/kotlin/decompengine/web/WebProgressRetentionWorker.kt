@@ -1,5 +1,9 @@
 package decompengine.web
 
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.buildJsonObject
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
@@ -41,3 +45,14 @@ internal class WebProgressRetentionWorker(intervalMs: Long, step: () -> Unit, st
 internal data class WebProgressRetentionStatus(
     val enabled: Boolean, val examined: Long, val expired: Long, val failures: Long, val lastFailureCode: String?,
 )
+
+/** Process-local scan counters, sampled for private bootstrap; never an expiry completion promise. */
+internal fun webProgressRetentionStatus(status: WebProgressRetentionStatus): JsonObject =
+    buildJsonObject {
+        put("enabled", JsonPrimitive(status.enabled))
+        put("sampledAt", JsonPrimitive(java.time.Instant.now().toString()))
+        put("examined", JsonPrimitive(status.examined.toString()))
+        put("expired", JsonPrimitive(status.expired.toString()))
+        put("failures", JsonPrimitive(status.failures.toString()))
+        put("lastFailureCode", status.lastFailureCode?.let { JsonPrimitive(it) } ?: JsonNull)
+    }

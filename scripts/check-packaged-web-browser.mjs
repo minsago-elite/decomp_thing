@@ -619,7 +619,14 @@ try {
     assert.deepEqual(scheduler.values, ['running', '0', '2', '0', '32']);
     assert.ok(scheduler.text.includes('approximate aggregate observations') && scheduler.text.includes('queue position and start time are not reported'));
     assert.ok(Number.isFinite(Date.parse(scheduler.sampledAt)));
-    report.runtimeSnapshot = { connected: true, unavailableCapabilitiesExplained: true, scheduler: { approximate: true, lifecycle: 'running', activeWorkers: 0, workerLimit: 2, queuedTasks: 0, queueCapacity: 32, sampledAt: scheduler.sampledAt, queuePositionUnknown: true }, navigationRequests: 0 };
+    const retention = await evaluate(authenticated, `(() => {
+      const section = document.querySelector('section[aria-labelledby="retention-title"]');
+      return { text: section.innerText, values: Array.from(section.querySelectorAll('dd')).map(node => node.textContent), sampledAt: section.querySelector('time')?.dateTime };
+    })()`);
+    assert.ok(retention.text.includes('Periodic progress cleanup is enabled.') && retention.text.includes('reset on restart') && retention.text.includes('does not promise an exact expiry time'));
+    assert.ok(retention.values.slice(0, 3).every(value => /^(0|[1-9][0-9]*)$/.test(value)));
+    assert.ok(Number.isFinite(Date.parse(retention.sampledAt)));
+    report.runtimeSnapshot = { retention: { enabled: true, processLocalCounters: true, sampledAt: retention.sampledAt, boundedScanExplained: true }, connected: true, unavailableCapabilitiesExplained: true, scheduler: { approximate: true, lifecycle: 'running', activeWorkers: 0, workerLimit: 2, queuedTasks: 0, queueCapacity: 32, sampledAt: scheduler.sampledAt, queuePositionUnknown: true }, navigationRequests: 0 };
 
     await cdp.call('Page.reload', {}, authenticated.sessionId);
     await ready(authenticated, `document.querySelector('h1')?.textContent === 'Runtime status' && document.body.innerText.includes('Local session connected.')`, 'cookie session restored after reload');

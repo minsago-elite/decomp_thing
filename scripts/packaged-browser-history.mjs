@@ -12,7 +12,8 @@ export async function seedHistory(root) {
   const input = Buffer.alloc(64);
   input.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]);
   input.writeUInt16LE(2, 16); input.writeUInt16LE(62, 18); input.writeUInt32LE(1, 20); input.writeUInt16LE(64, 52);
-  const at = '2026-09-05T00:00:00Z';
+  // This journey tests replay/pinning, so keep its history inside the real retention window.
+  const at = new Date(Date.now() - 300_000).toISOString();
   const job = { id: jobId, filename: 'synthetic-history.elf', status: 'uploaded', created_at: at, updated_at: at,
     size_bytes: 64, binary_path: join(directory, 'input.elf'), metadata: { format: 'ELF64', endianness: 'little',
       elf_version: 1, os_abi: 'System V', object_type: 'EXEC', machine: 'x86-64', entry_point: 0,
