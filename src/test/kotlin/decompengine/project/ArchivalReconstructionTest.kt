@@ -123,6 +123,34 @@ class ArchivalReconstructionTest {
     }
 
     @Test
+    fun `requested profile budgets cannot raise the default host ceiling`() {
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val host = ReconstructionHostSafetyLimits.DEFAULT
+        val raised = base.budgets.copy(
+            reconstructionMaximumContextCharacters = host.maximum.reconstructionMaximumContextCharacters + 1,
+        )
+        val profile = ReconstructionProfile(base.schemaVersion, base.id, base.layout, raised, base.adapterConfiguration)
+        val digest = profile.sha256
+        var calls = 0
+        val analyzer = ProgramModelAnalyzer { _, _ -> calls++; error("must not analyze") }
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ArchivalReconstructionService(analyzer, profile = profile)
+        }
+        assertTrue(failure.message.orEmpty().contains("context budget exceeds the host safety limit"))
+        assertFailsWith<IllegalArgumentException> { GhidraHeadlessProgramModelAnalyzer.bundled(profile) }
+        assertEquals(0, calls)
+        assertEquals(digest, profile.sha256)
+        // A host caller can explicitly authorize another ceiling; this does not alter the request.
+        val explicitHost = ReconstructionHostSafetyLimits(raised)
+        ArchivalReconstructionService(analyzer, profile = profile, hostSafetyLimits = explicitHost)
+        GhidraHeadlessProgramModelAnalyzer.bundled(profile, explicitHost)
+        assertEquals(0, calls)
+        assertEquals(digest, profile.sha256)
+        assertEquals(base.budgets.reconstructionMaximumContextCharacters,
+            host.maximum.reconstructionMaximumContextCharacters)
+    }
+
+    @Test
     fun `service rejects unsupported profiles before analysis or output writes`() {
         val base = GeneratedCMakeReconstructionProfile.descriptor
         val profile = ReconstructionProfile(base.schemaVersion, "unsupported-service-v1", base.layout,
