@@ -92,6 +92,42 @@ class FullTreePlanningInventoryControlTest {
         }
 
     @Test
+    fun `clang options dispatch binds exact planning owners without an emitted denominator`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+
+        val modules = registry.requireOwnerModulesForShard("clang-lib-options")
+        assertEquals(2, modules.size)
+        assertEquals(
+            listOf(
+                "source/clang/lib/Options/DriverOptions.cpp",
+                "source/clang/lib/Options/OptionUtils.cpp",
+            ),
+            modules.map { it.sourcePath },
+        )
+        assertEquals(
+            listOf(
+                "cu-3c4fe7b84249f1a69a5cd83e190b7f57",
+                "cu-8fe669f96215d441895e5f8f8215bc8c",
+            ),
+            modules.map { it.unitId },
+        )
+        assertTrue(modules.all { it.moduleId == it.unitId && it.shardId == "clang-lib-options" })
+        assertTrue(registry.sourceOnlyUnits.none { it.shardId == "clang-lib-options" })
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("clang-lib-options-missing")
+        }
+    }
+
+    @Test
     fun `shuffled stale forged and expanded planning documents fail closed`() =
         inControlTemporaryDirectory { directory ->
             val fixture = createFullTreeControlFixture(directory.resolve("fixture"))
