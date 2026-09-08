@@ -563,3 +563,19 @@ history/activity/recovery and retained-byte checks. No workflow executes. The re
 identifies archive/JAR/browser hashes, test-only --no-sandbox, unchanged installation and
 confirmed shutdown/cleanup. It proves native delivery, not full browser automatic reconnect
 or fallback behavior; the UI still chooses polling.
+
+## Bounded browser SSE decoder prerequisite
+
+The frontend now has an incremental SSE decoder over transport byte chunks. It accepts
+LF/CRLF/CR split across arbitrary chunks, validates UTF-8 and bounds each wire frame to
+65,536 data bytes plus 1,024 framing bytes. Complete event documents pass the shared JSON
+contract and deployment-path checks; event type/id must agree with the document. Gap
+controls cannot inherit the previous event's cursor. Partial records are discarded on
+disconnect, errors terminate the decoder, and a generator yields records individually
+instead of accumulating an event queue from a large input chunk.
+
+This is a client-integration prerequisite. It does not perform fetch, authorize delivery,
+bind the selected job/attempt, deduplicate events or implement reconnect/fallback. Those
+remain the stream consumer's responsibility; the activity UI still polls. Tests exercise
+the actual decoder with shared event fixtures, byte-by-byte Unicode, all line endings,
+multiline JSON, gaps, malformed framing, ignored-field budgets and interrupted records.
