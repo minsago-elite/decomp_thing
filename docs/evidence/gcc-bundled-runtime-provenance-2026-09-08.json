@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "issue": 235,
+  "recordedAt": "2026-09-08",
+  "repositoryRevision": "bf250156",
+  "authority": "non-authoritative-repository-fact-record",
+  "state": "unresolved",
+  "facts": [
+    {
+      "source": "src/main/kotlin/decompengine/oracle/gcc/GccBundledGhidraRuntime.kt",
+      "claim": "The versioned GCC runtime binds an absolute bundle root, a bridge-first ordered classpath with per-entry size and SHA-256 identities, the pinned Ghidra release, and a direct GhidraWorkerCommand; it rejects writable-output overlap and uses fresh-empty state for v3 or an explicit resume manifest for v4."
+    },
+    {
+      "source": "src/main/kotlin/decompengine/oracle/gcc/GccBundledGhidraDeploymentReference.kt",
+      "claim": "The independent deployment reference binds the release, archive identity, complete inventory, exact classpath, bridge and export-guard paths, and the exporter resource read from the loaded application JAR; installed lookup derives the reference and bundle beside that JAR."
+    },
+    {
+      "source": "src/main/kotlin/decompengine/oracle/gcc/GccBundledGhidraRetainedRuntime.kt",
+      "claim": "Retained runtime admission checks the root-owned descriptor-relative tree, exact file identities and modes, executable mount, ancestor trust and nested-mount exclusion, then revalidates the retained runtime identity."
+    },
+    {
+      "source": "src/main/kotlin/decompengine/oracle/gcc/GccCompilerEngineLiveContainmentController.kt",
+      "claim": "The live controller exposes BOOT and terminal-absence cleanup ownership with startAuthorized=false and releaseEligible=false; its source contract has no production START, export, scoring or output-lease release transition."
+    },
+    {
+      "source": "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationCoordinator.kt",
+      "claim": "Prepared operation publication retains complete=false and releaseEligible=false, and planning requires the same owner's captured export and authenticated inputs; detached records cannot authorize execution."
+    }
+  ],
+  "productionGate": {
+    "complete": false,
+    "releaseEligible": false,
+    "unavailable": [
+      "current-head hosted or provisioned production qualification of contained START, export, cleanup and exact absence",
+      "real cc1 and lto1 normal-path interruption/resume equivalence and semantic-drift proof tracked by #137",
+      "dedicated ext4 lifecycle, whole-operation accounting and recovery qualification tracked by #138",
+      "release-grade authenticated GCC model, plan and output acceptance"
+    ],
+    "interpretation": "This record preserves bundled direct-API isolation and authenticated provenance as source contracts. It does not authorize execution, promote byte assessments to oracle truth, release the scratch lease, or close issue #235."
+  }
+}
