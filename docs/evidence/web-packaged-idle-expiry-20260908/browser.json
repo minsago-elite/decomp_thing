@@ -1,0 +1,159 @@
+{
+  "status": "passed",
+  "mode": "idle-expiry",
+  "testDirectory": "/home/june/decomp_thing/build/packaged-browser-w8Q8jP",
+  "driverNode": "24.20.0",
+  "tools": {
+    "node": "/home/june/decomp_thing/build/tools/decomp-node-24.20.0/node-v24.20.0-linux-x64/bin/node",
+    "chrome": "/tmp/decomp-web-browser-pin-yp1jzpiy/installed/chrome",
+    "javaHome": "/opt/openjdk-bin-21",
+    "python": "/usr/bin/python3",
+    "chromeSha256": "2d18db9d8608b052b6a552ee00ec1e830f93692e928b65ecc67d693bd33fe801"
+  },
+  "requests": {
+    "idleExpiry": [
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:34405/nested/",
+        "type": "Document"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:34405/nested/assets/ui/assets/index-DmsUN96c.css",
+        "type": "Stylesheet"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:34405/nested/assets/ui/assets/index-Dc3-iH10.js",
+        "type": "Script"
+      },
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:34405/nested/api/v1/session",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:34405/nested/assets/ui/assets/mark-DPpOXuhp.svg",
+        "type": "Image"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:34405/nested/api/v1/bootstrap",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:34405/nested/api/v1/jobs",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:34405/favicon.ico",
+        "type": "Other"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:34405/nested/jobs/dddddddddddddddddddddddddddddddd/runs/run_fixture_3",
+        "type": "Document"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:34405/nested/assets/ui/assets/index-DmsUN96c.css",
+        "type": "Stylesheet"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:34405/nested/assets/ui/assets/index-Dc3-iH10.js",
+        "type": "Script"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:34405/nested/api/v1/bootstrap",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:34405/nested/assets/ui/assets/mark-DPpOXuhp.svg",
+        "type": "Image"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:34405/nested/assets/ui/assets/Run-7EjUrUTO.js",
+        "type": "Script"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:34405/favicon.ico",
+        "type": "Other"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:34405/nested/api/v1/jobs/dddddddddddddddddddddddddddddddd/runs/run_fixture_3",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:34405/nested/api/v1/jobs/dddddddddddddddddddddddddddddddd/runs/run_fixture_3/progress-pin",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:34405/nested/api/v1/jobs/dddddddddddddddddddddddddddddddd/runs/run_fixture_3/progress-pin",
+        "type": "Fetch"
+      }
+    ]
+  },
+  "workDirectory": "/home/june/decomp_thing/build/packaged-browser-work-7Hinvo",
+  "archive": "llm_bin_patch-0.1.0.zip",
+  "archivePath": "/home/june/decomp_thing/build/distributions/llm_bin_patch-0.1.0.zip",
+  "archiveSha256": "e554925e12e839c3ed95932af52e008d75e9e6626661dd6518ee70f7198c1ad3",
+  "applicationJar": "llm-bin-patch-0.1.0.jar",
+  "applicationJarSha256": "c0485f7e07ee4fa1248611caef42a73396bb2d229951a8c52d78a7bada0e8aa8",
+  "buildId": "fb0a2f5eaecb140165717824a27e66282b271360b53d6066cbc612cde4137f56",
+  "applicationVersion": "0.1.0",
+  "resourceBudget": {
+    "expandedBytes": 957432161,
+    "requiredBytes": 1024541025,
+    "availableBytes": 89114378240,
+    "requiredInodes": 7768,
+    "availableInodes": 174113787
+  },
+  "unrelatedWorkingDirectory": "/home/june/decomp_thing/build/packaged-browser-work-7Hinvo/unrelated working directory",
+  "basePath": "/nested/",
+  "nodeOnApplicationPath": false,
+  "npmOnApplicationPath": false,
+  "readOnlyInstallation": true,
+  "origin": "http://127.0.0.1:34405",
+  "browserTempDirectory": "/home/june/decomp_thing/build/ct-WWboxK",
+  "browser": {
+    "protocolVersion": "1.3",
+    "product": "Chrome/149.0.7827.55",
+    "revision": "@3188f8a607ae7e067593be8aab7f02d2451fec07",
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/149.0.0.0 Safari/537.36",
+    "jsVersion": "14.9.207.21"
+  },
+  "browserSandboxDisabled": true,
+  "idleExpiry": {
+    "realTimeIdleWaitMs": 1802136,
+    "minimumIdleWaitMs": 1802000,
+    "automaticRequestsDuringIdle": 0,
+    "privateViewRetainedUntilRead": true,
+    "actualServer401": true,
+    "distinctExpiredNotice": true,
+    "privateAttemptCleared": true,
+    "restartNotInferred": true,
+    "explicitExpiryReadRequests": 1,
+    "automaticFollowupRequests": 0,
+    "followupObservationMs": 3000,
+    "workflowMutations": 0,
+    "initialSessionExchanges": 1,
+    "storageEntries": 0,
+    "workflowBytesUnchanged": true,
+    "progressBytesUnchanged": true
+  },
+  "installationUnchanged": true,
+  "shutdownConfirmed": true,
+  "workRetained": false,
+  "workCleanupConfirmed": true
+}
