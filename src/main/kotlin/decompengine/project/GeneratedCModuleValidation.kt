@@ -45,6 +45,7 @@ internal object GeneratedCModuleValidation {
     }
 
     fun validate(projectDir: Path, sourcePath: String, profile: ReconstructionProfile): ModuleCompilationEvidence {
+        if (Thread.interrupted()) throw InterruptedException("module compilation cancelled before launch")
         val command = command(profile, sourcePath)
         val source = projectDir.resolve(sourcePath)
         val before = sha256(source.readBytes())
@@ -85,7 +86,13 @@ internal object GeneratedCModuleValidation {
                 returnCode == 0 -> "passed"
                 else -> "failed"
             }
-        } catch (_: Exception) {
+        } catch (interrupted: InterruptedException) {
+            throw interrupted
+        } catch (failure: Exception) {
+            if (Thread.currentThread().isInterrupted) {
+                Thread.interrupted()
+                throw InterruptedException("module compilation cancelled").also { it.initCause(failure) }
+            }
             outcome = if (process == null) "failed-to-start" else "failed"
         } finally {
             process?.let { MakeProjectBuilder.terminateBuildProcess(it, 0) }

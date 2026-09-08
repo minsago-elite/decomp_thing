@@ -816,7 +816,28 @@ object SourceTreeGenerator {
                 writeAtomically(sourcePath, normalizedSource)
                 val compilation = if (issues.isEmpty()) {
                     progress.phase(AgentWorkflowPhase.BUILD_VALIDATING, module.id)
-                    GeneratedCModuleValidation.validate(projectDir, module.sourcePath, profile).also { validation ->
+                    val validation = try {
+                        GeneratedCModuleValidation.validate(projectDir, module.sourcePath, profile)
+                    } catch (failure: Exception) {
+                        if (failure !is InterruptedException && !Thread.currentThread().isInterrupted) throw failure
+                        // Restore durable state before reinstating cancellation, since file
+                        // operations may otherwise abort immediately on the interrupted thread.
+                        Thread.interrupted()
+                        val interrupted = ModuleReconstructionInterruptedException(
+                            module.id, AgentStopReason.CANCELLED, "module compiler validation interrupted",
+                            attempted.agentExecutionEvidence, attempted.promptSha256,
+                            attempted.promptCharacters, attempted.promptBudgetCharacters,
+                        ).also { it.initCause(failure) }
+                        try {
+                            val retainedEvidence = restoreAcceptedRevision()
+                            writeInterruptionReport(attemptPath, module, fingerprint, cacheIdentity,
+                                sourcePath, recordedCheckpoint, interrupted, retainedEvidence)
+                        } finally {
+                            Thread.currentThread().interrupt()
+                        }
+                        throw interrupted
+                    }
+                    validation.also { validation ->
                         if (!validation.passed) issues += ModuleReconstructionIssue(
                             "module-compilation-${validation.outcome}",
                             "module compiler gate ${validation.outcome}; diagnostics SHA-256=${validation.diagnosticsSha256}",

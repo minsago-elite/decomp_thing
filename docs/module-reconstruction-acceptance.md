@@ -48,3 +48,11 @@ and production independent-agent runs are also tracked by #64 and #67.
 Regression coverage is in `SourceTreeTest`, `AgentExecutionEvidenceTest`, and
 `ReconstructionAcpEvidenceArchiveVerifierTest`; the profile and strict project
 builder retain their separate focused suites.
+
+Cancellation at the module compiler gate stops reconstruction. It does not become
+an ordinary compile rejection or a cached unresolved checkpoint. When a prior
+accepted revision exists, the workflow restores its source and execution evidence,
+retains an interrupted-attempt report, and preserves the caller's interrupt flag.
+The prior accepted checkpoint and manifest remain reusable. Compiler wait
+interruption and interrupted file I/O propagate through the cancellation path;
+this local behavior does not establish authenticated production compiler identity.

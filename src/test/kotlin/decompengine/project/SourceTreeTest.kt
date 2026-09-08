@@ -38,6 +38,38 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class SourceTreeTest {
     @Test
+    fun `compiler cancellation restores accepted revision and remains retryable`() {
+        val project = createTempDirectory("source-tree-compiler-cancelled-")
+        val originalModel = oneModuleModel()
+        SourceTreeGenerator.generate(originalModel, project, reconstructor = validReconstructor())
+        val paths = listOf("src/modules/parse.c", "reports/modules/parse.json", "source_tree_manifest.json")
+        val before = paths.associateWith { project.resolve(it).readBytes() }
+        val candidate = ModuleReconstructor { request ->
+            validReconstructor().reconstruct(request).let { it.copy(source = it.source.replace("return 4096;", "return 8192;")) }
+        }
+        val progress = object : decompengine.agent.AgentWorkflowProgress by decompengine.agent.AgentWorkflowProgress.NONE {
+            override fun phase(phase: decompengine.agent.AgentWorkflowPhase, taskId: String?, acceptedRevisionSha256: String?) {
+                if (phase == decompengine.agent.AgentWorkflowPhase.BUILD_VALIDATING) Thread.currentThread().interrupt()
+            }
+        }
+        try {
+            val interrupted = assertFailsWith<ModuleReconstructionInterruptedException> {
+                SourceTreeGenerator.generate(originalModel, project, reconstructor = candidate,
+                    observedBehavior = "retry candidate", progress = progress)
+            }
+            assertEquals(AgentStopReason.CANCELLED, interrupted.stopReason)
+            assertTrue(Thread.currentThread().isInterrupted)
+        } finally {
+            Thread.interrupted()
+        }
+        paths.forEach { assertTrue(before.getValue(it).contentEquals(project.resolve(it).readBytes()), it) }
+        assertTrue(project.resolve("reports/modules/parse.attempt.json").readText().contains("\"status\": \"interrupted\""))
+        SourceTreeGenerator.generate(originalModel, project, reconstructor = ModuleReconstructor {
+            error("cancelled compiler validation must preserve reusable accepted state")
+        })
+    }
+
+    @Test
     fun `explicit byte typedef is resolved by the compiler`() {
         val project = createTempDirectory("source-defined-byte-type-")
         val reconstructor = ModuleReconstructor {
