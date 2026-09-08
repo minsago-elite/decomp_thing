@@ -35,12 +35,15 @@ async function setup(basePath = '/nested') {
 
 it('clears peer private state after confirmed logout without transmitting credentials or making peer requests', async () => {
   const first = await setup(); const peer = await setup(); const other = await setup('/other');
+  let invalidations = 0;
+  peer.session.onInvalidated(() => { invalidations += 1; });
   await first.session.logout();
   expect(first.session.snapshot()).toEqual({ status: 'required', reason: 'signed-out' });
   expect(peer.session.snapshot()).toEqual({ status: 'required', reason: 'session-changed' });
   expect(peer.session.csrf()).toBeNull();
   expect(other.session.snapshot().status).toBe('authenticated');
   expect(peer.gateway.bootstrap).toHaveBeenCalledOnce();
+  expect(invalidations).toBe(1);
   expect(peer.gateway.logout).not.toHaveBeenCalled(); expect(peer.gateway.exchange).not.toHaveBeenCalled();
   expect(Channel.messages).toEqual([{ version: 1, type: 'session-invalidated' }]);
   expect(JSON.stringify(Channel.messages)).not.toContain(first.data.csrfToken);

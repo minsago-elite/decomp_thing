@@ -5,6 +5,8 @@ import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
+import decompengine.project.DeterministicModulePlanner
+import decompengine.project.ProgramModelJson
 import java.lang.reflect.Modifier
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -101,6 +103,44 @@ class GccCompilerEngineResumeEvidenceValidationTest {
     }
 
     @Test
+    fun `captured model handoff survives filesystem replacement and caller mutation for both execution legs`() {
+        val transition = transitionFixture(twoBatchFixture())
+        withDescriptorExportFixture(transition.interrupted, includeModel = false) { interrupted ->
+            val retained = GccBundledExportCapture.captureInterruptedSnapshot(interrupted.root, interrupted.reportsIdentity, interrupted.artifacts)
+            for (resumed in listOf(false, true)) {
+                val fixture = if (resumed) transition.resumed else transition.fresh
+                withDescriptorExportFixture(fixture) { export ->
+                    fun capture() = if (resumed) {
+                        GccBundledExportCapture.captureResumed(export.root, export.reportsIdentity, export.artifacts, retained)
+                    } else GccBundledExportCapture.capture(export.root, export.reportsIdentity, export.artifacts)
+                    val captured = capture()
+                    // Synthetic receipts exercise the immutable result handoff, not live authority.
+                    val result = GccBundledExecutedOperation(byteArrayOf(1), byteArrayOf(2), captured)
+                    assertFalse(result.complete)
+                    assertFalse(result.releaseEligible)
+                    assertContentEquals(fixture.model, result.programModelBytes)
+                    captured.programModelBytes.fill(0)
+                    result.programModelBytes.fill(0)
+                    assertContentEquals(fixture.model, result.programModelBytes)
+                    val path = export.directory.resolve("reports/program_model.json")
+                    Files.move(path, path.resolveSibling("original-model"))
+                    Files.writeString(path, "invalid replacement")
+                    assertFails { capture() }
+                    assertContentEquals(fixture.model, result.programModelBytes)
+                    assertEquals(result.assessment.programModelSha256, sha(result.programModelBytes))
+                    fun plan(bytes: ByteArray) = DeterministicModulePlanner(
+                        maximumEntities = 100_000, maximumDependencyEdges = 1_000_000, maximumWorkUnits = 10_000_000,
+                    ).plan(ProgramModelJson.readCanonical(bytes)).toJson()
+                    assertEquals(plan(fixture.model), plan(result.programModelBytes))
+                    assertFails { GccBundledExportAssessment(captured.assessment, captured.canonicalBytes, fixture.model + byteArrayOf(32)) }
+                    val changed = fixture.model.copyOf().also { it[0] = 32 }
+                    assertFails { GccBundledExportAssessment(captured.assessment, captured.canonicalBytes, changed) }
+                }
+            }
+        }
+    }
+
+    @Test
     fun `resumed descriptor capture preserves exact retained prefix and rejects wrong reuse lineage`() {
         val transition = transitionFixture(twoBatchFixture())
         withDescriptorExportFixture(transition.interrupted, includeModel = false) { old ->
@@ -135,6 +175,196 @@ class GccCompilerEngineResumeEvidenceValidationTest {
             withDescriptorExportFixture(changedLineage.resumed) { changed ->
                 assertFails { GccBundledExportCapture.captureResumed(changed.root, changed.reportsIdentity, changed.artifacts, retained) }
             }
+        }
+    }
+
+    @Test
+    fun `stopped capture validates one committed batch ahead while preserving observed progress`() {
+        val full = threeBatchFixture()
+        val first = transitionFixture(full, interruptedBatchCount = 1)
+        val second = transitionFixture(full, interruptedBatchCount = 2)
+        val raced = second.interrupted.copy(progress = first.interrupted.progress)
+        for (pending in listOf(false, true)) withDescriptorExportFixture(raced, includeModel = false) { captured ->
+            if (pending) Files.writeString(captured.directory.resolve("reports/.program_model.json.progress.json.pending"), "partial-progress")
+            val stopped = GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts)
+            assertEquals(1024L, stopped.assessment.completed)
+            assertContentEquals(first.interrupted.progress, stopped.capturedProgress)
+            assertContentEquals(second.interrupted.progress, stopped.effectiveProgress)
+            assertContentEquals(first.interrupted.progress, Files.readAllBytes(captured.directory.resolve("reports/program_model.json.progress.json")))
+            assertEquals(if (pending) 1 else 0, OracleJson.parseCanonical(stopped.inFlightArtifacts).jsonObject.size)
+            val trigger = GccBundledCheckpointTrigger(512)
+            trigger.observe(GccBundledExportCapture.observeProgress(captured.root, captured.reportsIdentity, captured.artifacts))
+            val journalPayload = OracleJson.parseCanonical(trigger.assessStoppedPrefix(stopped.assessment, stopped.planningPrefixSha256,
+                stopped.inFlightArtifacts, stopped.capturedProgress, stopped.effectiveProgress)).jsonObject
+            assertFails { trigger.assessStoppedPrefix(stopped.assessment, capturedProgress = stopped.capturedProgress) }
+            assertFails { trigger.assessStoppedPrefix(stopped.assessment, capturedProgress = stopped.capturedProgress,
+                effectiveProgress = stopped.capturedProgress) }
+            assertTrue(journalPayload.getValue("effectiveProgressDerived").jsonPrimitive.boolean)
+            assertEquals(first.interrupted.progress.decodeToString(), journalPayload.getValue("capturedProgressUtf8").jsonPrimitive.content)
+            assertEquals(sha(first.interrupted.progress), journalPayload.getValue("capturedProgressSha256").jsonPrimitive.content)
+            withDescriptorExportFixture(second.resumed) { resumed ->
+                assertEquals(1024L, GccBundledExportCapture.captureResumed(resumed.root, resumed.reportsIdentity, resumed.artifacts, stopped).assessment.reused)
+            }
+        }
+    }
+
+    @Test
+    fun `terminal stopped checkpoints retain partial assembly and resume every committed record`() {
+        val partial = twoBatchFixture()
+        val full = buildFixture(listOf(partial.specs.first(), BatchSpec(
+            (512 until 1024).map { function(functionId(it), "function_$it", "partial") },
+        )))
+        for (fixture in listOf(partial, full)) {
+            val prior = transitionFixture(fixture).interrupted
+            val total = fixture.specs.sumOf { it.functions.size }.toLong()
+            val terminalProgress = progress(phase = "planning", total = total, completed = total, partial = total, failed = 0)
+            for (advanced in listOf(false, true)) for (pending in listOf(false, true)) {
+                val stoppedRun = fixture.copy(progress = if (advanced) prior.progress else terminalProgress)
+                withDescriptorExportFixture(stoppedRun, includeModel = false) { captured ->
+                    val pendingName = if (advanced) ".program_model.json.progress.json.pending" else ".program_model.json.pending"
+                    val pendingPath = captured.directory.resolve("reports/$pendingName")
+                    if (pending) Files.writeString(pendingPath, "unfinished")
+                    val stopped = GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts)
+                    assertEquals(total, stopped.assessment.completed)
+                    assertEquals(2L, stopped.assessment.observedBatchCount)
+                    assertContentEquals(terminalProgress, stopped.effectiveProgress)
+                    assertContentEquals(stoppedRun.progress, stopped.capturedProgress)
+                    if (pending) {
+                        assertEquals("unfinished", Files.readString(pendingPath))
+                        assertEquals(setOf("reports/$pendingName"), OracleJson.parseCanonical(stopped.inFlightArtifacts).jsonObject.keys)
+                    }
+                    val trigger = GccBundledCheckpointTrigger(512)
+                    trigger.observe(GccCompilerEngineResumeByteValidator.assessExportProgress(prior.state, prior.progress))
+                    trigger.assessStoppedPrefix(stopped.assessment, stopped.planningPrefixSha256, stopped.inFlightArtifacts,
+                        stopped.capturedProgress, stopped.effectiveProgress)
+                    val resumed = fixture.copy(progress = progress(total = total, completed = total, partial = total, failed = 0, reused = total))
+                    withDescriptorExportFixture(resumed) { result ->
+                        assertEquals(total, GccBundledExportCapture.captureResumed(result.root, result.reportsIdentity, result.artifacts, stopped).assessment.reused)
+                    }
+                    if (!advanced) {
+                        Files.writeString(pendingPath, "changed")
+                        val changed = GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts)
+                        assertNotEquals(stopped.inFlightArtifactsSha256, changed.inFlightArtifactsSha256)
+                    }
+                }
+            }
+            withDescriptorExportFixture(fixture.copy(progress = prior.progress), includeModel = false) { captured ->
+                Files.writeString(captured.directory.resolve("reports/.program_model.json.pending"), "impossible before progress publication")
+                assertFails { GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts) }
+            }
+        }
+    }
+
+    @Test
+    fun `stopped published model validates both progress publication boundaries and exact resumed output`() {
+        val fixture = twoBatchFixture()
+        val prior = transitionFixture(fixture).interrupted
+        val planning = progress(phase = "planning", total = 513, completed = 513, partial = 513, failed = 0)
+        for (observed in listOf(planning, fixture.progress)) for (pending in listOf(false, true)) {
+            if (observed.contentEquals(fixture.progress) && pending) continue
+            withDescriptorExportFixture(fixture.copy(progress = observed)) { captured ->
+                if (pending) Files.writeString(captured.directory.resolve("reports/.program_model.json.progress.json.pending"), "unfinished")
+                val stopped = GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts)
+                assertEquals(513L, stopped.assessment.completed)
+                assertContentEquals(observed, stopped.capturedProgress)
+                assertContentEquals(planning, stopped.effectiveProgress)
+                assertContentEquals(observed, Files.readAllBytes(captured.directory.resolve("reports/program_model.json.progress.json")))
+                val artifact = OracleJson.parseCanonical(stopped.inFlightArtifacts).jsonObject.getValue("reports/program_model.json").jsonObject
+                assertEquals(sha(fixture.model), artifact.getValue("sha256").jsonPrimitive.content)
+                assertEquals(fixture.model.size.toString(), artifact.getValue("bytes").jsonPrimitive.content)
+                val trigger = GccBundledCheckpointTrigger(512)
+                trigger.observe(GccCompilerEngineResumeByteValidator.assessExportProgress(prior.state, prior.progress))
+                val receipt = OracleJson.parseCanonical(trigger.assessStoppedPrefix(stopped.assessment, stopped.planningPrefixSha256,
+                    stopped.inFlightArtifacts, stopped.capturedProgress, stopped.effectiveProgress)).jsonObject
+                assertEquals(!observed.contentEquals(planning), receipt.getValue("effectiveProgressDerived").jsonPrimitive.boolean)
+                val resumed = fixture.copy(progress = progress(total = 513, completed = 513, partial = 513, failed = 0, reused = 513))
+                withDescriptorExportFixture(resumed) { result ->
+                    val assessed = GccBundledExportCapture.captureResumed(result.root, result.reportsIdentity, result.artifacts, stopped)
+                    assertEquals(sha(fixture.model), assessed.assessment.programModelSha256)
+                }
+                // Equal bytes at a replacement inode must change retained descriptor evidence.
+                val model = captured.directory.resolve("reports/program_model.json")
+                Files.move(model, model.resolveSibling("original-model"))
+                Files.write(model, fixture.model)
+                val replaced = GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts)
+                assertNotEquals(stopped.inFlightArtifactsSha256, replaced.inFlightArtifactsSha256)
+            }
+        }
+    }
+
+    @Test
+    fun `stopped published model rejects invalid assembly progress lineage and residue`() {
+        val fixture = twoBatchFixture()
+        val planning = progress(phase = "planning", total = 513, completed = 513, partial = 513, failed = 0)
+        val invalid = listOf(
+            fixture.copy(model = fixture.model + byteArrayOf(32)),
+            fixture.copy(progress = transitionFixture(fixture).interrupted.progress),
+            fixture.copy(progress = progress(total = 513, completed = 513, partial = 513, failed = 0, reused = 512)),
+        )
+        invalid.forEach { run -> withDescriptorExportFixture(run) { captured ->
+            assertFails { GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts) }
+        } }
+        withDescriptorExportFixture(fixture, includeModel = false) { captured ->
+            assertFails { GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts) }
+        }
+        for (name in listOf(".program_model.json.pending", ".program_model.json.progress.json.pending")) {
+            withDescriptorExportFixture(fixture) { captured ->
+                Files.writeString(captured.directory.resolve("reports/$name"), "impossible residue")
+                assertFails { GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts) }
+            }
+        }
+        withDescriptorExportFixture(fixture.copy(progress = planning)) { captured ->
+            assertFails { GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts,
+                GccResumeByteValidationLimits(assembledModelBytes = fixture.model.size - 1)) }
+            val model = captured.directory.resolve("reports/program_model.json")
+            Files.move(model, model.resolveSibling("original-model"))
+            Files.createSymbolicLink(model, Path.of("original-model"))
+            assertFails { GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts) }
+        }
+    }
+
+    @Test
+    fun `terminal checkpoint capture recomputes whole inventory and semantic commitments`() {
+        val specs = twoBatchFixture().specs
+        val invalid = listOf(
+            buildFixture(specs, inventoryOverride = "a".repeat(64)),
+            buildFixture(specs, batchCommitmentOverride = "b".repeat(64)),
+            buildFixture(specs, semanticShaOverride = "c".repeat(64)),
+            buildFixture(specs, semanticBytesOverride = 1),
+        )
+        val terminal = progress(phase = "planning", total = 513, completed = 513, partial = 513, failed = 0)
+        invalid.forEach { fixture ->
+            assertFailsWith<GccCompilerEngineResumeEvidenceException> {
+                GccCompilerEngineResumeByteValidator.assessStoppedCheckpointPrefix(fixture.state, terminal, fixture.batches)
+            }
+        }
+        val fixture = twoBatchFixture().copy(progress = terminal)
+        withDescriptorExportFixture(fixture, includeModel = false) { captured ->
+            val pending = captured.directory.resolve("reports/.program_model.json.pending")
+            Files.writeString(pending, "oversized")
+            assertFails {
+                GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts,
+                    GccResumeByteValidationLimits(assembledModelBytes = 1))
+            }
+            Files.delete(pending)
+            Files.createSymbolicLink(pending, Path.of("program_model.json.progress.json"))
+            assertFails { GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts) }
+        }
+    }
+
+    @Test
+    fun `stopped progress derivation rejects multiple advances and impossible pending layouts`() {
+        val full = threeBatchFixture()
+        val first = transitionFixture(full, interruptedBatchCount = 1)
+        val second = transitionFixture(full, interruptedBatchCount = 2)
+        assertFails { GccCompilerEngineResumeByteValidator.assessStoppedCheckpointPrefix(full.state, first.interrupted.progress, full.batches) }
+        withDescriptorExportFixture(first.interrupted, includeModel = false) { captured ->
+            Files.writeString(captured.directory.resolve("reports/.program_model.json.progress.json.pending"), "unexpected")
+            assertFails { GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts) }
+        }
+        withDescriptorExportFixture(second.interrupted.copy(progress = first.interrupted.progress), includeModel = false) { captured ->
+            Files.writeString(captured.directory.resolve("reports/program_model.json.export/planning-batches/.batch-00001024-00001025.functions.fragment.pending"), "unexpected")
+            assertFails { GccBundledExportCapture.captureInterruptedSnapshot(captured.root, captured.reportsIdentity, captured.artifacts) }
         }
     }
 
@@ -1202,7 +1432,7 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         val partial = spec.functions.count { it.status == "partial" }
         val failed = spec.functions.count { it.status == "failed" }
         append("schemaVersion=1\n")
-        append("exporterVersion=9\n")
+        append("exporterVersion=10\n")
         append("recoveryMode=planning\n")
         append("stateSha256=$stateSha\n")
         append("inventorySha256=$inventorySha\n")
@@ -1231,7 +1461,7 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         semanticSha256: String,
         batchCommitmentSha256: String,
     ): ByteArray = (
-        "{\"schemaVersion\":2,\"exporterVersion\":9,\"exporterSha256\":\"$SHA_B\"," +
+        "{\"schemaVersion\":2,\"exporterVersion\":10,\"exporterSha256\":\"$SHA_B\"," +
             "\"analysisToolSha256\":\"$SHA_C\",\"recoveryMode\":\"planning\"," +
             "\"inputSha256\":\"$SHA_A\",\"language\":\"x86:LE:64:default\",\"compilerSpec\":\"gcc\"," +
             "\"semanticStateBinding\":{\"schemaVersion\":1,\"scope\":\"planning-exporter-visible-program\"," +
@@ -1319,7 +1549,8 @@ class GccCompilerEngineResumeEvidenceValidationTest {
             append("      \"name\": \"$name\",\n")
             append("      \"address\": \"${addressForId(id)}\",\n")
             append("      \"prototype\": \"void $name(void)\",\n")
-            append("      \"status\": \"$status\",\n")
+            append("      \"extractionStatus\": \"$status\",\n")
+            append("      \"recoveryAssessment\": \"unassessed\",\n")
             append("      \"calls\": [],\n")
             append("      \"referencedGlobals\": [${quoted(referencedGlobals)}],\n")
             append("      \"strings\": [],\n")
@@ -1335,7 +1566,8 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         append("      \"address\": \"${addressForId(id)}\",\n")
         append("      \"type\": \"int\",\n")
         append("      \"initializer\": null,\n")
-        append("      \"status\": \"recovered\"\n")
+        append("      \"extractionStatus\": \"recovered\",\n")
+        append("      \"recoveryAssessment\": \"unassessed\"\n")
         append("    }")
     }.toByteArray()
 
@@ -1344,7 +1576,8 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         append("      \"id\": \"$id\",\n")
         append("      \"declaration\": \"$declaration\",\n")
         append("      \"sourceAddress\": \"0x1\",\n")
-        append("      \"status\": \"partial\"\n")
+        append("      \"extractionStatus\": \"partial\",\n")
+        append("      \"recoveryAssessment\": \"unassessed\"\n")
         append("    }")
     }.toByteArray()
 
@@ -1358,7 +1591,7 @@ class GccCompilerEngineResumeEvidenceValidationTest {
 
     private fun model(functions: List<ByteArray>, globals: List<ByteArray>, types: List<ByteArray>): ByteArray =
         buildString {
-            append("{\n  \"schemaVersion\": 1,\n  \"inputSha256\": \"$SHA_A\",\n  \"functions\": [\n")
+            append("{\n  \"schemaVersion\": 2,\n  \"inputSha256\": \"$SHA_A\",\n  \"functions\": [\n")
             append(modelRecords(functions))
             append("  ],\n  \"globals\": [\n")
             append(modelRecords(globals))

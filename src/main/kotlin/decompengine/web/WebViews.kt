@@ -304,7 +304,7 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
                 <ol class="workflow-list">
                   <li><span>1</span><div><strong>Symbolic paths</strong><p>angr derives reachable argv and stdin candidates.</p></div></li>
                   <li><span>2</span><div><strong>Static + mutations</strong><p>Binary strings seed bounded input variations.</p></div></li>
-                  <li><span>3</span><div><strong>Observed evidence</strong><p>Sandboxed executions become coverage and confidence evidence.</p></div></li>
+                  <li><span>3</span><div><strong>Observed evidence</strong><p>Recorded executions show observed outputs and exploration breadth.</p></div></li>
                 </ol>
               </section>
             </div>
@@ -384,7 +384,7 @@ fun renderSourceFile(
             ?.get("score")?.jsonPrimitive?.doubleOrNull?.takeIf { it.isFinite() && it in 0.0..1.0 }
     }.getOrNull()
     val provenance = if (fileEvidence == null) "" else """
-        <div class="source-provenance"><span><b>Generator</b>${generator.escapeHtml()}</span><span><b>Entities</b>${entities.escapeHtml().ifBlank { "none" }}</span><span><b>Implementation</b>${implementation.escapeHtml()}</span>${moduleConfidence?.let { "<span><b>Reported module confidence</b>${(it * 100).roundToInt()}%</span>" }.orEmpty()}</div>
+        <div class="source-provenance"><span><b>Generator</b>${generator.escapeHtml()}</span><span><b>Entities</b>${entities.escapeHtml().ifBlank { "none" }}</span><span><b>Implementation</b>${implementation.escapeHtml()}</span><span><b>Scored recovery evidence</b>Not available in this view</span>${moduleConfidence?.let { "<span><b>Reported structural heuristic</b>${"%.3f".format(java.util.Locale.ROOT, it)} · uncalibrated</span>" }.orEmpty()}</div>
     """.trimIndent()
     return page(
         title = relativePath,
@@ -458,7 +458,7 @@ private fun renderExploration(job: Job, reports: WebReportContext, root: JsonObj
         </section>
     """.trimIndent()
     val confidence = root["confidence"]?.jsonObject
-    val score = confidence?.get("score")?.jsonPrimitive?.doubleOrNull ?: 0.0
+    val score = confidence?.get("score")?.jsonPrimitive?.doubleOrNull?.takeIf { it.isFinite() && it in 0.0..1.0 }
     val candidates = root["candidates"]?.jsonArray ?: JsonArray(emptyList())
     val observations = root["observations"]?.jsonArray?.associateBy {
         it.jsonObject["candidateId"]?.jsonPrimitive?.contentOrNull.orEmpty()
@@ -478,7 +478,7 @@ private fun renderExploration(job: Job, reports: WebReportContext, root: JsonObj
       <section class="panel evidence-panel">
         <div class="section-heading compact"><span class="step">03</span><div><p class="kicker">Evidence</p><h2>Exploration report</h2></div><a class="text-link" href="${artifactHref(job, "${reports.artifactPrefix}/exploration.json")}">Download JSON ↓</a></div>
         <div class="metric-grid">
-          ${metric("Confidence", "${(score * 100).roundToInt()}%", "Evidence-bounded", score)}
+          ${metric("Exploration heuristic", score?.let { "%.3f".format(java.util.Locale.ROOT, it) } ?: "Unavailable", "Uncalibrated")}
           ${metric("Candidates", root.number("candidateCount"), "Generated inputs")}
           ${metric("Output paths", root.number("expandedOutputSignatures"), "Distinct signatures")}
           ${metric("New paths", root["newOutputSignatures"]?.jsonArray?.size?.toString() ?: "0", "Beyond baseline")}
@@ -551,8 +551,8 @@ private fun renderSourceTree(job: Job, source: SourceTreeView, reports: WebRepor
     }.getOrNull()
     return """
       <section class="panel source-tree-panel">
-        <div class="section-heading compact"><span class="step">04</span><div><p class="kicker">Reconstructed project</p><h2>Archival source tree</h2></div>${confidence?.let { "<span class=\"count\">${(it * 100).roundToInt()}%</span>" }.orEmpty()}</div>
-        <p class="tree-note">${files.size} readable project files. Confidence is evidence-bounded and does not claim universal equivalence.</p>
+        <div class="section-heading compact"><span class="step">04</span><div><p class="kicker">Reconstructed project</p><h2>Archival source tree</h2></div>${confidence?.let { "<span class=\"count\">${"%.3f".format(java.util.Locale.ROOT, it)} heuristic</span>" }.orEmpty()}</div>
+        <p class="tree-note">${files.size} readable project files. Structural heuristic scores are uncalibrated. Recovery accuracy and behavioral equivalence are not established by these scores.</p>
         <ul class="source-tree">$rows</ul>
         ${source.archiveSha256?.let { digest ->
             "<a class=\"button primary archive-download\" href=\"${artifactHref(job, "${reports.artifactPrefix}/source-tree.zip")}?sha256=${digest.escapeHtml()}\">Download verified source archive ↓</a><p class=\"tree-note\">SHA-256: <code>${digest.escapeHtml()}</code>. Verified payload and current source/build identity; not behavioral equivalence or release certification.</p>"

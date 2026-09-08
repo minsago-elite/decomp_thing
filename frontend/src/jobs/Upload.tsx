@@ -56,6 +56,20 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
     live.current = true;
     return () => { live.current = false; active.current?.abort(); };
   }, []);
+  useEffect(() => session.onInvalidated((remote) => {
+    active.current?.abort();
+    if (!remote) {
+      setProgress(null);
+      return;
+    }
+    const next = recovery.read();
+    setRetained(next);
+    setAttempt(null);
+    setProgress(null);
+    setPhase(next.kind === 'empty' ? 'idle' : 'retry');
+    setMessage('The session changed in another tab. Reconnect before retrying this upload.');
+    if (input.current) input.current.value = '';
+  }), [recovery, session]);
   useEffect(() => {
     if (phase === 'idle') return;
     const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
