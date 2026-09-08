@@ -92,6 +92,81 @@ class FullTreePlanningInventoryControlTest {
         }
 
     @Test
+    fun `clang frontend dispatch binds exact planning owners without an emitted denominator`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+
+        val modules = registry.requireOwnerModulesForShard("clang-lib-frontend")
+        assertEquals(38, modules.size)
+        assertEquals(
+            listOf(
+                "source/clang/lib/Frontend/ASTConsumers.cpp",
+                "source/clang/lib/Frontend/ASTMerge.cpp",
+                "source/clang/lib/Frontend/ASTUnit.cpp",
+                "source/clang/lib/Frontend/ChainedDiagnosticConsumer.cpp",
+                "source/clang/lib/Frontend/ChainedIncludesSource.cpp",
+                "source/clang/lib/Frontend/CompilerInstance.cpp",
+                "source/clang/lib/Frontend/CompilerInvocation.cpp",
+                "source/clang/lib/Frontend/DependencyFile.cpp",
+                "source/clang/lib/Frontend/DependencyGraph.cpp",
+                "source/clang/lib/Frontend/DiagnosticRenderer.cpp",
+                "source/clang/lib/Frontend/FrontendAction.cpp",
+                "source/clang/lib/Frontend/FrontendActions.cpp",
+                "source/clang/lib/Frontend/FrontendOptions.cpp",
+                "source/clang/lib/Frontend/HeaderIncludeGen.cpp",
+                "source/clang/lib/Frontend/InitPreprocessor.cpp",
+                "source/clang/lib/Frontend/InterfaceStubFunctionsConsumer.cpp",
+                "source/clang/lib/Frontend/LayoutOverrideSource.cpp",
+                "source/clang/lib/Frontend/LogDiagnosticPrinter.cpp",
+                "source/clang/lib/Frontend/ModuleDependencyCollector.cpp",
+                "source/clang/lib/Frontend/MultiplexConsumer.cpp",
+                "source/clang/lib/Frontend/PrecompiledPreamble.cpp",
+                "source/clang/lib/Frontend/PrintPreprocessedOutput.cpp",
+                "source/clang/lib/Frontend/Rewrite/FixItRewriter.cpp",
+                "source/clang/lib/Frontend/Rewrite/FrontendActions.cpp",
+                "source/clang/lib/Frontend/Rewrite/HTMLPrint.cpp",
+                "source/clang/lib/Frontend/Rewrite/InclusionRewriter.cpp",
+                "source/clang/lib/Frontend/Rewrite/RewriteMacros.cpp",
+                "source/clang/lib/Frontend/Rewrite/RewriteTest.cpp",
+                "source/clang/lib/Frontend/SARIFDiagnostic.cpp",
+                "source/clang/lib/Frontend/SARIFDiagnosticPrinter.cpp",
+                "source/clang/lib/Frontend/SerializedDiagnosticPrinter.cpp",
+                "source/clang/lib/Frontend/SerializedDiagnosticReader.cpp",
+                "source/clang/lib/Frontend/StandaloneDiagnostic.cpp",
+                "source/clang/lib/Frontend/TestModuleFileExtension.cpp",
+                "source/clang/lib/Frontend/TextDiagnostic.cpp",
+                "source/clang/lib/Frontend/TextDiagnosticBuffer.cpp",
+                "source/clang/lib/Frontend/TextDiagnosticPrinter.cpp",
+                "source/clang/lib/Frontend/VerifyDiagnosticConsumer.cpp",
+            ),
+            modules.map { it.sourcePath },
+        )
+        assertTrue(modules.all {
+            it.moduleId == it.unitId &&
+                it.shardId == "clang-lib-frontend" &&
+                it.sourceKind == "handwritten"
+        })
+        assertEquals(
+            listOf(
+                "source/clang/lib/Frontend/Rewrite/RewriteModernObjC.cpp",
+                "source/clang/lib/Frontend/Rewrite/RewriteObjC.cpp",
+            ),
+            registry.sourceOnlyUnits.filter { it.shardId == "clang-lib-frontend" }.map { it.sourcePath },
+        )
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("clang-lib-frontend-missing")
+        }
+    }
+
+    @Test
     fun `shuffled stale forged and expanded planning documents fail closed`() =
         inControlTemporaryDirectory { directory ->
             val fixture = createFullTreeControlFixture(directory.resolve("fixture"))
