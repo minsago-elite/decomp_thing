@@ -46,9 +46,13 @@ export async function seedHistory(root) {
   const progressPath = join(reportDirectory, 'agent-progress.json');
   const progress = JSON.stringify({ schemaVersion: 1, displayOnly: true, nextSequence: 205, queueDropped: 0, historyDropped: 0, truncated: false,
     events: Array.from({ length: 205 }, (_, sequence) => ({ sequence, runId: 'writer_fixture_progress', workflow: 'reconstruct', time: at,
-      taskId: sequence % 2 ? 'task_odd' : 'task_even', sessionIdSha256: 'a'.repeat(64), kind: sequence === 1 ? 'message' : sequence === 202 ? 'context_usage' : sequence === 203 ? 'agent_finished' : 'workflow_phase',
+      taskId: sequence % 2 ? 'task_odd' : 'task_even', sessionIdSha256: 'a'.repeat(64), kind: sequence === 1 ? 'plan' : sequence === 2 ? 'file_change' : sequence === 202 ? 'context_usage' : sequence === 203 ? 'agent_finished' : 'workflow_phase',
       ...(sequence === 202 ? { contextUsedTokens: '9007199254740993', contextWindowTokens: '18446744073709551615' } : {}),
-      ...(sequence === 203 ? { stopReason: 'limit_exhausted', wallClock: 'PT1H2M3.000000001S' } : {}), ...(sequence === 1 ? { role: 'thought' } : { phase: 'planning' }), text: `Synthetic private content ${sequence}`, inputTokens: '18446744073709551615' })) });
+      ...(sequence === 203 ? { stopReason: 'limit_exhausted', wallClock: 'PT1H2M3.000000001S' } : {}),
+      ...(sequence === 1 ? { entryCount: 1, entriesTruncated: false, entries: [{ idSha256: 'b'.repeat(64), status: 'pending', text: 'Synthetic private plan' }] } : {}),
+      ...(sequence === 2 ? { path: '/Synthetic-private-root/input', change: 'modified', afterSha256: 'c'.repeat(64) } : {}),
+      ...(sequence !== 1 && sequence !== 2 ? { phase: 'planning', path: '/Synthetic-private-root/input', text: `Synthetic private content ${sequence}` } : {}),
+      inputTokens: '18446744073709551615' })) });
   await fs.writeFile(progressPath, progress, { flag: 'wx', mode: 0o600 });
   return { jobId, directory, retained, count: attempts.length, reportPath, exploration, progressPath, progress };
 }
@@ -89,6 +93,29 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.equal(polling.first.items[0].payload.fields.inputTokens, '18446744073709551615');
   assert.equal(polling.first.items[0].runId, 'run_fixture_3');
   assert.equal(polling.first.items[0].payload.writerId, 'writer_fixture_progress');
+  for (const event of [...polling.first.items, ...polling.second.items]) {
+    assert.equal(event.payload.fields.text, undefined);
+    assert.equal(event.payload.fields.entries, undefined);
+    assert.equal(event.payload.fields.path, undefined);
+    if (event.sequence === '1') {
+      assert.equal(event.payload.observationKind, 'plan');
+      assert.equal(event.payload.fields.entriesTruncated, false);
+      assert.equal(event.payload.fields.entryCount, '1');
+      assert.equal(event.payload.fields.textOmitted, undefined);
+      assert.equal(event.payload.omittedFieldCount, '1');
+    } else if (event.sequence === '2') {
+      assert.equal(event.payload.observationKind, 'file_change');
+      assert.equal(event.payload.fields.change, 'modified');
+      assert.equal(event.payload.fields.afterSha256, 'c'.repeat(64));
+      assert.equal(event.payload.fields.textOmitted, undefined);
+      assert.equal(event.payload.omittedFieldCount, '1');
+    } else {
+      assert.equal(event.payload.fields.textOmitted, true);
+      assert.equal(event.payload.omittedFieldCount, '2');
+    }
+  }
+  assert.ok(!JSON.stringify(polling).includes('Synthetic private'));
+  assert.ok(!JSON.stringify(polling).includes('Synthetic-private-root'));
   assert.deepEqual(polling.idle.items, []);
   assert.equal(await fs.readFile(fixture.progressPath, 'utf8'), fixture.progress);
   // Exercise the rendered UI, not only direct endpoint reads. All data is an inert fixture.
@@ -106,7 +133,7 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.ok(atBound >= 6, 'Progress request accounting must include endpoint and UI reads');
   await new Promise(resolve => setTimeout(resolve, 3000));
   assert.equal(progressRequests(), atBound, 'Display bound must stop polling');
-  await evaluate(tab, `(() => { const control = document.querySelector('.activity-filters select'); control.focus(); control.value = 'messages'; control.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await evaluate(tab, `(() => { const control = document.querySelector('.activity-filters select'); control.focus(); control.value = 'plans'; control.dispatchEvent(new Event('change', { bubbles: true })); })()`);
   await ready(tab, `(${activityRows}).length === 1`, 'activity category filter');
   assert.deepEqual(await evaluate(tab, activityRows), ['Sequence 1']);
   assert.equal(await evaluate(tab, `document.activeElement.tagName`), 'SELECT');
@@ -222,7 +249,7 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.deepEqual(tab.exceptions, []);
   for (const [name, bytes] of Object.entries(fixture.retained)) assert.deepEqual(await fs.readFile(join(fixture.directory, name)), Buffer.from(bytes));
   assert.deepEqual((await fs.readdir(fixture.directory)).sort(), [...Object.keys(fixture.retained), 'reports'].sort());
-  return { activityUi: { pausedReceiptAgeAdvances: true, receiptAgeIsNotSourceAge: true, exactObservedUsage: true, explicitUsageUnitsAndProvenance: true, durationWithoutRounding: true, missingPricingBasis: true, backgroundSuspendsReads: true, offlineSuspendsReads: true, recoveryReconcilesSnapshot: true, recoveryPreservesRows: true, lastReceivedTime: true, categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, progressBytesUnchanged: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
+  return { activityUi: { pausedReceiptAgeAdvances: true, receiptAgeIsNotSourceAge: true, exactObservedUsage: true, explicitUsageUnitsAndProvenance: true, durationWithoutRounding: true, missingPricingBasis: true, backgroundSuspendsReads: true, offlineSuspendsReads: true, recoveryReconcilesSnapshot: true, recoveryPreservesRows: true, lastReceivedTime: true, categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, privateProseAbsentFromResponses: true, privatePathsAbsentFromResponses: true, presentationOmissionsCounted: true, progressBytesUnchanged: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
     earlierAttemptReload: true, previousInterruptedAttempt: true, exactUnsignedUsage: true,
     unacceptedCandidate: true, explorationSummary: true, nativeReportDownload: true, downloadedBytesMatch: true, reportBytesUnchanged: true, retainedBytesUnchanged: true, mutationRequests: 0, executionStarted: false };
 }
