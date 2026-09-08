@@ -60,8 +60,10 @@ before output. Worker budget tests separately exercise owned `sleep`/`printf` pr
 The pipeline fixture supplies a recording analyzer; it does not run Ghidra or
 qualify production execution.
 
-Parent-side metadata still reads the whole binary after worker export. This layer
-does not bound those reads or share one elapsed deadline across export and
-metadata processing. A bounded positional ELF inventory and report path remain
+The analyzer now uses a [bounded positional ELF inventory](bounded-elf-metadata.md)
+and shares its elapsed deadline across export and metadata. It verifies the input
+digest against the model before reporting. Downstream unresolved-symbol and
+generated-file reports still materialize complete strings; their independent
+streaming and publication bounds remain
 [#84](https://github.com/minsago-elite/decomp_thing/issues/84) work, along with the
 other open consumer, role-permission and production qualification criteria.
