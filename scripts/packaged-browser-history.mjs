@@ -313,7 +313,32 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.deepEqual(tab.exceptions, []);
   for (const [name, bytes] of Object.entries(fixture.retained)) assert.deepEqual(await fs.readFile(join(fixture.directory, name)), Buffer.from(bytes));
   assert.deepEqual((await fs.readdir(fixture.directory)).sort(), [...Object.keys(fixture.retained), 'reports'].sort());
+  // Exercise policy mutations only after proving the existing read-only history journey.
+  await cdp.call('Page.navigate', { url: browserOrigin + path + '/run_fixture_3' }, tab.sessionId);
+  await ready(tab, `document.body.innerText.includes('Progress retention')`, 'progress pin controls');
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Read progress pin').click()`);
+  await ready(tab, `document.body.innerText.includes('Progress history is not pinned.')`, 'initial unpinned policy');
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Pin progress history').click()`);
+  await ready(tab, `document.body.innerText.includes('Progress history is pinned.')`, 'pin saved and reconciled');
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Unpin progress history').click()`);
+  await ready(tab, `document.body.innerText.includes('Progress history is not pinned.')`, 'unpin saved and reconciled');
+  const mutations = tab.requests.filter(request => !['GET', 'HEAD'].includes(request.method));
+  assert.equal(mutations.length, 2);
+  assert.ok(mutations.every(request => request.method === 'PUT' && new URL(request.url).pathname === progressEndpoint + '/progress-pin'));
+  const changed = JSON.parse(await fs.readFile(join(fixture.directory, 'workflow-state.json'), 'utf8'));
+  assert.deepEqual(changed.pinAudit.entries.map(entry => [entry.runId, entry.action, entry.outcome, entry.actor.kind]),
+    [['run_fixture_3', 'progress.pin', 'applied', 'browser_session'], ['run_fixture_3', 'progress.unpin', 'applied', 'browser_session']]);
+  const normalize = attempt => ({ ...attempt, createdAt: new Date(attempt.createdAt).toISOString(),
+    startedAt: new Date(attempt.startedAt).toISOString(), endedAt: new Date(attempt.endedAt).toISOString() });
+  const before = JSON.parse(fixture.retained['workflow-state.json']);
+  changed.attempts.forEach((attempt, index) => {
+    const expected = before.attempts[index];
+    if (attempt.runId === 'run_fixture_3') { assert.notEqual(attempt.version, expected.version); attempt = { ...attempt, version: expected.version }; }
+    assert.deepEqual(normalize(attempt), normalize(expected));
+  });
+  for (const name of ['input.elf', 'job.json']) assert.deepEqual(await fs.readFile(join(fixture.directory, name)), Buffer.from(fixture.retained[name]));
+  assert.deepEqual(tab.exceptions, []);
   return { activityUi: { emptyCutoverSnapshotAndSseResume: true, emptyCutoverFixtureRestored: true, expiredCursorShowsGap: true, explicitGapRecovery: true, appendedObservationViaSseWithoutPolling: true, appendedFixtureRestored: true, pausedReceiptAgeAdvances: true, receiptAgeIsNotSourceAge: true, exactObservedUsage: true, explicitUsageUnitsAndProvenance: true, durationWithoutRounding: true, missingPricingBasis: true, backgroundSuspendsReads: true, offlineSuspendsReads: true, recoveryReconcilesSnapshot: true, recoveryPreservesRows: true, lastReceivedTime: true, categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, nativeEventSourceMatchesPolling: true, targetPollingQuery: true, cursorAliasPreservesPage: true, privateProseAbsentFromResponses: true, privatePathsAbsentFromResponses: true, presentationOmissionsCounted: true, progressBytesRestoredAfterControlledAppend: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
     earlierAttemptReload: true, previousInterruptedAttempt: true, exactUnsignedUsage: true,
-    unacceptedCandidate: true, explorationSummary: true, nativeReportDownload: true, downloadedBytesMatch: true, reportBytesUnchanged: true, retainedBytesUnchanged: true, mutationRequests: 0, executionStarted: false };
+    unacceptedCandidate: true, explorationSummary: true, nativeReportDownload: true, downloadedBytesMatch: true, reportBytesUnchanged: true, readPhaseRetainedBytesUnchanged: true, pinUi: { readBeforeChange: true, pinAndUnpinReconciled: true, auditedBrowserActor: true, otherAttemptDataPreserved: true }, mutationRequests: 2, executionStarted: false };
 }

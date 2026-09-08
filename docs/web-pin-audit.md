@@ -33,3 +33,11 @@ The authenticated HTTP route and typed client now use this request boundary; see
 All 292 selected JVM tests pass. The [request replay manifest and retained reports](evidence/web-pin-request-replay-20260908/manifest.json) identify the tested source and evidence hashes. Frontend/package/browser qualification was not repeated because the request path remains internal.
 
 HTTP integration is qualified by 296 selected JVM tests, 329 frontend tests, lint/typechecked bundle and 48 valid/39 invalid shared contract fixtures. The [HTTP manifest and four retained tests](evidence/web-pin-http-20260908/manifest.json) include production-route and storage-reopen coverage. Distribution archive and packaged browser checks were not repeated; UI controls remain unfinished.
+
+## Attempt-page pin controls
+
+The authenticated attempt page now includes a Progress retention section. It explains that the pin protects only the selected stored progress history, requires an explicit policy read, and then offers Pin or Unpin. The component gets CSRF authority from the current in-memory browser session and creates one fresh idempotency key for each explicit action.
+
+A mutation never changes the displayed policy optimistically. Its response is identity-checked, then a fresh GET establishes the next editable version; a replayed older result cannot become the next guard. Stale versions, capacity/access errors and uncertain outcomes clear editable state and require another policy read. There is no automatic mutation retry. Hidden/offline tabs abort requests and clear editable policy; returning requires an explicit read. Navigation/session loss unmounts the controls and aborts pending work, with late responses ignored.
+
+Component tests cover pin/unpin, duplicate clicks, original-result reconciliation, stale/capacity/access/storage failures, foreign identities, failed post-write reads, offline transitions and unmount. The packaged history journey additionally clicks the actual controls, checks exactly two PUT requests, verifies browser-attributed pin/unpin receipts and confirms preservation of other attempt data and original input/job bytes. Its mutation phase intentionally changes workflow policy metadata; the earlier read-only phase still requires byte-for-byte preservation.
