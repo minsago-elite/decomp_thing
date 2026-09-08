@@ -71,6 +71,10 @@
       "reason": "Built-in immutable generated-C/Ninja descriptor."
     },
     {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCProjectBuilder.kt",
+      "reason": "Generated-C build configuration, source ownership, process execution and build-contract rendering for the Make/Ninja adapters."
+    },
+    {
       "path": "src/main/kotlin/decompengine/project/GeneratedCProjectRendering.kt",
       "reason": "Generated-C shared and module interfaces, entrypoint, and Make build-definition rendering."
     },
@@ -189,8 +193,8 @@
       "path": "src/main/kotlin/decompengine/project/RecompilableProject.kt",
       "rule": "generic-adapter-reference",
       "fragment": ": ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor",
-      "count": 2,
-      "reason": "Existing source-revision and build API descriptor defaults only; generated-C implementation policy in this file is not exempt."
+      "count": 1,
+      "reason": "Existing source-revision API descriptor default only; generic capture resolves the selected adapter."
     },
     {
       "path": "src/main/kotlin/decompengine/project/RepairAcpEvidenceArchiveVerifier.kt",
