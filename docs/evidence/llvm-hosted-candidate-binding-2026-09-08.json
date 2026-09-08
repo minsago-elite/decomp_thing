@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "issue": 939,
+  "recordedAt": "2026-09-08",
+  "status": "unverified",
+  "scope": "Current source and synthetic-fixture evidence for binding a hosted clean-build receipt to one exact candidate executable; this record does not qualify hosted execution or admission.",
+  "sourceRevisionInspected": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "sourceSha256": {
+    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorHostedCleanBuildV2.kt": "eaf6ddf792b025f5951840e19665327facd23722be92d53b299b48e50cf94443",
+    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorHostedCleanBuildV2Verifier.kt": "c3384b7f47ba434c32c171460e8f63bc53509f574833fe8a161d934c98a2ac79",
+    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorCandidateFourWayBindingV2Verifier.kt": "dc70a121acafbb105541b626382da0e1b8b6eb27c7accabc68a0fc743202233c",
+    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorCandidateAcpLineageIndexV2.kt": "74790d34eff4176b1cb7b230b2a6788b6bbdf11bcd446f88cd04c11b394465f6",
+    "oracle/llvm-behavior-hosted-clean-build-v2.schema.json": "327c964163c2c76a42fe890b780abe44c76183e5a4b07156e4a4a10cfed620a1",
+    "oracle/llvm-behavior-candidate-acp-lineage-index-v2.schema.json": "1c1401b348e49be8c2500cccb5a0a2d6e13f007ac2455a78da7c5e2a3325de71"
+  },
+  "fixtureSha256": {
+    "src/test/kotlin/decompengine/oracle/behavior/LlvmBehaviorHostedCleanBuildV2Test.kt": "fbc41a3a58a292f87376d5ee5bb869151364804b247816310a4993e2cdead64f",
+    "src/test/kotlin/decompengine/oracle/behavior/LlvmBehaviorHostedCleanBuildV2VerifierTest.kt": "a4c04a81904a4aba0ecf80975b94de7e67a33bfb97caa04dc0c16e80bd7bfb7a",
+    "src/test/kotlin/decompengine/oracle/behavior/LlvmBehaviorCandidateFourWayBindingV2VerifierTest.kt": "1f360f020dc05c7ff3cfdc376bbfc5c5854dbfc5a18d0c1e864760854bd2cbe3",
+    "oracle/llvm/22.1.6/source-lock.json": "179b1298b14ddb701c46eb1ed6a5bb0aa60ee01580bafcf5c555b1d13c994306",
+    "oracle/llvm/22.1.6/toolchain-reproduction.json": "14a383bc5792b7ace786cbbd8964383469c1ffa5a4bb06a99e38c71518643f4f",
+    "oracle/llvm/22.1.6/build-record.json": "415afaf3554f954aed4442f0fa3c83ecc7e9f1fe0ddf68fb4c39e9231ece9005",
+    "oracle/llvm/22.1.6/build-toolchain.Dockerfile": "97e2d13915806242c14489b5a8b1417bd0478f3a11dc05e76888ba2ab43b1291",
+    "oracle/llvm/22.1.6/hosted-clean-build-v2-worker.Dockerfile": "fee734ad2acdf083e1cc71a286255af76a14b3175016a888a1761060acb143cf"
+  },
+  "currentCodeBoundary": {
+    "innerWorker": [
+      "derives two bounded clean-build records from one verified archive and lineage-index input",
+      "requires equal candidate executable byte length and SHA-256 across both builds",
+      "publishes an unsigned receipt and executable pair with executableReproduced=true"
+    ],
+    "pairVerifier": [
+      "reopens the exact canonical receipt and executable names in one mode-0700 directory",
+      "cross-binds receipt, each clean-build entry, candidateExecutable, ELF inspection, and terminal descriptor hashes",
+      "returns exactExecutableBound=true while receipt facts, hosted execution, workflow, and admission remain false"
+    ],
+    "fourWayVerifier": "structurally binds the verified archive, positive ACP lineage index, unsigned hosted receipt, and exact executable; it grants no hosted-build, PREPARED, START, scoring, certification, or release authority"
+  },
+  "fixtureConstruction": {
+    "hostedPairVerifier": "LlvmBehaviorHostedCleanBuildV2VerifierTest builds canonical in-memory receipt JSON and copies /bin/true bytes as systemElf(); it does not use a checked-in hosted receipt or executable.",
+    "fourWayBinding": "LlvmBehaviorCandidateFourWayBindingV2VerifierTest creates temporary archive, lineage, receipt, and executable files; its executable fixture is /bin/true and its receipt claims are synthetic.",
+    "toolchainInputs": "The listed LLVM 22.1.6 lock, reproduction, build-record, Dockerfile, and worker-Dockerfile bytes are repository inputs inspected by the current contract; they are not proof of a live hosted run."
+  },
+  "unverifiedAcceptanceCriteria": [
+    "No authenticated ingress proves that a particular reconstruction/repair archive and source revision reached a hosted worker.",
+    "No live hosted execution proves the compiler, linker, runtime image, clean extraction roots, dependency closure, and cleanup boundary recorded by the receipt.",
+    "No hosted workflow identity or Sigstore/SLSA attestation binds the receipt and executable as the two subjects of one admitted run.",
+    "No required clean-build qualification has reproduced the exact executable bytes from the admitted candidate in the production hosted environment.",
+    "No final immutable admission/publication record binds ACP session, accepted changes, hosted build, and admitted artifact after terminal cleanup.",
+    "The current bounded generated-C worker scope does not establish #115 full-tree configure/build/archive reproduction."
+  ],
+  "validation": {
+    "testsRunForThisRecord": false,
+    "reason": "Finalization requested with tests skipped; this record captures repository source and fixture inspection only.",
+    "knownLimitations": [
+      "Synthetic verifier fixtures and local /bin/true bytes do not qualify a real candidate executable.",
+      "The current unsigned receipt and structural four-way result are implementation evidence, not production qualification or release evidence."
+    ]
+  }
+}
