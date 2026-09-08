@@ -8,6 +8,8 @@ import decompengine.jobs.JobStore
 import decompengine.oracle.core.OracleJson
 import decompengine.project.ArchivalBundleLimits
 import decompengine.project.ArchivalBundleVerifier
+import decompengine.project.ReconstructionAdapters
+import decompengine.project.requireNormalizedProjectPath
 import decompengine.repair.StableRegularFile
 import decompengine.repair.readStableRegularFile
 import java.nio.file.Files
@@ -32,6 +34,11 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
         require(expectedSha256 == null || archive.sha256 == expectedSha256) { "archive differs from the displayed verified digest" }
         val input = identity(store.readInput(jobId))
         val source = sources.read(jobId).revision()
+        val buildPolicy = ReconstructionAdapters.resolve(source.profile).behaviorBuild
+        val layout = buildPolicy.layout(source.profile)
+        requireNormalizedProjectPath(layout.contractPath, "archive build contract path")
+        requireNormalizedProjectPath(layout.artifactPath, "archive build artifact path")
+        require(layout.contractPath != layout.artifactPath) { "archive build evidence paths are duplicated" }
         val inventory = store.sourceArchiveInventory(jobId)
         val temporary = Files.createTempDirectory("decomp-web-archive-")
         try {
@@ -61,12 +68,12 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
                 ) { "archive payload differs from the current source tree: $relative" }
                 identity(observed)
             }
-            val contractSnapshot = store.readArtifact(jobId, "reports/source-tree/reports/build_contract.json", MAXIMUM_FILE_BYTES)
-            requireSame(current.getValue("reports/build_contract.json"), contractSnapshot)
-            val contract = OracleJson.parse(contractSnapshot.bytes).jsonObject
-            val artifact = contract.getValue("artifact").jsonObject
-            require(artifact.getValue("path").jsonPrimitive.content == "build/reconstructed") { "archive build artifact path is invalid" }
-            val executable = store.readArtifact(jobId, "reports/source-tree/build/reconstructed", MAXIMUM_BYTES).let { snapshot ->
+            val contractSnapshot = store.readArtifact(jobId, "reports/source-tree/${layout.contractPath}", MAXIMUM_FILE_BYTES)
+            requireSame(current.getValue(layout.contractPath), contractSnapshot)
+            val contract = buildPolicy.parseContract(OracleJson.parse(contractSnapshot.bytes).jsonObject, source.profile)
+            val artifact = contract.artifact
+            require(artifact.getValue("path").jsonPrimitive.content == layout.artifactPath) { "archive build artifact path is invalid" }
+            val executable = store.readArtifact(jobId, "reports/source-tree/${layout.artifactPath}", MAXIMUM_BYTES).let { snapshot ->
                 require(artifact.getValue("sha256").jsonPrimitive.content == snapshot.sha256 &&
                     artifact.getValue("bytes").jsonPrimitive.longOrNull == snapshot.bytes.size.toLong()
                 ) { "archive build contract differs from the current rebuilt executable" }
@@ -77,7 +84,7 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
             }
             require(inventory == store.sourceArchiveInventory(jobId)) { "archive source inventory changed during verification" }
             require(source.manifestDocument == sources.read(jobId).manifestDocument) { "archive source revision changed during verification" }
-            requireSame(executable, store.readArtifact(jobId, "reports/source-tree/build/reconstructed", MAXIMUM_BYTES))
+            requireSame(executable, store.readArtifact(jobId, "reports/source-tree/${layout.artifactPath}", MAXIMUM_BYTES))
             requireSame(input, store.readInput(jobId))
             requireSame(identity(archive), store.readArtifact(jobId, ARCHIVE_PATH, MAXIMUM_BYTES))
             return WebArchiveSnapshot(archive.bytes, archive.sha256, source.view.copy(archiveSha256 = archive.sha256), source.manifestDocument)

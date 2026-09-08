@@ -59,6 +59,12 @@ input, payload, executable and archive bindings are rechecked before serving the
 same captured ZIP bytes. Only compact file identities are retained for payload
 rechecks, rather than another full in-memory copy of the source tree.
 
+The admitted reconstruction adapter supplies the build-contract and artifact
+paths and parses the build record. Web verification reads those exact paths,
+checks the artifact path against adapter policy, and retains the bounded byte,
+identity, inventory and final reread checks. The Make and Ninja profiles use
+this same route; the archive transport's own layout requirements still apply.
+
 The job page displays a verified archive link only from this verification result,
 with its exact SHA-256 in both the displayed digest and download URL. A later
 request with that digest rejects even a different otherwise valid archive. A
