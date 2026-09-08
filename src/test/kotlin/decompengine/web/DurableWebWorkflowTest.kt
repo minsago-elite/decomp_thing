@@ -433,7 +433,10 @@ class DurableWebWorkflowTest {
             service.initializeExistingStorage()
             val admission = assertIs<DurableWebWorkflowAdmission.Started>(service.startDurable(job.id, version(service, job.id), DurableWebWorkflowRequest(WorkflowKind.RECONSTRUCT)))
             val before = service.getAttempt(job.id, admission.runId)
-            val pinned = service.setProgressRetentionPinned(job.id, admission.runId, before.version, true)
+            val actor = decompengine.jobs.WorkflowPinActor.browserSession("b".repeat(64))
+            val pinned = service.setProgressRetentionPinned(job.id, admission.runId, before.version, true, actor)
+            val audited = assertIs<WorkflowJobInspection.Available>(service.inspectDurableJob(job.id)).snapshot.pinAudit.entries.single()
+            assertEquals(actor, audited.actor); assertEquals(pinned.version, audited.appliedVersion)
             assertTrue(pinned.progressRetentionPinned)
             assertEquals("VERSION_CONFLICT", assertFailsWith<WebJobServiceException> {
                 service.setProgressRetentionPinned(job.id, admission.runId, before.version, false)
