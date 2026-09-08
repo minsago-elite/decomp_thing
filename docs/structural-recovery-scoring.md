@@ -295,3 +295,20 @@ all five schemas, and compares output bytes:
 ```bash
 python3 -m unittest tests.oracle.test_structural_recovery -v
 ```
+
+## Focused global/type evidence
+
+`docs/evidence/structural-global-type-fixture-2026-09-08.json` records one
+byte-bound fixture slice from the checked v1 report. It covers the four global
+dimensions and eight recoverable type dimensions through the reviewed identity
+map. Its 12 oracle facts and 14 recovered claims produce 10 credits while
+retaining one `recovered-unknown`, one `contradicted`, and two `fabricated`
+outcomes. The slice has zero global/type `oracle-unobservable` facts; the
+denominator field remains explicit rather than treating absence as success.
+
+This is fixture evidence with `productionVerified: false` and
+`adapterReplayVerified: false`. The production gate is unavailable: #679 has no
+registered host-owned adapter (`StructuralReplayAdapterRegistry.production` is
+empty), and the repository has no checked GCC production global/type oracle,
+recovered model, identity-map replay, or score. Consequently this slice does
+not establish the #682 production outcome or downstream #45/#46 qualification.
