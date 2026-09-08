@@ -151,9 +151,8 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                         contentKind = source.contentKind,
                     )
                 } ?: source
-                val agentGenerated = receiptSource.generator.isAgentGenerated() ||
-                    checkpoint.generator.isAgentGenerated() ||
-                    checkpoint.reconstructorIdentity.startsWith("agent:")
+                val agentGenerated = moduleClaimsAgentExecution(receiptSource.generator, checkpoint.reconstructorIdentity) ||
+                    moduleClaimsAgentExecution(checkpoint.generator, checkpoint.reconstructorIdentity)
 
                 if (!agentGenerated) {
                     require(checkpoint.hasNoExecutionEvidence()) {
@@ -327,9 +326,6 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         val promptSha256 = root.requiredSha256("promptSha256", "module checkpoint")
         val promptCharacters = root.optionalNonNegativeLong("promptCharacters", "module checkpoint")
         val promptBudgetCharacters = root.optionalNonNegativeLong("promptBudgetCharacters", "module checkpoint")
-        require(promptCharacters == null || promptBudgetCharacters == null || promptCharacters <= promptBudgetCharacters) {
-            "module checkpoint prompt exceeds its recorded budget: $moduleId"
-        }
         val executionEvidencePath = root.optionalString("executionEvidencePath", "module checkpoint")
         executionEvidencePath?.let { requireNormalizedProjectPath(it, "module checkpoint execution evidence path") }
         val executionEvidenceSha256 = root.optionalSha256("executionEvidenceSha256", "module checkpoint")
@@ -353,6 +349,16 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             "module checkpoint receipt assessment binding is incomplete: $moduleId"
         }
         val accepted = root.requiredBoolean("accepted", "module checkpoint")
+        // An unresolved checkpoint may retain the size of a prompt rejected before dispatch.
+        require(!accepted || promptCharacters == null || promptBudgetCharacters == null ||
+            promptCharacters <= promptBudgetCharacters) {
+            "accepted module checkpoint prompt exceeds its recorded budget: $moduleId"
+        }
+        if (accepted && moduleClaimsAgentExecution(generator, reconstructorIdentity)) {
+            require(modulePromptBudgetIsValid(promptCharacters, promptBudgetCharacters, profile)) {
+                "accepted agent checkpoint prompt budget is missing, invalid, or exceeds the reconstruction profile: $moduleId"
+            }
+        }
         root.requiredBoolean("retryable", "module checkpoint")
         if (schemaVersion >= 5L) {
             val compilationElement = root.getValue("compilation")
@@ -1400,8 +1406,6 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             index += fragment.length
         }
     }
-
-    private fun String.isAgentGenerated(): Boolean = startsWith("agent:") || startsWith("unresolved:agent:")
 
     private fun Enum<*>.wireName(): String = name.lowercase().replace('_', '-')
 

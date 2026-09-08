@@ -245,3 +245,26 @@ both built-in profiles. Its deliberately oversized context is rejected before an
 agent invocation. This is prompt-byte and budget-gate compatibility evidence, not a
 live ACP interoperability result. Legacy request field names and the remaining
 profile-budget/neutrality migration are separate work.
+
+The complete module prompt now uses the smaller of the selected profile's
+`reconstructionMaximumContextCharacters` and the reconstructor's configured
+ceiling. That effective limit is recorded in results, cancellation reports,
+oversize diagnostics and the profile-aware reconstructor cache identity. Default
+profile identities remain unchanged; custom strategies retain their existing
+identity unless they opt into the profile-aware method.
+
+Accepted agent candidates, reused checkpoints, rollback baselines and archival
+checks require numeric prompt metadata with a nonnegative character count, a
+positive budget, and `characters <= budget <= profile limit`. Unresolved records
+may retain the size of an oversized prompt that was rejected before dispatch.
+The archive's exact factory and cache identity checks still apply. These checks
+establish budget consistency; they do not replace invocation-bound ACP evidence.
+
+Focused tests cover either ceiling being tighter, exact-limit dispatch to a
+cancelled test harness, default identity compatibility, and unresolved workflow
+reports that retain the selected limit without dispatching an agent. Candidate
+assessment also rejects an above-profile budget under each supported agent
+identity form before invoking the compiler.
+The auditor's metadata test covers missing and null values, numeric strings,
+negative values, zero budgets and exceeded limits while preserving unaffected
+module evidence. Its authored fixture supplies no ACP release receipt.
