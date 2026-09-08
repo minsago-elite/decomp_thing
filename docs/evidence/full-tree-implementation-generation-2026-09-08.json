@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "kind": "full-tree-implementation-generation-evidence-v1",
+  "scope": "repository-fact-contract",
+  "authority": {
+    "status": "unresolved",
+    "releaseEligible": false,
+    "implementationGeneration": "not-attested",
+    "unresolvedDisposition": "release-blocking"
+  },
+  "population": {
+    "oracleId": "clang-llvm-full-tree-22.1.6",
+    "planningInventory": {
+      "path": "oracle/llvm/22.1.6/full-tree-planning-inventory.json",
+      "sha256": "2bf9181f031e94304d63e184e5d2fb684623f981b655afb966a06db7c43be15a",
+      "sourceModules": 2150,
+      "generatedSourceModules": 1,
+      "handwrittenSourceModules": 2149,
+      "sourceModuleShards": 57,
+      "sourceOnlyUnits": 2325,
+      "workUnits": 11100
+    },
+    "sourceInventory": {
+      "path": "oracle/llvm/22.1.6/full-tree-source-inventory.json",
+      "sha256": "33e53beb62221888abbf5e198a4da2abe3b5c29c809bb90f1faff15c3829edc4",
+      "candidateTranslationUnits": 4474,
+      "linkedSourceUnits": 2149,
+      "generatedCompilationUnits": 1,
+      "sourceOnlyUnits": 2325,
+      "tablegenInputs": 1666,
+      "disabledProjects": 21
+    }
+  },
+  "existingContracts": {
+    "historicalOwnershipProjection": {
+      "path": "docs/full-tree-implementation-ownership-planning.md",
+      "sha256": "3211b6b81950482a4cbfe1bde5f0b8a4b5199d9f648d16f003cd33e0bb6edd31",
+      "status": "non-authoritative",
+      "releaseEligible": false,
+      "dependencyStatus": "not-inferred-from-historical-function-evidence"
+    },
+    "candidateAcceptance": {
+      "path": "docs/module-reconstruction-acceptance.md",
+      "sha256": "4f09621ec8cbbb1f0058abd48e322425dc0610dafc652ba58e0c76921d872fb1",
+      "genericPlaceholderDefinitions": "rejected",
+      "failedOrMissingImplementation": "unresolved"
+    }
+  },
+  "productionGaps": [
+    "No full-tree implementation-generation artifact or completeness run is attached to #118.",
+    "Shared-header inference, dependency derivation, clean compilation, and archive publication remain outstanding.",
+    "The local compiler gate does not authenticate the compiler or inputs and does not prove contained production compilation.",
+    "No ACP production scheduling/provenance, durable crash publication, or behavior/fidelity qualification is evidenced here."
+  ],
+  "preservedBoundaries": {
+    "provenance": "The record binds only the cited repository bytes by SHA-256.",
+    "oracle": "Authenticated inventory controls remain the authority; this record cannot certify candidate source or a release.",
+    "acp": "ACP remains a candidate producer and cannot author, validate, score, or publish oracle authority.",
+    "ghidra": "Production analysis remains isolated through the bundled Ghidra JVM APIs; external GHIDRA_HOME/analyzeHeadless use is not admitted.",
+    "unresolved": "Missing, failed, or unqualified implementation evidence remains explicitly release-blocking."
+  }
+}
