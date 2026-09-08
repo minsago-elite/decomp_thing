@@ -416,6 +416,18 @@ class AgentExecutionEvidenceTest {
         val manifestEntry = manifest.files.single { it.path == evidencePath }
         assertEquals(sha256(evidenceFile.readBytes()), manifestEntry.sha256)
         assertEquals("acp-execution-receipt:v2", manifestEntry.generator)
+        val receipt = Json.parseToJsonElement(project.resolve("reports/confidence.json").readText())
+            .jsonObject.getValue("implementationReceiptInventory").jsonArray.single().jsonObject
+        assertEquals("accepted", receipt.getValue("status").jsonPrimitive.content)
+        assertEquals(listOf("fn_0000000000401000"), receipt.getValue("entityIds").jsonArray.map { it.jsonPrimitive.content })
+        val receiptEvidence = receipt.getValue("evidence").jsonObject
+        assertEquals(evidencePath, receiptEvidence.getValue("executionEvidencePath").jsonPrimitive.content)
+        assertEquals(sha256(evidenceFile.readBytes()), receiptEvidence.getValue("executionEvidenceSha256").jsonPrimitive.content)
+        assertEquals(harness.requestBinding.requestSha256, receiptEvidence.getValue("executionRequestSha256").jsonPrimitive.content)
+        assertEquals("returned-completed", receiptEvidence.getValue("executionTerminalOutcome").jsonPrimitive.content)
+        assertTrue(receiptEvidence.getValue("executionReleaseComplete").jsonPrimitive.boolean)
+        assertEquals("unavailable", Json.parseToJsonElement(project.resolve("reports/confidence.json").readText())
+            .jsonObject.getValue("productionRun").jsonObject.getValue("status").jsonPrimitive.content)
 
         assertEquals(0, MakeProjectBuilder.build(project).returnCode)
         val bundle = ArchivalPackager.create(project, temp.resolve("source-tree.zip"))

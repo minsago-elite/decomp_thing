@@ -850,6 +850,8 @@ object SourceTreeGenerator {
             moduleRevisionEvidence[module.id] = buildString {
                 append("{\"sourcePath\":\"").append(module.sourcePath.jsonEscape()).append("\",")
                 append("\"sourceSha256\":\"").append(checkpoint.sourceSha256).append("\",")
+                append("\"generator\":\"").append(checkpoint.generator.jsonEscape()).append("\",")
+                append("\"reconstructorIdentity\":\"").append(checkpoint.reconstructorIdentity.jsonEscape()).append("\",")
                 append("\"inputFingerprint\":\"").append(checkpoint.fingerprint).append("\",")
                 append("\"inputFingerprintProvider\":\"").append(INPUT_FINGERPRINT_PROVIDER).append("\",")
                 append("\"inputBinarySha256\":\"").append(model.inputSha256.jsonEscape()).append("\",")
@@ -857,6 +859,21 @@ object SourceTreeGenerator {
                 append("\"checkpointPath\":\"").append(checkpointEvidencePath.jsonEscape()).append("\",")
                 append("\"checkpointSha256\":\"").append(sha256(checkpointText.toByteArray())).append("\",")
                 append("\"acceptedImplementation\":").append(checkpoint.accepted).append(',')
+                append("\"promptSha256\":\"").append(checkpoint.promptSha256.jsonEscape()).append("\",")
+                append("\"promptCharacters\":").append(checkpoint.promptCharacters ?: "null").append(',')
+                append("\"promptBudgetCharacters\":").append(checkpoint.promptBudgetCharacters ?: "null").append(',')
+                append("\"executionEvidencePath\":")
+                append(checkpoint.executionEvidencePath?.let { "\"${it.jsonEscape()}\"" } ?: "null").append(',')
+                append("\"executionEvidenceSha256\":")
+                append(checkpoint.executionEvidenceSha256?.let { "\"$it\"" } ?: "null").append(',')
+                append("\"executionEvidenceSchemaVersion\":")
+                append(checkpoint.executionEvidenceSchemaVersion ?: "null").append(',')
+                append("\"executionRequestSha256\":")
+                append(checkpoint.executionRequestSha256?.let { "\"$it\"" } ?: "null").append(',')
+                append("\"executionTerminalOutcome\":")
+                append(checkpoint.executionTerminalOutcome?.let { "\"${it.jsonEscape()}\"" } ?: "null").append(',')
+                append("\"executionReleaseComplete\":")
+                append(checkpoint.executionReleaseComplete ?: "null").append(',')
                 append("\"compilation\":").append(checkpoint.compilation?.toJson() ?: "null").append(',')
                 append("\"behavior\":{\"status\":\"unknown\",\"reason\":\"no revision-bound behavioral measurements attached\",\"coverage\":null,\"outputAgreement\":null,\"unobservedBehavior\":\"unknown\"}}")
             }
@@ -1419,12 +1436,13 @@ object SourceTreeGenerator {
         val moduleById = plan.modules.associateBy { it.id }
         val unresolvedRecoverySet = unresolvedRecovery.toSet()
         return buildString {
-            append("{\n  \"schemaVersion\": 2,")
+            append("{\n  \"schemaVersion\": 3,")
             append("\n  \"basis\": \"recovery evidence only; behavioral equivalence is not implied\",")
             append("\n  \"scoreMeaning\": \"structural recovery heuristic; not implementation acceptance or measured behavioral confidence\",")
             append("\n  \"scoreInterpretation\": ").append(HeuristicScoreInterpretation.STRUCTURAL_RECOVERY.toJson()).append(',')
             append("\n  \"recoveryAssessment\": ").append(model.unassessedRecoveryAssessment()).append(',')
             append("\n  \"projectScore\": ").append("%.4f".format(java.util.Locale.ROOT, projectScore)).append(',')
+            append("\n  \"productionRun\": {\"status\":\"unavailable\",\"identity\":null,\"reason\":\"no authenticated complete-driver run identity is supplied to local source generation\"},")
             append("\n  \"modules\": [")
             append(moduleScores.sortedBy { it.first }.joinToString(",") { (id, value) ->
                 val module = moduleById.getValue(id)
@@ -1433,6 +1451,14 @@ object SourceTreeGenerator {
                     "\"unresolvedRecoveryEntityIds\":${idsJson(owned.filter { it in unresolvedRecoverySet })}," +
                     "\"unresolvedImplementationIds\":${idsJson(owned.filter { it in unresolvedImplementations })}," +
                     "\"revisionEvidence\":${moduleRevisionEvidence.getValue(id)}}"
+            })
+            append("\n  ],\n  \"implementationReceiptInventory\": [")
+            append(moduleScores.sortedBy { it.first }.joinToString(",") { (id, _) ->
+                val module = moduleById.getValue(id)
+                val implementationIds = module.functionIds + module.globalIds
+                val status = if (implementationIds.any(unresolvedImplementations::contains)) "unresolved" else "accepted"
+                "\n    {\"moduleId\":\"${id.jsonEscape()}\",\"entityIds\":${idsJson(implementationIds)}," +
+                    "\"status\":\"$status\",\"evidence\":${moduleRevisionEvidence.getValue(id)}}"
             })
             append("\n  ],\n  \"unresolvedRecoveryEntityIds\": ").append(idsJson(unresolvedRecovery))
             append(",\n  \"unresolvedImplementationIds\": ").append(idsJson(unresolvedImplementations))

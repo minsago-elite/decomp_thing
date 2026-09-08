@@ -7,6 +7,24 @@ target must match the profile's editable `module-implementation` declaration.
 Interfaces are readable and the one implementation is writable. The workflow
 retains the invocation receipt before interpreting the agent's result.
 
+Each generation also publishes an `implementationReceiptInventory` in the
+profile-declared confidence report. It contains one row per planned module with
+the owned function/global IDs, accepted or unresolved status, source and
+checkpoint hashes, input/model/profile identity, reconstructor identity, prompt
+size/hash/budget, compiler evidence, and any persisted ACP execution receipt
+commitments. The same report declares `productionRun.status` as `unavailable`
+with a null identity because local source generation is not an authenticated
+complete-driver production run. `source_tree_manifest.json` remains the source
+file inventory, and `UNRESOLVED.md` remains the human-readable unresolved
+inventory.
+
+This is bounded fixture and local-workflow evidence. It does not satisfy the
+remaining #47 acceptance boundary: run the pinned GCC 16.2.0 model through the
+configured authenticated reconstruction agent and publish the resulting
+production run identity with one receipt row for every planner-owned
+implementation. Resume/hash-preservation and clean-build qualification remain
+downstream checks.
+
 A successful agent turn is a candidate revision. Acceptance requires exact
 agreement between its source bytes and reported change, complete ACP release
 evidence, attributable definitions for every owned entity, no generic placeholder
