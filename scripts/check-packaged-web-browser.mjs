@@ -679,6 +679,8 @@ try {
       report.serverRestart = await qualifyServerRestart({ fixture: historyFixture, makeTarget, cdp, evaluate, ready, browserOrigin,
         stopServer: async () => {
           const previous = application;
+          assert.equal(previous.exitCode, null, 'Restart qualification requires a live server before SIGTERM');
+          assert.equal(previous.signalCode, null, 'Restart qualification requires an unsignalled server before SIGTERM');
           await stop(previous);
           assert.notEqual(previous.signalCode, 'SIGKILL', 'Restart qualification requires graceful server shutdown');
         },
