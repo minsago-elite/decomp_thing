@@ -69,23 +69,26 @@ internal class AcpExecutionScheduler(
         val queueTimeoutNanos = limits.maximumQueueWait.toNanos()
         val waiter = Waiter(workspaceGroup)
         var queued = false
+        var immediateWithoutReservation = false
         try {
             // The queue position is reserved before the caller's first observer runs, so a
             // slow observer can neither be overtaken by later callers nor wait outside the
             // queue bounds.
             lock.withLock {
-                if (quarantinedByGroup.containsKey(workspaceGroup) || quarantinedCount() == limits.maximumActive) {
-                    throw schedulingFailure("cleanupUnverified", AgentFailureKind.UNAVAILABLE, retryable = false)
-                }
-                val immediatelyAdmissible = active < limits.maximumActive &&
-                    eligible(workspaceGroup) &&
+                val immediate = active < limits.maximumActive && eligible(workspaceGroup) &&
                     queue.none { eligible(it.group) }
-                if (!immediatelyAdmissible) {
-                    if (queue.size >= limits.maximumQueued ||
-                        queue.count { it.group == workspaceGroup } >= limits.maximumQueuedPerWorkspace
-                    ) {
-                        throw schedulingFailure("queueCapacity", AgentFailureKind.RESOURCE_EXHAUSTED)
-                    }
+                if (immediate && (queue.size >= limits.maximumQueued ||
+                        queue.count { it.group == workspaceGroup } >= limits.maximumQueuedPerWorkspace)
+                ) {
+                    // An eligible caller may consume spare capacity even when all queue slots
+                    // are occupied by ineligible workspace reservations.
+                    immediateWithoutReservation = true
+                } else if (queue.size >= limits.maximumQueued ||
+                    queue.count { it.group == workspaceGroup } >= limits.maximumQueuedPerWorkspace
+                ) {
+                    // A full queue still has to observe cancellation before it emits a
+                    // capacity failure. The caller cannot reserve a position in this case.
+                } else {
                     queue.add(waiter)
                     queued = true
                 }
@@ -112,20 +115,14 @@ internal class AcpExecutionScheduler(
                         if (quarantinedByGroup.containsKey(workspaceGroup) || quarantinedCount() == limits.maximumActive) {
                             throw schedulingFailure("cleanupUnverified", AgentFailureKind.UNAVAILABLE, retryable = false)
                         }
+                        if (immediateWithoutReservation && active < limits.maximumActive &&
+                            eligible(workspaceGroup) && queue.none { eligible(it.group) }
+                        ) {
+                            if (current) return admit(workspaceGroup)
+                            continue
+                        }
                         if (!queued) {
-                            // Queue bounds charge waiting work only. A blocked workspace cannot
-                            // prevent immediate admission to spare capacity for an eligible group.
-                            if (active < limits.maximumActive && eligible(workspaceGroup) && queue.none { eligible(it.group) }) {
-                                if (current) return admit(workspaceGroup)
-                                continue
-                            }
-                            if (queue.size >= limits.maximumQueued ||
-                                queue.count { it.group == workspaceGroup } >= limits.maximumQueuedPerWorkspace
-                            ) {
-                                throw schedulingFailure("queueCapacity", AgentFailureKind.RESOURCE_EXHAUSTED)
-                            }
-                            queue.add(waiter)
-                            queued = true
+                            throw schedulingFailure("queueCapacity", AgentFailureKind.RESOURCE_EXHAUSTED)
                         }
                         if (active < limits.maximumActive && queue.firstOrNull { eligible(it.group) } === waiter) {
                             if (current) {

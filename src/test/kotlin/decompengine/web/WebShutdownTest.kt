@@ -48,6 +48,18 @@ class WebShutdownTest {
         }
     }
 
+    @Test
+    fun `listener bind failure releases store ownership for a retry`() {
+        val root = createTempDirectory("web-bind-failure-")
+        val occupied = java.net.ServerSocket(0)
+        try {
+            val port = occupied.localPort
+            kotlin.test.assertFailsWith<java.net.BindException> { UploadServer("127.0.0.1", port, root) }
+        } finally { occupied.close() }
+        val retry = UploadServer("127.0.0.1", 0, root)
+        try { retry.stop() } finally { root.toFile().deleteRecursively() }
+    }
+
     private fun verifyShutdown(swallowInterruption: Boolean, keepWaiting: Boolean = false, abruptExit: Boolean = false) {
         val root = createTempDirectory("web-shutdown-")
         val log = root.resolve("child.log")

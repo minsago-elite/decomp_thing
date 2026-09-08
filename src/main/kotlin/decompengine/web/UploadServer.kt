@@ -211,7 +211,12 @@ class UploadServer(
     }
     // Acquire cooperative ownership before binding so a refused contender never occupies a listener.
     private val ownership: WebJobStoreOwnership = WebJobStoreOwnership.acquire(dataDir.toAbsolutePath().normalize())
-    private val server = HttpServer.create(InetSocketAddress(host, port), listenBacklog)
+    private val server: HttpServer = try {
+        HttpServer.create(InetSocketAddress(host, port), listenBacklog)
+    } catch (failure: Throwable) {
+        ownership.close()
+        throw failure
+    }
     private val store = JobStore(dataDir)
     private val jobs = WebJobService(store, analyzer, reconstructor, executor,
         attemptStoreFactory = { root ->
@@ -324,44 +329,57 @@ class UploadServer(
 
     fun stop(delaySeconds: Int = 0) {
         require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
+        val callerWasInterrupted = Thread.interrupted()
+        var interruptedDuringShutdown = callerWasInterrupted
         // Signal recovery and the job service even while start or a queued callback holds
         // lifecycleLock through filesystem operations: no queued operation may begin and no
         // completion may be published after the stop signal is observable.
-        stopRequested.set(true)
-        jobs.beginShutdown()
-        val callerWasInterrupted = Thread.currentThread().isInterrupted
-        val inspection = synchronized(lifecycleLock) {
-            stopping = true
-            // JDK HttpServer.stop does not release a bound listener before start. Start its
-            // dispatcher only after closing request admission, then close it below. This also
-            // covers failed ownership/recovery admission and explicit stop-before-start.
-            if (!started) {
-                server.start()
-                started = true
-            }
-            authenticationInspectionCancellation.set(true)
-            authenticationInspectionWorker.get()
-        }
-        val streamsClosed = streamResources.shutdown()
-        server.stop(delaySeconds)
-        if (!streamsClosed && !streamResources.shutdown()) System.err.println("Event stream shutdown did not complete cleanly.")
-        requestExecutor.shutdownNow()
-        requestDeadlines.shutdownNow()
-        access.close()
-        jobs.close()
-        var inspectionWaitInterrupted = false
         try {
-            check(inspection === null || inspection !== Thread.currentThread()) { "Inspection cannot await its own shutdown" }
-            // The provider owns its cleanup deadlines. Do not truncate them with a web timeout,
-            // including when the shutdown caller is interrupted while cleanup is still running.
-            while (inspection?.isAlive == true) {
-                try { inspection.join() } catch (_: InterruptedException) { inspectionWaitInterrupted = true }
+            stopRequested.set(true)
+            jobs.beginShutdown()
+            val inspection = synchronized(lifecycleLock) {
+                stopping = true
+                // JDK HttpServer.stop does not release a bound listener before start. Start its
+                // dispatcher only after closing request admission, then close it below. This also
+                // covers failed ownership/recovery admission and explicit stop-before-start.
+                if (!started) {
+                    server.start()
+                    started = true
+                }
+                authenticationInspectionCancellation.set(true)
+                authenticationInspectionWorker.get()
             }
-        } catch (exception: Exception) {
-            if (exception is InterruptedException) Thread.currentThread().interrupt()
+            val streamsClosed = streamResources.shutdown()
+            server.stop(delaySeconds)
+            if (!streamsClosed && !streamResources.shutdown()) System.err.println("Event stream shutdown did not complete cleanly.")
+            requestExecutor.shutdownNow()
+            requestDeadlines.shutdownNow()
+            access.close()
+            jobs.close()
+            var inspectionWaitInterrupted = false
+            try {
+                check(inspection === null || inspection !== Thread.currentThread()) { "Inspection cannot await its own shutdown" }
+                // The provider owns its cleanup deadlines. Do not truncate them with a web timeout,
+                // including when the shutdown caller is interrupted while cleanup is still running.
+                while (inspection?.isAlive == true) {
+                    try { inspection.join() } catch (_: InterruptedException) {
+                        inspectionWaitInterrupted = true
+                        interruptedDuringShutdown = true
+                        Thread.interrupted()
+                    }
+                }
+            } catch (exception: Exception) {
+                if (exception is InterruptedException) {
+                    inspectionWaitInterrupted = true
+                    interruptedDuringShutdown = true
+                    Thread.interrupted()
+                }
+            }
+            if (inspectionWaitInterrupted) Thread.interrupted()
+            if (!releaseOwnershipIfIdle()) throw IllegalStateException("HTTP requests remain active after server stop")
+        } finally {
+            if (interruptedDuringShutdown) Thread.currentThread().interrupt()
         }
-        if (inspectionWaitInterrupted) Thread.currentThread().interrupt()
-        if (!releaseOwnershipIfIdle()) throw IllegalStateException("HTTP requests remain active after server stop")
     }
 
     /** Admission covers the whole handler, including upload publication and error handling. */
