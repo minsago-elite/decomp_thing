@@ -1,0 +1,418 @@
+[
+  {
+    "name": "generated v1 contract pipeline has no schema/type drift",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/session.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/bootstrap.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/job-lossless.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/jobs-page.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/run-queued.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/run-completed-unaccepted.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/artifact.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/revision-accepted.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/report-accepted.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/report-exploration.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/report-partial.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/report-missing.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/report-unsupported.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/report-unknown.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/report-invalid.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/report-incompatible.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/event-message-lossless.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/event-run-state.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/event-evidence.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/event-gap.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/snapshot.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/events-poll.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/git-workspace.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/git-operation.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/error-validation.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/error-version-conflict.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/request-workflow-start.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/request-recover.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/request-git-commit.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/request-git-push.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/request-session.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-numeric-count.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-count-overflow.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-address.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-private-path.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-unknown-enum.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-unknown-version.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-partial-accepted.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-root-accepted.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-test-only-accepted.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-terminal-without-time.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-git-sha256-abbreviation.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-request-unknown-field.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-report-artifact-binding.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-page-over-limit.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-snapshot-watermark.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-report-failed-accepted.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-gap-invented-cursor.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/upload-progress.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-upload-progress-publication.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-upload-progress-limit.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/runs-page.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/runs-wrong-job.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/runs-duplicate.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/event-workflow-observation.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-observation-authority.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-observation-numeric-count.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-observation-missing-omission.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-observation-raw-object.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/events-observation-poll.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/event-observation-plan.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-observation-plan-limit.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/event-observation-truncated-preview.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/snapshot-progress-omissions.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-snapshot-progress-boundary.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-snapshot-progress-count.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/bootstrap-scheduler-saturated.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/bootstrap-scheduler-unavailable.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-scheduler-bound.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-scheduler-exact.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-scheduler-capacity.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/event-observation-public-metadata.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/event-observation-plan-metadata.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/error-event-gap.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/error-event-gap-empty.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-event-gap-missing.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-event-gap-foreign-snapshot.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-event-gap-wrong-code.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-event-gap-partial-boundary.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-event-gap-retryable.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/snapshot-empty-cutover.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/error-event-gap-empty-cutover.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-empty-cutover-missing-watermark.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/progress-pin.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/request-progress-pin.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-progress-pin-numeric.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-progress-pin-actor.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline accepts shared fixtures/bootstrap-retention.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-retention-accounting.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects shared fixtures/invalid-retention-error.json",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline round-trips unsigned decimal and address strings without Number conversion",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline drops additive response fields at every level while retaining known event branch fields",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline discards additive nested report claims without promoting partial observations to acceptance",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects unknown request fields and encodes only the real HTTP body",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline does not accept new kinds, versions, event variants or foreign report adapters",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects a bootstrap which cannot negotiate v1",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline checks bootstrap and download links against the caller deployment prefix",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline checks nested report download identities without deriving authority from its href",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline binds retention-gap recovery to the same job, run and configured base",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline validates full calendar dates and Unicode code point lengths",
+    "status": "passed"
+  },
+  {
+    "name": "generated v1 contract pipeline rejects malformed, ambiguous or unbounded JSON before schema traversal",
+    "status": "passed"
+  },
+  {
+    "name": "workflow observation authority preserves display correlation and exact counts without promoting reported acceptance",
+    "status": "passed"
+  },
+  {
+    "name": "binds HTTP gap recovery to the configured deployment and selected snapshot resource",
+    "status": "passed"
+  }
+]
