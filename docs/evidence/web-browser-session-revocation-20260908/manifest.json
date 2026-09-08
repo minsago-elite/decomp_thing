@@ -1,0 +1,27 @@
+{
+  "status": "passed",
+  "driverCommit": "6f5d8ecb",
+  "applicationFeatureCommit": "a800c265",
+  "archiveSha256": "11ba96bb1470a3b538de20fd1cebdd52d9f6056017b3b6655772ff4f0ad92e69",
+  "browserEvidenceSha256": "76e053ef6d308da4295df16f4242a5a8e4849fc502a80ae8abc62275688e4fd7",
+  "scope": {
+    "peerNotificationsUnavailable": true,
+    "privateAttemptRetainedUntilRead": true,
+    "actualServer401": true,
+    "sharedAttemptStateCleared": true,
+    "pinControlsRemoved": true,
+    "activityRemoved": true,
+    "privateReadRequests": 1,
+    "automaticFollowupRequests": 0,
+    "mutationRequests": 0,
+    "workflowStateUnchanged": true,
+    "storageEntries": 0
+  },
+  "limits": [
+    "A single private GET after server-side logout is qualified; expiration timers, server restart and conflicting workflow commands remain separate scenarios.",
+    "Peer notifications are unavailable in one controlled tab; normal peer logout remains separately qualified by the same browser journey.",
+    "The archive predates subsequent upstream A-series merges. Application frontend implementation is unchanged; merged JVM source is verified separately.",
+    "Earlier intermittent appended-SSE timeout remains unresolved; this run passed that assertion without a timeout or assertion change.",
+    "Chrome uses test-only --no-sandbox. No workflow or native analysis ran."
+  ]
+}
