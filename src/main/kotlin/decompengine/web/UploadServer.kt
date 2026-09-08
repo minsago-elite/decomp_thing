@@ -223,6 +223,7 @@ class UploadServer(
             ownership.ensureLockFile()
             WorkflowAttemptStore.open(root)
         },
+        progressRetentionIntervalMs = if (uiMode == WebUiMode.SPA) 1000 else null,
         shutdownTimeoutMs = 5000, failureDiagnostic = { diagnostic(it, "Background operation failed") })
     private val sourceEvidence = WebSourceEvidence(store, sourceProfiles, jobs::readArtifact)
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
