@@ -110,6 +110,8 @@ class ReconstructionPipelineTest {
         assertTrue(report.projectDir.resolve("Makefile").exists())
         assertTrue(report.projectDir.resolve("reports/build.log").exists())
         assertTrue(report.projectDir.resolve("build/reconstructed").isExecutable())
+        val profileCompiler = GeneratedCMakeReconstructionProfile.descriptor.adapterConfiguration.getValue("compiler-driver").single()
+        assertTrue("CC=$profileCompiler" in report.command)
     }
 
     @Test

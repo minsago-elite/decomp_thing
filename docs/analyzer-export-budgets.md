@@ -13,11 +13,12 @@ tool identity, recovery mode, model-byte limit, diagnostic limits and terminatio
 grace. Binding does not locate Ghidra, construct a worker command or write files.
 The existing isolated worker execution applies the resulting limits.
 
-Host admission remains a separate caller responsibility. This capability alone
-does not route the legacy reconstruction pipeline through a selected profile or
-bound its parent-side ELF metadata reads. The wrapper still reads the whole input
-after export; bounded metadata inspection and complete pipeline handoff remain
-part of [#84](https://github.com/minsago-elite/decomp_thing/issues/84).
+Host admission remains a separate caller responsibility. The profile overload of
+`ReconstructionPipeline.generate` performs that admission before binding budgets;
+its [pipeline contract](profiled-reconstruction-pipeline.md) describes the full
+handoff. The wrapper still reads the whole input after export. Bounded metadata
+inspection and a shared elapsed deadline remain part of
+[#84](https://github.com/minsago-elite/decomp_thing/issues/84).
 
 ## Focused verification
 
