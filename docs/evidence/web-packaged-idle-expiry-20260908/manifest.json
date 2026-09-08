@@ -1,0 +1,46 @@
+{
+  "status": "passed",
+  "driverSourceCommit": "6e520f8f",
+  "applicationSourceCommit": "eaa79ed3",
+  "documentationCheckpoint": "cdbd60a5",
+  "masterIncluded": "1c999572",
+  "archiveSha256": "e554925e12e839c3ed95932af52e008d75e9e6626661dd6518ee70f7198c1ad3",
+  "applicationJarSha256": "c0485f7e07ee4fa1248611caef42a73396bb2d229951a8c52d78a7bada0e8aa8",
+  "uiBuildId": "fb0a2f5eaecb140165717824a27e66282b271360b53d6066cbc612cde4137f56",
+  "verification": {
+    "distZip": "passed",
+    "packagedIdleExpiry": {
+      "realTimeIdleWaitMs": 1802136,
+      "minimumIdleWaitMs": 1802000,
+      "automaticRequestsDuringIdle": 0,
+      "privateViewRetainedUntilRead": true,
+      "actualServer401": true,
+      "distinctExpiredNotice": true,
+      "privateAttemptCleared": true,
+      "restartNotInferred": true,
+      "explicitExpiryReadRequests": 1,
+      "automaticFollowupRequests": 0,
+      "followupObservationMs": 3000,
+      "workflowMutations": 0,
+      "initialSessionExchanges": 1,
+      "storageEntries": 0,
+      "workflowBytesUnchanged": true,
+      "progressBytesUnchanged": true
+    },
+    "shutdownConfirmed": true,
+    "workCleanupConfirmed": true,
+    "installationUnchanged": true
+  },
+  "files": {
+    "browser.json": "b972ff9fcde8370f9d183d77f6d849985db4b9ecdfb83427ab87c4152f6781a7",
+    "distribution-build.txt": "cf7da30fa049ab158073385b4f977548f6c5010aa253579f9d22d1b0ce28e65c"
+  },
+  "limits": [
+    "Unmodified production 30-minute idle deadline in real wall time; no clock/response interception.",
+    "Inert terminal fixture, explicit private pin-policy GET after idle; this is not expiry during active upload or streaming, nor eight-hour absolute expiry.",
+    "The browser retains prior private content until the explicit server rejection; this test does not claim proactive idle-expiry detection.",
+    "No automatic follow-up requests observed for three seconds; no workflow mutations or native analysis ran.",
+    "Chrome used test-only --no-sandbox.",
+    "Does not qualify all #179 connection/multi-tab workflow criteria. Later cancellation changes are absent from this archive and independently qualified."
+  ]
+}

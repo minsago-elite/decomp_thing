@@ -159,3 +159,39 @@ it('shows measured bytes separately from publication and stops progress polling 
   expect(transport.get).toHaveBeenCalledOnce();
   expect(transport.route).toHaveBeenCalledOnce();
 });
+
+
+it.each(['timer', 'SESSION_REQUIRED', 'SESSION_EXPIRED'])('stops an active upload and progress read on %s without replaying its intent', async (cause) => {
+  vi.useFakeTimers();
+  transport.upload.mockImplementation((_file, { signal }) => new Promise((_resolve, reject) => {
+    signal?.addEventListener('abort', () => { reject(new ApiClientError('aborted')); });
+  }));
+  transport.get.mockImplementation(() => new Promise(() => undefined));
+  const { session } = await mount();
+  const file = select();
+  fireEvent.click(screen.getByRole('button', { name: 'Upload binary' }));
+  await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+  const options = transport.upload.mock.calls[0]![1];
+  const progressSignal = transport.get.mock.calls[0]![2].signal;
+  await act(async () => {
+    if (cause === 'timer') await vi.advanceTimersByTimeAsync(59_500);
+    else session.observeRequestFailure()(new ApiClientError('http_error', { status: 401, serverCode: cause }));
+  });
+  expect(options.signal?.aborted).toBe(true);
+  expect(progressSignal?.aborted).toBe(true);
+  expect(session.csrf()).toBeNull();
+  expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Retry this upload' }).disabled).toBe(true);
+  expect(screen.getByText(/Selected: binary.elf/)).toBeTruthy();
+  await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+  expect(transport.get).toHaveBeenCalledOnce();
+  expect(transport.upload).toHaveBeenCalledOnce();
+  expect(transport.route).not.toHaveBeenCalled();
+  if (cause !== 'timer') {
+    await act(async () => { await session.refresh(); });
+    expect(transport.upload).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry this upload' }));
+    expect(transport.upload).toHaveBeenCalledTimes(2);
+    expect(transport.upload.mock.calls[1]![0]).toBe(file);
+    expect(transport.upload.mock.calls[1]![1].idempotencyKey).toBe(options.idempotencyKey);
+  }
+});

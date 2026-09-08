@@ -1,0 +1,32 @@
+{
+  "sourceCommit": "eaa79ed3",
+  "masterIncluded": "1c999572",
+  "verification": {
+    "beforeFix": {
+      "newRegressionsFailed": 3,
+      "existingUploadTestsPassed": 12
+    },
+    "afterFix": {
+      "frontendTests": 360,
+      "failures": 0,
+      "lint": "passed",
+      "typecheck": "passed",
+      "productionUiBuild": "passed"
+    }
+  },
+  "files": {
+    "before-fix.txt": "fc5ea401e5fe540956cdc0465d624f0d8fe42c937b56bd95499a422c0bbd62ae",
+    "frontend-build.txt": "db616d99403d89ee9b475cd2b1714bde6fc7417b52466dda136bb101e9820ba5",
+    "frontend-tests.txt": "5f06c3c49c0d4908f272ecf27435d8292a2990b9a4d9b09c301841940584f27f"
+  },
+  "scope": [
+    "Local expiry timer and validated SESSION_REQUIRED/SESSION_EXPIRED private request rejection abort an active upload and progress read.",
+    "No further polling, automatic upload replay or navigation; retained selection remains available and explicit reconnect/retry reuses file and idempotency key.",
+    "Duplicate private rejection notifies local invalidation once; no new peer broadcast is introduced."
+  ],
+  "limits": [
+    "Transport is mocked and expiry uses fake timers; real-browser expiry and server worker lifetime are not qualified by these tests.",
+    "No JVM or packaged browser run for this frontend-only change.",
+    "Other D4 connection, multi-tab command and active workflow criteria remain open."
+  ]
+}

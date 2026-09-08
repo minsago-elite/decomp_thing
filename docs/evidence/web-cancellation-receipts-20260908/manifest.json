@@ -1,0 +1,25 @@
+{
+  "sourceCommit": "a6ed54ab",
+  "masterIncluded": "1c999572",
+  "jvm": {
+    "tests": 57,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "files": {
+    "passing-build.txt": "b96d6041b53ba06fbab7fe5a126b5cc9bda5676a8bf6ee12dd4609b2ce991b40",
+    "receipt-tests.xml": "4fe669ca203e03ec6954a5786180c0225fd49e73d614c8050c41923b5dc5e7e0"
+  },
+  "scope": [
+    "Atomic cancellation state and acknowledgement, scoped key digests, original receipt plus current-state replay.",
+    "Concurrent duplicates, changed-intent conflicts, actor isolation, replay after terminal transition/new attempt/reopen, retained capacity backpressure, and uncertain publication recovery.",
+    "Closed receipt decoding rejects invalid states, contradictory terminal acknowledgement, foreign targets and malformed actor digests."
+  ],
+  "limits": [
+    "Storage boundary only; service signalling and authenticated HTTP/UI command integration remain open.",
+    "256 receipts per job, with no eviction or reclamation. New keys are refused at capacity; known keys still replay.",
+    "Older state without receipts is supported; state containing the new field is not claimed compatible with older readers.",
+    "No packaged browser qualification for this operation. Independent real-time idle expiry remains pending on an earlier archive."
+  ]
+}
