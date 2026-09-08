@@ -44,7 +44,15 @@ import kotlin.io.path.pathString
  * symbol conventions live here rather than in the reusable repair/revision implementation.
  */
 object GeneratedCRepairIndexProfile : RepairIndexProfile {
-    override fun profileId(): String = "generated-c-make-v1"
+    override fun profileId(): String = GeneratedCMakeReconstructionProfile.PROFILE_ID
+
+    // Version the repair interpretation separately from the reconstruction descriptor. Retained
+    // graphs with the historical ID-only fingerprint must not acquire new recovery semantics.
+    private val configurationIdentity = sha256(
+        ("generated-c-repair-index-v2\n" + GeneratedCMakeReconstructionProfile.descriptor.sha256 + "\n")
+            .toByteArray(Charsets.UTF_8),
+    )
+    override fun configurationSha256(): String = configurationIdentity
 
     override fun authorizesRecoveryLayout(
         sourcePaths: List<String>,
