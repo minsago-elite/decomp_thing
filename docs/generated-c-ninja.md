@@ -59,3 +59,10 @@ rejected. A build record from another tool or configuration cannot qualify solel
 by retaining successful status flags. These are consistency checks on retained
 local evidence, not compiler/runtime authentication or independent verification
 of every operation performed by an edited build definition.
+
+The CLI and default web evidence reader share the built-in profile catalog. The
+web reader admits Ninja job artifacts only when their manifest matches the
+registered profile digest and declared file roles. A loopback integration test
+checks build.ninja source display, current build verification and digest-pinned
+archive bytes. Custom server profile lists remain explicit; this admission change
+does not add a profile picker to web job creation, which retains its default.

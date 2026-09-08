@@ -1,6 +1,9 @@
 package decompengine.web
 
 import decompengine.jobs.elfFixture
+import decompengine.project.ReconstructionProfiles
+import decompengine.project.ReconstructionAdapters
+import decompengine.project.GeneratedCNinjaReconstructionProfile
 import decompengine.project.GeneratedCMakeReconstructionProfile
 import decompengine.project.GeneratedFileEvidence
 import decompengine.project.ProjectContentKind
@@ -560,6 +563,34 @@ class UploadServerTest {
     }
 
     @Test
+    fun `default web profiles display Ninja sources and verified archive bytes`() {
+        withServer { server, dataDir ->
+            val jobId = uploadedJobId(server)
+            val reports = dataDir.resolve("$jobId/reports").createDirectories()
+            val tree = reports.resolve("source-tree")
+            val profile = GeneratedCNinjaReconstructionProfile.descriptor
+            SourceTreeGenerator.generate(RecoveredProgramModel(
+                inputSha256 = digest(elfFixture()),
+                functions = listOf(RecoveredFunction("fn_1000", "core", 0x1000uL, "int core(void)")),
+            ), tree, profile = profile)
+            assertEquals(0, ReconstructionAdapters.resolve(profile).build(tree, profile).returnCode)
+            val archive = ArchivalPackager.create(tree, reports.resolve("source-tree.zip"), profile = profile)
+            val source = request(server, "GET", "/jobs/$jobId/source/build.ninja")
+            assertEquals(200, source.status)
+            assertTrue(source.body.decodeToString().contains("ninja_required_version"))
+            assertTrue(source.body.decodeToString().contains("Current build identity verified"))
+            val pinned = "/jobs/$jobId/artifacts/reports/source-tree.zip?sha256=${archive.archiveSha256}"
+            val page = request(server, "GET", "/jobs/$jobId").body.decodeToString()
+            assertTrue(page.contains("Download verified source archive"))
+            assertTrue(page.contains(pinned))
+            val downloaded = request(server, "GET", pinned)
+            assertEquals(200, downloaded.status)
+            assertContentEquals(archive.archivePath.readBytes(), downloaded.body)
+            assertEquals(archive.archiveSha256, digest(downloaded.body))
+        }
+    }
+
+    @Test
     fun `verified archive links pin bytes and reject stale source build and archive identities`() {
         withServer { server, dataDir ->
             val jobId = uploadedJobId(server)
@@ -700,7 +731,7 @@ class UploadServerTest {
     private fun withServer(
         analyzer: JobAnalyzer = JobAnalyzer { _, _ -> },
         reconstructor: JobReconstructor = JobReconstructor { _, _ -> },
-        profiles: List<ReconstructionProfile> = listOf(GeneratedCMakeReconstructionProfile.descriptor),
+        profiles: List<ReconstructionProfile> = ReconstructionProfiles.builtIn,
         block: (UploadServer, java.nio.file.Path) -> Unit,
     ) {
         val dataDir = createTempDirectory("web-jobs-")
