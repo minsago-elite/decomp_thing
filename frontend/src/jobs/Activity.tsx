@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { ApiClientError, createApiClient } from '../api/client';
+import { createEventStream } from '../api/eventStream';
 import type { Snapshot, WebEvent } from '../api/generated';
 import { ActivityReceiptAge } from './ActivityReceiptAge';
 import type { ActivityReceiptTime } from './ActivityReceiptAge';
@@ -12,6 +13,10 @@ const capacity = 200;
 /** Retained journal observations are display evidence, never acceptance receipts. */
 export function Activity({ jobId, runId, basePath }: { jobId: string; runId: string; basePath: string }) {
   const client = useMemo(() => createApiClient({ basePath }), [basePath]);
+  const stream = useMemo(() => createEventStream({ basePath }), [basePath]);
+  const fallback = useRef(false);
+  const streamFailures = useRef(0);
+  const [periodic, setPeriodic] = useState(false);
   const availability = useBrowserAvailability();
   const [retry, setRetry] = useState(0);
   const failures = useRef(0);
@@ -34,6 +39,33 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const path = `/jobs/${jobId}/runs/${runId}`;
+    // Catch up one bounded page before switching to live delivery, including on resume.
+    let useStreaming = false;
+    let readingStream = false;
+    const accept = (items: WebEvent[], cursor: string | null) => {
+      const previous = position.current;
+      const added: WebEvent[] = [];
+      let last = previous.last;
+      for (const event of items) {
+        if (event.type === 'retention.gap') throw new ApiClientError('http_error', { status: 410, serverCode: 'PROGRESS_GAP' });
+        if (event.jobId !== jobId || event.runId !== runId || event.sequence === null || event.cursor === null) throw new Error('binding');
+        const duplicate = [...previous.rows, ...added, ...(previous.last ? [previous.last] : [])].find(row => row.cursor === event.cursor || row.sequence === event.sequence);
+        if (duplicate) {
+          if (JSON.stringify(duplicate) !== JSON.stringify(event)) throw new Error('conflicting replay');
+          continue;
+        }
+        if (last?.sequence !== null && last?.sequence !== undefined && BigInt(event.sequence) !== BigInt(last.sequence) + 1n) throw new Error('gap');
+        added.push(event); last = event;
+      }
+      const next = [...previous.rows, ...added];
+      if (next.length > capacity) throw new Error('capacity');
+      // Never regress the acknowledged cursor when a stream replays a retained duplicate.
+      const acknowledged = items.length > 0 && added.length === 0 ? previous.cursor : cursor ?? previous.cursor;
+      position.current = { initialized: true, cursor: acknowledged, rows: next, last };
+      setRows(next); setLastRead({ at: new Date().toISOString(), monotonicMs: performance.now() }); setRetry(0); failures.current = 0;
+      if (next.length === capacity) { setFollowing(false); return false; }
+      return true;
+    };
     const poll = async () => {
       try {
         if (!position.current.initialized || reconcile.current) {
@@ -44,32 +76,42 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
           if (!position.current.initialized) position.current = { initialized: true, cursor: data.oldestCursor ?? data.throughCursor, rows: [], last: null };
           reconcile.current = false;
         }
-        const previous = position.current;
-        const query = new URLSearchParams({ transport: 'poll', limit: String(capacity - previous.rows.length) });
-        if (previous.cursor) query.set('after', previous.cursor);
-        const { data } = await client.get('events', `${path}/events?${query}`, { signal: controller.signal });
-        if (controller.signal.aborted) return;
-        const added: WebEvent[] = [];
-        let last = previous.last;
-        for (const event of data.items) {
-          if (event.jobId !== jobId || event.runId !== runId || event.sequence === null || event.cursor === null) throw new Error('binding');
-          const duplicate = [...previous.rows, ...(previous.last ? [previous.last] : [])].find(row => row.cursor === event.cursor || row.sequence === event.sequence);
-          if (duplicate) {
-            if (JSON.stringify(duplicate) !== JSON.stringify(event)) throw new Error('conflicting replay');
-            continue;
+        readingStream = useStreaming && !fallback.current;
+        if (readingStream) {
+          const started = performance.now();
+          const cursor = position.current.cursor;
+          for await (const event of stream({ jobId, runId, ...(cursor ? { after: cursor } : {}), signal: controller.signal })) {
+            if (controller.signal.aborted) return;
+            if (!accept([event], event.cursor)) return;
+            streamFailures.current = 0;
           }
-          if (last?.sequence !== null && last?.sequence !== undefined && BigInt(event.sequence) !== BigInt(last.sequence) + 1n) throw new Error('gap');
-          added.push(event); last = event;
+          if (controller.signal.aborted) return;
+          // The server leases connections for 30 seconds. Brief EOFs may mean unsupported streaming.
+          if (performance.now() - started < 15_000) throw new ApiClientError('network_error');
+          failures.current = 0; streamFailures.current = 0; setRetry(0);
+          reconcile.current = true;
+        } else {
+          const previous = position.current;
+          const query = new URLSearchParams({ transport: 'poll', limit: String(capacity - previous.rows.length) });
+          if (previous.cursor) query.set('after', previous.cursor);
+          const { data } = await client.get('events', `${path}/events?${query}`, { signal: controller.signal });
+          if (controller.signal.aborted) return;
+          if (!accept(data.items, data.nextCursor)) return;
+          useStreaming = !data.hasMore;
         }
-        const next = [...previous.rows, ...added];
-        if (next.length > capacity) throw new Error('capacity');
-        position.current = { initialized: true, cursor: data.nextCursor ?? previous.cursor, rows: next, last };
-        setRows(next); setLastRead({ at: new Date().toISOString(), monotonicMs: performance.now() }); setRetry(0); failures.current = 0;
-        if (next.length === capacity) { setFollowing(false); return; }
         timer = setTimeout(() => { void poll(); }, 2500);
       } catch (failure: unknown) {
         if (controller.signal.aborted) return;
+        const unsupported = readingStream && failure instanceof ApiClientError && [406, 415, 501].includes(failure.status ?? 0);
+        if (unsupported) {
+          fallback.current = true; setPeriodic(true); readingStream = false;
+          void poll();
+          return;
+        }
         const transient = failure instanceof ApiClientError && (failure.code === 'network_error' || failure.code === 'timeout' || failure.status === 502 || failure.status === 504);
+        if (transient && readingStream && ++streamFailures.current >= 2) {
+          fallback.current = true; setPeriodic(true);
+        }
         if (transient && failures.current < 4) {
           failures.current += 1; setRetry(failures.current); reconcile.current = true;
           const delay = 1000 * 2 ** (failures.current - 1) * (0.8 + Math.random() * 0.4);
@@ -92,7 +134,7 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
     };
     void poll();
     return () => { controller.abort(); clearTimeout(timer); };
-  }, [client, jobId, runId, following, reset, availability.online, availability.visible]);
+  }, [client, stream, jobId, runId, following, reset, availability.online, availability.visible]);
 
   const visible = rows.filter(event => matchesActivity(event, group, task));
   return <section aria-labelledby="activity-title">
@@ -107,7 +149,7 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
     </button>{' '}
     <button type="button" onClick={() => {
       position.current = { initialized: false, cursor: null, rows: [], last: null };
-      setRows([]); setSnapshot(null); setLastRead(null); setRetry(0); failures.current = 0; reconcile.current = true; setError(''); setReset(value => value + 1); setFollowing(true);
+      setRows([]); setSnapshot(null); setLastRead(null); setRetry(0); failures.current = 0; streamFailures.current = 0; fallback.current = false; setPeriodic(false); reconcile.current = true; setError(''); setReset(value => value + 1); setFollowing(true);
     }}>Read fresh activity history</button>
     <fieldset class="activity-filters">
       <legend>Filter this activity page</legend>
@@ -122,9 +164,9 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
         <input value={task} maxLength={533} onInput={event => setTask(event.currentTarget.value)} />
       </label>
       <button type="button" onClick={() => { setGroup('all'); setTask(''); }}>Clear activity filters</button>
-      <p>Filters apply only to the current page and do not change the polling position.</p>
+      <p>Filters apply only to the current page and do not change the delivery position.</p>
     </fieldset>
-    <p role="status">{!following ? 'Activity paused.' : !availability.online ? 'Browser reports offline. Activity reads are suspended.' : !availability.visible ? 'Background tab: activity reads are suspended.' : retry > 0 ? `Reconnecting activity: retry ${retry} of 4. Displayed observations may be stale.` : 'Following retained activity.'} {visible.length} matching observations shown; {rows.length} of at most {capacity} observations retained on this page.</p>
+    <p role="status">{!following ? 'Activity paused.' : !availability.online ? 'Browser reports offline. Activity reads are suspended.' : !availability.visible ? 'Background tab: activity reads are suspended.' : retry > 0 ? `Reconnecting activity: retry ${retry} of 4. Displayed observations may be stale.` : 'Following retained activity.'} {periodic && following && 'Using periodic refresh because streaming was unavailable.'} {visible.length} matching observations shown; {rows.length} of at most {capacity} observations retained on this page.</p>
     <p>{lastRead ? <ActivityReceiptAge receipt={lastRead} visible={availability.visible} /> : 'No verified activity page has been received.'} Pausing or losing this connection does not stop server work.</p>
     {error && <p role="alert">{error}</p>}
     {rows.length === capacity && <p>Display limit reached. Continue activity on the next page to replace these rows while preserving the cursor.</p>}

@@ -72,6 +72,15 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   await cdp.call('Page.reload', {}, tab.sessionId);
   await ready(tab, `document.body.innerText.includes('revision_fixture_3')`, 'pinned earlier attempt reload');
   const progressEndpoint = `/nested/api/v1/jobs/${fixture.jobId}/runs/run_fixture_3`;
+  let activityStreams = 0;
+  let activityPolls = 0;
+  cdp.on('Network.requestWillBeSent', event => {
+    const requestUrl = new URL(event.request.url);
+    if (event.type !== 'Fetch' || requestUrl.pathname !== progressEndpoint + '/events') return;
+    const accept = event.request.headers.Accept ?? event.request.headers.accept ?? '';
+    if (accept === 'text/event-stream') activityStreams++;
+    if (requestUrl.searchParams.get('transport') === 'poll') activityPolls++;
+  }, tab.sessionId);
   const polling = await evaluate(tab, `(async () => {
     const read = async path => { const response = await fetch(path); if (!response.ok) throw new Error('Progress request failed'); return (await response.json()).data; };
     const snapshot = await read('${progressEndpoint}/snapshot');
@@ -195,6 +204,7 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   const whileOffline = progressRequests();
   await new Promise(resolve => setTimeout(resolve, 3000));
   assert.equal(progressRequests(), whileOffline, 'Offline activity must not poll');
+  const streamsBeforeOnline = activityStreams;
   await cdp.call('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }, tab.sessionId);
   await ready(tab, `document.body.innerText.includes('Following retained activity.')`, 'online activity resumption');
   const onlineDeadline = Date.now() + 10000;
@@ -205,6 +215,33 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.deepEqual(await evaluate(tab, activityRows), Array.from({ length: 5 }, (_, index) => `Sequence ${index + 200}`));
   assert.equal(snapshotRequests(), beforeOfflineSnapshots + 1, 'Online resume must read a fresh snapshot');
   assert.ok(await evaluate(tab, `document.body.innerText.includes('Last activity received:')`));
+  // Publish one inert observation into the owned fixture while Activity is already streaming.
+  const streamDeadline = Date.now() + 10000;
+  while (activityStreams <= streamsBeforeOnline) {
+    assert.ok(Date.now() < streamDeadline, 'Activity did not open its SSE fetch');
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  const pollingBeforeAppend = activityPolls;
+  const appended = JSON.parse(fixture.progress);
+  appended.events.push({ ...appended.events[0], sequence: 205, text: 'Synthetic private streamed content' });
+  appended.nextSequence = 206;
+  const publication = fixture.progressPath + '.browser-publication';
+  try {
+    await fs.writeFile(publication, JSON.stringify(appended), { flag: 'wx', mode: 0o600 });
+    await fs.rename(publication, fixture.progressPath);
+    await ready(tab, `(${activityRows}).includes('Sequence 205')`, 'Activity received appended SSE observation');
+    assert.deepEqual(await evaluate(tab, activityRows), Array.from({ length: 6 }, (_, index) => `Sequence ${index + 200}`));
+    assert.equal(activityPolls, pollingBeforeAppend,
+      'The appended observation must arrive over the existing stream, without another polling request');
+    assert.equal(await evaluate(tab, `document.body.innerText.includes('Synthetic private streamed content')`), false);
+    await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Pause activity').click()`);
+    await ready(tab, `document.body.innerText.includes('Activity paused.')`, 'pause appended stream');
+  } finally {
+    await fs.rm(publication, { force: true });
+    await fs.writeFile(publication, fixture.progress, { flag: 'wx', mode: 0o600 });
+    await fs.rename(publication, fixture.progressPath);
+  }
+  assert.equal(await fs.readFile(fixture.progressPath, 'utf8'), fixture.progress);
   const accessibility = await cdp.call('Accessibility.getFullAXTree', {}, tab.sessionId);
   assert.ok(accessibility.nodes.some(node => node.role?.value === 'status' && node.properties?.some(property => property.name === 'live' && property.value.value === 'polite')));
   assert.equal(await evaluate(tab, `document.querySelector('ol[aria-label="Activity observations"]').closest('[aria-live], [role="status"], [role="log"]') === null`), true);
@@ -235,7 +272,7 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.deepEqual(tab.exceptions, []);
   for (const [name, bytes] of Object.entries(fixture.retained)) assert.deepEqual(await fs.readFile(join(fixture.directory, name)), Buffer.from(bytes));
   assert.deepEqual((await fs.readdir(fixture.directory)).sort(), [...Object.keys(fixture.retained), 'reports'].sort());
-  return { activityUi: { pausedReceiptAgeAdvances: true, receiptAgeIsNotSourceAge: true, exactObservedUsage: true, explicitUsageUnitsAndProvenance: true, durationWithoutRounding: true, missingPricingBasis: true, backgroundSuspendsReads: true, offlineSuspendsReads: true, recoveryReconcilesSnapshot: true, recoveryPreservesRows: true, lastReceivedTime: true, categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, nativeEventSourceMatchesPolling: true, targetPollingQuery: true, cursorAliasPreservesPage: true, privateProseAbsentFromResponses: true, privatePathsAbsentFromResponses: true, presentationOmissionsCounted: true, progressBytesUnchanged: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
+  return { activityUi: { appendedObservationViaSseWithoutPolling: true, appendedFixtureRestored: true, pausedReceiptAgeAdvances: true, receiptAgeIsNotSourceAge: true, exactObservedUsage: true, explicitUsageUnitsAndProvenance: true, durationWithoutRounding: true, missingPricingBasis: true, backgroundSuspendsReads: true, offlineSuspendsReads: true, recoveryReconcilesSnapshot: true, recoveryPreservesRows: true, lastReceivedTime: true, categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, nativeEventSourceMatchesPolling: true, targetPollingQuery: true, cursorAliasPreservesPage: true, privateProseAbsentFromResponses: true, privatePathsAbsentFromResponses: true, presentationOmissionsCounted: true, progressBytesRestoredAfterControlledAppend: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
     earlierAttemptReload: true, previousInterruptedAttempt: true, exactUnsignedUsage: true,
     unacceptedCandidate: true, explorationSummary: true, nativeReportDownload: true, downloadedBytesMatch: true, reportBytesUnchanged: true, retainedBytesUnchanged: true, mutationRequests: 0, executionStarted: false };
 }
