@@ -68,7 +68,7 @@ ordinary directory ancestors.
 ## Current migration state
 
 The initial repository run fails on remaining policy and ownership migrations.
-Examples include Doctor/MVP compiler assumptions, repair runtime policy,
+Examples include MVP compiler assumptions, repair runtime policy,
 benchmark scripts/tests/workflows, and retained historical
 benchmark identities in LLVM reference evidence. Retained evidence must not be
 rewritten merely to satisfy the scanner.
@@ -82,6 +82,12 @@ bounded positional windows and checks it against the exported model's input
 identity. The analyzer summary and supplemental reports now use
 [bounded streaming publication](bounded-report-publication.md); complete phase
 resource bounds and other report consumers remain unfinished.
+
+Doctor's compiler/build probes and authored sanitizer sample now come from its
+selected registered adapter, through both the CLI and JVM API. The generic root
+covers the full Doctor package. This removes four findings, leaving 80
+(67 benchmark and 13 generic); the diagnostic executor still needs output/time
+bounds. See [profile-selected Doctor diagnostics](profiled-doctor-diagnostics.md).
 
 Passing the authored scanner tests verifies its detection and exemption
 behavior. It does not make the repository scan pass or complete #84. Current

@@ -5,7 +5,7 @@
     "src/main/kotlin/decompengine/acp",
     "src/main/kotlin/decompengine/agent",
     "src/main/kotlin/decompengine/analysis",
-    "src/main/kotlin/decompengine/doctor/Doctor.kt",
+    "src/main/kotlin/decompengine/doctor",
     "src/main/kotlin/decompengine/mvp",
     "src/main/kotlin/decompengine/project",
     "src/main/kotlin/decompengine/repair",
@@ -97,6 +97,10 @@
     {
       "path": "src/main/kotlin/decompengine/project/GeneratedCRepairSourcePolicy.kt",
       "reason": "Descriptor-bound generated-C repair and validation source permissions."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCToolchainDiagnostics.kt",
+      "reason": "Generated-C compiler/build version probes and authored sanitizer capability sample selected by the registered adapter."
     },
     {
       "path": "src/main/kotlin/decompengine/project/GeneratedCToolchainEvidence.kt",
@@ -220,9 +224,9 @@
     {
       "path": "src/main/kotlin/decompengine/project/ReconstructionProfiles.kt",
       "rule": "generic-adapter-reference",
-      "fragment": "GeneratedCMakeReconstructionProfile.descriptor,",
+      "fragment": "val default: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor",
       "count": 1,
-      "reason": "Application-owned registration of the built-in Make descriptor."
+      "reason": "Application-owned explicit Make compatibility default, also included in the immutable built-in registry."
     },
     {
       "path": "src/main/kotlin/decompengine/project/ReconstructionProfiles.kt",
