@@ -1,0 +1,266 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-09-08T10:14:05.981406+00:00",
+  "scope": "Single local observations of authored sparse pre-read ELF inputs with an empty injected exporter; not production qualification.",
+  "sourceBaseCommit": "9b6bcfcf31a2e63b843274b7e0aac14d4d4a896f",
+  "sourceSha256": {
+    "src/main/kotlin/decompengine/analysis/AnalysisDeadline.kt": "88b59d9681a10750b4d559277ceff17301cfdf5b807057560086a21003ce420d",
+    "src/main/kotlin/decompengine/analysis/BundledGhidra.kt": "de22971921efaca11e846cbd6a7eb23aa9443e813da72a93ad651d164f2838b0",
+    "src/main/kotlin/decompengine/analysis/GhidraJvmAnalyzer.kt": "0b2ca3fd1678e25821a72fd1df3085ec463695c0f25495afa08fe286384c7034",
+    "src/main/kotlin/decompengine/project/ArchivalReconstruction.kt": "2d8436936155a19ff23cd7add9e8bb345fbc13c5f36b1200b176cab3c7fa23c5",
+    "src/main/kotlin/decompengine/project/ProgramModel.kt": "f2f3bc4ec5e21964f012d189c424ee3e90ab2b7bd13c1275fb5cf33bda1c02ab",
+    "src/test/kotlin/decompengine/analysis/MetadataScaleProbe.kt": "baa5a0bdb762bd0130058713bd1bcc00222cb8f49238f15cf73e7fd4d2e67082"
+  },
+  "platform": {
+    "system": "Linux",
+    "architecture": "x86_64",
+    "javaVersion": "openjdk version \"21.0.12\" 2026-07-21 LTS\nOpenJDK Runtime Environment Temurin-21.0.12+8 (build 21.0.12+8-LTS)\nOpenJDK 64-Bit Server VM Temurin-21.0.12+8 (build 21.0.12+8-LTS, mixed mode, sharing)"
+  },
+  "jvmArguments": [
+    "-Xmx64m"
+  ],
+  "measurementMethod": "One fresh Python process per case, with one Java child. Linux resource.getrusage(RUSAGE_CHILDREN).ru_maxrss after subprocess.run; no Java worker subprocesses are launched by the probe.",
+  "cases": [
+    {
+      "schemaVersion": 1,
+      "probe": "authored-padded-elf-metadata",
+      "sizeCase": "1MiB",
+      "fixture": "authored ELF64 header; zero section offset; verified zero padding in a sparse file",
+      "exportMode": "injected-no-op-empty-model",
+      "exportInvocations": 1,
+      "inputBytes": 1048576,
+      "inputSha256": "59111aeaf222003d206f0c5db881112c33ba9f42703885ed16904271d1a15cbc",
+      "expectedHashBufferBytes": 65536,
+      "expectedHashWorkingBufferBytes": 131072,
+      "expectedHashBytesRead": 1048576,
+      "inputCacheState": "fully pre-read by fixed-buffer expected SHA-256 verification",
+      "fixturePreparationMillis": 4,
+      "expectedHashElapsedMillis": 15,
+      "elapsedMillis": 429,
+      "maxHeapBytes": 67108864,
+      "profile": {
+        "id": "generated-c-make-v1",
+        "sha256": "a448a139a09f28ad9f2e08bfcebcb9d85765a0a557ebb11db6d7634bc145f28f",
+        "requestedExportWallClockMillis": 600000,
+        "requestedExportMaximumResidentBytes": 4294967296
+      },
+      "metadata": {
+        "format": "ELF64",
+        "endianness": "little",
+        "elfVersion": 1,
+        "osAbi": "Linux",
+        "objectType": "executable",
+        "machine": "x86-64",
+        "entryPoint": 4198400,
+        "elfHeaderSize": 64,
+        "programHeaderCount": 2,
+        "sectionHeaderCount": 5,
+        "sectionNameTableIndex": 4
+      },
+      "metadataInspection": {
+        "limits": {
+          "maximumInputBytes": 1073741824,
+          "maximumSectionHeaders": 131072,
+          "maximumScannedSymbols": 2000000,
+          "maximumRetainedSymbols": 100000,
+          "maximumNameBytes": 16384,
+          "maximumNameByteVisits": 67108864,
+          "maximumRetainedNameBytes": 16777216,
+          "maximumModeledMetadataBytes": 67108864,
+          "maximumMetadataReadBytes": 268435456,
+          "maximumWorkUnits": 100000000,
+          "maximumWallClockMillis": 600000
+        },
+        "usage": {
+          "sectionHeadersVisited": 0,
+          "symbolsScanned": 0,
+          "symbolsRetained": 0,
+          "nameBytesVisited": 0,
+          "retainedNameBytes": 0,
+          "modeledMetadataBytes": 8388608,
+          "metadataReadBytes": 65600,
+          "workUnits": 1
+        }
+      },
+      "reportPublication": {
+        "maximumBytes": 1048576,
+        "maximumStringCharacters": 65536,
+        "maximumCollectionItems": 1000000,
+        "maximumDepth": 16,
+        "maximumWallClockMillis": 60000
+      },
+      "productionExportExecuted": false,
+      "productionScaleQualified": false,
+      "limitation": "Measures sparse, pre-read padded input handling with an empty injected model; metadata/model complexity, real export and whole-parent production RSS remain unqualified.",
+      "processMeasurement": {
+        "maximumResidentKiB": 93620,
+        "processElapsedSeconds": 1.006,
+        "processExitCode": 0,
+        "method": "fresh Python process with one Java child; Linux RUSAGE_CHILDREN.ru_maxrss"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "probe": "authored-padded-elf-metadata",
+      "sizeCase": "64MiB",
+      "fixture": "authored ELF64 header; zero section offset; verified zero padding in a sparse file",
+      "exportMode": "injected-no-op-empty-model",
+      "exportInvocations": 1,
+      "inputBytes": 67108864,
+      "inputSha256": "1b2a2f5d851f0a10ee3f791dbf9cf7845f08fd6b8936231c20041c5e420b2009",
+      "expectedHashBufferBytes": 65536,
+      "expectedHashWorkingBufferBytes": 131072,
+      "expectedHashBytesRead": 67108864,
+      "inputCacheState": "fully pre-read by fixed-buffer expected SHA-256 verification",
+      "fixturePreparationMillis": 1,
+      "expectedHashElapsedMillis": 43,
+      "elapsedMillis": 216,
+      "maxHeapBytes": 67108864,
+      "profile": {
+        "id": "generated-c-make-v1",
+        "sha256": "a448a139a09f28ad9f2e08bfcebcb9d85765a0a557ebb11db6d7634bc145f28f",
+        "requestedExportWallClockMillis": 600000,
+        "requestedExportMaximumResidentBytes": 4294967296
+      },
+      "metadata": {
+        "format": "ELF64",
+        "endianness": "little",
+        "elfVersion": 1,
+        "osAbi": "Linux",
+        "objectType": "executable",
+        "machine": "x86-64",
+        "entryPoint": 4198400,
+        "elfHeaderSize": 64,
+        "programHeaderCount": 2,
+        "sectionHeaderCount": 5,
+        "sectionNameTableIndex": 4
+      },
+      "metadataInspection": {
+        "limits": {
+          "maximumInputBytes": 1073741824,
+          "maximumSectionHeaders": 131072,
+          "maximumScannedSymbols": 2000000,
+          "maximumRetainedSymbols": 100000,
+          "maximumNameBytes": 16384,
+          "maximumNameByteVisits": 67108864,
+          "maximumRetainedNameBytes": 16777216,
+          "maximumModeledMetadataBytes": 67108864,
+          "maximumMetadataReadBytes": 268435456,
+          "maximumWorkUnits": 100000000,
+          "maximumWallClockMillis": 600000
+        },
+        "usage": {
+          "sectionHeadersVisited": 0,
+          "symbolsScanned": 0,
+          "symbolsRetained": 0,
+          "nameBytesVisited": 0,
+          "retainedNameBytes": 0,
+          "modeledMetadataBytes": 8388608,
+          "metadataReadBytes": 65600,
+          "workUnits": 1
+        }
+      },
+      "reportPublication": {
+        "maximumBytes": 1048576,
+        "maximumStringCharacters": 65536,
+        "maximumCollectionItems": 1000000,
+        "maximumDepth": 16,
+        "maximumWallClockMillis": 60000
+      },
+      "productionExportExecuted": false,
+      "productionScaleQualified": false,
+      "limitation": "Measures sparse, pre-read padded input handling with an empty injected model; metadata/model complexity, real export and whole-parent production RSS remain unqualified.",
+      "processMeasurement": {
+        "maximumResidentKiB": 101872,
+        "processElapsedSeconds": 0.724,
+        "processExitCode": 0,
+        "method": "fresh Python process with one Java child; Linux RUSAGE_CHILDREN.ru_maxrss"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "probe": "authored-padded-elf-metadata",
+      "sizeCase": "1GiB",
+      "fixture": "authored ELF64 header; zero section offset; verified zero padding in a sparse file",
+      "exportMode": "injected-no-op-empty-model",
+      "exportInvocations": 1,
+      "inputBytes": 1073741824,
+      "inputSha256": "ec51f78c84f7d27252ad59f198c2f65e8183244734a62b66c08ed1cc87557002",
+      "expectedHashBufferBytes": 65536,
+      "expectedHashWorkingBufferBytes": 131072,
+      "expectedHashBytesRead": 1073741824,
+      "inputCacheState": "fully pre-read by fixed-buffer expected SHA-256 verification",
+      "fixturePreparationMillis": 2,
+      "expectedHashElapsedMillis": 550,
+      "elapsedMillis": 1452,
+      "maxHeapBytes": 67108864,
+      "profile": {
+        "id": "generated-c-make-v1",
+        "sha256": "a448a139a09f28ad9f2e08bfcebcb9d85765a0a557ebb11db6d7634bc145f28f",
+        "requestedExportWallClockMillis": 600000,
+        "requestedExportMaximumResidentBytes": 4294967296
+      },
+      "metadata": {
+        "format": "ELF64",
+        "endianness": "little",
+        "elfVersion": 1,
+        "osAbi": "Linux",
+        "objectType": "executable",
+        "machine": "x86-64",
+        "entryPoint": 4198400,
+        "elfHeaderSize": 64,
+        "programHeaderCount": 2,
+        "sectionHeaderCount": 5,
+        "sectionNameTableIndex": 4
+      },
+      "metadataInspection": {
+        "limits": {
+          "maximumInputBytes": 1073741824,
+          "maximumSectionHeaders": 131072,
+          "maximumScannedSymbols": 2000000,
+          "maximumRetainedSymbols": 100000,
+          "maximumNameBytes": 16384,
+          "maximumNameByteVisits": 67108864,
+          "maximumRetainedNameBytes": 16777216,
+          "maximumModeledMetadataBytes": 67108864,
+          "maximumMetadataReadBytes": 268435456,
+          "maximumWorkUnits": 100000000,
+          "maximumWallClockMillis": 600000
+        },
+        "usage": {
+          "sectionHeadersVisited": 0,
+          "symbolsScanned": 0,
+          "symbolsRetained": 0,
+          "nameBytesVisited": 0,
+          "retainedNameBytes": 0,
+          "modeledMetadataBytes": 8388608,
+          "metadataReadBytes": 65600,
+          "workUnits": 1
+        }
+      },
+      "reportPublication": {
+        "maximumBytes": 1048576,
+        "maximumStringCharacters": 65536,
+        "maximumCollectionItems": 1000000,
+        "maximumDepth": 16,
+        "maximumWallClockMillis": 60000
+      },
+      "productionExportExecuted": false,
+      "productionScaleQualified": false,
+      "limitation": "Measures sparse, pre-read padded input handling with an empty injected model; metadata/model complexity, real export and whole-parent production RSS remain unqualified.",
+      "processMeasurement": {
+        "maximumResidentKiB": 104988,
+        "processElapsedSeconds": 2.441,
+        "processExitCode": 0,
+        "method": "fresh Python process with one Java child; Linux RUSAGE_CHILDREN.ru_maxrss"
+      }
+    }
+  ],
+  "limitations": [
+    "One observation per size, with no statistical timing or RSS guarantee.",
+    "Sparse input was fully pre-read for expected SHA-256 verification.",
+    "No section/symbol/name complexity or recovered model complexity.",
+    "No real bundled export, compiler, ACP or production candidate execution.",
+    "No whole-parent production RSS qualification or hard aggregate cleanup bound."
+  ]
+}
