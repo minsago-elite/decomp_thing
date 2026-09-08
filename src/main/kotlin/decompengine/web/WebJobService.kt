@@ -268,6 +268,29 @@ class WebJobService(
         }
     }
 
+    /** Explicit maintenance, serialized with bounded artifact capture and service shutdown.
+     * The caller must hold the policy decision protecting persistent pins/read leases stable.
+     * No request handler or automatic scheduler invokes this until that policy is integrated.
+     */
+    @Synchronized
+    internal fun expireProgressJournal(jobId: String, runId: String, protectedFromRetention: Boolean,
+        retention: java.time.Duration = decompengine.jobs.AgentProgressJournalRetention.DEFAULT_TERMINAL_RETENTION,
+    ): decompengine.jobs.ProgressRetentionResult {
+        requireInitializedRead()
+        if (stopping) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
+        requirePublicationAvailable()
+        getAttempt(jobId, runId)
+        // Terminal metadata can precede worker exit; keep all artifacts until work really releases.
+        if (protectedFromRetention || active.containsKey(jobId) || uploads.isNotEmpty())
+            return decompengine.jobs.ProgressRetentionResult.RETAINED
+        val owner = attempts ?: throw WebJobServiceException("JOB_NOT_FOUND", "The requested job is unavailable.")
+        return try { owner.expireProgressJournal(jobId, runId, protectedFromRetention = false, retention = retention) }
+        catch (failure: WorkflowStoreException) {
+            throw WebJobServiceException(failure.code,
+                "Progress retention did not finish. Preserve its journal and pending retention file, then retry maintenance with storage ownership.", failure)
+        }
+    }
+
     @Synchronized
     fun resolveArtifact(jobId: String, relativePath: String): Path {
         requireInitializedRead()
