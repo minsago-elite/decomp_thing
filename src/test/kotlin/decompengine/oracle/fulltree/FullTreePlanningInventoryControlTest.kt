@@ -19,6 +19,127 @@ import kotlinx.serialization.json.JsonPrimitive
 
 class FullTreePlanningInventoryControlTest {
     @Test
+    fun `clang driver dispatch binds all 75 planning owners without an emitted denominator`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+
+        val modules = registry.requireOwnerModulesForShard("clang-lib-driver")
+        assertEquals(75, modules.size)
+        assertEquals(75, modules.map { it.sourcePath }.toSet().size)
+        assertEquals(75, modules.map { it.unitId }.toSet().size)
+        assertEquals(
+            listOf(
+                "source/clang/lib/Driver/Action.cpp",
+                "source/clang/lib/Driver/Compilation.cpp",
+                "source/clang/lib/Driver/CreateASTUnitFromArgs.cpp",
+                "source/clang/lib/Driver/CreateInvocationFromArgs.cpp",
+                "source/clang/lib/Driver/Distro.cpp",
+                "source/clang/lib/Driver/Driver.cpp",
+                "source/clang/lib/Driver/Job.cpp",
+                "source/clang/lib/Driver/Multilib.cpp",
+                "source/clang/lib/Driver/MultilibBuilder.cpp",
+                "source/clang/lib/Driver/Phases.cpp",
+                "source/clang/lib/Driver/SanitizerArgs.cpp",
+                "source/clang/lib/Driver/Tool.cpp",
+                "source/clang/lib/Driver/ToolChain.cpp",
+                "source/clang/lib/Driver/ToolChains/AIX.cpp",
+                "source/clang/lib/Driver/ToolChains/AMDGPU.cpp",
+                "source/clang/lib/Driver/ToolChains/AMDGPUOpenMP.cpp",
+                "source/clang/lib/Driver/ToolChains/AVR.cpp",
+                "source/clang/lib/Driver/ToolChains/Arch/AArch64.cpp",
+                "source/clang/lib/Driver/ToolChains/Arch/ARM.cpp",
+                "source/clang/lib/Driver/ToolChains/Arch/CSKY.cpp",
+                "source/clang/lib/Driver/ToolChains/Arch/LoongArch.cpp",
+                "source/clang/lib/Driver/ToolChains/Arch/M68k.cpp",
+                "source/clang/lib/Driver/ToolChains/Arch/Mips.cpp",
+                "source/clang/lib/Driver/ToolChains/Arch/PPC.cpp",
+                "source/clang/lib/Driver/ToolChains/Arch/RISCV.cpp",
+                "source/clang/lib/Driver/ToolChains/Arch/Sparc.cpp",
+                "source/clang/lib/Driver/ToolChains/Arch/SystemZ.cpp",
+                "source/clang/lib/Driver/ToolChains/Arch/VE.cpp",
+                "source/clang/lib/Driver/ToolChains/Arch/X86.cpp",
+                "source/clang/lib/Driver/ToolChains/BareMetal.cpp",
+                "source/clang/lib/Driver/ToolChains/CSKYToolChain.cpp",
+                "source/clang/lib/Driver/ToolChains/Clang.cpp",
+                "source/clang/lib/Driver/ToolChains/CommonArgs.cpp",
+                "source/clang/lib/Driver/ToolChains/CrossWindows.cpp",
+                "source/clang/lib/Driver/ToolChains/Cuda.cpp",
+                "source/clang/lib/Driver/ToolChains/Cygwin.cpp",
+                "source/clang/lib/Driver/ToolChains/Darwin.cpp",
+                "source/clang/lib/Driver/ToolChains/DragonFly.cpp",
+                "source/clang/lib/Driver/ToolChains/Flang.cpp",
+                "source/clang/lib/Driver/ToolChains/FreeBSD.cpp",
+                "source/clang/lib/Driver/ToolChains/Fuchsia.cpp",
+                "source/clang/lib/Driver/ToolChains/Gnu.cpp",
+                "source/clang/lib/Driver/ToolChains/HIPAMD.cpp",
+                "source/clang/lib/Driver/ToolChains/HIPSPV.cpp",
+                "source/clang/lib/Driver/ToolChains/HIPUtility.cpp",
+                "source/clang/lib/Driver/ToolChains/HLSL.cpp",
+                "source/clang/lib/Driver/ToolChains/Haiku.cpp",
+                "source/clang/lib/Driver/ToolChains/Hexagon.cpp",
+                "source/clang/lib/Driver/ToolChains/Hurd.cpp",
+                "source/clang/lib/Driver/ToolChains/InterfaceStubs.cpp",
+                "source/clang/lib/Driver/ToolChains/LFILinux.cpp",
+                "source/clang/lib/Driver/ToolChains/Linux.cpp",
+                "source/clang/lib/Driver/ToolChains/MSP430.cpp",
+                "source/clang/lib/Driver/ToolChains/MSVC.cpp",
+                "source/clang/lib/Driver/ToolChains/Managarm.cpp",
+                "source/clang/lib/Driver/ToolChains/MinGW.cpp",
+                "source/clang/lib/Driver/ToolChains/MipsLinux.cpp",
+                "source/clang/lib/Driver/ToolChains/NetBSD.cpp",
+                "source/clang/lib/Driver/ToolChains/OHOS.cpp",
+                "source/clang/lib/Driver/ToolChains/OpenBSD.cpp",
+                "source/clang/lib/Driver/ToolChains/PPCFreeBSD.cpp",
+                "source/clang/lib/Driver/ToolChains/PPCLinux.cpp",
+                "source/clang/lib/Driver/ToolChains/PS4CPU.cpp",
+                "source/clang/lib/Driver/ToolChains/SPIRV.cpp",
+                "source/clang/lib/Driver/ToolChains/SPIRVOpenMP.cpp",
+                "source/clang/lib/Driver/ToolChains/SYCL.cpp",
+                "source/clang/lib/Driver/ToolChains/Solaris.cpp",
+                "source/clang/lib/Driver/ToolChains/TCE.cpp",
+                "source/clang/lib/Driver/ToolChains/UEFI.cpp",
+                "source/clang/lib/Driver/ToolChains/VEToolchain.cpp",
+                "source/clang/lib/Driver/ToolChains/WebAssembly.cpp",
+                "source/clang/lib/Driver/ToolChains/XCore.cpp",
+                "source/clang/lib/Driver/ToolChains/ZOS.cpp",
+                "source/clang/lib/Driver/Types.cpp",
+                "source/clang/lib/Driver/XRayArgs.cpp",
+            ),
+            modules.map { it.sourcePath },
+        )
+        assertTrue(
+            modules.all {
+                it.moduleId == it.unitId &&
+                    it.shardId == "clang-lib-driver" &&
+                    it.sourceKind == "handwritten" &&
+                    it.sourcePath.startsWith("source/clang/lib/Driver/")
+            },
+        )
+        modules.forEach { module ->
+            assertEquals(
+                FullTreeInventoryControl.compilationUnitId(module.sourcePath),
+                module.unitId,
+            )
+            assertEquals(module, registry.requireOwnerModule(module.unitId))
+        }
+        assertEquals(
+            listOf("source/clang/lib/Driver/OffloadBundler.cpp"),
+            registry.sourceOnlyUnits.filter { it.shardId == "clang-lib-driver" }.map { it.sourcePath },
+        )
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("clang-lib-driver-missing")
+        }
+    }
+
+    @Test
     fun `fixture planning inventory is closed exact and byte deterministic`() =
         inControlTemporaryDirectory { directory ->
             val fixture = createFullTreeControlFixture(directory.resolve("fixture"))
