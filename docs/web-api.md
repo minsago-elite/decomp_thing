@@ -105,6 +105,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET J/runs`, `GET R` | `200 runs`, `200 run` | Bounded attempts or durable attempt snapshot; #160 |
 | `GET R/progress-pin` | `200 progressPin`, strong run ETag | Current per-attempt journal pin; #172 |
 | `PUT R/progress-pin` | `200 progressPin`, original result on keyed replay | Strict `progressPinRequest`, session/Origin/CSRF, run If-Match and idempotency; #172/#177 |
+| `PUT R/cancellation` | `200 cancellation`, original acknowledgement plus current run | Strict `cancellationRequest`, session/Origin/CSRF, run If-Match and actor-scoped idempotency; #485/#180 |
 | `POST J/runs` | `202 run`, `Location: R` | `workflowStart` request, capability/limits/input checks, job If-Match; #163 |
 | `POST R/cancel` | `202 run` or `200 run` if already terminal | Idempotent recorded intent, run If-Match; #163 |
 | `POST R/recover` | `202 run`, `Location` of a new attempt | Explicit `retry` or capability-gated `resume`; If-Match; #163 |
@@ -519,3 +520,10 @@ Successful changes and no-ops use the durable receipts described in [pin audit/r
 The generated `progressPin`/`progressPinRequest` contracts and the client's guarded `put` method support this endpoint. The client performs one request without automatically retrying ambiguous mutations. The authenticated attempt page now provides explicit read/pin/unpin controls with fresh-read reconciliation. Audit presentation and denied/failed-request audit coverage remain unfinished; successful policy receipts alone do not complete #177.
 
 Private bootstrap now includes an optional `runtime.progressRetention` sample with enabled configuration, sample time, completed attempt checks, expired journals, failed checks and the last diagnostic code. Runtime displays this process-local sample from the last session check without launching another probe. The SPA `terminalEventRetentionMs` value is 86400000: the threshold for timed expiry, not a guarantee against earlier size/count eviction or a maximum scan delay. See [production retention](web-progress-adapter.md#spa-production-retention-and-sampled-status).
+
+
+## Implemented cancellation endpoint
+
+The [cancellation HTTP contract](web-cancellation-http.md) exposes `PUT /api/v1/jobs/{jobId}/runs/{runId}/cancellation`. The request is exactly `{action: "cancel"}` with explicit CSRF, If-Match and idempotency headers. `cancellation.current` is the existing run projection from the current durable attempt; `acknowledgement` projects only original expected/applied versions, state and time from the atomic receipt. Actor/key digests stay private. The current run version supplies ETag.
+
+Receipt replay is distinct from terminal outcome: an original cancelling acknowledgement can accompany a completed, cancelled or interrupted current attempt. The operation neither approves evidence nor enables an unregistered workflow adapter. Browser eligibility/controls and broader live HTTP qualification remain open.
