@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "recordId": "function:fn_0000000000401020",
+  "modelInputSha256": "abc123",
+  "modelSchemaVersion": 1,
+  "kind": "function",
+  "identity": "fn_0000000000401020",
+  "rawName": "render_page",
+  "address": "0x401020",
+  "prototype": "int render_page(void)",
+  "extractionStatus": "partial",
+  "existingGeneratedCCandidate": "render_page",
+  "cppResolution": "unresolved",
+  "unresolvedReason": "The extracted model has no namespace, overload, or C++ type identity for this entity.",
+  "oracleAuthority": "none",
+  "ghidraExecution": "none"
+}
