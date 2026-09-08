@@ -37,6 +37,16 @@ data class ArchivalAudit(
     val moduleCompilationEvidence: Map<String, JsonObject> = emptyMap(),
 ) {
     val provenanceComplete: Boolean get() = missingModelProvenance.isEmpty() && missingSourceProvenance.isEmpty()
+    val equivalence: EquivalenceAssessment
+        get() = assessEquivalence(
+            requiredCorpusSha256 = requiredCorpusSha256,
+            observedPortableCorpusSha256 = observedPortableCorpusSha256,
+            behaviorMatched = behaviorMatched,
+            behaviorEvidenceProblems = behaviorEvidenceProblems,
+            unresolvedBehaviorReportIds = unresolvedBehaviorReportIds,
+        )
+
+    // Retained for archive compatibility. A passing selected corpus is not a universal claim.
     val universalEquivalenceClaim: Boolean = false
 
     fun toJson(): String = """
@@ -51,6 +61,8 @@ data class ArchivalAudit(
           "requiredCorpusSha256": [${requiredCorpusSha256.joinToString(",") { JsonPrimitive(it).toString() }}],
           "observedPortableCorpusSha256": [${observedPortableCorpusSha256.joinToString(",") { JsonPrimitive(it).toString() }}],
           "behaviorMatched": ${behaviorMatched ?: "null"},
+          "equivalenceStatus": ${JsonPrimitive(equivalence.status.wireValue)},
+          "equivalenceBlockers": [${equivalence.blockers.joinToString(",") { JsonPrimitive(it).toString() }}],
           "sandboxReported": $sandboxReported,
           "networkIsolationObserved": [${networkIsolation.sorted().joinToString(",")}],
           "moduleSourceRevisions": [${moduleRevisionSha256.toSortedMap().entries.joinToString(",") { (id, hash) -> "{\"moduleId\":${JsonPrimitive(id)},\"sourceRevisionSha256\":${JsonPrimitive(hash)}}" }}],
