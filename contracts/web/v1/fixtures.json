@@ -401,6 +401,22 @@
     {
       "file": "fixtures/invalid-cancellation-actor.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/cancellation-policy-eligible.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/cancellation-policy-terminal.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/cancellation-policy-pending.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-cancellation-policy.json",
+      "valid": false
     }
   ]
 }

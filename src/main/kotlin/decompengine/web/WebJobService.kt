@@ -562,6 +562,29 @@ class WebJobService(
         return DurableWebWorkflowAdmission.Started(jobId, queued.attempt.runId)
     }
 
+    /** A read-only eligibility snapshot for a new command, never an admission reservation. */
+    @Synchronized
+    internal fun cancellationEligibility(jobId: String, runId: String): WebCancellationEligibility {
+        requireInitializedRead()
+        if (stopping) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
+        requirePublicationAvailable()
+        val snapshot = when (val view = inspectDurableJob(jobId)) {
+            is WorkflowJobInspection.Available -> view.snapshot
+            is WorkflowJobInspection.Unavailable -> throw WebJobServiceException(view.diagnostic.code, view.diagnostic.message)
+        }
+        val attempt = snapshot.attempts.singleOrNull { it.runId == runId }
+            ?: throw WebJobServiceException("RUN_NOT_FOUND", "The requested attempt does not belong to this job.")
+        val owned = (active[jobId] as? DurableTask)?.attempt?.runId == runId
+        val reason = when {
+            attempt.state.terminal -> "ATTEMPT_TERMINAL"
+            attempt.state == WorkflowRunState.CANCELLING -> "CANCELLATION_PENDING"
+            !owned -> "NO_OWNED_WORKER"
+            snapshot.cancellationReceipts.entries.size >= decompengine.jobs.WorkflowCancellationReceipts.MAX_ENTRIES -> "CANCELLATION_RECEIPT_CAPACITY"
+            else -> null
+        }
+        return WebCancellationEligibility(attempt, reason)
+    }
+
     /** Internal command boundary; HTTP adapters must authorize and bind command replay separately. */
     @Synchronized
     internal fun cancelDurable(jobId: String, runId: String, expectedRunVersion: String): WorkflowAttempt {
