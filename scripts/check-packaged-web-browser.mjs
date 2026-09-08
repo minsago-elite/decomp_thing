@@ -11,6 +11,7 @@ import { seedScale, qualifyScale } from './packaged-browser-scale.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyUpgrade } from './packaged-browser-upgrade.mjs';
+import { qualifyServerRestart } from './packaged-browser-restart.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -672,6 +673,26 @@ try {
       report.uploadFailures = await qualifyUploadFailures({ makeTarget, cdp, evaluate, ready, browserOrigin, data });
       report.measuredUpload = await qualifyMeasuredUpload({ makeTarget, cdp, evaluate, ready, waitFor, browserOrigin, data });
       report.jobDataCreated = true;
+    }
+
+    if (historyFixture) {
+      report.serverRestart = await qualifyServerRestart({ fixture: historyFixture, makeTarget, cdp, evaluate, ready, browserOrigin,
+        stopServer: async () => {
+          const previous = application;
+          await stop(previous);
+          assert.notEqual(previous.signalCode, 'SIGKILL', 'Restart qualification requires graceful server shutdown');
+        },
+        startServer: async () => {
+          const restartedOrigin = await launchApplication(installation, new URL(browserOrigin).port);
+          assert.equal(restartedOrigin, browserOrigin);
+          const handoff = await waitFor(() => applicationOutput.split(/\s+/).find(part => part.startsWith(browserOrigin + '/nested/#bootstrap=')), 'restarted server bootstrap handoff');
+          sensitiveValues.push(new URL(handoff).hash.slice('#bootstrap='.length));
+          return handoff;
+        },
+      });
+      // The restart tab established a new cookie; this existing tab explicitly reloads its session/CSRF snapshot.
+      await cdp.call('Page.reload', {}, authenticated.sessionId);
+      await ready(authenticated, `document.querySelector('#server-runtime-title') !== null`, 'Runtime session after server restart');
     }
 
     // A tab without peer notifications must still reconcile a server rejection.
