@@ -352,6 +352,36 @@ class WebJobService(
         }
     }
 
+    /** Internal command boundary for future authenticated pin controls. Coordinate CAS with the
+     * owned task's current lifecycle version before allowing its next transition.
+     */
+    @Synchronized
+    internal fun setProgressRetentionPinned(jobId: String, runId: String, expectedRunVersion: String,
+        pinned: Boolean): WorkflowAttempt {
+        requireInitializedRead()
+        if (stopping) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
+        requirePublicationAvailable()
+        getAttempt(jobId, runId)
+        val owner = attempts ?: throw WebJobServiceException("JOB_NOT_FOUND", "The requested job is unavailable.")
+        val task = (active[jobId] as? DurableTask)?.takeIf { it.attempt.runId == runId }
+        return try {
+            owner.setProgressRetentionPinned(jobId, runId, expectedRunVersion, pinned).attempt.also { updated ->
+                task?.attempt = updated
+            }
+        } catch (failure: Throwable) {
+            if (failure is WorkflowStoreException && !failure.outcomeUnknown) {
+                throw WebJobServiceException(failure.code, "The progress retention pin was not changed. Refresh the attempt before retrying.", failure)
+            }
+            val diagnostic = WebJobDiagnostic(jobId, "RECOVERY_REQUIRED",
+                "Retention pin publication is uncertain. Reopen storage before making further changes.")
+            publicationFailures[jobId] = diagnostic
+            val unavailable = WebJobServiceException(diagnostic.code, diagnostic.message, failure)
+            task?.failPublication(unavailable)
+            if (failure !is Exception) throw failure
+            throw unavailable
+        }
+    }
+
     @Synchronized
     fun resolveArtifact(jobId: String, relativePath: String): Path {
         requireInitializedRead()
@@ -574,17 +604,21 @@ class WebJobService(
 
     private inner class DurableTask(val job: Job, var attempt: WorkflowAttempt, val adapter: DurableWebWorkflowAdapter) : OwnedTask(job.id) {
         private var publicationFailure: WebJobServiceException? = null
+        fun failPublication(failure: WebJobServiceException) {
+            publicationFailure = failure
+            if (!started) { terminal = true; release() }
+        }
         override fun run() {
             try {
-                val reports = synchronized(this@WebJobService) {
+                val context = synchronized(this@WebJobService) {
                     if (terminal || active[jobId] !== this) return
                     if (closed || stopping) { stopPending(); return }
                     started = true
                     worker = Thread.currentThread()
                     attempt = checkNotNull(attempts).transition(jobId, attempt.runId, attempt.version, WorkflowTransition.Start).attempt
-                    store.runReportsDirectory(jobId, attempt.runId, create = true)
+                    DurableWebWorkflowContext(job, attempt, store.runReportsDirectory(jobId, attempt.runId, create = true))
                 }
-                val outcome = adapter.execute(DurableWebWorkflowContext(job, attempt, reports))
+                val outcome = adapter.execute(context)
                 synchronized(this@WebJobService) {
                     if (closed || stopping || Thread.currentThread().isInterrupted) finish(interrupted())
                     else finish(when (outcome) {

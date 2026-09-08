@@ -694,3 +694,11 @@ Shutdown cancels scheduling and keeps service/storage ownership until the last m
 Public pin controls, audit/UI reporting, default server activation and broader job/evidence retention remain unfinished. The existing advertised retention guarantee is unchanged.
 
 All 276 selected JVM tests pass. The [retained worker manifest and three results](evidence/web-retention-worker-20260908/manifest.json) record source and evidence hashes. Frontend/package/browser checks were not repeated because default server behavior and public HTTP/UI contracts are unchanged.
+
+## Service coordination for pin changes
+
+`WebJobService.setProgressRetentionPinned` now provides an internal command boundary that validates initialization, shutdown, selected attempt and publication admission. It applies the store's run-version CAS and updates any matching owned task's current attempt under the same service monitor. Without this coordination, a queued or running worker would retain its pre-pin version and fail its next lifecycle publication. The invocation context is now captured immutably under the monitor before the adapter is called; later policy changes do not rewrite that invocation view.
+
+Known pre-publication failures leave the old pin and task version usable. Uncertain publication makes the job unavailable for changes until storage is reopened and prevents a worker from publishing over the uncertain state. A queued task is revoked immediately and late delivery is inert; a running task retains ownership until its callback actually exits. Pin policy survives subsequent restart recovery. No public mutation route is enabled yet: authenticated requests, audit records and UI controls still need integration.
+
+Tests use inert adapter callbacks to exercise queued/running pin changes, stable invocation context, final lifecycle publication, stale-version rejection, no-op byte preservation, failures before/after rename, queued revocation and running ownership retention through shutdown. These callbacks do not analyze binaries or invoke providers/native workflows.
