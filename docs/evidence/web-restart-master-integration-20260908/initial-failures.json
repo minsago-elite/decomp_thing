@@ -1,0 +1,38 @@
+[
+  {
+    "suite": "decompengine.web.WebProgressCutoverTest",
+    "message": "org.opentest4j.AssertionFailedError: Expected value to be true."
+  },
+  {
+    "suite": "decompengine.web.WebProgressRetentionWorkerTest",
+    "message": "decompengine.jobs.WorkflowStoreException: Workflow state was not published; the prior durable state is preserved."
+  },
+  {
+    "suite": "decompengine.web.WebRecoveryAdmissionTest",
+    "message": "java.io.IOException: No space left on device"
+  },
+  {
+    "suite": "decompengine.web.WebProgressPinControllerTest",
+    "message": "decompengine.jobs.WorkflowStoreException: Workflow state was not published; the prior durable state is preserved."
+  },
+  {
+    "suite": "decompengine.web.WebShutdownTest",
+    "message": "org.opentest4j.AssertionFailedError: "
+  },
+  {
+    "suite": "decompengine.web.WebShutdownTest",
+    "message": "org.opentest4j.AssertionFailedError: "
+  },
+  {
+    "suite": "decompengine.web.WebShutdownTest",
+    "message": "org.opentest4j.AssertionFailedError: "
+  },
+  {
+    "suite": "decompengine.web.WebShutdownTest",
+    "message": "org.opentest4j.AssertionFailedError: "
+  },
+  {
+    "suite": "decompengine.web.WebRequestLifetimeTest",
+    "message": "java.io.IOException: No space left on device"
+  }
+]

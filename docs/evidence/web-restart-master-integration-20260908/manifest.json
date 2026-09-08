@@ -1,0 +1,33 @@
+{
+  "sourceCommit": "46605377",
+  "masterIncluded": "1c999572",
+  "verification": {
+    "validContractFixtures": 50,
+    "invalidContractFixturesRejected": 42,
+    "jvmTests": 299,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "files": {
+    "initial-failures.json": "c443b85374801f243595a48f58a321ae6fcb6033b4cd08cf3427454eedbf5457",
+    "passing-build.txt": "3c0d396a6b027ed4ff72d60eae3ce52d1272f45075093fdd42b16485e0f4567a",
+    "passing-suites.json": "d8dab76af528a96efa1815f8b112e56bee616374241810bd340b07d8a47d0c9e"
+  },
+  "initialRun": {
+    "status": "failed",
+    "failures": 9,
+    "environment": "/tmp was full (63 GiB used, zero available). Four failure reports explicitly contained No space left on device; publisher-wait and child-ready assertion failures did not independently prove that cause.",
+    "retainedSummary": "initial-failures.json"
+  },
+  "successfulRun": {
+    "status": "passed",
+    "temporaryDirectory": "/home/june/decomp_thing/build/d4-restart-jvm-tmp",
+    "configuration": "Gradle init script configures Test.systemProperty(java.io.tmpdir) to the dedicated workspace directory. Test source/assertions unchanged."
+  },
+  "limits": [
+    "Frontend unchanged; frontend suites and packaged browser were not repeated for this legacy HTTP merge.",
+    "The previous restart browser report remains evidence for its c3a9fc4c archive, not a freshly rebuilt merged archive.",
+    "No broad D-series acceptance criteria are closed by this integration."
+  ]
+}
