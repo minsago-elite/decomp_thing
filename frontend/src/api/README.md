@@ -93,3 +93,5 @@ paths on gap controls. A gap cannot inherit an event id. Unknown fields/comments
 frame budget; partial final records are discarded, and errors make the decoder terminal.
 The stream consumer must still bind job/attempt identity, deduplicate cursors and own fetch
 cancellation/reconnection. The activity UI is not yet connected to this decoder.
+
+`createEventStream` opens one same-origin SSE connection for an explicit job/run, with an optional Last-Event-ID resume header. It yields validated events without collecting a client queue, checks selected identity, preserves bounded JSON HTTP error metadata and stops after a retention gap. Caller abort, early iterator return and a 45-second absolute deadline cancel the source; even a late fetch response is cancelled. EOF ends the connection without retry or acknowledgement. Callers own cursor advancement, duplicate/order checks, snapshot reconciliation and retry/fallback policy. The Activity UI continues to use polling until that integration lands.
