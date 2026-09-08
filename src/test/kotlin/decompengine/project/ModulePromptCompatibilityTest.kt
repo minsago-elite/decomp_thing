@@ -107,6 +107,13 @@ class ModulePromptCompatibilityTest {
             assertTrue(checkpoint.getValue("issues").jsonArray.any {
                 it.jsonObject.getValue("code").jsonPrimitive.content == "context-budget-exceeded"
             })
+            val generationEvidence = Json.parseToJsonElement(
+                project.resolve("reports/confidence.json").readText(),
+            ).jsonObject.getValue("sourceGenerationBudgetEvidence").jsonObject
+            val moduleEvidence = generationEvidence.getValue("modules").jsonArray.single().jsonObject
+            assertTrue(moduleEvidence.getValue("promptCharacters").jsonPrimitive.content.toInt() > 1)
+            assertEquals("1", moduleEvidence.getValue("promptBudgetCharacters").jsonPrimitive.content)
+            assertEquals("unresolved", moduleEvidence.getValue("outcome").jsonPrimitive.content)
         }
     }
 

@@ -514,6 +514,14 @@ internal const val MAXIMUM_CHECKPOINT_EXECUTION_EVIDENCE_BYTES: Int = 64 * 1024 
 object SourceTreeGenerator {
     private const val INPUT_FINGERPRINT_PROVIDER = "module-reconstruction-input-v2"
 
+    private data class ModuleGenerationBudgetObservation(
+        val moduleId: String,
+        val outcome: String,
+        val sourceBytes: Long,
+        val promptCharacters: Int?,
+        val promptBudgetCharacters: Int?,
+    )
+
     fun generate(
         model: RecoveredProgramModel,
         projectDir: Path,
@@ -607,6 +615,7 @@ object SourceTreeGenerator {
         }
         val unresolvedImplementations = sortedSetOf<String>()
         val moduleRevisionEvidence = mutableMapOf<String, String>()
+        val generationBudgetObservations = mutableListOf<ModuleGenerationBudgetObservation>()
 
         moduleDependencyOrder(dependenciesByModule).map(moduleById::getValue).forEachIndexed { index, module ->
             val dependencies = dependenciesByModule.getValue(module.id)
@@ -830,6 +839,13 @@ object SourceTreeGenerator {
             val normalizedSource = sourcePath.readText()
             val moduleEntityIds = module.functionIds + module.globalIds
             if (!checkpoint.accepted) unresolvedImplementations += moduleEntityIds
+            generationBudgetObservations += ModuleGenerationBudgetObservation(
+                moduleId = module.id,
+                outcome = if (checkpoint.accepted) "accepted" else "unresolved",
+                sourceBytes = normalizedSource.toByteArray().size.toLong(),
+                promptCharacters = checkpoint.promptCharacters,
+                promptBudgetCharacters = checkpoint.promptBudgetCharacters,
+            )
             progress.phase(
                 if (checkpoint.accepted) AgentWorkflowPhase.ACCEPTED else AgentWorkflowPhase.UNRESOLVED,
                 module.id,
@@ -909,7 +925,15 @@ object SourceTreeGenerator {
         projectDir.resolve(modulePlanPath).also { it.parent.createDirectories() }.writeText(plan.toJson())
         generated += evidence(profile, programModelPath, model.toJson(), "analysis", model.functions.map { it.id } + model.globals.map { it.id })
         generated += evidence(profile, modulePlanPath, plan.toJson(), "planner", model.functions.map { it.id } + model.globals.map { it.id })
-        val confidence = renderConfidence(model, plan, unresolvedImplementations, moduleRevisionEvidence)
+        val confidence = renderConfidence(
+            model,
+            plan,
+            unresolvedImplementations,
+            moduleRevisionEvidence,
+            profile,
+            hostSafetyLimits,
+            generationBudgetObservations,
+        )
         projectDir.resolve(confidencePath).also { it.parent.createDirectories() }.writeText(confidence)
         generated += evidence(profile, confidencePath, confidence, "evidence", model.functions.map { it.id } + model.globals.map { it.id })
         val toolchain = adapter.toolchainEvidence(profile)
@@ -1393,6 +1417,9 @@ object SourceTreeGenerator {
         plan: ModulePlan,
         unresolvedImplementations: Set<String>,
         moduleRevisionEvidence: Map<String, String>,
+        profile: ReconstructionProfile,
+        hostSafetyLimits: ReconstructionHostSafetyLimits,
+        generationBudgetObservations: List<ModuleGenerationBudgetObservation>,
     ): String {
         fun score(status: RecoveryStatus) = when (status) {
             RecoveryStatus.RECOVERED -> 1.0
@@ -1437,6 +1464,36 @@ object SourceTreeGenerator {
             append("\n  ],\n  \"unresolvedRecoveryEntityIds\": ").append(idsJson(unresolvedRecovery))
             append(",\n  \"unresolvedImplementationIds\": ").append(idsJson(unresolvedImplementations))
             append(",\n  \"unresolvedEntityIds\": ").append(idsJson(unresolvedRecovery + unresolvedImplementations))
+            append(",\n  \"sourceGenerationBudgetEvidence\": {")
+            append("\n    \"schemaVersion\": 1,")
+            append("\n    \"selectedProfile\": {")
+            append("\n      \"id\":\"").append(profile.id.jsonEscape()).append("\",")
+            append("\n      \"sha256\":\"").append(profile.sha256).append("\",")
+            append("\n      \"descriptor\":").append(profile.canonicalJson())
+            append("\n    },")
+            append("\n    \"hostSafetyLimits\":{")
+            append("\n      \"budgets\":").append(hostSafetyLimits.maximum.canonicalJson())
+            append("\n    },")
+            append("\n    \"admission\":{\"profileWithinHost\":true},")
+            append("\n    \"outcome\":{")
+            append("\n      \"plannedModules\":").append(plan.modules.size).append(',')
+            append("\n      \"completedModules\":").append(generationBudgetObservations.size).append(',')
+            append("\n      \"acceptedModules\":").append(generationBudgetObservations.count { it.outcome == "accepted" }).append(',')
+            append("\n      \"unresolvedModules\":").append(generationBudgetObservations.count { it.outcome == "unresolved" })
+            append("\n    },")
+            append("\n    \"modules\":[")
+            append(generationBudgetObservations.sortedBy { it.moduleId }.joinToString(",") { observation ->
+                "\n      {\"moduleId\":\"${observation.moduleId.jsonEscape()}\",\"outcome\":\"${observation.outcome}\"," +
+                    "\"sourceBytes\":${observation.sourceBytes}," +
+                    "\"promptCharacters\":${observation.promptCharacters ?: "null"}," +
+                    "\"promptBudgetCharacters\":${observation.promptBudgetCharacters ?: "null"}}"
+            })
+            append("\n    ],")
+            append("\n    \"limitations\":[")
+            append("\"profile and host ceilings are local admission commitments; this record does not authenticate production execution\",")
+            append("\"prompt usage is retained only when the selected reconstructor reports it; null is not a measured prompt\",")
+            append("\"module outcomes and source byte counts are local generation observations, not behavioral equivalence evidence\"")
+            append("]\n  }")
             append("\n}\n")
         }
     }
