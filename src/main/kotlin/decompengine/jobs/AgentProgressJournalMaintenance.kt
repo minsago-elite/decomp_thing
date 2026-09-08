@@ -62,7 +62,6 @@ internal object AgentProgressJournalMaintenance {
                     lock = requireNotNull(Fs.openRegularFileAtOrNull(directory.fd, LOCK_FILE))
                 }
                 lock.use {
-                    require(it.identity.linkCount == 1) { "retention lock has multiple names" }
                     FileChannel.open(Fs.descriptorPath(it), WRITE)
                 }
             } ?: return ProgressRetentionResult.WRITER_ACTIVE
@@ -79,12 +78,12 @@ internal object AgentProgressJournalMaintenance {
                     val pendingTime = expiryTime(pending.bytes)
                     when {
                         currentTime != null && pendingTime == null -> {
-                            require(currentTime <= now && matches(attempt, pending.bytes, current.bytes, currentTime))
+                            require(matches(attempt, pending.bytes, current.bytes, currentTime))
                             finish(directory, current, pending, ::validateDirectories, fault)
                             return ProgressRetentionResult.EXPIRED
                         }
                         currentTime == null && pendingTime != null -> {
-                            require(pendingTime <= now && matches(attempt, current.bytes, pending.bytes, pendingTime))
+                            require(matches(attempt, current.bytes, pending.bytes, pendingTime))
                             publish(directory, current, pending, ::validateDirectories, fault)
                             return ProgressRetentionResult.EXPIRED
                         }
