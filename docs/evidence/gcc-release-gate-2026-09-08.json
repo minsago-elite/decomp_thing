@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "recordKind": "gcc-driver-release-gate",
+  "issue": 54,
+  "recordedOnUtc": "2026-09-08",
+  "evidenceBasis": {
+    "repositoryCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+    "profileId": "gcc-16-2-0-driver-behavior",
+    "reference": {
+      "sourceLock": {
+        "path": "oracle/gcc/16.2.0/source-lock.json",
+        "sha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc"
+      },
+      "oracleManifest": {
+        "path": "oracle/gcc/16.2.0/oracle-manifest.json",
+        "sha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9"
+      },
+      "buildRecord": {
+        "path": "oracle/gcc/16.2.0/build-record.json",
+        "sha256": "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
+      },
+      "behaviorCorpus": {
+        "path": "oracle/gcc/16.2.0/behavior-corpus.json",
+        "sha256": "bcc1a14ca8c54f94106c943f0bc5698cb9af3151b7bf20a49ae3c8828baaad0e"
+      },
+      "behaviorEvidence": {
+        "path": "oracle/gcc/16.2.0/behavior-corpus-evidence.json",
+        "sha256": "9dcf787aea232615a1ff8721144b86bc1f5e9a2a7068fa9e9280db0bc4ad6803",
+        "cases": 14,
+        "passed": 14
+      },
+      "strippedOracleExecutable": {
+        "path": "oracle/gcc/16.2.0/artifacts/gcc-driver.stripped",
+        "bytes": 2349296,
+        "sha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4"
+      }
+    }
+  },
+  "authorityBoundary": {
+    "oracleEvidence": "authenticated-retained-reference-only",
+    "candidateEvidence": "must-be-independently-authenticated",
+    "releaseDecision": "deterministic-kotlin-jvm-verifier-required",
+    "presentationMayAuthorizeRelease": false,
+    "analysis": {
+      "provider": "bundled-ghidra-java-api",
+      "isolatedWorkerRequired": true,
+      "externalGhidraHomeRequired": false,
+      "externalAnalyzeHeadlessAllowed": false
+    }
+  },
+  "releaseGate": {
+    "status": "unresolved",
+    "productionQualification": "unavailable",
+    "releaseEligible": false,
+    "referenceResult": "available",
+    "candidateResult": "unavailable",
+    "requiredEvidence": {
+      "structuralA6A7": "unavailable",
+      "acceptedReconstructedArchive": "unavailable",
+      "candidateBehaviorObservations": "unavailable",
+      "repeatedCleanRuns": "unavailable"
+    }
+  },
+  "persistentMismatchLedger": {
+    "status": "persistent-unresolved",
+    "identityRule": "sha256(profileId + newline + caseSet + newline + dimension + newline + candidateSourceRevisionOrUnavailable)",
+    "entries": [
+      {
+        "id": "gcc-release-edafdf537d8e019d935c680956578d57390a00a7ccd3a1c5ec212be67fa4e4b3",
+        "state": "unresolved",
+        "kind": "missing-candidate-evidence",
+        "caseSet": "all-required-cases",
+        "dimension": "candidate-observation",
+        "module": "driver-release",
+        "candidateSourceRevision": null,
+        "observedCandidateMismatch": false,
+        "persistsAcrossRevisions": true,
+        "blocksRelease": true,
+        "reason": "No authenticated reconstructed GCC archive, candidate executable, or candidate observation report is retained. This is an evidence blocker, not an invented candidate mismatch."
+      }
+    ]
+  },
+  "productionGap": "The retained reference pass and oracle executable do not qualify a reconstructed GCC release. The gate still lacks authenticated #40/#42/#45 structural evidence, #50 source/archive identity, #51-#53 candidate behavior observations, and repeated clean qualification runs."
+}
