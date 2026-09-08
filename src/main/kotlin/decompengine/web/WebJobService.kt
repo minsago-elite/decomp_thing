@@ -588,15 +588,24 @@ class WebJobService(
             val remaining = deadline - System.nanoTime()
             if (remaining > 0 && worker !== Thread.currentThread()) finished.await(remaining, TimeUnit.NANOSECONDS)
         }
-        retentionWorker?.awaitStopped(deadline - System.nanoTime())
-        synchronized(this) {
-            releaseIfQuiescent()
-            if (active.isNotEmpty() || uploads.isNotEmpty() || retentionWorker?.isIdle == false) {
-                val failure = WebJobServiceException("SHUTDOWN_INCOMPLETE", "Owned work has not stopped; storage ownership is retained until it exits.")
-                if (problem == null) problem = failure else problem.addSuppressed(failure)
+        var retentionWaitInterrupted = false
+        try {
+            try {
+                retentionWorker?.awaitStopped(deadline - System.nanoTime())
+            } catch (_: InterruptedException) {
+                retentionWaitInterrupted = true
             }
+            synchronized(this) {
+                releaseIfQuiescent()
+                if (active.isNotEmpty() || uploads.isNotEmpty() || retentionWorker?.isIdle == false) {
+                    val failure = WebJobServiceException("SHUTDOWN_INCOMPLETE", "Owned work has not stopped; storage ownership is retained until it exits.")
+                    if (problem == null) problem = failure else problem.addSuppressed(failure)
+                }
+            }
+            problem?.let { throw it }
+        } finally {
+            if (retentionWaitInterrupted) Thread.currentThread().interrupt()
         }
-        problem?.let { throw it }
     }
 
     private fun releaseIfQuiescent() {
