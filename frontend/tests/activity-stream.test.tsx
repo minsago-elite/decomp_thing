@@ -53,6 +53,24 @@ it('streams from the catch-up cursor, deduplicates, and cancels on pause without
   expect(transport.get.mock.calls.at(-1)![1]).toContain('after=cursor_next_2');
 });
 
+it('deduplicates semantically identical JSON field ordering and continues the stream', async () => {
+  const live = connection(); fetcher.mockResolvedValueOnce(live.response);
+  const { payload, ...envelope } = first;
+  const reordered: WebEvent = { payload: { ...payload, fields: Object.fromEntries(Object.entries(payload.fields).reverse()) }, ...envelope };
+  expect(JSON.stringify(reordered)).not.toBe(JSON.stringify(first));
+  // Producer object order differs on the wire; schema projection must normalize it before replay comparison.
+  expect(decodeContract(JSON.stringify(reordered))).toEqual(first);
+  await start();
+  await act(async () => { await Promise.resolve(); live.send(reordered, next(1)); }); await advance(0);
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.getAllByRole('listitem')).toHaveLength(2);
+  expect(screen.getByText(`Sequence ${next(1).sequence}`)).toBeTruthy();
+  await act(async () => { await Promise.resolve(); fireEvent.click(screen.getByRole('button', { name: 'Pause activity' })); });
+  transport.get.mockResolvedValueOnce({ data: { items: [], nextCursor: next(1).cursor, hasMore: false } });
+  await act(async () => { await Promise.resolve(); fireEvent.click(screen.getByRole('button', { name: 'Resume activity' })); });
+  expect(transport.get.mock.calls.at(-1)![1]).toContain('after=cursor_next_1');
+});
+
 it('reconciles a snapshot after a leased EOF and resumes after the last displayed event', async () => {
   const live = connection(); const resumed = connection();
   fetcher.mockResolvedValueOnce(live.response).mockResolvedValueOnce(resumed.response);
