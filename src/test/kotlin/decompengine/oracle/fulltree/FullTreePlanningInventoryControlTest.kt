@@ -19,6 +19,55 @@ import kotlinx.serialization.json.JsonPrimitive
 
 class FullTreePlanningInventoryControlTest {
     @Test
+    fun `clang index dispatch binds the exact linked owner without an emitted denominator`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+
+        val modules = registry.requireOwnerModulesForShard("clang-lib-index")
+        assertEquals(1, modules.size)
+        assertEquals(
+            listOf("source/clang/lib/Index/USRGeneration.cpp"),
+            modules.map { it.sourcePath },
+        )
+        assertEquals(
+            listOf("cu-aaeb50637488dcdad9827a10d5763b21"),
+            modules.map { it.unitId },
+        )
+        assertTrue(
+            modules.all {
+                it.moduleId == it.unitId &&
+                    it.shardId == "clang-lib-index" &&
+                    it.sourceKind == "handwritten" &&
+                    it.sourcePath.startsWith("source/clang/lib/Index/")
+            },
+        )
+        assertEquals(
+            listOf(
+                "source/clang/lib/Index/CommentToXML.cpp",
+                "source/clang/lib/Index/FileIndexRecord.cpp",
+                "source/clang/lib/Index/IndexBody.cpp",
+                "source/clang/lib/Index/IndexDecl.cpp",
+                "source/clang/lib/Index/IndexSymbol.cpp",
+                "source/clang/lib/Index/IndexTypeSourceInfo.cpp",
+                "source/clang/lib/Index/IndexingAction.cpp",
+                "source/clang/lib/Index/IndexingContext.cpp",
+            ),
+            registry.sourceOnlyUnits.filter { it.shardId == "clang-lib-index" }.map { it.sourcePath },
+        )
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("clang-lib-index-missing")
+        }
+    }
+
+    @Test
     fun `fixture planning inventory is closed exact and byte deterministic`() =
         inControlTemporaryDirectory { directory ->
             val fixture = createFullTreeControlFixture(directory.resolve("fixture"))
