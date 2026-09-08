@@ -692,3 +692,5 @@ Malformed or unavailable records increment bounded saturating failure counters a
 Shutdown cancels scheduling and keeps service/storage ownership until the last maintenance work callback has left. The worker joins the service's existing shutdown wait budget and reports incomplete shutdown if still live; its termination callback permits later quiescent release. Three tests cover a callback that temporarily ignores interruption, missing-root initialization, and periodic expiry across twenty inert jobs (more than one batch), including durable pin preservation/unpinning and malformed-journal isolation. No workflow executes.
 
 Public pin controls, audit/UI reporting, default server activation and broader job/evidence retention remain unfinished. The existing advertised retention guarantee is unchanged.
+
+All 276 selected JVM tests pass. The [retained worker manifest and three results](evidence/web-retention-worker-20260908/manifest.json) record source and evidence hashes. Frontend/package/browser checks were not repeated because default server behavior and public HTTP/UI contracts are unchanged.
