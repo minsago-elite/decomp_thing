@@ -626,3 +626,11 @@ A separate real SSE connection starts from a snapshot, then atomic eviction remo
 250 selected web/journal/workflow-store tests pass. These controlled interleavings establish the implemented cutover and replay contract alongside the read-lock, empty-watermark and client/browser checks retained above. They are not production throughput or slow-socket stress qualification. Client and server implementation code is unchanged in this test layer, so frontend, package and browser checks were not repeated. Timed terminal-run retention and slow-socket qualification remain outstanding.
 
 The [retained cutover manifest and JUnit result](evidence/web-concurrent-cutover-20260908/manifest.json) record the implementation/test source, selected test totals, observed schedule counts and evidence hash. The retained JUnit file covers the two new HTTP cutover tests; totals describe the complete selected suite.
+
+## Unread socket lease qualification
+
+`WebEventStreamTest` opens one authenticated owned loopback SSE peer that never reads. Its synthetic source offers at most 64 expanding bounded journal windows, then a fixed tail. The test observes the dedicated writer parked inside JDK 21 `SocketChannelImpl` write code. While that stream remains charged, the single ordinary HTTP worker serves health and authenticated polling requests. The six-second fixture lease releases the reservation with zero cleanup failures while the peer remains open and unread. Fixture teardown also requires stream and HTTP-worker shutdown. No workflow executes.
+
+All 251 selected web/journal/workflow-store JVM tests pass. The existing lease/logout closure helper now accepts an IOException only when its cause chain confirms EOF, since forced cancellation may end within HTTP chunk framing; unrelated I/O errors still fail. The [retained manifest and JUnit result](evidence/web-slow-socket-20260908/manifest.json) identify the tested source and evidence hash. The retained XML covers seven SSE tests; totals describe the complete selected suite.
+
+This qualifies one bounded blocked peer on the pinned JDK, not production throughput or cross-platform load. Runtime code is unchanged, so frontend, package and browser checks were not repeated. Timed terminal-run retention and the remaining issue criteria are still open.
