@@ -1,0 +1,35 @@
+{
+  "status": "passed",
+  "sourceCommit": "c3a9fc4c",
+  "identicalTreeMergeCommit": "488fd30e",
+  "masterIncluded": "027171f2",
+  "verification": {
+    "frontendTests": 357,
+    "frontendFailures": 0,
+    "lint": "passed",
+    "typecheckedBuild": "passed",
+    "validContracts": 50,
+    "invalidContractsRejected": 42,
+    "jvm": {
+      "tests": 299,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "distZip": "passed",
+    "packagedHistoryBrowser": "passed"
+  },
+  "archiveSha256": "23b9b2b892aea5ed2ea810273128ab9989ecb4f59c53ad81e11563b9beab1afc",
+  "files": {
+    "browser.json": "dda22d807f3f4d3b974d5fcee8117715e9ddcb0e31163d54f2600b7e8c234a29",
+    "http-tests.xml": "0f5a47402316ece1be387d1572719b59d9ae56c60df579a6d6949d0eec60d295",
+    "session-tests.json": "f868c2f7e204d9ac79ca2e2defacd0ed2f78a58001ec4a172e19fa9ea75cf30c"
+  },
+  "limits": [
+    "Server identity stability/replacement and rejected old cookies are covered with real HTTP over two lifetimes of the same store; changed-instance UI is covered by session/component tests.",
+    "The packaged browser is regression coverage, not a full browser stop/restart/sign-in/attempt reconciliation test.",
+    "Identity comparison is private and page-memory only; missing identities, initial connections and failed reads do not establish restart.",
+    "Earlier intermittent SSE append timeout remains unresolved; this run passed the unchanged assertion.",
+    "Chrome uses test-only --no-sandbox. No workflow or native analysis ran; shutdown and owned-work cleanup passed."
+  ]
+}

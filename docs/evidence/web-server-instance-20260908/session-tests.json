@@ -1,0 +1,120 @@
+[
+  {
+    "file": "session-status.test.tsx",
+    "tests": [
+      {
+        "name": "renders connection and explicit logout without displaying or storing credentials",
+        "status": "passed"
+      },
+      {
+        "name": "offers a read-only check after expiry without replaying an exchange",
+        "status": "passed"
+      },
+      {
+        "name": "contains a failed logout and gives an explicit check without automatic retries",
+        "status": "passed"
+      },
+      {
+        "name": "offers no request control when the bootstrap fragment could not be removed",
+        "status": "passed"
+      },
+      {
+        "name": "announces a changed authenticated server without displaying the opaque identifier",
+        "status": "passed"
+      }
+    ]
+  },
+  {
+    "file": "session.test.ts",
+    "tests": [
+      {
+        "name": "bootstrap fragment removal removes the fragment before exchange and preserves only the existing path/query",
+        "status": "passed"
+      },
+      {
+        "name": "bootstrap fragment removal scrubs malformed/duplicate bootstrap fragments and never submits them",
+        "status": "passed"
+      },
+      {
+        "name": "bootstrap fragment removal stops before requests if removal fails, while ordinary anchors are preserved",
+        "status": "passed"
+      },
+      {
+        "name": "page-local session state restores cookies through one read-only bootstrap and coalesces initial calls",
+        "status": "passed"
+      },
+      {
+        "name": "page-local session state does not automatically retry a failed or consumed one-time exchange",
+        "status": "passed"
+      },
+      {
+        "name": "page-local session state exposes a safe recoverable state for SESSION_REQUIRED",
+        "status": "passed"
+      },
+      {
+        "name": "page-local session state exposes a safe recoverable state for SESSION_EXPIRED",
+        "status": "passed"
+      },
+      {
+        "name": "page-local session state exposes a safe recoverable state for BOOTSTRAP_EXPIRED",
+        "status": "passed"
+      },
+      {
+        "name": "page-local session state exposes a safe recoverable state for ORIGIN_DENIED",
+        "status": "passed"
+      },
+      {
+        "name": "page-local session state clears authorization at absolute expiry without requesting or replaying anything",
+        "status": "passed"
+      },
+      {
+        "name": "page-local session state coalesces explicit logout and clears CSRF before sending it",
+        "status": "passed"
+      },
+      {
+        "name": "page-local session state reports unconfirmed logout honestly and never retries it automatically",
+        "status": "passed"
+      },
+      {
+        "name": "page-local session state supersedes a pending read with one fresh link and ignores its stale result",
+        "status": "passed"
+      },
+      {
+        "name": "page-local session state blocks a pending read and all later reads when fragment removal fails",
+        "status": "passed"
+      },
+      {
+        "name": "page-local session state holds one newest explicit link until logout settles, without replaying logout",
+        "status": "passed"
+      },
+      {
+        "name": "page-local session state discards queued credentials after removal failure and ignores old mutation completion",
+        "status": "passed"
+      },
+      {
+        "name": "page-local session state rejects a mismatched bootstrap base and ignores completion after disposal",
+        "status": "passed"
+      },
+      {
+        "name": "shared private request rejection clears session credentials once without requests or mutation replay",
+        "status": "passed"
+      },
+      {
+        "name": "shared private request rejection ignores a late denial from before a fresh sign-in and after disposal",
+        "status": "passed"
+      },
+      {
+        "name": "shared private request rejection does not infer session loss from access denial, network errors or invalid envelopes",
+        "status": "passed"
+      },
+      {
+        "name": "authenticated server instance comparison reports a changed instance after reconnect without exposing the identifier in snapshots",
+        "status": "passed"
+      },
+      {
+        "name": "authenticated server instance comparison does not infer restart from a network failure or an unsupported identity gap",
+        "status": "passed"
+      }
+    ]
+  }
+]
