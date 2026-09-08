@@ -1,0 +1,35 @@
+{
+  "sourceCommit": "b39e99c8",
+  "masterIncluded": "1c999572",
+  "verification": {
+    "jvm": {
+      "tests": 314,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "frontendTests": 366,
+    "frontendFailures": 0,
+    "lint": "passed",
+    "typecheck": "passed",
+    "frontendProductionBuild": "passed within Gradle",
+    "validContracts": 52,
+    "invalidContractsRejected": 44,
+    "schemaHashPrefix": "c530ae45c1a7"
+  },
+  "files": {
+    "frontend-tests.txt": "cd38745536024cc10c4a0ea6e7ff228ff3ef933df469e52e900bf25f7ed5468f",
+    "http-tests.xml": "987ddf51e8255cf87728e98689819b698419d5f9ac6146e9fad8fa71f95a0e2b",
+    "jvm-build.txt": "d6c92ae47a86725b6779583fa554d176c48dc64bdaf4113836df978e56d0ddb1"
+  },
+  "scope": [
+    "Real authenticated HTTP cancellation of an owned queued inert task; original cancelling acknowledgement/current cancelled state, current ETag on replay after a pin version change.",
+    "Session/origin/CSRF/method/content-type/precondition/key/query/body/target validation occurs before receipt publication. Revoked sessions cannot read retained receipts.",
+    "Typed client sends one explicit version/key-bound request and does not retry an ambiguous transport failure."
+  ],
+  "limits": [
+    "Production workflow adapters remain unregistered. No workflow start capability or browser cancellation controls added.",
+    "Running-worker completion races, acceptance preservation and restart replay are service-level tests; broader HTTP/browser qualification remains open.",
+    "No distZip or packaged browser rerun for this endpoint. Existing idle-expiry browser evidence is tied to its earlier archive."
+  ]
+}
