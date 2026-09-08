@@ -1007,7 +1007,7 @@ object SourceTreeGenerator {
         val confidence = renderConfidence(model, plan, unresolvedImplementations, moduleRevisionEvidence)
         projectDir.resolve(confidencePath).also { it.parent.createDirectories() }.writeText(confidence)
         generated += evidence(profile, confidencePath, confidence, "evidence", model.functions.map { it.id } + model.globals.map { it.id })
-        val toolchain = renderToolchain()
+        val toolchain = GeneratedCToolchainEvidence.render(profile)
         projectDir.resolve(toolchainPath).also { it.parent.createDirectories() }.writeText(toolchain)
         generated += evidence(profile, toolchainPath, toolchain, "environment", emptyList())
         val unresolvedMarkdown = renderUnresolvedMarkdown(model, plan, unresolvedImplementations)
@@ -1815,25 +1815,6 @@ object SourceTreeGenerator {
             append(",\n  \"unresolvedEntityIds\": ").append(idsJson(unresolvedRecovery + unresolvedImplementations))
             append("\n}\n")
         }
-    }
-
-    private fun renderToolchain(): String {
-        fun version(command: String): String = runCatching {
-            ProcessBuilder(command, "--version").redirectErrorStream(true).start().let { process ->
-                val line = process.inputStream.bufferedReader().readLine().orEmpty()
-                process.waitFor()
-                line
-            }
-        }.getOrDefault("unavailable").replace("\\", "\\\\").replace("\"", "\\\"")
-        return """
-            {
-              "decompEngineVersion": "0.1.0",
-              "javaVersion": "${System.getProperty("java.version")}",
-              "gcc": "${version("gcc")}",
-              "make": "${version("make")}",
-              "note": "LLM model and prompt hashes are recorded per generated module when applicable."
-            }
-        """.trimIndent() + "\n"
     }
 
     private fun renderUnresolvedMarkdown(

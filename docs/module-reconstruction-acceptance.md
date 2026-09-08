@@ -95,3 +95,11 @@ checkpoint records appear in `moduleCompilationEvidenceProblems` instead.
 Unaccepted sources have no accepted compiler record. Diagnostic commitments and counts
 are format-checked and bounded; retained hashes do not independently authenticate
 the compiler or prove that diagnostic bytes were replayed.
+
+Toolchain reporting uses the generated-C adapter's selected compiler driver and
+Make version observations. Each probe drains bounded output and waits within the
+smaller of the profile build budget and a two-second/16-KiB host ceiling, followed
+by the existing build-process cleanup. Failed, oversized, timed-out or invalid
+UTF-8 observations are reported as `unavailable`; caller cancellation propagates.
+`compilerCommand` and `compilerVersion` replace the historical hardcoded `gcc`
+field. These local version strings do not authenticate executable identity.
