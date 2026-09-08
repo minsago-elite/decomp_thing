@@ -33,9 +33,9 @@ internal object ReconstructionAdapters {
 
 /** Build-system-specific evidence requirements inside the shared archive transport. */
 internal interface ArchiveBuildPolicy {
-    val requiredPaths: Set<String>
+    fun requiredPaths(profile: ReconstructionProfile): Set<String>
     val rebuildInstructions: String
-    fun validate(projectDir: Path, requireArtifact: Boolean)
+    fun validate(projectDir: Path, profile: ReconstructionProfile, requireArtifact: Boolean)
     fun sourceRevision(projectDir: Path): BuildSourceRevision
     fun isBuildInput(relativePath: String): Boolean
 }

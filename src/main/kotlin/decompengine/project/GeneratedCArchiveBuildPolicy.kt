@@ -18,23 +18,16 @@ import kotlinx.serialization.json.longOrNull
 /** Existing generated-C/Make source and artifact verification for archival builds. */
 internal object GeneratedCArchiveBuildPolicy : ArchiveBuildPolicy {
     override val rebuildInstructions = "Build with the exact parallel warnings-as-errors command in `BUILDING.md`. The recovered program model, module plan, confidence, unresolved entities, build logs, and per-module provenance are under `reports/`."
-    override val requiredPaths = setOf(
-        "ARCHIVE_README.md",
-        "BUILDING.md",
-        "Makefile",
-        "UNRESOLVED.md",
-        "reports/archival_audit.json",
-        "reports/build.log",
-        "reports/build_contract.json",
-        "reports/confidence.json",
-        "reports/module_plan.json",
-        "reports/program_model.json",
-        "reports/toolchain.json",
-        "source_tree_manifest.json",
-    )
+    override fun requiredPaths(profile: ReconstructionProfile): Set<String> = setOf(
+        "ARCHIVE_README.md", "BUILDING.md", "reports/archival_audit.json",
+        "reports/build.log", "reports/build_contract.json", "source_tree_manifest.json",
+    ) + listOf(
+        "build-definition", "unresolved-evidence", "confidence-evidence",
+        "module-plan-evidence", "program-model-evidence", "toolchain-evidence",
+    ).map { profile.layout.declaration(it).materialize() }
 
-    override fun validate(projectDir: Path, requireArtifact: Boolean) {
-        requiredPaths.filterNot { it == "ARCHIVE_README.md" || it == "reports/archival_audit.json" }
+    override fun validate(projectDir: Path, profile: ReconstructionProfile, requireArtifact: Boolean) {
+        requiredPaths(profile).filterNot { it == "ARCHIVE_README.md" || it == "reports/archival_audit.json" }
             .forEach { relative ->
                 require(projectDir.resolve(relative).isRegularFile(LinkOption.NOFOLLOW_LINKS)) {
                     "archive project is missing required evidence: $relative"
