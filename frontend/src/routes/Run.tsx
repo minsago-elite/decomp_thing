@@ -1,22 +1,24 @@
 import { usePrivateTransport } from '../session/PrivateTransport';
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import type { Run as RunData } from '../api/generated';
 import { ApiClientError } from '../api/client';
 import { jobPath, runPath } from '../app/paths';
 import type { BrowserSession } from '../session/session';
 import { Activity } from '../jobs/Activity';
+import { CancellationControls } from '../jobs/CancellationControls';
 import { ProgressPin } from '../jobs/ProgressPin';
 import { ExplorationEvidence } from '../jobs/ExplorationEvidence';
 import { useSession } from '../session/useSession';
 
 function Details({ jobId, runId, basePath, session }: { jobId: string; runId: string; basePath: string; session: BrowserSession }) {
   const { client } = usePrivateTransport(basePath);
+  const detailRead = useRef<AbortController | null>(null);
   const [run, setRun] = useState<RunData | null>(null);
   const [error, setError] = useState('');
   const [refresh, setRefresh] = useState(0);
   const [loading, setLoading] = useState(true);
   useEffect(() => {
-    const controller = new AbortController(); setRun(null); setError(''); setLoading(true);
+    const controller = new AbortController(); detailRead.current = controller; setRun(null); setError(''); setLoading(true);
     void client.get('run', `/jobs/${jobId}/runs/${runId}`, { signal: controller.signal }).then(response => {
       if (controller.signal.aborted) return;
       if (response.data.jobId !== jobId || response.data.runId !== runId) {
@@ -33,6 +35,9 @@ function Details({ jobId, runId, basePath, session }: { jobId: string; runId: st
     {loading && <p role="status">Loading attempt…</p>}
     {error && <p role="alert">{error}</p>}
     <button type="button" disabled={loading} onClick={() => setRefresh(value => value + 1)}>Refresh attempt</button>
+    <CancellationControls key={`cancel/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} onCurrent={current => {
+      detailRead.current?.abort(); setRun(current); setError(''); setLoading(false);
+    }} />
     {run && <>
       <dl class="job-facts">
         <dt>Attempt identity</dt><dd><code>{run.runId}</code></dd>
