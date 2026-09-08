@@ -14,10 +14,15 @@ export function ActivityReceiptAge({ receipt, visible }: { receipt: ActivityRece
     const sample = () => {
       const nowMonoMs = performance.now();
       const nowWallMs = Date.now();
-      if (state.wasVisible !== null && visible && !state.wasVisible) {
+      if (state.wasVisible !== null) {
         const wallElapsedMs = nowWallMs - state.lastWallMs;
         const monotonicElapsedMs = nowMonoMs - state.lastMonoMs;
-        if (wallElapsedMs > monotonicElapsedMs + 1000) state.offsetMs += wallElapsedMs - monotonicElapsedMs;
+        // A suspended browser can stop performance.now(). Only treat a large wall/monotonic
+        // discrepancy as suspension when the monotonic clock actually paused; ordinary wall
+        // clock corrections during an active interval must not age the receipt permanently.
+        if (wallElapsedMs > monotonicElapsedMs + 1000 && monotonicElapsedMs < 1000) {
+          state.offsetMs += wallElapsedMs - monotonicElapsedMs;
+        }
       }
       state.lastMonoMs = nowMonoMs;
       state.lastWallMs = nowWallMs;
