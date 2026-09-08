@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.web.WebCancellationControllerTest" tests="7" skipped="0" failures="0" errors="0" timestamp="2026-09-08T10:27:09.666Z" hostname="whatsername" time="14.386">
+  <properties/>
+  <testcase name="authenticated policy reads do not publish commands and terminal attempts are ineligible()" classname="decompengine.web.WebCancellationControllerTest" time="0.456"/>
+  <testcase name="running HTTP cancellation reports completion when the worker finishes successfully()" classname="decompengine.web.WebCancellationControllerTest" time="0.424"/>
+  <testcase name="revoked sessions cannot retrieve a retained cancellation acknowledgement()" classname="decompengine.web.WebCancellationControllerTest" time="0.197"/>
+  <testcase name="authenticated cancellation distinguishes acknowledgement from terminal state and replay uses current ETag()" classname="decompengine.web.WebCancellationControllerTest" time="0.286"/>
+  <testcase name="authorization and bounded closed command validation precede receipt publication()" classname="decompengine.web.WebCancellationControllerTest" time="0.668"/>
+  <testcase name="policy distinguishes unowned work and receipt capacity without leaking other attempt data()" classname="decompengine.web.WebCancellationControllerTest" time="11.901"/>
+  <testcase name="running HTTP cancellation waits for worker exit and replay cannot signal a newer attempt()" classname="decompengine.web.WebCancellationControllerTest" time="0.45"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
