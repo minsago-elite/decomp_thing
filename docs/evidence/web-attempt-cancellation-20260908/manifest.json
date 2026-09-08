@@ -1,0 +1,23 @@
+{
+  "sourceCommit": "251960bd",
+  "masterIncluded": "1c999572",
+  "jvm": {
+    "tests": 302,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "temporaryStorage": "workspace-backed java.io.tmpdir via local Gradle init script",
+  "files": {
+    "cancellation-tests.xml": "eb5b9416b7d6837c72a56211cdcf905cfdd0a43df9c2d37640c1b084f19a4fb4",
+    "initial-build.txt": "387599cd5f8178622a714d0410617f82179123e1b5498962d6693d2b8588b12c",
+    "passing-build.txt": "f2c036f2957d6b6e3b93771cc2f36fa4e11e8f503822ebd97d0e2c92d8110dfd"
+  },
+  "initialRun": "Three new test failures: two expected isIdle before service close, contrary to its shutdown-quiescence semantics; one expected uncertain publication for a known pre-rename failure. Tests corrected to exercise dispatch/terminal behavior and distinguish known unchanged from uncertain state. Stale-version fixture made independent of worker-start scheduling.",
+  "limits": [
+    "Internal service operation only; no HTTP route, command replay record, browser control or production adapter enabled.",
+    "Cancellation remains pending until adapter exit; the existing trusted adapter contract requires child cleanup before returning.",
+    "Full accepted-revision preservation and HTTP/session/replay qualification remain open.",
+    "No packaged browser test for this internal operation. Independent idle-expiry run still uses its earlier archive and remains pending."
+  ]
+}

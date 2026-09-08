@@ -1,0 +1,20 @@
+{
+  "sourceCommit": "20b0ca06f88630489a7c6e9270e28a26581bea09",
+  "criterion": "#181 acceptance criterion 3: monetary estimates require a configured price/version basis",
+  "result": "qualified for current no-basis state: no monetary estimate is displayed",
+  "verification": {
+    "frontendTests": 361,
+    "failures": 0,
+    "lint": "passed",
+    "typecheck": "passed"
+  },
+  "files": {
+    "frontend-tests.txt": "4d4400142591468a7f63e40dc28dbb9f65b74b9e09fc00e2676f7a5855d8d899"
+  },
+  "limits": [
+    "No runtime or schema changes; no pricing configuration or estimate feature added.",
+    "Other five #181 criteria remain open. Any future estimate renderer/configuration requires new qualification.",
+    "JVM and packaged browser not rerun for this test/documentation change.",
+    "Independent real-time idle-expiry run is still pending and is not evidence for this audit."
+  ]
+}

@@ -1,0 +1,13 @@
+
+> decomp-workbench@0.1.0 test
+> node scripts/check-toolchain.mjs && vitest run
+
+
+ RUN  v4.1.11 /home/june/decomp_thing/frontend
+
+
+ Test Files  25 passed (25)
+      Tests  366 passed (366)
+   Start at  18:41:10
+   Duration  4.01s (transform 13.17s, setup 4.12s, import 16.34s, tests 9.88s, environment 24.24s)
+

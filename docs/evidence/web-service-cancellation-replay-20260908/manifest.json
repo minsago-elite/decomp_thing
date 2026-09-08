@@ -1,0 +1,25 @@
+{
+  "sourceCommit": "884e670e",
+  "masterIncluded": "1c999572",
+  "jvm": {
+    "tests": 311,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "files": {
+    "cancellation-tests.xml": "072a1d7bba0c8eb27bf8f20761b76f2fd1306de1f9a67e8862c48e9c1d4f23d7",
+    "passing-build.txt": "d23ca8ee79fc6c61662c7f8154f234711761f122de2f8c22ac3870400ac31869"
+  },
+  "scope": [
+    "Service coordinates atomic receipts with owned-task state before signalling.",
+    "Replay does not interrupt again, does not restore an old run version after pin publication, and cannot touch a newer queued attempt.",
+    "Queued cancellation returns original cancelling acknowledgement plus current cancelled state. Uncertain publication blocks dispatch and replays after store reopen with current interrupted state."
+  ],
+  "limits": [
+    "Internal service boundary only. Authenticated HTTP routing, response contracts and browser controls remain open.",
+    "Store-reopen replay uses the same supplied actor identity; it does not restore an invalid browser session or grant fresh sessions access to old receipts.",
+    "Production adapters remain unregistered; tests use inert owned adapters.",
+    "No packaged browser test for this operation; prior idle-expiry evidence is scoped to its earlier archive."
+  ]
+}
