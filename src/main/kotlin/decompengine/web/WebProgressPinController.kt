@@ -11,7 +11,7 @@ internal class WebProgressPinController(private val access: LocalWebAccess, priv
     fun handle(exchange: HttpExchange, jobId: String, runId: String) {
         val read = exchange.requestMethod == "GET"
         val session = checkNotNull(access.authorize(exchange,
-            if (read) WebEndpointPolicy.privateRead() else WebEndpointPolicy.jsonMutation("PUT")))
+            WebEndpointPolicy.progressPin()))
         requireNoWebApiQuery(exchange); requireJsonAccept(exchange)
         if (!jobId.matches(Regex("[0-9a-f]{32}")) || !runId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) {
             throw WebAccessDenied(404, "NOT_FOUND", "The requested attempt is unavailable.")
@@ -45,7 +45,7 @@ internal class WebProgressPinController(private val access: LocalWebAccess, priv
                 when (failure.code) {
                     "VERSION_CONFLICT" -> throw WebAccessDenied(412, failure.code, "The run version changed. Read its current pin policy.")
                     "IDEMPOTENCY_CONFLICT" -> throw WebAccessDenied(409, failure.code, "The request key was used for a different pin change.")
-                    "PIN_RECEIPT_CAPACITY" -> throw WebAccessDenied(429, failure.code, "Pin request history is at capacity. Reconcile the policy before a later explicit request.")
+                    "PIN_RECEIPT_CAPACITY" -> throw WebAccessDenied(429, failure.code, "Pin request history is at capacity. Reconcile the policy before a later explicit request.", retryAfterMs = failure.retryAfterMs)
                     else -> throw failure
                 }
             }

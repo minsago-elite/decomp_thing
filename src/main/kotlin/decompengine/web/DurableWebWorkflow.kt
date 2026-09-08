@@ -46,7 +46,12 @@ sealed interface WebJobInspection {
     data class Available(val presentation: WebJobPresentation) : WebJobInspection
     data class Unavailable(val diagnostic: WebJobDiagnostic) : WebJobInspection
 }
-class WebJobServiceException(val code: String, message: String, cause: Throwable? = null) : RuntimeException(message, cause)
+class WebJobServiceException(
+    val code: String,
+    message: String,
+    cause: Throwable? = null,
+    val retryAfterMs: Long? = (cause as? WorkflowStoreException)?.retryAfterMs,
+) : RuntimeException(message, cause)
 
 /** Parse once before namespace selection; normalization must never change the selected authority. */
 internal fun canonicalReportSegments(path: String): List<String> {

@@ -79,6 +79,7 @@ class WebEndpointPolicy private constructor(
     internal val sessionRequired: Boolean,
     internal val mutation: Boolean,
     internal val multipart: Boolean,
+    internal val mutationMethods: Set<String> = if (mutation) methods else emptySet(),
 ) {
     companion object {
         /** Routing preflight only; private handlers must still authorize their session/mutation policy. */
@@ -96,6 +97,8 @@ class WebEndpointPolicy private constructor(
             require(method in setOf("POST", "PUT", "PATCH", "DELETE")) { "mutation policy requires an explicit mutation method" }
             return WebEndpointPolicy(setOf(method), true, true, false)
         }
+        internal fun progressPin(): WebEndpointPolicy =
+            WebEndpointPolicy(setOf("GET", "PUT"), true, true, false, setOf("PUT"))
         fun multipartUpload(): WebEndpointPolicy = WebEndpointPolicy(setOf("POST"), true, true, true)
     }
 }
@@ -107,8 +110,12 @@ class WebAccessDenied internal constructor(
     val allowedMethods: Set<String> = emptySet(),
     internal val clearCookie: Boolean = false,
     internal val eventGap: JsonObject? = null,
+    internal val retryAfterMs: Long? = null,
 ) : RuntimeException(message) {
-    init { require(eventGap == null || (status == 410 && code == "EVENT_GAP")) }
+    init {
+        require(eventGap == null || (status == 410 && code == "EVENT_GAP"))
+        require(retryAfterMs == null || status == 429 && retryAfterMs > 0)
+    }
 }
 
 /** These return values deliberately redact their printable representation. Never serialize them wholesale. */
@@ -229,7 +236,7 @@ class LocalWebAccess(
         ensureOpen()
         validateBoundary(exchange, policy)
         if (!policy.sessionRequired) return null
-        return describe(authenticate(exchange, policy.mutation), clock.instant())
+        return describe(authenticate(exchange, exchange.requestMethod in policy.mutationMethods), clock.instant())
     }
 
     /** Authenticated bootstrap GET restores the same CSRF token without invalidating other tabs. */
@@ -281,7 +288,8 @@ class LocalWebAccess(
                 failure.eventGap?.let { put("recovery", it) }
                 put("retryable", failure.status == 429)
                 put("details", JsonArray(emptyList()))
-                put("retryAfterMs", if (failure.status == 429) JsonPrimitiveRetry else JsonNull)
+                val retryAfterMs = if (failure.status == 429) failure.retryAfterMs ?: DEFAULT_RETRY_AFTER_MS else null
+                put("retryAfterMs", retryAfterMs?.let(::JsonPrimitive) ?: JsonNull)
             })
         }.toString().toByteArray()
         exchange.responseHeaders.set("Content-Type", "application/json; charset=utf-8")
@@ -303,7 +311,10 @@ class LocalWebAccess(
     internal fun deniedHeaders(exchange: HttpExchange, failure: WebAccessDenied) {
         if (failure.allowedMethods.isNotEmpty()) exchange.responseHeaders.set("Allow", failure.allowedMethods.sorted().joinToString(", "))
         if (failure.clearCookie) exchange.responseHeaders.add("Set-Cookie", expiredSessionCookie())
-        if (failure.status == 429) exchange.responseHeaders.set("Retry-After", "30")
+        if (failure.status == 429) {
+            val retryAfterMs = failure.retryAfterMs ?: DEFAULT_RETRY_AFTER_MS
+            exchange.responseHeaders.set("Retry-After", ((retryAfterMs + 999) / 1000).coerceAtLeast(1).toString())
+        }
     }
 
     private fun validateBoundary(exchange: HttpExchange, policy: WebEndpointPolicy) {
@@ -322,7 +333,7 @@ class LocalWebAccess(
         if (exchange.requestMethod !in policy.methods) {
             throw WebAccessDenied(405, "METHOD_NOT_ALLOWED", "The endpoint does not support this method.", policy.methods)
         }
-        if (policy.mutation) {
+        if (exchange.requestMethod in policy.mutationMethods) {
             if (origin == null) deny(403, "ORIGIN_DENIED", "Mutations require the exact application origin.")
             val contentType = singleHeader(exchange, "Content-Type", 256)
             val valid = if (policy.multipart) contentType?.let(MULTIPART_TYPE::matches) == true else contentType?.let(JSON_TYPE::matches) == true
@@ -422,7 +433,7 @@ class LocalWebAccess(
         )
         private val JSON_TYPE = Regex("application/json(?:[ \\t]*;[ \\t]*charset=(?:utf-8|\"utf-8\"))?", RegexOption.IGNORE_CASE)
         private val MULTIPART_TYPE = Regex("multipart/form-data[ \\t]*;[ \\t]*boundary=(?:[A-Za-z0-9'()+_,./:=?-]{1,70}|\"[A-Za-z0-9'()+_,./:=? -]{0,69}[A-Za-z0-9'()+_,./:=?-]\")", RegexOption.IGNORE_CASE)
-        private val JsonPrimitiveRetry = kotlinx.serialization.json.JsonPrimitive("30000")
+        private const val DEFAULT_RETRY_AFTER_MS = 30_000L
         private fun validToken(value: String): Boolean = TOKEN.matches(value) && runCatching {
             val decoded = Base64.getUrlDecoder().decode(value)
             decoded.size == TOKEN_BYTES && Base64.getUrlEncoder().withoutPadding().encodeToString(decoded) == value

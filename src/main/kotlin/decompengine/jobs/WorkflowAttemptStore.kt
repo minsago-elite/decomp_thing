@@ -105,7 +105,13 @@ sealed interface WorkflowJobInspection {
 data class WorkflowMutation(val snapshot: WorkflowJobSnapshot, val attempt: WorkflowAttempt)
 /** Current attempt is for owned-task coordination; receipt describes the original request response. */
 internal data class WorkflowPinRequestResult(val attempt: WorkflowAttempt, val receipt: WorkflowPinAuditEntry, val replayed: Boolean)
-class WorkflowStoreException(val code: String, message: String, val outcomeUnknown: Boolean = false, cause: Throwable? = null) : RuntimeException(message, cause)
+class WorkflowStoreException(
+    val code: String,
+    message: String,
+    val outcomeUnknown: Boolean = false,
+    cause: Throwable? = null,
+    val retryAfterMs: Long? = null,
+) : RuntimeException(message, cause)
 
 internal enum class WorkflowStoreFaultPoint { AFTER_TEMP_WRITE, AFTER_TEMP_FSYNC, BEFORE_RENAME, AFTER_RENAME, AFTER_DIRECTORY_FSYNC }
 internal fun interface WorkflowStoreFaultInjector { fun hit(point: WorkflowStoreFaultPoint) }
