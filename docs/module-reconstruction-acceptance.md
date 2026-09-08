@@ -148,3 +148,12 @@ executable as `buildCommand`/`buildVersion`, replacing the historical `make` fie
 Archive verification and the legacy single-project pipeline still contain
 additional generated-C/Make conventions; this service dispatch is not complete
 alternate-profile support or authenticated production build qualification.
+
+Archive transport selects `ArchiveBuildPolicy` from the registered adapter. The
+generated-C policy owns required evidence paths, rebuild instructions, successful
+build-contract validation, source revision capture and archived build-input
+selection. Creation still verifies the built artifact; extraction verifies the
+retained source-bound contract without requiring the omitted binary artifact.
+Shared ZIP/path/hash checks and authenticated ACP lineage verification remain in
+the archive layer. Model/report path assumptions and other archive consumers still
+require migration before alternate-profile support is complete.
