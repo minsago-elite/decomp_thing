@@ -220,6 +220,118 @@ class WebAttemptCancellationTest {
         }
     }
 
+    @Test fun `service replay returns the recorded acknowledgement without touching a newer queued attempt`() = fixture { root ->
+        val store = JobStore(root)
+        val job = store.createFromUpload("replay.elf", elfFixture())
+        val actor = WorkflowCancellationActor.browserSession("a".repeat(64))
+        val key = "inert_service_cancel_key"
+        lateinit var original: WorkflowAttempt
+        lateinit var receipt: WorkflowCancellationReceipt
+        val pending = mutableListOf<Runnable>()
+        service(store, Executor { pending += it }) { error("No fixture should execute") }.use { service ->
+            service.initializeExistingStorage()
+            original = start(service, job.id)
+            val first = service.requestDurableCancellation(job.id, original.runId, original.version, actor, key)
+            receipt = first.receipt
+            assertFalse(first.replayed)
+            assertEquals(WorkflowRunState.CANCELLING, receipt.acknowledgedState)
+            assertEquals(WorkflowRunState.CANCELLED, first.attempt.state)
+            val next = start(service, job.id)
+            val bytes = root.resolve("${job.id}/workflow-state.json").readBytes()
+            val replay = service.requestDurableCancellation(job.id, original.runId, original.version, actor, key)
+            assertTrue(replay.replayed); assertEquals(receipt, replay.receipt)
+            assertEquals(WorkflowRunState.CANCELLED, replay.attempt.state)
+            assertEquals(next, service.getAttempt(job.id, next.runId))
+            assertContentEquals(bytes, root.resolve("${job.id}/workflow-state.json").readBytes())
+            pending.first().run()
+            assertEquals(next, service.getAttempt(job.id, next.runId))
+        }
+        service(store, Executor { error("Replay must not schedule work") }) { error("No fixture should execute") }.use { service ->
+            service.initializeExistingStorage()
+            val bytes = root.resolve("${job.id}/workflow-state.json").readBytes()
+            val replay = service.requestDurableCancellation(job.id, original.runId, original.version, actor, key)
+            assertTrue(replay.replayed); assertEquals(receipt, replay.receipt)
+            assertEquals(WorkflowRunState.CANCELLED, replay.attempt.state)
+            assertContentEquals(bytes, root.resolve("${job.id}/workflow-state.json").readBytes())
+        }
+    }
+
+    @Test fun `running receipt replay never repeats interruption or rolls back a newer pin version`() = fixture { root ->
+        val store = JobStore(root)
+        val job = store.createFromUpload("signal.elf", elfFixture())
+        val actor = WorkflowCancellationActor.browserSession("a".repeat(64))
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val signals = java.util.concurrent.atomic.AtomicInteger()
+        val executor = Executors.newSingleThreadExecutor { runnable ->
+            object : Thread(runnable) { override fun interrupt() { signals.incrementAndGet(); super.interrupt() } }
+        }
+        val service = service(store, executor) {
+            entered.countDown()
+            while (release.count != 0L) try { release.await() } catch (_: InterruptedException) { }
+            DurableWebWorkflowOutcome.Completed()
+        }
+        try {
+            service.initializeExistingStorage()
+            val queued = start(service, job.id)
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            val current = service.getAttempt(job.id, queued.runId)
+            val beforeSignals = signals.get()
+            val first = service.requestDurableCancellation(job.id, current.runId, current.version, actor, "inert_running_cancel_key")
+            assertEquals(beforeSignals + 1, signals.get())
+            assertEquals(WorkflowRunState.CANCELLING, first.attempt.state)
+            val beforePolicy = root.resolve("${job.id}/workflow-state.json").readBytes()
+            val policy = service.cancellationEligibility(job.id, current.runId)
+            assertFalse(policy.eligible); assertEquals("CANCELLATION_PENDING", policy.reasonCode)
+            assertEquals(first.attempt, policy.attempt)
+            assertContentEquals(beforePolicy, root.resolve("${job.id}/workflow-state.json").readBytes())
+            val pinned = service.setProgressRetentionPinned(job.id, current.runId, first.attempt.version, true)
+            val bytes = root.resolve("${job.id}/workflow-state.json").readBytes()
+            val replay = service.requestDurableCancellation(job.id, current.runId, current.version, actor, "inert_running_cancel_key")
+            assertTrue(replay.replayed); assertEquals(first.receipt, replay.receipt)
+            assertEquals(pinned, replay.attempt)
+            assertEquals(beforeSignals + 1, signals.get())
+            assertContentEquals(bytes, root.resolve("${job.id}/workflow-state.json").readBytes())
+            release.countDown(); executor.shutdown(); assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS))
+            val ended = service.getAttempt(job.id, current.runId)
+            assertEquals(WorkflowRunState.COMPLETED, ended.state)
+            assertTrue(ended.progressRetentionPinned)
+            assertNull(ended.acceptedRevision)
+        } finally { release.countDown(); executor.shutdownNow(); executor.awaitTermination(5, TimeUnit.SECONDS); service.close() }
+    }
+
+    @Test fun `uncertain service receipt publication prevents dispatch and replays after reopening`() = fixture { root ->
+        val store = JobStore(root)
+        val job = store.createFromUpload("receipt.elf", elfFixture())
+        val pending = mutableListOf<Runnable>()
+        val actor = WorkflowCancellationActor.browserSession("a".repeat(64))
+        val fail = AtomicBoolean(false)
+        lateinit var original: WorkflowAttempt
+        val service = WebJobService(store, JobAnalyzer { _, _ -> }, JobReconstructor { _, _ -> }, Executor { pending += it },
+            durableAdapters = listOf(adapter { error("Uncertain cancellation must not dispatch") }),
+            attemptStoreFactory = { path -> WorkflowAttemptStore.open(path, Clock.systemUTC(), WorkflowStoreFaultInjector {
+                if (fail.get() && it == WorkflowStoreFaultPoint.AFTER_RENAME) throw IOException("inert uncertain receipt")
+            }) })
+        service.use {
+            service.initializeExistingStorage()
+            original = start(service, job.id)
+            fail.set(true)
+            assertEquals("RECOVERY_REQUIRED", assertFailsWith<WebJobServiceException> {
+                service.requestDurableCancellation(job.id, original.runId, original.version, actor, "inert_uncertain_key")
+            }.code)
+            val bytes = root.resolve("${job.id}/workflow-state.json").readBytes()
+            pending.single().run()
+            assertContentEquals(bytes, root.resolve("${job.id}/workflow-state.json").readBytes())
+        }
+        service(store, Executor { error("Replay must not dispatch") }) { error("No fixture should execute") }.use { reopened ->
+            reopened.initializeExistingStorage()
+            val replay = reopened.requestDurableCancellation(job.id, original.runId, original.version, actor, "inert_uncertain_key")
+            assertTrue(replay.replayed)
+            assertEquals(WorkflowRunState.CANCELLING, replay.receipt.acknowledgedState)
+            assertEquals(WorkflowRunState.INTERRUPTED, replay.attempt.state)
+        }
+    }
+
     private fun start(service: WebJobService, jobId: String): WorkflowAttempt {
         val version = (service.inspectDurableJob(jobId) as WorkflowJobInspection.Available).snapshot.version
         val started = assertIs<DurableWebWorkflowAdmission.Started>(service.startDurable(jobId, version, DurableWebWorkflowRequest(WorkflowKind.RECONSTRUCT)))

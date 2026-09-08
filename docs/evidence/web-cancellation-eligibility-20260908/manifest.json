@@ -1,0 +1,33 @@
+{
+  "sourceCommit": "f350fc06",
+  "masterIncluded": "1c999572",
+  "verification": {
+    "jvm": {
+      "tests": 316,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "frontendTests": 370,
+    "lint": "passed",
+    "typecheck": "passed",
+    "frontendProductionBuild": "passed within Gradle",
+    "validContracts": 55,
+    "invalidContractsRejected": 45,
+    "schemaHashPrefix": "8389f4f81ef9"
+  },
+  "files": {
+    "frontend-tests.txt": "cea4c4631b0a9dd2d6adbaff88c5ed76093c3546047afa8d9ba3fc2a56a633b5",
+    "http-tests.xml": "a3ffddbf5cc4b06c927f9f431a93dc3b682302d17a26a11b69351fb1fde9ceb4",
+    "jvm-build.txt": "91a1567009717261da50c447f5f0b1c8789d01532e3ff3502966fe52cf9287dc"
+  },
+  "scope": [
+    "Authenticated read-only eligibility for the exact run; current version and bounded reasons for terminal, pending, unowned and receipt-capacity states.",
+    "HTTP tests verify unchanged durable bytes for policy reads and no actor or unrelated-run disclosure. Running-service test verifies pending policy without publication.",
+    "Eligibility describes a new command snapshot; retained ambiguous commands may still replay with original key/version."
+  ],
+  "limits": [
+    "Production workflow adapters remain unregistered. Browser cancellation controls and broader running HTTP/browser qualification remain open.",
+    "No distZip or packaged browser run for this API checkpoint."
+  ]
+}
