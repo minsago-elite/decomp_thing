@@ -14,6 +14,21 @@ suffixes and includes, the generated source tree, Make, generated entry symbols,
 diagnostics. `RepairValidationStrategy` similarly keeps build commands and rebuilt-program locations
 outside the repair loop. GCC is one useful C benchmark, not an architectural dependency.
 
+The generated-C repair configuration fingerprint is SHA-256 over these UTF-8 bytes:
+`generated-c-repair-index-v2\n`, the canonical SHA-256 of
+`GeneratedCMakeReconstructionProfile.descriptor`, and a final newline. The prefix versions
+repair-policy interpretation independently of the descriptor's layout, roles, build configuration
+and budgets. Repair resource budgets retain their separate graph/recovery binding.
+
+This intentionally changes the historical fingerprint, which hashed only `generated-c-make-v1`.
+Existing graphs carrying that historical identity are rejected before pending recovery writes;
+they are not silently relabelled or migrated. Preserve the existing workspace and retained graph.
+Recover a pending transaction using its matching historical implementation before moving accepted
+source into a separate new workspace with a new graph. This does not import or claim continuity
+of the historical accepted lineage. A qualified graph migration remains separate work.
+The configured repair adapter still supports only its fixed Make descriptor; this fingerprint
+prerequisite does not admit Ninja or relocated repair layouts.
+
 Production validation is a mandatory capability, not a weak default. Both
 `RepairValidationStrategy` and the generated-C `GeneratedCRepairValidationBoundary` expose immutable
 `STRICT_CONTAINED` versus `TEST_ONLY_HOST_PROCESS` assurance; the public loop rejects anything but
@@ -21,10 +36,10 @@ strict containment before graph creation or agent execution. The strict contract
 bounded private source snapshot (never the canonical tree mounted read/write), an empty explicit
 environment, authenticated executable/runtime inputs rather than sibling-directory mounts, network
 denial, and tree-wide pids, memory, writable-file, wall, and output cleanup. Builds and behavior runs
-use separate contained scopes. This tree currently provides the program-neutral capability and a
-test-only fixture boundary, but no production implementation; the CLI therefore fails closed until
-the shared production sandbox authority is adapted and an actual contained C build/behavior flow is
-captured as acceptance evidence.
+use separate contained scopes. The registered provider creates
+`LinuxGeneratedCRepairValidationBoundary`, whose availability path deliberately throws until its
+complete provisioned compiler/runtime closure and public-factory path are qualified. The CLI
+therefore remains unavailable for production repair; local fixture success does not remove that gate.
 
 The repair core never discovers or parses a report path or program-model schema. The generated-C
 profile alone reads its `reports/module_plan.json` and `reports/program_model.json`, translates C
