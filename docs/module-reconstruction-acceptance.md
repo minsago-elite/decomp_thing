@@ -56,3 +56,10 @@ retains an interrupted-attempt report, and preserves the caller's interrupt flag
 The prior accepted checkpoint and manifest remain reusable. Compiler wait
 interruption and interrupted file I/O propagate through the cancellation path;
 this local behavior does not establish authenticated production compiler identity.
+
+The authored running-compiler regression first compiles an accepted revision with
+`cc`, then pauses the next compiler-wrapper invocation after explicit readiness.
+It confirms changed candidate bytes are present before interrupting generation,
+then requires wrapper termination, restored accepted source/checkpoint/manifest
+bytes, preserved cancellation and reuse without another reconstruction call.
+This is a local interruption fixture, not production compiler qualification.

@@ -38,6 +38,75 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class SourceTreeTest {
     @Test
+    fun `running compiler cancellation restores accepted revision and terminates its process`() {
+        val root = createTempDirectory("source-tree-running-compiler-")
+        val project = root.resolve("project")
+        val pause = root.resolve("pause")
+        val ready = root.resolve("ready")
+        val compiler = root.resolve("authored-compiler")
+        compiler.writeText("""
+            #!/bin/sh
+            if [ -f "$pause" ]; then
+                printf '%s\n' "${'$'}${'$'}" > "$ready"
+                exec /bin/sleep 10
+            fi
+            exec /usr/bin/cc "${'$'}@"
+        """.trimIndent() + "\n")
+        check(compiler.toFile().setExecutable(true, true))
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val profile = ReconstructionProfile(base.schemaVersion, base.id, base.layout, base.budgets,
+            base.adapterConfiguration + ("compiler-driver" to listOf(compiler.toString())))
+        val model = oneModuleModel()
+        SourceTreeGenerator.generate(model, project, reconstructor = validReconstructor(), profile = profile)
+        val paths = listOf("src/modules/parse.c", "reports/modules/parse.json", "source_tree_manifest.json")
+        val before = paths.associateWith { project.resolve(it).readBytes() }
+        pause.writeText("pause next compiler invocation")
+        val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+        val cancelled = java.util.concurrent.atomic.AtomicBoolean()
+        val candidate = ModuleReconstructor { request ->
+            validReconstructor().reconstruct(request).let { it.copy(source = it.source.replace("return 4096;", "return 8192;")) }
+        }
+        val worker = Thread {
+            try {
+                SourceTreeGenerator.generate(model, project, reconstructor = candidate,
+                    observedBehavior = "new observation", profile = profile)
+            } catch (error: Throwable) {
+                failure.set(error)
+            } finally {
+                cancelled.set(Thread.currentThread().isInterrupted)
+            }
+        }
+        var process: ProcessHandle? = null
+        try {
+            worker.start()
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
+            var pid: Long? = null
+            while (pid == null && worker.isAlive && System.nanoTime() < deadline) {
+                pid = if (Files.exists(ready)) ready.readText().trim().toLongOrNull() else null
+                if (pid == null) Thread.sleep(5)
+            }
+            process = ProcessHandle.of(requireNotNull(pid) { "compiler did not become ready: ${failure.get()}" }).orElseThrow()
+            assertTrue(process.isAlive)
+            assertTrue(project.resolve("src/modules/parse.c").readText().contains("return 8192;"))
+            assertFalse(before.getValue("src/modules/parse.c").contentEquals(project.resolve("src/modules/parse.c").readBytes()))
+            worker.interrupt()
+            worker.join(5000)
+            assertFalse(worker.isAlive, "cancelled generation must stop")
+            assertTrue(failure.get() is ModuleReconstructionInterruptedException, "unexpected failure: ${failure.get()}")
+            assertTrue(cancelled.get())
+            assertFalse(process.isAlive, "owned compiler must terminate")
+            paths.forEach { assertTrue(before.getValue(it).contentEquals(project.resolve(it).readBytes()), it) }
+            SourceTreeGenerator.generate(model, project, profile = profile, reconstructor = ModuleReconstructor {
+                error("accepted revision must remain reusable after compiler interruption")
+            })
+        } finally {
+            process?.let { if (it.isAlive) it.destroyForcibly() }
+            if (worker.isAlive) worker.interrupt()
+            worker.join(5000)
+        }
+    }
+
+    @Test
     fun `compiler cancellation restores accepted revision and remains retryable`() {
         val project = createTempDirectory("source-tree-compiler-cancelled-")
         val originalModel = oneModuleModel()
