@@ -17,10 +17,11 @@ export function ActivityReceiptAge({ receipt, visible }: { receipt: ActivityRece
       if (state.wasVisible !== null) {
         const wallElapsedMs = nowWallMs - state.lastWallMs;
         const monotonicElapsedMs = nowMonoMs - state.lastMonoMs;
-        // A suspended browser can stop performance.now(). Only treat a large wall/monotonic
-        // discrepancy as suspension when the monotonic clock actually paused; ordinary wall
-        // clock corrections during an active interval must not age the receipt permanently.
-        if (wallElapsedMs > monotonicElapsedMs + 1000 && monotonicElapsedMs < 1000) {
+        // A suspended browser can stop performance.now(). The sample timer bounds the amount of
+        // active monotonic time between samples; a shorter interval with a large wall-clock gap
+        // means the browser was suspended during this sampling window. A full active interval
+        // remains ordinary wall-clock correction and must not age the receipt permanently.
+        if (wallElapsedMs > monotonicElapsedMs + 1000 && monotonicElapsedMs < 10000) {
           state.offsetMs += wallElapsedMs - monotonicElapsedMs;
         }
       }
