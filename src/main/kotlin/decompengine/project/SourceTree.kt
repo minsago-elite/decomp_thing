@@ -1712,21 +1712,25 @@ object SourceTreeGenerator {
         observedBehavior: String?,
         profileSha256: String,
     ): String {
-        val functions = module.functionIds.sorted().joinToString("\n") { id ->
-            val item = model.functions.single { it.id == id }
-            listOf(item.id, item.name, item.address.toString(), item.prototype, item.status.name, item.decompiledC.orEmpty(),
-                item.calls.sorted().joinToString(","), item.referencedGlobals.sorted().joinToString(","), item.strings.sorted().joinToString(",")).joinToString("|")
-        }
-        val globals = module.globalIds.sorted().joinToString("\n") { id -> model.globals.single { it.id == id }.toString() }
-        val types = module.typeIds.sorted().joinToString("\n") { id -> model.types.single { it.id == id }.toString() }
-        val dependencies = dependencyHeaders.toSortedMap().entries.joinToString("\n") { it.key + "\n" + it.value }
-        return sha256(
-            (
-                functions + "\n" + globals + "\n" + types + "\n" + sharedHeader + moduleHeader + privateHeader +
-                    dependencies + "\n" + observedBehavior.orEmpty() + "\n" + profileSha256 +
-                    "\n" + GeneratedCModuleValidation.POLICY_ID
-                ).toByteArray(),
+        val selectedModel = model.copy(
+            functions = module.functionIds.map { id -> model.functions.single { it.id == id } },
+            globals = module.globalIds.map { id -> model.globals.single { it.id == id } },
+            types = module.typeIds.map { id -> model.types.single { it.id == id } },
         )
+        val inputs = kotlinx.serialization.json.JsonObject(linkedMapOf(
+            "provider" to kotlinx.serialization.json.JsonPrimitive("module-reconstruction-input-v2"),
+            "model" to Json.parseToJsonElement(selectedModel.toJson()),
+            "sharedHeader" to kotlinx.serialization.json.JsonPrimitive(sharedHeader),
+            "moduleHeader" to kotlinx.serialization.json.JsonPrimitive(moduleHeader),
+            "privateHeader" to kotlinx.serialization.json.JsonPrimitive(privateHeader),
+            "dependencyHeaders" to kotlinx.serialization.json.JsonObject(dependencyHeaders.toSortedMap().mapValues {
+                kotlinx.serialization.json.JsonPrimitive(it.value)
+            }),
+            "observedBehavior" to (observedBehavior?.let { kotlinx.serialization.json.JsonPrimitive(it) } ?: JsonNull),
+            "profileSha256" to kotlinx.serialization.json.JsonPrimitive(profileSha256),
+            "compilerPolicy" to kotlinx.serialization.json.JsonPrimitive(GeneratedCModuleValidation.POLICY_ID),
+        ))
+        return sha256(inputs.toString().toByteArray(Charsets.UTF_8))
     }
 
     private fun renderConfidence(

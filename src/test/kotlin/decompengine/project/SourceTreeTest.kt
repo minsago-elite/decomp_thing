@@ -38,6 +38,35 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class SourceTreeTest {
     @Test
+    fun `module cache binds binary identity and model schema while reusing unchanged inputs`() {
+        val project = createTempDirectory("source-tree-model-identity-")
+        var calls = 0
+        val reconstructor = ModuleReconstructor { request ->
+            calls++
+            validReconstructor().reconstruct(request)
+        }
+        val original = oneModuleModel()
+        fun fingerprint(): String = Json.parseToJsonElement(project.resolve("reports/modules/parse.json").readText())
+            .jsonObject.getValue("fingerprint").jsonPrimitive.content
+        SourceTreeGenerator.generate(original, project, reconstructor = reconstructor)
+        assertEquals(1, calls)
+        val first = fingerprint()
+        SourceTreeGenerator.generate(original, project, reconstructor = reconstructor)
+        assertEquals(1, calls)
+        val nextBinary = original.copy(inputSha256 = sha256("another authored binary".toByteArray()))
+        SourceTreeGenerator.generate(nextBinary, project, reconstructor = reconstructor)
+        assertEquals(2, calls)
+        val second = fingerprint()
+        assertFalse(first == second)
+        val nextSchema = nextBinary.copy(schemaVersion = 2)
+        SourceTreeGenerator.generate(nextSchema, project, reconstructor = reconstructor)
+        assertEquals(3, calls)
+        assertFalse(second == fingerprint())
+        SourceTreeGenerator.generate(nextSchema, project, reconstructor = reconstructor)
+        assertEquals(3, calls)
+    }
+
+    @Test
     fun `running compiler cancellation restores accepted revision and terminates its process`() {
         val root = createTempDirectory("source-tree-running-compiler-")
         val project = root.resolve("project")

@@ -63,3 +63,16 @@ It confirms changed candidate bytes are present before interrupting generation,
 then requires wrapper termination, restored accepted source/checkpoint/manifest
 bytes, preserved cancellation and reuse without another reconstruction call.
 This is a local interruption fixture, not production compiler qualification.
+
+Module input fingerprint version 2 uses structured JSON containing the selected
+module model (including input-binary SHA-256 and model schema version), exact
+shared/module/private interfaces, sorted dependency interfaces, observed-behavior
+text, profile digest and compiler policy. The model's deterministic serialization
+retains every selected function/global/type field. Null and empty observations
+remain distinct. Changing binary identity or model contract invalidates cached
+reconstruction even when extracted source fields are otherwise unchanged.
+
+Existing fingerprints use the historical encoding and therefore miss the new
+cache key once; regeneration produces the new key. Unchanged current inputs still
+reuse accepted checkpoints. This input binding does not make observed-behavior
+prose a validated measurement or establish production executable identity.
