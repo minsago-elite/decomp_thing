@@ -61,6 +61,15 @@ current adapters still use their existing output/control locations; alternate
 inventory-root fixtures establish transport behavior, not an end-to-end proof
 of a backend with relocated artifacts.
 
+Archive output omissions and strict build-control JSON locations come from
+`ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
+and web inventory consume an immutable copy. Preflight retains entry accounting,
+portable-path checks and link checks for omitted output trees. Source/hash
+manifests, required evidence and declared payload paths remain protected. The
+current adapters still use their existing output/control locations; alternate
+inventory-root fixtures establish transport behavior, not an end-to-end proof
+of a backend with relocated artifacts.
+
 ## Scope and limits
 
 The inventory includes tracked files and nonignored untracked files. Ordinary
@@ -80,10 +89,17 @@ ordinary directory ancestors.
 ## Current migration state
 
 The initial repository run fails on remaining policy and ownership migrations.
-Examples include direct Make dispatch in `ReconstructionPipeline`, Doctor/MVP
-compiler assumptions, repair runtime policy, benchmark scripts/tests/workflows, and retained historical
+Examples include Doctor/MVP compiler assumptions, repair runtime policy,
+benchmark scripts/tests/workflows, and retained historical
 benchmark identities in LLVM reference evidence. Retained evidence must not be
 rewritten merely to satisfy the scanner.
+
+`ReconstructionPipeline` now resolves its build adapter from the selected profile.
+Its profile overload admits host budgets and binds analyzer export limits before
+output, then forwards that profile and host policy through generation. Two exact
+single-occurrence allowances preserve the old generator and pipeline defaults;
+they do not exempt build dispatch. Parent-side ELF metadata still uses whole-file
+reads, so this migration does not establish complete phase resource bounds.
 
 Passing the authored scanner tests verifies its detection and exemption
 behavior. It does not make the repository scan pass or complete #84. Current

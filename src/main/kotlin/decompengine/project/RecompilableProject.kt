@@ -139,14 +139,49 @@ internal fun String.escapeJson(): String =
         }
     }
 
+private fun requireSupplementalReportLayout(profile: ReconstructionProfile) {
+    for (report in listOf("reports/analysis.json", "reports/unresolved.json")) {
+        val ancestors = generateSequence(report.substringBeforeLast('/', "")) {
+            it.substringBeforeLast('/', "")
+        }.takeWhile(String::isNotEmpty).toList()
+        for (declaration in profile.layout.declarations) {
+            require(!declaration.canMaterializeUnder(report) && ancestors.none(declaration::matches)) {
+                "project layout declaration ${declaration.id} conflicts with supplemental report: $report"
+            }
+        }
+    }
+}
+
 object RecompilableProjectGenerator {
     fun generate(
         analysis: GhidraAnalysis,
         projectDir: Path,
         reconstructor: ModuleReconstructor = EvidenceModuleReconstructor(),
+    ): Path = generate(
+        analysis = analysis,
+        projectDir = projectDir,
+        profile = GeneratedCMakeReconstructionProfile.descriptor,
+        reconstructor = reconstructor,
+    )
+
+    fun generate(
+        analysis: GhidraAnalysis,
+        projectDir: Path,
+        profile: ReconstructionProfile,
+        hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+        reconstructor: ModuleReconstructor? = null,
     ): Path {
+        hostSafetyLimits.requireAllows(profile.budgets)
+        ReconstructionAdapters.resolve(profile)
+        requireSupplementalReportLayout(profile)
+        val manifest = SourceTreeGenerator.generate(
+            analysis.programModel,
+            projectDir,
+            hostSafetyLimits = hostSafetyLimits,
+            reconstructor = reconstructor,
+            profile = profile,
+        )
         val reportsDir = projectDir.resolve("reports").createDirectories()
-        val manifest = SourceTreeGenerator.generate(analysis.programModel, projectDir, reconstructor = reconstructor)
         reportsDir.resolve("analysis.json").writeText(
             """
             {
@@ -169,9 +204,36 @@ object RecompilableProjectGenerator {
 }
 
 class ReconstructionPipeline(private val analyzer: GhidraJvmAnalyzer) {
+    /** Legacy analysis path: the supplied analyzer remains responsible for its export limits. */
     fun generate(binaryPath: Path, workDir: Path): BuildReport {
+        val profile = GeneratedCMakeReconstructionProfile.descriptor
+        ReconstructionHostSafetyLimits.DEFAULT.requireAllows(profile.budgets)
+        val adapter = ReconstructionAdapters.resolve(profile)
         val analysis = analyzer.analyze(binaryPath, workDir.resolve("analysis"))
         val projectDir = RecompilableProjectGenerator.generate(analysis, workDir.resolve("project"))
-        return MakeProjectBuilder.build(projectDir)
+        return adapter.build(projectDir, profile)
+    }
+
+    /** Admits the profile and binds worker export budgets before analysis creates output. */
+    fun generate(
+        binaryPath: Path,
+        workDir: Path,
+        profile: ReconstructionProfile,
+        hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+        reconstructor: ModuleReconstructor? = null,
+    ): BuildReport {
+        hostSafetyLimits.requireAllows(profile.budgets)
+        val adapter = ReconstructionAdapters.resolve(profile)
+        requireSupplementalReportLayout(profile)
+        val selectedAnalyzer = analyzer.withExportBudgets(profile.budgets)
+        val analysis = selectedAnalyzer.analyze(binaryPath, workDir.resolve("analysis"))
+        val projectDir = RecompilableProjectGenerator.generate(
+            analysis,
+            workDir.resolve("project"),
+            profile = profile,
+            hostSafetyLimits = hostSafetyLimits,
+            reconstructor = reconstructor,
+        )
+        return adapter.build(projectDir, profile)
     }
 }

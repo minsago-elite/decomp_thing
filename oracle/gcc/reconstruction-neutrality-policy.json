@@ -197,6 +197,20 @@
       "reason": "Existing source-revision API descriptor default only; generic capture resolves the selected adapter."
     },
     {
+      "path": "src/main/kotlin/decompengine/project/RecompilableProject.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "profile = GeneratedCMakeReconstructionProfile.descriptor,",
+      "count": 1,
+      "reason": "Existing project-generator signature delegates with its compatibility default descriptor; the profile overload forwards selected policy."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/RecompilableProject.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "val profile = GeneratedCMakeReconstructionProfile.descriptor",
+      "count": 1,
+      "reason": "Existing two-argument pipeline retains its compatibility default descriptor and resolves its registered build adapter."
+    },
+    {
       "path": "src/main/kotlin/decompengine/project/RepairAcpEvidenceArchiveVerifier.kt",
       "rule": "generic-adapter-reference",
       "fragment": "repairProfile: RepairIndexProfile = GeneratedCRepairIndexProfile",
