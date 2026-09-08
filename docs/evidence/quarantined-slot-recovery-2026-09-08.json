@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-09-08T12:30:41Z",
+  "issue": 933,
+  "scope": "Focused source and fixture evidence for bounded lease quarantine ordering. This record does not qualify crash recovery or production reset authority.",
+  "sourceBaseCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "sourceFiles": [
+    {
+      "path": "src/main/kotlin/decompengine/oracle/fulltree/FullTreeDiskScratchAuthority.kt",
+      "sha256": "eadc6c791d6848bf87999814e5b2af71b963277609351eba6df86c74cae18cde",
+      "anchors": [
+        "FullTreeDiskScratchLease.requireCleanAndRelease:939-984",
+        "FullTreeDiskScratchLease.abandonForRecovery:988-990",
+        "FullTreeDiskScratchColdLease:1072-1347",
+        "FullTreeDiskScratchAuthority.openExistingReadOnly:1349-1400",
+        "quarantineAndRemoveLeaseRoot:1591-1662",
+        "MAXIMUM_LEASE_ROOT_ENTRIES=2:2132"
+      ],
+      "facts": [
+        "The release path selects the exact source descriptor, rejects a pre-existing quarantine name, uses renameNoReplace, rechecks the pinned identity, synchronizes the mount parent before unlinking lease.json, synchronizes the quarantined root, rejects any remaining member, removes the empty quarantine directory, synchronizes the parent again, and verifies the dedicated mount is empty.",
+        "Lease-root inspection is capped by MAXIMUM_LEASE_ROOT_ENTRIES plus one and the release helper only accepts the canonical lease.json or empty quarantine shape; it does not recursively walk arbitrary content.",
+        "abandonForRecovery and close only close descriptors and release the cooperative flock. The cold lease is observation-only and exposes no reset, rename, unlink, cleanup, release, or synchronization operation."
+      ]
+    }
+  ],
+  "fixtures": [
+    {
+      "path": "src/test/kotlin/decompengine/oracle/fulltree/FullTreeDiskScratchAuthorityTest.kt",
+      "sha256": "a6e47340eed9877e593616f43dee7be386cdcdf0f10c4329d9de8699f5c56606",
+      "tests": [
+        "release quarantine cutoffs preserve safe same-kernel ordering:437-526",
+        "failed acquisition quarantine cutoffs preserve safe same-kernel ordering:529-775",
+        "closing a live ext4 lease preserves exact residue for cold recovery:778-879",
+        "run-root faults preserve bounded immediately visible active residue:881-962",
+        "crashed ext4 lease can be cold opened without mutation or release:964-1159"
+      ],
+      "fixtureContract": "All listed ext4 cases require DECOMP_TEST_ORACLE_EXT4_SCRATCH; the cutoff cases inject exceptions at rename, parent-sync, and record-unlink boundaries and assert only one lease/quarantine root with either the exact record or no record.",
+      "limitation": "The test teardown removes known fixture residue directly with Files.deleteIfExists; it is not a production recovery authority. The cutoff injector is same-kernel exception injection, not power-loss or reboot."
+    },
+    {
+      "path": "src/test/kotlin/decompengine/oracle/fulltree/FullTreeDiskScratchCrashProbe.kt",
+      "sha256": "4d1d2925d8ba635290ae84bc6c4f771b4ed0779d6447533b2bf761bd6a1ef297",
+      "anchors": [
+        "FullTreeDiskScratchCrashProbe.main:9-43"
+      ],
+      "fixtureContract": "A separate JVM acquires a lease, optionally creates the operation run directory, emits canonical evidence, and exits with Runtime.halt(0), leaving record-only or active-run residue for cold observation.",
+      "limitation": "This fixture proves only that cold observation can inspect residue without mutation. It does not exercise a trusted reset, quarantined-slot recovery, worker/cgroup absence, or arbitrary nested residue."
+    }
+  ],
+  "boundedEvidence": {
+    "status": "partial-static-evidence",
+    "claim": "The current release transaction has a constant-size, descriptor-relative canonical lease shape and a bounded fail-closed cleanup path. Its ordering preserves the lease record until the quarantine parent is synchronized, and unexpected members stop cleanup rather than triggering recursive traversal.",
+    "doesNotProve": [
+      "A crash after any quarantine boundary converges to an empty slot.",
+      "Cleanup of a quarantined slot is bounded independently of arbitrary sparse logical size or arbitrary directory depth.",
+      "A trusted provisioner owns and can authenticate reset of record-bearing, empty, or post-reboot quarantine residue.",
+      "Whole-run active-plus-residue accounting or worker/cgroup absence is composed with reset."
+    ]
+  },
+  "validation": {
+    "testsRun": false,
+    "reason": "Skipped per issue-933 task instruction.",
+    "productionQualification": false,
+    "privilegedExt4Qualification": false
+  },
+  "unverifiedCriteria": [
+    "Implement or identify a trusted reset owner for quarantined lease slots and bind reset to authenticated operation evidence.",
+    "Exercise process death, power-loss/reboot ambiguity, and every post-rename/post-sync/post-unlink residue state.",
+    "Prove cleanup refusal or completion remains bounded without depending on sparse logical size or directory depth.",
+    "Qualify the privileged ext4 lifecycle and integrate reset with worker/cgroup absence and whole-run residue accounting."
+  ]
+}
