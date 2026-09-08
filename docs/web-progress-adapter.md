@@ -694,3 +694,23 @@ Shutdown cancels scheduling and keeps service/storage ownership until the last m
 Public pin controls, audit/UI reporting, default server activation and broader job/evidence retention remain unfinished. The existing advertised retention guarantee is unchanged.
 
 All 276 selected JVM tests pass. The [retained worker manifest and three results](evidence/web-retention-worker-20260908/manifest.json) record source and evidence hashes. Frontend/package/browser checks were not repeated because default server behavior and public HTTP/UI contracts are unchanged.
+
+## Service coordination for pin changes
+
+`WebJobService.setProgressRetentionPinned` now provides an internal command boundary that validates initialization, shutdown, selected attempt and publication admission. It applies the store's run-version CAS and updates any matching owned task's current attempt under the same service monitor. Without this coordination, a queued or running worker would retain its pre-pin version and fail its next lifecycle publication. The invocation context is now captured immutably under the monitor before the adapter is called; later policy changes do not rewrite that invocation view.
+
+Known pre-publication failures leave the old pin and task version usable. Uncertain publication makes the job unavailable for changes until storage is reopened and prevents a worker from publishing over the uncertain state. A queued task is revoked immediately and late delivery is inert; a running task retains ownership until its callback actually exits. Pin policy survives subsequent restart recovery. No public mutation route is enabled yet: authenticated requests, audit records and UI controls still need integration.
+
+Tests use inert adapter callbacks to exercise queued/running pin changes, stable invocation context, final lifecycle publication, stale-version rejection, no-op byte preservation, failures before/after rename, queued revocation and running ownership retention through shutdown. These callbacks do not analyze binaries or invoke providers/native workflows.
+
+All 280 selected JVM tests pass. The [retained manifest and durable workflow results](evidence/web-service-pin-coordination-20260908/manifest.json) identify the tested source and evidence hash. Frontend/package/browser checks were not repeated for this internal command; no public route or default behavior changes.
+
+## Retention-worker termination lock ordering
+
+The first broad pin-audit run exposed a JVM-reported deadlock in periodic service shutdown. `WebJobService.close` held its monitor while calling `shutdownNow`; the retention executor's `terminated` hook held the executor main lock while invoking the owner callback, which needed that same service monitor. A repeated stop could therefore wait forever instead of respecting the shutdown deadline.
+
+The termination hook now only marks completed work. The existing worker thread invokes the owner callback after its executor runnable returns and releases executor locks. A latch lets bounded shutdown await completion of that notification. No extra thread, shared pool or queued notification is introduced. Storage ownership still outlives every maintenance work callback; the notification can release ownership after work is quiescent.
+
+A controlled regression holds owner notification open and requires a second stop to return. It fails with `TimeoutException` against the prior worker and passes with the fix. The originally deadlocked JVM was terminated only after `jcmd Thread.print` explicitly reported the lock cycle; its interrupted test run is not counted as passing verification.
+
+All 285 selected JVM tests pass with the pin audit and termination-lock fix together. The [retained manifest](evidence/web-pin-audit-shutdown-20260908/manifest.json) identifies the tested source, passing reports, original deadlock and failing negative control. Frontend/package/browser checks were not repeated for these internal changes.
