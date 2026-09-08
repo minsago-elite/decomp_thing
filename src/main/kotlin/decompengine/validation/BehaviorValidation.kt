@@ -1,6 +1,10 @@
 package decompengine.validation
 
 import decompengine.project.writeProjectEvidenceAtomically
+import decompengine.project.BehaviorValidationBudgets
+import decompengine.project.GeneratedCMakeReconstructionProfile
+import decompengine.project.ReconstructionHostSafetyLimits
+import decompengine.project.ReconstructionProfile
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -165,11 +169,11 @@ object BwrapCapability {
  * [decompengine.repair.RepairValidationStrategy] implementation.
  */
 class SandboxRunner(
-    private val timeout: Duration = Duration.ofSeconds(5),
+    internal val timeout: Duration = Duration.ofSeconds(5),
     private val bwrapPath: Path = Path.of("/usr/bin/bwrap"),
     private val timeoutPath: Path = Path.of("/usr/bin/timeout"),
     private val networkIsolation: Boolean = BwrapCapability.networkIsolationSupported(bwrapPath, timeoutPath),
-    private val outputLimits: SandboxOutputLimits = SandboxOutputLimits(),
+    internal val outputLimits: SandboxOutputLimits = SandboxOutputLimits(),
 ) {
     private val launcherPath = Path.of("/bin/sh").toRealPath()
     fun networkIsolationSupported(): Boolean = networkIsolation
@@ -376,8 +380,10 @@ internal fun terminateProcessTree(process: Process) {
 }
 
 class BehaviorComparator(
-    private val sandbox: SandboxRunner = SandboxRunner(),
-    private val maximumAggregateOutputBytes: Long = 16L * 1024 * 1024,
+    private val sandbox: SandboxRunner? = null,
+    private val maximumAggregateOutputBytes: Long? = null,
+    private val profile: ReconstructionProfile? = null,
+    private val hostSafetyLimits: ReconstructionHostSafetyLimits? = null,
 ) {
     fun compare(
         id: String,
@@ -406,23 +412,49 @@ class BehaviorComparator(
         fileInputs: Map<String, Map<String, Path>> = emptyMap(),
         expectedCorpusSha256: String? = null,
     ): BehaviorComparisonReport {
+        val selectedProfile = profile ?: project?.profile ?: GeneratedCMakeReconstructionProfile.descriptor
+        val selectedHost = hostSafetyLimits ?: project?.hostSafetyLimits ?: ReconstructionHostSafetyLimits.DEFAULT
+        val behaviorBudgets = selectedProfile.budgets.behavior
+        selectedHost.requireBehaviorAllows(behaviorBudgets)
+        val selectedSandbox = sandbox ?: SandboxRunner(
+            timeout = Duration.ofMillis(behaviorBudgets.wallClockMillis),
+            outputLimits = SandboxOutputLimits(
+                maximumStdoutBytes = behaviorBudgets.maximumStdoutBytes,
+                maximumStderrBytes = behaviorBudgets.maximumStderrBytes,
+                maximumAggregateBytes = behaviorBudgets.maximumAggregateOutputBytes,
+            ),
+        )
+        require(selectedSandbox.timeout.toMillis() <= behaviorBudgets.wallClockMillis) {
+            "behavior runner timeout exceeds the selected profile budget"
+        }
+        require(selectedSandbox.outputLimits.maximumStdoutBytes <= behaviorBudgets.maximumStdoutBytes &&
+            selectedSandbox.outputLimits.maximumStderrBytes <= behaviorBudgets.maximumStderrBytes &&
+            selectedSandbox.outputLimits.maximumAggregateBytes <= behaviorBudgets.maximumAggregateOutputBytes
+        ) { "behavior runner output limits exceed the selected profile budget" }
         require(expectedCorpusSha256 == null || expectedCorpusSha256.matches(Regex("[0-9a-f]{64}"))) {
             "expected behavior corpus digest must be a lowercase SHA-256"
         }
         require(id.matches(Regex("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"))) { "behavior report ID must be a safe filename component" }
-        require(cases.size in 1..1024) { "between one and 1024 behavior cases are required" }
+        require(cases.size in 1..behaviorBudgets.maximumCases) {
+            "between one and ${behaviorBudgets.maximumCases} behavior cases are required"
+        }
         require(cases.map { it.id }.distinct().size == cases.size) { "behavior case IDs must be unique" }
         require(cases.all { input -> input.id.isNotEmpty() && input.id.length <= 256 && input.args.size <= 256 &&
             input.args.all { it.length <= 64 * 1024 && '\u0000' !in it } }) { "behavior case fields exceed their bounds" }
-        require(cases.sumOf { it.stdin.size.toLong() } <= 8L * 1024 * 1024 &&
-            cases.sumOf { input -> input.args.sumOf { it.toByteArray().size.toLong() } } <= 1024L * 1024
-        ) { "behavior corpus exceeds its byte bound" }
+        require(cases.sumOf { it.stdin.size.toLong() } <= behaviorBudgets.maximumStdinBytes &&
+            cases.sumOf { input -> input.args.sumOf { it.toByteArray().size.toLong() } } <= behaviorBudgets.maximumArgumentBytes
+        ) { "behavior corpus exceeds its selected profile byte bound" }
         val inputs = cases.map { ProcessInput(it.id, it.args.toList(), it.stdin.clone()) }
         require(fileInputs.keys.all { id -> inputs.any { it.id == id } }) { "file inputs reference an unknown behavior case" }
         val boundFiles = fileInputs.mapValues { it.value.toMap() }
         reportsDir.createDirectories()
         val capture = BehaviorEvidenceCapture()
-        val fileRecords = captureBehaviorFileInputs(boundFiles, capture)
+        val fileRecords = captureBehaviorFileInputs(
+            boundFiles,
+            capture,
+            maximumFiles = behaviorBudgets.maximumInputFiles,
+            maximumBytes = behaviorBudgets.maximumInputFileBytes,
+        )
         if (expectedCorpusSha256 != null) {
             require(BehaviorEvidence.inputCorpusSha256(inputs, fileRecords) == expectedCorpusSha256) {
                 "behavior corpus differs from the required corpus digest"
@@ -430,15 +462,27 @@ class BehaviorComparator(
         }
         val originalIdentity = capture.executable(originalBinary)
         val rebuiltIdentity = capture.executable(rebuiltBinary)
-        val comparisonLimit = minOf(maximumAggregateOutputBytes, 16L * 1024 * 1024)
+        val comparisonLimit = minOf(
+            maximumAggregateOutputBytes ?: behaviorBudgets.maximumComparisonOutputBytes,
+            behaviorBudgets.maximumComparisonOutputBytes,
+        )
         require(comparisonLimit > 0L) { "behavior comparison output bound must be positive" }
-        val policy = JsonObject(sandbox.evidencePolicy(capture) +
+        val policy = JsonObject(selectedSandbox.evidencePolicy(capture) +
+            ("profileId" to JsonPrimitive(selectedProfile.id)) +
+            ("profileSha256" to JsonPrimitive(selectedProfile.sha256)) +
+            ("profileBudgets" to behaviorBudgets.toJson()) +
+            ("hostSafetyBudgets" to selectedHost.maximum.behavior.toJson()) +
+            ("maximumCases" to JsonPrimitive(behaviorBudgets.maximumCases)) +
+            ("maximumStdinBytes" to JsonPrimitive(behaviorBudgets.maximumStdinBytes)) +
+            ("maximumArgumentBytes" to JsonPrimitive(behaviorBudgets.maximumArgumentBytes)) +
+            ("maximumInputFileBytes" to JsonPrimitive(behaviorBudgets.maximumInputFileBytes)) +
+            ("maximumInputFiles" to JsonPrimitive(behaviorBudgets.maximumInputFiles)) +
             ("maximumComparisonOutputBytes" to JsonPrimitive(comparisonLimit)))
         val projectRevision = project?.let { capture.project(it, originalIdentity, rebuiltBinary) }
         var aggregateOutputBytes = 0L
         fun runBounded(binary: Path, input: ProcessInput): ProcessOutput {
             capture.requireCurrent()
-            val output = sandbox.runWithFiles(binary, input, boundFiles[input.id].orEmpty())
+            val output = selectedSandbox.runWithFiles(binary, input, boundFiles[input.id].orEmpty())
             capture.requireCurrent()
             aggregateOutputBytes = Math.addExact(
                 aggregateOutputBytes,
@@ -479,6 +523,19 @@ class BehaviorComparator(
         return report
     }
 }
+
+private fun BehaviorValidationBudgets.toJson(): JsonObject = JsonObject(mapOf(
+    "maximumCases" to JsonPrimitive(maximumCases),
+    "wallClockMillis" to JsonPrimitive(wallClockMillis),
+    "maximumStdoutBytes" to JsonPrimitive(maximumStdoutBytes),
+    "maximumStderrBytes" to JsonPrimitive(maximumStderrBytes),
+    "maximumAggregateOutputBytes" to JsonPrimitive(maximumAggregateOutputBytes),
+    "maximumComparisonOutputBytes" to JsonPrimitive(maximumComparisonOutputBytes),
+    "maximumStdinBytes" to JsonPrimitive(maximumStdinBytes),
+    "maximumArgumentBytes" to JsonPrimitive(maximumArgumentBytes),
+    "maximumInputFileBytes" to JsonPrimitive(maximumInputFileBytes),
+    "maximumInputFiles" to JsonPrimitive(maximumInputFiles),
+))
 
 private fun BehaviorComparisonReport.toJson(): String = """
 {

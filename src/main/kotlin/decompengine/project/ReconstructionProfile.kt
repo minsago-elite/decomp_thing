@@ -177,6 +177,7 @@ data class ReconstructionBudgets(
     val archiveMaximumEntries: Int,
     val archiveMaximumFileBytes: Long,
     val archiveMaximumTotalBytes: Long,
+    val behavior: BehaviorValidationBudgets = BehaviorValidationBudgets.DEFAULT,
 ) {
     init {
         require(exportWallClockMillis > 0) { "export wall-clock budget must be positive" }
@@ -208,8 +209,59 @@ data class ReconstructionBudgets(
         append("\"plannerMaximumDependencyEdges\":").append(plannerMaximumDependencyEdges).append(',')
         append("\"plannerMaximumEntities\":").append(plannerMaximumEntities).append(',')
         append("\"plannerMaximumWorkUnits\":").append(plannerMaximumWorkUnits).append(',')
-        append("\"reconstructionMaximumContextCharacters\":").append(reconstructionMaximumContextCharacters)
+        append("\"reconstructionMaximumContextCharacters\":").append(reconstructionMaximumContextCharacters).append(',')
+        append("\"behavior\":").append(behavior.canonicalJson())
         append('}')
+    }
+}
+
+/** Profile-owned bounds consumed by behavior validation and retained in its evidence. */
+data class BehaviorValidationBudgets(
+    val maximumCases: Int,
+    val wallClockMillis: Long,
+    val maximumStdoutBytes: Long,
+    val maximumStderrBytes: Long,
+    val maximumAggregateOutputBytes: Long,
+    val maximumComparisonOutputBytes: Long,
+    val maximumStdinBytes: Long,
+    val maximumArgumentBytes: Long,
+    val maximumInputFileBytes: Long,
+    val maximumInputFiles: Int,
+) {
+    init {
+        require(maximumCases > 0) { "behavior case budget must be positive" }
+        require(wallClockMillis > 0) { "behavior wall-clock budget must be positive" }
+        require(maximumStdoutBytes > 0) { "behavior stdout budget must be positive" }
+        require(maximumStderrBytes > 0) { "behavior stderr budget must be positive" }
+        require(maximumAggregateOutputBytes >= maxOf(maximumStdoutBytes, maximumStderrBytes)) {
+            "behavior aggregate output budget must cover each stream"
+        }
+        require(maximumComparisonOutputBytes >= maximumAggregateOutputBytes) {
+            "behavior comparison output budget must cover one execution"
+        }
+        require(maximumStdinBytes > 0) { "behavior stdin budget must be positive" }
+        require(maximumArgumentBytes > 0) { "behavior argument budget must be positive" }
+        require(maximumInputFileBytes > 0) { "behavior input-file byte budget must be positive" }
+        require(maximumInputFiles > 0) { "behavior input-file count budget must be positive" }
+    }
+
+    internal fun canonicalJson(): String = """
+        {"maximumAggregateOutputBytes":$maximumAggregateOutputBytes,"maximumArgumentBytes":$maximumArgumentBytes,"maximumCases":$maximumCases,"maximumComparisonOutputBytes":$maximumComparisonOutputBytes,"maximumInputFileBytes":$maximumInputFileBytes,"maximumInputFiles":$maximumInputFiles,"maximumStderrBytes":$maximumStderrBytes,"maximumStdoutBytes":$maximumStdoutBytes,"maximumStdinBytes":$maximumStdinBytes,"wallClockMillis":$wallClockMillis}
+    """.trimIndent()
+
+    companion object {
+        val DEFAULT = BehaviorValidationBudgets(
+            maximumCases = 1_024,
+            wallClockMillis = 5_000,
+            maximumStdoutBytes = 8L * 1024 * 1024,
+            maximumStderrBytes = 8L * 1024 * 1024,
+            maximumAggregateOutputBytes = 16L * 1024 * 1024,
+            maximumComparisonOutputBytes = 16L * 1024 * 1024,
+            maximumStdinBytes = 8L * 1024 * 1024,
+            maximumArgumentBytes = 1L * 1024 * 1024,
+            maximumInputFileBytes = 8L * 1024 * 1024,
+            maximumInputFiles = 1_024,
+        )
     }
 }
 
@@ -269,6 +321,40 @@ class ReconstructionHostSafetyLimits(val maximum: ReconstructionBudgets) {
         }
         require(requested.archiveMaximumTotalBytes <= maximum.archiveMaximumTotalBytes) {
             "requested archive total budget exceeds the host safety limit"
+        }
+        requireBehaviorAllows(requested.behavior)
+    }
+
+    fun requireBehaviorAllows(requested: BehaviorValidationBudgets) {
+        require(requested.maximumCases <= maximum.behavior.maximumCases) {
+            "requested behavior case budget exceeds the host safety limit"
+        }
+        require(requested.wallClockMillis <= maximum.behavior.wallClockMillis) {
+            "requested behavior wall-clock budget exceeds the host safety limit"
+        }
+        require(requested.maximumStdoutBytes <= maximum.behavior.maximumStdoutBytes) {
+            "requested behavior stdout budget exceeds the host safety limit"
+        }
+        require(requested.maximumStderrBytes <= maximum.behavior.maximumStderrBytes) {
+            "requested behavior stderr budget exceeds the host safety limit"
+        }
+        require(requested.maximumAggregateOutputBytes <= maximum.behavior.maximumAggregateOutputBytes) {
+            "requested behavior aggregate output budget exceeds the host safety limit"
+        }
+        require(requested.maximumComparisonOutputBytes <= maximum.behavior.maximumComparisonOutputBytes) {
+            "requested behavior comparison output budget exceeds the host safety limit"
+        }
+        require(requested.maximumStdinBytes <= maximum.behavior.maximumStdinBytes) {
+            "requested behavior stdin budget exceeds the host safety limit"
+        }
+        require(requested.maximumArgumentBytes <= maximum.behavior.maximumArgumentBytes) {
+            "requested behavior argument budget exceeds the host safety limit"
+        }
+        require(requested.maximumInputFileBytes <= maximum.behavior.maximumInputFileBytes) {
+            "requested behavior input-file byte budget exceeds the host safety limit"
+        }
+        require(requested.maximumInputFiles <= maximum.behavior.maximumInputFiles) {
+            "requested behavior input-file count budget exceeds the host safety limit"
         }
     }
 }

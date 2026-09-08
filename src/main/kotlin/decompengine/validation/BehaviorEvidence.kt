@@ -5,6 +5,8 @@ import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.project.GeneratedCMakeReconstructionProfile
 import decompengine.project.BehaviorBuildLayout
+import decompengine.project.BehaviorValidationBudgets
+import decompengine.project.ReconstructionHostSafetyLimits
 import decompengine.project.ReconstructionAdapters
 import decompengine.project.ReconstructionProfile
 import decompengine.project.SourceTreeManifestReader
@@ -28,6 +30,7 @@ import kotlinx.serialization.json.longOrNull
 class BehaviorProjectContext(
     val projectDir: Path,
     val profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+    val hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
 )
 
 internal class BehaviorEvidenceCapture {
@@ -192,8 +195,8 @@ internal object BehaviorEvidence {
         })
         val body = JsonObject(legacy + mapOf(
             "cases" to cases,
-            "schemaVersion" to JsonPrimitive(4),
-            "provider" to JsonPrimitive("local-revision-bound-behavior-v4"),
+            "schemaVersion" to JsonPrimitive(5),
+            "provider" to JsonPrimitive("local-revision-bound-behavior-v5"),
             "originalIdentity" to original,
             "rebuiltIdentity" to rebuilt,
             "executionPolicy" to policy,
@@ -233,7 +236,8 @@ internal object BehaviorEvidence {
         require((schemaVersion == 1 && root.string("provider") == PROVIDER) ||
             (schemaVersion == 2 && root.string("provider") == "local-revision-bound-behavior-v2") ||
             (schemaVersion == 3 && root.string("provider") == "local-revision-bound-behavior-v3") ||
-            (schemaVersion == 4 && root.string("provider") == "local-revision-bound-behavior-v4")) { "unsupported behavior report" }
+            (schemaVersion == 4 && root.string("provider") == "local-revision-bound-behavior-v4") ||
+            (schemaVersion == 5 && root.string("provider") == "local-revision-bound-behavior-v5")) { "unsupported behavior report" }
         require(root.string("id").matches(Regex("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"))) { "invalid behavior report ID" }
         require(root.string("sandbox") == "bubblewrap") { "unsupported behavior sandbox request" }
         val originalPath = absolutePath(root.string("originalBinary"))
@@ -243,10 +247,17 @@ internal object BehaviorEvidence {
         require(root.getValue("originalIdentity").jsonObject.count("bytes") > 0L &&
             root.getValue("rebuiltIdentity").jsonObject.count("bytes") > 0L)
         val policy = root.getValue("executionPolicy").jsonObject
-        require(policy.keys == setOf("assurance", "environment", "workingDirectory", "networkIsolationRequested",
-            "timeoutMillis", "maximumStdoutBytes", "maximumStderrBytes", "maximumAggregateBytes",
-            "maximumComparisonOutputBytes", "bubblewrap", "timeout") +
-            if (schemaVersion == 4) setOf("completionLauncher", "maximumCompletionBytes") else emptySet<String>()) {
+        val policyKeys = buildSet {
+            addAll(setOf("assurance", "environment", "workingDirectory", "networkIsolationRequested",
+                "timeoutMillis", "maximumStdoutBytes", "maximumStderrBytes", "maximumAggregateBytes",
+                "maximumComparisonOutputBytes", "bubblewrap", "timeout"))
+            if (schemaVersion >= 5) addAll(setOf(
+                "profileId", "profileSha256", "profileBudgets", "hostSafetyBudgets", "maximumCases",
+                "maximumStdinBytes", "maximumArgumentBytes", "maximumInputFileBytes", "maximumInputFiles",
+            ))
+            if (schemaVersion >= 4) addAll(setOf("completionLauncher", "maximumCompletionBytes"))
+        }
+        require(policy.keys == policyKeys) {
             "behavior execution policy is not closed"
         }
         require(policy.string("assurance") == "local-path-stability-checks-not-production-authority" &&
@@ -257,6 +268,33 @@ internal object BehaviorEvidence {
             require(policy.count(it) > 0L) { "behavior policy bound is empty" }
         }
         require(policy.count("maximumComparisonOutputBytes") <= 16L * 1024 * 1024)
+        if (schemaVersion >= 5) {
+            require(policy.string("profileId").matches(Regex("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")))
+            requireHash(policy.string("profileSha256"))
+            val profileBudgets = behaviorBudgets(policy.getValue("profileBudgets").jsonObject)
+            val hostBudgets = behaviorBudgets(policy.getValue("hostSafetyBudgets").jsonObject)
+            require(profileBudgets.maximumCases == policy.integer("maximumCases"))
+            require(profileBudgets.maximumStdinBytes == policy.count("maximumStdinBytes"))
+            require(profileBudgets.maximumArgumentBytes == policy.count("maximumArgumentBytes"))
+            require(profileBudgets.maximumInputFileBytes == policy.count("maximumInputFileBytes"))
+            require(profileBudgets.maximumInputFiles == policy.integer("maximumInputFiles"))
+            require(policy.count("timeoutMillis") <= profileBudgets.wallClockMillis)
+            require(policy.count("maximumStdoutBytes") <= profileBudgets.maximumStdoutBytes)
+            require(policy.count("maximumStderrBytes") <= profileBudgets.maximumStderrBytes)
+            require(policy.count("maximumAggregateBytes") <= profileBudgets.maximumAggregateOutputBytes)
+            require(policy.count("maximumComparisonOutputBytes") <= profileBudgets.maximumComparisonOutputBytes)
+            require(profileBudgets.maximumCases <= hostBudgets.maximumCases &&
+                profileBudgets.wallClockMillis <= hostBudgets.wallClockMillis &&
+                profileBudgets.maximumStdoutBytes <= hostBudgets.maximumStdoutBytes &&
+                profileBudgets.maximumStderrBytes <= hostBudgets.maximumStderrBytes &&
+                profileBudgets.maximumAggregateOutputBytes <= hostBudgets.maximumAggregateOutputBytes &&
+                profileBudgets.maximumComparisonOutputBytes <= hostBudgets.maximumComparisonOutputBytes &&
+                profileBudgets.maximumStdinBytes <= hostBudgets.maximumStdinBytes &&
+                profileBudgets.maximumArgumentBytes <= hostBudgets.maximumArgumentBytes &&
+                profileBudgets.maximumInputFileBytes <= hostBudgets.maximumInputFileBytes &&
+                profileBudgets.maximumInputFiles <= hostBudgets.maximumInputFiles
+            ) { "behavior profile budgets exceed host safety budgets" }
+        }
         fun executable(name: String): Path {
             val executable = policy.getValue(name).jsonObject
             require(executable.keys == setOf("path", "bytes", "sha256"))
@@ -266,18 +304,21 @@ internal object BehaviorEvidence {
         }
         val bubblewrap = executable("bubblewrap")
         val timeout = executable("timeout")
-        val launcher = if (schemaVersion == 4) executable("completionLauncher") else null
-        if (schemaVersion == 4) require(policy.count("maximumCompletionBytes") == MAXIMUM_BUBBLEWRAP_COMPLETION_BYTES.toLong())
+        val launcher = if (schemaVersion >= 4) executable("completionLauncher") else null
+        if (schemaVersion >= 4) require(policy.count("maximumCompletionBytes") == MAXIMUM_BUBBLEWRAP_COMPLETION_BYTES.toLong())
         val network = policy.boolean("networkIsolationRequested")
         require(root.boolean("networkIsolated") == network) { "behavior network request is contradictory" }
         val cases = root.getValue("cases").jsonArray
-        require(cases.size in 1..1024) { "behavior case count is outside its bound" }
+        val maximumCases = if (schemaVersion >= 5) root.getValue("executionPolicy").jsonObject.integer("maximumCases") else 1024
+        require(cases.size in 1..maximumCases) { "behavior case count is outside its bound" }
         val identifiers = hashSetOf<String>()
         var observedOutputBytes = 0L
         var stdinBytes = 0L
         var argumentBytes = 0L
         var fileBytes = 0L
         var fileCount = 0L
+        val maximumInputFileBytes = if (schemaVersion >= 5) policy.count("maximumInputFileBytes") else MAXIMUM_BEHAVIOR_FILE_BYTES
+        val maximumInputFiles = if (schemaVersion >= 5) policy.integer("maximumInputFiles") else MAXIMUM_BEHAVIOR_INPUT_FILES
         val matches = cases.map { element ->
             val case = element.jsonObject
             require(case.keys == setOf("id", "args", "stdinHex", "matches", "exitCodeMatches", "stdoutMatches",
@@ -293,12 +334,12 @@ internal object BehaviorEvidence {
                 require(file.count("bytes") == hex.length / 2L) { "behavior input file length differs from retained bytes" }
                 fileBytes = Math.addExact(fileBytes, file.count("bytes"))
                 fileCount++
-                require(fileBytes <= MAXIMUM_BEHAVIOR_FILE_BYTES && fileCount <= MAXIMUM_BEHAVIOR_INPUT_FILES) { "behavior file corpus exceeds its bound" }
+                require(fileBytes <= maximumInputFileBytes && fileCount <= maximumInputFiles) { "behavior file corpus exceeds its bound" }
                 require(OracleArtifacts.sha256(java.util.HexFormat.of().parseHex(hex)) == file.string("sha256")) { "behavior input file digest differs from retained bytes" }
                 name to source
             } else emptyList()
             require(inputFiles.map { it.first } == inputFiles.map { it.first }.distinct().sorted()) { "behavior input files must be unique and sorted" }
-            requireBehaviorFileNames(inputFiles.map { it.first })
+            requireBehaviorFileNames(inputFiles.map { it.first }, maximumInputFiles)
             val identifier = case.string("id")
             require(identifier.isNotEmpty() && identifier.length <= 256 && identifiers.add(identifier)) { "behavior case IDs are invalid or duplicated" }
             val arguments = case.getValue("args").jsonArray.map { argument ->
@@ -309,7 +350,9 @@ internal object BehaviorEvidence {
             requireHex(case.string("stdinHex"))
             stdinBytes += case.string("stdinHex").length / 2
             argumentBytes += arguments.sumOf { it.toByteArray().size.toLong() }
-            require(stdinBytes <= 8L * 1024 * 1024 && argumentBytes <= 1024L * 1024)
+            val maximumStdinBytes = if (schemaVersion >= 5) root.getValue("executionPolicy").jsonObject.count("maximumStdinBytes") else 8L * 1024 * 1024
+            val maximumArgumentBytes = if (schemaVersion >= 5) root.getValue("executionPolicy").jsonObject.count("maximumArgumentBytes") else 1024L * 1024
+            require(stdinBytes <= maximumStdinBytes && argumentBytes <= maximumArgumentBytes)
             val original = output(case.getValue("original").jsonObject, network, schemaVersion)
             val rebuilt = output(case.getValue("rebuilt").jsonObject, network, schemaVersion)
             for ((observation, path) in listOf(original to originalPath, rebuilt to rebuiltPath)) {
@@ -330,7 +373,7 @@ internal object BehaviorEvidence {
                     (schemaVersion < 4 && recordedCommand == JsonArray(historicalCommand.map(::JsonPrimitive)))) {
                     "behavior sandbox command contradicts its inputs or execution policy"
                 }
-                if (schemaVersion == 4) {
+                if (schemaVersion >= 4) {
                     val completion = observation.getValue("completionEvidence").jsonObject
                     require(completion.keys == setOf("channelPath", "statusHex", "launchCommand"))
                     require(completion.string("channelPath").length <= 4096)
@@ -362,6 +405,13 @@ internal object BehaviorEvidence {
                 "buildContract", "sourceRevisionSha256", "sourceInputs", "artifact")) { "behavior revision is not closed" }
             revision.string("profileId")
             listOf("profileSha256", "inputSha256", "sourceRevisionSha256").forEach { requireHash(revision.string(it)) }
+            if (schemaVersion >= 5) {
+                val policy = root.getValue("executionPolicy").jsonObject
+                require(revision.string("profileId") == policy.string("profileId") &&
+                    revision.string("profileSha256") == policy.string("profileSha256")) {
+                    "behavior project and execution profiles differ"
+                }
+            }
             identity(revision.getValue("manifest").jsonObject)
             identity(revision.getValue("buildContract").jsonObject)
             listOf("files", "sourceInputs").forEach { name ->
@@ -390,7 +440,7 @@ internal object BehaviorEvidence {
 
     private fun output(output: JsonObject, network: Boolean, schemaVersion: Int): JsonObject {
         require(output.keys == setOf("exitCode", "stdoutHex", "stderrHex", "networkIsolated", "sandboxCommand") +
-            if (schemaVersion == 4) setOf("completionEvidence") else emptySet<String>())
+            if (schemaVersion >= 4) setOf("completionEvidence") else emptySet<String>())
         if (schemaVersion < 4) rejectReservedWrapperExit(output.integer("exitCode"))
         requireHex(output.string("stdoutHex"))
         requireHex(output.string("stderrHex"))
@@ -421,6 +471,26 @@ internal object BehaviorEvidence {
     }
     private fun absolutePath(value: String): Path = Path.of(value).also {
         require(it.isAbsolute && it.normalize() == it) { "behavior executable locator is not absolute and normalized" }
+    }
+
+    private fun behaviorBudgets(value: JsonObject): BehaviorValidationBudgets {
+        require(value.keys == setOf(
+            "maximumCases", "wallClockMillis", "maximumStdoutBytes", "maximumStderrBytes",
+            "maximumAggregateOutputBytes", "maximumComparisonOutputBytes", "maximumStdinBytes",
+            "maximumArgumentBytes", "maximumInputFileBytes", "maximumInputFiles",
+        )) { "behavior budget record is not closed" }
+        return BehaviorValidationBudgets(
+            maximumCases = value.integer("maximumCases"),
+            wallClockMillis = value.count("wallClockMillis"),
+            maximumStdoutBytes = value.count("maximumStdoutBytes"),
+            maximumStderrBytes = value.count("maximumStderrBytes"),
+            maximumAggregateOutputBytes = value.count("maximumAggregateOutputBytes"),
+            maximumComparisonOutputBytes = value.count("maximumComparisonOutputBytes"),
+            maximumStdinBytes = value.count("maximumStdinBytes"),
+            maximumArgumentBytes = value.count("maximumArgumentBytes"),
+            maximumInputFileBytes = value.count("maximumInputFileBytes"),
+            maximumInputFiles = value.integer("maximumInputFiles"),
+        )
     }
 }
 
