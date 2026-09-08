@@ -4,10 +4,11 @@ import { ApiClientError, createApiClient } from '../api/client';
 import { jobPath, runPath } from '../app/paths';
 import type { BrowserSession } from '../session/session';
 import { Activity } from '../jobs/Activity';
+import { ProgressPin } from '../jobs/ProgressPin';
 import { ExplorationEvidence } from '../jobs/ExplorationEvidence';
 import { useSession } from '../session/useSession';
 
-function Details({ jobId, runId, basePath }: { jobId: string; runId: string; basePath: string }) {
+function Details({ jobId, runId, basePath, session }: { jobId: string; runId: string; basePath: string; session: BrowserSession }) {
   const client = useMemo(() => createApiClient({ basePath }), [basePath]);
   const [run, setRun] = useState<RunData | null>(null);
   const [error, setError] = useState('');
@@ -62,6 +63,7 @@ function Details({ jobId, runId, basePath }: { jobId: string; runId: string; bas
         <dt>Tool calls</dt><dd>{run.usage.toolCalls ?? 'Not reported'}</dd>
         <dt>Wall-clock usage</dt><dd>{run.usage.wallClockMs === null ? 'Not reported' : `${run.usage.wallClockMs} milliseconds`}</dd>
       </dl> : <p>Usage was not reported for this attempt.</p>}
+      <ProgressPin key={`pin/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} />
       <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
       <ExplorationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
       <p>Source and artifact navigation for this attempt is not connected yet.</p>
@@ -77,7 +79,7 @@ export default function Run({ jobId, runId, basePath, session }: { jobId: string
     {valid ? <>
       <a href={jobPath(basePath, jobId)}>Return to job overview</a>
       <p><a href={`${jobPath(basePath, jobId)}/runs`}>Browse attempt history</a></p>
-      {state?.status === 'authenticated' ? <Details key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
+      {session && state?.status === 'authenticated' ? <Details key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} />
         : <p>Connect a local session to view this attempt.</p>}
     </> : <p role="alert">The requested job or attempt identity is invalid.</p>}
   </section>;
