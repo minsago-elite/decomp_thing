@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "issue": 464,
+  "recordedOn": "2026-09-08",
+  "sourceCommit": "bf250156",
+  "scope": "Checked repository contract evidence only; this record is not production qualification.",
+  "contract": {
+    "assessmentField": "recoveryAssessment",
+    "state": "unassessed",
+    "population": "all function, global, and type IDs in the exact model, sorted and bound to modelSha256",
+    "assessedEntityIds": [],
+    "extractionStatusCanUpgradeAssessment": false,
+    "compilationCanUpgradeAssessment": false,
+    "heuristicScoreIsCalibrated": false,
+    "unresolvedCategories": [
+      "missing",
+      "unknown",
+      "contradicted",
+      "unobservable"
+    ],
+    "unresolvedCategoriesStatus": "not yet joined as verified per-entity findings; they remain unresolved/unassessed"
+  },
+  "repositoryFacts": [
+    "ExtractedRecoveryAssessment.kt derives the population from the model and emits schemaVersion, state, modelSchemaVersion, modelSha256, unassessedEntityIds, and an empty assessedEntityIds array.",
+    "SourceTree.kt publishes that model-bound object in reports/confidence.json while retaining structural heuristic scores separately.",
+    "ArchivalAudit.kt publishes the same model-bound object in reports/archival_audit.json; its broader unresolvedEntityIds also includes provenance, implementation, and compilation diagnostics.",
+    "SourceTree.kt, Main.kt, and WebViews.kt preserve unassessed or unavailable recovery accuracy instead of treating extraction, compilation, or heuristic scores as correctness.",
+    "ArchivalAuditProvenanceTest.kt checks the model hash and population linkage between confidence and archival audit reports for historical and schema-2 models."
+  ],
+  "productionGap": {
+    "verifiedAssessmentJoin": "Unavailable; #462 remains open and this tree has no authenticated per-entity finding creator or production replay registration.",
+    "authenticatedOracleEvidence": "Unavailable; #40 and #136 own the production structural evidence path.",
+    "calibration": "Unavailable; #42 owns validated confidence calibration.",
+    "qualification": "No current production GCC run, full report-consumer integration, or live CLI/web qualification was performed for this record."
+  },
+  "boundary": "Keep bundled Java-API Ghidra execution, isolated workers, authenticated oracle boundaries, provenance, and unresolved states unchanged until the dependent evidence path exists."
+}
