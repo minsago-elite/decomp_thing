@@ -674,6 +674,23 @@ try {
       report.jobDataCreated = true;
     }
 
+    // A tab without peer notifications must still reconcile a server rejection.
+    let unnotified;
+    let unnotifiedState;
+    if (historyFixture) {
+      unnotified = await makeTarget();
+      await cdp.call('Page.addScriptToEvaluateOnNewDocument', {
+        source: "Object.defineProperty(globalThis, 'BroadcastChannel', { value: undefined, configurable: true });",
+      }, unnotified.sessionId);
+      await cdp.call('Page.navigate', { url: browserOrigin + `/nested/jobs/${historyFixture.jobId}/runs/run_fixture_3` }, unnotified.sessionId);
+      await cdp.call('Page.bringToFront', {}, unnotified.sessionId);
+      await ready(unnotified, `document.querySelector('section[aria-label="Progress retention"]') !== null`, 'unnotified private attempt');
+      await evaluate(unnotified, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Read progress pin').click()`);
+      await ready(unnotified, `document.body.innerText.includes('Progress history is not pinned.')`, 'unnotified initial policy');
+      assert.equal(await evaluate(unnotified, 'typeof BroadcastChannel'), 'undefined');
+      unnotifiedState = await fs.readFile(join(historyFixture.directory, 'workflow-state.json'));
+    }
+
     const peer = await makeTarget();
     await cdp.call('Page.navigate', { url: browserOrigin + '/nested/runtime' }, peer.sessionId);
     await ready(peer, `document.querySelector('#server-runtime-title') !== null`, 'peer private Runtime');
@@ -699,6 +716,31 @@ try {
     assert.equal(await evaluate(peer, 'localStorage.length + sessionStorage.length'), 0);
     await evaluate(peer, 'window.__sessionInvalidationChannel.close()');
     report.sessionInvalidation = { privateRuntimeCleared: true, credentialFreeMessage: true, automaticPeerRequests: 0, peerMutationRequests: 0, storageEntries: 0 };
+
+    if (unnotified) {
+      assert.equal(await evaluate(unnotified, `document.querySelector('section[aria-label="Progress retention"]') !== null`), true,
+        'The test tab unexpectedly received a peer invalidation');
+      await cdp.call('Page.bringToFront', {}, unnotified.sessionId);
+      await ready(unnotified, `[...document.querySelectorAll('button')].some(button => button.textContent === 'Read progress pin' && !button.disabled)`, 'unnotified tab foreground controls');
+      const before = unnotified.requests.length;
+      await evaluate(unnotified, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Read progress pin').click()`);
+      await ready(unnotified, `document.body.innerText.includes('To access private work, open the sign-in link') && document.body.innerText.includes('Connect a local session to view this attempt.')`, 'server rejection clears shared attempt state');
+      assert.equal(await evaluate(unnotified, `document.querySelector('section[aria-label="Progress retention"]') === null && document.querySelector('ol[aria-label="Activity observations"]') === null`), true);
+      await delay(3000);
+      const requests = unnotified.requests.slice(before);
+      assert.equal(requests.length, 1, 'Session rejection must not trigger automatic probes or retries');
+      assert.equal(requests[0].method, 'GET');
+      assert.equal(requests[0].url, browserOrigin + `/nested/api/v1/jobs/${historyFixture.jobId}/runs/run_fixture_3/progress-pin`);
+      assert.ok(unnotified.responses.some(response => response.url === requests[0].url && response.status === 401), 'Expected an actual server HTTP 401');
+      assert.ok(unnotified.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
+      assert.equal(await evaluate(unnotified, 'localStorage.length + sessionStorage.length'), 0);
+      assert.deepEqual(unnotified.exceptions, []);
+      assert.deepEqual(await fs.readFile(join(historyFixture.directory, 'workflow-state.json')), unnotifiedState);
+      report.unnotifiedSessionRevocation = { peerNotificationsUnavailable: true, privateAttemptRetainedUntilRead: true,
+        actualServer401: true, sharedAttemptStateCleared: true, pinControlsRemoved: true, activityRemoved: true,
+        privateReadRequests: 1, automaticFollowupRequests: 0, mutationRequests: 0, workflowStateUnchanged: true, storageEntries: 0 };
+      report.requests.unnotified = unnotified.requests;
+    }
 
     await cdp.call('Page.reload', {}, authenticated.sessionId);
     await ready(authenticated, `document.body.innerText.includes('To access private work, open the sign-in link')`, 'revoked session after reload');

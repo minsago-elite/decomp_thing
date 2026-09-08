@@ -1,5 +1,9 @@
 package decompengine.exploration
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import decompengine.validation.ProcessInput
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
@@ -138,6 +142,12 @@ class AutomaticExplorationTest {
         assertTrue(report.confidence.score > 0.5)
         assertTrue(report.reportPath.exists())
         val json = report.reportPath.readText()
+        val interpretation = Json.parseToJsonElement(json).jsonObject.getValue("confidence").jsonObject
+            .getValue("scoreInterpretation").jsonObject
+        assertEquals("exploration-breadth", interpretation.getValue("kind").jsonPrimitive.content)
+        assertEquals("uncalibrated", interpretation.getValue("calibrationStatus").jsonPrimitive.content)
+        assertEquals(JsonNull, interpretation.getValue("calibratedProbability"))
+        assertEquals(JsonNull, interpretation.getValue("calibrationArtifactSha256"))
         assertTrue(json.contains("\"source\": \"ANGR\""))
         assertTrue(json.contains("\"source\": \"STATIC_HINT\""))
         assertTrue(json.contains("\"source\": \"MUTATION\""))

@@ -7,8 +7,120 @@ It returns an opaque `GccBundledPreparedOperation`. Preparation alone does not
 authorize START; `complete`, `startAuthorized` and `releaseEligible` remain false.
 Its one-shot `execute()` performs contained fresh-control admission.
 `executeUntilCheckpoint(minimumCompletedFunctions)` admits a prepared INTERRUPTED
-intent through the same retained containment boundary. Neither path supports
-resume or release yet.
+intent through the same retained containment boundary. `resume()` continues under
+that same owner, and `plan()` uses only its successfully captured fresh/resumed
+export. Release and cold-restart recovery remain unqualified.
+
+## Contained CLI route
+
+The normal `gcc-engine-plan` command now requires the contained coordinator. It
+does not fall back to the diagnostic planning service when admission fails.
+Use the complete application distribution, its bundled Ghidra dependency, a
+matching compiler-engine profile/binary/provenance archive, and a provisioned
+dedicated scratch mount meeting the containment prerequisites below.
+
+```sh
+mkdir -m 700 results
+llm_bin_patch gcc-engine-plan cc1 /data/gcc-cc1.stripped \
+  --profile /data/compiler-engines.json \
+  --ghidra-archive /data/ghidra_12.1.3_PUBLIC_20260817.zip \
+  --output "$PWD/results" --scratch /mnt/gcc-scratch
+```
+
+`--output` must already exist, be empty and mode 0700, and be disjoint from
+scratch. Input files must remain outside both roots. Linked paths, duplicate
+options, unknown options and conflicting resource selections are rejected.
+The default scratch policy requires 8 GiB available and at most a 64 GiB
+filesystem, with 32768 available and at most 1000000 filesystem inodes. Override
+these integer ceilings with `--scratch-min-bytes`, `--scratch-max-bytes`,
+`--scratch-min-inodes`, and `--scratch-max-inodes`. The profile selects wall and
+memory ceilings; these limits do not establish measured benchmark compliance.
+
+`--resume-after-checkpoint 512` requests interruption at a whole planning batch
+and immediate resume within the same process. The value must be a positive
+multiple of 512 below the engine's function population. This option does not
+load a detached receipt or restore ownership after a process restart.
+
+The output directory contains `invocation.json`, immutable generated inputs,
+and the operation journal. Its directory identities and CLI selection are bound
+into the schema-2 intent and revalidated before START. After contained planning,
+`result.json` records model/plan paths on retained scratch, their digests, and
+linked journal receipt digests. Model and plan files are not copied into the
+external output directory. Result publication is bounded and checked against
+the same operation deadline. Failed attempts preserve partial files and require
+a new empty output directory; they do not silently overwrite or release scratch.
+
+Successful provisioned-host CLI fresh/resume execution and full-engine resource
+qualification are still unverified. Results remain incomplete and
+release-ineligible; issue #291 and its parent issues track that qualification.
+
+### Real-engine CLI qualification runner
+
+`bash scripts/ci-qualify-gcc-engine-cli.sh` runs only
+`GccBundledCliQualificationTest`. It sets required mode, disables test caching,
+and fails on missing inputs or prerequisites. Ordinary test runs skip its two
+real-engine cases unless `DECOMP_REQUIRE_GCC_ENGINE_CLI=true` is selected.
+The runner does not invoke the broad CI script or vulnerability-reproduction tests.
+
+Supply canonical paths in these environment variables:
+
+- `DECOMP_GCC_CLI_PROFILE` and `DECOMP_GCC_CLI_ARCHIVE`: the retained compiler-engine
+  profile and matching Ghidra provenance archive.
+- `DECOMP_GCC_CLI_CC1_BINARY` and `DECOMP_GCC_CLI_LTO1_BINARY`: genuine stripped
+  binaries matching that profile. `scripts/rebuild-gcc-compiler-engines.py` is the
+  existing authenticated rebuild path; an authored substitute does not qualify.
+- `DECOMP_GCC_CLI_CC1_FRESH_SCRATCH`, `DECOMP_GCC_CLI_CC1_RESUME_SCRATCH`,
+  `DECOMP_GCC_CLI_LTO1_FRESH_SCRATCH`, `DECOMP_GCC_CLI_LTO1_RESUME_SCRATCH`: four
+  distinct, empty dedicated mounts satisfying the CLI's default scratch policy.
+- `DECOMP_GCC_CLI_EVIDENCE_ROOT`: an existing private evidence directory disjoint
+  from all inputs and scratch mounts, with capacity for four captured model/plan pairs.
+
+On a trusted GitHub Actions provisioner with noninteractive sudo, the existing
+scratch setup script has four explicit real-engine selections:
+
+```sh
+bash scripts/ci-prepare-oracle-ext4-scratch.sh --gcc-engine-cc1-fresh
+bash scripts/ci-prepare-oracle-ext4-scratch.sh --gcc-engine-cc1-resume
+bash scripts/ci-prepare-oracle-ext4-scratch.sh --gcc-engine-lto1-fresh
+bash scripts/ci-prepare-oracle-ext4-scratch.sh --gcc-engine-lto1-resume
+```
+
+Each selection creates a distinct 12 GiB ext4 image with 65,536 inodes and publishes
+its matching `DECOMP_GCC_CLI_*_SCRATCH` and `*_IMAGE` variables through `GITHUB_ENV`
+for subsequent steps. This leaves metadata headroom above the default 8 GiB and
+32,768 available-inode minima. The trusted host must have adequate backing storage
+for all four images and retained evidence; sparse image creation does not reserve
+physical storage. The Kotlin lease still checks actual mount identity, flags and
+capacity before use. Provisioning does not grant production execution authority.
+
+After evidence retention and confirmed worker absence, trusted teardown uses
+`ci-release-oracle-ext4-scratch.sh` with each corresponding selection. It checks
+the exact profile paths and loop-device detachment. These helpers do not replace
+Kotlin lifecycle validation or establish crash recovery. Their privileged engine
+mount paths still require provisioned-host qualification.
+
+Provision the reviewed root-owned JVM/system libraries, native helpers and bundled
+Ghidra runtime required by the existing contained tests. The qualification invokes
+the real `MainKt.main` CLI entry point in the Gradle test JVM, using its independently
+configured development deployment references. It does not qualify the installed
+shell launcher. Required mode assigns that host JVM an 8 GiB heap; the worker still
+uses profile-bound limits. This setting is not a measurement or enforcement of
+aggregate host-plus-worker RSS, so provide adequate host memory and keep whole-operation
+resource acceptance separate.
+
+Each engine gets fresh and same-owner resume runs. The runner checks the exact CLI
+invocation, profile policy, journal membership and predecessor hashes, export/plan
+bindings, process-absence records and shared deadline origin. It requires resumed
+reuse to equal the stopped checkpoint prefix, independently checks plan ownership,
+and compares retained model/plan bytes. Only then does it write `comparison.json`,
+which still reports benchmark acceptance and release eligibility as false.
+All CLI output directories, journals, generated controls and captured model/plan
+bytes remain in the evidence directory; scratch remains retained for trusted
+cleanup. Preserve the original profile/reference files, binaries and archive with
+these results for replay. Missing `comparison.json` is not successful qualification.
+
+The runner has not yet completed on a provisioned host. Local checks establish
+compilation and required-mode rejection only, not actual engine equivalence.
 
 This is separate from the historical path-based GCC BOOT controller. That
 controller's caller-populated output directory and capacity checks are not
@@ -19,10 +131,12 @@ behavior are not silently promoted or rewritten.
 
 `GccBundledOperationIntent` snapshots the operation ID, cc1/lto1 work unit, fresh
 run kind, exact artifact identities, bundled runtime/classpath, fixed environment,
-process budgets and disk policy. The canonical schema-1 provider is
-`gcc-bundled-operation-intent-v1`; SHA-256 of all canonical bytes is the request
-identity. No output path, output inode, final command or systemd attachment is
-invented before allocation.
+process budgets and disk policy. Legacy intents use the schema-1 provider
+`gcc-bundled-operation-intent-v1`; retained planner profiles use schema 2 and
+`gcc-bundled-operation-intent-v2`. CLI intents additionally bind their invocation
+and external output directory identities. SHA-256 of all canonical bytes is the
+request identity. The analysis scratch output identity and final command come
+from actual lease allocation.
 
 The disk work unit uses the actual GCC engine ID. Its separate
 `gcc-bundled-work-scope-v1` commitment binds the engine, benchmark-profile and
@@ -370,11 +484,11 @@ The command definition binds the stopped manifest and derived fresh paths; it
 does not authenticate the manifest or prove that repeated analysis is identical.
 
 The default remains v3. Fresh operation intents reject v4 before acquiring a
-lease, and the existing execution path accepts only v2/v3. A resume controller
-must revalidate retained state/control evidence, protect the original state,
-create the separate control directory, journal attachment and START, and prove
-absence/resource accounting. No v4 execution or benchmark qualification is
-claimed by command-contract tests.
+lease, and the fresh execution path accepts only v2/v3. The same-owner resume
+path described below selects v4 after stopped-state revalidation, protects the
+original state, and journals the separate attachment and START. Full hosted
+execution and cumulative resource accounting still need qualification; command
+contract tests do not prove either.
 
 ## Resume journal lifecycle
 
@@ -417,3 +531,133 @@ the option is absent. Descriptor fixtures exercise replacement and permission
 changes. A local bubblewrap fixture tests retained write rejection and successful
 writes to the new project/reports, without claiming authenticated runtime,
 systemd/cgroup, dedicated ext4 or live compiler qualification.
+
+## Same-owner resume integration
+
+A successful v3 interruption now retains the first control-directory identity
+and a SHA-256 commitment to all stopped planning checkpoint/fragment bytes.
+The commitment uses the UTF-8 domain `gcc-bundled-planning-prefix-bytes-v1\n`,
+followed in batch order by each checkpoint, functions, globals, types and failures
+file, each framed by its eight-byte big-endian byte length. The stopped-prefix
+journal assessment commits this digest alongside its semantic assessment.
+
+`resume()` accepts no caller-supplied evidence and is available once under the
+same retained owner. It revalidates stopped evidence, constructs the v4 definition,
+records resume preparation, and launches through the existing authenticated keeper
+with the old project and control directory read-only. Before START it recaptures
+the old project and prefix and writes separate attachment/authorization records.
+Failed execution retains cleanup responsibility; any failed attempt poisons the
+owner and cannot be retried by reusing its receipts.
+
+After the launcher proves process/cgroup absence, the coordinator records the
+second execution, verifies the unchanged original project, validates the complete
+export and requires exactly the retained reuse count, exporter state and function
+inventory. It hashes the reused prefix bytes again and rejects changed serialization
+even when the completed model validates. The resumed export receipt binds that
+prefix digest. This result still has complete and release eligibility false.
+
+This is implementation, not qualification: the local suites exercise command,
+journal, namespace and byte-validation components, but have not executed the full
+same-owner compiler lifecycle under the required hosted provisioning. The normal
+CLI, real cc1/lto1 fresh/resumed model and planner comparisons, cumulative resource
+accounting and benchmark publication remain incomplete. Per-leg ceilings are not
+a cumulative A10 budget proof. The bounded first-incomplete-batch write sequence is handled as described below;
+other residue still fails closed and is retained.
+
+## First incomplete planning batch
+
+Interrupted capture permits only the exporter write sequence immediately after
+the progress-bound committed prefix: zero to four published fragments in the order
+functions, globals, types, failures, plus at most the next artifact's named
+`.pending` file (which can be the checkpoint pending file). Empty pending files
+are allowed. These bytes are not parsed as committed evidence and do not increase
+completed/reused counts. Missing committed records, gaps, multiple pending files,
+future-batch residue, links and excess bytes are rejected.
+
+Capture records every permitted leftover file's name, size, SHA-256, inode/mount/
+ownership identity and modification metadata under the existing capture bounds.
+The stopped-prefix journal assessment binds this manifest and its hash. Same-owner
+revalidation requires the unchanged leftover manifest before START. Host capture
+never removes residue. After semantic-state validation, the existing exporter
+can discard its named pending file and rewrite the first incomplete batch; resumed
+capture still requires the exact original committed prefix and reuse count.
+
+A complete next nonterminal checkpoint can be validated as described below.
+Terminal batches and multiple advances remain rejected, preserved states.
+Hosted interrupted/resumed compiler qualification and whole-run resource evidence
+remain required; local fixtures establish only bounded capture/validation behavior.
+
+## Checkpoint published before progress
+
+If exactly the next checkpoint exists beyond observed progress, stopped capture
+reads its complete fragment set and the validator first validates the observed
+prefix against the original progress bytes. It then validates the next full batch
+and derives effective counters from its authenticated partial/failed counts. The
+full extended prefix is validated again for contiguous inventory, ownership and
+semantic commitments. Only one additional nonterminal full batch is admitted.
+This is a diagnostic derivation, not a claim that the exporter wrote new progress.
+
+The stopped journal payload retains `capturedProgressUtf8` (including its newline)
+and its SHA-256 separately from `effectiveProgressUtf8`, and explicitly records
+`effectiveProgressDerived`. The effective bytes must hash to the stopped assessment's
+progress commitment. Same-owner revalidation requires unchanged captured progress,
+checkpoint bytes and in-flight bindings. Host capture does not rewrite any file.
+The resumed leg must reuse the extended committed count.
+
+A bounded `.program_model.json.progress.json.pending` file may accompany the
+advanced checkpoint; its bytes and identity are recorded as in-flight evidence.
+Later batch fragments cannot accompany this state because the exporter writes
+progress before starting another batch. Pending progress without an advanced
+checkpoint, multiple advances, missing fragments and terminal checkpoints fail
+closed. Local tests cover both sides of this race and the derived/observed evidence
+separation; real hosted interruption and compiler/plan equivalence remain unproven.
+
+## One retained-owner wall deadline
+
+After initial preflight, entry into the first execution creates a same-process
+monotonic deadline using the operation's wall ceiling. The same object covers
+runtime preparation, interruption, stopped capture, time between legs, resume
+preparation/execution and export capture. It cannot be reconstructed from a receipt
+or reset by `resume()`. Expiry or clock regression permanently revokes it.
+
+Each launch receives at most the remaining whole service seconds. The launcher
+binds the deadline policy in its runtime closure, checks immediately before START,
+limits the outcome wait to remaining milliseconds and checks on every outcome
+poll. Expiry uses the existing failure cleanup and process-absence path. It never
+extends cleanup deadlines or bypasses cleanup to meet a timing target. Execution
+receipts and export assessments include the same monotonic start, maximum wall
+budget, elapsed time and remaining time; the owner rechecks after journal/lease
+post-validation before returning a successful result.
+
+This covers the retained-owner execution interval. Initial preflight/lease
+preparation, other benchmark legs, cumulative CPU/disk accounting and full A10
+publication policy still need separate integration and evidence. Local clock tests
+cover inter-leg gaps, floor rounding, expiry, monotonic wrap and regression; the
+hosted authored-ELF fixture also checks receipt timing consistency when provisioned.
+No full hosted compiler-resume qualification is inferred from clock tests.
+
+## Required hosted authored resume fixture
+
+CI provisions two additional independent 1 GiB ext4 images: one for the authored
+interruption/resume owner and one for its uninterrupted fresh control. Their
+prepare/release selectors are `--bundled-ghidra-resume` and
+`--bundled-ghidra-resume-control`; each has a fixed mount parent and environment
+prefix. The existing required-provisioning flag makes missing hosted prerequisites
+fail the fixture rather than silently skip. Local unprovisioned runs skip the two
+contained Ghidra fixtures, while a separate local test compiles the generated ELF
+and checks its 4,096 defined functions.
+
+The hosted resume test observes a checkpoint, resumes under the same owner,
+checks preserved journal records and expected reuse, then compares complete model
+bytes against fresh normal import/analysis on the other filesystem. Both module
+plans are derived by the deterministic planner from the respective captured
+models. Retained artifacts include the two plans, model/checkpoint evidence,
+receipts and a comparison record linking both evidence directories and receipt
+hashes. Control logs are read from the execution's actual control directory.
+Failures preserve bounded compiler, journal and control-log diagnostics.
+
+This is an authored integration gate, not cc1/lto1 benchmark acceptance. It has
+been compiled but requires the hosted runtime, user-systemd and dedicated-ext4
+setup to qualify. Real compiler equivalence, the normal CLI and complete A10
+resource/publication evidence remain separate requirements. Trusted CI fixture
+teardown does not imply production scratch-release authority.

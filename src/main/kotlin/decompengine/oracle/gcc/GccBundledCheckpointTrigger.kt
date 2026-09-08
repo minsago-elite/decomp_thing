@@ -43,10 +43,16 @@ internal class GccBundledCheckpointTrigger(val minimumCompletedFunctions: Long) 
         }
     }
 
-    fun assessStoppedPrefix(prefix: GccInterruptedPrefixAssessment): ByteArray {
+    fun assessStoppedPrefix(prefix: GccInterruptedPrefixAssessment, planningPrefixSha256: String? = null, inFlightArtifacts: ByteArray? = null,
+        capturedProgress: ByteArray? = null, effectiveProgress: ByteArray? = null): ByteArray {
+        require(planningPrefixSha256 == null || planningPrefixSha256.matches(Regex("[a-f0-9]{64}")))
+        require((capturedProgress == null) == (effectiveProgress == null)) { "GCC stopped progress evidence must be paired" }
+        if (effectiveProgress != null) require(OracleArtifacts.sha256(effectiveProgress) == prefix.progressSha256) {
+            "GCC effective progress differs from the stopped assessment"
+        }
         val trigger = checkNotNull(observed) { "GCC interruption lacks its selected planning trigger" }
         require(prefix.stateSha256 == trigger.stateSha256 && prefix.functionCount == trigger.total &&
-            prefix.completed >= trigger.completed && prefix.completed < prefix.functionCount && prefix.reused == 0L
+            prefix.completed >= trigger.completed && prefix.completed <= prefix.functionCount && prefix.reused == 0L
         ) { "GCC stopped prefix does not extend the observed fresh planning checkpoint" }
         val unsigned = JsonObject(mapOf(
             "provider" to JsonPrimitive("gcc-bundled-stopped-prefix-assessment-v1"),
@@ -62,7 +68,16 @@ internal class GccBundledCheckpointTrigger(val minimumCompletedFunctions: Long) 
             "partial" to JsonPrimitive(prefix.partial), "failed" to JsonPrimitive(prefix.failed),
             "reused" to JsonPrimitive(prefix.reused),
             "complete" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
-        ))
+        ) + (planningPrefixSha256?.let { mapOf("planningPrefixSha256" to JsonPrimitive(it)) } ?: emptyMap()) +
+            (inFlightArtifacts?.let { mapOf(
+                "inFlightArtifacts" to OracleJson.parseCanonical(it),
+                "inFlightArtifactsSha256" to JsonPrimitive(OracleArtifacts.sha256(it)),
+            ) } ?: emptyMap()) + (capturedProgress?.let { mapOf(
+                "capturedProgressUtf8" to JsonPrimitive(it.toString(Charsets.UTF_8)),
+                "capturedProgressSha256" to JsonPrimitive(OracleArtifacts.sha256(it)),
+                "effectiveProgressUtf8" to JsonPrimitive(checkNotNull(effectiveProgress).toString(Charsets.UTF_8)),
+                "effectiveProgressDerived" to JsonPrimitive(!it.contentEquals(effectiveProgress)),
+            ) } ?: emptyMap()))
         return OracleJson.canonicalBytes(JsonObject(unsigned + ("assessmentSha256" to
             JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(unsigned))))))
     }
