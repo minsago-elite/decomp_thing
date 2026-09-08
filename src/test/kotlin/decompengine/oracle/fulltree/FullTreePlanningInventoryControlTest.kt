@@ -368,6 +368,61 @@ class FullTreePlanningInventoryControlTest {
             assertEquals(2, truncatedSanitizerCollision.toSet().size)
         }
 
+    @Test
+    fun `llvm profiledata dispatch binds exact planning owners without an emitted denominator`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+
+        val modules = registry.requireOwnerModulesForShard("llvm-lib-profiledata")
+        assertEquals(18, modules.size)
+        assertEquals(
+            listOf(
+                "source/llvm/lib/ProfileData/Coverage/CoverageMapping.cpp",
+                "source/llvm/lib/ProfileData/Coverage/CoverageMappingReader.cpp",
+                "source/llvm/lib/ProfileData/Coverage/CoverageMappingWriter.cpp",
+                "source/llvm/lib/ProfileData/DataAccessProf.cpp",
+                "source/llvm/lib/ProfileData/IndexedMemProfData.cpp",
+                "source/llvm/lib/ProfileData/InstrProf.cpp",
+                "source/llvm/lib/ProfileData/InstrProfCorrelator.cpp",
+                "source/llvm/lib/ProfileData/InstrProfReader.cpp",
+                "source/llvm/lib/ProfileData/ItaniumManglingCanonicalizer.cpp",
+                "source/llvm/lib/ProfileData/MemProf.cpp",
+                "source/llvm/lib/ProfileData/MemProfCommon.cpp",
+                "source/llvm/lib/ProfileData/MemProfRadixTree.cpp",
+                "source/llvm/lib/ProfileData/MemProfSummary.cpp",
+                "source/llvm/lib/ProfileData/PGOCtxProfReader.cpp",
+                "source/llvm/lib/ProfileData/ProfileSummaryBuilder.cpp",
+                "source/llvm/lib/ProfileData/SampleProf.cpp",
+                "source/llvm/lib/ProfileData/SampleProfReader.cpp",
+                "source/llvm/lib/ProfileData/SymbolRemappingReader.cpp",
+            ),
+            modules.map { it.sourcePath },
+        )
+        assertTrue(modules.all { it.moduleId == it.unitId && it.shardId == "llvm-lib-profiledata" })
+        assertEquals(
+            listOf(
+                "source/llvm/lib/ProfileData/GCOV.cpp",
+                "source/llvm/lib/ProfileData/InstrProfWriter.cpp",
+                "source/llvm/lib/ProfileData/MemProfReader.cpp",
+                "source/llvm/lib/ProfileData/MemProfSummaryBuilder.cpp",
+                "source/llvm/lib/ProfileData/PGOCtxProfWriter.cpp",
+                "source/llvm/lib/ProfileData/SampleProfWriter.cpp",
+            ),
+            registry.sourceOnlyUnits.filter { it.shardId == "llvm-lib-profiledata" }.map { it.sourcePath },
+        )
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("llvm-lib-profiledata-missing")
+        }
+    }
+
     private fun generate(
         fixture: FullTreeControlFixture,
         output: Path,
