@@ -21,14 +21,14 @@ import kotlin.test.*
 
 /** Owned inert records only: no adapter, analyzer or executor performs workflow work. */
 class WebProgressCutoverTest {
-    private class Fixture : AutoCloseable {
+    private class Fixture(clock: java.time.Clock = java.time.Clock.systemUTC()) : AutoCloseable {
         val root = Files.createTempDirectory("web-progress-cutover-")
         val store = JobStore(root)
         val job = store.createFromUpload("cutover.elf", elfFixture())
         lateinit var owner: WorkflowAttemptStore
         val service = WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected analysis") },
             JobReconstructor { _, _ -> error("Unexpected reconstruction") },
-            attemptStoreFactory = { WorkflowAttemptStore.open(it).also { value -> owner = value } })
+            attemptStoreFactory = { WorkflowAttemptStore.open(it, clock).also { value -> owner = value } })
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         val origin = "http://127.0.0.1:${server.address.port}"
         val access = LocalWebAccess(LocalWebAccessConfiguration(origin))
@@ -215,4 +215,68 @@ class WebProgressCutoverTest {
             }
         } finally { readerWorker.shutdownNow(); assertTrue(readerWorker.awaitTermination(5, TimeUnit.SECONDS)) }
     }
+    @Test fun `owned terminal expiry reaches SSE and polling with recoverable empty snapshots`() {
+        var now = java.time.Instant.parse("2026-09-08T00:00:00Z")
+        val clock = object : java.time.Clock() {
+            override fun instant() = now
+            override fun getZone(): java.time.ZoneId = java.time.ZoneOffset.UTC
+            override fun withZone(zone: java.time.ZoneId): java.time.Clock = java.time.Clock.fixed(now, zone)
+        }
+        Fixture(clock).use { f ->
+            f.publish(0, 7)
+            val started = f.owner.transition(f.job.id, f.run.runId, f.run.version, WorkflowTransition.Start).attempt
+            val finished = f.owner.transition(f.job.id, f.run.runId, started.version,
+                WorkflowTransition.Finish(WorkflowRunState.COMPLETED, WorkflowTerminalReason.NO_CHANGES)).attempt
+            val metadata = Files.readAllBytes(f.root.resolve("${f.job.id}/workflow-state.json"))
+            val original = Files.readAllBytes(f.journal)
+            now = now.plus(Duration.ofHours(24)).minusNanos(1)
+            assertEquals(ProgressRetentionResult.RETAINED, f.service.expireProgressJournal(f.job.id, f.run.runId, false))
+            now = now.plusNanos(1)
+            assertEquals(ProgressRetentionResult.RETAINED, f.service.expireProgressJournal(f.job.id, f.run.runId, true))
+            assertContentEquals(original, Files.readAllBytes(f.journal))
+            val cursor = data(f.get("/snapshot")).getValue("throughCursor").jsonPrimitive.content
+            val readerWorker = Executors.newSingleThreadExecutor()
+            try {
+                val connection = f.stream(cursor)
+                assertEquals(200, connection.statusCode())
+                connection.body().bufferedReader().use { reader ->
+                    val pending = readerWorker.submit<Map<String, String>> { frame(reader) }
+                    assertEquals(ProgressRetentionResult.EXPIRED, f.service.expireProgressJournal(f.job.id, f.run.runId, false))
+                    val gap = pending.get(5, TimeUnit.SECONDS)
+                    assertEquals("retention.gap", gap["event"]); assertFalse("id" in gap)
+                    val control = Json.parseToJsonElement(gap.getValue("data")).jsonObject
+                    assertEquals(JsonNull, control["cursor"]); assertEquals(JsonNull, control["sequence"])
+                    assertNull(readerWorker.submit<String?> { reader.readLine() }.get(5, TimeUnit.SECONDS))
+                }
+                val expired = f.get("/events?transport=poll&after=$cursor")
+                assertEquals(410, expired.statusCode())
+                assertEquals("EVENT_GAP", Json.parseToJsonElement(expired.body()).jsonObject.getValue("error").jsonObject.getValue("code").jsonPrimitive.content)
+                val fresh = data(f.get("/snapshot"))
+                val progress = fresh.getValue("progress").jsonObject
+                assertEquals("0", progress.getValue("retainedEventCount").jsonPrimitive.content)
+                assertEquals("8", progress.getValue("historyDropped").jsonPrimitive.content)
+                assertEquals(JsonNull, fresh["oldestCursor"])
+                assertEquals("7", fresh.getValue("throughSequence").jsonPrimitive.content)
+                val freshCursor = fresh.getValue("throughCursor").jsonPrimitive.content
+                assertTrue(replay(f, freshCursor).isEmpty())
+                assertEquals(ProgressRetentionResult.RETAINED, f.service.expireProgressJournal(f.job.id, f.run.runId, false))
+                assertEquals(finished, f.service.getAttempt(f.job.id, f.run.runId))
+                assertContentEquals(metadata, Files.readAllBytes(f.root.resolve("${f.job.id}/workflow-state.json")))
+            } finally { readerWorker.shutdownNow(); assertTrue(readerWorker.awaitTermination(5, TimeUnit.SECONDS)) }
+        }
+    }
+
+    @Test fun `service retention rejects foreign attempts and shutdown without touching history`() = Fixture().use { f ->
+        val original = Files.readAllBytes(f.journal)
+        assertEquals("RUN_NOT_FOUND", assertFailsWith<WebJobServiceException> {
+            f.service.expireProgressJournal(f.job.id, "foreign", true)
+        }.code)
+        assertEquals(ProgressRetentionResult.RETAINED, f.service.expireProgressJournal(f.job.id, f.run.runId, false))
+        f.service.beginShutdown()
+        assertEquals("SERVICE_STOPPED", assertFailsWith<WebJobServiceException> {
+            f.service.expireProgressJournal(f.job.id, f.run.runId, false)
+        }.code)
+        assertContentEquals(original, Files.readAllBytes(f.journal))
+    }
+
 }
