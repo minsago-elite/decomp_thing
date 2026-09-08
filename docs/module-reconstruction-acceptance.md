@@ -176,3 +176,11 @@ fixture also relocates the build definition to `config/rebuild.mk`, verifies its
 retained source-input digest and completes strict extraction and rebuilding.
 That relocation fixture remains a Make build. The separate generated-C/Ninja
 profile provides a non-Make build path; see [its qualification](generated-c-ninja.md).
+
+Build diagnostic ownership reads the selected `module-plan-evidence` declaration.
+Relocating that report preserves planned module IDs in the build contract rather
+than silently assigning fallback source-path owners. The service fixture relocates
+the plan to `reports/planning/modules.json`, compares planned IDs with build owners,
+and requires identical build contracts after archive extraction and rebuilding.
+This covers build ownership; the separate generated-C repair index still has
+its own default report-path assumptions.

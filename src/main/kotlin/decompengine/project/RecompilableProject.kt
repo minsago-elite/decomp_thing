@@ -260,7 +260,7 @@ internal object GeneratedCProjectBuilder {
         resetBuildDirectory(projectRoot.resolve("build"))
         val reportsDir = projectRoot.resolve("reports").createDirectories()
         val diagnosticsDir = reportsDir.resolve("build/modules").createDirectories()
-        val owners = discoverOwners(projectRoot)
+        val owners = discoverOwners(projectRoot, profile)
         val command = invocation.command
         writeBuildInstructions(projectRoot, invocation)
         val sourceRevisionBeforeBuild = captureBuildSourceRevision(projectRoot, profile)
@@ -397,8 +397,8 @@ internal object GeneratedCProjectBuilder {
         handles.forEach { handle -> if (handle.isAlive) runCatching { handle.onExit().get(5, TimeUnit.SECONDS) } }
     }
 
-    private fun discoverOwners(projectDir: Path): List<BuildOwner> {
-        val planPath = projectDir.resolve("reports/module_plan.json")
+    private fun discoverOwners(projectDir: Path, profile: ReconstructionProfile): List<BuildOwner> {
+        val planPath = projectDir.resolve(profile.layout.declaration("module-plan-evidence").materialize())
         val planned = if (planPath.isRegularFile()) {
             val root = Json.parseToJsonElement(planPath.readText()).jsonObject
             root["modules"]?.jsonArray.orEmpty().associate { element ->

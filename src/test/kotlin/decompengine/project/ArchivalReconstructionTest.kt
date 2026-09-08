@@ -58,6 +58,7 @@ class ArchivalReconstructionTest {
         val relocated = mapOf(
             "build-definition" to "config/rebuild.mk",
             "program-model-evidence" to "reports/inputs/model.json",
+            "module-plan-evidence" to "reports/planning/modules.json",
             "confidence-evidence" to "reports/assessment/confidence.json",
             "toolchain-evidence" to "reports/environment/tools.json",
             "unresolved-evidence" to "reports/assessment/unresolved.md",
@@ -76,6 +77,14 @@ class ArchivalReconstructionTest {
         val result = ArchivalReconstructionService(analyzer, profile = profile).reconstruct(input, temp.resolve("result"))
         assertEquals(listOf("-f", "config/rebuild.mk"), result.build.command.takeLast(2))
         val contract = Json.parseToJsonElement(result.projectDir.resolve("reports/build_contract.json").readText()).jsonObject
+        val plannedModules = Json.parseToJsonElement(result.projectDir.resolve(relocated.getValue("module-plan-evidence"))
+            .readText()).jsonObject.getValue("modules").jsonArray.map { it.jsonObject }
+        assertTrue(plannedModules.isNotEmpty())
+        val buildOwners = contract.getValue("modules").jsonArray.map { it.jsonObject }
+        for (module in plannedModules) {
+            val owner = buildOwners.single { it.getValue("source") == module.getValue("sourcePath") }
+            assertEquals(module.getValue("id"), owner.getValue("id"))
+        }
         val definitionInput = contract.getValue("sourceInputs").jsonArray.single {
             it.jsonObject.getValue("path").jsonPrimitive.content == "config/rebuild.mk"
         }.jsonObject
@@ -90,6 +99,7 @@ class ArchivalReconstructionTest {
             ArchivalBundleLimits(), profile, 2048)
         for (path in relocated.values) assertEquals(result.projectDir.resolve(path).readText(), extracted.resolve(path).readText())
         assertEquals(0, ReconstructionAdapters.resolve(profile).build(extracted, profile).returnCode)
+        assertEquals(contract, Json.parseToJsonElement(extracted.resolve("reports/build_contract.json").readText()).jsonObject)
         assertEquals(ArchivalProjectAuditor.audit(result.projectDir, profile).toJson(),
             ArchivalProjectAuditor.audit(extracted, profile).toJson())
     }
