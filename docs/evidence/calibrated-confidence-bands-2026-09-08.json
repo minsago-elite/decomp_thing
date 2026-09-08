@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "kind": "confidence-calibration-evidence",
+  "recordedAt": "2026-09-08",
+  "repositoryCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "scope": {
+    "benchmark": "gcc",
+    "revision": "16.2.0",
+    "dimension": "function-boundary-recovery",
+    "distributionStatus": "unverified"
+  },
+  "calibration": {
+    "status": "unavailable",
+    "bands": [],
+    "minimumSampleSupport": null,
+    "empiricalErrorRate": null,
+    "tolerance": null,
+    "outOfDistributionRule": {
+      "status": "defined",
+      "action": "unresolved",
+      "calibratedProbability": null
+    }
+  },
+  "evidence": [
+    {
+      "path": "docs/heuristic-score-interpretation.md",
+      "sha256": "86acd2f52f8b38aabad9a5f98a8933eba6fd45d2da059eeca765c2d4fceb8c56",
+      "claim": "Current fixed score formulas are explicitly uncalibrated and expose no empirical support."
+    },
+    {
+      "path": "oracle/heuristic-score-interpretation.schema.json",
+      "sha256": "7052f78a3e144c9a78f42157db65de8fb056ff663b27c431cb76b4eb13e08bc9",
+      "claim": "The current report descriptor requires an uncalibrated status and null calibrated probability, artifact identity, and sample count."
+    },
+    {
+      "path": "oracle/gcc/16.2.0/function-recovery-oracle.json",
+      "sha256": "b49b8a72a96580bd8727d9dc530753f40f78185a656f472ebe83a7a1f6fc9aae",
+      "claim": "A checked GCC function oracle exists, but this repository has no authenticated recovered production score artifact for this record."
+    }
+  ],
+  "productionGap": {
+    "status": "open",
+    "blockedBy": [
+      "#40 authenticated production structural replay and score evidence",
+      "#685 empirical band error verification against a declared tolerance",
+      "#42 distribution qualification for the calibrated population"
+    ],
+    "referenceCorpusBoundary": "#41 supplies a reference driver corpus; its observations do not calibrate reconstructed accuracy."
+  }
+}
