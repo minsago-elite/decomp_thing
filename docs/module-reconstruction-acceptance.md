@@ -268,3 +268,16 @@ identity form before invoking the compiler.
 The auditor's metadata test covers missing and null values, numeric strings,
 negative values, zero budgets and exceeded limits while preserving unaffected
 module evidence. Its authored fixture supplies no ACP release receipt.
+
+Direct `SourceTreeGenerator.generate` calls select a planner from the admitted
+profile when no planner is supplied. The planner consumes the profile's entity,
+dependency-edge and work limits, maximum functions per module, and declared
+module implementation/interface paths. The archival service uses this same
+selection path.
+
+An explicitly supplied planner retains stricter limits; generation caps each of
+its four limits by the profile. Its module implementation and interface
+declarations must match the profile before traversal or source-tree writes.
+Compatible Make and Ninja module declarations remain interchangeable even though
+their build definitions differ. This binds planning policy to the selected
+profile; the service's independent host admission remains a separate check.
