@@ -86,6 +86,20 @@ internal object DescriptorBoundAtomicStateFile {
         faultInjector,
     )
 
+    /** Larger immutable inventory manifests; ordinary journal records retain their one-MiB limit. */
+    fun publishManifestNoReplace(
+        parent: LinuxDescriptor,
+        name: String,
+        bytes: ByteArray,
+        maximumBytes: Int,
+        faultInjector: DescriptorBoundStateFaultInjector? = null,
+    ): DescriptorBoundStateSnapshot = publishNoReplaceWithMode(
+        parent, name, bytes, maximumBytes, MAXIMUM_MANIFEST_BYTES, OWNER_READ_ONLY_MODE, faultInjector,
+    )
+
+    fun readManifestOrNull(parent: LinuxDescriptor, name: String, maximumBytes: Int): DescriptorBoundStateSnapshot? =
+        inspectWithModeOrNull(parent, name, maximumBytes, MAXIMUM_MANIFEST_BYTES, OWNER_READ_ONLY_MODE)?.use { it.snapshot() }
+
     /** Publishes immutable transport bytes which are owner-readable and owner-executable. */
     fun publishExecutableNoReplace(
         parent: LinuxDescriptor,
@@ -453,6 +467,7 @@ private fun stateFail(message: String): Nothing = throw IOException(message)
 private const val OWNER_DIRECTORY_MODE = 0x1c0 // 0700
 private const val OWNER_READ_ONLY_MODE = 0x100 // 0400
 private const val OWNER_READ_EXECUTE_MODE = 0x140 // 0500
+private const val MAXIMUM_MANIFEST_BYTES = 64 * 1024 * 1024
 private const val MAXIMUM_STATE_FILE_BYTES = 1024 * 1024
 private const val MAXIMUM_EXECUTABLE_BYTES = 512 * 1024 * 1024
 private val STATE_NAME = Regex("[a-z0-9][a-z0-9._-]{0,126}[a-z0-9]")

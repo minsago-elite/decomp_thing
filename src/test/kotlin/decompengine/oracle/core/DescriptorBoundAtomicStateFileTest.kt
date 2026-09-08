@@ -18,6 +18,28 @@ import kotlin.test.assertTrue
 
 class DescriptorBoundAtomicStateFileTest {
     @Test
+    fun `large manifest publication preserves read-only no-replace semantics without enlarging journal bounds`() = withStateDirectory { path ->
+        LinuxFilesystemSyscalls.openRoot(path).use { root ->
+            val bytes = ByteArray(1024 * 1024 + 1) { 42 }
+            assertFailsWith<IllegalArgumentException> {
+                DescriptorBoundAtomicStateFile.publishNoReplace(root, "large.json", bytes, bytes.size)
+            }
+            assertFalse(Files.exists(path.resolve("large.json")))
+            val snapshot = DescriptorBoundAtomicStateFile.publishManifestNoReplace(root, "large.json", bytes, bytes.size)
+            assertContentEquals(bytes, snapshot.bytes)
+            assertContentEquals(bytes, DescriptorBoundAtomicStateFile.readManifestOrNull(root, "large.json", bytes.size)?.bytes)
+            assertEquals(PosixFilePermissions.fromString("r--------"), Files.getPosixFilePermissions(path.resolve("large.json")))
+            assertFailsWith<IOException> {
+                DescriptorBoundAtomicStateFile.publishManifestNoReplace(root, "large.json", ByteArray(bytes.size) { 43 }, bytes.size)
+            }
+            assertContentEquals(bytes, Files.readAllBytes(path.resolve("large.json")))
+            assertFailsWith<IllegalArgumentException> {
+                DescriptorBoundAtomicStateFile.readManifestOrNull(root, "large.json", 64 * 1024 * 1024 + 1)
+            }
+        }
+    }
+
+    @Test
     fun `immutable publication is durable idempotent and never replaces different bytes`() =
         withStateDirectory { path ->
             LinuxFilesystemSyscalls.openRoot(path).use { root ->
