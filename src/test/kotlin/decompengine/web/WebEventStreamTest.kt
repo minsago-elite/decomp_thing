@@ -177,7 +177,7 @@ class WebEventStreamTest {
     companion object {
         private fun journal(sequences: List<Int>) = buildJsonObject {
             put("schemaVersion", 1); put("displayOnly", true); put("nextSequence", (sequences.lastOrNull() ?: -1) + 1)
-            put("queueDropped", 0); put("historyDropped", 0); put("truncated", false)
+            put("queueDropped", 0); put("historyDropped", sequences.firstOrNull() ?: 0); put("truncated", (sequences.firstOrNull() ?: 0) > 0)
             put("events", buildJsonArray { sequences.forEach { seq -> add(buildJsonObject {
                 put("sequence", seq); put("runId", "writer_fixture"); put("workflow", "reconstruct")
                 put("time", "2026-09-06T00:00:00Z"); put("kind", "message"); put("text", "PRIVATE_STREAM")

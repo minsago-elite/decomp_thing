@@ -24,7 +24,7 @@ function browser(fetch) {
     close() { this.closed = true; }
   }
   const window = { addEventListener(name, callback) { state.windowEvents[name] = callback; } };
-  vm.runInNewContext(source, { window, document, BroadcastChannel: Channel, AbortController, DOMException, URL,
+  vm.runInNewContext(source, { window, document, BroadcastChannel: Channel, AbortController, DOMException, URL, Headers,
     location: { origin: 'http://127.0.0.1:8000', replace(path) { state.redirects.push(path); }, assign() { assert.fail('Unexpected navigation'); } },
     setTimeout(callback, delay) { const id = ++nextTimer; state.timers.set(id, { callback, delay }); return id; },
     clearTimeout(id) { state.timers.delete(id); },
@@ -50,7 +50,7 @@ test('expiry timer aborts outstanding reads and ignores a late successful respon
   const late = deferred();
   const { state, window } = browser(async input => input.endsWith('/csrf') ? credentials() : late.promise);
   await flush();
-  assert.deepEqual(Object.keys(window.legacySession).sort(), ['isActive', 'request']);
+  assert.deepEqual(Object.keys(window.legacySession).sort(), ['isActive', 'mutate', 'request']);
   const pending = window.legacySession.request('/api/jobs/inert');
   const rejected = assert.rejects(pending, { name: 'AbortError' });
   const timer = [...state.timers.values()][0];
@@ -105,4 +105,20 @@ test('history cache departure removes private content and restoration requires a
   state.windowEvents.pageshow({ persisted: true });
   assert.deepEqual(state.redirects, ['/login']);
   assert.equal(state.requests.length, 1);
+});
+
+test('operator mutations preserve action headers and attach private CSRF without retry', async () => {
+  const { state, window } = browser(async input => input.endsWith('/csrf') ? credentials() : { status: 401 });
+  await flush();
+  await assert.rejects(window.legacySession.mutate('/api/operator/auth-methods', {
+    headers: { 'X-Decomp-Operator-Action': 'inspect-auth-methods' }, body: '{}',
+  }), { name: 'AbortError' });
+  assert.equal(state.requests.length, 2);
+  const options = state.requests[1].options;
+  assert.equal(options.method, 'POST');
+  assert.equal(options.headers.get('Content-Type'), 'application/json');
+  assert.equal(options.headers.get('X-CSRF-Token'), 'synthetic-csrf');
+  assert.equal(options.headers.get('X-Decomp-Operator-Action'), 'inspect-auth-methods');
+  assert.equal(options.body, '{}');
+  assert.equal(window.legacySession.isActive(), false);
 });

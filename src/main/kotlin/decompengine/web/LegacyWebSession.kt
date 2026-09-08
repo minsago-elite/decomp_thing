@@ -64,7 +64,13 @@ internal val LEGACY_SESSION_SCRIPT = """
     if (!active) throw new DOMException('Session ended', 'AbortError');
     return response;
   }
-  Object.defineProperty(window, 'legacySession', { value: Object.freeze({ request, isActive: () => active }) });
+  async function mutate(input, options = {}) {
+    const headers = new Headers(options.headers);
+    headers.set('Content-Type', 'application/json');
+    headers.set('X-CSRF-Token', await credentials());
+    return request(input, { ...options, method: 'POST', headers, body: options.body ?? '{}' });
+  }
+  Object.defineProperty(window, 'legacySession', { value: Object.freeze({ request, mutate, isActive: () => active }) });
   window.addEventListener('pagehide', clear);
   window.addEventListener('pageshow', event => { if (event.persisted) invalidate(); });
   const message = document.createElement('p');
