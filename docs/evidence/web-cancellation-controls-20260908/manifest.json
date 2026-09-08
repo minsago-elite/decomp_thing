@@ -1,0 +1,21 @@
+{
+  "sourceCommit": "0e5730f5",
+  "masterIncluded": "1c999572",
+  "verification": {
+    "frontendTests": 384,
+    "failures": 0,
+    "lint": "passed",
+    "typecheck": "passed",
+    "productionFrontendBuild": "passed"
+  },
+  "files": {
+    "frontend-tests.txt": "1f02e0e06eb99087fc1336e768f5d11c28b2f492eaff115c7b274ace5cbed789",
+    "frontend-build.txt": "26d0c195283389ea415493c5dbf8741fcf6e10712e8c7e370425dd7c248ede15"
+  },
+  "limits": [
+    "Mocked transport component tests and browser storage tests, not packaged browser qualification.",
+    "JVM unchanged; parent API checkpoint retains 316 selected passing tests.",
+    "Production adapters remain unregistered; full session/restart integration and broader concurrent races remain open."
+  ],
+  "initialFailures": "Six test fixtures used trailing slash in normalized storage key; corrected fixture keys, then all 384 passed."
+}
