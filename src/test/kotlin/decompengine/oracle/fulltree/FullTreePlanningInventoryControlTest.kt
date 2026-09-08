@@ -19,6 +19,37 @@ import kotlinx.serialization.json.JsonPrimitive
 
 class FullTreePlanningInventoryControlTest {
     @Test
+    fun `clang parse dispatch binds all 18 planning owners without an emitted denominator`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+
+        val modules = registry.requireOwnerModulesForShard("clang-lib-parse")
+        assertEquals(18, modules.size)
+        assertEquals(18, modules.map { it.sourcePath }.toSet().size)
+        assertEquals(18, modules.map { it.unitId }.toSet().size)
+        assertTrue(modules.all { it.sourceKind == "handwritten" })
+        assertTrue(
+            modules.all {
+                it.moduleId == it.unitId &&
+                    it.shardId == "clang-lib-parse" &&
+                    it.sourcePath.startsWith("source/clang/lib/Parse/")
+            },
+        )
+        assertTrue(registry.sourceOnlyUnits.none { it.shardId == "clang-lib-parse" })
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("clang-lib-parse-missing")
+        }
+    }
+
+    @Test
     fun `fixture planning inventory is closed exact and byte deterministic`() =
         inControlTemporaryDirectory { directory ->
             val fixture = createFullTreeControlFixture(directory.resolve("fixture"))
