@@ -92,6 +92,36 @@ class FullTreePlanningInventoryControlTest {
         }
 
     @Test
+    fun `llvm asmparser dispatch binds exact planning owners without an emitted denominator`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+
+        val modules = registry.requireOwnerModulesForShard("llvm-lib-asmparser")
+        assertEquals(4, modules.size)
+        assertEquals(
+            listOf(
+                "source/llvm/lib/AsmParser/AsmParserContext.cpp",
+                "source/llvm/lib/AsmParser/LLLexer.cpp",
+                "source/llvm/lib/AsmParser/LLParser.cpp",
+                "source/llvm/lib/AsmParser/Parser.cpp",
+            ),
+            modules.map { it.sourcePath },
+        )
+        assertTrue(modules.all { it.moduleId == it.unitId && it.shardId == "llvm-lib-asmparser" })
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("llvm-lib-asmparser-missing")
+        }
+    }
+
+    @Test
     fun `shuffled stale forged and expanded planning documents fail closed`() =
         inControlTemporaryDirectory { directory ->
             val fixture = createFullTreeControlFixture(directory.resolve("fixture"))
