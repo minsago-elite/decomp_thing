@@ -35,6 +35,34 @@ class WebProgressRetentionWorkerTest {
         } finally { release.countDown(); worker.stop(); worker.awaitStopped(TimeUnit.SECONDS.toNanos(3)) }
     }
 
+    @Test fun `blocked owner notification does not hold the executor termination lock`() {
+        val entered = CountDownLatch(1); val releaseWork = CountDownLatch(1)
+        val notifying = CountDownLatch(1); val releaseNotification = CountDownLatch(1)
+        val worker = WebProgressRetentionWorker(1, {
+            entered.countDown()
+            while (releaseWork.count != 0L) try { releaseWork.await() } catch (_: InterruptedException) { }
+        }, {
+            notifying.countDown()
+            while (releaseNotification.count != 0L) try { releaseNotification.await() } catch (_: InterruptedException) { }
+        })
+        val stopper = java.util.concurrent.Executors.newSingleThreadExecutor()
+        try {
+            worker.start(); assertTrue(entered.await(3, TimeUnit.SECONDS))
+            worker.stop(); releaseWork.countDown()
+            assertTrue(notifying.await(3, TimeUnit.SECONDS))
+            // Models another service close while the first notification waits for its monitor.
+            // Previously stopped() held ThreadPoolExecutor.mainLock and this call deadlocked.
+            stopper.submit { worker.stop() }.get(3, TimeUnit.SECONDS)
+            assertTrue(worker.isIdle)
+            releaseNotification.countDown()
+            worker.awaitStopped(TimeUnit.SECONDS.toNanos(3))
+        } finally {
+            releaseWork.countDown(); releaseNotification.countDown()
+            worker.stop(); worker.awaitStopped(TimeUnit.SECONDS.toNanos(3))
+            stopper.shutdownNow(); assertTrue(stopper.awaitTermination(3, TimeUnit.SECONDS))
+        }
+    }
+
     @Test fun `opt-in service maintenance expires eligible runs preserves pins and isolates malformed journals`() {
         val root = Files.createTempDirectory("web-periodic-retention-")
         val store = JobStore(root)
