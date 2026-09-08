@@ -103,6 +103,8 @@ sealed interface WorkflowJobInspection {
     data class Unavailable(override val jobId: String, val diagnostic: WorkflowStoreDiagnostic) : WorkflowJobInspection
 }
 data class WorkflowMutation(val snapshot: WorkflowJobSnapshot, val attempt: WorkflowAttempt)
+/** Current attempt is for owned-task coordination; receipt describes the original request response. */
+internal data class WorkflowPinRequestResult(val attempt: WorkflowAttempt, val receipt: WorkflowPinAuditEntry, val replayed: Boolean)
 class WorkflowStoreException(val code: String, message: String, val outcomeUnknown: Boolean = false, cause: Throwable? = null) : RuntimeException(message, cause)
 
 internal enum class WorkflowStoreFaultPoint { AFTER_TEMP_WRITE, AFTER_TEMP_FSYNC, BEFORE_RENAME, AFTER_RENAME, AFTER_DIRECTORY_FSYNC }
@@ -165,6 +167,31 @@ class WorkflowAttemptStore private constructor(
             val updated = replace(current, attempt).copy(pinAudit = current.pinAudit.append(clock.instant(), actor, old, attempt))
             persist(directory, updated)
             WorkflowMutation(updated, attempt)
+        }
+    }
+
+    /** HTTP-request preparation: scope keys to actor and selected pin resource. Replay precedes CAS. */
+    internal fun requestProgressRetentionPinned(jobId: String, runId: String, expectedRunVersion: String,
+        pinned: Boolean, actor: WorkflowPinActor, requestKey: String): WorkflowPinRequestResult = withJob(jobId) { directory ->
+        if (actor.kind != "browser_session") fail("INVALID_PIN_ACTOR", "A pin request requires a browser session actor.")
+        if (!requestKey.matches(Regex("[A-Za-z0-9_-]{16,128}"))) fail("INVALID_IDEMPOTENCY_KEY", "The pin request key is invalid.")
+        val current = available(jobId, directory).snapshot
+        requireRecovered(current, directory)
+        val old = current.attempts.singleOrNull { it.runId == runId }
+            ?: fail("RUN_NOT_FOUND", "The requested attempt does not belong to this job.")
+        val keyDigest = sha256("decomp-pin-request-v1\u0000$jobId\u0000$runId\u0000${actor.sessionDigest}\u0000$requestKey".toByteArray(Charsets.US_ASCII))
+        val recorded = current.pinAudit.entries.singleOrNull { it.actor == actor && it.runId == runId && it.requestKeyDigest == keyDigest }
+        if (recorded != null) {
+            if (recorded.previousVersion != expectedRunVersion || recorded.pinned != pinned) {
+                fail("IDEMPOTENCY_CONFLICT", "The pin request key was already used for different intent.")
+            }
+            WorkflowPinRequestResult(old, recorded, replayed = true)
+        } else {
+            checkVersion(old.version, expectedRunVersion)
+            val attempt = if (old.progressRetentionPinned == pinned) old else old.copy(version = newId("version"), progressRetentionPinned = pinned)
+            val audit = current.pinAudit.append(clock.instant(), actor, old, attempt, keyDigest)
+            persist(directory, replace(current, attempt).copy(pinAudit = audit))
+            WorkflowPinRequestResult(attempt, audit.entries.last(), replayed = false)
         }
     }
 

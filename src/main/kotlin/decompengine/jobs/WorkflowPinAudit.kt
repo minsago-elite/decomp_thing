@@ -26,9 +26,12 @@ data class WorkflowPinActor private constructor(val kind: String, val sessionDig
 data class WorkflowPinAuditEntry(
     val sequence: ULong, val at: Instant, val actor: WorkflowPinActor, val runId: String,
     val pinned: Boolean, val previousVersion: String, val appliedVersion: String,
-)
+    val requestKeyDigest: String? = null,
+) {
+    val outcome: String get() = if (previousVersion == appliedVersion) "unchanged" else "applied"
+}
 
-/** Bounded receipts of applied changes, committed in the same file as the pin. Not a request log. */
+/** Bounded successful policy receipts, committed in the same file as the pin. Not a denial log. */
 class WorkflowPinAudit private constructor(val omitted: ULong, entries: List<WorkflowPinAuditEntry>) {
     val entries: List<WorkflowPinAuditEntry> = Collections.unmodifiableList(entries.toList())
     init {
@@ -39,17 +42,24 @@ class WorkflowPinAudit private constructor(val omitted: ULong, entries: List<Wor
             listOf(entry.runId, entry.previousVersion, entry.appliedVersion).forEach {
                 require(it.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")))
             }
-            require(entry.previousVersion != entry.appliedVersion)
+            require(entry.requestKeyDigest == null || entry.requestKeyDigest.matches(Regex("[0-9a-f]{64}")))
+            require(entry.outcome == "applied" || entry.requestKeyDigest != null)
+            require(entry.requestKeyDigest == null || entry.actor.kind == "browser_session")
             require(entry.at.toString().length <= 40)
         }
+        val keyed = entries.filter { it.requestKeyDigest != null }
+        require(keyed.map { Triple(it.actor, it.runId, it.requestKeyDigest) }.distinct().size == keyed.size)
     }
     override fun equals(other: Any?): Boolean = other is WorkflowPinAudit && omitted == other.omitted && entries == other.entries
     override fun hashCode(): Int = 31 * omitted.hashCode() + entries.hashCode()
 
-    internal fun append(at: Instant, actor: WorkflowPinActor, before: WorkflowAttempt, after: WorkflowAttempt): WorkflowPinAudit {
+    internal fun append(at: Instant, actor: WorkflowPinActor, before: WorkflowAttempt, after: WorkflowAttempt, requestKeyDigest: String? = null): WorkflowPinAudit {
         val next = omitted + entries.size.toULong()
         if (next == ULong.MAX_VALUE) throw WorkflowStoreException("STORE_LIMIT", "The retained pin audit sequence is exhausted.")
-        val appended = entries + WorkflowPinAuditEntry(next, at, actor, after.runId, after.progressRetentionPinned, before.version, after.version)
+        if (entries.size == MAX_ENTRIES && entries.first().let { it.requestKeyDigest != null && java.time.Duration.between(it.at, at) < REQUEST_RETENTION }) {
+            throw WorkflowStoreException("PIN_RECEIPT_CAPACITY", "Retained pin request receipts are at capacity. Retry after their retention window.")
+        }
+        val appended = entries + WorkflowPinAuditEntry(next, at, actor, after.runId, after.progressRetentionPinned, before.version, after.version, requestKeyDigest)
         return WorkflowPinAudit(omitted + if (entries.size == MAX_ENTRIES) 1uL else 0uL, appended.takeLast(MAX_ENTRIES))
     }
     internal fun validateTargets(attempts: List<WorkflowAttempt>) {
@@ -57,7 +67,9 @@ class WorkflowPinAudit private constructor(val omitted: ULong, entries: List<Wor
         entries.groupBy { it.runId }.forEach { (runId, receipts) ->
             val attempt = requireNotNull(byId[runId])
             require(receipts.last().pinned == attempt.progressRetentionPinned)
-            require(receipts.zipWithNext().all { (before, after) -> before.pinned != after.pinned })
+            require(receipts.zipWithNext().all { (before, after) ->
+                if (after.outcome == "unchanged") before.pinned == after.pinned else before.pinned != after.pinned
+            })
         }
     }
     internal fun encode(): JsonObject = buildJsonObject {
@@ -68,11 +80,13 @@ class WorkflowPinAudit private constructor(val omitted: ULong, entries: List<Wor
                 put("kind", entry.actor.kind); put("sessionDigest", entry.actor.sessionDigest?.let(::JsonPrimitive) ?: JsonNull)
             })
             put("runId", entry.runId); put("action", if (entry.pinned) "progress.pin" else "progress.unpin")
-            put("outcome", "applied"); put("previousVersion", entry.previousVersion); put("appliedVersion", entry.appliedVersion)
+            put("outcome", entry.outcome); put("previousVersion", entry.previousVersion); put("appliedVersion", entry.appliedVersion)
+            entry.requestKeyDigest?.let { put("requestKeyDigest", it) }
         } }))
     }
     companion object {
         const val MAX_ENTRIES = 256
+        val REQUEST_RETENTION: java.time.Duration = java.time.Duration.ofHours(24)
         val EMPTY = WorkflowPinAudit(0uL, emptyList())
         internal fun decode(value: JsonElement): WorkflowPinAudit {
             val root = value.jsonObject
@@ -82,8 +96,7 @@ class WorkflowPinAudit private constructor(val omitted: ULong, entries: List<Wor
             require(entries.size <= MAX_ENTRIES)
             return WorkflowPinAudit(root.uint("omitted"), entries.map { value ->
                 val e = value.jsonObject
-                require(e.keys == setOf("sequence", "at", "actor", "runId", "action", "outcome", "previousVersion", "appliedVersion"))
-                require(e.text("outcome") == "applied")
+                require((e - "requestKeyDigest").keys == setOf("sequence", "at", "actor", "runId", "action", "outcome", "previousVersion", "appliedVersion"))
                 val actor = e.getValue("actor").jsonObject
                 require(actor.keys == setOf("kind", "sessionDigest"))
                 val at = e.text("at"); require(at.length <= 40)
@@ -91,7 +104,8 @@ class WorkflowPinAudit private constructor(val omitted: ULong, entries: List<Wor
                 val action = e.text("action"); require(action in setOf("progress.pin", "progress.unpin"))
                 WorkflowPinAuditEntry(e.uint("sequence"), instant,
                     WorkflowPinActor.decode(actor.text("kind"), if (actor.getValue("sessionDigest") == JsonNull) null else actor.text("sessionDigest")),
-                    e.text("runId"), action == "progress.pin", e.text("previousVersion"), e.text("appliedVersion"))
+                    e.text("runId"), action == "progress.pin", e.text("previousVersion"), e.text("appliedVersion"),
+                    if ("requestKeyDigest" in e) e.text("requestKeyDigest") else null).also { require(e.text("outcome") == it.outcome) }
             })
         }
         private fun JsonObject.text(key: String): String = getValue(key).jsonPrimitive.let { require(it.isString); it.content }

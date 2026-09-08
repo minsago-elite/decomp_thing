@@ -352,12 +352,22 @@ class WebJobService(
         }
     }
 
-    /** Internal command boundary for future authenticated pin controls. Coordinate CAS with the
-     * owned task's current lifecycle version before allowing its next transition.
-     */
+    /** Internal command boundary. Coordinate policy publication with the owned task's version. */
     @Synchronized
     internal fun setProgressRetentionPinned(jobId: String, runId: String, expectedRunVersion: String,
-        pinned: Boolean, actor: decompengine.jobs.WorkflowPinActor = decompengine.jobs.WorkflowPinActor.INTERNAL): WorkflowAttempt {
+        pinned: Boolean, actor: decompengine.jobs.WorkflowPinActor = decompengine.jobs.WorkflowPinActor.INTERNAL): WorkflowAttempt =
+        coordinatePinPublication(jobId, runId, { owner -> owner.setProgressRetentionPinned(jobId, runId, expectedRunVersion, pinned, actor).attempt }, { it })
+
+    @Synchronized
+    internal fun requestProgressRetentionPinned(jobId: String, runId: String, expectedRunVersion: String,
+        pinned: Boolean, actor: decompengine.jobs.WorkflowPinActor, requestKey: String): decompengine.jobs.WorkflowPinRequestResult =
+        coordinatePinPublication(jobId, runId, { owner -> owner.requestProgressRetentionPinned(jobId, runId, expectedRunVersion, pinned, actor, requestKey) }, { it.attempt })
+
+    /** Called only under the service monitor. A replay's original response version must never
+     * replace the current version used by a queued/running task's next lifecycle transition.
+     */
+    private fun <T> coordinatePinPublication(jobId: String, runId: String, command: (WorkflowAttemptStore) -> T,
+        currentAttempt: (T) -> WorkflowAttempt): T {
         requireInitializedRead()
         if (stopping) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
         requirePublicationAvailable()
@@ -365,12 +375,10 @@ class WebJobService(
         val owner = attempts ?: throw WebJobServiceException("JOB_NOT_FOUND", "The requested job is unavailable.")
         val task = (active[jobId] as? DurableTask)?.takeIf { it.attempt.runId == runId }
         return try {
-            owner.setProgressRetentionPinned(jobId, runId, expectedRunVersion, pinned, actor).attempt.also { updated ->
-                task?.attempt = updated
-            }
+            command(owner).also { result -> task?.attempt = currentAttempt(result) }
         } catch (failure: Throwable) {
             if (failure is WorkflowStoreException && !failure.outcomeUnknown) {
-                throw WebJobServiceException(failure.code, "The progress retention pin was not changed. Refresh the attempt before retrying.", failure)
+                throw WebJobServiceException(failure.code, "The progress retention pin request was not applied. Refresh the attempt before retrying.", failure)
             }
             val diagnostic = WebJobDiagnostic(jobId, "RECOVERY_REQUIRED",
                 "Retention pin publication is uncertain. Reopen storage before making further changes.")
