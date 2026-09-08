@@ -538,14 +538,11 @@ class UploadServer(
                         require(it.matches(Regex("runId=[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "Only an exact workflow attempt selection is supported" }
                         it.removePrefix("runId=")
                     }
-                    val snapshot = try {
-                        AgentProgressJournal.read(jobs.reportContext(job.id, runId).reportsDirectory)
-                    } catch (failure: IOException) {
-                        throw WebJobServiceException("JOB_STORAGE_UNAVAILABLE", "Persisted activity history is unavailable.", failure)
-                    } catch (failure: IllegalArgumentException) {
-                        throw WebJobServiceException("JOB_STORAGE_UNAVAILABLE", "Persisted activity history is invalid.", failure)
+                    val bytes = jobs.readProgressJournal(job.id, runId)
+                    val snapshot = try { AgentProgressJournal.decode(bytes) } catch (_: Exception) {
+                        throw WebJobServiceException("PROGRESS_UNAVAILABLE", "The retained progress journal is unavailable.")
                     }
-                    exchange.sendJson(200, snapshot?.toString() ?: "{\"schemaVersion\":1,\"displayOnly\":true,\"nextSequence\":0,\"queueDropped\":0,\"historyDropped\":0,\"truncated\":false,\"events\":[]}")
+                    exchange.sendJson(200, snapshot.toString())
                 }
                 else -> legacyError(exchange, 404, "NOT_FOUND", "The requested route does not exist.") {
                     renderErrorPage(404, "Page not found", "The requested route does not exist.")
@@ -553,13 +550,14 @@ class UploadServer(
             }
         } catch (exception: WebJobServiceException) {
             val status = if (exception.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else 503
-            val code = if (status == 404) exception.code else if (exception.code == "UPLOAD_CAPACITY") "UPLOAD_CAPACITY" else "JOB_STORAGE_UNAVAILABLE"
-            val message = when (code) {
-                "JOB_NOT_FOUND", "RUN_NOT_FOUND" -> "The requested job or attempt is unavailable."
+            val code = if (status == 404 || exception.code == "PROGRESS_UNAVAILABLE") exception.code
+            else if (exception.code == "UPLOAD_CAPACITY") "UPLOAD_CAPACITY" else "JOB_STORAGE_UNAVAILABLE"
+            legacyError(exchange, status, code, when (code) {
+                "PROGRESS_UNAVAILABLE" -> "The retained progress journal is unavailable. Missing data does not establish an empty history."
                 "UPLOAD_CAPACITY" -> "Upload capacity is temporarily unavailable. Retry shortly."
-                else -> "Job storage is unavailable. Inspect storage before retrying."
-            }
-            legacyError(exchange, status, code, message) {
+                "JOB_STORAGE_UNAVAILABLE" -> "Job storage is unavailable. Inspect storage before retrying."
+                else -> "The requested job or attempt is unavailable."
+            }) {
                 renderErrorPage(status, "Job storage unavailable", "${exception.code}: ${exception.message}")
             }
         } catch (exception: JobStoreException) {

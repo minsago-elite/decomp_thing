@@ -369,9 +369,17 @@ paths, query strings, uploaded filenames, persisted diagnostics or exception mes
 | Unknown API route or unsupported method | 404 | `NOT_FOUND` |
 | Missing job / attempt | 404 | `JOB_NOT_FOUND` / `RUN_NOT_FOUND` |
 | Unavailable or damaged service storage | 503 | `JOB_STORAGE_UNAVAILABLE` |
+| Missing, unreadable, malformed or oversized progress journal | 503 | `PROGRESS_UNAVAILABLE` |
 | Invalid request arguments | 400 | `INVALID_REQUEST` |
 | Unsupported uploaded ELF | 400 | `INVALID_UPLOAD` |
 | Unexpected exception | 500 | `INTERNAL_ERROR` |
+
+Legacy event reads and v1 progress reads now use the same fixed-path service operation,
+which validates job/attempt ownership and applies the retained-descriptor artifact reader's
+2 MiB ceiling. Legacy event reads no longer fabricate a zero-event snapshot when the journal
+is missing. Malformed and oversized journals also return `PROGRESS_UNAVAILABLE`; an actual
+persisted, valid zero-event journal still returns 200. This does not add cursor replay or v1
+session authorization to the legacy route, nor change its successful event representation.
 
 The HTTP tests cover missing/unknown resources, invalid query/upload, damaged storage,
 request-ID agreement, content type, cache policy and preservation of stored bytes. Unexpected
