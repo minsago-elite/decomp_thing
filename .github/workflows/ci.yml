@@ -173,6 +173,8 @@ jobs:
             util-linux
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           bwrap --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 /usr/bin/true
+      - name: Check runtime provisioning with isolated inert fixtures
+        run: python3 scripts/test-ci-bundled-runtime.py
       - name: Prepare root-owned oracle JVM and system libraries
         run: bash scripts/ci-prepare-oracle-runtime.sh
       - name: Prepare required live ACP sandbox host
