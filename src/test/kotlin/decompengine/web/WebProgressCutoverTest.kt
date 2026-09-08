@@ -17,6 +17,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.test.*
 
 /** Owned inert records only: no adapter, analyzer or executor performs workflow work. */
@@ -118,6 +119,15 @@ class WebProgressCutoverTest {
 
     @Test fun `racing HTTP snapshots and atomic publication have exact bounded replay cutovers`() = Fixture().use { f ->
         val barrier = CyclicBarrier(2)
+        val readEntered = CountDownLatch(1)
+        val releaseRead = CountDownLatch(1)
+        val overlapped = AtomicBoolean(false)
+        f.service.progressSnapshotReadHook = {
+            if (overlapped.compareAndSet(false, true)) {
+                readEntered.countDown()
+                check(releaseRead.await(10, TimeUnit.SECONDS))
+            }
+        }
         val captured = Array(34) { CountDownLatch(1) }
         val published = Array(34) { CountDownLatch(1) }
         val publisher = Executors.newSingleThreadExecutor()
@@ -125,11 +135,13 @@ class WebProgressCutoverTest {
             var current = f.run
             for (step in 1..33) {
                 barrier.await(10, TimeUnit.SECONDS)
-                if (step % 3 == 1) check(captured[step].await(5, TimeUnit.SECONDS))
+                if (step == 1) check(readEntered.await(5, TimeUnit.SECONDS))
+                else if (step % 3 == 1) check(captured[step].await(5, TimeUnit.SECONDS))
                 f.publish(0, step * 8)
                 if (step == 3) current = f.owner.transition(f.job.id, current.runId, current.version, WorkflowTransition.Start).attempt
                 if (step == 33) f.owner.transition(f.job.id, current.runId, current.version,
                     WorkflowTransition.Finish(WorkflowRunState.COMPLETED, WorkflowTerminalReason.COMPLETED))
+                if (step == 1) releaseRead.countDown()
                 published[step].countDown()
                 barrier.await(10, TimeUnit.SECONDS)
             }
@@ -169,6 +181,7 @@ class WebProgressCutoverTest {
                     replay(f, snapshot.getValue("throughCursor").jsonPrimitive.content))
             }
             publications.get(10, TimeUnit.SECONDS)
+            assertTrue(overlapped.get(), "The qualification must observe a publication while a read transaction is active")
             assertTrue(overlappingSnapshots >= 22)
             println("Cutover qualification: 33 rounds, 264 appends, 11 forced-before, 11 forced-after, 11 racing snapshots; $overlappingSnapshots initial snapshots succeeded, ${33 - overlappingSnapshots} explicit interrupted reads recovered.")
         } finally { publisher.shutdownNow(); assertTrue(publisher.awaitTermination(5, TimeUnit.SECONDS)) }

@@ -66,6 +66,8 @@ class WebJobService(
 
     /** Internal seam for deterministic publication-failure fixtures; production code never reassigns this. */
     internal var uploadPublisher = decompengine.jobs.StagedJobUpload(store.storageRoot)
+    /** Test-only observation point after the durable progress bytes have been captured. */
+    internal var progressSnapshotReadHook: (() -> Unit)? = null
     private val publicationFailures = mutableMapOf<String, WebJobDiagnostic>()
     private var attempts: WorkflowAttemptStore? = null
     private var initialized = false
@@ -261,7 +263,9 @@ class WebJobService(
         val owner = attempts ?: throw WebJobServiceException("JOB_NOT_FOUND", "The requested job is unavailable.")
         return try {
             owner.withAttemptSnapshot(jobId, runId) { attempt ->
-                attempt to readProgressJournal(jobId, attempt.runId)
+                val bytes = readProgressJournal(jobId, attempt.runId)
+                progressSnapshotReadHook?.invoke()
+                attempt to bytes
             }
         } catch (failure: WorkflowStoreException) {
             throw WebJobServiceException(failure.code, "The requested progress snapshot is unavailable.")
