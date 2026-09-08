@@ -1,0 +1,172 @@
+{
+  "schemaVersion": 1,
+  "status": "passed",
+  "scope": "benign web job recovery",
+  "startedAt": "20260905T165132Z",
+  "commit": "e8ff154aca462f3c684ba04543905d16d5116825",
+  "worktreeDirty": false,
+  "trackedDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "java": "openjdk version \"21.0.12\" 2026-07-21 LTS\nOpenJDK Runtime Environment Temurin-21.0.12+8 (build 21.0.12+8-LTS)\nOpenJDK 64-Bit Server VM Temurin-21.0.12+8 (build 21.0.12+8-LTS, mixed mode, sharing)",
+  "kernel": "Linux 7.1.8-gentoo-dist-hardened",
+  "testFilesystem": "xfs",
+  "command": [
+    "/home/june/decomp_worktree/gradlew",
+    "--offline",
+    "--no-daemon",
+    "--console=plain",
+    "-Dorg.gradle.jvmargs=-Xmx2048m -Djava.io.tmpdir=/home/june/decomp_worktree/build/web-job-recovery-verification/20260905T165132Z-ag8pi_mr/tmp",
+    "-Drecovery.config=/home/june/decomp_worktree/build/web-job-recovery-verification/20260905T165132Z-ag8pi_mr/config.json",
+    "-I",
+    "/home/june/decomp_worktree/build/web-job-recovery-verification/20260905T165132Z-ag8pi_mr/recovery.init.gradle",
+    "-Pkotlin.compiler.execution.strategy=in-process",
+    "-Pkotlin.incremental=false",
+    "test",
+    "--tests",
+    "decompengine.jobs.JobStoreTest",
+    "--tests",
+    "decompengine.jobs.JobStoreDirectoriesTest",
+    "--tests",
+    "decompengine.jobs.JobStoreDirectoriesCrashTest",
+    "--tests",
+    "decompengine.jobs.JobMetadataPublicationTest",
+    "--tests",
+    "decompengine.jobs.JobMetadataCrashTest",
+    "--tests",
+    "decompengine.jobs.JobUploadCrashTest",
+    "--tests",
+    "decompengine.jobs.JobRecoveryInventoryTest",
+    "--tests",
+    "decompengine.jobs.JobRecoveryAdmissionTest",
+    "--tests",
+    "decompengine.web.UploadServerTest",
+    "--tests",
+    "decompengine.web.UploadUncertaintyHttpTest",
+    "--tests",
+    "decompengine.web.WebShutdownTest",
+    "--tests",
+    "decompengine.web.WebRequestLifetimeTest",
+    "--tests",
+    "decompengine.web.WebRecoveryAdmissionTest"
+  ],
+  "requiredSuites": [
+    "decompengine.jobs.JobStoreTest",
+    "decompengine.jobs.JobStoreDirectoriesTest",
+    "decompengine.jobs.JobStoreDirectoriesCrashTest",
+    "decompengine.jobs.JobMetadataPublicationTest",
+    "decompengine.jobs.JobMetadataCrashTest",
+    "decompengine.jobs.JobUploadCrashTest",
+    "decompengine.jobs.JobRecoveryInventoryTest",
+    "decompengine.jobs.JobRecoveryAdmissionTest",
+    "decompengine.web.UploadServerTest",
+    "decompengine.web.UploadUncertaintyHttpTest",
+    "decompengine.web.WebShutdownTest",
+    "decompengine.web.WebRequestLifetimeTest",
+    "decompengine.web.WebRecoveryAdmissionTest"
+  ],
+  "limitations": [
+    "Not full CI or B-series release qualification",
+    "No vulnerability reproduction lane is selected",
+    "No power-loss, kernel-I/O interruption or safe reclamation proof"
+  ],
+  "gradleExit": 0,
+  "totals": {
+    "tests": 104,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "suites": {
+    "decompengine.jobs.JobMetadataCrashTest": {
+      "tests": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "d91f5b6c1dd5495b77b3dc2498b421c3088d8181b7170c33c9e8afcdd89054cd"
+    },
+    "decompengine.jobs.JobMetadataPublicationTest": {
+      "tests": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "0a54537b8522c4be50a12bb24c5aa394c0f78e653a0f66c432f1df8269ebf09b"
+    },
+    "decompengine.jobs.JobRecoveryAdmissionTest": {
+      "tests": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "1ed0c7798709bf7d6bbe7a8a41da569bebfff110095c5e0e1337cc3284b67b24"
+    },
+    "decompengine.jobs.JobRecoveryInventoryTest": {
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "d5fe327a4d13edf5fff107001fbaf63aa3d690002c458e3d5dca1bf13cb4ed2f"
+    },
+    "decompengine.jobs.JobStoreDirectoriesCrashTest": {
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "2571d69dacc9a001a864621b8f3e13b1022ef5d51d60e40a6448851029b87a3d"
+    },
+    "decompengine.jobs.JobStoreDirectoriesTest": {
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "ab3cde0709a64acf3376f108f0f9402d90643ae08b450eb65b44a9a7e335f266"
+    },
+    "decompengine.jobs.JobStoreTest": {
+      "tests": 13,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "088132257ea5890f1efbcf6a99e6b7cd259986193f2f7798ecae911ce56ff3a9"
+    },
+    "decompengine.jobs.JobUploadCrashTest": {
+      "tests": 14,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "c3be86e107bacc06c94854c00b34447fe9be8f1ff509ea5fe7100d816cef9ac9"
+    },
+    "decompengine.web.UploadServerTest": {
+      "tests": 29,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "1c3b5411bda8b67b28a18485987f2f2eb72e0235cd03e877c81e6430bb83a129"
+    },
+    "decompengine.web.UploadUncertaintyHttpTest": {
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "92d648ff80f312a7a14dc644773a3444e87c4345ac7c1787d7703d614a6decb5"
+    },
+    "decompengine.web.WebRecoveryAdmissionTest": {
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "88b47ba951378d7ce59e7e5f8af8efa04209121a758f817e764b393191404ab8"
+    },
+    "decompengine.web.WebRequestLifetimeTest": {
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "19103ce15393636c6bec2da56d2c577733cd3e35450c606625d157d4ef49bf52"
+    },
+    "decompengine.web.WebShutdownTest": {
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "b4c1f43b2fadef5a8c453a756f4d67e9af298a038e712210789c7bf883a5e2a9"
+    }
+  },
+  "verificationFailures": []
+}

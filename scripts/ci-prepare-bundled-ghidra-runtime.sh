@@ -20,7 +20,7 @@ if [[ ! -f "$GITHUB_ENV" || -L "$GITHUB_ENV" || ! -w "$GITHUB_ENV" ]]; then
 fi
 
 project_root="$(cd "$(dirname "$0")/.." && pwd -P)"
-target="/opt/decomp-ci-ghidra-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+target="/var/lib/decomp-ci-ghidra-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 "$project_root/gradlew" --no-daemon -p "$project_root" installDist
 source_bundle="$project_root/build/install/llm_bin_patch/libexec/ghidra"
 
@@ -135,54 +135,59 @@ def copy_directory(source_descriptor, destination_descriptor, relative=""):
     require_trusted_directory(destination_descriptor)
 
 require(os.geteuid() == 0, "explicit CI provisioning requires root")
-require(target == f"/opt/decomp-ci-ghidra-{run_id}-{attempt}", "runtime provisioning target differs")
+require(target == f"/var/lib/decomp-ci-ghidra-{run_id}-{attempt}", "runtime provisioning target differs")
 require(os.path.isabs(source) and os.path.realpath(source) == source, "installed source bundle is not canonical")
 filesystem_root = os.open("/", directory_flags)
 try:
     require_trusted_directory(filesystem_root)
-    opt = os.open("opt", directory_flags, dir_fd=filesystem_root)
+    var = os.open("var", directory_flags, dir_fd=filesystem_root)
     try:
-        require_trusted_directory(opt)
-        target_name = os.path.basename(target)
-        os.mkdir(target_name, 0o700, dir_fd=opt)
-        target_descriptor = os.open(target_name, directory_flags, dir_fd=opt)
+        require_trusted_directory(var)
+        runtime_parent = os.open("lib", directory_flags, dir_fd=var)
         try:
-            target_identity = require_trusted_directory(target_descriptor)
-            marker = ("decomp-ci-bundled-ghidra-runtime-v1\n"
-                      f"run_id={run_id}\nrun_attempt={attempt}\npath={target}\n"
-                      f"identity={target_identity.st_dev}:{target_identity.st_ino}\n").encode("ascii")
-            marker_descriptor = os.open(".decomp-ci-bundled-ghidra-owner-v1", os.O_WRONLY | os.O_CREAT |
-                                        os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=target_descriptor)
+            require_trusted_directory(runtime_parent)
+            target_name = os.path.basename(target)
+            os.mkdir(target_name, 0o700, dir_fd=runtime_parent)
+            target_descriptor = os.open(target_name, directory_flags, dir_fd=runtime_parent)
             try:
-                write_all(marker_descriptor, marker)
-                os.fchmod(marker_descriptor, 0o444)
-                os.fsync(marker_descriptor)
-            finally:
-                os.close(marker_descriptor)
-            os.fsync(target_descriptor)
-            os.fsync(opt)
-            require(os.fstatvfs(target_descriptor).f_flag & os.ST_NOEXEC == 0,
-                    "provisioned bundled Ghidra runtime filesystem is noexec")
-            os.mkdir("bundle", 0o700, dir_fd=target_descriptor)
-            bundle_descriptor = os.open("bundle", directory_flags, dir_fd=target_descriptor)
-            try:
-                source_descriptor = os.open(source, directory_flags)
+                target_identity = require_trusted_directory(target_descriptor)
+                marker = ("decomp-ci-bundled-ghidra-runtime-v1\n"
+                          f"run_id={run_id}\nrun_attempt={attempt}\npath={target}\n"
+                          f"identity={target_identity.st_dev}:{target_identity.st_ino}\n").encode("ascii")
+                marker_descriptor = os.open(".decomp-ci-bundled-ghidra-owner-v1", os.O_WRONLY | os.O_CREAT |
+                                            os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=target_descriptor)
                 try:
-                    copy_directory(source_descriptor, bundle_descriptor)
+                    write_all(marker_descriptor, marker)
+                    os.fchmod(marker_descriptor, 0o444)
+                    os.fsync(marker_descriptor)
                 finally:
-                    os.close(source_descriptor)
+                    os.close(marker_descriptor)
+                os.fsync(target_descriptor)
+                os.fsync(runtime_parent)
+                require(os.fstatvfs(target_descriptor).f_flag & os.ST_NOEXEC == 0,
+                        "provisioned bundled Ghidra runtime filesystem is noexec")
+                os.mkdir("bundle", 0o700, dir_fd=target_descriptor)
+                bundle_descriptor = os.open("bundle", directory_flags, dir_fd=target_descriptor)
+                try:
+                    source_descriptor = os.open(source, directory_flags)
+                    try:
+                        copy_directory(source_descriptor, bundle_descriptor)
+                    finally:
+                        os.close(source_descriptor)
+                finally:
+                    os.close(bundle_descriptor)
+                os.fchmod(target_descriptor, 0o755)
+                os.fsync(target_descriptor)
+                require_trusted_directory(target_descriptor)
+                require(os.fstatvfs(target_descriptor).f_flag & os.ST_NOEXEC == 0,
+                        "provisioned runtime became noexec")
+                print(f"Provisioned application-bundled Ghidra: {counts['entries']} entries, {counts['bytes']} bytes at {target}/bundle")
             finally:
-                os.close(bundle_descriptor)
-            os.fchmod(target_descriptor, 0o755)
-            os.fsync(target_descriptor)
-            require_trusted_directory(target_descriptor)
-            require(os.fstatvfs(target_descriptor).f_flag & os.ST_NOEXEC == 0,
-                    "provisioned runtime became noexec")
-            print(f"Provisioned application-bundled Ghidra: {counts['entries']} entries, {counts['bytes']} bytes at {target}/bundle")
+                os.close(target_descriptor)
         finally:
-            os.close(target_descriptor)
+            os.close(runtime_parent)
     finally:
-        os.close(opt)
+        os.close(var)
 finally:
     os.close(filesystem_root)
 PY

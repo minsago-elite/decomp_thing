@@ -25,8 +25,10 @@ data class DoctorOptions(
     val toolsOnly: Boolean = false,
     val harnessOverride: String? = null,
     val workflowOverride: AcpPreflightWorkflow? = null,
+    val showAuthMethods: Boolean = false,
 ) {
     init {
+        require(!toolsOnly || !showAuthMethods) { "doctor --tools-only cannot be combined with --auth-methods" }
         require(!toolsOnly || harnessOverride == null) {
             "doctor --tools-only cannot be combined with --harness"
         }
@@ -82,8 +84,9 @@ class Doctor(
             checks += agentHarnessChecks(
                 harnessSelection,
                 options.workflowOverride ?: AcpPreflightWorkflow.ALL,
+                options.showAuthMethods,
             )
-            if (harnessSelection.getOrNull()?.kind == AcpHarnessKind.LEGACY_OPENAI) {
+            if (harnessSelection.getOrNull()?.kind == AcpHarnessKind.LEGACY_OPENAI && !options.showAuthMethods) {
                 checks += llmChecks()
             }
         }
@@ -102,6 +105,7 @@ class Doctor(
     private fun agentHarnessChecks(
         selection: Result<AcpHarnessSelection>,
         workflow: AcpPreflightWorkflow,
+        showAuthMethods: Boolean,
     ): List<DoctorCheck> = selection.fold(
         onSuccess = { resolved ->
             when (resolved.kind) {
@@ -111,10 +115,22 @@ class Doctor(
                         true,
                         "Selected ${resolved.provenance.stableDescriptor}",
                     )
+                    val authChecks = mutableListOf<DoctorCheck>()
                     val preflightCheck = try {
                         val harness = resolved.createHarness() as? AcpAgentHarness
                             ?: error("ACP factory returned a non-ACP harness")
                         val result = harness.preflight(workflow)
+                        if (showAuthMethods) {
+                            if (result.authentication.methods.isEmpty()) authChecks += DoctorCheck(
+                                "ACP authentication methods", true, "No authentication methods advertised; no login attempted.")
+                            result.authentication.methods.forEachIndexed { index, method ->
+                                fun quoted(value: String) = quoteTerminalPreview(value)
+                                authChecks += DoctorCheck("ACP authentication method ${index + 1}", true,
+                                    "id preview=${quoted(method.idPreview)}; variant=${method.variant}; " +
+                                        "name=${quoted(method.namePreview)}; " +
+                                        "description=${quoted(method.descriptionPreview.orEmpty())}; login unsupported; no login attempted.")
+                            }
+                        }
                         DoctorCheck(
                             "ACP preflight",
                             true,
@@ -127,9 +143,11 @@ class Doctor(
                             preflightFailureDetail(failure),
                         )
                     }
-                    listOf(selectionCheck, preflightCheck)
+                    listOf(selectionCheck, preflightCheck) + authChecks
                 }
-                AcpHarnessKind.LEGACY_OPENAI -> listOf(
+                AcpHarnessKind.LEGACY_OPENAI -> if (showAuthMethods) listOf(DoctorCheck(
+                    "ACP authentication methods", false, "--auth-methods requires the ACP harness; no login attempted."
+                )) else listOf(
                     DoctorCheck(
                         "ACP harness",
                         true,
@@ -166,7 +184,8 @@ class Doctor(
         val execution = failure as? AgentExecutionException
             ?: return "ACP preflight failed before a session was created; verify the authenticated provisioning and sandbox."
         val safeDetails = execution.failure.details.entries
-            .filter { (name, _) -> name in PREFLIGHT_DIAGNOSTIC_FIELDS }
+            .filter { (name, value) -> name in PREFLIGHT_DIAGNOSTIC_FIELDS ||
+                (name == "reason" && value == "invalidAuthenticationInventory") }
             .sortedBy { it.key }
             .joinToString(",") { (name, value) -> "$name=$value" }
         return buildString {
@@ -307,3 +326,15 @@ private val PREFLIGHT_DIAGNOSTIC_FIELDS = setOf(
     "sandboxCleanupVerified",
     "supportedVersions",
 )
+
+/** Preserve JSON quoting while making terminal-active Unicode visible as escapes. */
+internal fun quoteTerminalPreview(value: String): String = buildString {
+    kotlinx.serialization.json.JsonPrimitive(value).toString().forEach { character ->
+        when (Character.getType(character)) {
+            Character.CONTROL.toInt(), Character.FORMAT.toInt(), Character.SURROGATE.toInt(),
+            Character.LINE_SEPARATOR.toInt(), Character.PARAGRAPH_SEPARATOR.toInt() ->
+                append("\\u").append(character.code.toString(16).padStart(4, '0'))
+            else -> append(character)
+        }
+    }
+}

@@ -45,6 +45,7 @@ internal data class GccKotlinBootClasspathReferenceEntry(
  * principal; this does not claim exclusion of same-owner restoration or a privileged peer.
  */
 internal class GccKotlinBootClasspathReference private constructor(
+    private val deploymentRoot: Path,
     val closureSha256: String,
     entries: List<GccKotlinBootClasspathReferenceEntry>,
     private val referenceBytes: ByteArray,
@@ -53,6 +54,19 @@ internal class GccKotlinBootClasspathReference private constructor(
 ) : AutoCloseable {
     val entries: List<GccKotlinBootClasspathReferenceEntry> = Collections.unmodifiableList(entries)
     private var closed = false
+
+    /** Candidate paths come only from the independently retained deployment, never the caller. */
+    fun invocationManifestBytes(): ByteArray {
+        verify("before invocation manifest derivation")
+        return OracleJson.canonicalBytes(JsonObject(mapOf(
+            "schemaVersion" to JsonPrimitive(1),
+            "provider" to JsonPrimitive("gcc-kotlin-boot-classpath-manifest-v1"),
+            "entries" to JsonArray(entries.map { entry -> JsonObject(mapOf(
+                "path" to JsonPrimitive(deploymentRoot.resolve(entry.logicalName).toString()),
+                "bytes" to JsonPrimitive(entry.bytes), "sha256" to JsonPrimitive(entry.sha256),
+            )) }),
+        ))).also { verify("after invocation manifest derivation") }
+    }
 
     fun requireCandidateIdentities(candidates: List<Pair<Long, String>>) {
         check(!closed) { "GCC Kotlin BOOT class-path reference is closed" }
@@ -179,6 +193,7 @@ internal class GccKotlinBootClasspathReference private constructor(
                 }
                 guard.verifyUnchanged("after GCC Kotlin BOOT reference authorization")
                 val result = GccKotlinBootClasspathReference(
+                    deploymentRoot,
                     parsed.closureSha256,
                     parsed.entries,
                     bytes,

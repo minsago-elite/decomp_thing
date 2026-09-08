@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.acp.AcpAgentHarnessTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-09-05T17:13:03.240Z" hostname="whatsername" time="7.513">
+  <properties/>
+  <testcase name="unknown absent and mistyped session preferences fail before every setter prompt and workspace operation()" classname="decompengine.acp.AcpAgentHarnessTest" time="7.499"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

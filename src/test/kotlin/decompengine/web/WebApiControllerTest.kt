@@ -79,6 +79,12 @@ class WebApiControllerTest {
             Files.writeString(journalFile, JsonObject(journal + mapOf(
                 "historyDropped" to JsonPrimitive(1), "truncated" to JsonPrimitive(true),
                 "events" to kotlinx.serialization.json.JsonArray(journal.getValue("events").jsonArray.drop(1)),
+                // A writer that evicted history would republish its exact omission ranges.
+                "omittedSequenceRanges" to kotlinx.serialization.json.buildJsonArray {
+                    add(kotlinx.serialization.json.buildJsonObject {
+                        put("startInclusive", JsonPrimitive("0")); put("endExclusive", JsonPrimitive("1"))
+                    })
+                },
             )).toString())
             assertError(request(server, "$path/events?cursor=$firstCursor", headers = headers), 410, "PROGRESS_GAP")
             val fresh = assertEnvelope(request(server, "$path/snapshot", headers = headers), 200, "snapshot")

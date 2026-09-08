@@ -56,7 +56,7 @@ class ProgramModelTest {
     @Test
     fun `program model parser rejects schema drift and missing entity arrays`() {
         assertFailsWith<IllegalArgumentException> {
-            ProgramModelJson.read("{\"schemaVersion\":2,\"inputSha256\":\"x\",\"functions\":[],\"globals\":[],\"types\":[]}")
+            ProgramModelJson.read("{\"schemaVersion\":3,\"inputSha256\":\"x\",\"functions\":[],\"globals\":[],\"types\":[]}")
         }
         assertFailsWith<NoSuchElementException> {
             ProgramModelJson.read("{\"schemaVersion\":1,\"inputSha256\":\"x\",\"functions\":[]}")

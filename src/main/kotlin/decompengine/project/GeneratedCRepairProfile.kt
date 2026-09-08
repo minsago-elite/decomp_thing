@@ -260,8 +260,21 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
 
         val modelRoot = Json.parseToJsonElement(decodeGeneratedCText(requireNotNull(modelBytes), modelRelative)).jsonObject
         modelRoot.requireExactKeys(MODEL_ROOT_KEYS, modelRelative)
-        require(modelRoot.requiredInt("schemaVersion", modelRelative) == INDEX_EVIDENCE_SCHEMA_VERSION) {
+        val modelSchemaVersion = modelRoot.requiredInt("schemaVersion", modelRelative)
+        require(modelSchemaVersion in 1..2) {
             "unsupported generated C program-model schemaVersion"
+        }
+        fun modelKeys(legacyKeys: Set<String>): Set<String> = if (modelSchemaVersion == 1) legacyKeys
+            else legacyKeys - "status" + setOf("extractionStatus", "recoveryAssessment")
+        fun JsonObject.requireExtractionStatus() {
+            val field = if (modelSchemaVersion == 1) "status" else "extractionStatus"
+            require(requiredBoundedString(field, modelRelative, evidenceIdentifierLimit(budget)) in
+                setOf("recovered", "partial", "failed", "synthetic")) { "unsupported model extraction status" }
+            if (modelSchemaVersion == 2) {
+                require(requiredBoundedString("recoveryAssessment", modelRelative, evidenceIdentifierLimit(budget)) == "unassessed") {
+                    "extracted model cannot supply a scored recovery assessment"
+                }
+            }
         }
         modelRoot.requiredBoundedString(
             "inputSha256",
@@ -331,12 +344,12 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
         }
         functionElements.forEach { element ->
             val function = element.jsonObject
-            function.requireExactKeys(MODEL_FUNCTION_KEYS, "$modelRelative function")
+            function.requireExactKeys(modelKeys(MODEL_FUNCTION_KEYS), "$modelRelative function")
             function.requiredBoundedString("id", modelRelative, identifierLimit)
             function.requiredBoundedString("name", modelRelative, identifierLimit)
             function.requiredBoundedString("address", modelRelative, identifierLimit)
             function.requiredBoundedString("prototype", modelRelative, textLimit)
-            function.requiredBoundedString("status", modelRelative, identifierLimit)
+            function.requireExtractionStatus()
             val calls = function.requiredArray("calls", modelRelative)
             val referencedGlobals = function.requiredArray("referencedGlobals", modelRelative)
             val strings = function.requiredArray("strings", modelRelative)
@@ -352,21 +365,21 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
         }
         globalElements.forEach { element ->
             val global = element.jsonObject
-            global.requireExactKeys(MODEL_GLOBAL_KEYS, "$modelRelative global")
+            global.requireExactKeys(modelKeys(MODEL_GLOBAL_KEYS), "$modelRelative global")
             global.requiredBoundedString("id", modelRelative, identifierLimit)
             global.requiredBoundedString("name", modelRelative, identifierLimit)
             global.requiredBoundedString("address", modelRelative, identifierLimit)
             global.requiredBoundedString("type", modelRelative, textLimit)
             global.requireNullableBoundedString("initializer", modelRelative, textLimit, allowBlank = true)
-            global.requiredBoundedString("status", modelRelative, identifierLimit)
+            global.requireExtractionStatus()
         }
         typeElements.forEach { element ->
             val type = element.jsonObject
-            type.requireExactKeys(MODEL_TYPE_KEYS, "$modelRelative type")
+            type.requireExactKeys(modelKeys(MODEL_TYPE_KEYS), "$modelRelative type")
             type.requiredBoundedString("id", modelRelative, identifierLimit)
             type.requiredBoundedString("declaration", modelRelative, textLimit)
             type.requireNullableBoundedString("sourceAddress", modelRelative, identifierLimit)
-            type.requiredBoundedString("status", modelRelative, identifierLimit)
+            type.requireExtractionStatus()
         }
 
         val modules = moduleElements.map { element ->
@@ -733,7 +746,6 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
         return value
     }
 
-    private const val INDEX_EVIDENCE_SCHEMA_VERSION = 1
     private const val LEGACY_PLAN_SCHEMA_VERSION = 1
     private const val PLAN_SCHEMA_VERSION = 2
     private const val BUILD_CONTRACT_SCHEMA_VERSION = 2
