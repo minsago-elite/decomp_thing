@@ -139,3 +139,12 @@ orchestration. Explicit caller reconstructors are retained. The public
 names now reside with the generated-C implementation. Full-project build/archive
 routing and language-specific prompt/request assumptions remain to be migrated;
 only the generated-C/Make adapter is registered today.
+
+Archival reconstruction resolves its adapter before analysis or output creation
+and delegates the full-project build to that adapter. The generated-C adapter
+owns Make/compiler command configuration and forwards profile time/output budgets
+to the existing builder. Its toolchain report observes the selected build
+executable as `buildCommand`/`buildVersion`, replacing the historical `make` field.
+Archive verification and the legacy single-project pipeline still contain
+additional generated-C/Make conventions; this service dispatch is not complete
+alternate-profile support or authenticated production build qualification.
