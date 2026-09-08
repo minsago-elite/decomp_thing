@@ -27,6 +27,7 @@ internal data class RenderedEntrypoint(val source: String, val entityIds: List<S
 internal object ReconstructionAdapters {
     fun resolve(profile: ReconstructionProfile): ReconstructionAdapter = when (profile.id) {
         GeneratedCMakeReconstructionProfile.PROFILE_ID -> GeneratedCReconstructionAdapter
+        GeneratedCNinjaReconstructionProfile.PROFILE_ID -> GeneratedCNinjaReconstructionAdapter
         else -> throw IllegalArgumentException("no reconstruction adapter registered for profile: ${profile.id}")
     }
 }
