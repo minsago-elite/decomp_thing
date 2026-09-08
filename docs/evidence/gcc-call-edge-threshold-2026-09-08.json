@@ -1,0 +1,73 @@
+{
+  "evidenceId": "gcc-call-edge-threshold-v1",
+  "issue": 691,
+  "recordedOn": "2026-09-08",
+  "status": "unresolved",
+  "scope": "checked-in call-truth fixture and raw observability baseline",
+  "authority": "fixture-observability-only",
+  "productionVerified": false,
+  "threshold": {
+    "precision": {"minimumNumerator": 90, "minimumDenominator": 100},
+    "recall": {"minimumNumerator": 90, "minimumDenominator": 100}
+  },
+  "retainedFixtureFacts": {
+    "observations": 12,
+    "deduplicatedEdges": 11,
+    "scoreableDenominator": 9,
+    "exact": 7,
+    "partial": 2,
+    "excluded": 2,
+    "missing": 0,
+    "fabricated": 0,
+    "measurement": "raw call observability; not recovered-model precision or recall"
+  },
+  "contract": {
+    "edgeIdentity": "call-edge-<sha256-prefix>",
+    "populations": ["scored", "unobservable"],
+    "targetKinds": [
+      "direct-internal",
+      "external",
+      "indirect-proven",
+      "indirect-unresolved",
+      "virtual-unresolved"
+    ],
+    "unresolvedStatesRemainVisible": [
+      "unknown",
+      "unobservable",
+      "contradicted",
+      "fabricated"
+    ],
+    "downstreamScoringAuthorized": false,
+    "authoritativeReleaseEvidence": false,
+    "recoveredModelScored": false
+  },
+  "provenance": {
+    "repositoryCommit": "bf250156",
+    "sources": [
+      {
+        "path": "docs/full-tree-call-baseline-kotlin.md",
+        "sha256": "ba6f517e4bab2a186810265b5b680f1b541175c2acbc9bd8babbab3175207d37"
+      },
+      {
+        "path": "src/test/kotlin/decompengine/oracle/fulltree/FullTreeCallBaselineSqliteTest.kt",
+        "sha256": "9f3226e7d5d5dff1ffc4a9d577a953afcd78df84fe3da2624dd1c09e51c7c0fa"
+      },
+      {
+        "path": "oracle/full-tree-call-truth-v2.schema.json",
+        "sha256": "a8cc8966faf6a253fe522ba2afde60b3d9abfcef0c7eef3714ce7e77651f181e"
+      }
+    ]
+  },
+  "unavailableProductionGates": [
+    "Authenticated GCC exporter, bundled-Ghidra loader, and replay receipt bound to the input binary and model.",
+    "Retained production call-truth, recovered model, identity mapping, and verifier-authorized score report.",
+    "A registered production replay adapter; StructuralReplayAdapterRegistry is intentionally empty.",
+    "Production precision and recall evidence with explicit unknown, unobservable, contradicted, and fabricated handling."
+  ],
+  "isolation": {
+    "requiredAnalyzer": "bundled Ghidra Java APIs in the isolated worker",
+    "requiresGHIDRA_HOME": false,
+    "allowsExternalAnalyzeHeadless": false
+  },
+  "dependencies": [679, 681]
+}
