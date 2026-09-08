@@ -442,10 +442,10 @@ private fun validateSourceManifest(
         repairLineage = repairLineage,
     )
     val sourceManifestPayload = requireNotNull(payload["source_tree_manifest.json"])
-    val sourceRevision = archiveBuild.sourceRevision(projectDir)
+    val sourceRevision = archiveBuild.sourceRevision(projectDir, expectedProfile)
     val archivedBuildInputs = payload.values.asSequence()
         .filter { item ->
-            archiveBuild.isBuildInput(item.relativePath)
+            archiveBuild.isBuildInput(expectedProfile, item.relativePath)
         }
         .map { item -> BuildSourceInput(item.relativePath, item.size, item.sha256) }
         .sortedBy(BuildSourceInput::path)
