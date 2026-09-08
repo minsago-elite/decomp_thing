@@ -447,5 +447,29 @@ journal, namespace and byte-validation components, but have not executed the ful
 same-owner compiler lifecycle under the required hosted provisioning. The normal
 CLI, real cc1/lto1 fresh/resumed model and planner comparisons, cumulative resource
 accounting and benchmark publication remain incomplete. Per-leg ceilings are not
-a cumulative A10 budget proof. Interruptions leaving partial in-flight fragments
-still fail closed and retain residue.
+a cumulative A10 budget proof. The bounded first-incomplete-batch write sequence is handled as described below;
+other residue still fails closed and is retained.
+
+## First incomplete planning batch
+
+Interrupted capture permits only the exporter write sequence immediately after
+the progress-bound committed prefix: zero to four published fragments in the order
+functions, globals, types, failures, plus at most the next artifact's named
+`.pending` file (which can be the checkpoint pending file). Empty pending files
+are allowed. These bytes are not parsed as committed evidence and do not increase
+completed/reused counts. Missing committed records, gaps, multiple pending files,
+future-batch residue, links and excess bytes are rejected.
+
+Capture records every permitted leftover file's name, size, SHA-256, inode/mount/
+ownership identity and modification metadata under the existing capture bounds.
+The stopped-prefix journal assessment binds this manifest and its hash. Same-owner
+revalidation requires the unchanged leftover manifest before START. Host capture
+never removes residue. After semantic-state validation, the existing exporter
+can discard its named pending file and rewrite the first incomplete batch; resumed
+capture still requires the exact original committed prefix and reuse count.
+
+A complete next checkpoint whose progress update was interrupted is not yet
+normalized into a larger stopped prefix and remains a rejected, preserved state.
+Hosted interrupted/resumed compiler qualification and whole-run resource evidence
+remain required; local fixtures establish only this bounded capture/validation
+behavior.
