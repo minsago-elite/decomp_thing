@@ -2266,6 +2266,9 @@
         },
         "scheduler": {
           "$ref": "#/definitions/scheduler"
+        },
+        "progressRetention": {
+          "$ref": "#/definitions/progressRetention"
         }
       },
       "required": [
@@ -2726,6 +2729,46 @@
       },
       "required": [
         "pinned"
+      ],
+      "additionalProperties": false
+    },
+    "progressRetention": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "sampledAt": {
+          "$ref": "#/definitions/instant"
+        },
+        "examined": {
+          "$ref": "#/definitions/uint64"
+        },
+        "expired": {
+          "$ref": "#/definitions/uint64"
+        },
+        "failures": {
+          "$ref": "#/definitions/uint64"
+        },
+        "lastFailureCode": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "enabled",
+        "sampledAt",
+        "examined",
+        "expired",
+        "failures",
+        "lastFailureCode"
       ],
       "additionalProperties": false
     }

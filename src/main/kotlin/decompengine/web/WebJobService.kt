@@ -84,47 +84,103 @@ class WebJobService(
 
     @Synchronized internal fun progressRetentionStatus(): WebProgressRetentionStatus = retentionStatus
 
-    /** At most 32 discovery/attempt units per tick. Release the service monitor between each unit. */
+    private sealed interface RetentionWork {
+        data object Discover : RetentionWork
+        data class Job(val id: String) : RetentionWork
+        data class Run(val jobId: String, val runId: String) : RetentionWork
+    }
+
+    /** At most 32 discovery/attempt units per tick; storage I/O runs outside the service monitor. */
     private fun runProgressRetentionBatch() {
         repeat(32) {
-            val continueBatch = synchronized(this) {
-                if (!initialized || closed || stopping || attempts == null || publicationFailures.isNotEmpty() || uploads.isNotEmpty())
-                    return@synchronized false
-                try {
-                    if (retentionRuns.isNotEmpty()) {
-                        val (jobId, runId) = retentionRuns.removeFirst()
-                        val result = expireProgressJournal(jobId, runId, protectedFromRetention = false)
-                        retentionStatus = retentionStatus.copy(examined = incrementRetentionCount(retentionStatus.examined),
-                            expired = if (result == decompengine.jobs.ProgressRetentionResult.EXPIRED) incrementRetentionCount(retentionStatus.expired) else retentionStatus.expired)
-                        true
+            val work = synchronized(this) {
+                if (!initialized || closed || stopping || attempts == null || publicationFailures.isNotEmpty() || uploads.isNotEmpty()) {
+                    null
+                } else if (retentionRuns.isNotEmpty()) {
+                    val (jobId, runId) = retentionRuns.removeFirst()
+                    RetentionWork.Run(jobId, runId)
+                } else if (retentionJobs.isEmpty()) {
+                    if (retentionCycleActive) {
+                        retentionCycleActive = false
+                        null
                     } else {
-                        if (retentionJobs.isEmpty()) {
-                            if (retentionCycleActive) { retentionCycleActive = false; return@synchronized false }
-                            retentionJobs.addAll(store.jobIds())
-                            retentionCycleActive = true
-                            if (retentionJobs.isEmpty()) { retentionCycleActive = false; return@synchronized false }
-                        }
-                        val jobId = retentionJobs.removeFirst()
-                        val inspection = inspectStoredJob(attempts!!, jobId)
-                        if (inspection is WorkflowJobInspection.Available) {
-                            // One bounded attempt inventory at a time; each decision is revalidated on execution.
-                            retentionRuns.addAll(inspection.snapshot.attempts.map { jobId to it.runId })
-                        } else recordRetentionFailure("JOB_RECORD_UNAVAILABLE")
-                        true
+                        retentionCycleActive = true
+                        RetentionWork.Discover
                     }
-                } catch (failure: Exception) {
+                } else {
+                    RetentionWork.Job(retentionJobs.removeFirst())
+                }
+            } ?: return
+            try {
+                when (work) {
+                    RetentionWork.Discover -> {
+                        val discovered = store.jobIds()
+                        synchronized(this) {
+                            if (!closed && !stopping) {
+                                retentionJobs.addAll(discovered)
+                                if (retentionJobs.isEmpty()) retentionCycleActive = false
+                            }
+                        }
+                    }
+                    is RetentionWork.Job -> {
+                        val owner = synchronized(this) { attempts } ?: return
+                        val inspection = inspectStoredJob(owner, work.id)
+                        synchronized(this) {
+                            if (inspection is WorkflowJobInspection.Available) {
+                                retentionRuns.addAll(inspection.snapshot.attempts.map { work.id to it.runId })
+                            } else recordRetentionFailure("JOB_RECORD_UNAVAILABLE")
+                        }
+                    }
+                    is RetentionWork.Run -> {
+                        val result = expireProgressJournalForRetention(work.jobId, work.runId)
+                        synchronized(this) {
+                            retentionStatus = retentionStatus.copy(
+                                examined = incrementRetentionCount(retentionStatus.examined),
+                                expired = if (result == decompengine.jobs.ProgressRetentionResult.EXPIRED) {
+                                    incrementRetentionCount(retentionStatus.expired)
+                                } else retentionStatus.expired,
+                            )
+                        }
+                    }
+                }
+            } catch (failure: Exception) {
+                synchronized(this) {
                     val code = when (failure) {
                         is WebJobServiceException -> failure.code
                         is WorkflowStoreException -> failure.code
                         else -> "RETENTION_UNAVAILABLE"
                     }
                     recordRetentionFailure(code)
-                    retentionCycleActive // A failed root inventory must wait for the next tick.
                 }
             }
-            if (!continueBatch || Thread.currentThread().isInterrupted) return
+            if (Thread.currentThread().isInterrupted) return
         }
     }
+
+    private fun expireProgressJournalForRetention(
+        jobId: String,
+        runId: String,
+        retention: java.time.Duration = decompengine.jobs.AgentProgressJournalRetention.DEFAULT_TERMINAL_RETENTION,
+    ): decompengine.jobs.ProgressRetentionResult {
+        val owner = synchronized(this) {
+            if (!initialized || closed || stopping || publicationFailures.isNotEmpty() || uploads.isNotEmpty()) {
+                return@synchronized null
+            }
+            getAttempt(jobId, runId)
+            if (active.containsKey(jobId)) return@synchronized null
+            attempts
+        } ?: return decompengine.jobs.ProgressRetentionResult.RETAINED
+        return try {
+            owner.expireProgressJournal(jobId, runId, protectedFromRetention = false, retention = retention)
+        } catch (failure: WorkflowStoreException) {
+            throw WebJobServiceException(
+                failure.code,
+                "Progress retention did not finish. Preserve its journal and pending retention file, then retry maintenance with storage ownership.",
+                failure,
+            )
+        }
+    }
+
     private fun incrementRetentionCount(value: Long) = if (value == Long.MAX_VALUE) value else value + 1
     private fun recordRetentionFailure(code: String) {
         retentionStatus = retentionStatus.copy(failures = incrementRetentionCount(retentionStatus.failures),
@@ -532,15 +588,24 @@ class WebJobService(
             val remaining = deadline - System.nanoTime()
             if (remaining > 0 && worker !== Thread.currentThread()) finished.await(remaining, TimeUnit.NANOSECONDS)
         }
-        retentionWorker?.awaitStopped(deadline - System.nanoTime())
-        synchronized(this) {
-            releaseIfQuiescent()
-            if (active.isNotEmpty() || uploads.isNotEmpty() || retentionWorker?.isIdle == false) {
-                val failure = WebJobServiceException("SHUTDOWN_INCOMPLETE", "Owned work has not stopped; storage ownership is retained until it exits.")
-                if (problem == null) problem = failure else problem.addSuppressed(failure)
+        var retentionWaitInterrupted = false
+        try {
+            try {
+                retentionWorker?.awaitStopped(deadline - System.nanoTime())
+            } catch (_: InterruptedException) {
+                retentionWaitInterrupted = true
             }
+            synchronized(this) {
+                releaseIfQuiescent()
+                if (active.isNotEmpty() || uploads.isNotEmpty() || retentionWorker?.isIdle == false) {
+                    val failure = WebJobServiceException("SHUTDOWN_INCOMPLETE", "Owned work has not stopped; storage ownership is retained until it exits.")
+                    if (problem == null) problem = failure else problem.addSuppressed(failure)
+                }
+            }
+            problem?.let { throw it }
+        } finally {
+            if (retentionWaitInterrupted) Thread.currentThread().interrupt()
         }
-        problem?.let { throw it }
     }
 
     private fun releaseIfQuiescent() {

@@ -304,3 +304,9 @@ identity are separate claims. Do not infer a reconstructed source archive's
 integrity or behavior from a successful application packaging check. See
 [the architecture](web-architecture.md), [delivery budgets](web-delivery.md) and
 [parity contract](web-parity.md).
+
+## SPA progress history retention
+
+The SPA server now schedules bounded progress-journal cleanup by default. Existing unpinned terminal journals older than 24 hours can expire after startup; pin selected history from its attempt page to retain it. Unpinning does not reset the deadline or recover removed observations. Byte/count limits can omit older observations before timed cleanup. Legacy mode keeps periodic cleanup disabled.
+
+The scan preserves active work, pending publication, durable pins and live writers, and coordinates with checked snapshot/artifact reads. It does not delete uploaded inputs, workflow metadata, source revisions or other reports. Runtime displays the enabled configuration and process-local scan counters sampled at the last session check. These are not disk accounting or proof that every eligible job has been visited. See [the production policy](web-progress-adapter.md#spa-production-retention-and-sampled-status).
