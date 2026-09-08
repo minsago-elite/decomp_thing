@@ -25,6 +25,11 @@ fun interface ProgramModelAnalyzer {
     fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel
 }
 
+/** Binds requested export budgets without starting analysis or raising existing limits. */
+interface ExportBudgetedProgramModelAnalyzer : ProgramModelAnalyzer {
+    fun withExportBudgets(budgets: ReconstructionBudgets): ProgramModelAnalyzer
+}
+
 data class RecoveredProgramWithCallSites(
     val programModel: RecoveredProgramModel,
     val callSites: RecoveredCallSiteReceipt,
@@ -67,7 +72,7 @@ class GhidraHeadlessProgramModelAnalyzer internal constructor(
     private val limits: GhidraProgramModelExportLimits = GhidraProgramModelExportLimits(),
     private val analysisToolSha256: String = UNAUTHENTICATED_ANALYSIS_TOOL_SHA256,
     private val recoveryMode: GhidraProgramModelRecoveryMode = GhidraProgramModelRecoveryMode.FULL,
-) : ProgramModelAnalyzer {
+) : ExportBudgetedProgramModelAnalyzer {
     constructor(
         limits: GhidraProgramModelExportLimits = GhidraProgramModelExportLimits(),
         analysisToolSha256: String = BundledGhidra.ARCHIVE_SHA256,
@@ -79,6 +84,17 @@ class GhidraHeadlessProgramModelAnalyzer internal constructor(
             "Ghidra analysis-tool identity must be a lowercase SHA-256 digest"
         }
     }
+
+    override fun withExportBudgets(budgets: ReconstructionBudgets): GhidraHeadlessProgramModelAnalyzer =
+        GhidraHeadlessProgramModelAnalyzer(
+            commandFactory = commandFactory,
+            limits = limits.copy(
+                wallClockTimeout = minOf(limits.wallClockTimeout, Duration.ofMillis(budgets.exportWallClockMillis)),
+                maximumResidentBytes = minOf(limits.maximumResidentBytes, budgets.exportMaximumResidentBytes),
+            ),
+            analysisToolSha256 = analysisToolSha256,
+            recoveryMode = recoveryMode,
+        )
 
     override fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel =
         analyzeInternal(binaryPath, workDir, false).first
