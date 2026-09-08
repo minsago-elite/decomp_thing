@@ -6,6 +6,7 @@ import kotlinx.serialization.json.JsonObject
 
 /** Local generation policy; production execution authority is a separate contract. */
 internal interface ReconstructionAdapter {
+    val diagnostics: ToolchainDiagnosticPolicy
     val compilation: ModuleCompilationPolicy
     val archiveBuild: ArchiveBuildPolicy
     val behaviorBuild: BehaviorBuildPolicy
