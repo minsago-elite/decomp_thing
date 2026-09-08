@@ -133,7 +133,7 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.ok(atBound >= 6, 'Progress request accounting must include endpoint and UI reads');
   await new Promise(resolve => setTimeout(resolve, 3000));
   assert.equal(progressRequests(), atBound, 'Display bound must stop polling');
-  await evaluate(tab, `(() => { const control = document.querySelector('.activity-filters select'); control.focus(); control.value = 'messages'; control.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await evaluate(tab, `(() => { const control = document.querySelector('.activity-filters select'); control.focus(); control.value = 'plans'; control.dispatchEvent(new Event('change', { bubbles: true })); })()`);
   await ready(tab, `(${activityRows}).length === 1`, 'activity category filter');
   assert.deepEqual(await evaluate(tab, activityRows), ['Sequence 1']);
   assert.equal(await evaluate(tab, `document.activeElement.tagName`), 'SELECT');
