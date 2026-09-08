@@ -597,6 +597,28 @@ class BehaviorEvidenceTest {
     }
 
     @Test
+    fun `source and build revision mutation before completion cannot replace earlier passing evidence`() {
+        for (mutated in listOf(
+            "src/modules/main.c",
+            "reports/build_contract.json",
+        )) {
+            val fixture = fixture()
+            val prior = fixture.evaluate().reportPath.readBytes()
+            val shim = fixture.original.parent.resolve("authored-runner-shim")
+            val command = "shift; exec \"${'$'}program\" \"${'$'}@\""
+            val target = fixture.project.resolve(mutated)
+            val mutation = "shift; \"${'$'}program\" \"${'$'}@\"; status=${'$'}?; printf x >> '${target}'; exit \"${'$'}status\""
+            val oldShim = shim.readText()
+            check(command in oldShim)
+            shim.writeText(oldShim.replace(command, mutation))
+
+            val failure = assertFails { fixture.evaluate() }
+            assertTrue(failure.message.orEmpty().contains("behavior evidence input changed during execution"))
+            assertTrue(prior.contentEquals(fixture.project.resolve("reports/probe.behavior.json").readBytes()))
+        }
+    }
+
+    @Test
     fun `missing evidence stays explicitly unresolved without per-module execution claims`() {
         val fixture = fixture()
         val audit = ArchivalProjectAuditor.audit(fixture.project)
