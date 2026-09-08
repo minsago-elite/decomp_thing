@@ -37,6 +37,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
@@ -539,6 +540,8 @@ class UploadServer(
                     }
                     val snapshot = try {
                         AgentProgressJournal.read(jobs.reportContext(job.id, runId).reportsDirectory)
+                    } catch (failure: IOException) {
+                        throw WebJobServiceException("JOB_STORAGE_UNAVAILABLE", "Persisted activity history is unavailable.", failure)
                     } catch (failure: IllegalArgumentException) {
                         throw WebJobServiceException("JOB_STORAGE_UNAVAILABLE", "Persisted activity history is invalid.", failure)
                     }
