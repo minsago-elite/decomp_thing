@@ -30,6 +30,25 @@ class BuiltinContextPackage(
 
 /** Deterministic whole-input selection. Exclusions require a trusted bounded retrieval capability. */
 internal object BuiltinContextAssembler {
+    fun validateInputs(
+        request: AgentExecutionRequest,
+        maximumBytes: Int,
+        maximumEvidenceBytes: Long,
+        control: BuiltinExecutionControl,
+    ) {
+        if (request.contextInputs.size > maximumBytes / 64) exhausted()
+        var totalEvidenceBytes = 0L
+        request.contextInputs.sortedBy { it.id }.forEach { input ->
+            control.checkpoint()
+            input.description?.let {
+                if (utf8Length(it, control::checkpoint) > MAXIMUM_DESCRIPTION_BYTES) exhausted()
+            }
+            val bytes = utf8Length(input.content, control::checkpoint)
+            if (bytes > maximumEvidenceBytes - totalEvidenceBytes) exhausted()
+            totalEvidenceBytes += bytes
+        }
+    }
+
     fun assemble(
         request: AgentExecutionRequest,
         maximumBytes: Int,
@@ -43,7 +62,7 @@ internal object BuiltinContextAssembler {
             ModelMessage(ModelRole.USER, request.objective),
             ModelMessage(ModelRole.SYSTEM, authority(request, maximumBytes)),
         )
-        if (request.contextInputs.size > maximumBytes / 64) exhausted()
+        validateInputs(request, maximumBytes, maximumEvidenceBytes, control)
         val inputs = request.contextInputs.sortedBy { it.id }
         var totalEvidenceBytes = 0L
         val entries = inputs.map { input ->

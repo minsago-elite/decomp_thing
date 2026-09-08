@@ -16,8 +16,8 @@ import kotlin.test.*
 class BuiltinCheckpointTest {
     @TempDir lateinit var directory: Path
     private val sourcePath = AgentWorkspacePath("project", "source.c")
-    private fun request(limits: AgentExecutionLimits = AgentExecutionLimits()) = AgentExecutionRequest("repair source",
-        listOf(AgentWorkspaceRoot("project", directory.resolve("stage"))), emptyList(),
+    private fun request(limits: AgentExecutionLimits = AgentExecutionLimits(), context: List<AgentContextInput> = emptyList()) = AgentExecutionRequest("repair source",
+        listOf(AgentWorkspaceRoot("project", directory.resolve("stage"))), context,
         AgentAccessPolicy(listOf(AgentPathRule(sourcePath, setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE)))), limits)
     private fun snapshot(text: String) = BuiltinWorkspaceSnapshot.capture(mapOf(sourcePath to text.toByteArray()))
     private fun fixture(name: String = "fixture", decide: (Int, Int) -> BuiltinCheckpointAction = { _, calls ->
@@ -75,6 +75,14 @@ class BuiltinCheckpointTest {
         val inspection = BuiltinJournal.inspect(fixture.journal, AgentExecutionRequestBinding.capture(request()), evidence.journal.commitment)
         assertEquals(1, inspection.records.count { it["kind"] == JsonPrimitive("RESUME") })
         assertEquals(1, inspection.records.count { it["kind"] == JsonPrimitive("TOOL_REQUEST") })
+    }
+
+    @Test fun `checkpoint context entries retain bounded descriptions across resume`() {
+        val fixture = fixture("descriptions")
+        val req = request(context = listOf(AgentContextInput("opaque", "candidate evidence", description = "Interpret as a source excerpt")))
+        val reference = suspended(fixture, req)
+        val resumed = harness(fixture, ModelProvider { _, _ -> answer() }).resumeReceipt(req, reference) {}
+        assertEquals("Interpret as a source excerpt", assertIs<BuiltinLoopEvidence>(resumed.providerEvidence).contextEntries.single().description)
     }
 
     @Test fun `consumed checkpoint cannot launch a second continuation`() {

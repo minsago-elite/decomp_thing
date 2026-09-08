@@ -92,11 +92,13 @@ class BuiltinLoopEvidence(
     contextEntries: List<BuiltinContextEntry> = emptyList(),
     val journal: BuiltinJournalEvidence? = null,
     val checkpoint: BuiltinCheckpointReference? = null,
+    candidateChanges: List<AgentFileChange> = emptyList(),
 ) : AgentExecutionProviderEvidence {
     override val providerId = "builtin"
     override val schemaVersion = 1
     val records: List<BuiltinTraceRecord> = Collections.unmodifiableList(ArrayList(records))
     val contextEntries: List<BuiltinContextEntry> = Collections.unmodifiableList(ArrayList(contextEntries))
+    val candidateChanges: List<AgentFileChange> = Collections.unmodifiableList(ArrayList(candidateChanges))
 }
 
 /** Optional implementation of the unchanged AgentHarness v1 seam; not registered in the production factory yet. */
@@ -182,6 +184,7 @@ class BuiltinAgentHarness(
                 }
             } catch (_: Exception) {
                 stop = BuiltinStop.TOOL_FAILED
+                failureKind = AgentFailureKind.INTERNAL
             } catch (fatal: Throwable) {
                 // Preserve a crash prefix, but release owned descriptors when unwinding is still possible.
                 try { journal?.close() } catch (_: Exception) { }
@@ -189,25 +192,36 @@ class BuiltinAgentHarness(
             } finally {
                 try { session?.close(); cleanup = true } catch (_: Exception) { /* Never claim cleaned-up success. */ }
             }
-            if (!cleanup) stop = BuiltinStop.TOOL_FAILED
+            if (!cleanup) {
+                stop = BuiltinStop.TOOL_FAILED
+                failureKind = AgentFailureKind.INTERNAL
+            }
             var finalAudit: JsonObject? = null
-            try { session?.finalChanges()?.let { changes = it.toList() } } catch (_: Exception) { stop = BuiltinStop.TOOL_FAILED }
-            try { finalAudit = session?.finalToolAudit() } catch (_: Exception) { stop = BuiltinStop.TOOL_FAILED }
+            try { session?.finalChanges()?.let { changes = it.toList() } } catch (_: Exception) {
+                stop = BuiltinStop.TOOL_FAILED; failureKind = AgentFailureKind.INTERNAL
+            }
+            try { finalAudit = session?.finalToolAudit() } catch (_: Exception) {
+                stop = BuiltinStop.TOOL_FAILED; failureKind = AgentFailureKind.INTERNAL
+            }
+            val terminalFailureKind = if (stop in setOf(BuiltinStop.COMPLETED, BuiltinStop.NO_CHANGE, BuiltinStop.VALIDATION_REQUIRED,
+                    BuiltinStop.REFUSED, BuiltinStop.CANCELLED, BuiltinStop.EXHAUSTED)) null
+                else failureKind ?: if (stop == BuiltinStop.INVALID_ACTION) AgentFailureKind.PROTOCOL else AgentFailureKind.INTERNAL
             try {
                 if (stop != BuiltinStop.SUSPENDED && resumeAdmitted) journal?.append(BuiltinJournalKind.TERMINAL, buildJsonObject {
                     put("stop", stop.name); put("cleanupComplete", cleanup); put("usage", usage())
                     put("state", BuiltinLoopState.TERMINATED.name)
+                    put("failureKind", terminalFailureKind?.name)
                     put("candidateChanges", builtinChangeJson(changes))
                     put("toolAudit", finalAudit ?: JsonNull)
                     val returnedChanges = if (stop in setOf(BuiltinStop.COMPLETED, BuiltinStop.NO_CHANGE, BuiltinStop.VALIDATION_REQUIRED,
                             BuiltinStop.REFUSED, BuiltinStop.CANCELLED, BuiltinStop.EXHAUSTED)) changes else emptyList()
                     put("resultChangesSha256", decompengine.project.agentFileChangeSetSha256(returnedChanges))
                 })
-            } catch (_: Exception) { stop = BuiltinStop.TOOL_FAILED }
-            try { journal?.close() } catch (_: Exception) { stop = BuiltinStop.TOOL_FAILED }
+            } catch (_: Exception) { stop = BuiltinStop.TOOL_FAILED; failureKind = AgentFailureKind.INTERNAL }
+            try { journal?.close() } catch (_: Exception) { stop = BuiltinStop.TOOL_FAILED; failureKind = AgentFailureKind.INTERNAL }
             records += BuiltinTraceRecord(records.size, BuiltinLoopState.TERMINATED)
             val evidence = BuiltinLoopEvidence(stop, records, modelCalls, toolCalls, inputTokens, outputTokens, estimated, cleanup, contextEntries,
-                journal?.evidence, checkpoint.takeIf { stop == BuiltinStop.SUSPENDED })
+                journal?.evidence, checkpoint.takeIf { stop == BuiltinStop.SUSPENDED }, changes)
             val ordinary = when (stop) {
                 BuiltinStop.COMPLETED, BuiltinStop.VALIDATION_REQUIRED -> AgentStopReason.COMPLETED
                 BuiltinStop.NO_CHANGE -> AgentStopReason.NO_CHANGES
@@ -247,6 +261,8 @@ class BuiltinAgentHarness(
                 messages += ModelMessage(ModelRole.USER, request.objective)
             }
             contextBytes(emptyList()) // Bound caller context before acquiring tool resources.
+            BuiltinContextAssembler.validateInputs(request, limits.maxContextBytes - limits.contextHistoryReserveBytes,
+                limits.maximumEvidenceBytes, control)
             val tools = openTools(request, control).also { session = it }
             val definitions = tools.definitions.toList()
             if (definitions.map { it.name }.distinct().size != definitions.size) throw BuiltinAbort(BuiltinStop.INVALID_ACTION)
@@ -462,7 +478,7 @@ class BuiltinAgentHarness(
                 } }))
                 put("contextEntries", JsonArray(contextEntries.map { entry -> buildJsonObject {
                     put("id", entry.id); put("mediaType", entry.mediaType); put("sha256", entry.sha256)
-                    put("bytes", entry.bytes); put("included", entry.included)
+                    put("bytes", entry.bytes); put("description", entry.description); put("included", entry.included)
                 } }))
             }
             journal!!.append(BuiltinJournalKind.CHECKPOINT, buildJsonObject {
@@ -525,7 +541,8 @@ class BuiltinAgentHarness(
             contextEntries = value.getValue("contextEntries").jsonArray.map { item ->
                 val entry = item.jsonObject
                 BuiltinContextEntry(entry.getValue("id").jsonPrimitive.content, entry.getValue("mediaType").jsonPrimitive.content,
-                    entry.getValue("sha256").jsonPrimitive.content, entry.getValue("bytes").jsonPrimitive.long, entry.getValue("included").jsonPrimitive.boolean)
+                    entry.getValue("sha256").jsonPrimitive.content, entry.getValue("bytes").jsonPrimitive.long,
+                    entry.getValue("description").jsonPrimitive.contentOrNull, entry.getValue("included").jsonPrimitive.boolean)
             }
             restoredContext = value.getValue("context").jsonObject
             val context = restoredContext!!
