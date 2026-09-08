@@ -79,12 +79,12 @@ internal object AgentProgressJournalMaintenance {
                     val pendingTime = expiryTime(pending.bytes)
                     when {
                         currentTime != null && pendingTime == null -> {
-                            require(currentTime <= now && matches(attempt, pending.bytes, current.bytes, currentTime, retention))
+                            require(currentTime <= now && matches(attempt, pending.bytes, current.bytes, currentTime))
                             finish(directory, current, pending, ::validateDirectories, fault)
                             return ProgressRetentionResult.EXPIRED
                         }
                         currentTime == null && pendingTime != null -> {
-                            require(pendingTime <= now && matches(attempt, current.bytes, pending.bytes, pendingTime, retention))
+                            require(pendingTime <= now && matches(attempt, current.bytes, pending.bytes, pendingTime))
                             publish(directory, current, pending, ::validateDirectories, fault)
                             return ProgressRetentionResult.EXPIRED
                         }
@@ -147,8 +147,13 @@ internal object AgentProgressJournalMaintenance {
             actual.isSymbolicLink == expected.isSymbolicLink
     private fun expiryTime(bytes: ByteArray): Instant? = AgentProgressJournal.decode(bytes)["retentionExpiredAt"]
         ?.jsonPrimitive?.content?.let(Instant::parse)
-    private fun matches(attempt: WorkflowAttempt, original: ByteArray, expired: ByteArray, time: Instant, retention: Duration) =
-        AgentProgressJournalRetention.expiredSnapshot(attempt, original, time, retention)?.contentEquals(expired) == true
+    private fun matches(attempt: WorkflowAttempt, original: ByteArray, expired: ByteArray, time: Instant): Boolean {
+        val endedAt = requireNotNull(attempt.endedAt)
+        val recordedRetention = Duration.between(endedAt, time)
+        return !recordedRetention.isNegative && !recordedRetention.isZero &&
+            AgentProgressJournalRetention.expiredSnapshot(attempt, original, time, recordedRetention)
+                ?.contentEquals(expired) == true
+    }
 
     private fun publish(directory: LinuxDescriptor, original: Captured, prepared: Captured,
         validate: () -> Unit, fault: (ProgressRetentionFaultPoint) -> Unit) {
