@@ -4,9 +4,11 @@ import decompengine.binary.ElfMetadata
 import decompengine.binary.ElfMetadataReader
 import decompengine.binary.ElfSymbolInventoryReader
 import decompengine.binary.SymbolInventory
-import decompengine.project.ProgramModelAnalyzer
+import decompengine.project.ExportBudgetedProgramModelAnalyzer
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
+import decompengine.project.ProgramModelAnalyzer
 import decompengine.project.RecoveredProgramModel
+import decompengine.project.ReconstructionBudgets
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.pathString
@@ -29,6 +31,13 @@ data class GhidraAnalysis(
 class GhidraAnalysisException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
 
 class GhidraJvmAnalyzer(private val analyzer: ProgramModelAnalyzer = GhidraHeadlessProgramModelAnalyzer()) {
+    /** Binds worker export limits; callers still admit the requested budgets against host policy. */
+    fun withExportBudgets(budgets: ReconstructionBudgets): GhidraJvmAnalyzer {
+        val bounded = analyzer as? ExportBudgetedProgramModelAnalyzer
+            ?: throw IllegalArgumentException("selected analyzer cannot apply reconstruction export budgets")
+        return GhidraJvmAnalyzer(bounded.withExportBudgets(budgets))
+    }
+
     fun analyze(binaryPath: Path, outputDir: Path): GhidraAnalysis {
         val reportsDir = outputDir.resolve("reports").createDirectories()
         val programModel = analyzer.analyze(binaryPath, outputDir)
