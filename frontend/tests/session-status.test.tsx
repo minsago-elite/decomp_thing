@@ -69,3 +69,16 @@ it('offers no request control when the bootstrap fragment could not be removed',
   expect(gateway.bootstrap).not.toHaveBeenCalled();
   expect(gateway.exchange).not.toHaveBeenCalled();
 });
+
+
+it('announces a changed authenticated server without displaying the opaque identifier', async () => {
+  const { session, data } = setup();
+  data.serverInstanceId = 'a'.repeat(32);
+  await session.initialize({ kind: 'absent' });
+  expect(await screen.findByText('Local session connected.')).toBeTruthy();
+  expect(screen.queryByText(/server instance changed/)).toBeNull();
+  data.serverInstanceId = 'b'.repeat(32);
+  await session.refresh();
+  expect(await screen.findByText(/server instance changed/)).toBeTruthy();
+  expect(document.body.textContent).not.toContain(data.serverInstanceId);
+});

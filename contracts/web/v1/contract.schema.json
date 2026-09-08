@@ -294,6 +294,11 @@
           "minLength": 32,
           "maxLength": 256,
           "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "serverInstanceId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$",
+          "description": "Opaque per-server-lifetime identifier for authenticated reconnect comparison; not authorization."
         }
       },
       "required": [

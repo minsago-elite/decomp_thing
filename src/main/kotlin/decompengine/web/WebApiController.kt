@@ -22,6 +22,7 @@ internal class WebApiController(
 ) {
     private val prefix = "${assets.basePath}api/v1/"
     private val applicationBuildId = applicationBuildId()
+    private val serverInstanceId = java.util.UUID.randomUUID().toString().replace("-", "")
     private val sessions = WebSessionController(access)
     private val uploadProgress = WebUploadProgress()
     private val progressPins = WebProgressPinController(access, jobs)
@@ -220,6 +221,7 @@ internal class WebApiController(
     private fun bootstrap(credentials: WebSessionCredentials): JsonObject = buildJsonObject {
         put("apiVersions", JsonArray(listOf(JsonPrimitive(1))))
         put("applicationBuildId", applicationBuildId)
+        put("serverInstanceId", serverInstanceId)
         put("uiBuildId", assets.manifest.buildId)
         put("basePath", assets.basePath)
         put("readiness", "degraded")
