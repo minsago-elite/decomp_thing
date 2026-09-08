@@ -689,7 +689,7 @@ class UploadServer(
 
 private const val MAX_UPLOAD_BYTES = 32L * 1024 * 1024
 
-private fun encodeJob(job: Job): String = Json.encodeToString(JsonElement.serializer(), job.toJson())
+private fun encodeJob(job: Job): String = Json.encodeToString(JsonElement.serializer(), legacyJobPresentation(job))
 
 private fun webOrigin(host: String, port: Int): String {
     val authority = if (':' in host && !host.startsWith('[')) "[$host]" else host
