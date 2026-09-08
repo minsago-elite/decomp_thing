@@ -240,11 +240,13 @@ describe('shared private request rejection', () => {
     await session.initialize({ kind: 'absent' });
     const observe = session.observeRequestFailure();
     const changed = vi.fn(); session.subscribe(changed);
+    const invalidated = vi.fn(); session.onInvalidated(invalidated);
     observe(denied('SESSION_EXPIRED'));
     expect(session.snapshot()).toEqual({ status: 'required', reason: 'expired' });
     expect(session.csrf()).toBeNull();
     observe(denied('SESSION_REQUIRED'));
     expect(changed).toHaveBeenCalledOnce();
+    expect(invalidated).toHaveBeenCalledExactlyOnceWith(false);
     expect(gateway.bootstrap).toHaveBeenCalledOnce();
     expect(gateway.exchange).not.toHaveBeenCalled();
     expect(gateway.logout).not.toHaveBeenCalled();
