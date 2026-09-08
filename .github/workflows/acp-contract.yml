@@ -2,8 +2,14 @@ name: ACP contract
 
 on:
   push:
+    branches:
+      - master
   pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   required-contract:
@@ -17,7 +23,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-          cache: gradle
+      - uses: gradle/actions/setup-gradle@v6
       - name: Install sandbox host prerequisites
         run: |
           sudo apt-get update

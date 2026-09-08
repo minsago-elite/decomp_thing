@@ -2,7 +2,14 @@ name: CI
 
 on:
   push:
+    branches:
+      - master
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   frontend:
@@ -16,6 +23,15 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
+      - name: Restore source-keyed frontend build outputs
+        id: frontend-build-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            build/frontend/dist
+            build/frontend/bundle-report.json
+            build/frontend/bundle-composition.json
+          key: frontend-build-${{ runner.os }}-${{ hashFiles('.node-version', 'scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt', 'frontend/package.json', 'frontend/package-lock.json', 'frontend/.npmrc', 'frontend/index.html', 'frontend/tsconfig.json', 'frontend/vite.config.ts', 'frontend/eslint.config.js', 'frontend/src/**', 'frontend/public/**', 'frontend/scripts/**', 'frontend/dev/**', 'scripts/generate-web-api.mjs', 'contracts/web/v1/contract.schema.json') }}
       - name: Install pinned build-only frontend toolchain
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
@@ -45,9 +61,11 @@ jobs:
         run: |
           npm --prefix frontend test -- --reporter=default --reporter=junit \
             --outputFile.junit="$RUNNER_TEMP/frontend-ci/component-tests.xml"
-      - name: Build and verify the production asset inventory
+      - name: Build production frontend assets on a cache miss
+        if: steps.frontend-build-cache.outputs.cache-hit != 'true'
+        run: npm --prefix frontend run build
+      - name: Verify the production asset inventory
         run: |
-          npm --prefix frontend run build
           frontend_version="$(node -p "require('./frontend/package.json').version")"
           node scripts/web-asset-manifest.mjs build/frontend/dist "$frontend_version" \
             --write "$RUNNER_TEMP/frontend-ci/asset-manifest.json"
@@ -56,6 +74,15 @@ jobs:
           node --test scripts/web-asset-manifest.test.mjs \
             | tee "$RUNNER_TEMP/frontend-ci/manifest-tests.txt"
           git diff --exit-code -- frontend/ contracts/web/v1/
+      - name: Save verified frontend build outputs
+        if: success() && steps.frontend-build-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            build/frontend/dist
+            build/frontend/bundle-report.json
+            build/frontend/bundle-composition.json
+          key: frontend-build-${{ runner.os }}-${{ hashFiles('.node-version', 'scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt', 'frontend/package.json', 'frontend/package-lock.json', 'frontend/.npmrc', 'frontend/index.html', 'frontend/tsconfig.json', 'frontend/vite.config.ts', 'frontend/eslint.config.js', 'frontend/src/**', 'frontend/public/**', 'frontend/scripts/**', 'frontend/dev/**', 'scripts/generate-web-api.mjs', 'contracts/web/v1/contract.schema.json') }}
       - name: Retain frontend verification evidence
         uses: actions/upload-artifact@v7
         if: always()
@@ -83,7 +110,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-          cache: gradle
+      - uses: gradle/actions/setup-gradle@v6
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -151,7 +178,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-          cache: gradle
+      - uses: gradle/actions/setup-gradle@v6
       - name: Install pinned build-only frontend toolchain
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
@@ -237,7 +264,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-          cache: gradle
+      - uses: gradle/actions/setup-gradle@v6
       - name: Install pinned build-only frontend toolchain
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
@@ -284,7 +311,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-          cache: gradle
+      - uses: gradle/actions/setup-gradle@v6
       - name: Install pinned build-only frontend toolchain
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"

@@ -25,8 +25,12 @@ request. It uses a clean locked npm install, strict type checking, lint, compone
 and state tests, the versioned web schema's positive/negative fixtures, a production
 bundle with size/dependency checks, and the manifest completeness/digest tests.
 It also rejects changes to checked frontend or contract inputs produced by those
-commands. No generated bundle, `node_modules`, or frontend dependency cache is
-restored; Gradle packaging in the other jobs builds its own current bundle.
+commands. Its production bundle outputs use a cache key containing every
+frontend, contract, generator and package-lock input; a hit skips only the
+bundle build after the source checks and still runs manifest and generated-output
+verification. Gradle packaging in the other jobs builds its own current bundle
+through the Gradle build cache, whose entries are selected by Gradle's task
+inputs rather than by restoring a generic `build/` directory.
 
 Run the frontend checks locally with the pinned tools:
 
@@ -74,8 +78,19 @@ actual executable digest/CDP version. It does not qualify browser sandbox behavi
 The packaged lane retains JSON reports, screenshots, tool pins and JVM test
 reports as `packaged-web-verification` for 14 days even after failure. Session
 secrets and bootstrap fragments are redacted; extraction/browser working data is
-removed after confirmed process shutdown. No browser cache or frontend output
-cache supplies the release; the existing Gradle dependency cache remains enabled.
+removed after confirmed process shutdown. No browser cache or standalone
+frontend output cache supplies the release; the Gradle task-output cache only
+reuses outputs whose declared task inputs match.
+
+All Gradle jobs enable the local Gradle build cache and use
+`gradle/actions/setup-gradle` to persist Gradle's reusable state between hosted
+runners. This includes compiled classes, generated resources and other cacheable
+task outputs, while tasks that explicitly disable caching retain their existing
+behavior. Normal push and pull-request workflows cancel older runs for the same
+branch or pull request; pushes from working branches are covered by the
+pull-request event and only the `master` push is retained, which avoids duplicate
+branch-push and pull-request runs. Manual workflows remain available for explicit
+qualification and the LLVM clean rebuild remains serialized and uncached.
 
 These are checkpoints under [#225](https://github.com/minsago-elite/decomp_thing/issues/225)
 and [#227](https://github.com/minsago-elite/decomp_thing/issues/227). Expanded
