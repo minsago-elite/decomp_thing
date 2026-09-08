@@ -200,6 +200,20 @@ flag/command/policy contradictions. The shim executes only the authored fixture
 programs and does not qualify bubblewrap containment. Existing real-bubblewrap
 integration cases require that executable on their test host.
 
+The focused `BehaviorEvidenceTest` regression `valid foreign revision report
+alongside a passing report remains unresolved` adds the missing valid-record case:
+two independently captured schema-4 reports are placed in one archive, and the
+audit keeps the current report in `projectBehaviorReportIds` while recording the
+foreign report in `behaviorEvidenceProblems` and
+`unresolvedBehaviorReportIds`. The mixed audit remains unavailable
+(`behaviorMatched = null`, `sandboxReported = false`), so a passing current record
+cannot hide a valid report from another project revision.
+
+This records the reviewable #37 consumer-side boundary for attribution of current
+schema-4 project revisions. The next actionable boundary is #36: retain and verify
+the exact original/rebuilt executable identities and runtime/source binding through
+completion before treating the record as stronger execution provenance.
+
 The earlier behavior/audit/archive/reconstruction/profile checkpoint passed 42
 focused tests. Bubblewrap was unavailable at that checkpoint; its two live runner
 failures were not counted as successful containment verification.
