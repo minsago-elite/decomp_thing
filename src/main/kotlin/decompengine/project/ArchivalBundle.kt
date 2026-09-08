@@ -107,6 +107,12 @@ object ArchivalPackager {
         )
         val payload = collectPayload(projectDir, archiveDestination, limits)
         validateSourceManifest(projectDir, payload.associateBy { it.relativePath }, profile)
+        val archivedBehaviorHashes = payload.asSequence()
+            .filter { it.relativePath.endsWith(".behavior.json") }
+            .associate { it.relativePath to it.sha256 }
+        require(archivedBehaviorHashes == audit.behaviorReportSha256) {
+            "behavior report bytes changed between audit and archive capture"
+        }
         val payloadBytes = payload.fold(0L) { total, item -> Math.addExact(total, item.size) }
         val hashManifestBytes = payload.fold(0L) { total, item ->
             Math.addExact(total, 67L + item.relativePath.toByteArray(Charsets.UTF_8).size)
