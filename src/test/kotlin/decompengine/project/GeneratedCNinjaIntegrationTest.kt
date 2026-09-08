@@ -13,6 +13,9 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlin.test.assertFailsWith
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
@@ -66,6 +69,33 @@ class GeneratedCNinjaIntegrationTest {
             sha256(extracted.resolve("build/reconstructed").readBytes()))
         assertEquals(audit.toJson(), ArchivalProjectAuditor.audit(extracted, profile).toJson())
         assertEquals(contract, Json.parseToJsonElement(extracted.resolve("reports/build_contract.json").readText()).jsonObject)
+    }
+
+    @Test
+    fun `Ninja archive rejects command dependency and budget records from another build policy`() {
+        val profile = GeneratedCNinjaReconstructionProfile.descriptor
+        val temp = createTempDirectory("ninja-build-record-")
+        val project = temp.resolve("project")
+        SourceTreeGenerator.generate(model(), project, reconstructor = RecoveredCModuleReconstructor(), profile = profile)
+        ReconstructionAdapters.resolve(profile).build(project, profile)
+        val path = project.resolve("reports/build_contract.json")
+        val original = path.readText()
+        val record = Json.parseToJsonElement(original).jsonObject
+        val changes = mapOf(
+            "command" to JsonArray(listOf(JsonPrimitive("other-build-tool"))),
+            "declaredDependencies" to JsonArray(listOf(JsonPrimitive("GNU Make"))),
+            "wallClockTimeoutMillis" to JsonPrimitive(profile.budgets.buildWallClockMillis + 1),
+            "maximumOutputBytes" to JsonPrimitive(profile.budgets.buildMaximumOutputBytes + 1),
+            "parallelism" to JsonPrimitive("4"),
+        )
+        for ((field, value) in changes) {
+            path.writeText(JsonObject(record + (field to value)).toString())
+            val archive = temp.resolve("rejected-$field.zip")
+            assertFailsWith<IllegalArgumentException>(field) { ArchivalPackager.create(project, archive, profile = profile) }
+            assertFalse(archive.exists(), field)
+        }
+        path.writeText(original)
+        ArchivalPackager.create(project, temp.resolve("accepted.zip"), profile = profile)
     }
 
     @Test
