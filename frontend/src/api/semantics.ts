@@ -42,6 +42,9 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       break;
     }
     case 'bootstrap': {
+      const retention = document.data.runtime.progressRetention;
+      if (retention && (BigInt(retention.expired) > BigInt(retention.examined)
+        || ((BigInt(retention.failures) === 0n) !== (retention.lastFailureCode === null)))) throw new ApiClientError('invalid_response');
       const scheduler = document.data.runtime.scheduler;
       if (scheduler?.state === 'available') {
         requireValue(BigInt(scheduler.activeWorkers) <= BigInt(scheduler.workerLimit));

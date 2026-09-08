@@ -246,7 +246,7 @@ internal class WebApiController(
             put("maxLogChunkBytes", "0")
             put("maxEventCount", "1024")
             put("maxEventBytes", "2097152")
-            put("terminalEventRetentionMs", "0")
+            put("terminalEventRetentionMs", if (jobs.progressRetentionStatus().enabled) decompengine.jobs.AgentProgressJournalRetention.DEFAULT_TERMINAL_RETENTION.toMillis().toString() else "0")
             put("defaultPageLimit", 50)
             put("maxPageLimit", 200)
         })
@@ -264,6 +264,7 @@ internal class WebApiController(
             })
             put("gitVersion", JsonNull)
             put("scheduler", webSchedulerSnapshot(jobs.schedulerSnapshot()))
+            put("progressRetention", webProgressRetentionStatus(jobs.progressRetentionStatus()))
         })
     }
 
