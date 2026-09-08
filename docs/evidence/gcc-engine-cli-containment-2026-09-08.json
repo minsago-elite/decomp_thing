@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-09-08T12:17:32+00:00",
+  "issue": 981,
+  "scope": "Bounded source and fixture audit for fresh and same-owner interrupted/resumed GCC engine CLI routing; this record is not production or hosted qualification.",
+  "sourceCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "sourceSha256": {
+    "src/main/kotlin/decompengine/oracle/gcc/GccBundledCliCommand.kt": "3588017da3362901b43977f095b1e38427e03eeb0dcd36c47899f56fdeb7f35e",
+    "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationCoordinator.kt": "4ab8bc5bd7aaaddccd92a8317ecd2a9c79d86d794098623e58de6bae4df091a8",
+    "oracle/gcc/16.2.0/compiler-engines.json": "e0ca60b7e856e9330e45fd58e61828313e8dd824413ee0df7ef76ee5d2b47bdc",
+    "oracle/gcc/compiler-engines.schema.json": "2dca9dda70f95641c5cafd3dae0edc382a3d1b783daed94bfb74ed439932264b",
+    "src/test/kotlin/decompengine/oracle/gcc/GccBundledCliCommandTest.kt": "bc924f7a2cfb8de68d8fe96ec5aeaa40a304c56abeb24008d332e3528ca94362",
+    "src/test/kotlin/decompengine/oracle/gcc/GccBundledContainedExecutionTest.kt": "c19860464d0030097bfbe87671ccb14f824a2eb019b0ecf5917d367c6631a423",
+    "src/test/kotlin/decompengine/oracle/gcc/GccBundledCliQualificationTest.kt": "8a4991cff779a9ef16c403c88ec6b6fe1df16090fa3d4d1d21e59a33114312b7"
+  },
+  "sourceObservations": [
+    {
+      "criterion": "Fresh CLI dispatch enters the contained coordinator",
+      "status": "present-in-current-code",
+      "reference": "src/main/kotlin/decompengine/oracle/gcc/GccBundledCliCommand.kt:11-49",
+      "detail": "No checkpoint option selects FRESH_CONTROL, then prepareNew(owner), execute(), plan(), and publishCliResult() run under one retained owner."
+    },
+    {
+      "criterion": "CLI interruption and resume retain the same owner and lineage",
+      "status": "present-in-current-code; same-owner-only",
+      "reference": "src/main/kotlin/decompengine/oracle/gcc/GccBundledCliCommand.kt:38-49; src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationCoordinator.kt:148-297",
+      "detail": "The checkpoint option selects INTERRUPTED, executeUntilCheckpoint() captures state and prefix evidence, and resume() revalidates retained inputs/checkpoints before the resumed START and export."
+    },
+    {
+      "criterion": "Planner and result remain bound to captured output",
+      "status": "present-in-current-code",
+      "reference": "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationCoordinator.kt:301-430",
+      "detail": "Planning requires this owner's completed export, rechecks the captured model before START, and publishes model/plan receipt hashes with complete=false and releaseEligible=false."
+    }
+  ],
+  "fixtureObservations": [
+    {
+      "reference": "src/test/kotlin/decompengine/oracle/gcc/GccBundledCliCommandTest.kt:19-119",
+      "status": "declared-coverage-not-executed",
+      "detail": "The fixture covers option selection, exact checkpoint selection, bound invocation identity, and preflight rejection; it does not run a real engine."
+    },
+    {
+      "reference": "src/test/kotlin/decompengine/oracle/gcc/GccBundledContainedExecutionTest.kt:157-213",
+      "status": "declared-coverage-not-executed",
+      "detail": "The authored multi-batch fixture exercises same-owner interruption/resume and fresh model/plan comparison when provisioned containment is available; it is fixture evidence, not benchmark acceptance."
+    },
+    {
+      "reference": "src/test/kotlin/decompengine/oracle/gcc/GccBundledCliQualificationTest.kt:24-77",
+      "status": "declared-coverage-not-executed",
+      "detail": "The opt-in cc1/lto1 CLI fixture compares fresh and same-owner resumed model/plan bytes and records benchmarkAccepted=false, releaseEligible=false, and no cold-recovery qualification."
+    },
+    {
+      "reference": "oracle/gcc/16.2.0/compiler-engines.json; oracle/gcc/compiler-engines.schema.json",
+      "status": "current-profile-fixture",
+      "detail": "The current retained profile and schema are the exact profile inputs named by the coordinator tests; no new engine bytes or profile claims are introduced here."
+    }
+  ],
+  "unverifiedCriteria": [
+    "No later-invocation or cold-recovery run establishes live-owner absence before reusing a checkpoint.",
+    "No current run proves that cc1 or lto1 actually executed through the installed CLI launcher.",
+    "No hosted/provisioned interruption, resume, stale-input rejection, or output-lineage qualification was executed for this record.",
+    "No whole-operation wall-clock or memory qualification was performed; parent issue #291 remains open and releaseEligible remains false."
+  ],
+  "validation": {
+    "mode": "source-and-fixture-audit-only",
+    "testsExecuted": [],
+    "testsSkipped": "Per task instruction, remaining tests were skipped; the record was checked only against the current source paths, line references, and SHA-256 values above."
+  },
+  "disposition": {
+    "implementationStatus": "contained fresh and same-owner CLI routing is present",
+    "evidenceStatus": "bounded and incomplete",
+    "complete": false,
+    "benchmarkAccepted": false,
+    "releaseEligible": false
+  }
+}
