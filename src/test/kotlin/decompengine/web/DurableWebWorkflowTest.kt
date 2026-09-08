@@ -424,6 +424,141 @@ class DurableWebWorkflowTest {
         }
     }
 
+    @Test fun `service pin updates queued task version before start and rejects stale pin requests`() = withRoot { root ->
+        val store = JobStore(root); val job = store.createFromUpload("queued-pin.elf", elfFixture())
+        val queued = mutableListOf<Runnable>(); var executions = 0
+        service(store, listOf(adapter { context ->
+            assertTrue(context.attempt.progressRetentionPinned); executions++; DurableWebWorkflowOutcome.Completed()
+        }), Executor(queued::add)).use { service ->
+            service.initializeExistingStorage()
+            val admission = assertIs<DurableWebWorkflowAdmission.Started>(service.startDurable(job.id, version(service, job.id), DurableWebWorkflowRequest(WorkflowKind.RECONSTRUCT)))
+            val before = service.getAttempt(job.id, admission.runId)
+            val pinned = service.setProgressRetentionPinned(job.id, admission.runId, before.version, true)
+            assertTrue(pinned.progressRetentionPinned)
+            assertEquals("VERSION_CONFLICT", assertFailsWith<WebJobServiceException> {
+                service.setProgressRetentionPinned(job.id, admission.runId, before.version, false)
+            }.code)
+            val bytes = root.resolve("${job.id}/workflow-state.json").readBytes()
+            assertEquals(pinned, service.setProgressRetentionPinned(job.id, admission.runId, pinned.version, true))
+            assertContentEquals(bytes, root.resolve("${job.id}/workflow-state.json").readBytes())
+            queued.single().run()
+            val done = service.getAttempt(job.id, admission.runId)
+            assertEquals(WorkflowRunState.COMPLETED, done.state); assertTrue(done.progressRetentionPinned)
+            assertEquals(1, executions)
+            service.beginShutdown()
+            assertEquals("SERVICE_STOPPED", assertFailsWith<WebJobServiceException> {
+                service.setProgressRetentionPinned(job.id, admission.runId, done.version, false)
+            }.code)
+        }
+    }
+
+    @Test fun `pinning running work preserves its immutable invocation context and final publication`() = withRoot { root ->
+        val store = JobStore(root); val job = store.createFromUpload("running-pin.elf", elfFixture())
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        val worker = Executors.newSingleThreadExecutor()
+        val service = service(store, listOf(adapter { context ->
+            entered.countDown(); check(release.await(5, TimeUnit.SECONDS))
+            assertFalse(context.attempt.progressRetentionPinned)
+            DurableWebWorkflowOutcome.Completed(usage = WorkflowUsage(inputTokens = 7u))
+        }), worker)
+        try {
+            service.initializeExistingStorage()
+            val admission = assertIs<DurableWebWorkflowAdmission.Started>(service.startDurable(job.id, version(service, job.id), DurableWebWorkflowRequest(WorkflowKind.RECONSTRUCT)))
+            assertTrue(entered.await(3, TimeUnit.SECONDS))
+            val running = service.getAttempt(job.id, admission.runId)
+            assertEquals(WorkflowRunState.RUNNING, running.state)
+            service.setProgressRetentionPinned(job.id, admission.runId, running.version, true)
+            release.countDown(); worker.shutdown(); assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS))
+            val done = service.getAttempt(job.id, admission.runId)
+            assertEquals(WorkflowRunState.COMPLETED, done.state); assertTrue(done.progressRetentionPinned)
+            assertEquals(7uL, done.usage!!.inputTokens)
+        } finally { release.countDown(); worker.shutdownNow(); worker.awaitTermination(5, TimeUnit.SECONDS); service.close() }
+    }
+
+    @Test fun `pin publication failure before rename preserves queued execution while uncertainty revokes it`() {
+        for (point in listOf(WorkflowStoreFaultPoint.AFTER_TEMP_FSYNC, WorkflowStoreFaultPoint.AFTER_RENAME)) withRoot { root ->
+            val store = JobStore(root); val job = store.createFromUpload("failed-pin.elf", elfFixture())
+            val queued = mutableListOf<Runnable>(); var executions = 0
+            val failPin = AtomicBoolean()
+            val service = WebJobService(store, inertAnalyzer, inertReconstructor, Executor(queued::add),
+                durableAdapters = listOf(adapter { executions++; DurableWebWorkflowOutcome.Completed() }),
+                attemptStoreFactory = { WorkflowAttemptStore.open(it, Clock.systemUTC(), WorkflowStoreFaultInjector { stage ->
+                    if (failPin.get() && stage == point) throw IOException("private pin failure fixture")
+                }) })
+            lateinit var runId: String
+            service.use {
+                service.initializeExistingStorage()
+                runId = assertIs<DurableWebWorkflowAdmission.Started>(service.startDurable(job.id, version(service, job.id), DurableWebWorkflowRequest(WorkflowKind.RECONSTRUCT))).runId
+                val before = service.getAttempt(job.id, runId)
+                val original = root.resolve("${job.id}/workflow-state.json").readBytes()
+                failPin.set(true)
+                val failure = assertFailsWith<WebJobServiceException> { service.setProgressRetentionPinned(job.id, runId, before.version, true) }
+                assertFalse(failure.message!!.contains("private pin failure fixture"))
+                failPin.set(false)
+                if (point == WorkflowStoreFaultPoint.AFTER_TEMP_FSYNC) {
+                    assertEquals("PERSISTENCE_FAILED", failure.code)
+                    assertContentEquals(original, root.resolve("${job.id}/workflow-state.json").readBytes())
+                    queued.single().run()
+                    assertEquals(WorkflowRunState.COMPLETED, service.getAttempt(job.id, runId).state)
+                    assertFalse(service.getAttempt(job.id, runId).progressRetentionPinned)
+                    assertEquals(1, executions)
+                } else {
+                    assertEquals("RECOVERY_REQUIRED", failure.code)
+                    assertEquals("RECOVERY_REQUIRED", assertIs<WebJobInspection.Unavailable>(service.inspect(job.id)).diagnostic.code)
+                    assertEquals("RECOVERY_REQUIRED", assertFailsWith<WebJobServiceException> { service.upload("blocked.elf", elfFixture()) }.code)
+                    queued.single().run()
+                    assertEquals(0, executions)
+                }
+            }
+            WorkflowAttemptStore.open(root).use { owner ->
+                val recovered = owner.recoverAfterRestart(job.id) as WorkflowJobInspection.Available
+                val run = recovered.snapshot.attempts.single { it.runId == runId }
+                assertEquals(point == WorkflowStoreFaultPoint.AFTER_RENAME, run.progressRetentionPinned)
+                assertEquals(if (point == WorkflowStoreFaultPoint.AFTER_RENAME) WorkflowRunState.INTERRUPTED else WorkflowRunState.COMPLETED, run.state)
+            }
+        }
+    }
+
+    @Test fun `uncertain running pin retains ownership until callback exit without publishing over it`() = withRoot { root ->
+        val store = JobStore(root); val job = store.createFromUpload("running-uncertain-pin.elf", elfFixture())
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        val failPin = AtomicBoolean()
+        val observed = java.util.concurrent.atomic.AtomicReference<Throwable>()
+        val worker = Executors.newSingleThreadExecutor()
+        val service = WebJobService(store, inertAnalyzer, inertReconstructor,
+            Executor { task -> worker.execute { try { task.run() } catch (failure: Throwable) { observed.set(failure) } } },
+            durableAdapters = listOf(adapter {
+                entered.countDown()
+                while (release.count != 0L) try { release.await() } catch (_: InterruptedException) { }
+                DurableWebWorkflowOutcome.Completed()
+            }), shutdownTimeoutMs = 20,
+            attemptStoreFactory = { WorkflowAttemptStore.open(it, Clock.systemUTC(), WorkflowStoreFaultInjector { point ->
+                if (failPin.get() && point == WorkflowStoreFaultPoint.AFTER_RENAME) throw IOException("inert pin publication failure")
+            }) })
+        try {
+            service.initializeExistingStorage()
+            val admission = assertIs<DurableWebWorkflowAdmission.Started>(service.startDurable(job.id, version(service, job.id), DurableWebWorkflowRequest(WorkflowKind.RECONSTRUCT)))
+            assertTrue(entered.await(3, TimeUnit.SECONDS))
+            val running = service.getAttempt(job.id, admission.runId)
+            failPin.set(true)
+            assertEquals("RECOVERY_REQUIRED", assertFailsWith<WebJobServiceException> {
+                service.setProgressRetentionPinned(job.id, admission.runId, running.version, true)
+            }.code)
+            failPin.set(false)
+            val uncertainBytes = root.resolve("${job.id}/workflow-state.json").readBytes()
+            assertEquals("SHUTDOWN_INCOMPLETE", assertFailsWith<WebJobServiceException> { service.close() }.code)
+            assertEquals("OWNERSHIP_CONFLICT", assertFailsWith<WorkflowStoreException> { WorkflowAttemptStore.open(root) }.code)
+            release.countDown(); worker.shutdown(); assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS))
+            assertEquals("RECOVERY_REQUIRED", assertIs<WebJobServiceException>(observed.get()).code)
+            assertContentEquals(uncertainBytes, root.resolve("${job.id}/workflow-state.json").readBytes())
+            assertTrue(service.isIdle())
+        } finally { release.countDown(); worker.shutdownNow(); worker.awaitTermination(5, TimeUnit.SECONDS); service.close() }
+        WorkflowAttemptStore.open(root).use { owner ->
+            val run = (owner.recoverAfterRestart(job.id) as WorkflowJobInspection.Available).snapshot.latestRun!!
+            assertTrue(run.progressRetentionPinned); assertEquals(WorkflowRunState.INTERRUPTED, run.state)
+        }
+    }
+
     private fun service(store: JobStore, adapters: List<DurableWebWorkflowAdapter> = emptyList(), executor: Executor = Executor(Runnable::run)) =
         WebJobService(store, inertAnalyzer, inertReconstructor, executor, durableAdapters = adapters)
     private fun adapter(action: (DurableWebWorkflowContext) -> DurableWebWorkflowOutcome) = object : DurableWebWorkflowAdapter {
