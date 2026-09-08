@@ -134,7 +134,7 @@ resetting at a terminal queue drop while preserving the omission counters for
 the snapshot response. It does not certify that omitted events were delivered.
 
 Missing/changed anchors, sequence holes, trailing omissions and process restart
-return `410 PROGRESS_GAP`; malformed/tampered/cross-binding cursors return
+return `410 EVENT_GAP`; malformed/tampered/cross-binding cursors return
 `400 INVALID_CURSOR`. Invalid journals return a bounded `503 PROGRESS_UNAVAILABLE`
 message. A gap discards the prospective page rather than returning silently
 partial history. Snapshot-boundary results retain next-sequence and queue/history
@@ -160,8 +160,8 @@ The versioned API now exposes read-only `GET /api/v1/jobs/J/runs/R/snapshot` and
 `GET /api/v1/jobs/J/runs/R/events?cursor=...&limit=...`, including nested base paths.
 Both require the existing local session/origin policy and JSON Accept rules.
 The server resolves the exact durable attempt, reads its fixed journal artifact
-through the checked descriptor boundary, and rejects a changed attempt version
-after the read with `409 PROGRESS_CHANGED`. Missing/inaccessible journal bytes
+through the checked descriptor boundary while holding the durable attempt store read transaction.
+Lifecycle publication cannot interleave with that local evidence capture. Missing/inaccessible journal bytes
 return `503 PROGRESS_UNAVAILABLE`, never an invented empty history. The reader's
 missing-target exception needed explicit mapping; the HTTP regression caught
 and fixed an initial generic 500 response for that case.
@@ -172,11 +172,12 @@ record count. This optional v1 field preserves old snapshot fixture compatibilit
 new endpoint responses always supply it. Consumers must not interpret its absence
 as complete history. Counter/cursor consistency checks run in the typed client
 and shared verifier. Snapshot run state remains independent of journal claims.
-The version check covers a stable attempt observation around a stable journal
-file read; it is not a transaction between workflow state and journal publication.
+The read transaction holds run state stable while the checked descriptor captures one atomic
+journal publication. Its immutable attempt and captured bytes define the snapshot watermark;
+the store lock is released before decoding, serialization or network delivery.
 
 Use `oldestCursor` to explicitly read retained history and `throughCursor` to
-resume after the snapshot cutover. Gaps return `410 PROGRESS_GAP`; clients must
+resume after the snapshot cutover. Gaps return `410 EVENT_GAP`; clients must
 read a fresh snapshot and visibly acknowledge lost history before resuming.
 Polling is ordinary bounded HTTP with no retained stream/queue. Bootstrap now
 reports the implemented source-journal read ceilings (1,024 events / 2 MiB);
@@ -460,3 +461,268 @@ the application PATH and confirmed cleanup. Chrome used test-only `--no-sandbox`
 No uploaded binary, native analysis or live agent ran. This covers the embedded SPA on the
 recorded Linux/Chrome environment; legacy-browser automation, other browsers, certified public
 messages and complete classification of retained metadata remain outside this evidence.
+
+## Legacy HTML progress service boundary
+
+The legacy job controller now obtains a projected snapshot through the same bounded service
+read and privacy mapper as the legacy JSON route. `renderJob` accepts that snapshot explicitly;
+its progress renderer no longer opens `agent-progress.json`. Callers that do not supply a
+snapshot get an unavailable-progress label, even if a journal happens to exist beside the job.
+Missing, malformed or oversized journals leave the job page usable and clearly state that
+missing data does not establish empty history. A valid zero-event journal has a distinct
+retained-empty message. Polling errors retain displayed rows and replace the status message
+with unavailable progress; a successful subsequent response can replace that state.
+
+HTTP tests check unavailable and valid-empty HTML alongside JSON and byte preservation. A
+renderer regression supplies a snapshot differing from the on-disk journal and verifies only
+the supplied data appears; an omitted snapshot does not trigger an implicit read. This removes
+the progress-specific direct-read gap from the D2 audit. Other legacy exploration/repair HTML
+report reads and the legacy session boundary remain migration work. Browser execution of the
+legacy polling script is not covered by this JVM verification.
+
+## Target polling query compatibility
+
+The retained-journal endpoint now accepts the planned fallback query
+`events?transport=poll&after=...&limit=...`, and the activity client sends that spelling.
+Existing `cursor` requests use the same replay implementation and produce identical pages.
+Transport may be omitted; `after` and `cursor` are mutually exclusive even when equal.
+Duplicate/unknown fields, other transport values and oversized queries fail validation.
+The same 1–200 page limit, bounded source reads, HMAC cursor binding and explicit gap behavior
+remain in force. Polling rejects Last-Event-ID; that header is reserved for future streaming
+and cannot silently reset a polling client to the beginning of history.
+
+HTTP/core tests compare both spellings and exercise ambiguity, invalid transport and gap
+behavior. Frontend tests require `transport=poll` and continuation through `after`. This
+closes the target polling-query compatibility gap; SSE, heartbeat/resource management,
+transactional cutover and timed retention are still outstanding under #174.
+
+At source `3443883`, 179 web/journal JVM tests, 269 frontend tests, lint and distZip pass.
+The [packaged history/activity report](evidence/web-polling-query-browser-20260905.json)
+verifies the target query and equality with the cursor alias alongside 200/5 activity pages,
+pause/resume, recovery, metadata privacy and retained-byte checks. It identifies artifact
+hashes, an inert test-owned fixture, no workflow execution, test-only Chrome --no-sandbox,
+unchanged installation and confirmed cleanup. This does not qualify SSE or live delivery.
+
+## Dedicated stream resource prerequisite
+
+`WebStreamResources` provides the resource owner for the forthcoming SSE adapter. It admits
+at most 16 connections globally and two per authenticated session identity, independently of
+the ordinary HTTP and workflow executors. Rejection leaves the exchange with the router so
+it can return a typed error or keep using polling. The component does not authenticate a
+request itself: the endpoint must call LocalWebAccess before admission and revalidate while
+serving private events. It is not yet attached to an HTTP route or advertised as SSE support.
+
+Only admitted reservations can create virtual-thread work or cleanup tasks. There is no
+waiting-client queue or event buffer. Separate cleanup tasks prevent a blocked writer from
+preventing its connection-close attempt, and a blocked close cannot serialize other clients'
+cleanup. A reservation is released only after both the writer has exited and connection
+closure has succeeded. Interrupting a writer or cancelling its lease alone does not refund
+capacity. Failed cleanup keeps its reservation charged and makes shutdown report incomplete.
+
+Each reservation has a bounded 30-second connection lease; its deadline interrupts work and
+requests cleanup without running connection-close code on the deadline scheduler. Shutdown
+rejects new admission, requests cancellation and waits within one bounded grace period. It
+reports false if writers/cleanup remain, and late completion can be observed by another
+shutdown check without restarting work. The future stream transport must reconnect from its
+last acknowledged cursor; ending a connection is never a workflow cancellation.
+
+Nine resource tests cover global/session limits, simultaneous admissions, cancelled writers
+that ignore interruption, blocked/failed cleanup, deadlines, work failure, exact-once closure
+and bounded shutdown with late completion. The tests use controlled callbacks and latches,
+not a slow browser socket. Actual SSE framing, heartbeats, authenticated transport integration,
+slow socket behavior and server lifecycle integration remain required before #174's stream
+resource criteria are complete.
+
+## SSE transport integration
+
+The v1 events route now negotiates explicit text/event-stream and hands the exchange to
+WebStreamResources. UploadServer owns and shuts down that resource pool. WebEventStream
+uses the same WebProgressPages instance as polling, so session/job/attempt cursor binding
+and replay positions are interchangeable. Snapshot, polling and SSE share readWebProgress's
+fixed journal path and attempt-version guard; this remains a guarded read, not a transaction
+with journal publication.
+
+Frames contain the existing workflow.observation projection. Resume headers are bounded
+and mutually exclusive with query positions; heartbeat comments carry no cursor. Retention
+loss after delivery emits the existing retention.gap schema without an SSE id and closes.
+Authentication is rechecked before source reads and writes. The activity UI remains on
+bounded polling; this endpoint does not enable any unfinished production workflow adapter.
+
+HTTP tests use an actual single-worker HttpServer to prove two open streams do not occupy
+its only HTTP worker, quota rejection leaves ordinary requests responsive, logout closes
+streams, Last-Event-ID replays after the acknowledged record, polling/SSE documents match,
+retention loss emits an unnumbered gap and reconnect receives a pre-header 410. Accelerated
+heartbeat/lease tests verify real connection closure and unchanged fixture bytes. A test on
+UploadServer itself verifies routing and its shared guarded artifact projection. These do
+not establish arbitrary slow-socket behavior, the full client reconnect algorithm, timed
+retention or transactional snapshot/event cutover.
+
+At source `e15ba2e`, 194 web/journal tests and distZip pass. The
+[packaged SSE report](evidence/web-sse-browser-20260906.json) verifies native EventSource
+receipt with the session cookie and an event/id identical to polling, alongside the existing
+history/activity/recovery and retained-byte checks. No workflow executes. The report
+identifies archive/JAR/browser hashes, test-only --no-sandbox, unchanged installation and
+confirmed shutdown/cleanup. It proves native delivery, not full browser automatic reconnect
+or fallback behavior; the UI still chooses polling.
+
+## Bounded browser SSE decoder prerequisite
+
+The frontend now has an incremental SSE decoder over transport byte chunks. It accepts
+LF/CRLF/CR split across arbitrary chunks, validates UTF-8 and bounds each wire frame to
+65,536 data bytes plus 1,024 framing bytes. Complete event documents pass the shared JSON
+contract and deployment-path checks; event type/id must agree with the document. Gap
+controls cannot inherit the previous event's cursor. Partial records are discarded on
+disconnect, errors terminate the decoder, and a generator yields records individually
+instead of accumulating an event queue from a large input chunk.
+
+This is a client-integration prerequisite. It does not perform fetch, authorize delivery,
+bind the selected job/attempt, deduplicate events or implement reconnect/fallback. Those
+remain the stream consumer's responsibility; the activity UI still polls. Tests exercise
+the actual decoder with shared event fixtures, byte-by-byte Unicode, all line endings,
+multiline JSON, gaps, malformed framing, ignored-field budgets and interrupted records.
+
+## Single browser stream connection
+
+PR #399 adds `createEventStream`: one same-origin cookie-authenticated fetch with a bounded Last-Event-ID resume header, selected job/run checks and the incremental decoder above. It shares the existing bounded JSON body reader for HTTP errors and preserves only validated correlation/error metadata. Each connection has a 45-second absolute deadline; abort, early consumer return, retention gap and late fetch completion cancel its source. No reconnect or cursor acknowledgement occurs inside this transport.
+
+301 frontend tests, lint and the typechecked production build pass. Tests include late uncooperative fetch completion, cancellation during a pending read or suspended yield, early exit, HTTP error/correlation handling, oversized frames and selected-run binding. Server and packaged-browser checks were not repeated for this unused client layer. Activity still polls; consuming this stream with snapshot reconciliation, duplicate/order checks and bounded reconnect/fallback remains necessary for #174.
+
+## Activity streaming and reconnect integration
+
+Activity first catches up one bounded polling page, then consumes SSE from its acknowledged cursor. It validates identity/order, deduplicates retained replay without regressing the cursor, stops at exactly 200 displayed observations and cancels on pause, navigation, hidden/offline state or access denial. A retention gap stops delivery with explicit fresh-history recovery. After a normal leased EOF it reconciles a snapshot and resumes; short failures use the existing four-retry jittered backoff, with periodic polling after two streaming failures. Explicit unsupported responses (406/415/501) and the server's specific 429 STREAM_LIMIT response select polling immediately. Fresh-history recovery also retries streaming.
+
+This wires the client into Activity; it does not make the guarded snapshot/journal reads transactional or establish timed retention and slow-socket stress qualification. Browser qualification appends one inert observation to its owned journal, requires receipt over an already-open stream without another poll, then restores the original bytes. It does not execute a workflow.
+
+Verification for this integration: 312 frontend tests, lint, typechecked production build and distZip pass. The retained [packaged browser report](evidence/web-activity-stream-browser-20260908.json) confirms appended Activity delivery over SSE without another poll, restored fixture bytes, normal history/privacy/recovery checks and shutdown/owned cleanup. It records the final source and artifact identities and test-only Chrome --no-sandbox. JVM tests were not repeated for this frontend-only runtime change.
+
+## Typed HTTP event-gap recovery
+
+Polling and pre-header SSE gaps now use `410 EVENT_GAP` with `error.recovery`: selected job/run, requested cursor (nullable for an initial unanchored gap), oldest/latest cursors and a deployment-bound snapshot URL. The boundary is derived from the same retained bytes that detected the gap. Empty retention supplies a null oldest position; its latest position may acknowledge the omission watermark. Invalid cursors remain 400 without recovery metadata; ordinary errors cannot carry gap recovery. The shared schema and semantic checks reject foreign snapshot links, partial boundaries and blind-retry flags. Activity recognizes EVENT_GAP and the older PROGRESS_GAP spelling, and preserves explicit fresh-history recovery. In-stream gaps remain unnumbered controls.
+
+Verification: 231 JVM web/journal tests, 321 frontend tests, lint, typechecked build, distZip and 44 valid/36 invalid shared fixtures pass. The [retained packaged report](evidence/web-event-gap-browser-20260908.json) confirms the visible expired-cursor gap, preserved rows, explicit fresh-history recovery, restored fixture bytes and shutdown/owned cleanup. Snapshot/journal transactionality, timed retention and slow-socket stress remain unproven.
+
+## Durable attempt read transaction
+
+`WorkflowAttemptStore.withAttemptSnapshot` holds the existing job stripe and ownership read lock while the service captures bounded local journal bytes. `WebJobService.readProgressSnapshot` preserves initialization/publication-failure admission and the authenticated fixed-artifact boundary. Snapshot, polling and SSE share this reader. Durable lifecycle/acceptance publication and ownership release cannot interleave with evidence capture; no lock is held during HTTP serialization, socket writes, heartbeat waits or reconnect delays.
+
+The journal writer continues atomic file publication independently. The captured publication and the stable attempt coexist during the read; subsequent appends are addressed by the existing watermark cursor, and eviction produces EVENT_GAP. This is a read transaction, not a new writer journal or a second workflow authority. Concurrency tests cover a competing lifecycle transition, close waiting for capture, callback failure releasing the lock and foreign-run rejection. Full concurrent snapshot/replay stress and timed retention remain to be qualified under #174.
+
+Verification: 246 web/journal/workflow-store tests and distZip pass. The [packaged transaction report](evidence/web-progress-transaction-browser-20260908.json) confirms ordinary snapshot/SSE/gap/recovery behavior and shutdown/owned cleanup on the new reader. It records source/artifact identities, restored fixture bytes and test-only Chrome --no-sandbox; no workflow executes. Frontend tests were not repeated because client code is unchanged. This browser pass is not concurrent cutover stress evidence.
+
+## Empty retained-history cutover
+
+A fully omitted journal with a nonzero nextSequence now returns a signed throughCursor and throughSequence = nextSequence - 1, while oldestCursor stays null. The watermark authenticates the cumulative queue/history omission counters and selected session/job/run; it is not a persisted event and is never emitted as an SSE event id. An untouched zero-sequence journal still has null cutover fields. This closes the fresh-history reset loop when no event remains to anchor the cursor.
+
+Replay from this watermark accepts later contiguous publication, retains normal duplicate delivery semantics and rejects omission-counter rollback or reappearing acknowledged rows. Further loss returns EVENT_GAP and a new snapshot can acknowledge it. Shared snapshot/recovery semantics now distinguish an absent oldest event from an acknowledged logical watermark. The packaged browser scenario fully evicts its owned fixture, reads empty history successfully, then appends one observation and requires SSE delivery without another poll; all fixture bytes are restored afterward.
+
+Verification: 248 selected JVM tests, 324 frontend tests, lint, typechecked build, distZip and 46 valid/37 invalid shared fixtures pass. The [retained empty-cutover browser report](evidence/web-empty-cutover-browser-20260908.json) proves successful empty-history recovery and later SSE delivery, with restored fixture bytes and confirmed shutdown/owned cleanup. It records source/artifact identities and test-only Chrome --no-sandbox. This fixes an edge case missed by the earlier gap-recovery qualification; full concurrent snapshot/replay stress remains outstanding.
+
+## Controlled concurrent snapshot and replay qualification
+
+`WebProgressCutoverTest` drives the actual authenticated HTTP controller, service read transaction and checked journal reader against an owned fixture. Across 33 atomic publication rounds (264 appended observations), 11 snapshot reads are forced before publication, 11 after, and 11 race publication. Start and completion are inert store transitions in racing rounds. Snapshot state must agree with its captured journal watermark; bounded seven-record replay pages must contain exactly every subsequent sequence. Repeating the same page request must return identical data without acknowledging on the client's behalf.
+
+A separate real SSE connection starts from a snapshot, then atomic eviction removes its anchor. It must emit an unnumbered gap and close; polling must report EVENT_GAP. After a fresh snapshot, another connection receives every later append, with sequences identical to polling. No analyzer, reconstructor or workflow adapter executes. The final run accepted all 33 initial snapshots; no interrupted-read fallback occurred in that run.
+
+250 selected web/journal/workflow-store tests pass. These controlled interleavings establish the implemented cutover and replay contract alongside the read-lock, empty-watermark and client/browser checks retained above. They are not production throughput or slow-socket stress qualification. Client and server implementation code is unchanged in this test layer, so frontend, package and browser checks were not repeated. Timed terminal-run retention and slow-socket qualification remain outstanding.
+
+The [retained cutover manifest and JUnit result](evidence/web-concurrent-cutover-20260908/manifest.json) record the implementation/test source, selected test totals, observed schedule counts and evidence hash. The retained JUnit file covers the two new HTTP cutover tests; totals describe the complete selected suite.
+
+## Unread socket lease qualification
+
+`WebEventStreamTest` opens one authenticated owned loopback SSE peer that never reads. Its synthetic source offers at most 64 expanding bounded journal windows, then a fixed tail. The test observes the dedicated writer parked inside JDK 21 `SocketChannelImpl` write code. While that stream remains charged, the single ordinary HTTP worker serves health and authenticated polling requests. The six-second fixture lease releases the reservation with zero cleanup failures while the peer remains open and unread. Fixture teardown also requires stream and HTTP-worker shutdown. No workflow executes.
+
+All 251 selected web/journal/workflow-store JVM tests pass. The existing lease/logout closure helper now accepts an IOException only when its cause chain confirms EOF, since forced cancellation may end within HTTP chunk framing; unrelated I/O errors still fail. The [retained manifest and JUnit result](evidence/web-slow-socket-20260908/manifest.json) identify the tested source and evidence hash. The retained XML covers seven SSE tests; totals describe the complete selected suite.
+
+This qualifies one bounded blocked peer on the pinned JDK, not production throughput or cross-platform load. Runtime code is unchanged, so frontend, package and browser checks were not repeated. Timed terminal-run retention and the remaining issue criteria are still open.
+
+## Terminal retention preparation
+
+`AgentProgressJournalRetention.expiredSnapshot` prepares a bounded empty journal at the exact durable `endedAt + 24 hours` boundary (or a caller-supplied positive duration). Active attempts and completed attempts awaiting acceptance publication are ineligible. File mtimes and observation timestamps do not determine expiry. A clock earlier than the deadline leaves the journal alone. The function does not mutate its input or run metadata, and a previously expired journal requires no replacement.
+
+The replacement preserves `nextSequence` and prior queue loss, moves all retained records into cumulative history loss, and records the full omitted range. It contains only the known journal envelope and a canonical `retentionExpiredAt` timestamp. No observation payload survives. The decoder permits this optional marker only on an empty journal. This explicitly represents timed expiry of a single startup record, which ordinary size-based eviction cannot produce and the decoder previously rejected. Unmarked impossible single-record eviction remains invalid. Existing signed empty watermarks let old cursors report EVENT_GAP and fresh snapshots resume idle polling without a reset loop.
+
+This is preparation for persisted maintenance, not automatic expiry. The storage owner must still select eligible unpinned attempts, exclude active writers/read leases, stabilize durable attempt state, and publish these bytes through checked atomic replacement with interruption recovery. No HTTP read prunes data, no background sweep is enabled, and the advertised terminal-retention window remains unchanged until that integration is qualified. This layer does not fulfill the complete #174/#172 retention requirements.
+
+Verification: all 256 selected JVM tests pass. The [retained manifest and five retention test results](evidence/web-terminal-retention-core-20260908/manifest.json) identify the tested source and result hash. Frontend, package and browser checks were not repeated because this layer does not change HTTP/UI behavior.
+
+## Storage-owned retention publication
+
+`WorkflowAttemptStore.expireProgressJournal` now exposes an internal explicit maintenance operation under the existing ownership lifetime lock and job stripe. Callers must supply whether pins or read leases protect the attempt. Protected, active and pending-publication attempts are retained. The operation uses the owner's clock and the retention preparation above, preserving run state, input and evidence files. No HTTP route or automatic sweep invokes it yet.
+
+Maintenance and `AgentProgressJournal` share a JVM admission registry plus the writer's existing Java/native file lock. The registry prevents a competing in-process open/close from releasing a process-scoped POSIX lock held by a live writer. Maintenance takes the same lock before reading or publishing; it never waits for a live writer. This is distinct from the Linux helper's flock mechanism.
+
+Publication pins every directory in the fixed selected run report path and performs file operations relative to those descriptors. Linked journal/lock entries are rejected. An unnamed temporary file is written and synced before being linked as `.agent-progress-retention.pending.json`. After directory sync, an atomic exchange installs the expired journal and retains its predecessor at that pending name. The directory is synced before the old journal is removed, then synced again. Current names, captured bytes and directory identities are checked around publication. Unsupported descriptor/atomic-filesystem operations fail explicitly.
+
+Retry under storage ownership recognizes either a prepared replacement beside its original or an installed replacement beside its predecessor. It recomputes the expiry transformation for the selected durable attempt and recorded expiry time before resuming. A malformed or ambiguous pair remains intact with a sanitized PROGRESS_RETENTION_FAILED diagnostic. The code does not guess which unrelated bytes to remove.
+
+Qualification uses inert owned fixtures: protected/active/absent history, durable metadata/input preservation, every injected publication interruption, injected I/O failure before and after exchange, malformed transaction state, linked-entry denial, live-writer exclusion, a separate JVM lock probe, and a snapshot read holding the job transaction during expiry. Injected failures are not a power-loss or real disk-full filesystem qualification. Caller policy for persistent pins/read leases, automatic scheduling and service reporting remain unfinished under #174/#172; the advertised retention guarantee is unchanged.
+
+All 264 selected web/journal/workflow-store JVM tests pass. The [retained manifest and eight maintenance test results](evidence/web-retention-publication-20260908/manifest.json) record the tested source and evidence hash. Frontend/package/browser checks were not repeated because this layer changes no HTTP/UI behavior. Parent PR #421 CI has separately observed Node pin and trusted-runtime provisioning failures; local verification does not qualify those lanes.
+
+## Service maintenance and HTTP expiry recovery
+
+`WebJobService.expireProgressJournal` now connects explicit retention to the shared service boundary. It validates initialization, selected attempt and publication admission, rejects stopping/closed services, and retains protected runs, jobs whose workers have not exited, and storage during active uploads. Its service monitor excludes bounded artifact capture and shutdown; the store transaction and journal writer lease continue to protect publication. The caller must keep its persistent pin/read-lease policy decision stable through the call.
+
+A real authenticated HTTP fixture now exercises this operation at the durable terminal deadline. One nanosecond before 24 hours and an explicitly protected call retain original bytes. At the deadline, expiry removes the eight inert records while an SSE connection is open. The connection receives an unnumbered gap and closes, polling with the old cursor returns EVENT_GAP, and a fresh snapshot preserves sequence seven with empty retained history and eight history omissions. Polling from that fresh watermark is idle; repeated maintenance is a no-op. Durable run metadata remains byte-identical. Additional checks reject a foreign attempt and stopping service while preserving history.
+
+The fixture performs only direct inert store transitions; no adapter or workflow executes. The active-worker and upload guards are implemented, but this HTTP fixture does not exercise a live worker or upload. Automatic scheduling, persistent pin policy and service maintenance reporting remain required. No request handler invokes expiry, and the advertised terminal-retention guarantee is unchanged.
+
+All 266 selected JVM tests pass. The [retained manifest and HTTP cutover/retention results](evidence/web-service-retention-20260908/manifest.json) identify the tested source and result hash. The XML covers two earlier cutover tests and two new service-retention tests. Frontend/package/browser checks were not repeated for this internal service entry point.
+
+## Durable attempt progress pins
+
+`WorkflowAttempt.progressRetentionPinned` now records a pin for that attempt's progress journal. `WorkflowAttemptStore.setProgressRetentionPinned` uses the existing run-version comparison and atomic workflow-state publication, under the same job stripe as expiry. A real change advances run/job versions while preserving execution state, usage and acceptance; an unchanged pin with the current version returns without rewriting metadata. A stale request still conflicts. Lifecycle transitions and restart recovery preserve the pin.
+
+The store enforces the pin even when maintenance's additional protection flag is false. The pure retention preparer and publication helper also reject pinned attempts. Unpinning makes retained history eligible for the configured expiry deadline; it does not reset the deadline or restore records already removed. This pin concerns the selected progress journal, not every artifact or job-wide evidence policy.
+
+Persisted records without the optional field decode as unpinned without a read-time rewrite. Writers omit false and emit a strict boolean when pinned; malformed values fail state validation instead of falling back to unpinned. Older strict readers reject records containing the new field rather than silently ignoring an active pin. Do not use an older binary to edit pinned state.
+
+Tests cover lifecycle/restart preservation, pin-versus-transition version conflicts, no-op byte preservation, malformed values, and interrupted pin publication after rename followed by recovery. The authenticated HTTP expiry fixture also verifies that a durable pin prevents service expiry even when its caller supplies no additional protection. This is internal storage policy only: authenticated pin commands, audit/UI visibility, broader job pins, read leases and automatic scheduling remain to be integrated. No new public route or automatic expiry is enabled.
+
+All 270 selected JVM tests pass on an unchanged repeat. The first full run had one existing UploadServerTest cleanup failure reporting active HTTP requests after stop; this remains unresolved under #224. The [retained manifest, pin/HTTP results and initial failure](evidence/web-retention-pins-20260908/manifest.json) preserve both outcomes. Frontend/package/browser checks were not repeated for internal storage policy.
+
+## Opt-in bounded periodic maintenance
+
+`WebJobService` now accepts an optional `progressRetentionIntervalMs` (1 ms through one hour). When configured, one dedicated scheduled worker starts only after explicit storage initialization and runs fixed-delay maintenance. The default is disabled; the production server does not yet opt in. Activation remains a separate step after pin controls and maintenance reporting are available.
+
+Each callback performs at most 32 discovery/attempt units and releases the service monitor between units. It retains at most the bounded 10,000-job identity inventory and one job's bounded 1,024-attempt inventory, with no per-job timers or queued workflow tasks. A completed scan refreshes its job inventory on the next tick. Every attempt is revalidated through the shared service/store boundary before expiry; durable pins, active work, uploads, publication admission and checked journal publication remain enforced. Current progress reads capture complete bounded bytes before network delivery; source/archive reads use separate artifacts.
+
+Malformed or unavailable records increment bounded saturating failure counters and retain only a sanitized last error code. They do not stop later attempts from being examined. A failed root inventory waits until the next tick. Maintenance never creates a missing root or acquires ownership through a read. The configured interval and incremental scan mean eligible history expires when visited after its durable deadline, not at an exact wall-clock instant.
+
+Shutdown cancels scheduling and keeps service/storage ownership until the last maintenance work callback has left. The worker joins the service's existing shutdown wait budget and reports incomplete shutdown if still live; its termination callback permits later quiescent release. Three tests cover a callback that temporarily ignores interruption, missing-root initialization, and periodic expiry across twenty inert jobs (more than one batch), including durable pin preservation/unpinning and malformed-journal isolation. No workflow executes.
+
+Public pin controls, audit/UI reporting, default server activation and broader job/evidence retention remain unfinished. The existing advertised retention guarantee is unchanged.
+
+All 276 selected JVM tests pass. The [retained worker manifest and three results](evidence/web-retention-worker-20260908/manifest.json) record source and evidence hashes. Frontend/package/browser checks were not repeated because default server behavior and public HTTP/UI contracts are unchanged.
+
+## Service coordination for pin changes
+
+`WebJobService.setProgressRetentionPinned` now provides an internal command boundary that validates initialization, shutdown, selected attempt and publication admission. It applies the store's run-version CAS and updates any matching owned task's current attempt under the same service monitor. Without this coordination, a queued or running worker would retain its pre-pin version and fail its next lifecycle publication. The invocation context is now captured immutably under the monitor before the adapter is called; later policy changes do not rewrite that invocation view.
+
+Known pre-publication failures leave the old pin and task version usable. Uncertain publication makes the job unavailable for changes until storage is reopened and prevents a worker from publishing over the uncertain state. A queued task is revoked immediately and late delivery is inert; a running task retains ownership until its callback actually exits. Pin policy survives subsequent restart recovery. No public mutation route is enabled yet: authenticated requests, audit records and UI controls still need integration.
+
+Tests use inert adapter callbacks to exercise queued/running pin changes, stable invocation context, final lifecycle publication, stale-version rejection, no-op byte preservation, failures before/after rename, queued revocation and running ownership retention through shutdown. These callbacks do not analyze binaries or invoke providers/native workflows.
+
+All 280 selected JVM tests pass. The [retained manifest and durable workflow results](evidence/web-service-pin-coordination-20260908/manifest.json) identify the tested source and evidence hash. Frontend/package/browser checks were not repeated for this internal command; no public route or default behavior changes.
+
+## Retention-worker termination lock ordering
+
+The first broad pin-audit run exposed a JVM-reported deadlock in periodic service shutdown. `WebJobService.close` held its monitor while calling `shutdownNow`; the retention executor's `terminated` hook held the executor main lock while invoking the owner callback, which needed that same service monitor. A repeated stop could therefore wait forever instead of respecting the shutdown deadline.
+
+The termination hook now only marks completed work. The existing worker thread invokes the owner callback after its executor runnable returns and releases executor locks. A latch lets bounded shutdown await completion of that notification. No extra thread, shared pool or queued notification is introduced. Storage ownership still outlives every maintenance work callback; the notification can release ownership after work is quiescent.
+
+A controlled regression holds owner notification open and requires a second stop to return. It fails with `TimeoutException` against the prior worker and passes with the fix. The originally deadlocked JVM was terminated only after `jcmd Thread.print` explicitly reported the lock cycle; its interrupted test run is not counted as passing verification.
+
+All 285 selected JVM tests pass with the pin audit and termination-lock fix together. The [retained manifest](evidence/web-pin-audit-shutdown-20260908/manifest.json) identifies the tested source, passing reports, original deadlock and failing negative control. Frontend/package/browser checks were not repeated for these internal changes.
+
+## SPA production retention and sampled status
+
+The SPA UploadServer now configures the existing periodic worker with a one-second fixed delay. Each callback still performs at most 32 discovery/attempt units and releases the service monitor between units. An unpinned terminal progress journal becomes eligible for timed cleanup after 24 hours, subject to the established active-work, pending-publication, writer-lease and snapshot/publication checks. This is a scan threshold, not an exact expiry schedule or a promise that size-based eviction preserves every observation. Legacy server mode keeps periodic cleanup disabled.
+
+Private bootstrap reports optional `runtime.progressRetention`: whether periodic scanning is configured, server sample time, completed attempt checks, journals expired, failed checks and the last fixed diagnostic code. Counts describe this process, include repeated visits, and reset on restart. Failed job/root discovery can contribute to failed checks; the last error is historical and does not assert that every job is currently unavailable. No filenames, journal paths, request bodies or exception messages are exposed. Runtime displays the sample from the last session check without triggering another probe.
+
+`terminalEventRetentionMs` is now 86400000 for the SPA worker, defining the timed-cleanup eligibility threshold. Existing byte/count limits can omit observations earlier. The full scan can take multiple callbacks, and pins or active resources can retain history beyond the threshold. This does not implement full-job deletion, disk accounting or indefinite evidence retention.
+
+Production HTTP tests seed expired, pinned and recent inert histories, verify actual default expiry and private counters, and check that workflow metadata and protected journals are preserved. A legacy-mode fixture verifies that old progress is retained. The packaged history fixture now uses recent timestamps so its replay/pin journey intentionally stays within the production retention window; separate production tests exercise expiry. Browser qualification verifies the Runtime explanation and process-local sampled counters.
+
+All 298 selected JVM tests, 342 frontend tests, lint/typechecked bundle, 49 valid/41 invalid contract fixtures and distZip pass. The [retained production manifest and browser report](evidence/web-production-retention-20260908/manifest.json) verify default expiry, protection, private status, packaged Runtime/pin/replay behavior, and confirmed shutdown/cleanup. Preliminary frontend and date-fixture errors were corrected before final verification; their scope is recorded in the manifest.

@@ -295,6 +295,172 @@ class WorkflowAttemptStoreTest {
         }
     }
 
+    @Test
+    fun `attempt read transaction excludes lifecycle publication through local evidence capture`() = withRoot { root ->
+        val job = upload(root)
+        WorkflowAttemptStore.open(root, CLOCK).use { store ->
+            val queued = store.create(job, store.available(job).snapshot.version, NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, LIMITS)).attempt
+            val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            val mutationStarted = CountDownLatch(1); val mutationDone = CountDownLatch(1)
+            val executor = Executors.newFixedThreadPool(2)
+            try {
+                val read = executor.submit<WorkflowAttempt> {
+                    store.withAttemptSnapshot(job, queued.runId) { attempt ->
+                        entered.countDown(); check(release.await(5, TimeUnit.SECONDS))
+                        // The local evidence is captured before the durable state lock is released.
+                        assertTrue(stateJson(root, job).readText().contains(queued.version))
+                        attempt
+                    }
+                }
+                assertTrue(entered.await(5, TimeUnit.SECONDS))
+                val mutation = executor.submit<WorkflowMutation> {
+                    mutationStarted.countDown()
+                    try { store.transition(job, queued.runId, queued.version, WorkflowTransition.Start) }
+                    finally { mutationDone.countDown() }
+                }
+                assertTrue(mutationStarted.await(5, TimeUnit.SECONDS))
+                assertFalse(mutationDone.await(100, TimeUnit.MILLISECONDS))
+                release.countDown()
+                assertEquals(queued, read.get(5, TimeUnit.SECONDS))
+                val running = mutation.get(5, TimeUnit.SECONDS).attempt
+                assertEquals(WorkflowRunState.RUNNING, running.state)
+                assertNotEquals(queued.version, running.version)
+                assertEquals(running, store.withAttemptSnapshot(job, queued.runId) { it })
+            } finally { release.countDown(); executor.shutdownNow() }
+        }
+    }
+
+    @Test
+    fun `failed snapshot callback releases transaction and foreign run never invokes callback`() = withRoot { root ->
+        val job = upload(root)
+        WorkflowAttemptStore.open(root, CLOCK).use { store ->
+            val queued = store.create(job, store.available(job).snapshot.version, NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, LIMITS)).attempt
+            assertFailsWith<IOException> { store.withAttemptSnapshot(job, queued.runId) { throw IOException("inert read failure") } }
+            var called = false
+            assertCode("RUN_NOT_FOUND") { store.withAttemptSnapshot(job, "run_missing") { called = true } }
+            assertFalse(called)
+            val executor = Executors.newSingleThreadExecutor()
+            try {
+                val result = executor.submit<WorkflowMutation> { store.transition(job, queued.runId, queued.version, WorkflowTransition.Start) }
+                assertEquals(WorkflowRunState.RUNNING, result.get(5, TimeUnit.SECONDS).attempt.state)
+            } finally { executor.shutdownNow() }
+        }
+    }
+
+    @Test
+    fun `storage close waits for an active snapshot and rejects reads after ownership release`() = withRoot { root ->
+        val job = upload(root)
+        val store = WorkflowAttemptStore.open(root, CLOCK)
+        val queued = store.create(job, store.available(job).snapshot.version, NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, LIMITS)).attempt
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        val closeStarted = CountDownLatch(1); val closeDone = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(2)
+        try {
+            val read = executor.submit<WorkflowAttempt> { store.withAttemptSnapshot(job, queued.runId) {
+                entered.countDown(); check(release.await(5, TimeUnit.SECONDS)); it
+            } }
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            val closing = executor.submit {
+                closeStarted.countDown()
+                try { store.close() } finally { closeDone.countDown() }
+            }
+            assertTrue(closeStarted.await(5, TimeUnit.SECONDS))
+            assertFalse(closeDone.await(100, TimeUnit.MILLISECONDS))
+            release.countDown()
+            assertEquals(queued, read.get(5, TimeUnit.SECONDS))
+            closing.get(5, TimeUnit.SECONDS)
+            assertCode("STORE_CLOSED") { store.withAttemptSnapshot(job, queued.runId) { error("must not execute") } }
+            WorkflowAttemptStore.open(root, CLOCK).use { assertEquals(queued, it.withAttemptSnapshot(job, queued.runId) { attempt -> attempt }) }
+        } finally { release.countDown(); executor.shutdownNow(); store.close() }
+    }
+
+    @Test fun `durable progress pin survives lifecycle transitions and restart and blocks expiry`() = withRoot { root ->
+        val job = upload(root)
+        lateinit var finished: WorkflowAttempt
+        lateinit var journal: Path
+        lateinit var original: ByteArray
+        WorkflowAttemptStore.open(root, CLOCK).use { store ->
+            val queued = store.create(job, store.available(job).snapshot.version, NewWorkflowAttempt(WorkflowKind.EXPLORE, LIMITS)).attempt
+            assertFalse(stateJson(root, job).readText().contains("progressRetentionPinned"))
+            val pinned = store.setProgressRetentionPinned(job, queued.runId, queued.version, true).attempt
+            assertEquals(queued.copy(version = pinned.version, progressRetentionPinned = true), pinned)
+            val running = store.transition(job, pinned.runId, pinned.version, WorkflowTransition.Start).attempt
+            finished = store.transition(job, running.runId, running.version,
+                WorkflowTransition.Finish(WorkflowRunState.COMPLETED, WorkflowTerminalReason.NO_CHANGES)).attempt
+            assertTrue(finished.progressRetentionPinned)
+            val reports = root.resolve("$job/reports/runs/${finished.runId}")
+            AgentProgressJournal(reports, "explore").use { }
+            journal = reports.resolve(AgentProgressJournal.FILE_NAME)
+            original = journal.readBytes()
+        }
+        WorkflowAttemptStore.open(root, Clock.offset(CLOCK, java.time.Duration.ofHours(24))).use { store ->
+            assertEquals(finished, store.withAttemptSnapshot(job, finished.runId) { it })
+            assertEquals(ProgressRetentionResult.RETAINED, store.expireProgressJournal(job, finished.runId, false))
+            assertContentEquals(original, journal.readBytes())
+            val unpinned = store.setProgressRetentionPinned(job, finished.runId, finished.version, false).attempt
+            assertEquals(finished.copy(version = unpinned.version, progressRetentionPinned = false), unpinned)
+            assertEquals(ProgressRetentionResult.EXPIRED, store.expireProgressJournal(job, finished.runId, false))
+            assertEquals(unpinned, store.withAttemptSnapshot(job, unpinned.runId) { it })
+        }
+    }
+
+    @Test fun `pin mutations use run CAS and no-op pins do not rewrite metadata`() = withRoot { root ->
+        val job = upload(root)
+        val another = upload(root)
+        WorkflowAttemptStore.open(root, CLOCK).use { store ->
+            val queued = store.create(job, store.available(job).snapshot.version, NewWorkflowAttempt(WorkflowKind.EXPLORE, LIMITS)).attempt
+            val original = stateJson(root, job).readBytes()
+            assertEquals(queued, store.setProgressRetentionPinned(job, queued.runId, queued.version, false).attempt)
+            assertContentEquals(original, stateJson(root, job).readBytes())
+            assertCode("RUN_NOT_FOUND") { store.setProgressRetentionPinned(another, queued.runId, queued.version, true) }
+            val results = race { index ->
+                if (index == 0) store.setProgressRetentionPinned(job, queued.runId, queued.version, true)
+                else store.transition(job, queued.runId, queued.version, WorkflowTransition.Start)
+            }
+            assertEquals(1, results.count { it is WorkflowMutation })
+            assertEquals(1, results.count { it is WorkflowStoreException && it.code == "VERSION_CONFLICT" })
+            assertCode("VERSION_CONFLICT") { store.setProgressRetentionPinned(job, queued.runId, queued.version, false) }
+        }
+    }
+
+    @Test fun `malformed optional progress pins never become an unpinned default`() = withRoot { root ->
+        val job = upload(root)
+        WorkflowAttemptStore.open(root, CLOCK).use { store ->
+            val run = store.create(job, store.available(job).snapshot.version, NewWorkflowAttempt(WorkflowKind.EXPLORE, LIMITS)).attempt
+            val original = stateJson(root, job).readText()
+            for (value in listOf("null", "1", "\"true\"", "{}")) {
+                val parsed = Json.parseToJsonElement(original).jsonObject
+                val attempts = parsed.getValue("attempts") as kotlinx.serialization.json.JsonArray
+                stateJson(root, job).writeText(JsonObject(parsed + ("attempts" to kotlinx.serialization.json.JsonArray(
+                    attempts.map { JsonObject(it.jsonObject + ("progressRetentionPinned" to Json.parseToJsonElement(value))) }
+                ))).toString())
+                assertEquals("CORRUPT_WORKFLOW_STATE", (store.inspect(job) as WorkflowJobInspection.Unavailable).diagnostic.code)
+                assertCode("CORRUPT_WORKFLOW_STATE") { store.expireProgressJournal(job, run.runId, false) }
+            }
+            stateJson(root, job).writeText(original)
+            assertFalse(store.withAttemptSnapshot(job, run.runId) { it.progressRetentionPinned })
+            assertEquals(original, stateJson(root, job).readText())
+        }
+    }
+
+    @Test fun `uncertain pin publication preserves the committed pin after reopen`() = withRoot { root ->
+        val job = upload(root)
+        var crash = false
+        lateinit var run: WorkflowAttempt
+        WorkflowAttemptStore.open(root, CLOCK, WorkflowStoreFaultInjector { point ->
+            if (crash && point == WorkflowStoreFaultPoint.AFTER_RENAME) throw SimulatedCrash()
+        }).use { store ->
+            run = store.create(job, store.available(job).snapshot.version, NewWorkflowAttempt(WorkflowKind.EXPLORE, LIMITS)).attempt
+            crash = true
+            assertFailsWith<SimulatedCrash> { store.setProgressRetentionPinned(job, run.runId, run.version, true) }
+            assertCode("RECOVERY_REQUIRED") { store.inspect(job) }
+        }
+        WorkflowAttemptStore.open(root, CLOCK).use { store ->
+            val recovered = store.recoverAfterRestart(job) as WorkflowJobInspection.Available
+            assertTrue(recovered.snapshot.attempts.single().progressRetentionPinned)
+        }
+    }
+
     private fun completeCandidate(store: WorkflowAttemptStore, job: String): WorkflowMutation {
         val queued = store.create(job, store.available(job).snapshot.version, NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, LIMITS))
         val running = store.transition(job, queued.attempt.runId, queued.attempt.version, WorkflowTransition.Start)

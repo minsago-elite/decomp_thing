@@ -85,3 +85,13 @@ publication. Upload views use a 120-second deadline, keep File bytes in memory, 
 bounded key/filename/size ticket in tab sessionStorage for explicit retries after reload. The view uses a fresh X-Upload-ID and polls the session-bound uploadProgress endpoint
 for actual request bytes received, independently of its durable retry key. Unknown
 Content-Length leaves the percentage indeterminate while preserving the byte count.
+
+`createSseDecoder(basePath)` incrementally decodes the application's SSE frames. It yields
+one validated WebEvent at a time and retains at most one bounded unfinished frame. It checks
+UTF-8, line endings, event/cursor agreement and the shared contract, including deployment
+paths on gap controls. A gap cannot inherit an event id. Unknown fields/comments consume the
+frame budget; partial final records are discarded, and errors make the decoder terminal.
+The stream consumer must still bind job/attempt identity, deduplicate cursors and own fetch
+cancellation/reconnection. The activity UI is not yet connected to this decoder.
+
+`createEventStream` opens one same-origin SSE connection for an explicit job/run, with an optional Last-Event-ID resume header. It yields validated events without collecting a client queue, checks selected identity, preserves bounded JSON HTTP error metadata and stops after a retention gap. Caller abort, early iterator return and a 45-second absolute deadline cancel the source; even a late fetch response is cancelled. EOF ends the connection without retry or acknowledgement. Callers own cursor advancement, duplicate/order checks, snapshot reconciliation and retry/fallback policy. Activity now catches up a bounded polling page and then consumes this stream, with explicit gap recovery and bounded reconnect/polling fallback.

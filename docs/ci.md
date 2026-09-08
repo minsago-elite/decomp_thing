@@ -93,6 +93,9 @@ tests do not compile private helper copies. Distribution jobs should additionall
 
 The independent `ACP contract` workflow runs every ACP and shared-agent regression suite
 with `DECOMP_REQUIRE_LIVE_ACP_CONTRACT=1`. Missing host capabilities fail this lane.
+It installs the same checksum-verified frontend Node/npm distribution before invoking
+Gradle and adds its `bin` directory to subsequent steps through `GITHUB_PATH`.
+The runner's default Node is not a valid substitute for the embedded bundle's build pins.
 It provisions an empty, user-owned mode-0700 dedicated tmpfs with 64 MiB and 4,096
 inodes for `DECOMP_TEST_ACP_QUOTA_TMPFS`, and unmounts it in an unconditional cleanup
 step. The main Kotlin job provisions the same fixture. An existing mount is never

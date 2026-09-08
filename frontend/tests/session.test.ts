@@ -232,3 +232,50 @@ describe('page-local session state', () => {
     expect(session.snapshot().status).toBe('checking');
   });
 });
+
+
+describe('shared private request rejection', () => {
+  it('clears session credentials once without requests or mutation replay', async () => {
+    const { session, gateway } = setup();
+    await session.initialize({ kind: 'absent' });
+    const observe = session.observeRequestFailure();
+    const changed = vi.fn(); session.subscribe(changed);
+    observe(denied('SESSION_EXPIRED'));
+    expect(session.snapshot()).toEqual({ status: 'required', reason: 'expired' });
+    expect(session.csrf()).toBeNull();
+    observe(denied('SESSION_REQUIRED'));
+    expect(changed).toHaveBeenCalledOnce();
+    expect(gateway.bootstrap).toHaveBeenCalledOnce();
+    expect(gateway.exchange).not.toHaveBeenCalled();
+    expect(gateway.logout).not.toHaveBeenCalled();
+  });
+
+  it('ignores a late denial from before a fresh sign-in and after disposal', async () => {
+    const { session } = setup();
+    const publicRequest = session.observeRequestFailure();
+    await session.initialize({ kind: 'absent' });
+    const oldRequest = session.observeRequestFailure();
+    await session.connect({ kind: 'token', token: bootstrapToken });
+    publicRequest(denied('SESSION_EXPIRED'));
+    oldRequest(denied('SESSION_REQUIRED'));
+    expect(session.snapshot().status).toBe('authenticated');
+    const current = session.observeRequestFailure();
+    const changed = vi.fn(); session.subscribe(changed);
+    session.dispose(); current(denied('SESSION_REQUIRED'));
+    expect(changed).not.toHaveBeenCalled();
+  });
+
+  it('does not infer session loss from access denial, network errors or invalid envelopes', async () => {
+    const { session } = setup();
+    await session.initialize({ kind: 'absent' });
+    const observe = session.observeRequestFailure();
+    for (const error of [
+      new ApiClientError('http_error', { status: 403, serverCode: 'SESSION_EXPIRED' }),
+      new ApiClientError('http_error', { status: 401, serverCode: 'ORIGIN_DENIED' }),
+      new ApiClientError('invalid_headers', { status: 401 }),
+      new ApiClientError('network_error'),
+    ]) observe(error);
+    expect(session.snapshot().status).toBe('authenticated');
+    expect(session.csrf()).toBe(csrf);
+  });
+});

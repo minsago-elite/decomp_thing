@@ -1,0 +1,36 @@
+{
+  "status": "passed",
+  "sourceCommit": "102f34b3f9ba857d69aef6529c0aa194fa15596b",
+  "verification": {
+    "tests": 256,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "command": "./gradlew -PfrontendNodeHome=/home/june/decomp_thing/build/tools/decomp-node-24.20.0/node-v24.20.0-linux-x64 test --tests 'decompengine.web.*' --tests 'decompengine.jobs.AgentProgressJournal*Test' --tests 'decompengine.jobs.WorkflowAttemptStoreTest'",
+  "automaticExpiryEnabled": false,
+  "storageWritesPerformedByRetentionCore": false,
+  "workflowExecutionStarted": false,
+  "coverage": [
+    "Exact durable terminal time boundary and positive duration configuration",
+    "Active and pending acceptance publication remain ineligible",
+    "Single-record expiry marker with no retained prose or input mutation",
+    "Exact large sequence and omission accounting",
+    "Malformed expiry markers and corrupt counters rejected",
+    "Expired cursor gap and fresh empty watermark replay"
+  ],
+  "notRepeated": [
+    "frontend tests",
+    "package build",
+    "packaged browser qualification"
+  ],
+  "limitations": [
+    "Pure preparation and decoder support only; storage ownership, writer exclusion, pins/read leases, atomic publication, recovery and scheduling remain to be integrated.",
+    "No new terminal-retention guarantee is advertised."
+  ],
+  "retainedXml": {
+    "file": "TEST-decompengine.jobs.AgentProgressJournalRetentionTest.xml",
+    "tests": 5,
+    "sha256": "0573379d81b361b34f92adfdd565a568a8d1dda9b04a6321f4e04ac139489bd9"
+  }
+}

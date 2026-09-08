@@ -41,6 +41,7 @@ class WebRecoveryAdmissionTest {
         try {
             assertFailsWith<IllegalStateException> { server.start() }
             val response = java.net.URI("http://127.0.0.1:${server.serverPort}/").toURL().openConnection() as java.net.HttpURLConnection
+            response.setRequestProperty("Cookie", legacySessionHeaders(server).getValue("Cookie"))
             response.connectTimeout = 5000
             response.readTimeout = 5000
             try { assertEquals(200, response.responseCode) } finally { response.disconnect() }

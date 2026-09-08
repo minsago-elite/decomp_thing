@@ -9,6 +9,7 @@ import { Activity } from '../src/jobs/Activity';
 
 const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal: AbortSignal }) => Promise<unknown>>() }));
 vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>(), createApiClient: () => transport }));
+vi.mock('../src/api/eventStream', () => ({ createEventStream: () => async function* () { await Promise.resolve(); yield* []; throw new ApiClientError('http_error', { status: 406 }); } }));
 const fixture = <T,>(name: string): T => JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${name}.json`), 'utf8')) as T;
 const snapshot = fixture<{ data: Snapshot }>('snapshot-progress-omissions');
 const events = fixture<{ data: { items: (WebEvent & { type: 'workflow.observation'; payload: ProgressObservation })[]; nextCursor: string; hasMore: boolean } }>('events-observation-poll');
@@ -26,7 +27,8 @@ it('starts on request, preserves exact omissions and pause position, and dedupli
   fireEvent.click(screen.getByRole('button', { name: 'Pause activity' }));
   fireEvent.click(screen.getByRole('button', { name: 'Resume activity' }));
   await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(3));
-  expect(transport.get.mock.calls[2]![1]).toContain('cursor=cursor_example_2');
+  expect(transport.get.mock.calls[2]![1]).toContain('after=cursor_example_2');
+  expect(transport.get.mock.calls[2]![1]).toContain('transport=poll');
   expect(screen.getAllByRole('listitem')).toHaveLength(1);
 });
 
@@ -43,8 +45,8 @@ it('withholds message content for every visibility role including thought and sy
   expect(document.body.textContent).not.toContain('secret_');
 });
 
-it('pauses on a retention gap and explicitly resets history with a fresh snapshot', async () => {
-  transport.get.mockResolvedValueOnce(snapshot).mockRejectedValueOnce(new ApiClientError('http_error', { serverCode: 'PROGRESS_GAP', status: 410 }));
+it.each(['EVENT_GAP', 'PROGRESS_GAP'])('pauses on %s and explicitly resets history with a fresh snapshot', async serverCode => {
+  transport.get.mockResolvedValueOnce(snapshot).mockRejectedValueOnce(new ApiClientError('http_error', { serverCode, status: 410 }));
   mount(); fireEvent.click(screen.getByRole('button', { name: 'Follow activity' }));
   expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Retained history has a gap. Read a fresh history to establish a new position.');
   transport.get.mockResolvedValueOnce(snapshot).mockResolvedValueOnce(events);
@@ -88,7 +90,7 @@ it.each([200, 201])('preserves the display boundary and checks the next page sta
     expect(await screen.findByRole('alert')).toBeTruthy();
     expect(screen.queryAllByRole('listitem')).toHaveLength(0);
   }
-  expect(transport.get.mock.calls[2]![1]).toContain('cursor=cursor_199');
+  expect(transport.get.mock.calls[2]![1]).toContain('after=cursor_199');
   if (nextSequence === 200) expect(document.activeElement).toBe(button);
 });
 
@@ -138,7 +140,7 @@ it('filters categories and task references locally without discarding rows or mo
   transport.get.mockResolvedValueOnce({ data: { items: [], nextCursor: 'cursor_4', hasMore: false } });
   fireEvent.click(screen.getByRole('button', { name: 'Resume activity' }));
   await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(3));
-  expect(transport.get.mock.calls[2]![1]).toContain('cursor=cursor_4');
+  expect(transport.get.mock.calls[2]![1]).toContain('after=cursor_4');
 });
 
 it('links the exact attempt and exposes available correlation without inventing evidence links', async () => {

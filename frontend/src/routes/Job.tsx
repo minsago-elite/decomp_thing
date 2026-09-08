@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'preact/hooks';
-import { createApiClient, ApiClientError } from '../api/client';
+import { usePrivateTransport } from '../session/PrivateTransport';
+import { useEffect, useState } from 'preact/hooks';
+import { ApiClientError } from '../api/client';
 import type { Job as JobData } from '../api/generated';
 import { appPath, jobPath, runPath } from '../app/paths';
 import type { BrowserSession } from '../session/session';
@@ -7,7 +8,7 @@ import { useSession } from '../session/useSession';
 import { JobSummary } from '../jobs/JobSummary';
 
 function JobDetails({ jobId, basePath }: { jobId: string; basePath: string }) {
-  const client = useMemo(() => createApiClient({ basePath }), [basePath]);
+  const { client } = usePrivateTransport(basePath);
   const [job, setJob] = useState<JobData | null>(null);
   const [error, setError] = useState('');
   const [refresh, setRefresh] = useState(0);

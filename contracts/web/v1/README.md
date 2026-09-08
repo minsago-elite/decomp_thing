@@ -42,3 +42,9 @@ explicit omission accounting, separate from event-retention gaps. See
 The `event-observation-public-metadata` and `event-observation-plan-metadata` fixtures
 capture the current producer's omission of uncertified prose and paths. Older prose-bearing
 fixtures remain schema compatibility examples, not a public-visibility certification.
+
+A progress snapshot with zero retained events can still acknowledge a nonzero logical
+watermark after omissions. Its oldestCursor is null, while throughCursor/throughSequence
+identify the cutover. Only nextSequence zero requires a null cutover when progress metadata
+is present. EVENT_GAP recovery can likewise have a null oldestCursor and a non-null latestCursor.
+These positions acknowledge missing history; they do not create an event or acceptance evidence.

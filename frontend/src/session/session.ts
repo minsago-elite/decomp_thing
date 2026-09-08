@@ -177,6 +177,19 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
   }
   return {
     snapshot: () => state,
+    /** Bind denial handling to the session generation that issued the request. */
+    observeRequestFailure() {
+      const issuedGeneration = generation;
+      const issuedAuthenticated = state.status === 'authenticated';
+      return (error: ApiClientError) => {
+        if (disposed || !issuedAuthenticated || generation !== issuedGeneration || state.status !== 'authenticated'
+          || error.code !== 'http_error' || error.status !== 401
+          || !['SESSION_REQUIRED', 'SESSION_EXPIRED'].includes(error.serverCode ?? '')) return;
+        invalidatePending();
+        forget();
+        publish({ status: 'required', reason: error.serverCode === 'SESSION_EXPIRED' ? 'expired' : 'missing' });
+      };
+    },
     subscribe(listener: (state: SessionState) => void) {
       listeners.add(listener);
       return () => { listeners.delete(listener); };

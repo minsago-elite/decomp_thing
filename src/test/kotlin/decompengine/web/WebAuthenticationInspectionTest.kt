@@ -14,6 +14,7 @@ import kotlin.test.*
 import kotlinx.serialization.json.*
 
 class WebAuthenticationInspectionTest {
+    private val sessions = java.util.IdentityHashMap<UploadServer, Map<String, String>>()
     @Test fun `shutdown waits for cancelled inspection cleanup before returning`() {
         val entered = java.util.concurrent.CountDownLatch(1)
         val cancelled = java.util.concurrent.CountDownLatch(1)
@@ -346,6 +347,8 @@ class WebAuthenticationInspectionTest {
     private fun request(server: UploadServer, path: String, post: Boolean, explicit: Boolean = true, action: String = "inspect-auth", inspectionId: String? = null, includeInspectionId: Boolean = true): HttpResponse<String> {
         val request = HttpRequest.newBuilder(URI("http://127.0.0.1:${server.serverPort}$path"))
             .timeout(java.time.Duration.ofSeconds(5))
+        sessions.getOrPut(server) { legacySessionHeaders(server) }.forEach { (key, value) -> request.header(key, value) }
+        if (post) request.header("Origin", "http://127.0.0.1:${server.serverPort}").header("Content-Type", "application/json")
         if (post) request.POST(HttpRequest.BodyPublishers.noBody()) else request.GET()
         if (explicit) request.header("X-Decomp-Operator-Action", action)
         if (explicit && action == "cancel-auth-inspection" && includeInspectionId) {

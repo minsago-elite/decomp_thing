@@ -8,6 +8,7 @@ requirements/oracle-generation.txt. This is not an HTTP or runtime conformance t
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 import sys
 
@@ -21,7 +22,20 @@ def check_semantics(document: dict) -> None:
     """Check relationships JSON Schema cannot express with portable draft-07."""
     kind = document["kind"]
     data = document.get("data", {})
-    if kind == "uploadProgress":
+    if kind == "error":
+        error = document["error"]
+        recovery = error.get("recovery")
+        if (error["code"] == "EVENT_GAP") != (recovery is not None):
+            raise ValueError("event gap recovery must accompany only EVENT_GAP")
+        if recovery is not None:
+            if error["retryable"] or error["retryAfterMs"] is not None:
+                raise ValueError("event gaps require reconciliation, not blind retry")
+            if recovery["oldestCursor"] is not None and recovery["latestCursor"] is None:
+                raise ValueError("event gap boundary is incomplete")
+            suffix = "/api/v1/jobs/" + recovery["jobId"] + "/runs/" + recovery["runId"] + "/snapshot"
+            if not re.fullmatch(r"(?:/[A-Za-z0-9_-]+)*" + re.escape(suffix), recovery["snapshotHref"]):
+                raise ValueError("event gap snapshot belongs to another resource")
+    elif kind == "uploadProgress":
         if int(data["receivedBytes"]) > 33554433 or (data["totalBytes"] is not None and int(data["totalBytes"]) > 33554432):
             raise ValueError("upload progress exceeds the request ceiling")
         if (data["state"] == "published") != (data["jobId"] is not None):
@@ -39,6 +53,10 @@ def check_semantics(document: dict) -> None:
         if len(identities) != len(set(identities)):
             raise ValueError("a job appears more than once in a page")
     elif kind == "bootstrap":
+        retention = data["runtime"].get("progressRetention")
+        if retention is not None:
+            if int(retention["expired"]) > int(retention["examined"]) or ((int(retention["failures"]) == 0) != (retention["lastFailureCode"] is None)):
+                raise ValueError("retention counters are inconsistent")
         scheduler = data["runtime"].get("scheduler")
         if scheduler is not None and scheduler["state"] == "available":
             if int(scheduler["activeWorkers"]) > int(scheduler["workerLimit"]) or int(scheduler["queuedTasks"]) > int(scheduler["queueCapacity"]):
@@ -70,7 +88,7 @@ def check_semantics(document: dict) -> None:
             count, next_sequence = int(progress["retainedEventCount"]), int(progress["nextSequence"])
             if count > 1024 or count + int(progress["queueDropped"]) + int(progress["historyDropped"]) > next_sequence:
                 raise ValueError("snapshot progress counters exceed the boundary")
-            if (count == 0) != (data["oldestCursor"] is None) or (count == 0) != (data["throughSequence"] is None):
+            if (count == 0) != (data["oldestCursor"] is None) or (next_sequence == 0) != (data["throughSequence"] is None):
                 raise ValueError("snapshot retained records and cursors disagree")
             if data["throughSequence"] is not None and int(data["throughSequence"]) + 1 != next_sequence:
                 raise ValueError("snapshot progress boundary disagrees with next sequence")

@@ -1,6 +1,7 @@
+import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso/router';
-import { createApiClient, ApiClientError } from '../api/client';
+import { ApiClientError } from '../api/client';
 import { jobPath } from '../app/paths';
 import type { BrowserSession } from '../session/session';
 import type { UploadProgress } from '../api/generated';
@@ -43,7 +44,7 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
   const input = useRef<HTMLInputElement>(null);
   const live = useRef(true);
   const focusPicker = useRef(false);
-  const client = useMemo(() => createApiClient({ basePath, timeoutMs: 120_000 }), [basePath]);
+  const { client } = usePrivateTransport(basePath, 120_000);
   const limits = state?.status === 'authenticated' ? state.runtime.limits : null;
   const maxBytes = limits ? BigInt(limits.maxUploadBytes) : 0n;
   const connected = state?.status === 'authenticated' && maxBytes > 0n;

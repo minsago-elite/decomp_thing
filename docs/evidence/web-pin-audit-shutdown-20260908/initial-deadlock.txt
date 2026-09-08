@@ -1,0 +1,40 @@
+Found one Java-level deadlock:
+=============================
+"Test worker":
+  waiting for ownable synchronizer 0x00000000efaf4218, (a java.util.concurrent.locks.ReentrantLock$NonfairSync),
+  which is held by "decomp-web-progress-retention"
+
+"decomp-web-progress-retention":
+  waiting to lock monitor 0x00007f4d8cb266e0 (object 0x00000000efab4640, a decompengine.web.WebJobService),
+  which is held by "Test worker"
+
+
+"Test worker" #1 [535328] prio=5 os_prio=0 cpu=3987.98ms elapsed=112.83s tid=0x00007f4d8c02e520 nid=535328 waiting on condition  [0x00007f4d91dfb000]
+   java.lang.Thread.State: WAITING (parking)
+	at jdk.internal.misc.Unsafe.park(java.base@21.0.12/Native Method)
+	- parking to wait for  <0x00000000efaf4218> (a java.util.concurrent.locks.ReentrantLock$NonfairSync)
+	at java.util.concurrent.locks.LockSupport.park(java.base@21.0.12/LockSupport.java:221)
+	at java.util.concurrent.locks.AbstractQueuedSynchronizer.acquire(java.base@21.0.12/AbstractQueuedSynchronizer.java:788)
+	at java.util.concurrent.locks.AbstractQueuedSynchronizer.acquire(java.base@21.0.12/AbstractQueuedSynchronizer.java:1024)
+	at java.util.concurrent.locks.ReentrantLock$Sync.lock(java.base@21.0.12/ReentrantLock.java:153)
+	at java.util.concurrent.locks.ReentrantLock.lock(java.base@21.0.12/ReentrantLock.java:322)
+	at java.util.concurrent.ThreadPoolExecutor.tryTerminate(java.base@21.0.12/ThreadPoolExecutor.java:728)
+	at java.util.concurrent.ThreadPoolExecutor.shutdownNow(java.base@21.0.12/ThreadPoolExecutor.java:1433)
+	at java.util.concurrent.ScheduledThreadPoolExecutor.shutdownNow(java.base@21.0.12/ScheduledThreadPoolExecutor.java:870)
+	at decompengine.web.WebProgressRetentionWorker.stop(WebProgressRetentionWorker.kt:28)
+	at decompengine.web.WebJobService.close(WebJobService.kt:507)
+	- locked <0x00000000efab4640> (a decompengine.web.WebJobService)
+	at decompengine.web.WebProgressRetentionWorkerTest.opt-in service maintenance expires eligible runs preserves pins and isolates malformed journals(WebProgressRetentionWorkerTest.kt:76)
+
+"decomp-web-progress-retention" #1668 [539529] daemon prio=5 os_prio=0 cpu=38.84ms elapsed=55.15s tid=0x00007f4d8d2fcad0 nid=539529 waiting for monitor entry  [0x00007f4d641fe000]
+   java.lang.Thread.State: BLOCKED (on object monitor)
+	at decompengine.web.WebJobService.retentionWorker$lambda$0$0(WebJobService.kt:81)
+	- waiting to lock <0x00000000efab4640> (a decompengine.web.WebJobService)
+	at decompengine.web.WebJobService$$Lambda/0x00007f4d1839bc78.invoke(Unknown Source)
+	at decompengine.web.WebProgressRetentionWorker$executor$1.terminated(WebProgressRetentionWorker.kt:17)
+	at java.util.concurrent.ThreadPoolExecutor.tryTerminate(java.base@21.0.12/ThreadPoolExecutor.java:732)
+	at java.util.concurrent.ThreadPoolExecutor.processWorkerExit(java.base@21.0.12/ThreadPoolExecutor.java:1010)
+	at java.util.concurrent.ThreadPoolExecutor.runWorker(java.base@21.0.12/ThreadPoolExecutor.java:1158)
+	at java.util.concurrent.ThreadPoolExecutor$Worker.run(java.base@21.0.12/ThreadPoolExecutor.java:642)
+	at java.lang.Thread.runWith(java.base@21.0.12/Thread.java:1596)
+	at java.lang.Thread.run(java.base@21.0.12/Thread.java:1583)

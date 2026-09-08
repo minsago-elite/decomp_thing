@@ -22,7 +22,6 @@ import decompengine.jobs.ProgressRedactor
 import decompengine.jobs.BestEffortProgressJournal
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowPhase
-import decompengine.jobs.toJson
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.EvidenceModuleReconstructor
@@ -37,7 +36,6 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.ByteArrayOutputStream
-import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
@@ -180,8 +178,12 @@ class UploadServer(
     sensitiveValues: Collection<String> = System.getenv().values,
     private val listenBacklog: Int = 64,
     private val authenticationInspector: (decompengine.agent.AgentCancellation) -> decompengine.acp.AcpAuthenticationInventory = defaultWebAuthenticationInspector(),
+    private val requestShutdownTimeoutMs: Long = 1000,
 ) {
-    init { require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" } }
+    init {
+        require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" }
+        require(requestShutdownTimeoutMs in 0..5000) { "HTTP request shutdown wait must be between zero and five seconds" }
+    }
     private val diagnosticRedactor = ProgressRedactor(sensitiveValues)
     private val authenticationInspectionLock = Any()
     private var authenticationInspectionId: String? = null
@@ -202,6 +204,10 @@ class UploadServer(
             EmbeddedWebAssets.load(basePath = basePath)
         }
         WebUiMode.LEGACY -> {
+            require(java.net.InetAddress.getByName(host).isLoopbackAddress) {
+                "legacy browser access requires a loopback host until a remote access profile is qualified"
+            }
+            LocalWebAccessConfiguration(webOrigin(host, port.takeIf { it != 0 } ?: 1), basePath)
             require(basePath == "/") { "--base-path is supported by --ui spa" }
             require(devFrontendOrigin == null) { "--dev-frontend-origin requires --ui spa" }
             null
@@ -217,14 +223,15 @@ class UploadServer(
             ownership.ensureLockFile()
             WorkflowAttemptStore.open(root)
         },
+        progressRetentionIntervalMs = if (uiMode == WebUiMode.SPA) 1000 else null,
         shutdownTimeoutMs = 5000, failureDiagnostic = { diagnostic(it, "Background operation failed") })
     private val sourceEvidence = WebSourceEvidence(store, sourceProfiles, jobs::readArtifact)
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
-    private val access = spaAssets?.let {
-        LocalWebAccess(LocalWebAccessConfiguration(webOrigin(host, server.address.port), basePath,
-            setOfNotNull(devFrontendOrigin)))
-    }
-    private val api = access?.let { WebApiController(it, checkNotNull(spaAssets), jobs) }
+    private val access = LocalWebAccess(LocalWebAccessConfiguration(webOrigin(host, server.address.port), basePath,
+        setOfNotNull(devFrontendOrigin)))
+    private val legacySessions = WebSessionController(access)
+    internal val streamResources = WebStreamResources()
+    private val api = spaAssets?.let { WebApiController(access, it, jobs, streamResources) }
     private val requestExecutor = ThreadPoolExecutor(
         16, 16, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(64),
         { task -> Thread(task, "decomp-web-http").apply { isDaemon = true } },
@@ -237,12 +244,15 @@ class UploadServer(
     private var stopping = false
     private var started = false
     private var activeRequests = 0
+    private val requestsDrained = java.util.concurrent.CountDownLatch(1)
     private val stopRequested = java.util.concurrent.atomic.AtomicBoolean(false)
     val serverPort: Int get() = server.address.port
     val browserOrigin: String = devFrontendOrigin ?: webOrigin(host, serverPort)
 
     /** The CLI calls this explicitly; no HTTP route can issue a local link. */
-    fun issueBrowserBootstrap(): WebBootstrapToken = checkNotNull(access) { "Browser sessions require --ui spa" }.issueBootstrap()
+    fun issueBrowserBootstrap(): WebBootstrapToken {
+        return access.issueBootstrap()
+    }
 
     init {
         jobs.onQuiescent = {
@@ -258,7 +268,8 @@ class UploadServer(
             server.stop(0)
             requestExecutor.shutdownNow()
             requestDeadlines.shutdownNow()
-            access?.close()
+            streamResources.shutdown()
+            access.close()
             jobs.close()
             ownership.close()
             throw failure
@@ -327,6 +338,7 @@ class UploadServer(
         val callerWasInterrupted = Thread.currentThread().isInterrupted
         val inspection = synchronized(lifecycleLock) {
             stopping = true
+            if (activeRequests == 0) requestsDrained.countDown()
             // JDK HttpServer.stop does not release a bound listener before start. Start its
             // dispatcher only after closing request admission, then close it below. This also
             // covers failed ownership/recovery admission and explicit stop-before-start.
@@ -337,10 +349,12 @@ class UploadServer(
             authenticationInspectionCancellation.set(true)
             authenticationInspectionWorker.get()
         }
+        val streamsClosed = streamResources.shutdown()
         server.stop(delaySeconds)
+        if (!streamsClosed && !streamResources.shutdown()) System.err.println("Event stream shutdown did not complete cleanly.")
         requestExecutor.shutdownNow()
         requestDeadlines.shutdownNow()
-        access?.close()
+        access.close()
         jobs.close()
         var inspectionWaitInterrupted = false
         try {
@@ -353,7 +367,17 @@ class UploadServer(
         } catch (exception: Exception) {
             if (exception is InterruptedException) Thread.currentThread().interrupt()
         }
-        if (inspectionWaitInterrupted) Thread.currentThread().interrupt()
+        // Interrupting the executor does not mean admitted handlers have finished their finally blocks.
+        // Admission is closed, so reaching zero here is permanent. Never hold lifecycleLock while waiting.
+        var requestWaitInterrupted = false
+        val requestDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(requestShutdownTimeoutMs)
+        while (requestsDrained.count != 0L) {
+            val remaining = requestDeadline - System.nanoTime()
+            if (remaining <= 0) break
+            try { requestsDrained.await(remaining, TimeUnit.NANOSECONDS) }
+            catch (_: InterruptedException) { requestWaitInterrupted = true }
+        }
+        if (callerWasInterrupted || inspectionWaitInterrupted || requestWaitInterrupted) Thread.currentThread().interrupt()
         if (!releaseOwnershipIfIdle()) throw IllegalStateException("HTTP requests remain active after server stop")
     }
 
@@ -374,7 +398,10 @@ class UploadServer(
             action()
             return true
         } finally {
-            synchronized(lifecycleLock) { activeRequests-- }
+            synchronized(lifecycleLock) {
+                activeRequests--
+                if (stopping && activeRequests == 0) requestsDrained.countDown()
+            }
             try {
                 releaseOwnershipIfIdle()
             } catch (_: Exception) {
@@ -387,7 +414,7 @@ class UploadServer(
         // Sample service quiescence before taking the lifecycle lock; stopping closes the service to new work.
         val jobsIdle = jobs.isIdle()
         return synchronized(lifecycleLock) {
-            if (stopping && activeRequests == 0 && jobsIdle) {
+            if (stopping && activeRequests == 0 && jobsIdle && streamResources.snapshot().active == 0) {
                 ownership.close()
                 true
             } else false
@@ -506,10 +533,43 @@ class UploadServer(
         }
         val segments = exchange.requestURI.path.split('/').filter(String::isNotBlank)
         try {
+            access.authorize(exchange, WebEndpointPolicy.transport(setOf("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")))
+            if (exchange.requestURI.rawPath == "/api/v1/session") {
+                legacySessions.handle(exchange)
+                return
+            }
+            if (exchange.requestURI.rawPath == "/api/v1/session/csrf") {
+                val credentials = access.csrfForSession(exchange)
+                requireNoWebApiQuery(exchange)
+                requireJsonAccept(exchange)
+                sendWebApiResponse(exchange, 200, "session", buildJsonObject {
+                    put("csrfToken", credentials.csrfToken)
+                    put("expiresAt", credentials.session.expiresAt.toString())
+                    put("idleExpiresAt", credentials.session.idleExpiresAt.toString())
+                })
+                return
+            }
+            val legacyJsonRead = segments.size in 3..4 && segments.take(2) == listOf("api", "jobs") &&
+                (segments.size == 3 || segments[3] == "events")
+            val publicPage = exchange.requestURI.rawPath in setOf("/login", "/assets/app.css")
+            val mutation = exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")
+            val policy = when {
+                publicPage -> WebEndpointPolicy.publicRead()
+                legacyJsonRead -> WebEndpointPolicy.privateRead(allowHead = true)
+                mutation && segments == listOf("jobs") && exchange.requestMethod == "POST" -> WebEndpointPolicy.multipartUpload()
+                mutation -> WebEndpointPolicy.jsonMutation(exchange.requestMethod)
+                else -> WebEndpointPolicy.privateRead(allowHead = true)
+            }
+            access.authorize(exchange, policy)
+            if (exchange.requestURI.rawPath == "/login") {
+                exchange.sendHtml(200, renderLegacyLogin())
+                return
+            }
+            if (legacyJsonRead) requireJsonAccept(exchange)
             when {
-                exchange.requestMethod == "GET" && segments.isEmpty() ->
+                exchange.requestMethod in setOf("GET", "HEAD") && segments.isEmpty() ->
                     renderJobDashboard(exchange)
-                exchange.requestMethod == "GET" && segments == listOf("assets", "app.css") ->
+                exchange.requestMethod in setOf("GET", "HEAD") && segments == listOf("assets", "app.css") ->
                     exchange.sendBytes(200, APP_CSS.toByteArray(), "text/css; charset=utf-8", cache = true)
                 exchange.requestMethod == "GET" && segments == listOf("api", "recovery") ->
                     exchange.sendJson(200, store.recoveryInventory().toJson().toString())
@@ -520,38 +580,48 @@ class UploadServer(
                 exchange.requestMethod == "POST" && segments == listOf("api", "operator", "auth-methods") ->
                     handleAuthenticationInspection(exchange)
                 exchange.requestMethod == "POST" && segments == listOf("jobs") -> handlePostJob(exchange)
-                exchange.requestMethod == "GET" && segments.size == 2 && segments[0] == "jobs" ->
+                exchange.requestMethod in setOf("GET", "HEAD") && segments.size == 2 && segments[0] == "jobs" ->
                     handleJob(exchange, decode(segments[1]))
                 exchange.requestMethod == "POST" && segments.size == 3 && segments[0] == "jobs" && segments[2] == "explore" ->
                     handleExplore(exchange, decode(segments[1]))
                 exchange.requestMethod == "POST" && segments.size == 3 && segments[0] == "jobs" && segments[2] == "reconstruct" ->
                     handleReconstruct(exchange, decode(segments[1]))
-                exchange.requestMethod == "GET" && segments.size >= 4 && segments[0] == "jobs" && segments[2] == "source" ->
+                exchange.requestMethod in setOf("GET", "HEAD") && segments.size >= 4 && segments[0] == "jobs" && segments[2] == "source" ->
                     handleSource(exchange, decode(segments[1]), segments.drop(3).joinToString("/").let(::decode))
-                exchange.requestMethod == "GET" && segments.size >= 4 && segments[0] == "jobs" && segments[2] == "artifacts" ->
+                exchange.requestMethod in setOf("GET", "HEAD") && segments.size >= 4 && segments[0] == "jobs" && segments[2] == "artifacts" ->
                     handleArtifact(exchange, decode(segments[1]), segments.drop(3).joinToString("/").let(::decode))
-                exchange.requestMethod == "GET" && segments.size == 3 && segments[0] == "api" && segments[1] == "jobs" ->
+                exchange.requestMethod in setOf("GET", "HEAD") && segments.size == 3 && segments[0] == "api" && segments[1] == "jobs" ->
                     exchange.sendJson(200, encodeJob(jobs.get(decode(segments[2]))))
-                exchange.requestMethod == "GET" && segments.size == 4 && segments[0] == "api" && segments[1] == "jobs" && segments[3] == "events" -> {
+                exchange.requestMethod in setOf("GET", "HEAD") && segments.size == 4 && segments[0] == "api" && segments[1] == "jobs" && segments[3] == "events" -> {
                     val job = jobs.get(decode(segments[2]))
                     val runId = exchange.requestURI.rawQuery?.let {
                         require(it.matches(Regex("runId=[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "Only an exact workflow attempt selection is supported" }
                         it.removePrefix("runId=")
                     }
-                    val bytes = jobs.readProgressJournal(job.id, runId)
-                    val snapshot = try { legacyProgressPresentation(AgentProgressJournal.decode(bytes)) } catch (_: Exception) {
-                        throw WebJobServiceException("PROGRESS_UNAVAILABLE", "The retained progress journal is unavailable.")
-                    }
-                    exchange.sendJson(200, snapshot.toString())
+                    exchange.sendJson(200, readLegacyProgress(job.id, runId).toString())
                 }
                 else -> legacyError(exchange, 404, "NOT_FOUND", "The requested route does not exist.") {
                     renderErrorPage(404, "Page not found", "The requested route does not exist.")
                 }
             }
+        } catch (exception: WebAccessDenied) {
+            if (exchange.requestURI.rawPath.startsWith("/api/v1/")) {
+                access.sendDenied(exchange, exception)
+                return
+            }
+            access.deniedHeaders(exchange, exception)
+            if (exception.status == 401 && !exchange.requestURI.path.startsWith("/api/") &&
+                exchange.requestMethod in setOf("GET", "HEAD")) {
+                exchange.sendHtml(401, renderLegacyLogin())
+                return
+            }
+
+            legacyError(exchange, exception.status, exception.code, exception.message ?: "The request was invalid.") {
+                renderErrorPage(exception.status, "Invalid request", exception.message ?: "The request was invalid.")
+            }
         } catch (exception: WebJobServiceException) {
             val status = if (exception.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else 503
-            val code = if (status == 404 || exception.code == "PROGRESS_UNAVAILABLE") exception.code
-            else if (exception.code == "UPLOAD_CAPACITY") "UPLOAD_CAPACITY" else "JOB_STORAGE_UNAVAILABLE"
+            val code = if (status == 404 || exception.code in setOf("PROGRESS_UNAVAILABLE", "UPLOAD_CAPACITY")) exception.code else "JOB_STORAGE_UNAVAILABLE"
             legacyError(exchange, status, code, when (code) {
                 "PROGRESS_UNAVAILABLE" -> "The retained progress journal is unavailable. Missing data does not establish an empty history."
                 "UPLOAD_CAPACITY" -> "Upload capacity is temporarily unavailable. Retry shortly."
@@ -562,15 +632,15 @@ class UploadServer(
             }
         } catch (exception: JobStoreException) {
             legacyError(exchange, 404, "JOB_NOT_FOUND", "The requested job is unavailable.") {
-                renderErrorPage(404, "Job not found", diagnostic(exception, "The job does not exist."))
+                renderErrorPage(404, "Job not found", "The requested job is unavailable.")
             }
         } catch (exception: IllegalArgumentException) {
             legacyError(exchange, 400, "INVALID_REQUEST", "The request was invalid.") {
-                renderErrorPage(400, "Invalid request", diagnostic(exception, "The request was invalid."))
+                renderErrorPage(400, "Invalid request", "The request was invalid or the requested source or artifact is unavailable.")
             }
         } catch (exception: Exception) {
             legacyError(exchange, 500, "INTERNAL_ERROR", "The operation failed.") {
-                renderErrorPage(500, "Unexpected error", diagnostic(exception, "The operation failed."))
+                renderErrorPage(500, "Unexpected error", "The operation failed. Private diagnostic details are withheld.")
             }
         }
     }
@@ -619,7 +689,7 @@ class UploadServer(
             handleUploadRequest(exchange, jobs)
         } catch (exception: InvalidUploadException) {
             legacyError(exchange, 400, "INVALID_UPLOAD", "Upload a supported Linux ELF binary.") {
-                renderErrorPage(400, "Unsupported binary", diagnostic(exception, "Upload a Linux ELF binary."))
+                renderErrorPage(400, "Unsupported binary", "Upload a supported Linux ELF binary.")
             }
         }
     }
@@ -653,12 +723,36 @@ class UploadServer(
         diagnosticRedactor.text(failure.message ?: fallback, maximumCharacters = 480)
 
     /** A queued operation can be claimed once, either by a worker or by shutdown. */
+    private fun readLegacyProgress(jobId: String, runId: String?): kotlinx.serialization.json.JsonObject {
+        val bytes = jobs.readProgressJournal(jobId, runId)
+        return try { legacyProgressPresentation(AgentProgressJournal.decode(bytes)) } catch (_: Exception) {
+            throw WebJobServiceException("PROGRESS_UNAVAILABLE", "The retained progress journal is unavailable.")
+        }
+    }
+
     private fun handleJob(exchange: HttpExchange, jobId: String) {
         val view = jobs.presentation(jobId)
         val source = runCatching { archiveEvidence.read(jobId, reportPrefix = view.reports.artifactPrefix).source }
             .recoverCatching { sourceEvidence.read(jobId, view.reports.artifactPrefix).view() }
-        exchange.sendHtml(200, renderJob(view.job, view.reports, view.diagnostics, source.getOrNull(), source.isFailure))
+        val progress = runCatching { readLegacyProgress(jobId, view.reports.runId) }.getOrNull()
+        exchange.sendHtml(200, renderJob(view.job, view.reports, view.diagnostics, source.getOrNull(), source.isFailure,
+            progressSnapshot = progress,
+            explorationReport = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.EXPLORATION),
+            repairHistory = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.REPAIR_HISTORY),
+            reconstructionProgress = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.RECONSTRUCTION_PROGRESS),
+            artifacts = runCatching { jobs.listArtifactSummaries(jobId, view.reports.runId) }.getOrNull()))
     }
+
+    private enum class LegacyJsonReport(val filename: String) {
+        EXPLORATION("exploration.json"), REPAIR_HISTORY("repair_history.json"),
+        RECONSTRUCTION_PROGRESS("reconstruction_progress.json"),
+    }
+
+    private fun readLegacyJsonReport(jobId: String, context: WebReportContext, report: LegacyJsonReport): kotlinx.serialization.json.JsonObject? =
+        runCatching {
+            decompengine.oracle.core.OracleJson.parse(jobs.readArtifact(jobId,
+                "${context.artifactPrefix}/${report.filename}", 1_048_576).bytes) as kotlinx.serialization.json.JsonObject
+        }.getOrNull()
 
     private fun handleSource(exchange: HttpExchange, jobId: String, relativePath: String) {
         require(relativePath.isNotBlank()) { "source path must not be blank" }
@@ -726,7 +820,7 @@ internal fun handleUploadRequest(exchange: HttpExchange, jobs: WebJobService) {
         require(declaredLength == null || declaredLength <= MAX_UPLOAD_BYTES) { "upload exceeds the 32 MiB limit" }
         val contentType = exchange.requestHeaders.getFirst("Content-Type") ?: ""
         val job = jobs.uploadMultipart(exchange.requestBody, contentType)
-        if ((exchange.requestHeaders.getFirst("Accept") ?: "").contains("application/json")) {
+        if (exchange.requestsLegacyJson()) {
             exchange.sendJson(201, encodeJob(job))
         } else {
             exchange.redirect("/jobs/${job.id}")
@@ -735,7 +829,7 @@ internal fun handleUploadRequest(exchange: HttpExchange, jobs: WebJobService) {
         val uncertain = exception.cause as? decompengine.jobs.UploadPublicationUncertain
         if (exception.code != "RECOVERY_REQUIRED" || uncertain == null) throw exception
         exchange.responseHeaders.set("Location", "/jobs/${uncertain.jobId}")
-        if ((exchange.requestHeaders.getFirst("Accept") ?: "").contains("application/json")) {
+        if (exchange.requestsLegacyJson()) {
             exchange.sendJson(409, uploadPublicationProblem(uncertain.jobId).toString())
         } else {
             exchange.sendHtml(409, renderUploadPublicationUncertainPage(uncertain.jobId))
@@ -813,8 +907,14 @@ private fun HttpExchange.sendBytes(
         "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'",
     )
     responseHeaders.add("Cache-Control", if (cache) "public, max-age=3600" else "no-store")
-    sendResponseHeaders(status, body.size.toLong())
-    responseBody.use { it.write(body) }
+    responseHeaders.add("Content-Length", body.size.toString())
+    if (requestMethod == "HEAD") {
+        sendResponseHeaders(status, -1)
+        close()
+    } else {
+        sendResponseHeaders(status, body.size.toLong())
+        responseBody.use { it.write(body) }
+    }
 }
 
 private fun contentType(path: Path): String = when (path.fileName.toString().substringAfterLast('.', "")) {

@@ -1,8 +1,10 @@
 # Browser trust and deployment contract
 
 Design authority: [#149](https://github.com/minsago-elite/decomp_thing/issues/149).
-Implementation and qualification belong to D2 and D10; the legacy server does not
-yet enforce this contract. Scope and baseline gaps are in [web parity](web-parity.md).
+Implementation and qualification belong to D2 and D10. Both browser presentations now
+use the local session/request boundary; the broader contract remains partly unimplemented.
+Current access findings are in the [access audit](web-access-boundary-audit.md); historical
+scope and baseline gaps are in [web parity](web-parity.md).
 
 ## Data flow and authority
 
@@ -41,7 +43,7 @@ looking up jobs. Loopback binding alone does not authorize another website.
 
 At startup, generate a cryptographically random 256-bit single-use bootstrap
 token. Print a local URL carrying the token in the fragment, never a query or
-path. The operator opens that URL; the SPA removes the fragment with
+path. The operator opens that URL; the browser login removes the fragment with
 `history.replaceState` before fetching any content and POSTs the token to
 `/api/v1/session`. It has a five-minute expiry and is consumed atomically. Do not
 log or persist it, include it in an asset, or leave it in a copied/shareable link.
@@ -191,3 +193,127 @@ slow consumers and imported disabled Git config. Assertions inspect denied
 operations and unchanged owned state; fixtures never execute uploaded binaries
 or imported hooks. Review the actual packaged server, not only a fixture handler
 (#161/#164/#176/#177/#208/#216/#224/#225).
+
+## Legacy transport checkpoint
+
+Both UI modes now require loopback binding. Legacy startup rejects non-loopback configuration
+before opening the server socket or acquiring job storage; a remotely exposed legacy profile
+is not qualified. Legacy requests pass through the same `LocalWebAccess` transport preflight
+as v1 routing: exact configured Host/Origin pairing, bounded headers, forwarded-header rejection
+and same-origin/none Fetch Metadata when present. This covers pages, JSON, downloads and
+mutation routes before their handlers run. No permissive CORS headers are added.
+
+This preflight is not session authorization. Legacy requests still do not require the SPA
+session/CSRF token, and absent Origin remains accepted by the transport-only policy, including
+non-browser requests. Legacy bootstrap/session and form/automation migration remain open.
+The existing SPA private/mutation policy continues to enforce its stronger session and CSRF
+requirements after transport validation. Do not describe legacy mode as authenticated.
+
+HTTP regression cases use benign read and empty mutation requests with foreign Origin,
+cross-site Fetch Metadata and forwarding headers, checking denial across routes, unchanged job
+bytes and zero workflow callback executions. Matching/absent Origin reads remain compatible.
+Non-loopback startup is tested against an absent storage root. Host parsing/alias behavior is
+shared with the existing access-policy suite; this checkpoint does not add a remote proxy profile.
+
+The [packaged legacy browser report](evidence/web-legacy-transport-browser-20260905.json)
+passes with this preflight enabled: local navigation/reload/polling and missing/empty/restored
+journal recovery work without page exceptions. The report discloses test-owned fixture edits,
+GET/HEAD-only browser requests, unchanged installation and confirmed shutdown/cleanup. Chrome
+used test-only `--no-sandbox`; no workflow ran. This is recorded Linux/Chrome compatibility,
+not a session/CSRF or remote-access qualification.
+
+## Legacy mutation Origin requirement
+
+Legacy POST `/jobs`, `/jobs/J/explore` and `/jobs/J/reconstruct` now require an Origin header
+before dispatch. The shared transport preflight first checks that a supplied origin exactly
+matches the configured local authority; the mutation check rejects absence with 403
+`ORIGIN_DENIED`. Browser form submissions and same-origin fetches supply this header. Existing
+non-browser legacy clients must explicitly send the configured origin to continue using these
+routes. Reads may still omit Origin for normal navigation.
+
+This closes the missing-Origin mutation gap, not the legacy session/CSRF gap: possession of
+a matching origin string is not authentication. The local session bootstrap, authenticated
+legacy reads/forms and appropriate CSRF protection remain required before #161 is complete.
+HTTP tests now use a client that sends Origin without silently filtering it; they cover absent
+and mismatched Origin denial before upload/workflow handlers, with unchanged job bytes and
+zero denied workflow invocations. Existing allowed upload/admission/shutdown cases continue
+with the exact origin and retain their previous behavior.
+
+## Shared session controller prerequisite
+
+Session POST/DELETE handling now lives in `WebSessionController`, which depends only on
+`LocalWebAccess`. The SPA router delegates to it; the versioned response envelope, bounded
+serialization, request IDs and no-store headers are shared with other API responses. This
+allows the legacy router to adopt the same session exchange/logout implementation without
+loading SPA assets or introducing a second cookie/CSRF implementation.
+
+The standalone HTTP regression uses no assets or job service. It verifies that invalid
+method/origin/query/Accept requests do not consume the bootstrap token, a created session
+authorizes reads through the same access instance, logout requires CSRF, and successful logout
+revokes access. The existing SPA and legacy web/journal regression suite also passes.
+This extraction does not yet expose session routes or enforce session/CSRF in legacy mode;
+legacy form, CLI bootstrap and packaged-browser migration remain outstanding under #161.
+
+## Authenticated legacy presentation
+
+Legacy mode now requires the same local session for job pages, JSON polling, source views,
+artifact downloads and namespace misses. Only `/login` and the stylesheet are public reads.
+The CLI prints an explicit `/login#bootstrap=…` handoff in legacy mode; login clears the
+fragment before exchanging it through the shared `POST /api/v1/session` handler. The public
+login page contains no job metadata. Unauthenticated HTML navigation receives that page with
+401, while JSON APIs return a typed denial. This supersedes the transport-only limitations
+in the earlier checkpoints above.
+
+Legacy forms intercept submission and restore CSRF through authenticated, no-store
+`GET /api/v1/session/csrf`. The token stays in document memory. Uploads remain multipart;
+explore/reconstruct POSTs use JSON content type. All mutations require exact Origin, a valid
+session cookie and CSRF. Non-browser clients must exchange the operator bootstrap token and
+send those credentials explicitly. Failed mutations are not automatically retried. The
+End session button calls the shared CSRF-protected DELETE handler and clears the local view.
+Normal navigation/reload and file download use the HttpOnly cookie without tokens in links.
+
+The session restoration endpoint uses the v1 `session` envelope (`csrfToken`, `expiresAt`),
+rejects query parameters and requires JSON Accept. It is a legacy presentation adapter;
+SPA restoration continues through its existing bootstrap endpoint. Expired-cookie clearing
+and denial headers are shared with the v1 error responder. Remote access remains unavailable
+until its profile is qualified; this change does not complete all #161 acceptance criteria.
+
+Qualification at source `ef068ef`: 178 web/journal tests and distZip pass. The retained
+[legacy browser report](evidence/web-legacy-session-browser-20260905.json) proves denied
+unauthenticated views, fragment removal before exchange, authenticated form upload of a
+64-byte inert ELF header, polling/reload/recovery, a session-authorized artifact read and
+logout revocation of APIs/downloads. The uploaded job stays uploaded; no workflow executes.
+The [SPA session regression](evidence/web-legacy-session-spa-regression-20260905.json) passes
+on the same archive. Both reports identify archive/JAR/browser hashes, test-only
+`--no-sandbox`, unchanged installation and confirmed shutdown/cleanup. Legacy fixture edits
+and the test-only fetch guard are disclosed. Browser expiry, peer-tab clearing and remote
+profile qualification are not established by these runs.
+
+## Legacy session invalidation and private-page lifetime
+
+Legacy documents now restore session expiry on load and when visible again. The returned
+expiry schedules local invalidation; a 401 from any session-managed request invalidates
+immediately. Invalidation erases CSRF, aborts pending requests, clears private body/title
+and returns to `/login`. Polling checks document activity before rendering and scheduling
+another request, so a late successful response cannot repopulate an invalidated view.
+Page departure clears private DOM; a persisted history restoration goes to login.
+
+Confirmed logout also sends the same deployment-scoped, credential-free invalidation hint
+used by the SPA (`decomp-session-v1:/` in root-only legacy mode). A peer validates the closed
+message shape, clears its page and issues no logout request. BroadcastChannel is optional:
+without it, active polling learns revocation from 401 and an idle document rechecks when
+visible or clears at its known expiry. Notification delivery and background timer timing
+are browser-dependent; the server remains the authority for every request.
+
+Run `node --test scripts/legacy-session.test.mjs` with the pinned Node to verify the actual
+embedded script's expiry handling, late-response rejection, peer message validation,
+confirmed logout, 401 handling and history-cache lifecycle. These deterministic tests use
+a browser model and controlled responses/timers; they do not claim real elapsed server
+expiry or browser history-cache qualification.
+
+The [packaged legacy invalidation report](evidence/web-legacy-session-invalidation-20260905.json)
+at source `f9ec0fd` proves an idle peer clears through notification and an active peer with
+BroadcastChannel disabled clears on an actual server 401 after logout. Neither peer issues
+a mutation. Existing login/upload/download/polling/recovery checks also pass. The report
+retains artifact identities, explicit test fixture edits, test-only browser sandbox override,
+unchanged installation and confirmed cleanup. It does not establish real elapsed expiry.

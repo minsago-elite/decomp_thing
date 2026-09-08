@@ -1,0 +1,31 @@
+{
+  "status": "passed",
+  "sourceCommit": "84ed5ee8df38838d3104684d62ce8a29301a36d7",
+  "frontend": {
+    "tests": 337,
+    "lint": "passed",
+    "typecheckedBundle": "passed",
+    "generatedDrift": "passed",
+    "testLog": "frontend-tests.txt",
+    "testLogSha256": "c29299edfab055ad650b9c49537fb97e26079589e0e02cc13335b613674d391b"
+  },
+  "distribution": "./gradlew -PfrontendNodeHome=/home/june/decomp_thing/build/tools/decomp-node-24.20.0/node-v24.20.0-linux-x64 distZip",
+  "browser": {
+    "command": "node scripts/check-packaged-web-browser.mjs --mode history --archive build/distributions/llm_bin_patch-0.1.0.zip --chrome /tmp/decomp-web-browser-pin-yp1jzpiy/installed/chrome --java-home /opt/openjdk-bin-21 --work-parent build --no-sandbox",
+    "report": "browser.json",
+    "sha256": "5e666d2fbb01395c1f2107b6e871e48e473449a323dbac047b6360c6bf1758c9",
+    "actualPinAndUnpin": true,
+    "mutations": 2,
+    "workflowExecutionStarted": false,
+    "shutdownConfirmed": true,
+    "cleanupConfirmed": true
+  },
+  "notRepeated": [
+    "JVM suite; implementation unchanged in this layer"
+  ],
+  "limitations": [
+    "Public audit presentation and denied/failed-request audit coverage remain unfinished.",
+    "Broader job/evidence retention and default maintenance activation remain incomplete.",
+    "Pin policy mutations intentionally change workflow metadata; input/job bytes and other attempt data remain preserved."
+  ]
+}

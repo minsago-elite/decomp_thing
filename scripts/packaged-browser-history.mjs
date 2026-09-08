@@ -12,7 +12,8 @@ export async function seedHistory(root) {
   const input = Buffer.alloc(64);
   input.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]);
   input.writeUInt16LE(2, 16); input.writeUInt16LE(62, 18); input.writeUInt32LE(1, 20); input.writeUInt16LE(64, 52);
-  const at = '2026-09-05T00:00:00Z';
+  // This journey tests replay/pinning, so keep its history inside the real retention window.
+  const at = new Date(Date.now() - 300_000).toISOString();
   const job = { id: jobId, filename: 'synthetic-history.elf', status: 'uploaded', created_at: at, updated_at: at,
     size_bytes: 64, binary_path: join(directory, 'input.elf'), metadata: { format: 'ELF64', endianness: 'little',
       elf_version: 1, os_abi: 'System V', object_type: 'EXEC', machine: 'x86-64', entry_point: 0,
@@ -76,14 +77,35 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   await cdp.call('Page.reload', {}, tab.sessionId);
   await ready(tab, `document.body.innerText.includes('revision_fixture_3')`, 'pinned earlier attempt reload');
   const progressEndpoint = `/nested/api/v1/jobs/${fixture.jobId}/runs/run_fixture_3`;
+  let activityStreams = 0;
+  let activityPolls = 0;
+  cdp.on('Network.requestWillBeSent', event => {
+    const requestUrl = new URL(event.request.url);
+    if (event.type !== 'Fetch' || requestUrl.pathname !== progressEndpoint + '/events') return;
+    const accept = event.request.headers.Accept ?? event.request.headers.accept ?? '';
+    if (accept === 'text/event-stream') activityStreams++;
+    if (requestUrl.searchParams.get('transport') === 'poll') activityPolls++;
+  }, tab.sessionId);
   const polling = await evaluate(tab, `(async () => {
     const read = async path => { const response = await fetch(path); if (!response.ok) throw new Error('Progress request failed'); return (await response.json()).data; };
     const snapshot = await read('${progressEndpoint}/snapshot');
-    const first = await read('${progressEndpoint}/events?limit=2&cursor=' + snapshot.oldestCursor);
-    const second = await read('${progressEndpoint}/events?cursor=' + first.nextCursor);
-    const idle = await read('${progressEndpoint}/events?cursor=' + snapshot.throughCursor);
-    return { snapshot, first, second, idle };
+    const first = await read('${progressEndpoint}/events?transport=poll&limit=2&after=' + snapshot.oldestCursor);
+    const compatibility = await read('${progressEndpoint}/events?limit=2&cursor=' + snapshot.oldestCursor);
+    const second = await read('${progressEndpoint}/events?transport=poll&after=' + first.nextCursor);
+    const idle = await read('${progressEndpoint}/events?transport=poll&after=' + snapshot.throughCursor);
+    return { snapshot, first, compatibility, second, idle };
   })()`);
+  assert.deepEqual(polling.first, polling.compatibility);
+  const streamed = await evaluate(tab, `new Promise((resolve, reject) => {
+    const source = new EventSource('${progressEndpoint}/events?after=' + ${JSON.stringify(polling.snapshot.oldestCursor)});
+    const timer = setTimeout(() => { source.close(); reject(new Error('SSE fixture deadline')); }, 5000);
+    source.addEventListener('workflow.observation', event => {
+      clearTimeout(timer); source.close(); resolve({ id: event.lastEventId, data: JSON.parse(event.data) });
+    });
+    source.onerror = () => { clearTimeout(timer); source.close(); reject(new Error('SSE fixture unavailable')); };
+  })`);
+  assert.deepEqual(streamed.data, polling.first.items[0]);
+  assert.equal(streamed.id, polling.first.items[0].cursor);
   assert.equal(polling.snapshot.run.runId, 'run_fixture_3');
   assert.equal(polling.snapshot.progress.authority, 'observations');
   assert.equal(polling.snapshot.progress.retainedEventCount, '205');
@@ -209,6 +231,7 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   const whileOffline = progressRequests();
   await new Promise(resolve => setTimeout(resolve, 3000));
   assert.equal(progressRequests(), whileOffline, 'Offline activity must not poll');
+  const streamsBeforeOnline = activityStreams;
   await cdp.call('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }, tab.sessionId);
   await ready(tab, `document.body.innerText.includes('Following retained activity.')`, 'online activity resumption');
   const onlineDeadline = Date.now() + 10000;
@@ -219,6 +242,83 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.deepEqual(await evaluate(tab, activityRows), Array.from({ length: 5 }, (_, index) => `Sequence ${index + 200}`));
   assert.equal(snapshotRequests(), beforeOfflineSnapshots + 1, 'Online resume must read a fresh snapshot');
   assert.ok(await evaluate(tab, `document.body.innerText.includes('Last activity received:')`));
+  // Publish one inert observation into the owned fixture while Activity is already streaming.
+  const streamDeadline = Date.now() + 10000;
+  while (activityStreams <= streamsBeforeOnline) {
+    assert.ok(Date.now() < streamDeadline, 'Activity did not open its SSE fetch');
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  const pollingBeforeAppend = activityPolls;
+  const appended = JSON.parse(fixture.progress);
+  appended.events.push({ ...appended.events[0], sequence: 205, text: 'Synthetic private streamed content' });
+  appended.nextSequence = 206;
+  const publication = fixture.progressPath + '.browser-publication';
+  try {
+    await fs.writeFile(publication, JSON.stringify(appended), { flag: 'wx', mode: 0o600 });
+    await fs.rename(publication, fixture.progressPath);
+    try {
+      await ready(tab, `(${activityRows}).includes('Sequence 205')`, 'Activity received appended SSE observation');
+    } catch (error) {
+      const diagnostic = await evaluate(tab, `({
+        visibility: document.visibilityState, online: navigator.onLine,
+        rows: ${activityRows},
+        notices: [...document.querySelectorAll('[role="status"], [role="alert"]')].map(node => node.textContent.slice(0, 500))
+      })`);
+      throw new Error(`Activity append diagnostic: ${JSON.stringify(diagnostic)}; responses: ${JSON.stringify(tab.responses.slice(-8))}`, { cause: error });
+    }
+    assert.deepEqual(await evaluate(tab, activityRows), Array.from({ length: 6 }, (_, index) => `Sequence ${index + 200}`));
+    assert.equal(activityPolls, pollingBeforeAppend,
+      'The appended observation must arrive over the existing stream, without another polling request');
+    assert.equal(await evaluate(tab, `document.body.innerText.includes('Synthetic private streamed content')`), false);
+    await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Pause activity').click()`);
+    await ready(tab, `document.body.innerText.includes('Activity paused.')`, 'pause appended stream');
+  } finally {
+    await fs.rm(publication, { force: true });
+    await fs.writeFile(publication, fixture.progress, { flag: 'wx', mode: 0o600 });
+    await fs.rename(publication, fixture.progressPath);
+  }
+  assert.equal(await fs.readFile(fixture.progressPath, 'utf8'), fixture.progress);
+  // The displayed append cursor no longer exists after restoring the original fixture.
+  // Resume must expose a gap and preserve rows until explicit fresh-history recovery.
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Resume activity').click()`);
+  await ready(tab, `document.querySelector('[role="alert"]')?.textContent.includes('Retained history has a gap')`, 'expired Activity cursor reports EVENT_GAP');
+  assert.deepEqual(await evaluate(tab, activityRows), Array.from({ length: 6 }, (_, index) => `Sequence ${index + 200}`));
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Read fresh activity history').click()`);
+  await ready(tab, `(${activityRows}).length === 200 && !document.querySelector('[role="alert"]')`, 'explicit Activity gap recovery');
+  // Fully evicted history must still supply an acknowledged snapshot watermark.
+  const emptyJournal = { ...JSON.parse(fixture.progress), events: [], historyDropped: 205, truncated: true };
+  const emptyPublication = fixture.progressPath + '.browser-empty-publication';
+  const streamsBeforeEmpty = activityStreams;
+  try {
+    await fs.writeFile(emptyPublication, JSON.stringify(emptyJournal), { flag: 'wx', mode: 0o600 });
+    await fs.rename(emptyPublication, fixture.progressPath);
+    await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Read fresh activity history').click()`);
+    await ready(tab, `(${activityRows}).length === 0 && document.body.innerText.includes('Retained at snapshot: 0.') && document.body.innerText.includes('Last activity received:') && !document.querySelector('[role="alert"]')`, 'empty retained snapshot avoids a reset loop');
+    const emptySnapshot = await evaluate(tab, `(async () => (await (await fetch('${progressEndpoint}/snapshot', { credentials: 'same-origin' })).json()).data)()`);
+    assert.equal(emptySnapshot.oldestCursor, null);
+    assert.equal(emptySnapshot.throughSequence, '204');
+    assert.ok(emptySnapshot.throughCursor);
+    const emptyStreamDeadline = Date.now() + 10000;
+    while (activityStreams <= streamsBeforeEmpty) {
+      assert.ok(Date.now() < emptyStreamDeadline, 'Empty cutover did not open SSE');
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    const pollsBeforeEmptyAppend = activityPolls;
+    const resumedJournal = { ...emptyJournal, nextSequence: 206,
+      events: [{ ...JSON.parse(fixture.progress).events[0], sequence: 205 }] };
+    await fs.writeFile(emptyPublication, JSON.stringify(resumedJournal), { flag: 'wx', mode: 0o600 });
+    await fs.rename(emptyPublication, fixture.progressPath);
+    await ready(tab, `(${activityRows}).length === 1 && (${activityRows})[0] === 'Sequence 205'`, 'SSE resumes after an empty cutover');
+    assert.equal(activityPolls, pollsBeforeEmptyAppend);
+    assert.equal(await evaluate(tab, `document.body.innerText.includes('Synthetic private content')`), false);
+    await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Pause activity').click()`);
+    await ready(tab, `document.body.innerText.includes('Activity paused.')`, 'pause empty-cutover stream');
+  } finally {
+    await fs.rm(emptyPublication, { force: true });
+    await fs.writeFile(emptyPublication, fixture.progress, { flag: 'wx', mode: 0o600 });
+    await fs.rename(emptyPublication, fixture.progressPath);
+  }
+  assert.equal(await fs.readFile(fixture.progressPath, 'utf8'), fixture.progress);
   const accessibility = await cdp.call('Accessibility.getFullAXTree', {}, tab.sessionId);
   assert.ok(accessibility.nodes.some(node => node.role?.value === 'status' && node.properties?.some(property => property.name === 'live' && property.value.value === 'polite')));
   assert.equal(await evaluate(tab, `document.querySelector('ol[aria-label="Activity observations"]').closest('[aria-live], [role="status"], [role="log"]') === null`), true);
@@ -249,7 +349,32 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.deepEqual(tab.exceptions, []);
   for (const [name, bytes] of Object.entries(fixture.retained)) assert.deepEqual(await fs.readFile(join(fixture.directory, name)), Buffer.from(bytes));
   assert.deepEqual((await fs.readdir(fixture.directory)).sort(), [...Object.keys(fixture.retained), 'reports'].sort());
-  return { activityUi: { pausedReceiptAgeAdvances: true, receiptAgeIsNotSourceAge: true, exactObservedUsage: true, explicitUsageUnitsAndProvenance: true, durationWithoutRounding: true, missingPricingBasis: true, backgroundSuspendsReads: true, offlineSuspendsReads: true, recoveryReconcilesSnapshot: true, recoveryPreservesRows: true, lastReceivedTime: true, categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, privateProseAbsentFromResponses: true, privatePathsAbsentFromResponses: true, presentationOmissionsCounted: true, progressBytesUnchanged: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
+  // Exercise policy mutations only after proving the existing read-only history journey.
+  await cdp.call('Page.navigate', { url: browserOrigin + path + '/run_fixture_3' }, tab.sessionId);
+  await ready(tab, `document.body.innerText.includes('Progress retention')`, 'progress pin controls');
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Read progress pin').click()`);
+  await ready(tab, `document.body.innerText.includes('Progress history is not pinned.')`, 'initial unpinned policy');
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Pin progress history').click()`);
+  await ready(tab, `document.body.innerText.includes('Progress history is pinned.')`, 'pin saved and reconciled');
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Unpin progress history').click()`);
+  await ready(tab, `document.body.innerText.includes('Progress history is not pinned.')`, 'unpin saved and reconciled');
+  const mutations = tab.requests.filter(request => !['GET', 'HEAD'].includes(request.method));
+  assert.equal(mutations.length, 2);
+  assert.ok(mutations.every(request => request.method === 'PUT' && new URL(request.url).pathname === progressEndpoint + '/progress-pin'));
+  const changed = JSON.parse(await fs.readFile(join(fixture.directory, 'workflow-state.json'), 'utf8'));
+  assert.deepEqual(changed.pinAudit.entries.map(entry => [entry.runId, entry.action, entry.outcome, entry.actor.kind]),
+    [['run_fixture_3', 'progress.pin', 'applied', 'browser_session'], ['run_fixture_3', 'progress.unpin', 'applied', 'browser_session']]);
+  const normalize = attempt => ({ ...attempt, createdAt: new Date(attempt.createdAt).toISOString(),
+    startedAt: new Date(attempt.startedAt).toISOString(), endedAt: new Date(attempt.endedAt).toISOString() });
+  const before = JSON.parse(fixture.retained['workflow-state.json']);
+  changed.attempts.forEach((attempt, index) => {
+    const expected = before.attempts[index];
+    if (attempt.runId === 'run_fixture_3') { assert.notEqual(attempt.version, expected.version); attempt = { ...attempt, version: expected.version }; }
+    assert.deepEqual(normalize(attempt), normalize(expected));
+  });
+  for (const name of ['input.elf', 'job.json']) assert.deepEqual(await fs.readFile(join(fixture.directory, name)), Buffer.from(fixture.retained[name]));
+  assert.deepEqual(tab.exceptions, []);
+  return { activityUi: { emptyCutoverSnapshotAndSseResume: true, emptyCutoverFixtureRestored: true, expiredCursorShowsGap: true, explicitGapRecovery: true, appendedObservationViaSseWithoutPolling: true, appendedFixtureRestored: true, pausedReceiptAgeAdvances: true, receiptAgeIsNotSourceAge: true, exactObservedUsage: true, explicitUsageUnitsAndProvenance: true, durationWithoutRounding: true, missingPricingBasis: true, backgroundSuspendsReads: true, offlineSuspendsReads: true, recoveryReconcilesSnapshot: true, recoveryPreservesRows: true, lastReceivedTime: true, categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, nativeEventSourceMatchesPolling: true, targetPollingQuery: true, cursorAliasPreservesPage: true, privateProseAbsentFromResponses: true, privatePathsAbsentFromResponses: true, presentationOmissionsCounted: true, progressBytesRestoredAfterControlledAppend: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
     earlierAttemptReload: true, previousInterruptedAttempt: true, exactUnsignedUsage: true,
-    unacceptedCandidate: true, explorationSummary: true, nativeReportDownload: true, downloadedBytesMatch: true, reportBytesUnchanged: true, retainedBytesUnchanged: true, mutationRequests: 0, executionStarted: false };
+    unacceptedCandidate: true, explorationSummary: true, nativeReportDownload: true, downloadedBytesMatch: true, reportBytesUnchanged: true, readPhaseRetainedBytesUnchanged: true, pinUi: { readBeforeChange: true, pinAndUnpinReconciled: true, auditedBrowserActor: true, otherAttemptDataPreserved: true }, mutationRequests: 2, executionStarted: false };
 }

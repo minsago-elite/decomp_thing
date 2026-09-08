@@ -4,10 +4,10 @@ import kotlinx.serialization.json.*
 import kotlin.test.*
 
 class WebProgressPagesTest {
-    private fun journal(sequences: List<Long>, next: Long = (sequences.lastOrNull() ?: -1) + 1, text: String = "fixture"): ByteArray {
+    private fun journal(sequences: List<Long>, next: Long = (sequences.lastOrNull() ?: -1) + 1, text: String = "fixture", history: Long? = null): ByteArray {
         // Omissions must be accounted exactly: history eviction covers a prefix, queue drops cover the rest.
         // Empty snapshots cannot classify the initial admitted event as queue loss or single-event eviction.
-        val historyDropped = if (sequences.isEmpty() && next >= 2) 2L else sequences.firstOrNull() ?: 0L
+        val historyDropped = history ?: if (sequences.isEmpty() && next >= 2) 2L else sequences.firstOrNull() ?: 0L
         val queueDropped = next - sequences.size - historyDropped
         return buildJsonObject {
             put("schemaVersion", 1); put("displayOnly", true); put("nextSequence", next)
@@ -35,6 +35,27 @@ class WebProgressPagesTest {
         assertFalse(idle.getValue("hasMore").jsonPrimitive.boolean)
     }
 
+    @Test fun `target polling parameters preserve replay and reject ambiguous positions`() {
+        val pages = WebProgressPages(); val bytes = journal(listOf(0, 1, 2))
+        val first = page(pages, bytes, "transport=poll&limit=1")
+        val anchor = cursor(first)
+        val legacy = page(pages, bytes, "cursor=$anchor&limit=1")
+        assertEquals(legacy, page(pages, bytes, "transport=poll&after=$anchor&limit=1"))
+        assertEquals(legacy, page(pages, bytes, "after=$anchor&limit=1"))
+        assertEquals(legacy, page(pages, bytes, "transport=%70oll&cursor=$anchor&limit=1"))
+        for (query in listOf("transport=stream", "transport=", "transport=poll&transport=poll",
+            "after=$anchor&cursor=$anchor", "after=$anchor&after=$anchor", "limit=1&limit=2",
+            "transport=poll&", "transport=" + "x".repeat(4096))) {
+            assertEquals("VALIDATION_FAILED", assertFailsWith<WebAccessDenied> { page(pages, bytes, query) }.code, query.take(100))
+        }
+        for (query in listOf("transport=poll&after=", "transport=poll&after=%26cursor%3Danything")) {
+            assertEquals("INVALID_CURSOR", assertFailsWith<WebAccessDenied> { page(pages, bytes, query) }.code)
+        }
+        assertEquals("EVENT_GAP", assertFailsWith<WebAccessDenied> {
+            page(pages, journal(listOf(1, 2)), "transport=poll&after=$anchor")
+        }.code)
+    }
+
     @Test fun `cursors reject cross session job attempt and tampering`() {
         val pages = WebProgressPages(); val bytes = journal(listOf(0, 1))
         val token = cursor(page(pages, bytes, "limit=1"))
@@ -42,16 +63,16 @@ class WebProgressPagesTest {
             assertEquals("INVALID_CURSOR", assertFailsWith<WebAccessDenied> { pages.page(owner, job, run, bytes, "cursor=$token") }.code)
         }
         assertEquals("INVALID_CURSOR", assertFailsWith<WebAccessDenied> { page(pages, bytes, "cursor=${token.dropLast(1)}${if (token.last() == 'a') 'b' else 'a'}") }.code)
-        assertEquals("PROGRESS_GAP", assertFailsWith<WebAccessDenied> { page(WebProgressPages(), bytes, "cursor=$token") }.code)
+        assertEquals("EVENT_GAP", assertFailsWith<WebAccessDenied> { page(WebProgressPages(), bytes, "cursor=$token") }.code)
     }
 
     @Test fun `missing changed interior and trailing boundaries report explicit gaps`() {
         val pages = WebProgressPages(); val token = cursor(page(pages, journal(listOf(0, 1)), "limit=1"))
         for (bytes in listOf(journal(listOf(1, 2)), journal(listOf(0, 1), text = "changed"), journal(listOf(0, 2)), journal(listOf(0), next = 2))) {
-            assertEquals("PROGRESS_GAP", assertFailsWith<WebAccessDenied> { page(pages, bytes, "cursor=$token") }.code)
+            assertEquals("EVENT_GAP", assertFailsWith<WebAccessDenied> { page(pages, bytes, "cursor=$token") }.code)
         }
-        assertEquals("PROGRESS_GAP", assertFailsWith<WebAccessDenied> { page(pages, journal(listOf(5, 6))) }.code)
-        assertEquals("PROGRESS_GAP", assertFailsWith<WebAccessDenied> { page(pages, journal(emptyList(), next = 3)) }.code)
+        assertEquals("EVENT_GAP", assertFailsWith<WebAccessDenied> { page(pages, journal(listOf(5, 6))) }.code)
+        assertEquals("EVENT_GAP", assertFailsWith<WebAccessDenied> { page(pages, journal(emptyList(), next = 3)) }.code)
     }
 
     @Test fun `fresh boundary permits explicit retained-history selection and cutover`() {
@@ -97,4 +118,63 @@ class WebProgressPagesTest {
         assertEquals("VALIDATION_FAILED", assertFailsWith<WebAccessDenied> { page(pages, journal(emptyList()), "limit=201") }.code)
         assertEquals(emptyList(), sequences(page(pages, journal(emptyList()))))
     }
+    @Test fun `gap recovery describes the same retained bytes and configured snapshot route`() {
+        val pages = WebProgressPages()
+        val token = cursor(page(pages, journal(listOf(0)), "limit=1"))
+        val bytes = journal(listOf(1, 2))
+        val failure = assertFailsWith<WebAccessDenied> {
+            pages.page("owner", "job", "attempt", bytes, "after=$token", "/nested/api/v1/jobs/job/runs/attempt/snapshot")
+        }
+        assertEquals(410, failure.status); assertEquals("EVENT_GAP", failure.code)
+        val recovery = assertNotNull(failure.eventGap)
+        val retained = pages.boundary("owner", "job", "attempt", bytes)
+        assertEquals(token, recovery.getValue("requestedCursor").jsonPrimitive.content)
+        assertEquals(retained.oldestCursor, recovery.getValue("oldestCursor").jsonPrimitive.content)
+        assertEquals(retained.throughCursor, recovery.getValue("latestCursor").jsonPrimitive.content)
+        assertEquals("/nested/api/v1/jobs/job/runs/attempt/snapshot", recovery.getValue("snapshotHref").jsonPrimitive.content)
+        assertEquals("job", recovery.getValue("jobId").jsonPrimitive.content)
+        assertEquals("attempt", recovery.getValue("runId").jsonPrimitive.content)
+    }
+
+    @Test fun `empty retained gap has null positions and invalid cursors have no recovery disclosure`() {
+        val pages = WebProgressPages()
+        val failure = assertFailsWith<WebAccessDenied> { page(pages, journal(emptyList(), next = 3)) }
+        val recovery = assertNotNull(failure.eventGap)
+        for (key in listOf("requestedCursor", "oldestCursor")) assertEquals(JsonNull, recovery[key])
+        assertNotNull(recovery.getValue("latestCursor").jsonPrimitive.contentOrNull)
+        val invalid = assertFailsWith<WebAccessDenied> { page(pages, journal(listOf(0)), "after=malformed") }
+        assertEquals(400, invalid.status); assertNull(invalid.eventGap)
+    }
+
+    @Test fun `empty retained snapshot acknowledges omissions and reaches subsequent publication`() {
+        val pages = WebProgressPages()
+        val empty = journal(emptyList(), next = 3)
+        val boundary = pages.boundary("owner", "job", "attempt", empty)
+        assertEquals("2", boundary.throughSequence); assertNull(boundary.oldestCursor)
+        val token = assertNotNull(boundary.throughCursor)
+        assertTrue(token.length <= 128)
+        assertTrue(sequences(page(pages, empty, "after=$token")).isEmpty())
+        val appended = journal(listOf(3, 4), history = 2)
+        assertEquals(listOf("3", "4"), sequences(page(pages, appended, "after=$token")))
+        assertEquals(listOf("3", "4"), sequences(page(pages, appended, "after=$token"))) // retry is reachable, not acknowledged by the server
+        val laterLoss = journal(emptyList(), next = 4)
+        assertEquals("EVENT_GAP", assertFailsWith<WebAccessDenied> { page(pages, laterLoss, "after=$token") }.code)
+        val fresh = pages.boundary("owner", "job", "attempt", laterLoss).throughCursor!!
+        assertTrue(sequences(page(pages, laterLoss, "after=$fresh")).isEmpty())
+    }
+
+    @Test fun `empty cutover rejects counter regression resurrected rows foreign binding and tampering`() {
+        val pages = WebProgressPages(); val empty = journal(emptyList(), next = 3)
+        val token = pages.boundary("owner", "job", "attempt", empty).throughCursor!!
+        for (changed in listOf(journal(emptyList(), next = 3, history = 3), journal(listOf(0, 1, 2, 3)))) {
+            assertEquals("EVENT_GAP", assertFailsWith<WebAccessDenied> { page(pages, changed, "after=$token") }.code)
+        }
+        assertEquals("INVALID_CURSOR", assertFailsWith<WebAccessDenied> { pages.page("other", "job", "attempt", empty, "after=$token") }.code)
+        val tampered = token.dropLast(1) + if (token.last() == '0') '1' else '0'
+        assertEquals("INVALID_CURSOR", assertFailsWith<WebAccessDenied> { page(pages, empty, "after=$tampered") }.code)
+        assertEquals("EVENT_GAP", assertFailsWith<WebAccessDenied> { page(WebProgressPages(), empty, "after=$token") }.code)
+        val initial = pages.boundary("owner", "job", "attempt", journal(emptyList()))
+        assertNull(initial.throughCursor); assertNull(initial.throughSequence)
+    }
+
 }
