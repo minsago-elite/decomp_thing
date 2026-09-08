@@ -31,3 +31,5 @@ The 24-hour protection starts at the successful request timestamp, including no-
 The authenticated HTTP route and typed client now use this request boundary; see [the API contract](web-api.md#implemented-progress-pin-policy-endpoint). Rejected-request audit coverage and default periodic maintenance activation remain unfinished.
 
 All 292 selected JVM tests pass. The [request replay manifest and retained reports](evidence/web-pin-request-replay-20260908/manifest.json) identify the tested source and evidence hashes. Frontend/package/browser qualification was not repeated because the request path remains internal.
+
+HTTP integration is qualified by 296 selected JVM tests, 329 frontend tests, lint/typechecked bundle and 48 valid/39 invalid shared contract fixtures. The [HTTP manifest and four retained tests](evidence/web-pin-http-20260908/manifest.json) include production-route and storage-reopen coverage. Distribution archive and packaged browser checks were not repeated; UI controls remain unfinished.
