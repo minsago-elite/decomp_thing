@@ -1,10 +1,13 @@
 package decompengine.analysis
 
+import java.io.BufferedReader
 import java.io.File
 import java.io.InputStream
+import java.io.InputStreamReader
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.Properties
 
@@ -75,7 +78,12 @@ class BundledGhidra private constructor(val root: Path) {
         }
         val expectedPaths = mutableSetOf<String>()
         checkpoint("before reading bundled Ghidra checksum manifest")
-        val records = Files.readAllLines(manifest)
+        val records = Files.newInputStream(manifest, LinkOption.NOFOLLOW_LINKS).use { input ->
+            BufferedReader(InputStreamReader(
+                CheckpointInputStream(input, checkpoint, "bundled Ghidra checksum manifest"),
+                StandardCharsets.UTF_8,
+            )).readLines()
+        }
         checkpoint("after reading bundled Ghidra checksum manifest")
         records.forEach { record ->
             checkpoint("before checking bundled Ghidra checksum record")
@@ -121,7 +129,7 @@ class BundledGhidra private constructor(val root: Path) {
         checkpoint("before reading bundled Ghidra application properties")
         val properties = Properties().apply {
             Files.newInputStream(release.resolve("Ghidra/application.properties")).use { input ->
-                load(CheckpointInputStream(input, checkpoint))
+                load(CheckpointInputStream(input, checkpoint, "bundled Ghidra application properties"))
             }
         }
         checkpoint("after reading bundled Ghidra application properties")
@@ -166,18 +174,19 @@ class BundledGhidra private constructor(val root: Path) {
 private class CheckpointInputStream(
     private val input: InputStream,
     private val checkpoint: (String) -> Unit,
+    private val label: String,
 ) : InputStream() {
     override fun read(): Int {
-        checkpoint("before reading bundled Ghidra application properties bytes")
+        checkpoint("before reading $label bytes")
         val value = input.read()
-        checkpoint("after reading bundled Ghidra application properties bytes")
+        checkpoint("after reading $label bytes")
         return value
     }
 
     override fun read(bytes: ByteArray, offset: Int, length: Int): Int {
-        checkpoint("before reading bundled Ghidra application properties bytes")
+        checkpoint("before reading $label bytes")
         val count = input.read(bytes, offset, minOf(length, 65536))
-        checkpoint("after reading bundled Ghidra application properties bytes")
+        checkpoint("after reading $label bytes")
         return count
     }
 }
