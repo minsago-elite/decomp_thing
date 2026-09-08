@@ -201,7 +201,7 @@ for its final summary. Focused Make/Ninja service tests cover a buildable placeh
 tree remaining unresolved and an accepted authored implementation reaching local
 completion, including the persisted summary and progress fields.
 
-`ArchivalReconstructionService` and the bundled model-analyzer factory default to
+`ArchivalReconstructionService`, direct source generation and the bundled model-analyzer factory default to
 `ReconstructionHostSafetyLimits.DEFAULT`, an independent immutable host policy.
 The service no longer copies the requested profile's budgets into its own admission
 ceiling. The default limits cover export time/memory, planner work and cardinality,
@@ -211,7 +211,11 @@ Requests exceeding a default ceiling are rejected before analysis or reconstruct
 
 A JVM host that explicitly authorizes different limits can pass the same
 `ReconstructionHostSafetyLimits` to `GhidraHeadlessProgramModelAnalyzer.bundled`
-and `ArchivalReconstructionService`. This leaves requested budgets and profile
+and `ArchivalReconstructionService`. Direct generation also accepts an explicit
+host policy through an additive `SourceTreeGenerator.generate` overload; the
+original positional and trailing-lambda signature delegates with the default
+host policy. The service forwards the same policy it admitted at construction.
+This leaves requested budgets and profile
 identity unchanged rather than silently clamping them. The admission test checks
 an increased context request, both default entry points, unchanged identities and
 explicit host authorization. Individual phases still need their own measured
@@ -280,4 +284,6 @@ its four limits by the profile. Its module implementation and interface
 declarations must match the profile before traversal or source-tree writes.
 Compatible Make and Ninja module declarations remain interchangeable even though
 their build definitions differ. This binds planning policy to the selected
-profile; the service's independent host admission remains a separate check.
+profile; independent host admission remains a separate check and runs before
+direct generation selects or runs a planner, invokes reconstruction callbacks,
+or writes source-tree files.
