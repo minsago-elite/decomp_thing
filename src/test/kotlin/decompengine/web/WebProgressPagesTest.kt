@@ -4,14 +4,21 @@ import kotlinx.serialization.json.*
 import kotlin.test.*
 
 class WebProgressPagesTest {
-    private fun journal(sequences: List<Long>, next: Long = (sequences.lastOrNull() ?: -1) + 1, text: String = "fixture"): ByteArray = buildJsonObject {
-        put("schemaVersion", 1); put("displayOnly", true); put("nextSequence", next)
-        put("queueDropped", 0); put("historyDropped", 0); put("truncated", false)
-        put("events", buildJsonArray { sequences.forEach { seq -> add(buildJsonObject {
-            put("sequence", seq); put("runId", "writer_fixture"); put("workflow", "reconstruct")
-            put("time", "2026-09-05T00:00:00Z"); put("kind", "message"); put("text", text)
-        }) } })
-    }.toString().toByteArray()
+    private fun journal(sequences: List<Long>, next: Long = (sequences.lastOrNull() ?: -1) + 1, text: String = "fixture"): ByteArray {
+        // Omissions must be accounted exactly: history eviction covers a prefix, queue drops cover the rest.
+        // Empty snapshots cannot classify the initial admitted event as queue loss or single-event eviction.
+        val historyDropped = if (sequences.isEmpty() && next >= 2) 2L else sequences.firstOrNull() ?: 0L
+        val queueDropped = next - sequences.size - historyDropped
+        return buildJsonObject {
+            put("schemaVersion", 1); put("displayOnly", true); put("nextSequence", next)
+            put("queueDropped", queueDropped); put("historyDropped", historyDropped)
+            put("truncated", queueDropped > 0 || historyDropped > 0)
+            put("events", buildJsonArray { sequences.forEach { seq -> add(buildJsonObject {
+                put("sequence", seq); put("runId", "writer_fixture"); put("workflow", "reconstruct")
+                put("time", "2026-09-05T00:00:00Z"); put("kind", "message"); put("text", text)
+            }) } })
+        }.toString().toByteArray()
+    }
     private fun cursor(page: JsonObject) = page.getValue("nextCursor").jsonPrimitive.content
     private fun sequences(page: JsonObject) = page.getValue("items").jsonArray.map { it.jsonObject.getValue("sequence").jsonPrimitive.content }
     private fun page(pages: WebProgressPages, bytes: ByteArray, query: String? = null) = pages.page("owner", "job", "attempt", bytes, query)

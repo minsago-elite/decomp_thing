@@ -109,7 +109,7 @@ forced-interruption/resume fidelity still required by #137.
 The Kotlin CI lane runs `scripts/ci-prepare-bundled-ghidra-runtime.sh` before JVM
 checks. It builds `installDist` and makes a bounded descriptor-relative copy of
 `build/install/llm_bin_patch/libexec/ghidra` into the unoccupied executable path
-`/opt/decomp-ci-ghidra-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/bundle`. This uses the
+`/var/lib/decomp-ci-ghidra-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/bundle`. This uses the
 application build's already bundled dependency, not an external Ghidra installer
 or runtime download. It exports `DECOMP_TEST_BUNDLED_GHIDRA_ROOT` and sets
 `DECOMP_REQUIRE_BUNDLED_GHIDRA_RUNTIME=true`, so the hosted qualification cannot
@@ -127,3 +127,9 @@ The production application does not run sudo, provision copies, create mounts,
 change quotas or make the mandatory noexec output lease executable. Passing
 structural tests or a non-authoritative packaged Ghidra probe is not evidence
 that the required hosted BOOT lifecycle or later contained analysis has passed.
+
+The provisioner walks `/`, `/var`, and `/var/lib` through no-follow directory
+descriptors and requires root ownership with no group/other writes at each step.
+This matches the CI oracle JDK location: hosted `/opt` failed the same trust
+check in run 33955958408 before Kotlin tests began. Preparation and release
+use the same run/attempt-specific path and retain the inode-bound marker checks.
