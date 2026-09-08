@@ -29,3 +29,5 @@ Keys remain replayable while retained, including after storage reopen. A same-ac
 The 24-hour protection starts at the successful request timestamp, including no-op requests. Backward clock movement conservatively retains the receipt. At the exact deadline eviction may resume, with an explicit omitted prefix; once a key is evicted, the request is new and must pass current CAS. Clients must reconcile state before choosing a fresh action rather than blindly retrying an expired key. Validation rejects null/non-digest keys, duplicate scoped keys, contradictory outcomes and unkeyed no-op records; older applied-only receipts remain readable.
 
 The next integration is the authenticated HTTP route and its typed client contract. This layer does not add a public mutation, claim rejected-request audit coverage, or enable periodic maintenance by default.
+
+All 292 selected JVM tests pass. The [request replay manifest and retained reports](evidence/web-pin-request-replay-20260908/manifest.json) identify the tested source and evidence hashes. Frontend/package/browser qualification was not repeated because the request path remains internal.
