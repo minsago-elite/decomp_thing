@@ -43,8 +43,10 @@ data class ProjectBuildConfiguration(
     val wallClockTimeoutMillis: Long = 10L * 60 * 1_000,
     val maximumOutputBytes: Long = 32L * 1024 * 1024,
     val terminationGraceMillis: Long = 5_000,
+    val buildDefinition: String = "Makefile",
 ) {
     init {
+        validateBuildDefinitionPath(buildDefinition)
         require(makeExecutable.isNotBlank() && '\n' !in makeExecutable && '\r' !in makeExecutable) {
             "make executable must be a non-blank single-line value"
         }
@@ -72,7 +74,7 @@ data class ProjectBuildConfiguration(
         "--output-sync=target",
         "CC=$compilerExecutable",
         "CFLAGS=${cFlags.joinToString(" ")}",
-    )
+    ) + if (buildDefinition == "Makefile") emptyList() else listOf("-f", buildDefinition)
 }
 
 internal data class BuildSourceInput(
@@ -92,12 +94,17 @@ internal data class BuildArtifactIdentity(
     val sha256: String,
 )
 
-internal fun captureBuildSourceRevision(projectDir: Path): BuildSourceRevision {
+internal fun captureBuildSourceRevision(
+    projectDir: Path,
+    profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+): BuildSourceRevision {
+    val policy = ReconstructionAdapters.resolve(profile).archiveBuild
+    val buildDefinition = profile.layout.declaration("build-definition").materialize()
     val inputs = Files.walk(projectDir).use { paths ->
         paths.filter { path ->
             if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(path)) return@filter false
             val relative = path.relativeTo(projectDir).pathString.replace('\\', '/')
-            relative == "Makefile" || relative.startsWith("src/") || relative.startsWith("include/")
+            policy.isBuildInput(profile, relative)
         }.map { path ->
             val relative = path.relativeTo(projectDir).pathString.replace('\\', '/')
             require(relative.isNotBlank() && !relative.startsWith('/') && relative.split('/').none { it in setOf("", ".", "..") }) {
@@ -107,8 +114,8 @@ internal fun captureBuildSourceRevision(projectDir: Path): BuildSourceRevision {
             BuildSourceInput(relative, size, sha256File(path, size))
         }.toList().sortedBy { it.path }
     }
-    require(inputs.isNotEmpty() && inputs.any { it.path == "Makefile" }) {
-        "build source revision must contain Makefile and at least one input"
+    require(inputs.isNotEmpty() && inputs.any { it.path == buildDefinition }) {
+        "build source revision must contain $buildDefinition and at least one input"
     }
     require(inputs.map { it.path }.distinct().size == inputs.size) { "build source inputs must be unique" }
     val canonical = inputs.joinToString("") { input ->
@@ -118,6 +125,27 @@ internal fun captureBuildSourceRevision(projectDir: Path): BuildSourceRevision {
         sha256(canonical.toByteArray(Charsets.UTF_8)),
         Collections.unmodifiableList(inputs.toList()),
     )
+}
+
+internal fun validateBuildDefinitionPath(buildDefinition: String): String {
+    require(buildDefinition != "-") { "build definition must name a project file" }
+    validateRelativePath(buildDefinition)
+    val lower = buildDefinition.lowercase(java.util.Locale.ROOT)
+    require(
+        buildDefinition != "BUILDING.md" && buildDefinition != "ARCHIVE_README.md" &&
+            buildDefinition != "ARCHIVE_MANIFEST.sha256" && buildDefinition != "source_tree_manifest.json" &&
+            !lower.startsWith("reports/") && buildDefinition != "build/reconstructed" &&
+            !(lower.startsWith("src/") && lower.endsWith(".c")),
+    ) { "build definition collides with generated output or source ownership: $buildDefinition" }
+    val segments = lower.split('/')
+    val name = segments.last()
+    val credentialShaped = name == ".env" || name.startsWith(".env.") ||
+        name in setOf(".netrc", ".npmrc", ".pypirc", "id_rsa", "id_ed25519") ||
+        name.endsWith(".pem") || name.endsWith(".p12") || name.endsWith(".pfx") || name.endsWith(".key")
+    require(segments.none { it in setOf(".git", ".gradle", ".ghidra", ".idea", ".codex", "__pycache__") } && !credentialShaped) {
+        "build definition is not an archive-safe project path: $buildDefinition"
+    }
+    return buildDefinition
 }
 
 private fun sha256File(path: Path, expectedBytes: Long): String {
@@ -233,23 +261,36 @@ object MakeProjectBuilder {
     fun build(
         projectDir: Path,
         configuration: ProjectBuildConfiguration = ProjectBuildConfiguration(),
+        profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
     ): BuildReport {
+        require(configuration.buildDefinition == profile.layout.declaration("build-definition").materialize()) {
+            "build definition differs from the selected profile"
+        }
         require(!Files.isSymbolicLink(projectDir)) { "generated project root must not be a symbolic link" }
         val projectRoot = projectDir.toRealPath()
         require(projectRoot.toString().none { it == '=' || it.code < 0x20 || it.code == 0x7f }) {
             "generated project path cannot be encoded safely in GCC reproducible-prefix mappings: $projectRoot"
         }
         validateBuildProjectTree(projectRoot)
-        if (!projectRoot.resolve("Makefile").exists()) {
-            throw BuildException("generated project is missing Makefile")
+        val buildDefinitionPath = projectRoot.resolve(configuration.buildDefinition)
+        if (!buildDefinitionPath.exists()) {
+            throw BuildException("generated project is missing ${configuration.buildDefinition}")
         }
+        require(Files.isRegularFile(buildDefinitionPath, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(buildDefinitionPath)) {
+            "generated build definition is not a regular file: ${configuration.buildDefinition}"
+        }
+        val preservedBuildDefinition = Files.readAllBytes(buildDefinitionPath)
         resetBuildDirectory(projectRoot.resolve("build"))
+        if (configuration.buildDefinition.startsWith("build/")) {
+            buildDefinitionPath.parent.createDirectories()
+            Files.write(buildDefinitionPath, preservedBuildDefinition)
+        }
         val reportsDir = projectRoot.resolve("reports").createDirectories()
         val diagnosticsDir = reportsDir.resolve("build/modules").createDirectories()
         val owners = discoverOwners(projectRoot)
         val command = configuration.command()
         writeBuildInstructions(projectRoot, configuration)
-        val sourceRevisionBeforeBuild = captureBuildSourceRevision(projectRoot)
+        val sourceRevisionBeforeBuild = captureBuildSourceRevision(projectRoot, profile)
         val processBuilder = ProcessBuilder(command)
             .directory(projectRoot.toFile())
             .redirectErrorStream(true)
@@ -287,7 +328,7 @@ object MakeProjectBuilder {
             throw BuildException("generated project build exceeded ${configuration.wallClockTimeoutMillis} milliseconds")
         }
         val returnCode = process.exitValue()
-        val sourceRevisionAfterBuild = captureBuildSourceRevision(projectRoot)
+        val sourceRevisionAfterBuild = captureBuildSourceRevision(projectRoot, profile)
         val sourceStableDuringBuild = sourceRevisionBeforeBuild == sourceRevisionAfterBuild
         val artifact = projectRoot.resolve("build/reconstructed").takeIf {
             returnCode == 0 && Files.isRegularFile(it, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(it)

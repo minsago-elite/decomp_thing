@@ -1,5 +1,10 @@
 package decompengine.project
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
+
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
 import kotlin.io.path.readText
@@ -51,6 +56,7 @@ class ArchivalReconstructionTest {
     fun `service archives declared report paths and rebuilds the extracted project`() {
         val base = GeneratedCMakeReconstructionProfile.descriptor
         val relocated = mapOf(
+            "build-definition" to "config/rebuild.mk",
             "program-model-evidence" to "reports/inputs/model.json",
             "confidence-evidence" to "reports/assessment/confidence.json",
             "toolchain-evidence" to "reports/environment/tools.json",
@@ -68,6 +74,13 @@ class ArchivalReconstructionTest {
             functions = listOf(RecoveredFunction("fn_1000", "decomp_engine_main", 0x1000UL, "int decomp_engine_main(void)")),
         ) }
         val result = ArchivalReconstructionService(analyzer, profile = profile).reconstruct(input, temp.resolve("result"))
+        assertEquals(listOf("-f", "config/rebuild.mk"), result.build.command.takeLast(2))
+        val contract = Json.parseToJsonElement(result.projectDir.resolve("reports/build_contract.json").readText()).jsonObject
+        val definitionInput = contract.getValue("sourceInputs").jsonArray.single {
+            it.jsonObject.getValue("path").jsonPrimitive.content == "config/rebuild.mk"
+        }.jsonObject
+        assertEquals(sha256(result.projectDir.resolve("config/rebuild.mk").toFile().readBytes()),
+            definitionInput.getValue("sha256").jsonPrimitive.content)
         for ((id, path) in relocated) {
             assertTrue(result.projectDir.resolve(path).exists(), id)
             assertFalse(result.projectDir.resolve(base.layout.declaration(id).materialize()).exists(), id)

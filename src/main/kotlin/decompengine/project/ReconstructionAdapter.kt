@@ -36,6 +36,6 @@ internal interface ArchiveBuildPolicy {
     fun requiredPaths(profile: ReconstructionProfile): Set<String>
     val rebuildInstructions: String
     fun validate(projectDir: Path, profile: ReconstructionProfile, requireArtifact: Boolean)
-    fun sourceRevision(projectDir: Path): BuildSourceRevision
-    fun isBuildInput(relativePath: String): Boolean
+    fun sourceRevision(projectDir: Path, profile: ReconstructionProfile): BuildSourceRevision
+    fun isBuildInput(profile: ReconstructionProfile, relativePath: String): Boolean
 }
