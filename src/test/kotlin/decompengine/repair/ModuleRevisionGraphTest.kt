@@ -87,35 +87,41 @@ import kotlin.test.assertTrue
 class ModuleRevisionGraphTest {
     @Test
     fun `legacy generated C fingerprint is rejected before pending recovery writes`() {
-        val project = generatedProject()
-        val profile = GeneratedCRepairIndexProfile
-        val legacyFingerprint = sha256(profile.profileId().toByteArray(Charsets.UTF_8))
-        assertFalse(legacyFingerprint == profile.configurationSha256())
-        assertEquals(profile.configurationSha256(), profile.configurationSha256(RepairResourceBudget()))
-        val legacyProfile = object : RepairIndexProfile by profile {
-            override fun configurationSha256(): String = legacyFingerprint
-            override fun configurationSha256(budget: RepairResourceBudget): String = legacyFingerprint
-        }
-        val target = project.resolve("src/modules/alpha.c")
-        val accepted = target.readBytes()
-        val candidate = accepted + "\n/* authored pending legacy revision */\n".toByteArray()
-        ModuleRevisionGraph.open(project, legacyProfile).use { graph ->
-            val attempt = graph.beginAttempt(listOf("src/modules/alpha.c"))
-            graph.installCandidate(attempt, mapOf("src/modules/alpha.c" to candidate))
-        }
-        val graphPath = project.resolve("reports/repair-revisions/graph.json")
-        val graphBefore = graphPath.readBytes()
-        val failure = assertFailsWith<IllegalArgumentException> {
-            ModuleRevisionGraph.open(project, profile)
-        }
-        assertTrue(failure.message.orEmpty().contains("profile fingerprint differs"))
-        assertContentEquals(candidate, target.readBytes())
-        assertContentEquals(graphBefore, graphPath.readBytes())
-        // The matching historical policy can still recover its own pending transaction. The
-        // production registry intentionally does not offer this test-only compatibility adapter.
-        ModuleRevisionGraph.open(project, legacyProfile).use { recovered ->
-            assertContentEquals(accepted, target.readBytes())
-            assertEquals(null, recovered.snapshot.pendingAttemptId)
+        val current = decompengine.project.GeneratedCMakeReconstructionProfile.descriptor
+        val priorFingerprints = listOf(
+            sha256(current.id.toByteArray(Charsets.UTF_8)),
+            sha256(("generated-c-repair-index-v2\n" + current.sha256 + "\n").toByteArray(Charsets.UTF_8)),
+        )
+        for (legacyFingerprint in priorFingerprints) {
+            val project = generatedProject()
+            val profile = GeneratedCRepairIndexProfile
+            assertFalse(legacyFingerprint == profile.configurationSha256())
+            assertEquals(profile.configurationSha256(), profile.configurationSha256(RepairResourceBudget()))
+            val legacyProfile = object : RepairIndexProfile by profile {
+                override fun configurationSha256(): String = legacyFingerprint
+                override fun configurationSha256(budget: RepairResourceBudget): String = legacyFingerprint
+            }
+            val target = project.resolve("src/modules/alpha.c")
+            val accepted = target.readBytes()
+            val candidate = accepted + "\n/* authored pending legacy revision */\n".toByteArray()
+            ModuleRevisionGraph.open(project, legacyProfile).use { graph ->
+                val attempt = graph.beginAttempt(listOf("src/modules/alpha.c"))
+                graph.installCandidate(attempt, mapOf("src/modules/alpha.c" to candidate))
+            }
+            val graphPath = project.resolve("reports/repair-revisions/graph.json")
+            val graphBefore = graphPath.readBytes()
+            val failure = assertFailsWith<IllegalArgumentException> {
+                ModuleRevisionGraph.open(project, profile)
+            }
+            assertTrue(failure.message.orEmpty().contains("profile fingerprint differs"))
+            assertContentEquals(candidate, target.readBytes())
+            assertContentEquals(graphBefore, graphPath.readBytes())
+            // The matching historical policy can still recover its own pending transaction. The
+            // production registry intentionally does not offer this test-only compatibility adapter.
+            ModuleRevisionGraph.open(project, legacyProfile).use { recovered ->
+                assertContentEquals(accepted, target.readBytes())
+                assertEquals(null, recovered.snapshot.pendingAttemptId)
+            }
         }
     }
 
