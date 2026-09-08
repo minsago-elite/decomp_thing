@@ -92,6 +92,36 @@ class FullTreePlanningInventoryControlTest {
         }
 
     @Test
+    fun `clang tools driver dispatch binds exact planning owners without an emitted denominator`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+
+        val modules = registry.requireOwnerModulesForShard("clang-tools-driver")
+        assertEquals(4, modules.size)
+        assertEquals(
+            listOf(
+                "source/clang/tools/driver/cc1_main.cpp",
+                "source/clang/tools/driver/cc1as_main.cpp",
+                "source/clang/tools/driver/cc1gen_reproducer_main.cpp",
+                "source/clang/tools/driver/driver.cpp",
+            ),
+            modules.map { it.sourcePath },
+        )
+        assertTrue(modules.all { it.moduleId == it.unitId && it.shardId == "clang-tools-driver" })
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("clang-tools-driver-missing")
+        }
+    }
+
+    @Test
     fun `shuffled stale forged and expanded planning documents fail closed`() =
         inControlTemporaryDirectory { directory ->
             val fixture = createFullTreeControlFixture(directory.resolve("fixture"))
