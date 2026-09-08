@@ -331,3 +331,23 @@ the contents of prior protocol files; callers still must validate retained bytes
 Local tests cover identity replacement, permission changes, active-name exclusion,
 and immutable mount membership. Kernel mount enforcement and complete resume
 remain unqualified by these tests.
+
+## Retained interrupted-state revalidation
+
+After `executeUntilCheckpoint` completes both its journal writes and the lease's
+post-execution validation, the same live owner retains the stopped result and
+selected trigger. `requireInterruptedStateCurrent()` checks the held inputs,
+journal and dedicated lease, then recaptures the analysis-state manifest and
+export prefix through the lease-issued descriptor borrow. It requires exact
+manifest bytes, counts and stopped-prefix commitments. A prefix that advanced
+during stop delivery may be accepted at capture time; any advancement after
+that captured boundary fails revalidation. A validation failure poisons the
+owner. Calls before successful interruption or after close are rejected.
+
+This method accepts no detached receipt or caller-selected checkpoint. It does
+not authorize START, verify prior control-file contents, prove saved-project
+semantic equivalence, or enable resume. The next execution must still establish
+its separate control lifecycle and revalidate evidence before authorization.
+Local tests exercise state content, metadata, membership and inode changes and
+prefix advancement/regression; retained-owner execution still needs the hosted
+systemd/ext4 environment.
