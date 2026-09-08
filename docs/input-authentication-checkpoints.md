@@ -16,8 +16,8 @@ wrapper and cause; terminal callback exceptions propagate to the caller.
 
 These are cooperative checks between operations. They do not interrupt a blocked
 native read or establish whole-process resource limits. This infrastructure is
-part of [#84](https://github.com/minsago-elite/decomp_thing/issues/84); bounded ELF
-inspection and pipeline integration remain separate work.
+part of [#84](https://github.com/minsago-elite/decomp_thing/issues/84) and is now used
+by the analyzer's [bounded ELF inspection](bounded-elf-metadata.md).
 
 ## Focused verification
 
