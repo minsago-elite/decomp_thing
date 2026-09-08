@@ -92,6 +92,42 @@ class FullTreePlanningInventoryControlTest {
         }
 
     @Test
+    fun `clang format dispatch binds all 22 planning owners without an emitted denominator`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+
+        val modules = registry.requireOwnerModulesForShard("clang-lib-format")
+        assertEquals(22, modules.size)
+        assertEquals(22, modules.map { it.sourcePath }.toSet().size)
+        assertEquals(22, modules.map { it.unitId }.toSet().size)
+        assertTrue(
+            modules.all {
+                it.moduleId == it.unitId &&
+                    it.shardId == "clang-lib-format" &&
+                    it.sourceKind == "handwritten" &&
+                    it.sourcePath.startsWith("source/clang/lib/Format/")
+            },
+        )
+        assertEquals(
+            listOf("source/clang/lib/Format/MatchFilePath.cpp"),
+            registry.sourceOnlyUnits
+                .filter { it.shardId == "clang-lib-format" }
+                .map { it.sourcePath },
+        )
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("clang-lib-format-missing")
+        }
+    }
+
+    @Test
     fun `shuffled stale forged and expanded planning documents fail closed`() =
         inControlTemporaryDirectory { directory ->
             val fixture = createFullTreeControlFixture(directory.resolve("fixture"))
