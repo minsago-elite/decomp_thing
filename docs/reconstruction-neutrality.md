@@ -29,16 +29,19 @@ under `oracle/gcc`; it records known benchmark artifacts, not arbitrary hashes.
 
 Within generic surfaces, rules detect selected C/header suffix operations,
 source/include and build-output paths, Make/Ninja/compiler names, C flags, and
-concrete adapter references. Each concrete adapter exemption names one exact
-file with its ownership rationale. A new `GeneratedC` filename does not acquire
-an exemption. Adapter ownership never exempts benchmark identity rules.
+concrete adapter references. The benchmark-version rule also recognizes
+`GCC_VERSION=` assignments, and the inventory scans Dockerfile variants such as
+`Dockerfile.dev` and `Dockerfile.ci`. Each concrete adapter exemption names one
+exact file with its ownership rationale. A new `GeneratedC` filename does not
+acquire an exemption. Adapter ownership never exempts benchmark identity rules.
 
 Compatibility defaults, closed adapter dispatch, and an installed compiler
 runtime component use exact literal allowances with a rule, expected occurrence
 count, and rationale. An allowance suppresses only matches entirely contained
 in its literal fragment. Duplicate, overlapping, stale, unused, or out-of-scope
-allowances fail the gate. Missing declared paths and unsupported policy fields
-also fail. Ownership changes therefore require an explicit policy review.
+allowances fail the gate. Generic and benchmark roots must be disjoint. Missing
+declared paths and unsupported policy fields also fail. Ownership changes
+therefore require an explicit policy review.
 
 ## Scope and limits
 

@@ -198,6 +198,38 @@ class GenericLeakageTest(unittest.TestCase):
                 with self.assertRaisesRegex(PolicyError, message):
                     scan_repository(self.root)
 
+    def test_generic_and_benchmark_roots_cannot_overlap(self) -> None:
+        self.policy["benchmarkRoots"] = ["src"]
+        self.save_policy()
+        with self.assertRaisesRegex(PolicyError, "must be disjoint"):
+            scan_repository(self.root)
+
+    def test_allowances_cannot_overlap_across_rule_ids(self) -> None:
+        source = 'val tool = "make"\n'
+        self.write("src/Workflow.kt", source)
+        self.policy["allowances"] = [
+            self.allowance("src/Workflow.kt", "generic-tool", '"make"'),
+            self.allowance("src/Workflow.kt", "generic-layout", source),
+        ]
+        self.save_policy()
+        with self.assertRaisesRegex(PolicyError, "overlapping literal allowances"):
+            scan_repository(self.root)
+
+    def test_scans_version_assignments_build_descendants_and_dockerfile_variants(self) -> None:
+        self.write("src/Workflow.kt", "GCC_VERSION=16.2.0\nval output = \"build/reconstructed/program\"\n")
+        self.write("src/Dockerfile.dev", 'val output = "build/reconstructed/program"\n')
+
+        findings = scan_repository(self.root).findings
+
+        self.assertEqual(
+            [(item.path, item.rule, item.text) for item in findings],
+            [
+                ("src/Dockerfile.dev", "generic-layout", '"build/reconstructed/program"'),
+                ("src/Workflow.kt", "benchmark-version", "GCC_VERSION=16.2.0"),
+                ("src/Workflow.kt", "generic-layout", '"build/reconstructed/program"'),
+            ],
+        )
+
     def test_missing_declared_roots_are_rejected(self) -> None:
         for field in ("genericRoots", "benchmarkRoots"):
             with self.subTest(field=field):
