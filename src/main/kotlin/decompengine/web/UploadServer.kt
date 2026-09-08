@@ -546,6 +546,7 @@ class UploadServer(
                 sendWebApiResponse(exchange, 200, "session", buildJsonObject {
                     put("csrfToken", credentials.csrfToken)
                     put("expiresAt", credentials.session.expiresAt.toString())
+                    put("idleExpiresAt", credentials.session.idleExpiresAt.toString())
                 })
                 return
             }
@@ -555,7 +556,7 @@ class UploadServer(
             val mutation = exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")
             val policy = when {
                 publicPage -> WebEndpointPolicy.publicRead()
-                legacyJsonRead -> WebEndpointPolicy.privateRead()
+                legacyJsonRead -> WebEndpointPolicy.privateRead(allowHead = true)
                 mutation && segments == listOf("jobs") && exchange.requestMethod == "POST" -> WebEndpointPolicy.multipartUpload()
                 mutation -> WebEndpointPolicy.jsonMutation(exchange.requestMethod)
                 else -> WebEndpointPolicy.privateRead(allowHead = true)
@@ -567,9 +568,9 @@ class UploadServer(
             }
             if (legacyJsonRead) requireJsonAccept(exchange)
             when {
-                exchange.requestMethod == "GET" && segments.isEmpty() ->
+                exchange.requestMethod in setOf("GET", "HEAD") && segments.isEmpty() ->
                     renderJobDashboard(exchange)
-                exchange.requestMethod == "GET" && segments == listOf("assets", "app.css") ->
+                exchange.requestMethod in setOf("GET", "HEAD") && segments == listOf("assets", "app.css") ->
                     exchange.sendBytes(200, APP_CSS.toByteArray(), "text/css; charset=utf-8", cache = true)
                 exchange.requestMethod == "GET" && segments == listOf("api", "recovery") ->
                     exchange.sendJson(200, store.recoveryInventory().toJson().toString())
@@ -580,36 +581,25 @@ class UploadServer(
                 exchange.requestMethod == "POST" && segments == listOf("api", "operator", "auth-methods") ->
                     handleAuthenticationInspection(exchange)
                 exchange.requestMethod == "POST" && segments == listOf("jobs") -> handlePostJob(exchange)
-                exchange.requestMethod == "GET" && segments.size == 2 && segments[0] == "jobs" ->
+                exchange.requestMethod in setOf("GET", "HEAD") && segments.size == 2 && segments[0] == "jobs" ->
                     handleJob(exchange, decode(segments[1]))
                 exchange.requestMethod == "POST" && segments.size == 3 && segments[0] == "jobs" && segments[2] == "explore" ->
                     handleExplore(exchange, decode(segments[1]))
                 exchange.requestMethod == "POST" && segments.size == 3 && segments[0] == "jobs" && segments[2] == "reconstruct" ->
                     handleReconstruct(exchange, decode(segments[1]))
-                exchange.requestMethod == "GET" && segments.size >= 4 && segments[0] == "jobs" && segments[2] == "source" ->
+                exchange.requestMethod in setOf("GET", "HEAD") && segments.size >= 4 && segments[0] == "jobs" && segments[2] == "source" ->
                     handleSource(exchange, decode(segments[1]), segments.drop(3).joinToString("/").let(::decode))
-                exchange.requestMethod == "GET" && segments.size >= 4 && segments[0] == "jobs" && segments[2] == "artifacts" ->
+                exchange.requestMethod in setOf("GET", "HEAD") && segments.size >= 4 && segments[0] == "jobs" && segments[2] == "artifacts" ->
                     handleArtifact(exchange, decode(segments[1]), segments.drop(3).joinToString("/").let(::decode))
-                exchange.requestMethod == "GET" && segments.size == 3 && segments[0] == "api" && segments[1] == "jobs" ->
+                exchange.requestMethod in setOf("GET", "HEAD") && segments.size == 3 && segments[0] == "api" && segments[1] == "jobs" ->
                     exchange.sendJson(200, encodeJob(jobs.get(decode(segments[2]))))
-                exchange.requestMethod == "GET" && segments.size == 4 && segments[0] == "api" && segments[1] == "jobs" && segments[3] == "events" -> {
+                exchange.requestMethod in setOf("GET", "HEAD") && segments.size == 4 && segments[0] == "api" && segments[1] == "jobs" && segments[3] == "events" -> {
                     val job = jobs.get(decode(segments[2]))
                     val runId = exchange.requestURI.rawQuery?.let {
                         require(it.matches(Regex("runId=[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "Only an exact workflow attempt selection is supported" }
                         it.removePrefix("runId=")
                     }
-<<<<<<< HEAD
                     exchange.sendJson(200, readLegacyProgress(job.id, runId).toString())
-=======
-                    val snapshot = try {
-                        AgentProgressJournal.read(jobs.reportContext(job.id, runId).reportsDirectory)
-                    } catch (failure: IOException) {
-                        throw WebJobServiceException("JOB_STORAGE_UNAVAILABLE", "Persisted activity history is unavailable.", failure)
-                    } catch (failure: IllegalArgumentException) {
-                        throw WebJobServiceException("JOB_STORAGE_UNAVAILABLE", "Persisted activity history is invalid.", failure)
-                    }
-                    exchange.sendJson(200, snapshot?.toString() ?: "{\"schemaVersion\":1,\"displayOnly\":true,\"nextSequence\":0,\"queueDropped\":0,\"historyDropped\":0,\"truncated\":false,\"events\":[]}")
->>>>>>> ad74d5d3 (fix(web): classify progress journal IO failures)
                 }
                 else -> legacyError(exchange, 404, "NOT_FOUND", "The requested route does not exist.") {
                     renderErrorPage(404, "Page not found", "The requested route does not exist.")
@@ -922,6 +912,7 @@ private fun HttpExchange.sendBytes(
         "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'",
     )
     responseHeaders.add("Cache-Control", if (cache) "public, max-age=3600" else "no-store")
+    responseHeaders.add("Content-Length", body.size.toString())
     if (requestMethod == "HEAD") {
         sendResponseHeaders(status, -1)
         close()

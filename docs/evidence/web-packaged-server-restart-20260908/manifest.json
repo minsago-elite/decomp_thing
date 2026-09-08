@@ -1,0 +1,45 @@
+{
+  "status": "passed",
+  "sourceCommit": "d09f8c4964c3c4b8c7a348c92dd408646bdeef6d",
+  "applicationSourceCommit": "c3a9fc4c",
+  "masterIncluded": "2cb7821a",
+  "archiveSha256": "23b9b2b892aea5ed2ea810273128ab9989ecb4f59c53ad81e11563b9beab1afc",
+  "files": {
+    "browser.json": "2f1d08ff556789872bc4e3e2ed3ef7f26b73a5dc42e67f35ec5ec77907fcc7ae"
+  },
+  "verification": {
+    "driverSyntax": "passed",
+    "packagedHistoryBrowser": "passed",
+    "serverRestart": {
+      "stoppedDuringStream": true,
+      "reconnectingPreservesRows": true,
+      "explicitPauseDuringOutage": true,
+      "priorSessionRejected": true,
+      "automaticRequestsAfterRejection": 0,
+      "freshExplicitSignIn": true,
+      "changedInstanceNotice": true,
+      "documentReloadsDuringSignIn": 0,
+      "attemptFactsPreserved": true,
+      "retainedPages": [
+        200,
+        5
+      ],
+      "workflowBytesUnchanged": true,
+      "progressBytesUnchanged": true,
+      "workflowMutations": 0,
+      "sessionExchangeRequests": 1,
+      "storageEntries": 0
+    },
+    "shutdownConfirmed": true,
+    "workCleanupConfirmed": true
+  },
+  "limits": [
+    "Graceful SIGTERM of a confirmed live packaged server, same origin/store and terminal inert fixture only.",
+    "Fresh explicit sign-in changes the fragment in the same document; a full document reload loses the in-memory identity baseline.",
+    "No automatic requests after rejection were observed for three seconds.",
+    "No active workflow, native analysis, abrupt crash, actual session expiry or conflicting workflow commands were exercised.",
+    "Runtime sources and contract schema are unchanged from c3a9fc4c; its previously retained build and JVM/frontend verification apply. Those suites were not repeated for browser-driver changes.",
+    "Earlier intermittent appended-SSE timeout remains unresolved; this run passed the existing assertion.",
+    "Chrome used test-only --no-sandbox."
+  ]
+}

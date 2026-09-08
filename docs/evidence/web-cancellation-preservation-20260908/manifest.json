@@ -1,0 +1,24 @@
+{
+  "sourceCommit": "11db30b1",
+  "masterIncluded": "1c999572",
+  "jvm": {
+    "tests": 24,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "files": {
+    "cancellation-tests.xml": "7ccbc52bbf6a4b4d5833aca918963deb6510d9adcd4bc2353235236938124bc0",
+    "passing-build.txt": "4ec356ac46c74042bea9857efc90fa1479aaf61f976c70fb877dcdf47f20f67b"
+  },
+  "scope": [
+    "Queued/running cancellation preserves a supplied prior accepted reference, original accepted attempt and diagnostic bytes before and after store reopen.",
+    "Uncertain running cancellation does not signal the worker; shutdown retains ownership until exit; late completion cannot overwrite uncertain metadata; reopen marks interruption."
+  ],
+  "limits": [
+    "Synthetic accepted references exercise preservation only, not correctness of acceptance attestation.",
+    "No runtime change, HTTP/UI controls, durable command receipts or production adapter qualification.",
+    "Focused 24-test verification extends the parent 302-test checkpoint. No frontend/browser rerun.",
+    "The independent real-time idle-expiry browser is still pending and uses its earlier archive."
+  ]
+}

@@ -1,0 +1,20 @@
+# Versioned contract qualification
+
+Tracking: [D2.2 #159](https://github.com/minsago-elite/decomp_thing/issues/159). GitHub remains the source of scope and status. This audit concerns the shared v1 contract pipeline and implemented adapters; representative fixtures do not establish that every planned endpoint exists.
+
+| Criterion | Assessment | Evidence and limit |
+| --- | --- | --- |
+| Stable JSON codes for all error classes | Partial qualification | Current HTTP tests cover validation, missing resources, conflicts, authentication and progress failures. Complete endpoint/error-class coverage has not been audited here. |
+| Documented unknown-field/enum/version compatibility without implicit acceptance | Verified | Response decoding recursively projects known schema fields; producer/request validation rejects extra fields. Unknown API versions, kinds, event discriminators, report adapters and acceptance enums fail. Semantic binding checks run after projection. Added nested report claims leave partial observations and unknown acceptance unchanged. |
+| Lossless large integers and binary addresses | Verified for v1 | The schema encodes uint64 quantities as canonical decimal strings and addresses as bounded hexadecimal strings. Every positive fixture survives decode/serialize/decode unchanged. Boundary tests cover 2^53+1, uint64 maximum, invalid numeric counts, overflow and malformed addresses. Real HTTP job and legacy/SPA adapter-parity tests preserve the maximum unsigned entry address as `0xffffffffffffffff` in v1. Legacy numeric fields retain their documented older representation. |
+| Bounded deadlines/navigation abort and keyed mutation retries | Partial qualification | Shared JSON/SSE transports and consuming views have cancellation, timeout and no-automatic-mutation-retry tests. This audit does not establish every planned view's navigation or explicit retry behavior. |
+| Complete negotiation and migration route matrix | Partial qualification | Implemented legacy/v1 routes have negotiation tests; the full planned endpoint surface and migration requirements remain incomplete. |
+| CI drift detection and redacted diagnostic correlation | Partial qualification | Generation drift is checked by the test/type/build pipeline. This audit does not qualify the complete server-diagnostic correlation requirement. |
+
+Source: [schema](../contracts/web/v1/contract.schema.json), [decoder](../frontend/src/api/decode.ts), [schema projection](../frontend/src/api/validate.ts), [semantic checks](../frontend/src/api/semantics.ts), and [v1 producer](../src/main/kotlin/decompengine/web/WebApiController.kt). Large values stay strings; ordering/count comparisons use BigInt. These checks establish representation and contract consistency, not proof of execution or acceptance.
+
+[Frontend contract tests](../frontend/tests/api-contract.test.ts) now round-trip every positive fixture, through both producer validation and response decoding, instead of checking only that producer decoding succeeds. A new nested-report case adds unsupported acceptance/revision claims at multiple object levels; response projection removes them, retains observations/unknown acceptance, and producer validation rejects the extension. Existing tests independently reject unsupported enums/versions, numeric counts, overflow and inconsistent evidence bindings.
+
+All 352 frontend tests, lint, generated/type checks and 12 WebApiController real-HTTP tests pass. The independent Python verifier accepts 49 positive fixtures and rejects 41 negative fixtures. No application code changes in this audit. Distribution and browser tests were not repeated; existing browser evidence is not used as a substitute for the explicit decoder/HTTP assertions. The issue remains open for its other requirements and does not claim the stack has merged into master.
+
+The [retained evidence manifest](evidence/web-contract-criteria-20260908/manifest.json) binds the selected contract assertions and real-HTTP test report to this audit.

@@ -29,6 +29,10 @@ sealed interface DurableWebWorkflowOutcome {
     }
 }
 
+internal data class WebCancellationEligibility(val attempt: WorkflowAttempt, val reasonCode: String?) {
+    val eligible: Boolean get() = reasonCode == null
+}
+
 data class DurableWebWorkflowRequest(val workflow: WorkflowKind, val inputRevisionId: String? = null, val previousRunId: String? = null)
 
 sealed interface DurableWebWorkflowAdmission {

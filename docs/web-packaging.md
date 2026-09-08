@@ -148,6 +148,22 @@ below. `proxy` starts Vite with the explicit backend origin and configures only
 that loopback frontend origin on the JVM; it checks session restoration/logout
 and an actual HMR connection. It does not substitute fixture responses.
 
+`idle-expiry` is a separate opt-in journey that takes at least 30 minutes. It signs
+into an inert retained attempt, performs one initial private read, then waits
+through the production idle-session deadline with no tab requests. It checks
+owned server/browser liveness every 30 seconds and writes `idle-wait.json` beside
+the eventual `report.json`. After the wait, an explicit private read must receive
+HTTP 401 and show the distinct expired-session notice, clear the private attempt,
+and stop automatic requests. No production deadline or clock is changed and no
+response is intercepted. Use the same command options as `session`, replacing
+`--mode session` with `--mode idle-expiry`. A running heartbeat is not a passing
+qualification report; completion also requires confirmed shutdown and cleanup.
+The [2026-09-08 retained result](evidence/web-packaged-idle-expiry-20260908/manifest.json)
+passed the real idle interval, actual server rejection, distinct notice, private-state
+cleanup and no-follow-up checks, with shutdown and owned-work cleanup confirmed.
+This qualifies idle expiry after an explicit read on a terminal fixture, not expiry
+during an active upload/stream or the eight-hour absolute deadline.
+
 `upgrade` keeps one browser tab and the previous entry module alive while replacing
 the owned previous JVM with the current ZIP on exactly the same origin and
 `/nested/` base path. It loads only the previous home first, verifies its embedded

@@ -1,9 +1,9 @@
 # Versioned client contract boundary
 
 This is the frontend portion of [#159](https://github.com/minsago-elite/decomp_thing/issues/159).
-It implements the representative schemas in [the shared v1 contract](../../../contracts/web/v1/contract.schema.json),
-not every endpoint reserved by [the API design](../../../docs/web-api.md). It does not implement
-HTTP controllers, durable jobs, event subscriptions, uploads, source reads or Git operations.
+It implements decoding and transport for [the shared v1 contract](../../../contracts/web/v1/contract.schema.json).
+Controller and workflow behavior is implemented in the corresponding server and consuming views;
+presence of a schema type does not establish an implemented endpoint from [the API design](../../../docs/web-api.md).
 
 From `frontend/`, run `npm run api:generate` after an intentional shared schema change;
 `npm run api:check` compares deterministic output without writing. Typecheck/build and the contract
@@ -33,7 +33,7 @@ support; an explicit unavailable/unsupported report may carry its version withou
 These client checks validate contract consistency, not the authenticity of execution or acceptance.
 
 `createApiClient({basePath})` uses same-origin `/api/v1` URLs, credentials, JSON negotiation and
-`X-Request-ID` correlation. It exposes typed `get`, `post`, `upload` and `deleteSession` calls. `get`/`post`
+`X-Request-ID` correlation. It exposes typed `get`, `post`, `put`, `upload` and `deleteSession` calls. `get`/`post`
 return the entire typed response envelope. HTTP errors expose `ApiClientError` with a local `code`,
 optional HTTP `status`, bounded `requestId` and server `serverCode`; errors omit bodies, URLs,
 server messages and tokens. Current mutation requests require explicit in-memory CSRF, an

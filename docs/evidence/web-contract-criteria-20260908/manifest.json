@@ -1,0 +1,39 @@
+{
+  "status": "passed",
+  "sourceCommit": "3629f01f",
+  "verification": {
+    "frontendTests": 352,
+    "frontendFailures": 0,
+    "contractTests": 104,
+    "httpTests": 12,
+    "httpFailures": 0,
+    "httpErrors": 0,
+    "httpSkipped": 0,
+    "lint": "passed",
+    "generatedTypecheck": "passed",
+    "pythonValidAccepted": 49,
+    "pythonInvalidRejected": 41
+  },
+  "files": {
+    "http-tests.xml": "208a33079031f32aa61f74f8e7d5bd079cf6b658fb42c94127421bed31b3d7f2",
+    "contract-tests.json": "f9596ae42d7e0b1c96de9f380ab75e52c2beb27b7662d9502f11f06e2dd586ad"
+  },
+  "issue159CriteriaVerified": [
+    2,
+    3
+  ],
+  "criteriaStillOpen": [
+    1,
+    4,
+    5,
+    6
+  ],
+  "runtimeChange": false,
+  "limits": [
+    "Shared v1 contract and implemented adapters are qualified; fixtures do not establish all planned endpoint implementations.",
+    "Legacy numeric field representation remains the documented compatibility form.",
+    "Contract consistency and representation do not confer execution or acceptance authority.",
+    "Browser and distribution checks were not repeated for test/documentation changes.",
+    "Verified stacked source is not a claim of merge into master."
+  ]
+}

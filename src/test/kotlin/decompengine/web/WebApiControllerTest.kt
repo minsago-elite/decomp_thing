@@ -25,6 +25,38 @@ class WebApiControllerTest {
     private val client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build()
 
     @Test
+    fun `authenticated bootstrap identity is stable across sessions and changes with server lifetime`() {
+        val identities = mutableListOf<String>()
+        val root = createTempDirectory("web-instance-lifetime-")
+        var previousCookie: String? = null
+        repeat(2) {
+            val server = UploadServer("127.0.0.1", 0, root,
+                JobAnalyzer { _, _ -> error("Unexpected analysis") },
+                JobReconstructor { _, _ -> error("Unexpected reconstruction") },
+                uiMode = WebUiMode.SPA, basePath = "/workbench/")
+            server.start()
+            try {
+                val path = "/workbench/api/v1/bootstrap"
+                assertError(request(server, path), 401, "SESSION_REQUIRED")
+                fun read(cookie: String): String = assertEnvelope(request(server, path,
+                    headers = mapOf("Cookie" to cookie)), 200, "bootstrap")
+                    .getValue("serverInstanceId").jsonPrimitive.content
+                previousCookie?.let { old -> assertError(request(server, path, headers = mapOf("Cookie" to old)), 401, "SESSION_REQUIRED") }
+                val cookie = establish(server)
+                previousCookie = cookie
+                val identity = read(cookie)
+                assertTrue(identity.matches(Regex("[0-9a-f]{32}")))
+                assertEquals(identity, read(cookie))
+                assertEquals(identity, read(establish(server)))
+                assertFalse(request(server, path).body().contains(identity))
+                identities += identity
+            } finally { server.stop() }
+        }
+        assertNotEquals(identities[0], identities[1])
+    }
+
+
+    @Test
     fun `legacy and v1 uploads remain equivalent through mode changes on the same store`() {
         val root = createTempDirectory("web-adapter-parity-")
         var executions = 0

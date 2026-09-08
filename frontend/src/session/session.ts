@@ -14,7 +14,7 @@ export type RuntimeSnapshot = Pick<Bootstrap, 'applicationBuildId' | 'uiBuildId'
 
 export type SessionState =
   | { status: 'public' | 'checking' | 'signing-out' }
-  | { status: 'authenticated'; expiresAt: string; runtime: RuntimeSnapshot }
+  | { status: 'authenticated'; expiresAt: string; runtime: RuntimeSnapshot; serverChanged?: true }
   | { status: 'required'; reason: 'missing' | 'expired' | 'bootstrap-required' | 'bootstrap-expired' | 'invalid-link' | 'signed-out' | 'session-changed' }
   | { status: 'unavailable'; reason: 'connection' | 'configuration' | 'logout-unconfirmed' | 'removal-failed' };
 
@@ -23,6 +23,7 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
   const expectedBase = normalizeBasePath(basePath);
   let state: SessionState = { status: 'public' };
   let csrfToken: string | null = null;
+  let lastServerInstanceId: string | null = null;
   let initialized = false;
   let disposed = false;
   let fragmentBlocked = false;
@@ -61,6 +62,7 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
   function failed(error: unknown, logout = false) {
     forget();
     const code = error instanceof ApiClientError ? error.serverCode : undefined;
+    if (code === 'SESSION_REQUIRED' || code === 'SESSION_EXPIRED') notifyInvalidated(false);
     if (code === 'SESSION_REQUIRED') publish({ status: 'required', reason: 'missing' });
     else if (code === 'SESSION_EXPIRED') publish({ status: 'required', reason: 'expired' });
     else if (code === 'BOOTSTRAP_REQUIRED') publish({ status: 'required', reason: 'bootstrap-required' });
@@ -76,6 +78,7 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
       publish({ status: 'unavailable', reason: 'configuration' });
     } else if (remaining <= 0) {
       forget();
+      notifyInvalidated(false);
       publish({ status: 'required', reason: 'expired' });
     } else {
       forget();
@@ -86,9 +89,15 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
         readiness: bootstrap.readiness, capabilities: structuredClone(bootstrap.capabilities),
         limits: { ...bootstrap.limits }, runtime: { ...bootstrap.runtime },
       };
-      publish({ status: 'authenticated', expiresAt: bootstrap.sessionExpiresAt, runtime });
+      const instance = bootstrap.serverInstanceId ?? null;
+      const serverChanged = instance !== null && lastServerInstanceId !== null && instance !== lastServerInstanceId;
+      lastServerInstanceId = instance;
+      publish({ status: 'authenticated', expiresAt: bootstrap.sessionExpiresAt, runtime,
+        ...(serverChanged ? { serverChanged: true as const } : {}), });
       expiry = setTimeout(() => {
+        invalidatePending();
         forget();
+        notifyInvalidated(false);
         publish({ status: 'required', reason: 'expired' });
       }, Math.min(remaining, 2_147_483_647));
     }
@@ -187,6 +196,7 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
           || !['SESSION_REQUIRED', 'SESSION_EXPIRED'].includes(error.serverCode ?? '')) return;
         invalidatePending();
         forget();
+        notifyInvalidated(false);
         publish({ status: 'required', reason: error.serverCode === 'SESSION_EXPIRED' ? 'expired' : 'missing' });
       };
     },
@@ -222,6 +232,7 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
     },
     dispose() {
       disposed = true;
+      lastServerInstanceId = null;
       invalidation.close();
       forget();
       invalidatePending();

@@ -83,7 +83,7 @@ internal val LEGACY_SESSION_SCRIPT = """
     if (!response.ok) throw new Error('Session unavailable');
     const body = await response.json();
     if (!active) throw new DOMException('Session ended', 'AbortError');
-    const remaining = Date.parse(body.data.expiresAt) - Date.now();
+    const remaining = Date.parse(body.data.idleExpiresAt) - Date.now();
     if (!Number.isFinite(remaining) || remaining <= 0) {
       invalidate();
       throw new DOMException('Session ended', 'AbortError');

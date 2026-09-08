@@ -562,6 +562,92 @@ class WebJobService(
         return DurableWebWorkflowAdmission.Started(jobId, queued.attempt.runId)
     }
 
+    /** A read-only eligibility snapshot for a new command, never an admission reservation. */
+    @Synchronized
+    internal fun cancellationEligibility(jobId: String, runId: String): WebCancellationEligibility {
+        requireInitializedRead()
+        if (stopping) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
+        requirePublicationAvailable()
+        val snapshot = when (val view = inspectDurableJob(jobId)) {
+            is WorkflowJobInspection.Available -> view.snapshot
+            is WorkflowJobInspection.Unavailable -> throw WebJobServiceException(view.diagnostic.code, view.diagnostic.message)
+        }
+        val attempt = snapshot.attempts.singleOrNull { it.runId == runId }
+            ?: throw WebJobServiceException("RUN_NOT_FOUND", "The requested attempt does not belong to this job.")
+        val owned = (active[jobId] as? DurableTask)?.attempt?.runId == runId
+        val reason = when {
+            attempt.state.terminal -> "ATTEMPT_TERMINAL"
+            attempt.state == WorkflowRunState.CANCELLING -> "CANCELLATION_PENDING"
+            !owned -> "NO_OWNED_WORKER"
+            snapshot.cancellationReceipts.entries.size >= decompengine.jobs.WorkflowCancellationReceipts.MAX_ENTRIES -> "CANCELLATION_RECEIPT_CAPACITY"
+            else -> null
+        }
+        return WebCancellationEligibility(attempt, reason)
+    }
+
+    /** Internal command boundary; HTTP adapters must authorize and bind command replay separately. */
+    @Synchronized
+    internal fun cancelDurable(jobId: String, runId: String, expectedRunVersion: String): WorkflowAttempt {
+        requireInitializedRead()
+        if (stopping) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
+        requirePublicationAvailable()
+        val current = getAttempt(jobId, runId)
+        if (current.version != expectedRunVersion)
+            throw WebJobServiceException("VERSION_CONFLICT", "The attempt changed; refresh before requesting cancellation.")
+        if (current.state.terminal) return current
+        val task = (active[jobId] as? DurableTask)?.takeIf { it.attempt.runId == runId }
+            ?: throw WebJobServiceException("RECOVERY_REQUIRED", "This attempt has no owned worker; reopen storage to reconcile it.")
+        if (current.state == WorkflowRunState.CANCELLING) return current
+        task.attempt = recordCancellation(jobId, task) {
+            checkNotNull(attempts).transition(jobId, runId, expectedRunVersion, WorkflowTransition.RequestCancellation).attempt
+        }
+        signalCancellation(task)
+        return task.attempt
+    }
+
+    /** Authorized adapters supply actor/key; a replay never restores an old task version or repeats a signal. */
+    @Synchronized
+    internal fun requestDurableCancellation(jobId: String, runId: String, expectedRunVersion: String,
+        actor: decompengine.jobs.WorkflowCancellationActor, requestKey: String): decompengine.jobs.WorkflowCancellationRequestResult {
+        requireInitializedRead()
+        if (stopping) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
+        requirePublicationAvailable()
+        val current = getAttempt(jobId, runId)
+        val task = (active[jobId] as? DurableTask)?.takeIf { it.attempt.runId == runId }
+        if (!current.state.terminal && task == null)
+            throw WebJobServiceException("RECOVERY_REQUIRED", "This attempt has no owned worker; reopen storage to reconcile it.")
+        val result = recordCancellation(jobId, task) {
+            checkNotNull(attempts).requestCancellation(jobId, runId, expectedRunVersion, actor, requestKey)
+        }
+        if (task != null) {
+            task.attempt = result.attempt
+            if (!task.attempt.state.terminal) signalCancellation(task)
+        }
+        return result.copy(attempt = task?.attempt ?: result.attempt)
+    }
+
+    private fun <T> recordCancellation(jobId: String, task: DurableTask?, operation: () -> T): T = try { operation() }
+    catch (failure: Throwable) {
+        if (failure is WorkflowStoreException && !failure.outcomeUnknown)
+            throw WebJobServiceException(failure.code, "Cancellation was not recorded; refresh the attempt before retrying.", failure)
+        val diagnostic = WebJobDiagnostic(jobId, "RECOVERY_REQUIRED", "Cancellation publication is uncertain. Reopen storage before making further changes.")
+        publicationFailures[diagnostic.jobId] = diagnostic
+        val unavailable = WebJobServiceException(diagnostic.code, diagnostic.message, failure)
+        task?.failPublication(unavailable)
+        if (failure !is Exception) throw failure
+        throw unavailable
+    }
+
+    private fun signalCancellation(task: DurableTask) {
+        if (task.cancellationRequested) return
+        // Publication precedes signalling. Uncooperative running workers remain cancelling.
+        task.cancellationRequested = true
+        if (!task.started) {
+            ownedExecutor?.remove(task)
+            task.finish(WorkflowTransition.Finish(WorkflowRunState.CANCELLED, WorkflowTerminalReason.CANCELLED))
+        } else task.worker?.interrupt()
+    }
+
     override fun close() {
         var problem: Throwable? = null
         val running = synchronized(this) {
@@ -659,6 +745,7 @@ class WebJobService(
 
     private inner class DurableTask(val job: Job, var attempt: WorkflowAttempt, val adapter: DurableWebWorkflowAdapter) : OwnedTask(job.id) {
         private var publicationFailure: WebJobServiceException? = null
+        var cancellationRequested = false
         fun failPublication(failure: WebJobServiceException) {
             publicationFailure = failure
             if (!started) { terminal = true; release() }
@@ -714,7 +801,9 @@ class WebJobService(
                 if (!started) release()
             }
         }
-        private fun interrupted() = WorkflowTransition.Finish(WorkflowRunState.INTERRUPTED, WorkflowTerminalReason.PROCESS_INTERRUPTED)
+        private fun interrupted() = if (cancellationRequested && !closed && !stopping)
+            WorkflowTransition.Finish(WorkflowRunState.CANCELLED, WorkflowTerminalReason.CANCELLED)
+        else WorkflowTransition.Finish(WorkflowRunState.INTERRUPTED, WorkflowTerminalReason.PROCESS_INTERRUPTED)
     }
 
     private fun legacyStatus(state: WorkflowRunState): String = when (state) {

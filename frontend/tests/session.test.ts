@@ -240,11 +240,13 @@ describe('shared private request rejection', () => {
     await session.initialize({ kind: 'absent' });
     const observe = session.observeRequestFailure();
     const changed = vi.fn(); session.subscribe(changed);
+    const invalidated = vi.fn(); session.onInvalidated(invalidated);
     observe(denied('SESSION_EXPIRED'));
     expect(session.snapshot()).toEqual({ status: 'required', reason: 'expired' });
     expect(session.csrf()).toBeNull();
     observe(denied('SESSION_REQUIRED'));
     expect(changed).toHaveBeenCalledOnce();
+    expect(invalidated).toHaveBeenCalledExactlyOnceWith(false);
     expect(gateway.bootstrap).toHaveBeenCalledOnce();
     expect(gateway.exchange).not.toHaveBeenCalled();
     expect(gateway.logout).not.toHaveBeenCalled();
@@ -277,5 +279,42 @@ describe('shared private request rejection', () => {
     ]) observe(error);
     expect(session.snapshot().status).toBe('authenticated');
     expect(session.csrf()).toBe(csrf);
+  });
+});
+
+
+describe('authenticated server instance comparison', () => {
+  it('reports a changed instance after reconnect without exposing the identifier in snapshots', async () => {
+    const { session, gateway, data } = setup();
+    data.serverInstanceId = 'a'.repeat(32);
+    await session.initialize({ kind: 'absent' });
+    expect(session.snapshot()).not.toHaveProperty('serverChanged');
+    await session.refresh();
+    expect(session.snapshot()).not.toHaveProperty('serverChanged');
+    session.observeRequestFailure()(denied('SESSION_REQUIRED'));
+    data.serverInstanceId = 'b'.repeat(32);
+    await session.connect({ kind: 'token', token: bootstrapToken });
+    expect(session.snapshot()).toHaveProperty('serverChanged', true);
+    expect(JSON.stringify(session.snapshot())).not.toContain(data.serverInstanceId);
+    expect(gateway.exchange).toHaveBeenCalledOnce();
+    await session.refresh();
+    expect(session.snapshot()).not.toHaveProperty('serverChanged');
+  });
+
+  it('does not infer restart from a network failure or an unsupported identity gap', async () => {
+    const { session, gateway, data } = setup();
+    data.serverInstanceId = 'a'.repeat(32);
+    await session.initialize({ kind: 'absent' });
+    gateway.bootstrap.mockRejectedValueOnce(new ApiClientError('network_error'));
+    await session.refresh();
+    expect(session.snapshot()).toEqual({ status: 'unavailable', reason: 'connection' });
+    await session.refresh();
+    expect(session.snapshot()).not.toHaveProperty('serverChanged');
+    delete data.serverInstanceId;
+    await session.refresh();
+    data.serverInstanceId = 'b'.repeat(32);
+    await session.refresh();
+    expect(session.snapshot()).not.toHaveProperty('serverChanged');
+    expect(gateway.exchange).not.toHaveBeenCalled();
   });
 });

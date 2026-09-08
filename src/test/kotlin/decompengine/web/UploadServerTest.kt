@@ -203,7 +203,7 @@ class UploadServerTest {
         val jobBefore = record.readBytes()
         val journalBefore = journal.readBytes()
         for (path in listOf("/api/jobs/$id", "/api/jobs/$id/events")) {
-            for (accept in listOf("application/json", "application/*", "*/*", "text/html, application/json;q=0.5", "APPLICATION/JSON")) {
+            for (accept in listOf("application/json", "application/json; charset=utf-8", "application/*", "*/*", "text/html, application/json;q=0.5", "APPLICATION/JSON")) {
                 val response = request(server, "GET", path, headers = mapOf("Accept" to accept))
                 assertEquals(200, response.status, accept)
                 assertEquals("application/json; charset=utf-8", response.contentType)
@@ -214,18 +214,25 @@ class UploadServerTest {
                 assertTrue(response.body.decodeToString().contains("NOT_ACCEPTABLE"))
                 assertEquals("application/json; charset=utf-8", response.contentType)
             }
+            val specificRejection = request(server, "GET", path,
+                headers = mapOf("Accept" to "application/json; charset=utf-8;q=0, application/json;q=1"))
+            assertEquals(406, specificRejection.status)
             val oversized = request(server, "GET", path, headers = mapOf("Accept" to "x".repeat(513)))
             assertEquals(400, oversized.status)
             assertTrue(oversized.body.decodeToString().contains("INVALID_HEADER"))
-            for (method in listOf("POST", "PUT", "DELETE", "OPTIONS", "HEAD")) {
+            for (method in listOf("POST", "PUT", "DELETE", "OPTIONS")) {
                 val response = request(server, method, path, headers = mapOf("Accept" to "text/html"))
                 assertEquals(405, response.status, method)
-                assertEquals("GET", response.allow)
+                assertEquals("GET, HEAD", response.allow)
                 assertEquals("application/json; charset=utf-8", response.contentType)
                 assertEquals("no-store", response.cacheControl)
-                if (method == "HEAD") assertTrue(response.body.isEmpty())
-                else assertTrue(response.body.decodeToString().contains("METHOD_NOT_ALLOWED"))
+                assertTrue(response.body.decodeToString().contains("METHOD_NOT_ALLOWED"))
             }
+            val get = request(server, "GET", path, headers = mapOf("Accept" to "application/json"))
+            val head = request(server, "HEAD", path, headers = mapOf("Accept" to "application/json"))
+            assertEquals(200, head.status)
+            assertTrue(head.body.isEmpty())
+            assertEquals(get.contentLength, head.contentLength)
         }
         assertEquals(404, request(server, "POST", "/api/unknown", headers = mapOf("Accept" to "text/html")).status)
         assertContentEquals(jobBefore, record.readBytes())
@@ -1597,10 +1604,10 @@ class UploadServerTest {
         assertNoWebCors(response)
         fun header(name: String): String? = response.headers().firstValue(name).orElse(null)
         return Response(response.statusCode(), response.body(), header("Retry-After"), header("ETag"), header("Content-Type"),
-            header("Cache-Control"), header("X-Request-ID"), header("Allow"))
+            header("Cache-Control"), header("X-Request-ID"), header("Allow"), header("Content-Length"))
     }
 
-    private data class Response(val status: Int, val body: ByteArray, val retryAfter: String? = null, val etag: String? = null, val contentType: String? = null, val cacheControl: String? = null, val requestId: String? = null, val allow: String? = null)
+    private data class Response(val status: Int, val body: ByteArray, val retryAfter: String? = null, val etag: String? = null, val contentType: String? = null, val cacheControl: String? = null, val requestId: String? = null, val allow: String? = null, val contentLength: String? = null)
 }
 
 private fun ByteArray.startsWith(prefix: ByteArray): Boolean =
