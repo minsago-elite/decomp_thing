@@ -19,6 +19,144 @@ import kotlinx.serialization.json.JsonPrimitive
 
 class FullTreePlanningInventoryControlTest {
     @Test
+    fun `clang codegen dispatch binds exact planning owners without an emitted denominator`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+
+        val modules = registry.requireOwnerModulesForShard("clang-lib-codegen")
+        assertEquals(100, modules.size)
+        assertEquals(100, modules.map { it.sourcePath }.toSet().size)
+        assertEquals(
+            listOf(
+                "source/clang/lib/CodeGen/ABIInfo.cpp",
+                "source/clang/lib/CodeGen/ABIInfoImpl.cpp",
+                "source/clang/lib/CodeGen/BackendUtil.cpp",
+                "source/clang/lib/CodeGen/CGAtomic.cpp",
+                "source/clang/lib/CodeGen/CGBlocks.cpp",
+                "source/clang/lib/CodeGen/CGBuiltin.cpp",
+                "source/clang/lib/CodeGen/CGCUDANV.cpp",
+                "source/clang/lib/CodeGen/CGCUDARuntime.cpp",
+                "source/clang/lib/CodeGen/CGCXX.cpp",
+                "source/clang/lib/CodeGen/CGCXXABI.cpp",
+                "source/clang/lib/CodeGen/CGCall.cpp",
+                "source/clang/lib/CodeGen/CGClass.cpp",
+                "source/clang/lib/CodeGen/CGCleanup.cpp",
+                "source/clang/lib/CodeGen/CGCoroutine.cpp",
+                "source/clang/lib/CodeGen/CGDebugInfo.cpp",
+                "source/clang/lib/CodeGen/CGDecl.cpp",
+                "source/clang/lib/CodeGen/CGDeclCXX.cpp",
+                "source/clang/lib/CodeGen/CGException.cpp",
+                "source/clang/lib/CodeGen/CGExpr.cpp",
+                "source/clang/lib/CodeGen/CGExprAgg.cpp",
+                "source/clang/lib/CodeGen/CGExprCXX.cpp",
+                "source/clang/lib/CodeGen/CGExprComplex.cpp",
+                "source/clang/lib/CodeGen/CGExprConstant.cpp",
+                "source/clang/lib/CodeGen/CGExprScalar.cpp",
+                "source/clang/lib/CodeGen/CGGPUBuiltin.cpp",
+                "source/clang/lib/CodeGen/CGHLSLBuiltins.cpp",
+                "source/clang/lib/CodeGen/CGHLSLRuntime.cpp",
+                "source/clang/lib/CodeGen/CGLoopInfo.cpp",
+                "source/clang/lib/CodeGen/CGNonTrivialStruct.cpp",
+                "source/clang/lib/CodeGen/CGObjC.cpp",
+                "source/clang/lib/CodeGen/CGObjCGNU.cpp",
+                "source/clang/lib/CodeGen/CGObjCMac.cpp",
+                "source/clang/lib/CodeGen/CGObjCRuntime.cpp",
+                "source/clang/lib/CodeGen/CGOpenCLRuntime.cpp",
+                "source/clang/lib/CodeGen/CGOpenMPRuntime.cpp",
+                "source/clang/lib/CodeGen/CGOpenMPRuntimeGPU.cpp",
+                "source/clang/lib/CodeGen/CGPointerAuth.cpp",
+                "source/clang/lib/CodeGen/CGRecordLayoutBuilder.cpp",
+                "source/clang/lib/CodeGen/CGStmt.cpp",
+                "source/clang/lib/CodeGen/CGStmtOpenMP.cpp",
+                "source/clang/lib/CodeGen/CGVTT.cpp",
+                "source/clang/lib/CodeGen/CGVTables.cpp",
+                "source/clang/lib/CodeGen/CodeGenAction.cpp",
+                "source/clang/lib/CodeGen/CodeGenFunction.cpp",
+                "source/clang/lib/CodeGen/CodeGenModule.cpp",
+                "source/clang/lib/CodeGen/CodeGenPGO.cpp",
+                "source/clang/lib/CodeGen/CodeGenSYCL.cpp",
+                "source/clang/lib/CodeGen/CodeGenTBAA.cpp",
+                "source/clang/lib/CodeGen/CodeGenTypes.cpp",
+                "source/clang/lib/CodeGen/ConstantInitBuilder.cpp",
+                "source/clang/lib/CodeGen/CoverageMappingGen.cpp",
+                "source/clang/lib/CodeGen/HLSLBufferLayoutBuilder.cpp",
+                "source/clang/lib/CodeGen/ItaniumCXXABI.cpp",
+                "source/clang/lib/CodeGen/LinkInModulesPass.cpp",
+                "source/clang/lib/CodeGen/MacroPPCallbacks.cpp",
+                "source/clang/lib/CodeGen/MicrosoftCXXABI.cpp",
+                "source/clang/lib/CodeGen/ModuleBuilder.cpp",
+                "source/clang/lib/CodeGen/ObjectFilePCHContainerWriter.cpp",
+                "source/clang/lib/CodeGen/PatternInit.cpp",
+                "source/clang/lib/CodeGen/SanitizerMetadata.cpp",
+                "source/clang/lib/CodeGen/SwiftCallingConv.cpp",
+                "source/clang/lib/CodeGen/TargetBuiltins/AMDGPU.cpp",
+                "source/clang/lib/CodeGen/TargetBuiltins/ARM.cpp",
+                "source/clang/lib/CodeGen/TargetBuiltins/DirectX.cpp",
+                "source/clang/lib/CodeGen/TargetBuiltins/Hexagon.cpp",
+                "source/clang/lib/CodeGen/TargetBuiltins/NVPTX.cpp",
+                "source/clang/lib/CodeGen/TargetBuiltins/PPC.cpp",
+                "source/clang/lib/CodeGen/TargetBuiltins/RISCV.cpp",
+                "source/clang/lib/CodeGen/TargetBuiltins/SPIR.cpp",
+                "source/clang/lib/CodeGen/TargetBuiltins/SystemZ.cpp",
+                "source/clang/lib/CodeGen/TargetBuiltins/WebAssembly.cpp",
+                "source/clang/lib/CodeGen/TargetBuiltins/X86.cpp",
+                "source/clang/lib/CodeGen/TargetInfo.cpp",
+                "source/clang/lib/CodeGen/Targets/AArch64.cpp",
+                "source/clang/lib/CodeGen/Targets/AMDGPU.cpp",
+                "source/clang/lib/CodeGen/Targets/ARC.cpp",
+                "source/clang/lib/CodeGen/Targets/ARM.cpp",
+                "source/clang/lib/CodeGen/Targets/AVR.cpp",
+                "source/clang/lib/CodeGen/Targets/BPF.cpp",
+                "source/clang/lib/CodeGen/Targets/CSKY.cpp",
+                "source/clang/lib/CodeGen/Targets/DirectX.cpp",
+                "source/clang/lib/CodeGen/Targets/Hexagon.cpp",
+                "source/clang/lib/CodeGen/Targets/Lanai.cpp",
+                "source/clang/lib/CodeGen/Targets/LoongArch.cpp",
+                "source/clang/lib/CodeGen/Targets/M68k.cpp",
+                "source/clang/lib/CodeGen/Targets/MSP430.cpp",
+                "source/clang/lib/CodeGen/Targets/Mips.cpp",
+                "source/clang/lib/CodeGen/Targets/NVPTX.cpp",
+                "source/clang/lib/CodeGen/Targets/PPC.cpp",
+                "source/clang/lib/CodeGen/Targets/RISCV.cpp",
+                "source/clang/lib/CodeGen/Targets/SPIR.cpp",
+                "source/clang/lib/CodeGen/Targets/Sparc.cpp",
+                "source/clang/lib/CodeGen/Targets/SystemZ.cpp",
+                "source/clang/lib/CodeGen/Targets/TCE.cpp",
+                "source/clang/lib/CodeGen/Targets/VE.cpp",
+                "source/clang/lib/CodeGen/Targets/WebAssembly.cpp",
+                "source/clang/lib/CodeGen/Targets/X86.cpp",
+                "source/clang/lib/CodeGen/Targets/XCore.cpp",
+                "source/clang/lib/CodeGen/TrapReasonBuilder.cpp",
+                "source/clang/lib/CodeGen/VarBypassDetector.cpp",
+            ),
+            modules.map { it.sourcePath },
+        )
+        assertTrue(
+            modules.all {
+                it.moduleId == it.unitId &&
+                    it.shardId == "clang-lib-codegen" &&
+                    it.sourceKind == "handwritten" &&
+                    it.sourcePath.startsWith("source/clang/lib/CodeGen/")
+            },
+        )
+        assertEquals(
+            listOf("source/clang/lib/CodeGen/CodeGenABITypes.cpp"),
+            registry.sourceOnlyUnits.filter { it.shardId == "clang-lib-codegen" }.map { it.sourcePath },
+        )
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("clang-lib-codegen-missing")
+        }
+    }
+
+    @Test
     fun `fixture planning inventory is closed exact and byte deterministic`() =
         inControlTemporaryDirectory { directory ->
             val fixture = createFullTreeControlFixture(directory.resolve("fixture"))

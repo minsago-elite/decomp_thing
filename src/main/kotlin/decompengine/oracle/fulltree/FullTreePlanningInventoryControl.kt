@@ -57,6 +57,9 @@ sealed interface AuthenticatedFullTreePlanningRegistry {
 
     /** Resolves an authenticated A13 owner unit exactly; there is no nullable or catch-all fallback. */
     fun requireOwnerModule(ownerUnitId: String): FullTreePlanningSourceModule
+
+    /** Resolves the exact authenticated source-module population for one shard. */
+    fun requireOwnerModulesForShard(shardId: String): List<FullTreePlanningSourceModule>
 }
 
 data class FullTreePlanningInventoryGeneration(
@@ -477,6 +480,13 @@ object FullTreePlanningInventoryControl {
                 }
             },
         )
+        private val modulesByShardId: Map<String, List<FullTreePlanningSourceModule>> = Collections.unmodifiableMap(
+            LinkedHashMap<String, List<FullTreePlanningSourceModule>>().apply {
+                sourceModules.groupBy { it.shardId }.forEach { (shardId, modules) ->
+                    put(shardId, Collections.unmodifiableList(ArrayList(modules)))
+                }
+            },
+        )
 
         override fun requireOwnerModule(ownerUnitId: String): FullTreePlanningSourceModule {
             if (!ownerUnitId.matches(COMPILATION_UNIT_ID)) {
@@ -484,6 +494,14 @@ object FullTreePlanningInventoryControl {
             }
             return modulesByOwnerUnitId[ownerUnitId]
                 ?: throw FullTreeControlException("planning owner unit ID is outside the authenticated inventory")
+        }
+
+        override fun requireOwnerModulesForShard(shardId: String): List<FullTreePlanningSourceModule> {
+            if (!shardId.matches(SHARD_ID)) {
+                throw FullTreeControlException("planning shard ID is invalid")
+            }
+            return modulesByShardId[shardId]
+                ?: throw FullTreeControlException("planning shard ID is outside the authenticated inventory")
         }
 
         companion object {
@@ -592,6 +610,7 @@ private val SOURCE_ONLY_ORDER = Comparator<JsonObject> { left, right ->
     FULL_TREE_CODE_POINT_ORDER.compare(left.controlString("sourcePath"), right.controlString("sourcePath"))
 }
 private val COMPILATION_UNIT_ID = Regex("cu-[0-9a-f]{32}")
+private val SHARD_ID = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
 
 private const val PLANNING_SCHEMA = "full-tree-planning-inventory"
 private const val PLANNING_MAXIMUM_SOURCE_MODULES = 1_000_000
