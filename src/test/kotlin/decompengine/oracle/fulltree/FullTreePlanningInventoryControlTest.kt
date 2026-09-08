@@ -368,6 +368,46 @@ class FullTreePlanningInventoryControlTest {
             assertEquals(2, truncatedSanitizerCollision.toSet().size)
         }
 
+    @Test
+    fun `checked static analyzer shard binds all 190 source modules to exact owners`() =
+        inControlTemporaryDirectory { directory ->
+            val profile = Path.of("oracle/llvm/22.1.6")
+            val result = FullTreePlanningInventoryControl.generateAndPublish(
+                scopePath = profile.resolve("full-tree-scope.json"),
+                sourceLockPath = profile.resolve("source-lock.json"),
+                artifactManifestPath = profile.resolve("oracle-manifest.json"),
+                buildRecordPath = profile.resolve("build-record.json"),
+                inventoryPath = profile.resolve("full-tree-inventory.json"),
+                sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+                output = directory.resolve("full-tree-planning-inventory.json"),
+            )
+
+            val staticAnalyzer = result.registry.sourceModules.filter {
+                it.shardId == "clang-lib-staticanalyzer"
+            }
+            assertEquals(190, staticAnalyzer.size)
+            assertEquals(190, staticAnalyzer.map { it.sourcePath }.toSet().size)
+            assertEquals(190, staticAnalyzer.map { it.unitId }.toSet().size)
+            assertTrue(staticAnalyzer.all { it.sourceKind == "handwritten" })
+            assertTrue(
+                staticAnalyzer.all {
+                    it.sourcePath.startsWith("source/clang/lib/StaticAnalyzer/")
+                },
+            )
+            staticAnalyzer.forEach { module ->
+                assertEquals(module.unitId, module.moduleId)
+                assertEquals(
+                    FullTreeInventoryControl.compilationUnitId(module.sourcePath),
+                    module.unitId,
+                )
+                assertEquals(module, result.registry.requireOwnerModule(module.unitId))
+            }
+            assertEquals(
+                0,
+                result.registry.sourceOnlyUnits.count { it.shardId == "clang-lib-staticanalyzer" },
+            )
+        }
+
     private fun generate(
         fixture: FullTreeControlFixture,
         output: Path,
