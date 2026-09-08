@@ -71,7 +71,7 @@ class GccBundledContainedExecutionTest {
                     assertLinkedRecord(receipt, intent, "gcc-bundled-command-executed-v1")
                     val command = receipt.getValue("execution").jsonObject
                     assertEquals(OracleArtifacts.sha256(OracleJson.canonicalBytes(command)), receipt.getValue("executionSha256").jsonPrimitive.content)
-                    assertExecution(command, intent)
+                    assertExecution(command, intent, output)
                     executed.executionReceiptBytes[0] = '!'.code.toByte()
                     assertContentEquals(receiptBytes, executed.executionReceiptBytes)
                     val assessment = assertExport(output, byRole)
@@ -105,7 +105,7 @@ class GccBundledContainedExecutionTest {
                             .getOrElse { "exact-unit journal unavailable: ${it.javaClass.name}" }
                         failure.addSuppressed(AssertionError("Bundled contained export diagnostics:\n$diagnostic"))
                         for (name in listOf("contained-command.stdout", "contained-command.stderr")) {
-                            val log = selected.outputLease.path.resolve("reports").resolve(name)
+                            val log = controlReports(selected.outputLease.path, intent).resolve(name)
                             if (Files.isRegularFile(log, LinkOption.NOFOLLOW_LINKS)) {
                                 val captured = runCatching { boundedRead(log, MAXIMUM_LOG_BYTES).decodeToString() }
                                     .getOrElse { "bounded log unavailable: ${it.javaClass.name}" }
@@ -141,7 +141,7 @@ class GccBundledContainedExecutionTest {
         )
     }
 
-    private fun assertExecution(command: JsonObject, intent: GccBundledOperationIntent) {
+    private fun assertExecution(command: JsonObject, intent: GccBundledOperationIntent, output: Path) {
         assertEquals("kotlin-lease-contained-command-execution-v1", command.getValue("provider").jsonPrimitive.content)
         assertEquals(1L, command.getValue("schemaVersion").jsonPrimitive.long)
         assertEquals(0L, command.getValue("childExitCode").jsonPrimitive.long)
@@ -149,6 +149,9 @@ class GccBundledContainedExecutionTest {
             assertTrue(command.getValue(field).jsonPrimitive.boolean, field)
         }
         assertFalse(command.getValue("releaseEligible").jsonPrimitive.boolean)
+        val controlDirectory = Path.of(command.getValue("controlDirectory").jsonPrimitive.content).toAbsolutePath().normalize()
+        assertEquals(output.toAbsolutePath().normalize(), controlDirectory.parent)
+        assertEquals(intent.bundledRuntime.freshControlDirectoryName(output), controlDirectory.fileName.toString())
         assertEquals(
             OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(command - "executionSha256"))),
             command.getValue("executionSha256").jsonPrimitive.content,
@@ -159,6 +162,19 @@ class GccBundledContainedExecutionTest {
         assertTrue(cgroup.getValue("cpuNanos").jsonPrimitive.long > 0)
         assertEquals(0L, cgroup.getValue("memoryOomEvents").jsonPrimitive.long)
         assertEquals(0L, cgroup.getValue("memoryOomKillEvents").jsonPrimitive.long)
+    }
+
+    private fun controlReports(output: Path, intent: GccBundledOperationIntent): Path =
+        output.resolve(checkNotNull(intent.bundledRuntime.freshControlDirectoryName(output))).resolve("reports")
+
+    private fun executionControlReports(execution: ByteArray, output: Path): Path {
+        val record = OracleJson.parseCanonical(execution).jsonObject
+        val command = record.getValue("execution").jsonObject
+        val control = Path.of(command.getValue("controlDirectory").jsonPrimitive.content).toAbsolutePath().normalize()
+        require(control.parent == output.toAbsolutePath().normalize()) {
+            "contained execution control directory escaped its output lease"
+        }
+        return control.resolve("reports")
     }
 
     private fun assertExport(
@@ -304,8 +320,12 @@ class GccBundledContainedExecutionTest {
         val journal = fixture.resolve("journal/.gcc-bundled-operation-${intent.operationId}")
         for (name in names(journal)) retain("journal/$name", boundedRead(journal.resolve(name), MAXIMUM_METADATA_BYTES))
         val reports = definition.outputLease.path.resolve("reports")
-        for (name in listOf("program_model.json", "program_model.json.progress.json", "contained-command.stdout", "contained-command.stderr")) {
+        for (name in listOf("program_model.json", "program_model.json.progress.json")) {
             retain("reports/$name", boundedRead(reports.resolve(name), if (name == "program_model.json") MAXIMUM_MODEL_BYTES else MAXIMUM_LOG_BYTES))
+        }
+        val commandReports = executionControlReports(execution, definition.outputLease.path)
+        for (name in listOf("contained-command.stdout", "contained-command.stderr")) {
+            retain("reports/$name", boundedRead(commandReports.resolve(name), MAXIMUM_LOG_BYTES))
         }
         val export = reports.resolve("program_model.json.export")
         retain("reports/program_model.json.export/state.json", boundedRead(export.resolve("state.json"), MAXIMUM_METADATA_BYTES))

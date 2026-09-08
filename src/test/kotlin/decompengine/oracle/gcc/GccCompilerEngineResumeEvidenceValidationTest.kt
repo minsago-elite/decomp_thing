@@ -64,6 +64,11 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         val forward = GccBundledCheckpointTrigger(512)
         forward.observe(firstObservation)
         forward.assessStoppedPrefix(secondPrefix)
+        forward.requireUnchangedStoppedPrefix(firstPrefix, assessInterrupted(first))
+        forward.requireUnchangedStoppedPrefix(secondPrefix, assessInterrupted(second))
+        // Advancement is allowed while the stop is delivered, but never after its captured boundary.
+        assertFails { forward.requireUnchangedStoppedPrefix(firstPrefix, secondPrefix) }
+        assertFails { forward.requireUnchangedStoppedPrefix(secondPrefix, firstPrefix) }
         val backward = GccBundledCheckpointTrigger(1024)
         assertEquals(null, backward.observe(firstObservation))
         backward.observe(secondObservation)

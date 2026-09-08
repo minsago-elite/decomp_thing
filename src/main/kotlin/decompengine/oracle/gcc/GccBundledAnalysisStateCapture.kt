@@ -58,6 +58,19 @@ internal object GccBundledAnalysisStateCapture {
         }
     }
 
+    fun requireUnchanged(
+        run: LinuxDescriptor,
+        expectedState: LinuxFileIdentity,
+        expected: GccBundledAnalysisStateSnapshot,
+        limits: GccAnalysisStateCaptureLimits = GccAnalysisStateCaptureLimits(),
+    ) {
+        val current = capture(run, expectedState, limits)
+        require(current.entryCount == expected.entryCount && current.totalBytes == expected.totalBytes &&
+            current.canonicalBytes.contentEquals(expected.canonicalBytes)) {
+            "GCC retained analysis state differs from its stopped manifest"
+        }
+    }
+
     private class Collector(private val root: LinuxDescriptor, private val limits: GccAnalysisStateCaptureLimits) {
         private val started = System.nanoTime()
         private val entries = linkedMapOf<String, Entry>()

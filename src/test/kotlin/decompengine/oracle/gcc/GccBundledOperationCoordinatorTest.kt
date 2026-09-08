@@ -112,6 +112,10 @@ class GccBundledOperationCoordinatorTest {
                     val definition = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(definitionBytes)
                     val disk = FullTreeDiskScratchEvidence.parseCanonical(diskBytes)
                     val output = definition.outputLease.path
+                    val controlName = requireNotNull(intent.bundledRuntime.freshControlDirectoryName(output))
+                    assertEquals("-Duser.home=${output.resolve(controlName).resolve("tmp")}", definition.command[1])
+                    assertEquals("-Djava.io.tmpdir=${output.resolve(controlName).resolve("tmp")}", definition.command[2])
+                    assertFalse(Files.exists(output.resolve(controlName)))
                     val leaseRoot = output.parent
                     assertEquals(mount, leaseRoot.parent)
                     assertEquals(".decomp-oracle-lease-${intent.operationId}", leaseRoot.fileName.toString())
@@ -163,6 +167,7 @@ class GccBundledOperationCoordinatorTest {
                     assertContentEquals(preparedBytes, owner.preparedReceiptBytes)
                     assertContentEquals(diskBytes, owner.diskEvidenceBytes)
                     owner.requireCurrent()
+                    assertFailsWith<IllegalStateException> { owner.requireInterruptedStateCurrent() }
                     owner.requireCurrent()
                     assertFailsWith<FullTreeDiskScratchException> {
                         FullTreeDiskScratchAuthority.acquireDedicatedFilesystem(
@@ -277,6 +282,14 @@ class GccBundledOperationCoordinatorTest {
             assertFailsWith<IllegalArgumentException> { intent(engineId = engine) }
         }
         assertFailsWith<IllegalArgumentException> { intent(runKind = GccCompilerEngineContainmentRunKind.RESUMED) }
+        val fresh = intent()
+        assertFailsWith<IllegalArgumentException> {
+            GccBundledOperationIntent(
+                fresh.operationId, fresh.engineId, fresh.runKind, fresh.artifacts,
+                GccBundledGhidraRuntime(fresh.bundledRuntime.root, fresh.bundledRuntime.classPath, invocationVersion = 4),
+                fresh.budgets, fresh.diskPolicy,
+            )
+        }
         assertFailsWith<IllegalArgumentException> { intent(budgets = budgets().copy(wallClockMillis = 60_001)) }
         val maximum = policy().copy(maximumFilesystemBytes = 1024L * 1024 * 1024 * 1024, maximumFilesystemInodes = 2_000_000)
         assertTrue(intent(diskPolicy = maximum).canonicalBytes.isNotEmpty())
