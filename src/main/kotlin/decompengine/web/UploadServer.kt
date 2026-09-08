@@ -598,18 +598,7 @@ class UploadServer(
                         require(it.matches(Regex("runId=[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "Only an exact workflow attempt selection is supported" }
                         it.removePrefix("runId=")
                     }
-<<<<<<< HEAD
                     exchange.sendJson(200, readLegacyProgress(job.id, runId).toString())
-=======
-                    val snapshot = try {
-                        AgentProgressJournal.read(jobs.reportContext(job.id, runId).reportsDirectory)
-                    } catch (failure: IOException) {
-                        throw WebJobServiceException("JOB_STORAGE_UNAVAILABLE", "Persisted activity history is unavailable.", failure)
-                    } catch (failure: IllegalArgumentException) {
-                        throw WebJobServiceException("JOB_STORAGE_UNAVAILABLE", "Persisted activity history is invalid.", failure)
-                    }
-                    exchange.sendJson(200, snapshot?.toString() ?: "{\"schemaVersion\":1,\"displayOnly\":true,\"nextSequence\":0,\"queueDropped\":0,\"historyDropped\":0,\"truncated\":false,\"events\":[]}")
->>>>>>> ad74d5d3 (fix(web): classify progress journal IO failures)
                 }
                 else -> legacyError(exchange, 404, "NOT_FOUND", "The requested route does not exist.") {
                     renderErrorPage(404, "Page not found", "The requested route does not exist.")
