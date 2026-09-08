@@ -15,10 +15,15 @@ compatible, including the no-argument JVM constructor.
 
 The wrapper starts its elapsed timer before export. Selected profile budgets can
 lower its existing timeout and modeled metadata ceiling; metadata does not receive
-a fresh elapsed allowance after export. Worker execution retains its own configured
-limits. An injected analyzer is checked after it returns; the wrapper cannot
-preempt an arbitrary injected function. The standalone reader also checks its
-own elapsed time, including initial and terminal authentication.
+a fresh elapsed allowance after export. The
+[shared analysis deadline](shared-analysis-deadline.md) now reaches bundled command
+preparation, worker wait/drain operations and canonical model validation, while
+retaining any stricter configured worker allowance. That integration adds bundle
+and model-read/traversal checkpoints; its verification status and cooperative
+limits are recorded separately. An arbitrary injected analyzer is still checked
+after it returns and cannot be preempted internally by the wrapper. The standalone
+reader also checks its own elapsed time, including initial and terminal
+authentication.
 
 ## Limits and accounting
 
