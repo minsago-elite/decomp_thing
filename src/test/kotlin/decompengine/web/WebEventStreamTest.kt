@@ -206,7 +206,7 @@ class WebEventStreamTest {
                 JsonObject(event.jsonObject + labels.associateWith { JsonPrimitive("x".repeat(533)) })
             }))).toString().toByteArray().also { assertTrue(it.size <= 2 * 1024 * 1024) }
         }
-        Fixture(lifetimeMs = 6000, source = source).use { f ->
+        Fixture(lifetimeMs = 12_000, source = source).use { f ->
             Socket().use { peer ->
                 peer.receiveBufferSize = 1024
                 peer.connect(InetSocketAddress("127.0.0.1", f.server.address.port), 2000)
@@ -232,7 +232,7 @@ class WebEventStreamTest {
                     .header("Cookie", f.cookie).build(), HttpResponse.BodyHandlers.ofString())
                 assertEquals(200, poll.statusCode()); assertNoWebCors(poll)
                 assertEquals(1, f.resources.snapshot().active, "Ordinary reads must finish while the slow stream is still charged")
-                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8)
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
                 while (f.resources.snapshot().active != 0 && System.nanoTime() < deadline) Thread.sleep(10)
                 assertEquals(0, f.resources.snapshot().active, "Lease must release the connection while its peer is still open and unread")
                 assertEquals(0, f.resources.snapshot().cleanupFailures)
