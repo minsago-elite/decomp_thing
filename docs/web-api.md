@@ -379,7 +379,19 @@ which validates job/attempt ownership and applies the retained-descriptor artifa
 2 MiB ceiling. Legacy event reads no longer fabricate a zero-event snapshot when the journal
 is missing. Malformed and oversized journals also return `PROGRESS_UNAVAILABLE`; an actual
 persisted, valid zero-event journal still returns 200. This does not add cursor replay or v1
-session authorization to the legacy route, nor change its successful event representation.
+session authorization to the legacy route, nor add a new event authority.
+
+Legacy successful event JSON and initial HTML now share a closed metadata projection.
+Raw `text`, plan `entries`, `path` and unknown fields are withheld. Message prose is withheld
+for every role, including assistant and unknown roles, because the journal does not certify
+public visibility. Existing supported scalar event metadata and numeric representations remain;
+nested values and oversized labels are omitted. A positive `presentationOmittedFields` count
+at the snapshot/event level reports excluded fields without disclosing names or values. A removed
+`text` field sets `textOmitted: true`. These presentation counts are separate from journal queue
+and retention drops; events, sequence positions and durable journal bytes are not removed.
+The legacy view labels the visibility restriction and omitted fields, including during polling.
+This projection does not certify every retained label as public or finish the v1 transport/privacy
+audit; the SPA still withholds uncertified prose in its activity view.
 
 The HTTP tests cover missing/unknown resources, invalid query/upload, damaged storage,
 request-ID agreement, content type, cache policy and preservation of stored bytes. Unexpected
