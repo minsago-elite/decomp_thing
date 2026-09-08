@@ -100,6 +100,44 @@ class GccCompilerEngineResumeEvidenceValidationTest {
     }
 
     @Test
+    fun `resumed descriptor capture preserves exact retained prefix and rejects wrong reuse lineage`() {
+        val transition = transitionFixture(twoBatchFixture())
+        withDescriptorExportFixture(transition.interrupted, includeModel = false) { old ->
+            val retained = GccBundledExportCapture.captureInterruptedSnapshot(old.root, old.reportsIdentity, old.artifacts)
+            val trigger = GccBundledCheckpointTrigger(512)
+            trigger.observe(GccBundledExportCapture.observeProgress(old.root, old.reportsIdentity, old.artifacts))
+            val journalPayload = OracleJson.parseCanonical(trigger.assessStoppedPrefix(retained.assessment, retained.planningPrefixSha256)).jsonObject
+            assertEquals(retained.planningPrefixSha256, journalPayload.getValue("planningPrefixSha256").jsonPrimitive.content)
+            withDescriptorExportFixture(transition.resumed) { resumed ->
+                val result = GccBundledExportCapture.captureResumed(resumed.root, resumed.reportsIdentity, resumed.artifacts, retained)
+                assertEquals(512L, result.assessment.reused)
+                assertEquals(sha(transition.fresh.model), result.assessment.programModelSha256)
+                assertEquals(retained.planningPrefixSha256,
+                    OracleJson.parseCanonical(result.canonicalBytes).jsonObject.getValue("retainedPlanningPrefixSha256").jsonPrimitive.content)
+                assertFails { GccBundledExportCapture.captureResumed(resumed.root, resumed.reportsIdentity, resumed.artifacts,
+                    GccBundledInterruptedExportSnapshot(retained.assessment, "0".repeat(64))) }
+                assertFails { GccBundledExportCapture.capture(resumed.root, resumed.reportsIdentity, resumed.artifacts) }
+            }
+            val first = transition.resumed.batches.first()
+            val reorderedCheckpoint = first.checkpoint.decodeToString().trimEnd().lines().reversed().joinToString("\n", postfix = "\n").toByteArray()
+            val changedBytes = transition.resumed.copy(batches = listOf(GccPlanningBatchBytes(
+                reorderedCheckpoint, first.functions, first.globals, first.types, first.failures,
+            )) + transition.resumed.batches.drop(1))
+            assertFails { assess(changedBytes) }
+            withDescriptorExportFixture(changedBytes) { changed ->
+                assertFails { GccBundledExportCapture.captureResumed(changed.root, changed.reportsIdentity, changed.artifacts, retained) }
+            }
+            withDescriptorExportFixture(transition.fresh) { fresh ->
+                assertFails { GccBundledExportCapture.captureResumed(fresh.root, fresh.reportsIdentity, fresh.artifacts, retained) }
+            }
+            val changedLineage = transitionFixture(threeBatchFixture(), interruptedBatchCount = 2)
+            withDescriptorExportFixture(changedLineage.resumed) { changed ->
+                assertFails { GccBundledExportCapture.captureResumed(changed.root, changed.reportsIdentity, changed.artifacts, retained) }
+            }
+        }
+    }
+
+    @Test
     fun `interrupted descriptor capture validates the committed prefix without a final model`() {
         val prefix = transitionFixture(twoBatchFixture()).interrupted
         withDescriptorExportFixture(prefix, includeModel = false) { captured ->
