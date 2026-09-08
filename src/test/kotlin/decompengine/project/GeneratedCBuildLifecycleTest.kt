@@ -10,6 +10,7 @@ import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
@@ -20,11 +21,62 @@ class GeneratedCBuildLifecycleTest {
         it.resolve(profile.layout.declaration("build-definition").materialize()).writeText("# authored lifecycle fixture\n")
     }
 
-    private fun configuration(profile: ReconstructionProfile, timeout: Long = 10_000) = ProjectBuildConfiguration(
+    private fun configuration(
+        profile: ReconstructionProfile,
+        timeout: Long = 10_000,
+        output: Long = 32L * 1024 * 1024,
+    ) = ProjectBuildConfiguration(
         buildDefinition = profile.layout.declaration("build-definition").materialize(),
         wallClockTimeoutMillis = timeout,
+        maximumOutputBytes = output,
         terminationGraceMillis = 0,
     )
+
+    @Test
+    fun `build boundary admits only selected profile and host budgets`() {
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val profile = ReconstructionProfile(base.schemaVersion, base.id, base.layout,
+            base.budgets.copy(buildWallClockMillis = 100, buildMaximumOutputBytes = 128), base.adapterConfiguration)
+        val project = project(profile)
+        val failure = assertFailsWith<IllegalArgumentException> {
+            GeneratedCProjectBuilder.build(project, configuration(profile, timeout = 101, output = 128), profile)
+        }
+        assertTrue(failure.message.orEmpty().contains("selected profile"))
+        assertFalse(project.resolve("BUILDING.md").exists())
+
+        val hostFailure = assertFailsWith<IllegalArgumentException> {
+            GeneratedCProjectBuilder.build(
+                project,
+                configuration(profile, timeout = 100, output = 128),
+                profile,
+                hostSafetyLimits = ReconstructionHostSafetyLimits(profile.budgets.copy(buildWallClockMillis = 99)),
+            )
+        }
+        assertTrue(hostFailure.message.orEmpty().contains("host safety limit"))
+        assertFalse(project.resolve("BUILDING.md").exists())
+    }
+
+    @Test
+    fun `selected profile output budget stops execution without a success contract`() {
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val profile = ReconstructionProfile(base.schemaVersion, base.id, base.layout,
+            base.budgets.copy(buildWallClockMillis = 5_000, buildMaximumOutputBytes = 128), base.adapterConfiguration)
+        val project = project(profile)
+        val failure = assertFailsWith<BuildException> {
+            GeneratedCProjectBuilder.build(
+                project,
+                configuration(profile, timeout = 5_000, output = 128),
+                profile,
+                GeneratedCBuildInvocation(
+                    listOf("/bin/sh", "-c", "yes x | head -c 4096"),
+                    listOf("POSIX shell", "yes", "head"),
+                    "Authored output budget fixture.",
+                ),
+            )
+        }
+        assertTrue(failure.message.orEmpty().contains("output exceeds 128 bytes"))
+        assertFalse(project.resolve("reports/build_contract.json").exists())
+    }
 
     @Test
     fun `prelaunch cancellation preserves existing build files`() {

@@ -25,8 +25,14 @@ internal object GeneratedCNinjaReconstructionAdapter : ReconstructionAdapter by 
             "The build requires Ninja, the configured C compiler `${configuration.compilerExecutable}`, a POSIX shell, find, sort and tr. Warnings are errors and file/macro/debug paths are mapped to the project root. No Make invocation, API credentials, network access or analysis caches are required. Per-module diagnostics and the source-bound build contract are under `reports/`.")
     }
 
-    override fun build(projectDir: Path, profile: ReconstructionProfile): BuildReport {
+    override fun build(
+        projectDir: Path,
+        profile: ReconstructionProfile,
+        hostSafetyLimits: ReconstructionHostSafetyLimits,
+    ): BuildReport {
         val configuration = configuration(profile, 4)
-        return GeneratedCProjectBuilder.build(projectDir, configuration, profile, invocation(profile, configuration.parallelism))
+        return GeneratedCProjectBuilder.build(
+            projectDir, configuration, profile, invocation(profile, configuration.parallelism), hostSafetyLimits,
+        )
     }
 }

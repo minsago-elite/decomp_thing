@@ -158,7 +158,7 @@ class ReconstructionPipeline(private val analyzer: GhidraJvmAnalyzer) {
         val adapter = ReconstructionAdapters.resolve(profile)
         val analysis = analyzer.analyze(binaryPath, workDir.resolve("analysis"))
         val projectDir = RecompilableProjectGenerator.generate(analysis, workDir.resolve("project"))
-        return adapter.build(projectDir, profile)
+        return adapter.build(projectDir, profile, ReconstructionHostSafetyLimits.DEFAULT)
     }
 
     /** Admits the profile and binds worker export budgets before analysis creates output. */
@@ -181,6 +181,6 @@ class ReconstructionPipeline(private val analyzer: GhidraJvmAnalyzer) {
             hostSafetyLimits = hostSafetyLimits,
             reconstructor = reconstructor,
         )
-        return adapter.build(projectDir, profile)
+        return adapter.build(projectDir, profile, hostSafetyLimits)
     }
 }

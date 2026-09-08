@@ -10,7 +10,11 @@ internal object GeneratedCReconstructionAdapter : ReconstructionAdapter {
     override val behaviorBuild: BehaviorBuildPolicy = GeneratedCBehaviorBuildPolicy
     override fun rendering(model: RecoveredProgramModel, plan: ModulePlan): ProjectRendering =
         GeneratedCProjectRendering(model, plan)
-    override fun build(projectDir: Path, profile: ReconstructionProfile): BuildReport = MakeProjectBuilder.build(
+    override fun build(
+        projectDir: Path,
+        profile: ReconstructionProfile,
+        hostSafetyLimits: ReconstructionHostSafetyLimits,
+    ): BuildReport = MakeProjectBuilder.build(
         projectDir,
         ProjectBuildConfiguration(
             makeExecutable = profile.adapterConfiguration["build-executable"]?.singleOrNull() ?: "make",
@@ -21,6 +25,7 @@ internal object GeneratedCReconstructionAdapter : ReconstructionAdapter {
             buildDefinition = profile.layout.declaration("build-definition").materialize(),
         ),
         profile,
+        hostSafetyLimits,
     )
     override fun modulePrompt(request: ModuleReconstructionRequest): ModulePromptContent = GeneratedCModulePrompt.render(request)
     override fun defaultReconstructor(): ModuleReconstructor = EvidenceModuleReconstructor()

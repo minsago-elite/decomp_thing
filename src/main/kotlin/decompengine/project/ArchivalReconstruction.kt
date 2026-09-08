@@ -419,7 +419,7 @@ class ArchivalReconstructionService(
             progressPath.writeText("{\"phase\":\"modules\",\"completed\":$completed,\"total\":$total,\"module\":\"$module\"}\n")
         }
         progress.phase(AgentWorkflowPhase.BUILD_VALIDATING)
-        val build = adapter.build(project, profile)
+        val build = adapter.build(project, profile, hostSafetyLimits)
         val bundle = ArchivalPackager.create(
             project,
             outputDir.resolve("source-tree.zip"),

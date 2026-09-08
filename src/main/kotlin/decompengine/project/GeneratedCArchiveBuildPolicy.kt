@@ -36,9 +36,10 @@ internal object GeneratedCArchiveBuildPolicy : ArchiveBuildPolicy {
                 }
         }
         val contract = Json.parseToJsonElement(projectDir.resolve("reports/build_contract.json").readText()).jsonObject
-        require(contract["schemaVersion"]?.jsonPrimitive?.intOrNull == 2) {
-            "archive build contract must use source-bound schema version 2"
+        require(contract["schemaVersion"]?.jsonPrimitive?.intOrNull == GENERATED_C_BUILD_CONTRACT_SCHEMA_VERSION) {
+            "archive build contract must use source-bound schema version $GENERATED_C_BUILD_CONTRACT_SCHEMA_VERSION"
         }
+        contract.requireGeneratedCBuildBudgetEvidence(profile)
         require(contract["returnCode"]?.jsonPrimitive?.intOrNull == 0) { "archive build contract is not successful" }
         require(contract["sourceStableDuringBuild"]?.jsonPrimitive?.booleanOrNull == true) {
             "archive build contract does not prove stable source inputs"
