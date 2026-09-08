@@ -90,6 +90,34 @@ class FullTreePlanningInventoryControlTest {
                 }
             }
         }
+    }
+
+    @Test
+    fun `clang frontendtool dispatch binds exact planning owner without an emitted denominator`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+
+        val modules = registry.requireOwnerModulesForShard("clang-lib-frontendtool")
+        assertEquals(1, modules.size)
+        assertEquals(
+            listOf("source/clang/lib/FrontendTool/ExecuteCompilerInvocation.cpp"),
+            modules.map { it.sourcePath },
+        )
+        assertEquals(listOf("cu-b4837ea4cc24818596b117946fc94bc8"), modules.map { it.unitId })
+        assertTrue(modules.all { it.moduleId == it.unitId && it.shardId == "clang-lib-frontendtool" })
+        assertTrue(registry.sourceOnlyUnits.none { it.shardId == "clang-lib-frontendtool" })
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("clang-lib-frontendtool-missing")
+        }
+    }
 
     @Test
     fun `shuffled stale forged and expanded planning documents fail closed`() =
