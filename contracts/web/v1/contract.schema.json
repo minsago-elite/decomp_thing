@@ -2776,6 +2776,68 @@
         "lastFailureCode"
       ],
       "additionalProperties": false
+    },
+    "cancellationAcknowledgement": {
+      "type": "object",
+      "properties": {
+        "expectedVersion": {
+          "$ref": "#/definitions/id"
+        },
+        "appliedVersion": {
+          "$ref": "#/definitions/id"
+        },
+        "state": {
+          "enum": [
+            "cancelling",
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted"
+          ]
+        },
+        "recordedAt": {
+          "$ref": "#/definitions/instant"
+        }
+      },
+      "required": [
+        "expectedVersion",
+        "appliedVersion",
+        "state",
+        "recordedAt"
+      ],
+      "additionalProperties": false
+    },
+    "cancellation": {
+      "type": "object",
+      "properties": {
+        "current": {
+          "$ref": "#/definitions/run"
+        },
+        "acknowledgement": {
+          "$ref": "#/definitions/cancellationAcknowledgement"
+        },
+        "replayed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "current",
+        "acknowledgement",
+        "replayed"
+      ],
+      "additionalProperties": false
+    },
+    "cancellationCommand": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "cancel"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "additionalProperties": false
     }
   },
   "oneOf": [
@@ -3277,6 +3339,50 @@
         },
         "data": {
           "$ref": "#/definitions/progressPinChange"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "cancellation"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/cancellation"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "cancellationRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/cancellationCommand"
         }
       },
       "required": [
