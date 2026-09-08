@@ -524,7 +524,33 @@ object SourceTreeGenerator {
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
         progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
         onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
+    ): SourceTreeManifest = generate(
+        model = model,
+        projectDir = projectDir,
+        hostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+        planner = planner,
+        reconstructor = reconstructor,
+        overrides = overrides,
+        observedBehavior = observedBehavior,
+        profile = profile,
+        progress = progress,
+        onModuleProgress = onModuleProgress,
+    )
+
+    /** Explicit host policy can authorize a profile without changing its recorded budgets or identity. */
+    fun generate(
+        model: RecoveredProgramModel,
+        projectDir: Path,
+        hostSafetyLimits: ReconstructionHostSafetyLimits,
+        planner: DeterministicModulePlanner? = null,
+        reconstructor: ModuleReconstructor? = null,
+        overrides: Map<String, String> = emptyMap(),
+        observedBehavior: String? = null,
+        profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+        progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
+        onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
     ): SourceTreeManifest {
+        hostSafetyLimits.requireAllows(profile.budgets)
         val adapter = ReconstructionAdapters.resolve(profile)
         val selectedReconstructor = reconstructor ?: adapter.defaultReconstructor()
         val compilationPolicy = adapter.compilation

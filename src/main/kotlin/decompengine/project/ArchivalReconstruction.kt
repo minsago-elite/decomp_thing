@@ -322,7 +322,7 @@ class ArchivalReconstructionService(
     private val analyzer: ProgramModelAnalyzer,
     private val reconstructor: ModuleReconstructor? = null,
     private val profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
-    hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+    private val hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
     private val progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
 ) {
     init {
@@ -347,6 +347,7 @@ class ArchivalReconstructionService(
         SourceTreeGenerator.generate(
             model,
             project,
+            hostSafetyLimits = hostSafetyLimits,
             reconstructor = reconstructor,
             observedBehavior = observedBehavior,
             profile = profile,
