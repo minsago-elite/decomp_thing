@@ -203,7 +203,7 @@ class UploadServerTest {
         val jobBefore = record.readBytes()
         val journalBefore = journal.readBytes()
         for (path in listOf("/api/jobs/$id", "/api/jobs/$id/events")) {
-            for (accept in listOf("application/json", "application/*", "*/*", "text/html, application/json;q=0.5", "APPLICATION/JSON")) {
+            for (accept in listOf("application/json", "application/json; charset=utf-8", "application/*", "*/*", "text/html, application/json;q=0.5", "APPLICATION/JSON")) {
                 val response = request(server, "GET", path, headers = mapOf("Accept" to accept))
                 assertEquals(200, response.status, accept)
                 assertEquals("application/json; charset=utf-8", response.contentType)
@@ -214,6 +214,9 @@ class UploadServerTest {
                 assertTrue(response.body.decodeToString().contains("NOT_ACCEPTABLE"))
                 assertEquals("application/json; charset=utf-8", response.contentType)
             }
+            val specificRejection = request(server, "GET", path,
+                headers = mapOf("Accept" to "application/json; charset=utf-8;q=0, application/json;q=1"))
+            assertEquals(406, specificRejection.status)
             val oversized = request(server, "GET", path, headers = mapOf("Accept" to "x".repeat(513)))
             assertEquals(400, oversized.status)
             assertTrue(oversized.body.decodeToString().contains("INVALID_HEADER"))
