@@ -1,0 +1,27 @@
+{
+  "sourceCommit": "4a4221ad",
+  "masterIncluded": "1c999572",
+  "verification": {
+    "tests": 15,
+    "httpTests": 7,
+    "serviceTests": 8,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "files": {
+    "jvm-build.txt": "a332dcafb13827060465756b642e3aa0f5634feabd33e4b58a9d212828fed9bc",
+    "http-tests.xml": "6d0c88f64edd62d912e4658c32343204d9a8311a37961ef2d320354f47bee91e",
+    "service-tests.xml": "f256b200dca371e3a42260c1deaeebe43780e441185f047c33a496d44a22fd96"
+  },
+  "scope": [
+    "Actual authenticated HTTP with an inert owned worker held live after interrupt until explicit test release.",
+    "Concurrent duplicate requests publish one original acknowledgement and one replay, with one interrupt. Stale/foreign commands do not signal.",
+    "Current pin version survives replay and worker exit; original acknowledgement stays cancelling while current state becomes cancelled or completed. Old replay cannot affect a newer queued attempt."
+  ],
+  "limits": [
+    "No native execution or registered production adapters. Running-worker browser qualification remains open.",
+    "Non-null accepted-reference preservation is covered separately by the retained service suite, not the new HTTP cases.",
+    "No frontend or packaged-browser rerun for test-only change."
+  ]
+}

@@ -14,7 +14,7 @@ import kotlin.io.path.readBytes
 import kotlin.test.*
 
 class WebCancellationControllerTest {
-    private class Fixture : AutoCloseable {
+    private class Fixture(val execute: (DurableWebWorkflowContext) -> DurableWebWorkflowOutcome = { error("Unexpected fixture execution") }) : AutoCloseable {
         val root = Files.createTempDirectory("web-cancel-http-")
         val store = JobStore(root)
         val job = store.createFromUpload("inert.elf", elfFixture())
@@ -26,7 +26,7 @@ class WebCancellationControllerTest {
             durableAdapters = listOf(object : DurableWebWorkflowAdapter {
                 override val workflow = WorkflowKind.RECONSTRUCT
                 override val limits = WorkflowExecutionLimits(60000u, 15000u, 1048576u, 16u)
-                override fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome = error("Unexpected fixture execution")
+                override fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome = execute.invoke(context)
             }), attemptStoreFactory = { WorkflowAttemptStore.open(it, java.time.Clock.systemUTC(), WorkflowStoreFaultInjector { point ->
                 if (point == fault) throw java.io.IOException("PRIVATE_CANCEL_HTTP_CANARY")
             }).also { opened -> owner = opened } })
@@ -187,6 +187,73 @@ class WebCancellationControllerTest {
         assertFalse(response.body().contains(orphan.runId)); assertFalse(response.body().contains("actorDigest"))
         error(f.send("PUT", "{\"action\":\"cancel\"}", f.headers(next.version), nextPath), 429, "CANCELLATION_RECEIPT_CAPACITY")
         assertContentEquals(bytes, f.root.resolve("${f.job.id}/workflow-state.json").readBytes())
+    }
+
+    @Test fun `running HTTP cancellation waits for worker exit and replay cannot signal a newer attempt`() = runningHttp(false)
+
+    @Test fun `running HTTP cancellation reports completion when the worker finishes successfully`() = runningHttp(true)
+
+    private fun runningHttp(completes: Boolean) {
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val signals = java.util.concurrent.atomic.AtomicInteger()
+        Fixture {
+            entered.countDown()
+            while (release.count != 0L) try { release.await() } catch (_: InterruptedException) { /* Test worker remains live until explicitly released. */ }
+            if (!completes) throw InterruptedException("Owned fixture confirms cancellation exit")
+            DurableWebWorkflowOutcome.Completed()
+        }.use { f ->
+            val worker = object : Thread(f.pending.single(), "owned-http-cancellation-fixture") {
+                override fun interrupt() { signals.incrementAndGet(); super.interrupt() }
+            }
+            val body = "{\"action\":\"cancel\"}"
+            try {
+                worker.start(); assertTrue(entered.await(5, TimeUnit.SECONDS))
+                val running = f.service.getAttempt(f.job.id, f.run.runId)
+                assertEquals(WorkflowRunState.RUNNING, running.state)
+                val runningBytes = f.root.resolve("${f.job.id}/workflow-state.json").readBytes()
+                error(f.send("PUT", body, f.headers()), 412, "VERSION_CONFLICT")
+                error(f.send("PUT", body, f.headers(running.version), f.path.replace(f.run.runId, "run_foreign")), 404)
+                assertEquals(0, signals.get())
+                assertContentEquals(runningBytes, f.root.resolve("${f.job.id}/workflow-state.json").readBytes())
+                // Simultaneous identical HTTP requests publish one receipt and signal only once.
+                val callers = Executors.newFixedThreadPool(2)
+                val responses = try {
+                    val gate = java.util.concurrent.CountDownLatch(1)
+                    val requests = List(2) { callers.submit<HttpResponse<String>> { gate.await(); f.send("PUT", body, f.headers(running.version)) } }
+                    gate.countDown(); requests.map { it.get(10, TimeUnit.SECONDS) }
+                } finally { callers.shutdownNow(); assertTrue(callers.awaitTermination(5, TimeUnit.SECONDS)) }
+                val documents = responses.map(::data)
+                assertEquals(setOf(JsonPrimitive(false), JsonPrimitive(true)), documents.map { it.getValue("replayed") }.toSet())
+                assertEquals(documents[0]["acknowledgement"], documents[1]["acknowledgement"])
+                documents.forEach {
+                    assertEquals(JsonPrimitive("cancelling"), it.getValue("acknowledgement").jsonObject["state"])
+                    assertEquals(JsonPrimitive("cancelling"), it.getValue("current").jsonObject["state"])
+                }
+                assertEquals(1, signals.get()); assertTrue(worker.isAlive)
+                val waiting = policy(f.send(headers = mapOf("Cookie" to f.cookie)), false, "CANCELLATION_PENDING")
+                val pinned = f.service.setProgressRetentionPinned(f.job.id, f.run.runId, waiting.getValue("version").jsonPrimitive.content, true)
+                val pinnedBytes = f.root.resolve("${f.job.id}/workflow-state.json").readBytes()
+                val replay = data(f.send("PUT", body, f.headers(running.version)))
+                assertEquals(documents[0]["acknowledgement"], replay["acknowledgement"])
+                assertEquals(JsonPrimitive(pinned.version), replay.getValue("current").jsonObject["version"])
+                assertContentEquals(pinnedBytes, f.root.resolve("${f.job.id}/workflow-state.json").readBytes())
+                assertEquals(1, signals.get())
+                release.countDown(); worker.join(5000); assertFalse(worker.isAlive)
+                val terminal = policy(f.send(headers = mapOf("Cookie" to f.cookie)), false, "ATTEMPT_TERMINAL")
+                assertEquals(JsonPrimitive(if (completes) "completed" else "cancelled"), terminal["state"])
+                assertEquals(JsonPrimitive("not-evaluated"), terminal["acceptance"])
+                val next = assertIs<DurableWebWorkflowAdmission.Started>(f.service.startDurable(f.job.id, f.snapshot().version,
+                    DurableWebWorkflowRequest(WorkflowKind.RECONSTRUCT)))
+                val beforeReplay = f.root.resolve("${f.job.id}/workflow-state.json").readBytes()
+                val finalReplay = data(f.send("PUT", body, f.headers(running.version)))
+                assertEquals(documents[0]["acknowledgement"], finalReplay["acknowledgement"])
+                assertEquals(terminal, finalReplay.getValue("current"))
+                assertEquals(WorkflowRunState.QUEUED, f.service.getAttempt(f.job.id, next.runId).state)
+                assertEquals(1, signals.get())
+                assertContentEquals(beforeReplay, f.root.resolve("${f.job.id}/workflow-state.json").readBytes())
+            } finally { release.countDown(); worker.join(5000); assertFalse(worker.isAlive) }
+        }
     }
 
 }
