@@ -355,3 +355,29 @@ focus and byte-preservation checks also pass. Evidence:
 [`web-observed-usage-20260905.json`](evidence/web-observed-usage-20260905.json).
 No workflow ran. Chrome used test-only `--no-sandbox`; shutdown and owned-work
 cleanup were confirmed.
+
+## Receipt age during pauses and connection loss
+
+Activity now displays elapsed age alongside the original browser UTC receipt
+timestamp. Elapsed time uses this tab's monotonic clock, so wall-clock corrections
+do not make retained data appear newly received or years old. The label is
+coalesced to ten-second updates, then whole minutes/hours/days. It explicitly
+measures page receipt age, not source-observation age or provider measurement time.
+
+The timer runs only while the document is visible, including visible paused or
+offline views. Hiding the document releases the timer; returning catches up from
+the monotonic receipt anchor. A new verified page resets the anchor, and session
+cleanup/unmount removes it. Age updates occur outside the live region and do not
+restart polling, move focus, reset filters or confer acceptance authority.
+
+261 frontend tests, lint and typechecked `distZip` passed. Focused tests cover
+forward/backward wall-clock jumps, coalesced age progression, hidden-tab timer
+cleanup, return after two hours and reset on a new receipt. The packaged history
+browser verifies age advancement during an eleven-second pause without an
+activity request, along with the existing connection/filter/pagination and
+byte-preservation checks. Evidence:
+[`web-activity-age-20260905.json`](evidence/web-activity-age-20260905.json).
+No workflow ran; Chrome used test-only `--no-sandbox`. Shutdown and owned-work
+cleanup were confirmed. JVM tests were not rerun for this frontend-only change.
+This advances #179's stale-data presentation; shared recovery across other views,
+explicit restart signaling and full multi-tab workflow qualification remain open.
