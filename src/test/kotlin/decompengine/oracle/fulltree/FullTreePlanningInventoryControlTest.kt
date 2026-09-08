@@ -19,6 +19,115 @@ import kotlinx.serialization.json.JsonPrimitive
 
 class FullTreePlanningInventoryControlTest {
     @Test
+    fun `clang basic dispatch binds all 73 planning owners without an emitted denominator`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+
+        val modules = registry.requireOwnerModulesForShard("clang-lib-basic")
+        assertEquals(73, modules.size)
+        assertEquals(73, modules.map { it.sourcePath }.toSet().size)
+        assertEquals(73, modules.map { it.unitId }.toSet().size)
+        assertEquals(
+            listOf(
+                "source/clang/lib/Basic/ASTSourceDescriptor.cpp",
+                "source/clang/lib/Basic/Attributes.cpp",
+                "source/clang/lib/Basic/Builtins.cpp",
+                "source/clang/lib/Basic/CLWarnings.cpp",
+                "source/clang/lib/Basic/CharInfo.cpp",
+                "source/clang/lib/Basic/CodeGenOptions.cpp",
+                "source/clang/lib/Basic/Cuda.cpp",
+                "source/clang/lib/Basic/DarwinSDKInfo.cpp",
+                "source/clang/lib/Basic/Diagnostic.cpp",
+                "source/clang/lib/Basic/DiagnosticIDs.cpp",
+                "source/clang/lib/Basic/DiagnosticOptions.cpp",
+                "source/clang/lib/Basic/ExpressionTraits.cpp",
+                "source/clang/lib/Basic/FileEntry.cpp",
+                "source/clang/lib/Basic/FileManager.cpp",
+                "source/clang/lib/Basic/FileSystemStatCache.cpp",
+                "source/clang/lib/Basic/IdentifierTable.cpp",
+                "source/clang/lib/Basic/LangOptions.cpp",
+                "source/clang/lib/Basic/LangStandards.cpp",
+                "source/clang/lib/Basic/MakeSupport.cpp",
+                "source/clang/lib/Basic/Module.cpp",
+                "source/clang/lib/Basic/NoSanitizeList.cpp",
+                "source/clang/lib/Basic/ObjCRuntime.cpp",
+                "source/clang/lib/Basic/OffloadArch.cpp",
+                "source/clang/lib/Basic/OpenCLOptions.cpp",
+                "source/clang/lib/Basic/OpenMPKinds.cpp",
+                "source/clang/lib/Basic/OperatorPrecedence.cpp",
+                "source/clang/lib/Basic/ParsedAttrInfo.cpp",
+                "source/clang/lib/Basic/ProfileList.cpp",
+                "source/clang/lib/Basic/SanitizerSpecialCaseList.cpp",
+                "source/clang/lib/Basic/Sanitizers.cpp",
+                "source/clang/lib/Basic/Sarif.cpp",
+                "source/clang/lib/Basic/SimpleTypoCorrection.cpp",
+                "source/clang/lib/Basic/SourceLocation.cpp",
+                "source/clang/lib/Basic/SourceManager.cpp",
+                "source/clang/lib/Basic/SourceMgrAdapter.cpp",
+                "source/clang/lib/Basic/Stack.cpp",
+                "source/clang/lib/Basic/StackExhaustionHandler.cpp",
+                "source/clang/lib/Basic/TargetID.cpp",
+                "source/clang/lib/Basic/TargetInfo.cpp",
+                "source/clang/lib/Basic/Targets.cpp",
+                "source/clang/lib/Basic/Targets/AArch64.cpp",
+                "source/clang/lib/Basic/Targets/AMDGPU.cpp",
+                "source/clang/lib/Basic/Targets/ARC.cpp",
+                "source/clang/lib/Basic/Targets/ARM.cpp",
+                "source/clang/lib/Basic/Targets/AVR.cpp",
+                "source/clang/lib/Basic/Targets/BPF.cpp",
+                "source/clang/lib/Basic/Targets/CSKY.cpp",
+                "source/clang/lib/Basic/Targets/DirectX.cpp",
+                "source/clang/lib/Basic/Targets/Hexagon.cpp",
+                "source/clang/lib/Basic/Targets/Lanai.cpp",
+                "source/clang/lib/Basic/Targets/LoongArch.cpp",
+                "source/clang/lib/Basic/Targets/M68k.cpp",
+                "source/clang/lib/Basic/Targets/MSP430.cpp",
+                "source/clang/lib/Basic/Targets/Mips.cpp",
+                "source/clang/lib/Basic/Targets/NVPTX.cpp",
+                "source/clang/lib/Basic/Targets/OSTargets.cpp",
+                "source/clang/lib/Basic/Targets/PPC.cpp",
+                "source/clang/lib/Basic/Targets/RISCV.cpp",
+                "source/clang/lib/Basic/Targets/SPIR.cpp",
+                "source/clang/lib/Basic/Targets/Sparc.cpp",
+                "source/clang/lib/Basic/Targets/SystemZ.cpp",
+                "source/clang/lib/Basic/Targets/TCE.cpp",
+                "source/clang/lib/Basic/Targets/VE.cpp",
+                "source/clang/lib/Basic/Targets/WebAssembly.cpp",
+                "source/clang/lib/Basic/Targets/X86.cpp",
+                "source/clang/lib/Basic/Targets/XCore.cpp",
+                "source/clang/lib/Basic/Targets/Xtensa.cpp",
+                "source/clang/lib/Basic/TokenKinds.cpp",
+                "source/clang/lib/Basic/TypeTraits.cpp",
+                "source/clang/lib/Basic/Version.cpp",
+                "source/clang/lib/Basic/Warnings.cpp",
+                "source/clang/lib/Basic/XRayInstr.cpp",
+                "source/clang/lib/Basic/XRayLists.cpp",
+            ),
+            modules.map { it.sourcePath },
+        )
+        assertTrue(
+            modules.all {
+                it.moduleId == it.unitId &&
+                    it.shardId == "clang-lib-basic" &&
+                    it.sourceKind == "handwritten" &&
+                    it.sourcePath.startsWith("source/clang/lib/Basic/")
+            },
+        )
+        assertTrue(registry.sourceOnlyUnits.none { it.shardId == "clang-lib-basic" })
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("clang-lib-basic-missing")
+        }
+    }
+
+    @Test
     fun `fixture planning inventory is closed exact and byte deterministic`() =
         inControlTemporaryDirectory { directory ->
             val fixture = createFullTreeControlFixture(directory.resolve("fixture"))
