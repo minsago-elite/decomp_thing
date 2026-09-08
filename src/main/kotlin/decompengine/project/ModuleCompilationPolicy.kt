@@ -11,8 +11,6 @@ internal interface ModuleCompilationPolicy {
 
 /** Registration is application-owned; profile data cannot supply executable policy code. */
 internal object ReconstructionCompilationPolicies {
-    fun resolve(profile: ReconstructionProfile): ModuleCompilationPolicy = when (profile.id) {
-        GeneratedCMakeReconstructionProfile.PROFILE_ID -> GeneratedCModuleValidation
-        else -> throw IllegalArgumentException("no module compilation policy registered for profile: ${profile.id}")
-    }
+    fun resolve(profile: ReconstructionProfile): ModuleCompilationPolicy =
+        ReconstructionAdapters.resolve(profile).compilation
 }

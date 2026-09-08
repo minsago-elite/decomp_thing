@@ -96,99 +96,6 @@ fun interface ModuleReconstructor {
     ) = Unit
 }
 
-/** Emits buildable evidence stubs by default; raw recovered C remains in the program model for later refinement. */
-class EvidenceModuleReconstructor(private val includeRecoveredC: Boolean = false) : ModuleReconstructor {
-    override fun cacheIdentity(): String = if (includeRecoveredC) "recovered-c:v2" else "evidence-only:v1"
-
-    override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule {
-        val functions = request.module.functionIds.map { id -> request.model.functions.single { it.id == id } }
-        val globals = request.module.globalIds.map { id -> request.model.globals.single { it.id == id } }
-        val source = buildString {
-            append("#include <stddef.h>\n#include \"modules/${request.module.id}.h\"\n#include \"${request.module.id}_internal.h\"\n")
-            request.dependencyHeaders.keys.sorted().forEach { header -> append("#include \"").append(header.removePrefix("include/")).append("\"\n") }
-            append('\n')
-            globals.forEach { global ->
-                append("/* ${global.id}; recovered global @ 0x${global.address.toString(16)} */\n")
-                append(globalDeclaration(global, external = false)).append("\n\n")
-            }
-            functions.forEach { function ->
-                append("/* ${function.id} @ 0x${function.address.toString(16)}; status=${function.status.name.lowercase()} */\n")
-                val recovered = function.decompiledC?.trim()?.takeIf(String::isNotEmpty)?.takeIf { includeRecoveredC }
-                    ?.let(::markNamedParametersUsed)
-                if (recovered != null) append(recovered).append("\n\n")
-                else append(stub(function)).append("\n\n")
-            }
-        }
-        val unresolved = if (includeRecoveredC) {
-            functions.filter { it.decompiledC.isNullOrBlank() }.map { function ->
-                ModuleReconstructionIssue(
-                    "recovered-c-unavailable",
-                    "normalized recovered C is unavailable for ${function.id}",
-                    listOf(function.id),
-                )
-            }
-        } else {
-            listOf(
-                ModuleReconstructionIssue(
-                    "evidence-only-placeholder",
-                    "evidence-only mode emits placeholders and does not accept implementations",
-                    request.module.functionIds + request.module.globalIds,
-                ),
-            ).filter { it.entityIds.isNotEmpty() }
-        }
-        return ReconstructedModule(
-            source = source,
-            generator = if (includeRecoveredC) "recovered-c" else "evidence-only",
-            promptSha256 = sha256(source.toByteArray()),
-            issues = unresolved,
-            retryable = false,
-        )
-    }
-
-    private fun stub(function: RecoveredFunction): String {
-        val prototype = normalizedPrototype(function)
-        val body = if (prototype.trimStart().startsWith("void ")) "    return;" else "    return 0;"
-        return markNamedParametersUsed("$prototype {\n$body\n}")
-    }
-
-    /** Keep strict warning builds honest without changing recovered behavior. */
-    private fun markNamedParametersUsed(source: String): String {
-        val bodyStart = source.indexOf('{')
-        if (bodyStart < 0) return source
-        val signature = source.substring(0, bodyStart)
-        val parametersStart = signature.indexOf('(')
-        val parametersEnd = signature.lastIndexOf(')')
-        if (parametersStart < 0 || parametersEnd <= parametersStart) return source
-        val cKeywords = setOf(
-            "auto", "char", "const", "double", "enum", "extern", "float", "inline", "int", "long",
-            "register", "restrict", "short", "signed", "static", "struct", "typedef", "union", "unsigned",
-            "void", "volatile", "_Atomic", "_Bool", "_Complex",
-        )
-        val names = signature.substring(parametersStart + 1, parametersEnd)
-            .split(',')
-            .mapNotNull { parameter ->
-                Regex("([A-Za-z_][A-Za-z0-9_]*)\\s*(?:\\[[^]]*])?\\s*$")
-                    .find(parameter.trim())?.groupValues?.get(1)
-            }
-            .filterNot(cKeywords::contains)
-            .distinct()
-        if (names.isEmpty()) return source
-        val body = source.substring(bodyStart + 1)
-        val missingUses = names.filterNot { name ->
-            Regex("\\(\\s*void\\s*\\)\\s*${Regex.escape(name)}\\s*;").containsMatchIn(body)
-        }
-        if (missingUses.isEmpty()) return source
-        return buildString(source.length + missingUses.sumOf { it.length + 14 }) {
-            append(source, 0, bodyStart + 1)
-            missingUses.forEach { name -> append("\n    (void)").append(name).append(';') }
-            append(source, bodyStart + 1, source.length)
-        }
-    }
-}
-
-/** Uses already-normalized recovered C, primarily for trusted fixtures and post-normalization pipelines. */
-class RecoveredCModuleReconstructor : ModuleReconstructor by EvidenceModuleReconstructor(includeRecoveredC = true)
-
 class BoundedLlmModuleReconstructor(
     private val harness: AgentHarness,
     private val maximumContextCharacters: Int = 120_000,
@@ -630,22 +537,24 @@ object SourceTreeGenerator {
         model: RecoveredProgramModel,
         projectDir: Path,
         planner: DeterministicModulePlanner = DeterministicModulePlanner(),
-        reconstructor: ModuleReconstructor = EvidenceModuleReconstructor(),
+        reconstructor: ModuleReconstructor? = null,
         overrides: Map<String, String> = emptyMap(),
         observedBehavior: String? = null,
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
         progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
         onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
     ): SourceTreeManifest {
-        val compilationPolicy = ReconstructionCompilationPolicies.resolve(profile)
+        val adapter = ReconstructionAdapters.resolve(profile)
+        val selectedReconstructor = reconstructor ?: adapter.defaultReconstructor()
+        val compilationPolicy = adapter.compilation
         val plan = planner.plan(model, overrides)
-        val rendering = GeneratedCProjectRendering(model, plan)
-        val typesHeader = rendering.renderTypesHeader()
+        val rendering = adapter.rendering(model, plan)
+        val typesHeader = rendering.sharedInterface()
         val typesHeaderPath = profile.layout.declaration("shared-interface").materialize()
         val typesHeaderFile = projectDir.resolve(typesHeaderPath)
         typesHeaderFile.parent.createDirectories()
         typesHeaderFile.writeText(typesHeader)
-        val headers = plan.modules.associate { module -> module.id to rendering.renderModuleHeader(module) }
+        val headers = plan.modules.associate { module -> module.id to rendering.moduleInterface(module) }
         val moduleById = plan.modules.associateBy { it.id }
         val functionById = model.functions.associateBy { it.id }
         val functionOwners = plan.modules.flatMap { module -> module.functionIds.map { it to module.id } }.toMap()
@@ -658,7 +567,7 @@ object SourceTreeGenerator {
         }
         val headerHashes = headers.mapValues { sha256(it.value.toByteArray()) }
         val interfaceFingerprints = moduleInterfaceFingerprints(dependenciesByModule, headerHashes)
-        val privateHeaders = plan.modules.associate { module -> module.id to rendering.renderPrivateHeader(module) }
+        val privateHeaders = plan.modules.associate { module -> module.id to rendering.privateInterface(module) }
         headers.forEach { (id, content) ->
             val path = profile.layout.declaration("module-interface").materialize(mapOf("module" to id))
             val file = projectDir.resolve(path)
@@ -759,7 +668,7 @@ object SourceTreeGenerator {
                 sessionEvidenceFingerprint = fingerprint,
                 acceptedSourceSha256 = verifiedPreviousAcceptance?.sourceSha256,
             )
-            val cacheIdentity = reconstructor.cacheIdentity()
+            val cacheIdentity = selectedReconstructor.cacheIdentity()
             val cached = recordedCheckpoint?.takeIf { checkpoint ->
                 checkpoint.schemaVersion == 6 && checkpoint.inputBinarySha256 == model.inputSha256 &&
                     checkpoint.modelSchemaVersion == model.schemaVersion && checkpoint.profileSha256 == profile.sha256 &&
@@ -770,7 +679,7 @@ object SourceTreeGenerator {
                     checkpoint.hasCurrentExecutionEvidence(
                         projectDir = projectDir,
                         configuredEvidencePath = configuredExecutionEvidencePath,
-                        evidenceRequired = reconstructor.requiresExecutionEvidenceForCheckpointReuse(),
+                        evidenceRequired = selectedReconstructor.requiresExecutionEvidenceForCheckpointReuse(),
                     ) &&
                     (if (checkpoint.accepted) checkpoint.hasCurrentModuleAcceptance() else !checkpoint.retryable)
             }
@@ -795,7 +704,7 @@ object SourceTreeGenerator {
                     return attemptEvidence
                 }
                 val attempted = try {
-                    reconstructor.reconstruct(request)
+                    selectedReconstructor.reconstruct(request)
                 } catch (interrupted: ModuleReconstructionInterruptedException) {
                     interrupted.agentExecutionEvidence?.let(::persistExecutionEvidence)
                     val executionEvidence = restoreAcceptedRevision()
@@ -821,7 +730,7 @@ object SourceTreeGenerator {
                 val executionEvidence = attempted.agentExecutionEvidence?.let(::persistExecutionEvidence)
                     ?: persistedExecutionEvidence
                 progress.phase(AgentWorkflowPhase.POLICY_CHECKING, module.id)
-                val issues = assessReconstruction(module, model, attempted, normalizedSource).toMutableList()
+                val issues = assessReconstruction(adapter, module, model, attempted, normalizedSource).toMutableList()
                 writeAtomically(sourcePath, normalizedSource)
                 val compilation = if (issues.isEmpty()) {
                     progress.phase(AgentWorkflowPhase.BUILD_VALIDATING, module.id)
@@ -888,7 +797,7 @@ object SourceTreeGenerator {
                             + "\"previousAcceptedSourceSha256\":\"${previousAccepted.sourceSha256}\","
                             + "\"candidate\":${rejectedCheckpoint.toJson()}}\n",
                     )
-                    reconstructor.reconcileSessionCheckpoint(
+                    selectedReconstructor.reconcileSessionCheckpoint(
                         request, false, previousAccepted.sourceSha256,
                         executionEvidence?.requestSha256, executionEvidence?.sha256,
                     )
@@ -904,7 +813,7 @@ object SourceTreeGenerator {
             if (checkpoint.executionEvidencePath == null) configuredExecutionEvidenceFile?.deleteIfExists()
             attemptPath.deleteIfExists()
             projectDir.resolve("reports/modules/${module.id}.attempt.execution.json").deleteIfExists()
-            reconstructor.reconcileSessionCheckpoint(
+            selectedReconstructor.reconcileSessionCheckpoint(
                 request, checkpoint.accepted, checkpoint.sourceSha256,
                 checkpoint.executionRequestSha256, checkpoint.executionEvidenceSha256,
             )
@@ -958,7 +867,7 @@ object SourceTreeGenerator {
             onModuleProgress(index + 1, plan.modules.size, module.id)
         }
 
-        rendering.renderEntrypoint()?.let { entrypoint ->
+        rendering.entrypoint()?.let { entrypoint ->
             val mainSource = entrypoint.source
             val entrypointPath = profile.layout.declaration("entrypoint-implementation").materialize()
             val entrypointFile = projectDir.resolve(entrypointPath)
@@ -974,7 +883,7 @@ object SourceTreeGenerator {
                 false
             }
         }.map { it.path }.sorted()
-        val makefile = rendering.renderMakefile(sourcePaths, profile)
+        val makefile = rendering.buildDefinition(sourcePaths, profile)
         val makefilePath = profile.layout.declaration("build-definition").materialize()
         val makefileFile = projectDir.resolve(makefilePath)
         makefileFile.parent.createDirectories()
@@ -993,7 +902,7 @@ object SourceTreeGenerator {
         val confidence = renderConfidence(model, plan, unresolvedImplementations, moduleRevisionEvidence)
         projectDir.resolve(confidencePath).also { it.parent.createDirectories() }.writeText(confidence)
         generated += evidence(profile, confidencePath, confidence, "evidence", model.functions.map { it.id } + model.globals.map { it.id })
-        val toolchain = GeneratedCToolchainEvidence.render(profile)
+        val toolchain = adapter.toolchainEvidence(profile)
         projectDir.resolve(toolchainPath).also { it.parent.createDirectories() }.writeText(toolchain)
         generated += evidence(profile, toolchainPath, toolchain, "environment", emptyList())
         val unresolvedMarkdown = renderUnresolvedMarkdown(model, plan, unresolvedImplementations)
@@ -1329,7 +1238,7 @@ object SourceTreeGenerator {
         reconstructorIdentity: String,
         failure: Exception,
     ): ReconstructedModule {
-        val fallback = EvidenceModuleReconstructor().reconstruct(request)
+        val fallback = ReconstructionAdapters.resolve(request.profile).defaultReconstructor().reconstruct(request)
         val entityIds = request.module.functionIds + request.module.globalIds
         val agentOutcome = failure as? ModuleReconstructionAgentOutcomeException
         val code = when {
@@ -1359,6 +1268,7 @@ object SourceTreeGenerator {
     }
 
     private fun assessReconstruction(
+        adapter: ReconstructionAdapter,
         module: PlannedModule,
         model: RecoveredProgramModel,
         reconstructed: ReconstructedModule,
@@ -1399,7 +1309,7 @@ object SourceTreeGenerator {
                 )
             }
         }
-        issues += GeneratedCCandidateValidation.assess(module, model, reconstructed.generator, source)
+        issues += adapter.assess(module, model, reconstructed.generator, source)
         return issues.distinctBy { Triple(it.code, it.message, it.entityIds.sorted()) }
     }
 
