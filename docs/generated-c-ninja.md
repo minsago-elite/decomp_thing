@@ -66,3 +66,17 @@ registered profile digest and declared file roles. A loopback integration test
 checks build.ninja source display, current build verification and digest-pinned
 archive bytes. Custom server profile lists remain explicit; this admission change
 does not add a profile picker to web job creation, which retains its default.
+
+Make and Ninja share the generated-C build process lifecycle. Cancellation already
+pending at entry stops before resetting the build directory. Once launched, the
+command and output collection share one monotonic wall-clock budget; interruption
+propagates as `InterruptedException`, and failure or cancellation cleans up the
+owned process before returning. The existing termination grace and forced-exit
+waits are additional cleanup time, outside the execution budget. A cancelled or
+timed-out attempt does not publish a new build contract. Existing records are not
+rewritten into successful evidence for that attempt.
+
+`GeneratedCBuildLifecycleTest` checks prelaunch file preservation, interruption of
+an authored sleep command under both built-in profile configurations, and a quiet
+command's deadline. These tests exercise local process ownership and cleanup;
+they do not establish production containment or authenticated runtime identity.
