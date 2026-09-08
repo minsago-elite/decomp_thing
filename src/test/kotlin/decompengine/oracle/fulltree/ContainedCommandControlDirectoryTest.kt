@@ -206,6 +206,57 @@ printf exported > "${'$'}1/reports/new"
         }
     }
 
+    @Test
+    fun `retained reports require a separate active control and reject replacement`() = fixture { path ->
+        val mode = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------"))
+        Files.createDirectory(path.resolve("reports"), mode)
+        LinuxFilesystemSyscalls.openRoot(path).use { parent ->
+            LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, "reports").use { reports ->
+                val active = "control-${"d".repeat(64)}"
+                assertFails { ContainedCommandRetainedDirectories(null, emptyMap(), reportsIdentity = reports.identity) }
+                val retained = ContainedCommandRetainedDirectories(active, emptyMap(), reportsIdentity = reports.identity)
+                retained.verify(parent)
+                assertEquals(containedControlIdentityJson("reports", reports.identity), retained.reportsToJson())
+                assertEquals(listOf("--ro-bind", path.resolve("reports").toString(), path.resolve("reports").toString()), retained.mountArguments(path))
+                Files.move(path.resolve("reports"), path.resolve("original-reports"))
+                Files.createDirectory(path.resolve("reports"), mode)
+                assertFails { retained.verify(parent) }
+            }
+        }
+    }
+
+    @Test
+    fun `local planner mount keeps model reports read only and new plan reports writable`() = fixture { path ->
+        // Namespace behavior only; this does not qualify a planner invocation or resource accounting.
+        val bwrap = Path.of("/usr/bin/bwrap")
+        assumeTrue(Files.isExecutable(bwrap))
+        val prefix = listOf(bwrap.toString(), "--unshare-user", "--unshare-pid", "--ro-bind", "/", "/",
+            "--proc", "/proc", "--die-with-parent", "--cap-drop", "ALL")
+        assumeTrue(runLocalMountCommand(prefix + "/bin/true") == 0, "local user/mount namespaces are unavailable")
+        Files.createDirectory(path.resolve("reports"), PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
+        Files.writeString(path.resolve("reports/program_model.json"), "captured-model")
+        LinuxFilesystemSyscalls.openRoot(path).use { parent ->
+            LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, "reports").use { reports ->
+                val active = "control-${"d".repeat(64)}"
+                createContainedCommandControlDirectory(parent, active).use {
+                    val retained = ContainedCommandRetainedDirectories(active, emptyMap(), reportsIdentity = reports.identity)
+                    retained.verify(parent)
+                    val command = prefix + listOf("--bind", path.toString(), path.toString()) + retained.mountArguments(path) +
+                        listOf("/bin/sh", "-c", """set -eu
+if (printf changed > "${'$'}1/reports/program_model.json") 2>/dev/null; then exit 10; fi
+if (rm "${'$'}1/reports/program_model.json") 2>/dev/null; then exit 11; fi
+if (printf new > "${'$'}1/reports/new") 2>/dev/null; then exit 12; fi
+printf derived-plan > "${'$'}1/${'$'}2/reports/module_plan.json"
+""", "planner-mount-fixture", path.toString(), active)
+                    assertEquals(0, runLocalMountCommand(command))
+                    retained.verify(parent)
+                    assertEquals("captured-model", Files.readString(path.resolve("reports/program_model.json")))
+                    assertEquals("derived-plan", Files.readString(path.resolve(active).resolve("reports/module_plan.json")))
+                }
+            }
+        }
+    }
+
     private fun runLocalMountCommand(command: List<String>): Int {
         val process = ProcessBuilder(command).redirectOutput(ProcessBuilder.Redirect.DISCARD)
             .redirectError(ProcessBuilder.Redirect.DISCARD).start()

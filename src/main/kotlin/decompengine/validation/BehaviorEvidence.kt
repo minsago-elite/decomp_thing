@@ -180,22 +180,37 @@ internal object BehaviorEvidence {
     const val MAXIMUM_REPORT_BYTES = 64L * 1024 * 1024
     private const val PROVIDER = "local-revision-bound-behavior-v1"
 
+    fun inputCorpusSha256(inputs: List<ProcessInput>, fileInputs: Map<String, JsonArray>): String {
+        val cases = JsonArray(inputs.map { input -> JsonObject(mapOf(
+            "id" to JsonPrimitive(input.id),
+            "args" to JsonArray(input.args.map(::JsonPrimitive)),
+            "stdinHex" to JsonPrimitive(java.util.HexFormat.of().formatHex(input.stdin)),
+            "fileInputs" to (fileInputs[input.id] ?: JsonArray(emptyList())),
+        )) })
+        return hash(corpus(cases, includeFileLocators = false))
+    }
+
     fun encode(
         legacy: JsonObject,
         original: JsonObject,
         rebuilt: JsonObject,
         policy: JsonObject,
         project: JsonObject?,
+        fileInputs: Map<String, JsonArray> = emptyMap(),
     ): String {
-        val cases = legacy.getValue("cases").jsonArray
+        val cases = JsonArray(legacy.getValue("cases").jsonArray.map { element ->
+            val case = element.jsonObject
+            JsonObject(case + ("fileInputs" to (fileInputs[case.string("id")] ?: JsonArray(emptyList()))))
+        })
         val body = JsonObject(legacy + mapOf(
-            "schemaVersion" to JsonPrimitive(1),
-            "provider" to JsonPrimitive(PROVIDER),
+            "cases" to cases,
+            "schemaVersion" to JsonPrimitive(4),
+            "provider" to JsonPrimitive("local-revision-bound-behavior-v4"),
             "originalIdentity" to original,
             "rebuiltIdentity" to rebuilt,
             "executionPolicy" to policy,
             "projectRevision" to (project ?: JsonNull),
-            "corpusSha256" to JsonPrimitive(hash(corpus(cases))),
+            "corpusSha256" to JsonPrimitive(hash(corpus(cases, includeFileLocators = false))),
             "observationsSha256" to JsonPrimitive(hash(cases)),
         ))
         val record = JsonObject(body + ("reportSha256" to JsonPrimitive(hash(body))))
@@ -226,7 +241,11 @@ internal object BehaviorEvidence {
             "matches", "cases", "originalIdentity", "rebuiltIdentity", "executionPolicy", "projectRevision",
             "corpusSha256", "observationsSha256", "reportSha256",
         )) { "behavior report has missing or unknown fields" }
-        require(root.integer("schemaVersion") == 1 && root.string("provider") == PROVIDER) { "unsupported behavior report" }
+        val schemaVersion = root.integer("schemaVersion")
+        require((schemaVersion == 1 && root.string("provider") == PROVIDER) ||
+            (schemaVersion == 2 && root.string("provider") == "local-revision-bound-behavior-v2") ||
+            (schemaVersion == 3 && root.string("provider") == "local-revision-bound-behavior-v3") ||
+            (schemaVersion == 4 && root.string("provider") == "local-revision-bound-behavior-v4")) { "unsupported behavior report" }
         require(root.string("id").matches(Regex("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"))) { "invalid behavior report ID" }
         require(root.string("sandbox") == "bubblewrap") { "unsupported behavior sandbox request" }
         val originalPath = absolutePath(root.string("originalBinary"))
@@ -238,7 +257,8 @@ internal object BehaviorEvidence {
         val policy = root.getValue("executionPolicy").jsonObject
         require(policy.keys == setOf("assurance", "environment", "workingDirectory", "networkIsolationRequested",
             "timeoutMillis", "maximumStdoutBytes", "maximumStderrBytes", "maximumAggregateBytes",
-            "maximumComparisonOutputBytes", "bubblewrap", "timeout")) {
+            "maximumComparisonOutputBytes", "bubblewrap", "timeout") +
+            if (schemaVersion == 4) setOf("completionLauncher", "maximumCompletionBytes") else emptySet<String>()) {
             "behavior execution policy is not closed"
         }
         require(policy.string("assurance") == "local-path-stability-checks-not-production-authority" &&
@@ -258,6 +278,8 @@ internal object BehaviorEvidence {
         }
         val bubblewrap = executable("bubblewrap")
         val timeout = executable("timeout")
+        val launcher = if (schemaVersion == 4) executable("completionLauncher") else null
+        if (schemaVersion == 4) require(policy.count("maximumCompletionBytes") == MAXIMUM_BUBBLEWRAP_COMPLETION_BYTES.toLong())
         val network = policy.boolean("networkIsolationRequested")
         require(root.boolean("networkIsolated") == network) { "behavior network request is contradictory" }
         val cases = root.getValue("cases").jsonArray
@@ -266,10 +288,29 @@ internal object BehaviorEvidence {
         var observedOutputBytes = 0L
         var stdinBytes = 0L
         var argumentBytes = 0L
+        var fileBytes = 0L
+        var fileCount = 0L
         val matches = cases.map { element ->
             val case = element.jsonObject
             require(case.keys == setOf("id", "args", "stdinHex", "matches", "exitCodeMatches", "stdoutMatches",
-                "stderrMatches", "original", "rebuilt")) { "behavior case fields are not closed" }
+                "stderrMatches", "original", "rebuilt") + if (schemaVersion >= 2) setOf("fileInputs") else emptySet<String>()) { "behavior case fields are not closed" }
+            val inputFiles = if (schemaVersion >= 2) case.getValue("fileInputs").jsonArray.map { element ->
+                val file = element.jsonObject
+                require(file.keys == setOf("name", "sourcePath", "bytes", "sha256", "contentHex")) { "behavior input file fields are not closed" }
+                val name = file.string("name")
+                val source = absolutePath(file.string("sourcePath"))
+                identity(JsonObject(file.filterKeys { it in setOf("bytes", "sha256") }))
+                val hex = file.string("contentHex")
+                requireHex(hex)
+                require(file.count("bytes") == hex.length / 2L) { "behavior input file length differs from retained bytes" }
+                fileBytes = Math.addExact(fileBytes, file.count("bytes"))
+                fileCount++
+                require(fileBytes <= MAXIMUM_BEHAVIOR_FILE_BYTES && fileCount <= MAXIMUM_BEHAVIOR_INPUT_FILES) { "behavior file corpus exceeds its bound" }
+                require(OracleArtifacts.sha256(java.util.HexFormat.of().parseHex(hex)) == file.string("sha256")) { "behavior input file digest differs from retained bytes" }
+                name to source
+            } else emptyList()
+            require(inputFiles.map { it.first } == inputFiles.map { it.first }.distinct().sorted()) { "behavior input files must be unique and sorted" }
+            requireBehaviorFileNames(inputFiles.map { it.first })
             val identifier = case.string("id")
             require(identifier.isNotEmpty() && identifier.length <= 256 && identifiers.add(identifier)) { "behavior case IDs are invalid or duplicated" }
             val arguments = case.getValue("args").jsonArray.map { argument ->
@@ -281,8 +322,8 @@ internal object BehaviorEvidence {
             stdinBytes += case.string("stdinHex").length / 2
             argumentBytes += arguments.sumOf { it.toByteArray().size.toLong() }
             require(stdinBytes <= 8L * 1024 * 1024 && argumentBytes <= 1024L * 1024)
-            val original = output(case.getValue("original").jsonObject, network)
-            val rebuilt = output(case.getValue("rebuilt").jsonObject, network)
+            val original = output(case.getValue("original").jsonObject, network, schemaVersion)
+            val rebuilt = output(case.getValue("rebuilt").jsonObject, network, schemaVersion)
             for ((observation, path) in listOf(original to originalPath, rebuilt to rebuiltPath)) {
                 val stdoutBytes = observation.string("stdoutHex").length.toLong() / 2
                 val stderrBytes = observation.string("stderrHex").length.toLong() / 2
@@ -290,9 +331,30 @@ internal object BehaviorEvidence {
                     stdoutBytes + stderrBytes <= policy.count("maximumAggregateBytes")) { "behavior output exceeds its recorded policy" }
                 observedOutputBytes += stdoutBytes + stderrBytes
                 require(observedOutputBytes <= policy.count("maximumComparisonOutputBytes"))
-                val expectedCommand = behaviorSandboxCommand(path, arguments, policy.count("timeoutMillis"), bubblewrap, timeout, network)
-                require(observation.getValue("sandboxCommand") == JsonArray(expectedCommand.map(::JsonPrimitive))) {
+                val expectedCommand = behaviorSandboxCommand(path, arguments, policy.count("timeoutMillis"), bubblewrap, timeout, network, inputFiles.toMap())
+                // Historical records used integer-second native timeouts; the JVM watchdog
+                // still enforced the recorded millisecond limit. Preserve their exact recipe.
+                val historicalCommand = expectedCommand.toMutableList().apply {
+                    this[1] = "${maxOf(1L, policy.count("timeoutMillis") / 1000L)}s"
+                }
+                val recordedCommand = observation.getValue("sandboxCommand")
+                require(recordedCommand == JsonArray(expectedCommand.map(::JsonPrimitive)) ||
+                    (schemaVersion < 4 && recordedCommand == JsonArray(historicalCommand.map(::JsonPrimitive)))) {
                     "behavior sandbox command contradicts its inputs or execution policy"
+                }
+                if (schemaVersion == 4) {
+                    val completion = observation.getValue("completionEvidence").jsonObject
+                    require(completion.keys == setOf("channelPath", "statusHex", "launchCommand"))
+                    require(completion.string("channelPath").length <= 4096)
+                    val channel = absolutePath(completion.string("channelPath"))
+                    val hex = completion.string("statusHex")
+                    require(hex.length <= MAXIMUM_BUBBLEWRAP_COMPLETION_BYTES * 2)
+                    requireHex(hex)
+                    parseBubblewrapCompletion(java.util.HexFormat.of().parseHex(hex), observation.integer("exitCode"))
+                    require(completion.getValue("launchCommand") == JsonArray(
+                        completionLaunchCommand(expectedCommand, requireNotNull(launcher), channel).map(::JsonPrimitive))) {
+                        "completion launcher command contradicts the sandbox request"
+                    }
                 }
             }
             val exit = original.integer("exitCode") == rebuilt.integer("exitCode")
@@ -334,13 +396,14 @@ internal object BehaviorEvidence {
             require(JsonObject(artifact - "path") == root.getValue("rebuiltIdentity"))
             require(revision.string("inputSha256") == root.getValue("originalIdentity").jsonObject.string("sha256"))
         }
-        require(root.string("corpusSha256") == hash(corpus(cases)) && root.string("observationsSha256") == hash(cases) &&
+        require(root.string("corpusSha256") == hash(corpus(cases, includeFileLocators = schemaVersion < 3)) && root.string("observationsSha256") == hash(cases) &&
             root.string("reportSha256") == hash(JsonObject(root - "reportSha256"))) { "behavior commitments do not match their records" }
     }
 
-    private fun output(output: JsonObject, network: Boolean): JsonObject {
-        require(output.keys == setOf("exitCode", "stdoutHex", "stderrHex", "networkIsolated", "sandboxCommand"))
-        output.integer("exitCode")
+    private fun output(output: JsonObject, network: Boolean, schemaVersion: Int): JsonObject {
+        require(output.keys == setOf("exitCode", "stdoutHex", "stderrHex", "networkIsolated", "sandboxCommand") +
+            if (schemaVersion == 4) setOf("completionEvidence") else emptySet<String>())
+        if (schemaVersion < 4) rejectReservedWrapperExit(output.integer("exitCode"))
         requireHex(output.string("stdoutHex"))
         requireHex(output.string("stderrHex"))
         require(output.boolean("networkIsolated") == network)
@@ -349,8 +412,12 @@ internal object BehaviorEvidence {
         return output
     }
 
-    private fun corpus(cases: JsonArray) = JsonArray(cases.map { element ->
-        JsonObject(element.jsonObject.filterKeys { it in setOf("id", "args", "stdinHex") })
+    private fun corpus(cases: JsonArray, includeFileLocators: Boolean) = JsonArray(cases.map { element ->
+        val inputs = element.jsonObject.filterKeys { it in setOf("id", "args", "stdinHex", "fileInputs") }
+        if (includeFileLocators || "fileInputs" !in inputs) JsonObject(inputs)
+        else JsonObject(inputs + ("fileInputs" to JsonArray(inputs.getValue("fileInputs").jsonArray.map { file ->
+            JsonObject(file.jsonObject - "sourcePath")
+        })))
     })
 
     private fun hash(value: JsonElement): String = OracleArtifacts.sha256(OracleJson.canonicalBytes(value, BEHAVIOR_JSON_LIMITS))
@@ -385,14 +452,32 @@ internal fun behaviorSandboxCommand(
     bubblewrap: Path,
     timeout: Path,
     networkRequested: Boolean,
+    files: Map<String, Path> = emptyMap(),
 ): List<String> = buildList {
-    addAll(listOf(timeout.toAbsolutePath().normalize().toString(), "${maxOf(1L, timeoutMillis / 1000L)}s",
+    require(timeoutMillis > 0) { "behavior timeout must be positive" }
+    requireBehaviorFileNames(files.keys)
+    val seconds = timeoutMillis / 1000L
+    val remainder = timeoutMillis % 1000L
+    val duration = if (remainder == 0L) "${seconds}s" else "$seconds.${remainder.toString().padStart(3, '0')}s"
+    addAll(listOf(timeout.toAbsolutePath().normalize().toString(), duration,
         bubblewrap.toAbsolutePath().normalize().toString()))
     if (networkRequested) add("--unshare-net")
     addAll(listOf("--unshare-pid", "--new-session", "--die-with-parent",
         "--ro-bind", "/usr", "/usr", "--ro-bind", "/lib", "/lib", "--ro-bind", "/lib64", "/lib64",
         "--dir", "/tmp", "--dir", "/program", "--ro-bind", executable.toAbsolutePath().normalize().toString(),
-        "/program/executable", "--chdir", "/tmp", "/program/executable"))
+        "/program/executable"))
+    if (files.isNotEmpty()) {
+        addAll(listOf("--dir", "/inputs"))
+        val parents = files.keys.flatMap { name ->
+            val parts = name.split('/')
+            (1 until parts.size).map { parts.take(it).joinToString("/") }
+        }.distinct().sortedWith(compareBy<String> { it.count { char -> char == '/' } }.thenBy { it })
+        parents.forEach { addAll(listOf("--dir", "/inputs/$it")) }
+        files.toSortedMap().forEach { (name, path) ->
+            addAll(listOf("--ro-bind", path.toAbsolutePath().normalize().toString(), "/inputs/$name"))
+        }
+    }
+    addAll(listOf("--chdir", "/tmp", "/program/executable"))
     addAll(arguments)
 }
 
