@@ -392,6 +392,9 @@ class ArchivalReconstructionService(
     }
 
     private val adapter = ReconstructionAdapters.resolve(profile)
+    private val boundedAnalyzer = (analyzer as? ExportBudgetedProgramModelAnalyzer)
+        ?.withExportBudgets(profile.budgets)
+        ?: analyzer
 
     fun reconstruct(binaryPath: Path, outputDir: Path): ArchivalReconstructionResult {
         if (Thread.interrupted()) throw InterruptedException("archival reconstruction cancelled")
@@ -400,7 +403,7 @@ class ArchivalReconstructionService(
             outputDir, profile.budgets.reconstructionMaximumContextCharacters,
         )
         progress.phase(AgentWorkflowPhase.ANALYZING)
-        val model = analyzer.analyze(binaryPath, outputDir.resolve("analysis"))
+        val model = boundedAnalyzer.analyze(binaryPath, outputDir.resolve("analysis"))
         val project = outputDir.resolve("source-tree")
         val progressPath = outputDir.resolve("reconstruction_progress.json")
         progressPath.writeText("{\"phase\":\"planning\",\"completed\":0,\"total\":0}\n")
