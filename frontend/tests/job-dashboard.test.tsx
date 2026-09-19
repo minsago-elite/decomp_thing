@@ -75,6 +75,46 @@ it('retains stale rows after failed refresh and clears private rows on denied ac
   await waitFor(() => expect(screen.queryByText('program-1.elf')).toBeNull());
 });
 
+it.each([
+  {
+    name: 'empty library followed by transport failure', query: '', empty: 'No uploaded jobs yet.',
+    failure: new ApiClientError('timeout'), stale: 'The previous library snapshot was empty; current results are unknown until refresh succeeds.',
+  },
+  {
+    name: 'no matches followed by incomplete backend read', query: '?search=missing', empty: 'No jobs match these filters.',
+    failure: new ApiClientError('http_error', { status: 503, serverCode: 'JOB_RECORD_UNAVAILABLE' }),
+    stale: 'The previous filtered result had no matches; current results are unknown until refresh succeeds.',
+  },
+])('does not present $name as a fresh empty result', async ({ query, empty, failure, stale }) => {
+  history.replaceState(null, '', `/${query}`);
+  let resolveInitial: (value: ReturnType<typeof page>) => void = () => undefined;
+  let rejectRefresh: (reason: unknown) => void = () => undefined;
+  transport.get.mockImplementationOnce(() => new Promise(resolve => { resolveInitial = resolve; }))
+    .mockImplementationOnce(() => new Promise((_, reject) => { rejectRefresh = reject; }))
+    .mockResolvedValueOnce(page([job(5)]));
+  render(<Dashboard basePath="" />);
+  await waitFor(() => expect(transport.get).toHaveBeenCalledOnce());
+  expect(screen.getByRole('status').textContent).toBe('Loading jobs…');
+  expect(screen.queryByText(empty)).toBeNull();
+  await act(async () => { resolveInitial(page([])); await Promise.resolve(); });
+  expect(await screen.findByText(empty)).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(2));
+  expect(screen.getByRole('status').textContent).toContain('The previous empty result may be outdated.');
+  expect(screen.queryByText(empty)).toBeNull();
+  await act(async () => { rejectRefresh(failure); await Promise.resolve(); });
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toContain(stale);
+  if (failure.serverCode === 'JOB_RECORD_UNAVAILABLE') {
+    expect(alert.textContent).toContain('The server has not returned a partial library');
+  } else expect(alert.textContent).toContain('The server may be unavailable');
+  expect(screen.queryByText(empty)).toBeNull();
+  expect(screen.getByRole('status').textContent).not.toContain('0 jobs on this page');
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  expect(await screen.findByText('program-5.elf')).toBeTruthy();
+  expect(screen.queryByRole('alert')).toBeNull();
+});
+
 it('ignores late results after filter replacement and cancels reads on unmount', async () => {
   let complete: (value: ReturnType<typeof page>) => void = () => undefined;
   transport.get.mockImplementationOnce(() => new Promise(resolve => { complete = resolve; })).mockResolvedValue(page([job(2)]));
