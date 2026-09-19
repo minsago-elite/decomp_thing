@@ -54,6 +54,17 @@ class ArchiveTransportLayoutTest {
     }
 
     @Test
+    fun `ninja transport omits build history state files`() {
+        val layout = GeneratedCNinjaArchiveBuildPolicy.transportLayout(GeneratedCNinjaReconstructionProfile.descriptor)
+
+        assertTrue(layout.excludes("build"))
+        assertTrue(layout.excludes("build/reconstructed"))
+        assertTrue(layout.excludes(".ninja_log"))
+        assertTrue(layout.excludes(".ninja_deps"))
+        assertFalse(layout.excludes("reports/build_contract.json"))
+    }
+
+    @Test
     fun `transport layout copies inputs and exposes unmodifiable sets`() {
         val outputs = linkedSetOf("second-output", "first-output")
         val controls = linkedSetOf("evidence/build.json")

@@ -434,7 +434,7 @@ private fun runDoctor(args: List<String>) {
 
 private fun doctorUsageError(message: String): Nothing {
     System.err.println(message)
-    System.err.println("usage: llm_bin_patch doctor --tools-only [--output <directory>] [--profile <id>] [--auth-methods]")
+    System.err.println("usage: llm_bin_patch doctor --tools-only [--output <directory>] [--profile <id>]")
     System.err.println("   or: llm_bin_patch doctor [--output <directory>] [--profile <id>] [--harness acp|legacy-openai] [--workflow all|patch|reconstruct|repair|web] [--auth-methods]")
     kotlin.system.exitProcess(2)
 }
@@ -507,7 +507,7 @@ private fun printHelp() {
     println(
         """
         Usage:
-          llm_bin_patch doctor --tools-only [--output <directory>] [--profile <id>] [--auth-methods]
+          llm_bin_patch doctor --tools-only [--output <directory>] [--profile <id>]
           llm_bin_patch doctor [--output <directory>] [--profile <id>] [--harness acp|legacy-openai] [--workflow all|patch|reconstruct|repair|web] [--auth-methods]
           llm_bin_patch patch <input-elf> --output <directory> [--yes] [--harness acp|legacy-openai]
           llm_bin_patch runner [--control-dir <directory>] [--root <directory>]...

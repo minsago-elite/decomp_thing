@@ -9,6 +9,12 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 
 internal object GeneratedCNinjaArchiveBuildPolicy : ArchiveBuildPolicy by GeneratedCArchiveBuildPolicy {
+    private val ninjaTransport = ArchiveTransportLayout(
+        excludedOutputRoots = setOf("build", ".ninja_log", ".ninja_deps"),
+        strictBuildControlPaths = setOf("reports/build_contract.json"),
+    )
+
+    override fun transportLayout(profile: ReconstructionProfile): ArchiveTransportLayout = ninjaTransport
     override val rebuildInstructions = "Build with the exact Ninja command in `BUILDING.md`. Source, build and module evidence are retained under `reports/`."
 
     override fun validate(projectDir: Path, profile: ReconstructionProfile, requireArtifact: Boolean) {
