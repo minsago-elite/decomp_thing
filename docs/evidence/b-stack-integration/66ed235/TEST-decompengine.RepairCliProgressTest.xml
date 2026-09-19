@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.RepairCliProgressTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-09-05T16:46:18.908Z" hostname="whatsername" time="1.052">
+  <properties/>
+  <testcase name="blocked console does not block journal producers or bounded observer close()" classname="decompengine.RepairCliProgressTest" time="0.755"/>
+  <testcase name="live observer delivers persisted repair states with digest correlation()" classname="decompengine.RepairCliProgressTest" time="0.255"/>
+  <testcase name="one poll bounds phase output and marks omitted older updates()" classname="decompengine.RepairCliProgressTest" time="0.023"/>
+  <testcase name="cursor skips prior history reports gaps and never copies peer text()" classname="decompengine.RepairCliProgressTest" time="0.007"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

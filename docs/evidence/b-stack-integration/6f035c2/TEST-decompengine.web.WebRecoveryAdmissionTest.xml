@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.web.WebRecoveryAdmissionTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-09-05T16:40:52.630Z" hostname="whatsername" time="2.702">
+  <properties/>
+  <testcase name="rejected duplicate start does not shut down a running server()" classname="decompengine.web.WebRecoveryAdmissionTest" time="0.009"/>
+  <testcase name="incomplete startup recovery releases ownership and listener without changing statuses()" classname="decompengine.web.WebRecoveryAdmissionTest" time="1.399"/>
+  <testcase name="queued request cannot deadlock failed startup cleanup()" classname="decompengine.web.WebRecoveryAdmissionTest" time="0.013"/>
+  <testcase name="stop before startup preserves pending records and releases its listener()" classname="decompengine.web.WebRecoveryAdmissionTest" time="1.274"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

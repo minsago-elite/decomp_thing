@@ -1,0 +1,39 @@
+{
+  "status": "passed",
+  "sourceCommit": "e138a0d1106815289d75d75f0af55ae568dd6cca",
+  "command": "./gradlew -PfrontendNodeHome=/home/june/decomp_thing/build/tools/decomp-node-24.20.0/node-v24.20.0-linux-x64 test --tests 'decompengine.web.*' --tests 'decompengine.jobs.AgentProgressJournal*Test' --tests 'decompengine.jobs.WorkflowAttemptStoreTest'",
+  "verification": {
+    "tests": 273,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "retainedXml": [
+    {
+      "file": "TEST-decompengine.web.UploadServerShutdownTest.xml",
+      "tests": 3,
+      "sha256": "133aba8a3b15e0d0270742531708fd8d3d235686641a92498eb061952222bcfa"
+    },
+    {
+      "file": "TEST-decompengine.web.UploadServerTest.xml",
+      "tests": 47,
+      "sha256": "fc7e03fadff5f3c72e0f0c14b59601b9c7e09731d34c324ea505eb53e03aa762"
+    }
+  ],
+  "coverage": [
+    "Held admitted handler delays successful stop and ownership handoff",
+    "Interrupted caller drains and regains interrupt flag",
+    "Deadline expiry retains ownership and later cleanup permits retry",
+    "Previously failing shutdown timeout test passes"
+  ],
+  "newFixturesExecuteWorkflows": false,
+  "notRepeated": [
+    "frontend tests",
+    "package build",
+    "packaged browser qualification"
+  ],
+  "limitations": [
+    "The original intermittent report did not identify the remaining handler; this proves the bounded drain contract, not every potential cleanup failure.",
+    "The final request drain budget does not bound the entire workflow/provider shutdown sequence."
+  ]
+}

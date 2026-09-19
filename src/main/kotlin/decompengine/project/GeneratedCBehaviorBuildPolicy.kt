@@ -65,6 +65,38 @@ internal object GeneratedCBehaviorBuildPolicy : BehaviorBuildPolicy {
             require(contract.getValue(name).jsonArray.isNotEmpty())
             contract.getValue(name).jsonArray.forEach { require(it.jsonPrimitive.isString) }
         }
+        val parallelism = contract.integer("parallelism")
+        val expected = when (profile.id) {
+            GeneratedCMakeReconstructionProfile.PROFILE_ID -> {
+                val configuration = ProjectBuildConfiguration(
+                    makeExecutable = profile.adapterConfiguration["build-executable"]?.singleOrNull() ?: "make",
+                    compilerExecutable = profile.adapterConfiguration["compiler-driver"]?.singleOrNull() ?: "gcc",
+                    cFlags = profile.adapterConfiguration["compiler-flags"] ?: ProjectBuildConfiguration().cFlags,
+                    parallelism = parallelism,
+                    wallClockTimeoutMillis = profile.budgets.buildWallClockMillis,
+                    maximumOutputBytes = profile.budgets.buildMaximumOutputBytes,
+                    buildDefinition = profile.layout.declaration("build-definition").materialize(),
+                )
+                GeneratedCBuildInvocation.make(configuration)
+            }
+            GeneratedCNinjaReconstructionProfile.PROFILE_ID ->
+                GeneratedCNinjaReconstructionAdapter.invocation(profile, parallelism)
+            else -> throw IllegalArgumentException("no behavior build invocation registered for profile: ${profile.id}")
+        }
+        fun strings(name: String): List<String> = contract.getValue(name).jsonArray.map {
+            require(it.jsonPrimitive.isString) { "behavior build $name must contain strings" }
+            it.jsonPrimitive.content
+        }
+        require(strings("command") == expected.command) { "behavior build command differs from the selected profile" }
+        require(strings("declaredDependencies") == expected.dependencies) {
+            "behavior build dependencies differ from the selected profile"
+        }
+        require(contract.count("wallClockTimeoutMillis") in 1..profile.budgets.buildWallClockMillis) {
+            "behavior build time budget exceeds the selected profile"
+        }
+        require(contract.count("maximumOutputBytes") in 1..profile.budgets.buildMaximumOutputBytes) {
+            "behavior build output budget exceeds the selected profile"
+        }
         contract.getValue("modules").jsonArray.forEach { element ->
             val module = element.jsonObject
             require(module.keys == setOf("id", "source", "diagnostics"))

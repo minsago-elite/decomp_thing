@@ -1,0 +1,4 @@
+# Official https://nodejs.org/download/release/v24.20.0/SHASUMS256.txt
+# Reviewed 2026-09-05. Both archives bundle npm 11.19.0; no npm upgrade is needed.
+3515603e2487879a39bc75716f1a2affd027500c64ba50e845cf72cb33219013  node-v24.20.0-linux-arm64.tar.gz
+855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8ec  node-v24.20.0-linux-x64.tar.gz
