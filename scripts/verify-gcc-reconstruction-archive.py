@@ -16,11 +16,14 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import selectors
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any
 import zipfile
 
@@ -35,6 +38,9 @@ from oracle.gcc.verify_source_lock import VerificationError  # noqa: E402
 MAXIMUM_ARCHIVE_ENTRIES = 100_000
 MAXIMUM_ARCHIVE_FILE_BYTES = 128 * 1024 * 1024
 MAXIMUM_ARCHIVE_TOTAL_BYTES = 1024 * 1024 * 1024
+# Raw archive bytes (ZIP container + metadata + appended data) are not covered
+# by the extracted-payload ceiling, so bound them before any full read.
+MAXIMUM_ARCHIVE_RAW_BYTES = 2 * 1024 * 1024 * 1024
 SHA256 = set("0123456789abcdef")
 
 
@@ -71,6 +77,28 @@ def _read_json(path: Path, label: str) -> dict[str, Any]:
 def _regular(path: Path, label: str) -> None:
     if path.is_symlink() or not path.is_file():
         raise VerificationError(f"{label} must be a non-symlink regular file: {path}")
+
+
+def _file_identity(path: Path, label: str) -> tuple[int, int]:
+    """Capture a stable (device, inode) identity for alias detection."""
+    try:
+        identity = path.stat()
+    except OSError as error:
+        raise VerificationError(f"cannot stat {label}: {error}") from error
+    return (identity.st_dev, identity.st_ino)
+
+
+def _bound_raw_archive(path: Path, label: str) -> int:
+    """Reject oversized raw archive bytes before any full comparison or hash."""
+    try:
+        size = path.stat().st_size
+    except OSError as error:
+        raise VerificationError(f"cannot stat {label}: {error}") from error
+    if size > MAXIMUM_ARCHIVE_RAW_BYTES:
+        raise VerificationError(
+            f"{label} raw size {size} exceeds its {MAXIMUM_ARCHIVE_RAW_BYTES} byte bound"
+        )
+    return size
 
 
 def _bound_file(root: Path, relative: str, expected: str, label: str) -> dict[str, Any]:
@@ -249,12 +277,139 @@ def _verify_source_tree(root: Path, profile: dict[str, Any], control: dict[str, 
     }
 
 
+def _run_bounded_build(
+    command: list[str],
+    root: Path,
+    environment: dict[str, str],
+    timeout_seconds: float,
+    maximum_output: int,
+) -> tuple[int, int]:
+    """Run the recorded Make command in its own process group with a live
+    output ceiling.
+
+    Pipes are drained incrementally and the whole process group is terminated
+    as soon as the combined stdout/stderr byte count crosses
+    ``maximum_output``, so a noisy or hostile Makefile cannot exhaust verifier
+    memory while ``subprocess`` would otherwise buffer everything post-hoc.
+    The child runs with a minimal sanitized environment and no inherited file
+    descriptors beyond the captured pipes.
+    """
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=root,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+            start_new_session=True,
+        )
+    except OSError as error:
+        raise VerificationError(f"clean extraction build did not start: {error}") from error
+    assert process.stdout is not None and process.stderr is not None
+    process.stdout.readable()
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+    for stream in (process.stdout, process.stderr):
+        try:
+            os.set_blocking(stream.fileno(), False)
+        except (OSError, ValueError):
+            pass
+    chunks: dict[str, int] = {"stdout": 0, "stderr": 0}
+    total = 0
+    deadline = time.monotonic() + timeout_seconds
+    returncode: int | None = None
+    exceeded = False
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise VerificationError("clean extraction build did not complete: timed out")
+            for key, _ in selector.select(timeout=min(remaining, 0.5)):
+                try:
+                    data = os.read(key.fileobj.fileno(), 65536)
+                except (BlockingIOError, OSError):
+                    continue
+                if not data:
+                    try:
+                        selector.unregister(key.fileobj)
+                    except (KeyError, ValueError):
+                        pass
+                    continue
+                total += len(data)
+                chunks[key.data] += len(data)
+                if total > maximum_output:
+                    exceeded = True
+                    break
+            if exceeded:
+                break
+            returncode = process.poll()
+            if returncode is not None and not selector.get_map():
+                break
+        if exceeded:
+            raise VerificationError(
+                f"clean extraction build exceeded its recorded output bound ({maximum_output} bytes)"
+            )
+        try:
+            returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired as error:
+            raise VerificationError("clean extraction build did not complete: timed out") from error
+        return returncode, total
+    finally:
+        selector.close()
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
+            try:
+                process.wait(timeout=10)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        for stream in (process.stdout, process.stderr):
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+
+
+def _snapshot_archive(archive: Path, label: str) -> Path:
+    """Copy an accepted archive into a private stable snapshot.
+
+    The snapshot is created with exclusive semantics before any comparison or
+    build, so a concurrent substitution of the original path cannot make the
+    recorded digests describe different bytes than the extracted trees.
+    """
+    _regular(archive, label)
+    _bound_raw_archive(archive, label)
+    try:
+        staging = tempfile.NamedTemporaryFile(
+            prefix="cc1-archive-snapshot-", suffix=".zip", delete=False
+        )
+    except OSError as error:
+        raise VerificationError(f"cannot stage {label} snapshot: {error}") from error
+    snapshot = Path(staging.name)
+    staging.close()
+    try:
+        with archive.open("rb") as source, snapshot.open("wb") as destination:
+            shutil.copyfileobj(source, destination, 1024 * 1024)
+    except OSError as error:
+        try:
+            snapshot.unlink()
+        except OSError:
+            pass
+        raise VerificationError(f"cannot snapshot {label}: {error}") from error
+    return snapshot
+
+
 def _extract_and_build(
     archive: Path,
+    archive_label: str,
     profile: dict[str, Any],
     control: dict[str, Any],
 ) -> dict[str, Any]:
-    _regular(archive, "reconstruction archive")
+    _regular(archive, archive_label)
     archive_sha256 = _sha256_file(archive)
     archive_bytes = archive.stat().st_size
     with tempfile.TemporaryDirectory(prefix="cc1-archive-extract-") as temporary:
@@ -323,18 +478,31 @@ def _extract_and_build(
         if not isinstance(timeout_millis, int) or not 0 < timeout_millis <= 600_000:
             raise VerificationError("archive build timeout bound is invalid")
         environment = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LC_ALL": "C", "LANG": "C", "TZ": "UTC", "SOURCE_DATE_EPOCH": "0"}
-        try:
-            completed = subprocess.run(
-                evidence["command"], cwd=root, env=environment, capture_output=True,
-                timeout=timeout_millis / 1000, check=False,
+        # The recorded Make command comes from the archive under test, so it is
+        # treated as untrusted input: it runs with a minimal sanitized
+        # environment, no inherited file descriptors, its own process group
+        # (killed on output-limit or timeout), and a live output ceiling.
+        # This is the repository's process-level isolation boundary for the
+        # rebuild; it is not a network or filesystem sandbox, which is
+        # recorded in the receipt limitations below.
+        # Record the pre-build revision so a recorded Make command that mutates
+        # Makefile/src/include during replay is detected below. The archive's
+        # own sourceStableDuringBuild flag is not trusted on its own.
+        pre_revision = evidence["sourceRevisionSha256"]
+        returncode, output_bytes = _run_bounded_build(
+            evidence["command"],
+            root,
+            environment,
+            timeout_millis / 1000,
+            maximum_output,
+        )
+        if returncode != 0:
+            raise VerificationError(f"clean extraction build failed with exit {returncode}")
+        post_revision, _ = _source_revision(root)
+        if post_revision != pre_revision:
+            raise VerificationError(
+                "clean extraction build mutated the archive source tree during replay"
             )
-        except (OSError, subprocess.TimeoutExpired) as error:
-            raise VerificationError(f"clean extraction build did not complete: {error}") from error
-        output_bytes = len(completed.stdout) + len(completed.stderr)
-        if output_bytes > maximum_output:
-            raise VerificationError("clean extraction build exceeded its recorded output bound")
-        if completed.returncode != 0:
-            raise VerificationError(f"clean extraction build failed with exit {completed.returncode}")
         artifact = root / evidence["expectedArtifact"]["path"]
         _regular(artifact, "rebuilt cc1 archive executable")
         artifact_bytes = artifact.stat().st_size
@@ -354,10 +522,33 @@ def verify_archive(profile_path: Path, engine_id: str, archive: Path, repeat_arc
     profile, control = _authenticate_controls(profile_path.resolve(), engine_id)
     _regular(archive, "first reconstruction archive")
     _regular(repeat_archive, "repeat reconstruction archive")
-    if archive.stat().st_size != repeat_archive.stat().st_size or not filecmp.cmp(archive, repeat_archive, shallow=False):
-        raise VerificationError("repeated accepted cc1 archives are not byte-identical")
-    first = _extract_and_build(archive, profile, control)
-    repeat = _extract_and_build(repeat_archive, profile, control)
+    # Reject aliased inputs before comparing: the same file (or two hard links
+    # to one inode) extracted twice is not repeatability evidence.
+    if _file_identity(archive, "first reconstruction archive") == _file_identity(
+        repeat_archive, "repeat reconstruction archive"
+    ):
+        raise VerificationError("repeated archives must be distinct files, not the same inode")
+    _bound_raw_archive(archive, "first reconstruction archive")
+    _bound_raw_archive(repeat_archive, "repeat reconstruction archive")
+    first_snapshot = _snapshot_archive(archive, "first reconstruction archive")
+    repeat_snapshot = _snapshot_archive(repeat_archive, "repeat reconstruction archive")
+    try:
+        if first_snapshot.stat().st_size != repeat_snapshot.stat().st_size or not filecmp.cmp(
+            first_snapshot, repeat_snapshot, shallow=False
+        ):
+            raise VerificationError("repeated accepted cc1 archives are not byte-identical")
+        first = _extract_and_build(first_snapshot, "first reconstruction archive", profile, control)
+        repeat = _extract_and_build(repeat_snapshot, "repeat reconstruction archive", profile, control)
+        if _sha256_file(first_snapshot) != first["archiveSha256"] or _sha256_file(
+            repeat_snapshot
+        ) != repeat["archiveSha256"]:
+            raise VerificationError("archive snapshot changed during verification")
+    finally:
+        for snapshot in (first_snapshot, repeat_snapshot):
+            try:
+                snapshot.unlink()
+            except OSError:
+                pass
     if first["executable"] != repeat["executable"]:
         raise VerificationError("repeated cc1 archive builds produced different executable evidence")
     return {
@@ -382,9 +573,77 @@ def verify_archive(profile_path: Path, engine_id: str, archive: Path, repeat_arc
         "limitations": [
             "The verifier does not establish that a qualified bundled-Ghidra fresh run produced the archive.",
             "The verifier does not establish the parent engine interruption/resume equivalence proof.",
-            "The compiler and Make process are run in a temporary extraction; their host identity is retained as archive evidence only.",
+            "The archive supplies the Makefile and recorded Make command, which run as untrusted input under a process-level boundary only (own process group, sanitized environment, live output ceiling): no network or filesystem sandbox is enforced.",
         ],
     }
+
+
+def _publish_evidence(evidence: dict[str, Any], destination: Path, protected: list[Path]) -> None:
+    """Publish the receipt through an exclusively created temporary file.
+
+    The temporary file is created with O_CREAT|O_EXCL|O_NOFOLLOW in a verified
+    parent directory, so a pre-created symlink cannot redirect the write, and
+    the destination is resolved against every verifier input/control path so a
+    successful run cannot overwrite an archive or profile it just verified.
+    """
+    resolved_destination = destination.absolute()
+    try:
+        resolved_destination = resolved_destination.resolve()
+    except OSError as error:
+        raise VerificationError(f"cannot resolve evidence destination: {error}") from error
+    for guarded in protected:
+        try:
+            resolved_guarded = guarded.absolute().resolve()
+        except OSError:
+            continue
+        if resolved_destination == resolved_guarded:
+            raise VerificationError("evidence destination must not overwrite a verifier input")
+    if resolved_destination.is_symlink():
+        raise VerificationError("evidence destination must be a regular non-symlink path")
+    if resolved_destination.exists() and not resolved_destination.is_file():
+        raise VerificationError("evidence destination must be a regular non-symlink path")
+    try:
+        parent = resolved_destination.parent
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise VerificationError(f"cannot prepare evidence directory: {error}") from error
+    if parent.is_symlink():
+        raise VerificationError("evidence parent directory must not be a symlink")
+    payload = (json.dumps(evidence, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    descriptor = -1
+    temporary: Path | None = None
+    try:
+        for _ in range(100):
+            candidate = parent / f".{resolved_destination.name}.{os.getpid()}.{next(tempfile._get_candidate_names())}.tmp"
+            try:
+                descriptor = os.open(
+                    candidate,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                )
+            except FileExistsError:
+                continue
+            except OSError as error:
+                raise VerificationError(f"cannot stage evidence receipt: {error}") from error
+            temporary = candidate
+            break
+        if temporary is None or descriptor < 0:
+            raise VerificationError("cannot stage evidence receipt: no unique temporary name")
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            stream.write(payload)
+        os.replace(temporary, resolved_destination)
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
 
 
 def main() -> int:
@@ -397,15 +656,13 @@ def main() -> int:
     arguments = parser.parse_args()
     try:
         evidence = verify_archive(arguments.profile, arguments.engine, arguments.archive, arguments.repeat_archive)
-        destination = arguments.evidence.absolute()
-        if destination.is_symlink() or destination.exists() and not destination.is_file():
-            raise VerificationError("evidence destination must be a regular non-symlink path")
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary = destination.with_name(f".{destination.name}.tmp")
-        temporary.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        os.replace(temporary, destination)
+        _publish_evidence(
+            evidence,
+            arguments.evidence,
+            [arguments.profile, arguments.archive, arguments.repeat_archive],
+        )
         print(f"verified byte-identical cc1 reconstruction archives: {evidence['archives']['first']['sha256']}")
-        print(f"wrote evidence: {destination}")
+        print(f"wrote evidence: {arguments.evidence.absolute()}")
         return 0
     except (OSError, VerificationError) as error:
         print(f"cc1 reconstruction archive verification failed: {error}", file=sys.stderr)

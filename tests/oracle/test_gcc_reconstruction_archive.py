@@ -147,6 +147,41 @@ class GccReconstructionArchiveTest(unittest.TestCase):
         self.assertNotEqual(0, result.returncode)
         self.assertIn("byte-identical", result.stderr)
 
+    def test_aliased_repeat_archive_is_rejected(self) -> None:
+        first = self.root / "alias.zip"
+        self.make_archive(first)
+        result = self.run_verifier(first, first)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("distinct files", result.stderr)
+
+    def test_hardlinked_repeat_archive_is_rejected(self) -> None:
+        first = self.root / "hardlink.zip"
+        repeat = self.root / "hardlink-repeat.zip"
+        self.make_archive(first)
+        try:
+            repeat.hardlink_to(first)
+        except OSError as error:
+            self.skipTest(f"hard links unsupported: {error}")
+        result = self.run_verifier(first, repeat)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("distinct files", result.stderr)
+
+    def test_evidence_path_must_not_overwrite_inputs(self) -> None:
+        first = self.root / "overwrite.zip"
+        repeat = self.root / "overwrite-repeat.zip"
+        self.make_archive(first)
+        shutil.copyfile(first, repeat)
+        result = subprocess.run(
+            [
+                "python3", str(SCRIPT), "--profile", str(PROFILE), "--engine", "cc1",
+                "--archive", str(first), "--repeat-archive", str(repeat),
+                "--evidence", str(first),
+            ],
+            cwd=REPOSITORY_ROOT, text=True, capture_output=True, check=False,
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("must not overwrite", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
