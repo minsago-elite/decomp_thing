@@ -152,6 +152,74 @@ class FullTreePlanningInventoryControlTest {
         }
 
     @Test
+    fun `clang format dispatch binds all 22 planning owners without an emitted denominator`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+
+        val modules = registry.requireOwnerModulesForShard("clang-lib-format")
+        assertEquals(22, modules.size)
+        assertEquals(22, modules.map { it.sourcePath }.toSet().size)
+        assertEquals(22, modules.map { it.unitId }.toSet().size)
+        assertTrue(
+            modules.all {
+                it.moduleId == it.unitId &&
+                    it.shardId == "clang-lib-format" &&
+                    it.sourceKind == "handwritten" &&
+                    it.sourcePath.startsWith("source/clang/lib/Format/")
+            },
+        )
+        assertEquals(
+            listOf("source/clang/lib/Format/MatchFilePath.cpp"),
+            registry.sourceOnlyUnits
+                .filter { it.shardId == "clang-lib-format" }
+                .map { it.sourcePath },
+        )
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("clang-lib-format-missing")
+        }
+    }
+    fun `checked clang sema shard binds all 86 source modules to exact owners`() =
+        inControlTemporaryDirectory { directory ->
+            val profile = Path.of("oracle/llvm/22.1.6")
+            val result = FullTreePlanningInventoryControl.generateAndPublish(
+                scopePath = profile.resolve("full-tree-scope.json"),
+                sourceLockPath = profile.resolve("source-lock.json"),
+                artifactManifestPath = profile.resolve("oracle-manifest.json"),
+                buildRecordPath = profile.resolve("build-record.json"),
+                inventoryPath = profile.resolve("full-tree-inventory.json"),
+                sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+                output = directory.resolve("full-tree-planning-inventory.json"),
+            )
+
+            val sema = result.registry.requireOwnerModulesForShard("clang-lib-sema")
+            assertEquals(86, sema.size)
+            assertEquals(86, sema.map { it.sourcePath }.toSet().size)
+            assertEquals(86, sema.map { it.unitId }.toSet().size)
+            assertTrue(sema.all { it.sourceKind == "handwritten" })
+            assertTrue(sema.all { it.sourcePath.startsWith("source/clang/lib/Sema/") })
+            sema.forEach { module ->
+                assertEquals(module.unitId, module.moduleId)
+                assertEquals(
+                    FullTreeInventoryControl.compilationUnitId(module.sourcePath),
+                    module.unitId,
+                )
+                assertEquals(module, result.registry.requireOwnerModule(module.unitId))
+            }
+            assertEquals(
+                0,
+                result.registry.sourceOnlyUnits.count { it.shardId == "clang-lib-sema" },
+            )
+        }
+
+    @Test
     fun `llvm analysis dispatch binds exact planning owners without an emitted denominator`() {
         val profile = Path.of("oracle/llvm/22.1.6")
         val registry = FullTreePlanningInventoryControl.loadAndValidate(
@@ -306,6 +374,7 @@ class FullTreePlanningInventoryControlTest {
             registry.requireOwnerModulesForShard("llvm-lib-analysis-missing")
         }
     }
+
 
     @Test
     fun `shuffled stale forged and expanded planning documents fail closed`() =
