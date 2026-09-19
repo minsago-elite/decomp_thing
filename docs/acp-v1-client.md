@@ -248,7 +248,13 @@ launch. At most four invocations run at once, with one active invocation per pri
 holds at most 64 waiting invocations overall and eight per workspace. Eligible waiters run in FIFO order; a waiter
 whose workspace is already active cannot prevent another workspace from using a free global slot.
 
-Waiting consumes the original execution wall-clock budget and has a separate 30-second maximum. Cancellation and
+Waiting consumes the original execution wall-clock budget and has a separate 30-second maximum.
+Caller-provided cancellation/deadline observers run outside the shared scheduler lock. Initial lock
+acquisition uses bounded polling slices, and elapsed observer/lock time is checked against the queue
+deadline before admission, even if capacity is available. Observer callbacks must still return promptly:
+the scheduler cannot preempt arbitrary caller code, and a blocked eligible FIFO head can delay later
+waiters. A blocked workspace observer does not hold the mutex needed for other eligible work, state
+inspection or permit release. Cancellation and
 thread interruption remove a queued invocation without launching a process. Queue overflow, elapsed deadlines,
 and unavailable cleanup capacity return typed invocation-bound receipts with scheduler phase/reason metadata.
 The scheduler creates no threads or secondary executor queue and does not retry work automatically. Active turns
@@ -282,19 +288,188 @@ A timeout or cleanup error is reported with a fixed diagnostic; it never establi
 Shutdown and successful job-status publication share a lock: once shutdown begins, a worker that catches
 interruption and returns normally is recorded as failed with an explicit shutdown diagnostic. Previously
 published completion remains intact. This controls the web status only, not artifact acceptance or rollback.
-Injected executors remain outside this lifecycle. SIGKILL, power loss, stalled filesystem writes, and
+Injected executors are not shut down. The server tracks and discards its pending operations independently
+of executor ownership, so late or repeated callback delivery cannot start cancelled work or change a new
+owner's job status. Already-claimed work still requires its caller's cancellation/cleanup cooperation.
+SIGKILL, power loss, stalled filesystem writes, and
 durable recovery of indeterminate external work require the separate #68/#71 recovery mechanisms.
+
+Before startup recovery, a web server acquires a nonblocking exclusive `.web-owner.lock` for its job store.
+A second cooperating server fails before changing job status. Startup recovery scans at most 4,096
+store entries and reads at most 64 MiB of metadata, with the existing 256 KiB per-record limit.
+It finishes inspection before changing any recovery status and publishes from the inspected records,
+without rereading their metadata outside that budget. Inspection freezes each proposed replacement,
+including its timestamp, and validates it with the metadata encoder before admitting any status write.
+A legacy record that fits on disk but cannot encode its recovery replacement therefore rejects the
+entire inspection. Publication re-encodes the same validated record without retaining a second full
+set of metadata bytes. A valid job-name candidate with unreadable,
+invalid or unknown-status metadata, or an exhausted budget, fails startup with a fixed incomplete-scan
+message. No recovery status changes during a failed scan. Unknown names and private stages remain
+retained; their entries count toward the scan limit. Once status writes begin, a later write failure may
+leave some records reconciled and does not imply rollback. These are work/byte bounds, not deadlines
+for stalled filesystem calls or fencing of concurrent direct writers.
+Failed startup and explicit stop-before-start also close the bound HTTP listener. Shutdown closes
+request admission before starting the JDK dispatcher needed to release an unstarted bound listener.
+Failed startup marks stopping while still holding the lifecycle lock, then releases that lock before
+running dispatcher cleanup, so a queued request cannot deadlock cleanup and another start cannot
+slip into the failure interval. A duplicate start rejection leaves an already-running server intact.
+No admitted handler can mutate the store during failed-start cleanup. Same-JVM owners are tracked by canonical store
+path to avoid opening another channel to an owned lock file (see the [JDK FileLock platform notes](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/channels/FileLock.html)).
+The lock file is never deleted. Stop releases ownership only after owned workers have terminated and no
+scheduled operations or admitted HTTP handlers remain. Request admission closes when shutdown begins; the
+lifetime includes upload publication and error handling. A handler that outlives stop causes an explicit
+incomplete-stop error and retains ownership. Its `finally` path releases ownership when all work is idle,
+including after an exception. Other incomplete in-process shutdowns retain ownership until a later successful stop
+or JVM exit. The in-process timeout regression holds a worker beyond the grace period, verifies a new server
+is still refused, then releases the worker and retries stop before verifying a fresh server can start.
+Executor cancellation is requested once; later stop attempts wait for termination without interrupting
+workers again while they persist final status.
+This is cooperative local-filesystem web ownership, not fencing of arbitrary JobStore callers,
+older servers, external subprocesses, lock-file replacement, or network filesystems.
+`WebRequestLifetimeTest` holds the production request-admission wrapper across a final store write and an
+exception, verifies competing ownership is refused and late requests are not admitted, then verifies handoff.
+This is deterministic handler-lifetime evidence, supplemented by the existing HTTP route tests; it does not
+qualify stalled kernel I/O or abrupt host failure.
 `WebShutdownTest` covers propagated interruption, a worker returning after swallowing interruption, and
 a worker that remains blocked past the grace period. The last case verifies the fixed cleanup diagnostic,
 then starts a new server and checks that unfinished jobs become interrupted failures without rerunning.
 This is benign JVM-worker evidence; it does not cover orphaned external processes or power loss.
+The abrupt-death case forcibly terminates the child JVM after two active jobs and one queued job are
+persisted. It verifies no worker completion markers appear, then starts a replacement server and checks
+that all three jobs become interrupted failures without replay. This exercises OS lock release on process
+death and recovery from complete persisted records; it is not interruption during a filesystem write.
 
 Job metadata updates write and force a temporary file in the job directory, atomically replace `job.json`,
 then force the directory. There is no non-atomic fallback. An existing reader retains its previous complete
-snapshot; a failure before replacement leaves the published record intact. Temporary files are removed on
+snapshot. Before publication, the writer enforces the same 256 KiB encoded UTF-8 JSON limit as the reader,
+including escaping overhead; oversized records fail without replacing an existing record or publishing an upload.
+Upload admission also encodes a reservation record before staging: the longest supported status, a
+40-character timestamp allowance, and a 500-character status message at worst-case JSON escaping size.
+Thus an accepted filename leaves room for later bounded status updates; existing oversized legacy
+records are not rewritten or migrated by this admission check.
+The bounded canonical encoder stops at that output limit, and a filename character cap bounds its preliminary
+string-byte accounting. It no longer builds the entire encoded JSON string before checking the limit. New records
+use canonical field ordering; existing pretty-printed records remain readable without migration.
+A failure before replacement leaves the published record intact. Temporary files are removed on
 ordinary failure. A failure after replacement, including directory-force failure, may have published the new
-record and is not proof of rollback. Tests cover held readers and interruption before publication; power-loss
-injection, abandoned temporary-file reclamation, and atomic publication of the whole uploaded job remain open.
+record and is not proof of rollback. Tests cover held readers and interruption before publication.
+`JobMetadataPublicationTest` injects exceptions before writing, after a partial write, before/after file force,
+before/after replacement, and before/after directory force. A fresh store reads the exact prior record for
+pre-replacement failures and a complete new record for post-replacement failures; the input remains intact
+and ordinary cleanup removes the temporary file. These exception cases run cleanup and therefore do not
+substitute for process death during I/O, abandoned-file reclamation, or power-loss qualification.
+`JobMetadataCrashTest` separately halts a benign child JVM at the same eight application I/O boundaries,
+including after writing half a private record. It verifies terminal process state and absence of `finally`
+cleanup before opening a fresh store. The old or new published record remains complete and the input is
+unchanged. Pre-replacement temporary files remain private and are not promoted by interrupted-job recovery.
+These files are deliberately retained pending qualified reclamation. The test covers process death at controlled
+publication boundaries, not interruption inside a kernel syscall, whole-upload crash publication, or power loss.
+
+Uploads stage their input and metadata together in a private `.upload-` directory beneath the job store.
+Before parsing or staging, JobStore rejects input above its 32 MiB read limit and takes an owned byte-array
+copy. Metadata, declared size and persisted input all derive from that copy, so later caller mutation cannot
+change what is published. This bounds the retained input per upload, not aggregate request memory or storage.
+Before staging, the store creates missing directories, resolves the canonical store path, then opens and
+forces that directory and each canonical ancestor through the filesystem root, in leaf-to-root order.
+Every upload repeats confirmation, including when all directories already exist: a prior failed attempt
+may have created them without completing confirmation. Failure to open or force an ancestor stops the
+upload before private staging or final publication; existing jobs and newly created empty directories
+are retained. There is no fallback that silently accepts unsupported directory-force operations.
+The original configured path remains the metadata identity. Provisioning/durability of symlink aliases,
+concurrent path replacement and noncooperating filesystem writers remain outside this confirmation
+contract. Directory force calls on the tested local filesystem are not a power-loss qualification.
+`JobStoreDirectoriesCrashTest` halts a benign child JVM before the first directory force, after the
+store force, after its parent force, and after all ancestor forces. The parent observes the exact halt
+marker and terminal exit, verifies that ordinary cleanup did not run and that the newly created store
+contains no upload or private stage, then starts another JVM. That process must reconfirm the full
+existing canonical chain and publish one complete input/metadata record. These are application-boundary
+process-death tests; they do not interrupt directory creation or force inside a kernel syscall.
+The input and metadata are forced before the directory is atomically renamed to its final job ID; the store
+directory is then forced. Metadata records the final input path. Ordinary failures before publication clean
+up the staging directory; failures after rename may leave a complete published job even when the caller
+receives an error. Startup does not treat staging directory names as job IDs. Tests verify interrupted input
+writes leave no partial job and preserve prior jobs. Power-loss injection, abandoned staging/temporary-file
+reclamation, and the full supported-filesystem/ancestor-durability qualification remain open requirements.
+
+The publication outcomes below apply to the existing atomic local-store protocol. “Visible” describes
+process-observable state, not proof of power-loss durability.
+
+| Boundary | Published state and failure handling |
+| --- | --- |
+| Store/ancestor preparation, before private staging | No candidate job is published. A preparation failure retains existing jobs and any newly created empty directories; retry repeats all confirmations. |
+| Metadata before/during write, before/after file force, before replacement | The old published record remains complete. The candidate is private. Ordinary cleanup removes its temporary file; abrupt exit leaves it retained. |
+| Metadata atomic replacement attempt | An exception does not prove whether replacement occurred. Re-read the published record before deciding its state; no non-atomic fallback or rollback is claimed. |
+| Metadata after replacement, before/after directory force | The complete new record is visible. A force/confirmation error does not restore the old record or confirm durability. |
+| Upload input/metadata writes and forces, before/after private-stage force | No final candidate job is visible. Existing jobs remain intact. Ordinary cleanup removes private staging where possible; abrupt exit retains it without promotion. |
+| Upload atomic rename attempt | Any rename exception is an uncertain-publication outcome carrying the generated job ID, even if the destination is absent when checked. |
+| Upload after rename, before/after store-directory force | The complete input and matching metadata are visible together. A confirmation error returns uncertainty and does not delete the published destination. |
+| Upload after successful confirmation | Return the published job. This is one submitted upload's result, not deduplication of independently repeated submissions. |
+
+For an uncertain upload, HTTP returns 409 with `Location` and a “Check job” link; JSON also supplies
+`job_id`, `job_url` and `retry_upload:false`. Inspect that same job rather than automatically submitting
+another upload. A missing or unreadable result leaves the outcome unresolved and requires operator
+investigation; it does not establish rollback or authorize a duplicate-free retry. Explicit resubmission
+can create another job. Job publication does not establish analysis completion or an accepted source revision.
+
+The clean-commit consolidated run at `0cd6f6a` passed 100 tests with no failures/errors/skips on
+Temurin 21.0.12+8, Linux 7.1.8 and XFS. Evidence is retained at
+[the tracked manifest](evidence/web-job-recovery/20260905T142816Z-g5bs2nae/manifest.json) and matching JUnit XML reports with exact commands,
+suite results, XML digests and runtime/filesystem identity. `JobMetadataPublicationTest` covers eight
+exception boundaries; `JobMetadataCrashTest` covers eight abrupt-exit boundaries including a half-record;
+`JobUploadCrashTest` covers fourteen upload boundaries including partial input/metadata. Fresh readers
+verify complete old/new metadata, complete published inputs and matching metadata, unchanged existing
+jobs, terminal child state and absence of ordinary cleanup after abrupt exit. HTTP uncertainty tests
+verify the reconciliation response and exclude private I/O diagnostics. These prove #242's publication
+outcome and complete-record criteria at the tested application boundaries. They do not close writer
+ownership, safe reclamation, power-loss/kernel-I/O qualification or the entire recovery milestone.
+
+`GET /api/recovery` exposes a read-only schema-v1 recovery inventory for #242. It reports retained
+upload-stage and metadata-temporary counts, scanned entries, observed bytes as a decimal string,
+uninspected entries and `inventoryComplete`, with `displayOnly: true`. It returns no paths, filenames,
+file contents or I/O exception details. Inspection charges every encountered directory entry against
+a 4,096-entry budget, counts at most 128 candidates and accumulates at most 64 MiB of regular-file
+lengths. It reads attributes rather than file contents, scans one level inside private stages and job
+directories, and does not descend into job reports. Descriptor-relative inspection does not follow child
+symlinks. Unknown candidate layouts, inspection errors, unavailable secure directory streams or exceeded
+budgets make the inventory incomplete; observed counts and bytes then give lower bounds. An oversized
+file is omitted from the byte sum rather than clamped. `uninspectedEntries` counts encountered inspection
+failures/unsupported entries, not the unknown number remaining after budget exhaustion.
+
+This is an observation, not an atomic filesystem snapshot or a wall-time bound on filesystem I/O.
+The configured root follows the existing store path contract; this does not fence raw filesystem writers.
+A complete inventory says only that the scoped scan finished, not that candidates are abandoned or safe
+to delete. No files are reclaimed or promoted. Safe reclamation and aggregate storage quotas remain
+#242/#71 requirements; #69 may display this summary without interpreting it as completed cleanup.
+The web workbench now renders this summary when candidates are retained or inspection is incomplete,
+including incomplete scans with zero counted candidates. Incomplete results use an explicit lower-bound
+label and explain that additional files or bytes may remain. Complete results still state that retained
+files may belong to active work. The panel links to the JSON summary, omits private names and contents,
+and reports that no files were deleted. A complete empty scan omits the panel. Refresh performs a new
+bounded scan; the job list and recovery inventory are separate observations, not an atomic snapshot.
+The metadata and upload abrupt-exit tests also compare the inventory against the actual retained files
+after each child JVM terminates. They assert exact candidate counts and byte totals, then verify that
+interrupted-job recovery leaves the inventory and private file contents unchanged. A metadata temporary
+inside an upload stage contributes to that stage's byte total; the separate metadata-file counter covers
+temporaries within published job directories. These checks establish diagnostic coverage for those
+controlled crash layouts, without establishing abandonment or permission to reclaim them.
+
+`JobUploadCrashTest` halts a benign child JVM at fourteen controlled input/metadata write, force and
+directory-publication boundaries. Before final rename the candidate remains a private stage; afterward a
+fresh store sees a complete input and matching metadata. Existing jobs remain unchanged and recovery does
+not promote private stages. This covers application-boundary process death, not power loss, interruption
+inside kernel I/O, safe stage reclamation or uncertain-response retry deduplication.
+
+Once the final upload-directory rename is attempted, a failure is reported as
+`UploadPublicationUncertainException` with the generated job ID. This includes an exception from rename
+itself; it does not assume that an exception proves the destination is absent. The web endpoint returns
+HTTP 409 with a `Location` for inspecting that job. JSON clients receive `upload_publication_uncertain`,
+`job_id`, `job_url`, and `retry_upload: false`; the HTML response offers a Check job link. Underlying I/O
+error text is excluded. Inspect the referenced state before another upload; this is not an exactly-once
+retry protocol, and a missing record after a crash still needs recovery reconciliation.
+`UploadUncertaintyHttpTest` exercises the shared production upload handler over local HTTP with a
+directory-confirmation fault. JSON and HTML both return 409 with the same review location as the complete
+published job, no private I/O diagnostic and no `Retry-After` header. The fixture verifies each submitted
+request creates one job; it does not qualify uncertain-response retry deduplication.
 
 `web --listen-backlog` requests a TCP listen backlog of 64 by default and accepts values from 1 to 4096.
 Invalid values fail before the server binds or opens job storage. The underlying TCP implementation controls
@@ -434,9 +609,11 @@ sandbox evidence is published only after a verified gated launch returns; a fail
 Initial and final workspace digests are computed with a fixed-size streaming buffer. Traversal, hashing, and diffing
 check the execution wall deadline, and initial snapshotting also observes cancellation before any process is launched.
 When prompt cancellation has already been accepted, the final snapshot deliberately finishes under the wall deadline
-so the cancelled result still accounts for changes. `AgentExecutionLimits` has no staged-workspace byte/file-count
-field, so aggregate snapshot size limits and stress coverage remain #71 work; streaming bounds per-file memory, not the
-number of tracked paths or total staged bytes.
+so the cancelled result still accounts for changes. Each snapshot now enforces fixed implementation caps of 8,192
+visited entries, 4,096 unique regular files, 8 MiB per file and 64 MiB total hashed bytes. Oversized snapshots fail with
+RESOURCE_EXHAUSTED and a bounded phase/limit diagnostic; no partial change set is returned. These observation limits
+do not establish aggregate staged-storage/inode quotas, descriptor-bound inventory completeness or concurrent-workflow
+resource accounting. Those broader #63/#71 requirements and stress qualification remain open.
 
 Event consumers are trusted in-process callbacks and must be non-blocking and return promptly. Prompt-update callbacks
 are isolated from lifecycle polling, but post-response message-completion and file-change callbacks run synchronously
@@ -577,9 +754,29 @@ tool-call limit exactly once before terminal content can bind any terminal autho
 
 ## Upgrade policy
 
-The bounded `acp/v1/wire-contract.json` corpus currently freezes 49 SDK-decoded and re-encoded
+### Reproducing the web job recovery matrix
+
+Run `python3 scripts/verify-web-job-recovery.py` from a provisioned checkout with cached Gradle
+dependencies. This offline command selects eleven benign storage/web test classes covering upload and
+metadata publication, directory preparation, controlled JVM exits, ownership/shutdown, retained-file
+inventory and HTTP presentation. It does not select the patch reproduction lane or certify full B-series
+release readiness. Keep unrelated Gradle invocations separate while it runs.
+
+Each invocation creates a unique directory under `build/web-job-recovery-verification/` with workspace
+temporary files, isolated fresh JUnit/HTML reports, Gradle output and a JSON manifest. The manifest records
+the source commit, dirty-worktree flag and tracked-diff digest, exact command, required suites, runtime
+and test-filesystem details, totals and report digests. For reproducible source identity, run a clean
+committed checkout; the diff digest does not capture untracked source contents. JVM option environment
+variables are removed for this scoped run and temporary storage is directed into its evidence directory.
+The runner disables test output reuse and fails on a nonzero build exit, missing/unexpected/duplicate
+suites, empty or malformed reports, failures, errors or skips. An interrupted run without a terminal
+manifest is incomplete evidence. Its own lock prevents concurrent invocations of this runner.
+
+### ACP SDK upgrades
+
+The bounded `acp/v1/wire-contract.json` corpus currently freezes 58 SDK-decoded and re-encoded
 JSON-RPC messages. It includes the production model/mode setters, select and boolean configuration
-setters, flat and grouped session inventories, terminal token usage, session-info and configuration/mode/command/usage updates, and the original
+setters, flat and grouped session inventories, load request/responses, authentication/logout shapes, terminal token usage, session-info and configuration/mode/command/usage updates, and the original
 prompt/filesystem/terminal/permission lifecycle. `AcpV1WireContractGoldenTest` rejects missing or
 unvalidated entries and pins both Maven and SDK-reported versions. A golden update documents wire
 compatibility only; it does not implement advertised authentication, resume, or operator behavior.
@@ -596,3 +793,188 @@ An SDK upgrade is intentional work, not an automated version-range update. A cha
 
 The lifecycle wrapper remains necessary even when SDK internals change: executable selection, OS process ownership,
 stderr retention, resource deadlines, cancellation polling, and process-tree cleanup belong to the host application.
+
+### Operator authentication inventory
+
+Preflight returns an invocation-local `authentication` inventory containing at most 32 advertised
+methods. IDs are exact and bounded to 256 UTF-8 bytes; duplicate or blank IDs fail admission.
+Names/descriptions are bounded before redacted previews are retained. Removable control
+characters are normalized in both preview input and private values before literal and credential-pattern
+matching, so later stripping cannot reconstruct a secret. Raw input/private-value limits still apply
+before normalization.
+Authentication ID/name/description previews also pass a bounded private-fragment filter after
+redaction and truncation. Non-overlapping eight-UTF-16-unit blocks from normalized private values
+are indexed (at most 131,072 entries under the existing 1 MiB allowance). Every contiguous private
+fragment of at least 15 units contains one such block; a matching preview is withheld as an empty
+string. Some shorter matches are conservatively withheld too. Ordinary full-value redaction remains
+in place; arbitrary fragments below this threshold are not claimed to be confidential. The private
+index is local to inventory capture and is never serialized. Full-payload commitments remain unchanged. Truncation preserves UTF-16
+surrogate pairs. Redaction checks its 16,384-unit working-text limit after every replacement, before
+another replacement can expand inserted markers; exceeding it produces an omission marker. A single
+replacement can transiently allocate up to ten times that limit. The complete SDK-serialized
+method array, including retained variant-specific fields and extension metadata, must also fit
+64 KiB of canonical JSON, 16 levels, 4096 nodes, 16 KiB per string and 64 KiB total string bytes.
+Each number token in the SDK-serialized array is limited to 256 characters, including its sign, decimal point and exponent.
+This explicit numeric admission policy also applies to extension metadata and unknown variant payloads.
+Floating-point tokens use `OracleJson` binary64 canonicalization, which rejects non-finite and nonzero
+subnormal results; inventory commitments do not preserve arbitrary-precision decimal representations.
+Excess payloads fail preflight as invalid authentication inventories with normal cleanup. The bound
+applies after the existing transport frame and SDK decoding limits; it is not a raw-input parser limit.
+Unknown variants remain
+Unknown variants remain
+explicitly `unknown`, and every method currently reports `loginSupported=false`: this inventory
+is not an authentication action or grant. The printable doctor descriptor includes the count,
+scoped inventory commitment and logout advertisement/support flags. Default object string representations omit method IDs and previews.
+
+The `sdk-auth-methods-hmac-sha256-v2` commitment covers the ordered, complete SDK-serialized method
+array, including retained extension metadata and variant-specific fields. HMAC-SHA-256 authenticates
+the UTF-8 format name, a zero byte and the bounded canonical JSON array using a private random
+256-bit key generated once per JVM. The key is never persisted or exposed. This replaces the public
+unkeyed digest, which could reveal low-entropy secret values through offline guess checking.
+JSON object key order is normalized; array order remains significant. Ready web inspection returns
+`inventoryCommitment`, `inventoryFormat` and `inventoryScope`; the doctor descriptor carries the same
+information. Compare commitments only within the same format and scope. The random scope ID and
+key change after JVM restart, requiring fresh inspection rather than cross-process digest comparison.
+The public scope ID does not expose the key. Raw variant payloads are not retained in the operator projection.
+The commitment covers SDK-retained fields, not unknown fields discarded by SDK decoding, configured
+identity, credential validity or logout authority. It cannot authorize login by itself. Exact IDs are
+available only to explicit operator API consumers;
+those consumers must not print them without redaction. This result stays outside invocation acceptance
+receipts and session/project archives. Login/logout, interactive surfaces and credential-state handling
+remain tracked by #265/#70, with fresh advertised-method validation required before any future dispatch.
+
+Use `llm_bin_patch doctor --auth-methods` to inspect advertised method previews explicitly.
+The normal doctor report retains inventory count/scoped commitment and logout advertisement/support flags. Inspection prints quoted, redacted
+ID/name/description previews, variant category and the current unsupported-login status; previews
+may be truncated and are not exact selection tokens. This option cannot be combined with
+`--tools-only`; selecting the legacy harness fails without a legacy connectivity probe. No login,
+logout, session or model prompt is initiated. CLI output does not imply authentication readiness.
+
+Invalid authentication advertisements produce `PROTOCOL` with the bounded
+`invalidAuthenticationInventory` reason during preflight. A dedicated inventory-validation failure
+keeps malformed peer data distinct from unrelated configuration/redaction errors. Contained scripted
+preflight cases cover duplicate IDs, method-count overflow, blank IDs and oversized names, with
+verified cleanup and no complete execution evidence or authentication action.
+
+The web dashboard also has an explicit **Inspect authentication methods** button. It starts one
+asynchronous inspection per server via `POST /api/operator/auth-methods` with the operator-action
+header; `GET` on the same path reads idle/inspecting/ready/failed status without launching work.
+Responses contain redacted previews and `loginSupported=false`, never raw method IDs. A concurrent
+start returns 409. The admitted background task participates in the existing handler lifetime so
+server shutdown does not release store ownership while it is still running. Its production harness
+is retained across inspections, preserving unresolved-cleanup refusal. Configuration is selected on
+first use, caching both a selected harness and any configuration-selection failure; restart the server to change that selection, including after correcting an initially invalid configuration. No credentials or inspection status are
+persisted in project records. This does not provide login/logout, durable operator state, or automatic
+cancellation when a browser disconnects; production preflight keeps its existing deadline/cleanup bounds.
+
+Optional Chromium check (with the Playwright dependency described for progress verification):
+
+```sh
+java -cp 'build/libs/*:build/oracle/gcc/kotlin-boot-runtime/*' \
+  scripts/fixtures/AuthenticationDashboardFixture.java build/auth-dashboard.html
+DECOMP_PLAYWRIGHT_MODULE=/absolute/path/to/node_modules/playwright \
+  node scripts/verify-authentication-browser.cjs build/auth-dashboard.html build/auth-browser/new-run
+```
+
+The fixture renders the production dashboard and writes its exact `APP_CSS` to the adjacent
+`<dashboard.html>.css` file. The verifier serves that stylesheet, checks it loads and affects layout,
+and records both HTML and CSS hashes. It mocks status responses. It checks explicit-only
+inspection, preview rendering/escaping, failure, retry and empty inventory; trace/screenshot/result
+files use a fresh evidence directory. It does not establish independent-agent authentication.
+
+**Cancel inspection** posts an explicit cancellation request to
+`/api/operator/auth-methods/cancel`. Status and admission responses include an
+application-generated `inspectionId`; cancellation must include that exact value in
+`X-Decomp-Inspection-Id`. Missing identity during an active inspection returns 400,
+and an old identity returns 409 without changing the current cancellation signal.
+Identity matching, setting the signal, terminal publication and new admission share
+one lock. The browser captures the ID for each cancellation request and only enables
+cancellation after learning it from admission or a status response. A request acknowledgement is not a terminal cleanup result:
+the view continues polling until inspection finishes. HTTP, network, or malformed status-response
+failures display a retry notice and keep cancellation available once an inspection ID is known,
+without enabling a new inspection. If admission omitted the ID, cancellation remains disabled
+until a successful status response supplies it.
+A 409 start response attaches the page to the existing inspection. Late acknowledgements cannot overwrite
+a terminal result or a later inspection. The server's cancellation token reaches the preflight
+scheduler, launch and initialize waits. Shutdown requests cancellation and waits for the tracked
+inspection thread to finish, using the provider's own cleanup deadlines without a shorter web timeout.
+An interrupted shutdown caller continues waiting and has its interrupt flag restored afterward.
+Launch and shutdown share an admission lock, and admitted-task ownership remains held until completion.
+An injected inspector must return after its own cleanup; a stuck inspector can delay graceful shutdown.
+Forced JVM termination still cannot establish cleanup. The preflight overload preserves a cancelled invocation's
+receipt in `AcpPreflightCancelledException`; cleanup failures retain their original failed outcome.
+Only that terminal cancellation is rendered as `cancelled`. Login/logout cancellation and durable
+operator authentication state are still separate unsupported work.
+
+The pinned v1 wire corpus now also freezes the agent-managed authentication advertisement,
+`authenticate` request/empty response and `logout` request/empty response. Logout advertisement
+is the distinct `agentCapabilities.auth.logout` field; the baseline fixture omits it and advertises
+no auth methods. Method selection carries the exact advertised `methodId`. These are serializer
+and JSON-RPC envelope checks against SDK 0.30.1, not enabled login/logout behavior, external identity
+verification, permission to send an unadvertised method, or draft-v2 compatibility. The operator
+implementation still reports login unsupported until its lifecycle and authority requirements pass.
+
+The auth golden includes the SDK-emitted `type: "agent"` discriminator. The SDK accepts its absence
+as the agent-managed variant, but encoding normalizes it to the explicit discriminator; the fixture
+freezes the emitted shape instead of treating omitted input defaults as byte-preserving round trips.
+
+Preflight separately preserves presence of `agentCapabilities.auth.logout` as `logoutAdvertised`.
+It always reports `logoutSupported=false` until the explicit logout lifecycle is implemented and
+qualified. An empty method list does not imply absent logout advertisement. The ready web inspection
+response exposes both flags; the stable doctor descriptor names both explicitly. The existing method
+digest deliberately excludes this capability and must not be used to authorize logout. This capture
+retains no logout extension payload and sends no logout RPC.
+
+The additional `initialize-auth-variants.response` fixture freezes SDK v1 advertisements for
+`env_var`, `terminal` and an unknown type. Typed checks retain environment variable names/flags and
+setup links, terminal arguments/environment, and unknown raw extension data. All three project
+inventory variants remain `loginSupported=false`. A contained scripted preflight inspects those
+advertisements and completes cleanup without accepting any post-initialize request. This qualifies
+advertisement decoding and inspection only; it does not qualify credential handoff, terminal login,
+link handling, an authenticate exchange for those variants, or an independent external agent.
+
+Initial model/mode ID rejection and initial configuration option/value rejection now include the
+exact session-creation advertisement's bounded choice previews. The same formatter serves current
+configuration-inventory mismatches: at most four JSON-quoted IDs/values, with a fifth-entry lookahead
+for an omission marker, configured-environment redaction, and 48-character prefixes plus truncation
+markers. All configured model/mode IDs, option IDs and select values are redacted across every preview,
+including when an earlier preference fails. Whitespace-only preference IDs remain in the private
+set. After JSON quoting and omission formatting, the formatter checks the complete preview again;
+if a replacement marker or formatting recreates any private ID, it withholds the entire hint as
+an empty string. A fixed replacement cannot be safe for arbitrary configured identifiers. This
+does not change exact-match selection or typed rejection outcomes. Their separate allowance of at most 130 identifiers of
+256 characters leaves the existing 4096-value/1 MiB environment redaction budget intact. These are display hints, not exact selection tokens or additional setter authority. Capability
+absence and type/ambiguity rejection keep their existing typed outcomes. No setter or prompt is sent
+when the requested preference fails the initial advertisement check.
+
+A stop request publishes startup cancellation before waiting for the server lifecycle lock. Recovery
+checks it before inspection, between entries, after inspection and before each status update; an
+interrupted recovery thread is also cancelled without clearing its interrupt flag. Cancellation before
+publication reports that recovery statuses were unchanged. Cancellation after publication begins
+reports that some statuses may have changed, and a later explicit startup can reconcile remaining
+pending jobs. Request admission also checks the cancellation flag, covering a stop request racing the
+last startup check. These cooperative checks do not interrupt a filesystem operation already blocked
+inside the kernel, and ownership remains held until startup/cleanup returns.
+
+The early stop signal is shared by startup recovery, HTTP admission, background submission, queued
+callback claims and successful-completion publication. A callback delivered after observing the stop
+signal is discarded with the existing never-started outcome; an active operation returning after that
+signal is recorded as failed rather than complete. The signal also requests authentication-inspection
+cancellation before cleanup waits on the lifecycle lock. Signalling alone does not release ownership
+or prove resource cleanup; `stop` still closes the listener and waits for the existing lifetime rules.
+
+Job metadata decoding now enforces the writer's depth/node/string limits and supported top-level/ELF
+field sets. Text must be JSON strings, numeric fields must be JSON integers, input size must fit
+0–32 MiB, and unsigned ELF version/header/count fields must fit their declared widths. Unknown fields
+are rejected rather than silently dropped by a recovery rewrite. Older records may still omit
+`updated_at` or omit/null `status_message`. The existing signed-Long wire representation of the unsigned
+ELF entry point is preserved. Invalid records remain retained and cause startup inspection to fail
+before recovery status publication; this validates metadata structure, not the uploaded file's identity.
+
+Dashboard listing uses the same read-only scanner as startup recovery: at most 4,096 encountered
+store entries and 64 MiB of metadata, with 256 KiB per record and strict schema validation. A complete
+scan is required before returning sorted jobs. Unreadable records and exhausted budgets produce an
+explicit HTTP 503 “Job listing unavailable” page with fixed diagnostics; they no longer silently remove
+jobs from a successful listing. Listing never rewrites or removes records. After records are repaired
+or the store fits the limits, a later request can succeed. These limits do not provide pagination,
+aggregate storage admission or an atomic snapshot against noncooperating writers.

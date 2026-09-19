@@ -167,19 +167,25 @@ class AcpAgentHarness(
      * Launches the production-contained agent, negotiates stable ACP v1, and tears it down without
      * creating a session or sending a model prompt.
      */
-    fun preflight(workflow: AcpPreflightWorkflow = AcpPreflightWorkflow.ALL): AcpAgentPreflightResult {
+    fun preflight(workflow: AcpPreflightWorkflow = AcpPreflightWorkflow.ALL): AcpAgentPreflightResult =
+        preflight(workflow, AgentCancellation.NONE)
+
+    fun preflight(workflow: AcpPreflightWorkflow, cancellation: AgentCancellation): AcpAgentPreflightResult {
         val requiredCapabilities = configuration.requiredAgentCapabilities + workflow.requiredAgentCapabilities
+        val authentication = AtomicReference<AcpAuthenticationInventory?>()
         val receipt = executeInternalReceipt(
-            request = preflightRequest(),
+            request = preflightRequest(cancellation),
             onEvent = {},
             capturedFilesystem = null,
             preflightWorkflow = workflow,
+            authenticationInventory = authentication,
         )
-        receipt.requireResult()
+        if (receipt.requireResult().stopReason == AgentStopReason.CANCELLED) throw AcpPreflightCancelledException(receipt)
         val evidence = receipt.providerEvidence as? AcpInvocationEvidenceSnapshot
             ?: error("successful ACP preflight is missing invocation evidence")
         return AcpAgentPreflightResult(
             workflow = workflow,
+            authentication = requireNotNull(authentication.get()) { "successful preflight is missing authentication inventory" },
             negotiatedAgent = requireNotNull(evidence.negotiatedAgent) {
                 "successful ACP preflight is missing initialize evidence"
             },
@@ -243,6 +249,7 @@ class AcpAgentHarness(
         onEvent: (AgentExecutionEvent) -> Unit,
         capturedFilesystem: AcpCapturedRepairFilesystem?,
         preflightWorkflow: AcpPreflightWorkflow?,
+        authenticationInventory: AtomicReference<AcpAuthenticationInventory?>? = null,
     ): AgentExecutionReceipt {
         val wallDeadline = MonotonicDeadline(request.limits.wallClockTimeout)
         val binding = AgentExecutionRequestBinding.capture(request)
@@ -287,6 +294,7 @@ class AcpAgentHarness(
                     evidenceState,
                     wallDeadline,
                     sessionJournal,
+                    authenticationInventory,
                 ),
             )
         } catch (_: WorkspaceSnapshotCancelled) {
@@ -360,6 +368,7 @@ class AcpAgentHarness(
         evidenceState: AcpInvocationEvidenceState,
         wallDeadline: MonotonicDeadline,
         sessionJournal: AgentSessionJournal?,
+        authenticationInventory: AtomicReference<AcpAuthenticationInventory?>?,
     ): AgentExecutionResult {
         unresolvedCleanupFailure.get()?.let { throw it }
         if (preflightWorkflow != null) {
@@ -388,6 +397,10 @@ class AcpAgentHarness(
                 )
             } catch (_: WorkspaceSnapshotTimedOut) {
                 throw workspaceSnapshotTimeout("initial", null)
+            } catch (limit: WorkspaceSnapshotLimitExceeded) {
+                throw workspaceSnapshotLimit("initial", null, limit)
+            } catch (entry: WorkspaceSnapshotInvalidEntry) {
+                throw workspaceSnapshotEntry("initial", null, entry)
             }
         } else {
             null
@@ -499,6 +512,7 @@ class AcpAgentHarness(
                         preflightWorkflow = preflightWorkflow,
                         evidenceState = evidenceState,
                         sessionJournal = sessionJournal,
+                        authenticationInventory = authenticationInventory,
                     )
                 }
             } catch (failure: Throwable) {
@@ -720,7 +734,7 @@ class AcpAgentHarness(
                     honorCancellation = finished.stopReason != AgentStopReason.CANCELLED,
                 )
                 val finalSnapshot = WorkspaceSnapshot.capture(request, finalBudget)
-                requireNotNull(before).diff(finalSnapshot, request, finalBudget)
+                requireNotNull(before).diff(finalSnapshot, request, finalBudget, translator.sessionReference())
             } catch (_: WorkspaceSnapshotCancelled) {
                 throw AgentExecutionException(
                     AgentFailure(
@@ -732,6 +746,10 @@ class AcpAgentHarness(
                 )
             } catch (_: WorkspaceSnapshotTimedOut) {
                 throw workspaceSnapshotTimeout("final", translator.sessionReference())
+            } catch (limit: WorkspaceSnapshotLimitExceeded) {
+                throw workspaceSnapshotLimit("final", translator.sessionReference(), limit)
+            } catch (entry: WorkspaceSnapshotInvalidEntry) {
+                throw workspaceSnapshotEntry("final", translator.sessionReference(), entry)
             }
         }
         changes.forEach { change -> emitter.emit { sequence -> AgentFileChangeEvent(sequence, change) } }
@@ -776,8 +794,9 @@ class AcpAgentHarness(
         return result
     }
 
-    private fun preflightRequest(): AgentExecutionRequest = AgentExecutionRequest(
+    private fun preflightRequest(cancellation: AgentCancellation): AgentExecutionRequest = AgentExecutionRequest(
         objective = "negotiate the configured ACP agent without opening a session",
+        cancellation = cancellation,
         workspaceRoots = listOf(AgentWorkspaceRoot("preflight", ACP_PREFLIGHT_WORKSPACE)),
         accessPolicy = AgentAccessPolicy(emptyList(), emptySet()),
         limits = AgentExecutionLimits(
@@ -810,6 +829,7 @@ class AcpAgentHarness(
         preflightWorkflow: AcpPreflightWorkflow?,
         evidenceState: AcpInvocationEvidenceState,
         sessionJournal: AgentSessionJournal?,
+        authenticationInventory: AtomicReference<AcpAuthenticationInventory?>?,
     ): PromptOutcome {
         val protocolScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         protocolScopeReference.set(protocolScope)
@@ -854,6 +874,7 @@ class AcpAgentHarness(
                     wallDeadline = wallDeadline,
                     cancellation = request.cancellation,
                     protocolScope = protocolScope,
+                    authenticationInventory = authenticationInventory,
                 ),
             )
             evidenceState.reach(AcpExecutionLifecyclePhase.INITIALIZED)
@@ -1067,7 +1088,7 @@ class AcpAgentHarness(
         }
         preferences.configOptions.forEachIndexed { index, preference ->
             requireCurrentSessionConfigPreference(session.configOptions.value, preference, index,
-                configuration.environment.values.map { it.value })
+                configuration.environment.values.map { it.value }, preferences.privateIdentifiers())
             val wireValue = when (val configured = preference.value) {
                 is AcpSessionConfigValue.Select -> SessionConfigOptionValue.StringValue(configured.valueId)
                 is AcpSessionConfigValue.BooleanValue -> SessionConfigOptionValue.BoolValue(configured.value)
@@ -1207,7 +1228,7 @@ class AcpAgentHarness(
         preferences.configOptions.forEachIndexed { index, configured ->
             val matches = advertisedOptions.filter { it.id == configured.id }
             when (matches.size) {
-                0 -> rejectSessionPreference("configOption", index, "idNotAdvertised")
+                0 -> rejectSessionPreference("configOption", index, "idNotAdvertised", advertisedOptions.asSequence().map { it.id })
                 1 -> Unit
                 else -> throw AcpProtocolFailure(
                     "ACP session/new ambiguously advertised a configured config option",
@@ -1220,7 +1241,7 @@ class AcpAgentHarness(
                         rejectSessionPreference("configOption", index, "typeNotAdvertised")
                     }
                     when (advertised.selectValueIds.count { it == value.valueId }) {
-                        0 -> rejectSessionPreference("configOption", index, "valueNotAdvertised")
+                        0 -> rejectSessionPreference("configOption", index, "valueNotAdvertised", advertised.selectValueIds.asSequence())
                         1 -> Unit
                         else -> throw AcpProtocolFailure(
                             "ACP session/new ambiguously advertised a configured select value",
@@ -1243,17 +1264,28 @@ class AcpAgentHarness(
     ) {
         val values = advertised ?: rejectSessionPreference(kind, null, "capabilityAbsent")
         when (values.count { it == configured }) {
-            0 -> rejectSessionPreference(kind, null, "idNotAdvertised")
+            0 -> rejectSessionPreference(kind, null, "idNotAdvertised", values.asSequence())
             1 -> Unit
             else -> throw AcpProtocolFailure("ACP session/new ambiguously advertised a configured $kind")
         }
     }
 
-    private fun rejectSessionPreference(kind: String, index: Int?, reason: String): Nothing {
+    private fun rejectSessionPreference(
+        kind: String, index: Int?, reason: String, choices: Sequence<String>? = null,
+    ): Nothing {
+        val message = "ACP configured session preference was not advertised by the exact session/new response"
+        val preview = choices?.let {
+            val values = configuration.environment.values.map { value -> value.value }
+            val suffix = " Advertised choice previews: " + previewSessionChoices(it, values,
+                configuration.sessionPreferences.privateIdentifiers())
+            // The fixed label is appended after the helper's own collision scan; recheck the complete diagnostic.
+            val sensitive = values + configuration.sessionPreferences.privateIdentifiers()
+            if (sensitive.any { value -> value.isNotEmpty() && (message + suffix).contains(value) }) "" else suffix
+        }.orEmpty()
         throw AgentExecutionException(
             AgentFailure(
                 AgentFailureKind.CONFIGURATION,
-                "ACP configured session preference was not advertised by the exact session/new response",
+                "ACP configured session preference was not advertised by the exact session/new response" + preview,
                 details = buildMap {
                     put("preference", kind)
                     index?.let { put("preferenceIndex", it.toString()) }
@@ -1272,6 +1304,7 @@ class AcpAgentHarness(
         wallDeadline: MonotonicDeadline,
         cancellation: AgentCancellation,
         protocolScope: CoroutineScope,
+        authenticationInventory: AtomicReference<AcpAuthenticationInventory?>? = null,
     ): AcpNegotiatedAgentEvidence {
         val agentInfo = awaitPhase(
             phase = "initialize",
@@ -1297,6 +1330,23 @@ class AcpAgentHarness(
             throw AcpProtocolFailure(
                 "ACP SDK accepted unexpected protocol version ${agentInfo.protocolVersion}",
             )
+        }
+        authenticationInventory?.let { inventory ->
+            try {
+                inventory.set(AcpAuthenticationInventory.capture(
+                    agentInfo.authMethods, configuration.environment.values.map { it.value },
+                    logoutAdvertised = agentInfo.capabilities.auth.logout != null,
+                ))
+            } catch (failure: Exception) {
+                when (failure) {
+                    is AcpProtocolFailure, is AcpAuthenticationInventoryFailure -> throw AgentExecutionException(AgentFailure(
+                        AgentFailureKind.PROTOCOL,
+                        "ACP agent advertised an invalid authentication inventory",
+                        details = mapOf("reason" to "invalidAuthenticationInventory"),
+                    ))
+                    else -> throw failure
+                }
+            }
         }
         validateCapabilities(agentInfo.capabilities, requiredCapabilities)
         val agentImplementation = agentInfo.implementation
@@ -1491,6 +1541,28 @@ class AcpAgentHarness(
             }
         }
     }
+
+    private fun workspaceSnapshotEntry(
+        phase: String,
+        session: AgentSessionReference?,
+        entry: WorkspaceSnapshotInvalidEntry,
+    ) = AgentExecutionException(AgentFailure(
+        AgentFailureKind.WORKSPACE_VIOLATION,
+        "ACP $phase workspace snapshot encountered an unsupported or unavailable entry; changes are indeterminate",
+        session = session,
+        details = mapOf("phase" to "$phase-workspace-snapshot", "reason" to entry.reason),
+    ))
+
+    private fun workspaceSnapshotLimit(
+        phase: String,
+        session: AgentSessionReference?,
+        limit: WorkspaceSnapshotLimitExceeded,
+    ) = AgentExecutionException(AgentFailure(
+        AgentFailureKind.RESOURCE_EXHAUSTED,
+        "ACP $phase workspace snapshot exceeded its ${limit.dimension} limit; changes are indeterminate",
+        session = session,
+        details = mapOf("phase" to "$phase-workspace-snapshot", "limit" to limit.dimension),
+    ))
 
     private fun workspaceSnapshotTimeout(
         phase: String,
@@ -2836,13 +2908,56 @@ private class PolicyClientOperations(
     }
 }
 
-private data class FileState(val sha256: String, val size: Long)
+private data class FileMetadata(val mode: Int, val uid: Int, val gid: Int, val linkCount: Int)
+private data class FileState(val sha256: String, val size: Long, val metadata: FileMetadata)
 
-private class WorkspaceSnapshotBudget(
+internal data class WorkspaceSnapshotLimits(
+    val entries: Int = 8192,
+    val files: Int = 4096,
+    val fileBytes: Long = 8L * 1024 * 1024,
+    val totalBytes: Long = 64L * 1024 * 1024,
+) {
+    init {
+        require(entries in 1..8192 && files in 1..4096)
+        require(fileBytes in 1..8L * 1024 * 1024 && totalBytes in 1..64L * 1024 * 1024)
+    }
+}
+
+internal class WorkspaceSnapshotLimitExceeded(val dimension: String) : RuntimeException()
+internal class WorkspaceSnapshotInvalidEntry(val reason: String) : RuntimeException()
+
+internal class WorkspaceSnapshotBudget(
     private val cancellation: AgentCancellation,
     private val wallDeadline: MonotonicDeadline,
     private val honorCancellation: Boolean,
+    private val limits: WorkspaceSnapshotLimits = WorkspaceSnapshotLimits(),
 ) {
+    private var entries = 0
+    private var files = 0
+    private var bytes = 0L
+
+    fun entry() {
+        checkpoint()
+        if (entries == limits.entries) throw WorkspaceSnapshotLimitExceeded("entry-count")
+        entries++
+    }
+
+    fun file() {
+        if (files == limits.files) throw WorkspaceSnapshotLimitExceeded("file-count")
+        files++
+    }
+
+    fun declaredSize(size: Long) {
+        if (size < 0 || size > limits.fileBytes) throw WorkspaceSnapshotLimitExceeded("file-bytes")
+        if (size > limits.totalBytes - bytes) throw WorkspaceSnapshotLimitExceeded("total-bytes")
+    }
+
+    fun readBytes(count: Int, fileSize: Long) {
+        if (fileSize > limits.fileBytes) throw WorkspaceSnapshotLimitExceeded("file-bytes")
+        if (count > limits.totalBytes - bytes) throw WorkspaceSnapshotLimitExceeded("total-bytes")
+        bytes += count
+    }
+
     fun checkpoint() {
         if (honorCancellation && cancellation.isCancellationRequested()) throw WorkspaceSnapshotCancelled()
         if (wallDeadline.hasExpired()) throw WorkspaceSnapshotTimedOut()
@@ -2852,13 +2967,14 @@ private class WorkspaceSnapshotBudget(
 private class WorkspaceSnapshotCancelled : RuntimeException()
 private class WorkspaceSnapshotTimedOut : RuntimeException()
 
-private class WorkspaceSnapshot private constructor(
+internal class WorkspaceSnapshot private constructor(
     private val files: Map<AgentWorkspacePath, FileState>,
 ) {
     fun diff(
         after: WorkspaceSnapshot,
         request: AgentExecutionRequest,
         budget: WorkspaceSnapshotBudget,
+        session: AgentSessionReference? = null,
     ): List<AgentFileChange> {
         return (files.keys + after.files.keys)
             .distinct()
@@ -2867,6 +2983,14 @@ private class WorkspaceSnapshot private constructor(
                 budget.checkpoint()
                 val beforeState = files[path]
                 val afterState = after.files[path]
+                if (beforeState != null && afterState != null && beforeState.metadata != afterState.metadata) {
+                    throw AgentExecutionException(AgentFailure(
+                        AgentFailureKind.WORKSPACE_VIOLATION,
+                        "ACP workspace file metadata changed without metadata authority; changes are indeterminate",
+                        session = session,
+                        details = mapOf("phase" to "final-workspace-snapshot", "reason" to "file-metadata-changed"),
+                    ))
+                }
                 if (beforeState == afterState) return@mapNotNull null
                 val kind = when {
                     beforeState == null -> AgentFileChangeKind.CREATED
@@ -2883,7 +3007,8 @@ private class WorkspaceSnapshot private constructor(
                         AgentFailure(
                             AgentFailureKind.WORKSPACE_VIOLATION,
                             "ACP agent changed a path without $operation authority: ${path.rootId}:${path.relativePath}",
-                            details = mapOf("rootId" to path.rootId, "relativePath" to path.relativePath),
+                            session = session,
+                            details = mapOf("phase" to "final-workspace-snapshot", "rootId" to path.rootId, "relativePath" to path.relativePath),
                         ),
                     )
                 }
@@ -2899,51 +3024,100 @@ private class WorkspaceSnapshot private constructor(
 
     companion object {
         fun capture(request: AgentExecutionRequest, budget: WorkspaceSnapshotBudget): WorkspaceSnapshot {
-            val tracked = LinkedHashSet<Pair<String, Path>>()
-            request.accessPolicy.pathRules.forEach { rule ->
+            val states = LinkedHashMap<AgentWorkspacePath, FileState>()
+            val roots = LinkedHashMap<String, LinuxDescriptor>()
+            fun visit(rootId: String, parent: LinuxDescriptor, name: String, relative: String,
+                      recursive: Boolean, missingAllowed: Boolean, depth: Int) {
                 budget.checkpoint()
-                val root = request.workspaceRoots.single { it.id == rule.path.rootId }
-                val target = rule.path.resolve(request.workspaceRoots)
-                if (rule.recursive && target.isDirectory(LinkOption.NOFOLLOW_LINKS)) {
-                    Files.walk(target).use { paths ->
-                        val iterator = paths.iterator()
-                        while (true) {
-                            budget.checkpoint()
-                            if (!iterator.hasNext()) break
-                            val candidate = iterator.next()
-                            if (candidate.isRegularFile(LinkOption.NOFOLLOW_LINKS)) tracked += root.id to candidate
+                if (depth > 64) throw WorkspaceSnapshotLimitExceeded("directory-depth")
+                val entry = LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, name)
+                if (entry == null) {
+                    if (missingAllowed) return
+                    throw WorkspaceSnapshotInvalidEntry("entry-disappeared")
+                }
+                entry.use {
+                    val identity = entry.identity
+                    if (identity.isSymbolicLink) throw WorkspaceSnapshotInvalidEntry("symbolic-link")
+                    if (identity.isRegularFile) {
+                        val path = AgentWorkspacePath(rootId, relative)
+                        if (path !in states) {
+                            budget.file()
+                            val anchor = Path.of("/proc/self/fd/${roots.getValue(rootId).fd}")
+                            states[path] = hashFile(anchor, relative, budget, identity)
                         }
-                    }
-                } else if (target.isRegularFile(LinkOption.NOFOLLOW_LINKS)) {
-                    tracked += root.id to target
+                    } else if (identity.isDirectory) {
+                        if (recursive) LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, name).use { directory ->
+                            if (directory.identity != identity) throw WorkspaceSnapshotInvalidEntry("directory-binding-changed")
+                            val names = LinuxFilesystemSyscalls.directoryEntryNames(directory, 8192, budget::entry)
+                            names.forEach { child -> visit(rootId, directory, child, "$relative/$child", true, false, depth + 1) }
+                        }
+                    } else throw WorkspaceSnapshotInvalidEntry("special-file")
                 }
             }
-            val states = LinkedHashMap<AgentWorkspacePath, FileState>()
-            tracked.forEach { (rootId, absolute) ->
-                budget.checkpoint()
-                val root = request.workspaceRoots.single { it.id == rootId }
-                val relative = root.path.relativize(absolute).toString().replace(absolute.fileSystem.separator, "/")
-                val path = AgentWorkspacePath(rootId, relative)
-                states[path] = hashFile(absolute, budget)
+            try {
+                request.accessPolicy.pathRules.forEach { rule ->
+                    budget.entry()
+                    val root = request.workspaceRoots.single { it.id == rule.path.rootId }
+                    val pinnedRoot = roots[root.id] ?: run {
+                        if (roots.size == 64) throw WorkspaceSnapshotLimitExceeded("root-count")
+                        if (root.path.fileSystem != java.nio.file.FileSystems.getDefault()) {
+                            throw WorkspaceSnapshotInvalidEntry("unsupported-filesystem")
+                        }
+                        LinuxFilesystemSyscalls.requireSupported(root.path)
+                        LinuxFilesystemSyscalls.openRoot(root.path).also { roots[root.id] = it }
+                    }
+                    val parts = rule.path.relativePath.split('/')
+                    if (parts.size > 64) throw WorkspaceSnapshotLimitExceeded("directory-depth")
+                    val parents = mutableListOf<LinuxDescriptor>()
+                    try {
+                        var parent = pinnedRoot
+                        for (segment in parts.dropLast(1)) {
+                            budget.entry()
+                            val entry = LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, segment) ?: return@forEach
+                            entry.use {
+                                if (entry.identity.isSymbolicLink) throw WorkspaceSnapshotInvalidEntry("symbolic-link")
+                                if (!entry.identity.isDirectory) throw WorkspaceSnapshotInvalidEntry("parent-not-directory")
+                                parent = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, segment).also { parents += it }
+                                if (parent.identity != entry.identity) throw WorkspaceSnapshotInvalidEntry("directory-binding-changed")
+                            }
+                        }
+                        visit(root.id, parent, parts.last(), rule.path.relativePath, rule.recursive, true, parts.size)
+                    } finally {
+                        parents.asReversed().forEach { it.close() }
+                    }
+                }
+                roots.forEach { (id, pinned) ->
+                    budget.checkpoint()
+                    val root = request.workspaceRoots.single { it.id == id }
+                    LinuxFilesystemSyscalls.openRoot(root.path).use { current ->
+                        if (current.identity != pinned.identity) throw WorkspaceSnapshotInvalidEntry("root-binding-changed")
+                    }
+                }
+                return WorkspaceSnapshot(states)
+            } catch (_: IOException) {
+                throw WorkspaceSnapshotInvalidEntry("entry-unavailable")
+            } finally {
+                roots.values.toList().asReversed().forEach { it.close() }
             }
-            return WorkspaceSnapshot(states)
         }
 
-        private fun hashFile(path: Path, budget: WorkspaceSnapshotBudget): FileState {
-            val digest = MessageDigest.getInstance("SHA-256")
-            val buffer = ByteArray(WORKSPACE_HASH_BUFFER_BYTES)
-            var size = 0L
-            Files.newInputStream(path).use { input ->
-                while (true) {
-                    budget.checkpoint()
-                    val count = input.read(buffer)
-                    if (count < 0) break
-                    digest.update(buffer, 0, count)
-                    size += count
-                }
+        private fun hashFile(root: Path, relative: String, budget: WorkspaceSnapshotBudget, expected: LinuxFileIdentity): FileState {
+            val result = try {
+                decompengine.repair.hashStableRegularFile(root, relative,
+                    budget::declaredSize, budget::readBytes, budget::checkpoint,
+                    validateMetadata = { descriptor ->
+                        if (LinuxFilesystemSyscalls.extendedAttributeNames(descriptor, budget::checkpoint).isNotEmpty()) {
+                            throw WorkspaceSnapshotInvalidEntry("unsupported-extended-attributes")
+                        }
+                    })
+            } catch (_: IOException) {
+                throw WorkspaceSnapshotInvalidEntry("file-binding-unavailable")
+            } catch (_: IllegalArgumentException) {
+                throw WorkspaceSnapshotInvalidEntry("file-binding-changed")
             }
-            budget.checkpoint()
-            return FileState(digest.digest().toHex(), size)
+            if (result.identity != expected) throw WorkspaceSnapshotInvalidEntry("file-binding-changed")
+            return FileState(result.sha256, result.size, FileMetadata(
+                result.identity.mode, result.identity.uid, result.identity.gid, result.identity.linkCount))
         }
     }
 }
@@ -3236,7 +3410,7 @@ private fun Throwable.containsCleanupProofFailure(): Boolean {
     return false
 }
 
-private class MonotonicDeadline(timeout: Duration) {
+internal class MonotonicDeadline(timeout: Duration) {
     private val startedAt = System.nanoTime()
     private val timeoutNanos = try {
         timeout.toNanos()
@@ -3261,7 +3435,6 @@ private const val NANOS_PER_MILLI = 1_000_000L
 private const val MAX_PROTOCOL_DIAGNOSTIC_CHARS = 256
 private const val SESSION_NEW_METHOD = "session/new"
 private val ACP_PREFLIGHT_WORKSPACE: Path = Path.of("/decomp-acp-preflight/workspace")
-private const val WORKSPACE_HASH_BUFFER_BYTES = 64 * 1024
 private const val SUMMARY_CHARACTER_LIMIT = 64 * 1024
 // Pinned acp-jvm 0.30.1 Client handlers whose request model carries AcpWithSessionId. Elicitation
 // create/complete and protocol cancellation are intentionally absent because they are global.
