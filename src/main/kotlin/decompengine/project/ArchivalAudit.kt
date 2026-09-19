@@ -114,6 +114,7 @@ data class ArchivalAudit(
     val recoveryAssessment: JsonObject? = null,
     val moduleCompilationEvidence: Map<String, JsonObject> = emptyMap(),
     val archivePublication: ArchivePublicationEvidence? = null,
+    internal val behaviorReportSha256: Map<String, String> = emptyMap(),
 ) {
     val provenanceComplete: Boolean get() = missingModelProvenance.isEmpty() && missingSourceProvenance.isEmpty()
     val universalEquivalenceClaim: Boolean = false
@@ -444,6 +445,7 @@ object ArchivalProjectAuditor {
             observedPortableCorpusSha256 = observedCorpora.toList(),
             recoveryAssessment = model.unassessedRecoveryAssessment(sha256(modelText.toByteArray(Charsets.UTF_8))),
             archivePublication = publicationEvidence,
+            behaviorReportSha256 = behaviorHashes.toMap(),
         )
         require(readStableRegularFile(projectDir, "source_tree_manifest.json", maximumFileBytes).sha256 == manifestSnapshot.sha256) {
             "audit manifest changed during verification"

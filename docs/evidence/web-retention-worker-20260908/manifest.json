@@ -1,0 +1,38 @@
+{
+  "status": "passed",
+  "sourceCommit": "5e381a2cddfd570fa2e5eab7fcb5493279734afa",
+  "command": "./gradlew -PfrontendNodeHome=/home/june/decomp_thing/build/tools/decomp-node-24.20.0/node-v24.20.0-linux-x64 test --tests 'decompengine.web.*' --tests 'decompengine.jobs.AgentProgressJournal*Test' --tests 'decompengine.jobs.WorkflowAttemptStoreTest'",
+  "verification": {
+    "tests": 276,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "retainedXml": {
+    "file": "TEST-decompengine.web.WebProgressRetentionWorkerTest.xml",
+    "tests": 3,
+    "sha256": "1cefe501f9d9862fd7fa85840a0a743e8007ae0b53578cdb1b87e6de03de84a4"
+  },
+  "periodicFixtureJobs": 20,
+  "maximumUnitsPerCallback": 32,
+  "defaultEnabled": false,
+  "productionServerOptedIn": false,
+  "workflowExecutionStarted": false,
+  "coverage": [
+    "Callback remains non-idle until actual exit after stop",
+    "Periodic eligible expiry across multiple batches",
+    "Durable pin preservation and later unpin eligibility",
+    "Malformed journal isolated without stopping later work",
+    "Missing-root initialization does not create or acquire storage",
+    "Service closes and ownership can be reacquired"
+  ],
+  "notRepeated": [
+    "frontend tests",
+    "package build",
+    "packaged browser qualification"
+  ],
+  "limitations": [
+    "Default activation, pin commands/audit/UI and maintenance reporting remain unfinished.",
+    "Expiry follows a bounded incremental scan after the deadline; no exact wall-clock expiry guarantee is claimed."
+  ]
+}
