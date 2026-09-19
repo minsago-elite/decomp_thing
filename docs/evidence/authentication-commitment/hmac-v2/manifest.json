@@ -1,0 +1,47 @@
+{
+  "baseCommit": "b59a9630496ba034dae5f0f60ca98b2cf1d241ef",
+  "worktreeDirty": true,
+  "trackedDiffSha256": "6d11e967c4ca8106c5f51bdc24f6b440a75d05dec08083d521ed15ec94c3caf7",
+  "testedFilesSha256": {
+    "docs/acp-v1-client.md": "3f54f84d76f84915e4a52d0fc19755b15b970b726cb6efbcc557df421c2c247d",
+    "src/main/kotlin/decompengine/acp/AcpAgentPreflight.kt": "c43308e2d9e072ffb2a5351f2f0338747b0e174fa5d976fec79026b18560ea4f",
+    "src/main/kotlin/decompengine/acp/AcpAuthenticationInventory.kt": "1ddb79cd83ebf707a5c6c41a119bece4526700458966cdab18a0892afb0b830c",
+    "src/main/kotlin/decompengine/web/UploadServer.kt": "9c86ff90fe02cf5bdb6dfee1e01adbaa79fdb51c4af2aa13dd74b04c05d827be",
+    "src/test/kotlin/decompengine/acp/AcpAuthenticationInventoryTest.kt": "05d2ecf64e62122464850be677b138695597d24c5419f0c8afd1809dc33c0aaf",
+    "src/test/kotlin/decompengine/acp/AcpDoctorPreflightTest.kt": "267a0c620d72cc174562a4c133b5ac76e541e925717e54e2a31fe52794682e3d",
+    "src/test/kotlin/decompengine/web/WebAuthenticationInspectionTest.kt": "7d3b960e420c9ababe43e66a5ea8dea91dcc521b11ae8302660861ea35e22e1a"
+  },
+  "scope": "Scoped authentication HMAC, initialize-only contained preflight, web inspection and terminal preview regression",
+  "requiredLiveContract": true,
+  "gradleOffline": true,
+  "suites": {
+    "decompengine.acp.AcpAuthenticationInventoryTest": {
+      "tests": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "50b2e38a9f130ccaa20124375766f6e0be38da7948bbf197ebe1af8adaaa48a1"
+    },
+    "decompengine.acp.AcpDoctorPreflightTest": {
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "2196fe9fec09b34745a048cfcce44a931e0a5da0c03c62c9510c7071cfb0b45c"
+    },
+    "decompengine.web.WebAuthenticationInspectionTest": {
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "9064e3260c4856ca2a2b3b9bd1474965987821d6e4de719f1a892c22ba16a32f"
+    },
+    "decompengine.doctor.DoctorTest": {
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "b97633cee484e5c689283182152aa3e338e74c07b7a0d32a8cc020b308f77b9c"
+    }
+  }
+}
