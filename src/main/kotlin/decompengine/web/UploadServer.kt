@@ -163,6 +163,8 @@ internal fun renderWebReconstructionHarnessSelection(strategy: WebReconstruction
 private const val WEB_RECONSTRUCTION_MODE_ENVIRONMENT = "WEB_RECONSTRUCTION_MODE"
 private const val WEB_RECONSTRUCTION_HARNESS_REPORT = "reconstruction_harness_selection.json"
 
+enum class WebUiMode { LEGACY, SPA }
+
 class UploadServer(
     host: String,
     port: Int,
@@ -172,8 +174,25 @@ class UploadServer(
     executor: Executor? = null,
     sourceProfiles: List<ReconstructionProfile> = ReconstructionProfiles.builtIn,
     sensitiveValues: Collection<String> = System.getenv().values,
+    uiMode: WebUiMode = WebUiMode.LEGACY,
+    basePath: String = "/",
+    devFrontendOrigin: String? = null,
     listenBacklog: Int = 64,
 ) {
+    private val spaAssets = when (uiMode) {
+        WebUiMode.SPA -> {
+            require(java.net.InetAddress.getByName(host).isLoopbackAddress) {
+                "the SPA preview currently requires a loopback host"
+            }
+            require(devFrontendOrigin == null || devFrontendOrigin.startsWith("http://") || devFrontendOrigin.startsWith("https://")) { "--dev-frontend-origin must be an absolute HTTP(S) origin" }
+            EmbeddedWebAssets.load(basePath = basePath)
+        }
+        WebUiMode.LEGACY -> {
+            require(basePath == "/") { "--base-path is supported by --ui spa" }
+            require(devFrontendOrigin == null) { "--dev-frontend-origin requires --ui spa" }
+            null
+        }
+    }
     init {
         require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" }
     }
@@ -227,6 +246,10 @@ class UploadServer(
     }
 
     private fun route(exchange: HttpExchange) {
+        spaAssets?.let { assets ->
+            routeSpaPreview(exchange, assets)
+            return
+        }
         val segments = exchange.requestURI.path.split('/').filter(String::isNotBlank)
         try {
             when {
@@ -261,6 +284,40 @@ class UploadServer(
         } catch (exception: Exception) {
             exchange.sendHtml(500, renderErrorPage(500, "Unexpected error", diagnostic(exception, "The operation failed.")))
         }
+    }
+
+    private fun routeSpaPreview(exchange: HttpExchange, assets: EmbeddedWebAssets) {
+        val path = exchange.requestURI.rawPath
+        if (path.startsWith(assets.assetPrefix)) {
+            assets.serveAsset(exchange)
+            return
+        }
+        val base = assets.basePath
+        val canonical = when (path) {
+            base, "${base}runtime" -> path
+            base.removeSuffix("/").ifEmpty { "/" } -> base
+            "${base}runtime/" -> "${base}runtime"
+            else -> null
+        }
+        if (canonical != null) {
+            if (path != canonical && exchange.requestMethod in setOf("GET", "HEAD")) {
+                val query = exchange.requestURI.rawQuery?.let { "?$it" }.orEmpty()
+                exchange.responseHeaders.set("Location", canonical + query)
+                exchange.responseHeaders.set("Cache-Control", "no-store")
+                exchange.sendResponseHeaders(308, -1)
+                exchange.close()
+            } else assets.serveShell(exchange)
+            return
+        }
+        val requestId = java.util.UUID.randomUUID().toString()
+        val body = buildJsonObject {
+            put("apiVersion", 1); put("kind", "error"); put("requestId", requestId)
+            put("error", buildJsonObject {
+                put("code", "NOT_FOUND"); put("message", "The requested route is unavailable."); put("retryable", false)
+            })
+        }
+        exchange.responseHeaders.set("X-Request-ID", requestId)
+        exchange.sendJson(404, Json.encodeToString(JsonElement.serializer(), body))
     }
 
     private fun handlePostJob(exchange: HttpExchange) {
