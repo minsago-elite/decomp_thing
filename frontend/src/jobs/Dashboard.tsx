@@ -1,6 +1,6 @@
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { ApiClientError } from '../api/client';
+import { ApiClientError, withApiFailureReference } from '../api/client';
 import type { Jobs } from '../api/generated';
 import { jobPath } from '../app/paths';
 import { DEFAULT_FILTERS, JOB_STATUSES, JobFilterError, filterSearch, jobFilters } from './query';
@@ -64,16 +64,16 @@ export function Dashboard({ basePath }: { basePath: string }) {
       setPhase('error');
       if (failure instanceof ApiClientError && (failure.status === 401 || failure.status === 403)) {
         firstPage.current = null;
-        setData(null); setError('Access to this job library is unavailable. Check your local session.');
+        setData(null); setError(withApiFailureReference('Access to this job library is unavailable. Check your local session.', failure));
       } else if (failure instanceof ApiClientError && ['JOB_RECORD_UNAVAILABLE', 'LISTING_UNAVAILABLE', 'CORRUPT_WORKFLOW_STATE', 'CORRUPT_LEGACY_JOB', 'INVALID_STORAGE_ENTRY'].includes(failure.serverCode ?? '')) {
-        setError('Stored jobs could not be listed completely. The server has not returned a partial library; inspect job storage before retrying.');
+        setError(withApiFailureReference('Stored jobs could not be listed completely. The server has not returned a partial library; inspect job storage before retrying.', failure));
       } else if (failure instanceof ApiClientError && failure.serverCode === 'LISTING_BUSY') {
-        setError('Another job listing is in progress. Wait a moment, then refresh jobs to retry.');
+        setError(withApiFailureReference('Another job listing is in progress. Wait a moment, then refresh jobs to retry.', failure));
       } else if (failure instanceof ApiClientError && failure.serverCode === 'LISTING_LIMIT') {
-        setError('This library exceeds a listing limit. No partial results were returned. Narrowing filters may help; if the limit persists, the stored library needs attention.');
+        setError(withApiFailureReference('This library exceeds a listing limit. No partial results were returned. Narrowing filters may help; if the limit persists, the stored library needs attention.', failure));
       } else if (failure instanceof ApiClientError && ['CURSOR_EXPIRED', 'INVALID_CURSOR'].includes(failure.serverCode ?? '')) {
-        setError('This page snapshot expired. Refresh jobs to start a new snapshot.');
-      } else setError('Jobs could not be loaded. The server may be unavailable or a stored job may need attention.');
+        setError(withApiFailureReference('This page snapshot expired. Refresh jobs to start a new snapshot.', failure));
+      } else setError(withApiFailureReference('Jobs could not be loaded. The server may be unavailable or a stored job may need attention.', failure));
     });
     return () => { controller.abort(); };
   }, [selection, cursor, refresh, client]);

@@ -80,9 +80,10 @@ it('stops transport without claiming deletion and retains retry context through 
 });
 
 it('keeps server validation beside the control and aborts pending work on unmount', async () => {
-  transport.upload.mockRejectedValueOnce(new ApiClientError('http_error', { serverCode: 'INVALID_ELF', status: 422 }));
+  const requestId = '123e4567-e89b-42d3-a456-426614174000';
+  transport.upload.mockRejectedValueOnce(new ApiClientError('http_error', { serverCode: 'INVALID_ELF', status: 422, requestId }));
   const { view } = await mount(); select(); fireEvent.click(screen.getByRole('button', { name: 'Upload binary' }));
-  expect(await screen.findByText(/The server rejected this file/)).toBeTruthy();
+  expect((await screen.findByText(/The server rejected this file/)).textContent).toContain(`Reference ID: ${requestId}.`);
   transport.upload.mockImplementation(() => new Promise(() => undefined));
   fireEvent.click(screen.getByRole('button', { name: 'Retry this upload' }));
   await waitFor(() => expect(transport.upload).toHaveBeenCalledTimes(2));

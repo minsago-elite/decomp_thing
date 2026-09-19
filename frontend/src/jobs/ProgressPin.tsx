@@ -1,6 +1,6 @@
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { ApiClientError } from '../api/client';
+import { ApiClientError, withApiFailureReference } from '../api/client';
 import type { ProgressPin as Policy } from '../api/generated';
 import type { BrowserSession } from '../session/session';
 import { useBrowserAvailability } from '../session/useBrowserAvailability';
@@ -46,14 +46,14 @@ export function ProgressPin({ jobId, runId, basePath, session }: {
     } catch (failure: unknown) {
       if (controller.signal.aborted) return;
       setPolicy(null);
-      setMessage(failure instanceof ApiClientError && [401, 403].includes(failure.status ?? 0)
+      setMessage(withApiFailureReference(failure instanceof ApiClientError && [401, 403].includes(failure.status ?? 0)
         ? 'Progress retention access was denied. Reconnect the local session.'
         : failure instanceof ApiClientError && failure.status === 412
         ? 'The attempt changed. Read the current policy before choosing another action.'
         : failure instanceof ApiClientError && failure.status === 429
         ? 'Pin request history is at capacity. Read the current policy and try a new action later.'
         : change ? 'The change could not be confirmed. Read the current policy before choosing another action.'
-        : 'The current pin policy could not be verified. Check the local session and server, then read it again.');
+        : 'The current pin policy could not be verified. Check the local session and server, then read it again.', failure));
     } finally {
       if (active.current === controller) { active.current = null; setBusy(false); }
     }

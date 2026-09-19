@@ -1,6 +1,6 @@
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useState } from 'preact/hooks';
-import { ApiClientError } from '../api/client';
+import { ApiClientError, withApiFailureReference } from '../api/client';
 import type { Job as JobData } from '../api/generated';
 import { appPath, jobPath, runPath } from '../app/paths';
 import type { BrowserSession } from '../session/session';
@@ -22,8 +22,8 @@ function JobDetails({ jobId, basePath }: { jobId: string; basePath: string }) {
         setJob(response.data);
       }
     }).catch((failure: unknown) => {
-      if (!controller.signal.aborted) setError(failure instanceof ApiClientError && failure.status === 404
-        ? 'This job is unavailable. It may have been removed.' : 'Job metadata could not be loaded. Check the local session and server.');
+      if (!controller.signal.aborted) setError(withApiFailureReference(failure instanceof ApiClientError && failure.status === 404
+        ? 'This job is unavailable. It may have been removed.' : 'Job metadata could not be loaded. Check the local session and server.', failure));
     }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => { controller.abort(); };
   }, [client, jobId, refresh]);

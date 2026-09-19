@@ -5,7 +5,7 @@ import { ApiClientError } from './errors';
 import type { RequestData, RequestKind, ResponseKind, ResponseOf } from './generated';
 import { MAX_JSON_BYTES } from './json';
 
-export { ApiClientError } from './errors';
+export { ApiClientError, withApiFailureReference } from './errors';
 export interface RequestOptions { signal?: AbortSignal }
 export interface MutationOptions extends RequestOptions {
   csrfToken?: string;

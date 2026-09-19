@@ -1,6 +1,7 @@
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useState } from 'preact/hooks';
 import type { Report } from '../api/generated';
+import { withApiFailureReference } from '../api/errors';
 
 export function ExplorationEvidence({ jobId, runId, basePath }: { jobId: string; runId: string; basePath: string }) {
   const { client } = usePrivateTransport(basePath);
@@ -18,8 +19,8 @@ export function ExplorationEvidence({ jobId, runId, basePath }: { jobId: string;
         setError('The report does not belong to the requested attempt.'); return;
       }
       setReport(value);
-    }).catch(() => {
-      if (!controller.signal.aborted) setError('Exploration evidence could not be read. Check the session and refresh this attempt.');
+    }).catch((failure: unknown) => {
+      if (!controller.signal.aborted) setError(withApiFailureReference('Exploration evidence could not be read. Check the session and refresh this attempt.', failure));
     }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => { controller.abort(); };
   }, [client, jobId, runId, request]);
