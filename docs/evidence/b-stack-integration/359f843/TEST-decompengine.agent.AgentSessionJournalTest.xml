@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.agent.AgentSessionJournalTest" tests="13" skipped="0" failures="0" errors="0" timestamp="2026-09-05T17:19:05.643Z" hostname="whatsername" time="0.51">
+  <properties/>
+  <testcase name="different configured agent and capabilities cannot reuse a recorded session()" classname="decompengine.agent.AgentSessionJournalTest" time="0.042"/>
+  <testcase name="workspace inventory enforces one aggregate hash budget()" classname="decompengine.agent.AgentSessionJournalTest" time="0.026"/>
+  <testcase name="journal owner rejects unexplained durable metadata replacement()" classname="decompengine.agent.AgentSessionJournalTest" time="0.006"/>
+  <testcase name="admission cancellation is checked while hashing and publishes no turn()" classname="decompengine.agent.AgentSessionJournalTest" time="0.007"/>
+  <testcase name="load failure requires recorded explicit new session policy()" classname="decompengine.agent.AgentSessionJournalTest" time="0.051"/>
+  <testcase name="oversized initial inventory cannot publish a journal that cannot be reopened()" classname="decompengine.agent.AgentSessionJournalTest" time="0.147"/>
+  <testcase name="unknown edits after a turn quarantine the operation without altering source bytes()" classname="decompengine.agent.AgentSessionJournalTest" time="0.045"/>
+  <testcase name="clean cancellation preserves evidence and explicitly recreates the conversation()" classname="decompengine.agent.AgentSessionJournalTest" time="0.029"/>
+  <testcase name="pending publication blocks existing journal admission without changing evidence()" classname="decompengine.agent.AgentSessionJournalTest" time="0.033"/>
+  <testcase name="interrupted process without cleanup proof cannot restart or infer acceptance()" classname="decompengine.agent.AgentSessionJournalTest" time="0.035"/>
+  <testcase name="completed conversation loads after reopening and accepted publication is idempotent()" classname="decompengine.agent.AgentSessionJournalTest" time="0.045"/>
+  <testcase name="request receipt commits continuation policy and a second journal owner is rejected()" classname="decompengine.agent.AgentSessionJournalTest" time="0.007"/>
+  <testcase name="unsupported load records new conversation while retaining accepted project evidence()" classname="decompengine.agent.AgentSessionJournalTest" time="0.034"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

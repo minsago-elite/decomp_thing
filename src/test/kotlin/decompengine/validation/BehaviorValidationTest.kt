@@ -2,16 +2,21 @@ package decompengine.validation
 
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.project.ArchivalProjectAuditor
+import decompengine.project.GeneratedCMakeReconstructionProfile
 import decompengine.project.MakeProjectBuilder
 import decompengine.project.RecoveredCModuleReconstructor
 import decompengine.project.RecoveredFunction
 import decompengine.project.RecoveredProgramModel
+import decompengine.project.ReconstructionHostSafetyLimits
+import decompengine.project.ReconstructionProfile
 import decompengine.project.SourceTreeGenerator
+import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
 import kotlin.io.path.isExecutable
 import kotlin.io.path.pathString
+import kotlin.io.path.readBytes
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.Test
@@ -19,8 +24,66 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonPrimitive
 
 class BehaviorValidationTest {
+    @Test
+    fun `selected profile budgets are admitted recorded and exhausted independently`() {
+        val tempDir = createTempDirectory("validation-profile-budgets-")
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val selected = ReconstructionProfile(
+            base.schemaVersion,
+            "behavior-budget-fixture-v1",
+            base.layout,
+            base.budgets.copy(behavior = base.budgets.behavior.copy(
+                maximumCases = 2,
+                maximumStdinBytes = 4,
+                maximumArgumentBytes = 8,
+                maximumStdoutBytes = 16,
+                maximumStderrBytes = 16,
+                maximumAggregateOutputBytes = 32,
+                maximumComparisonOutputBytes = 32,
+            )),
+            base.adapterConfiguration,
+        )
+        val host = ReconstructionHostSafetyLimits(base.budgets.copy(behavior = selected.budgets.behavior.copy(
+            maximumCases = 1,
+            maximumStdinBytes = 4,
+            maximumArgumentBytes = 8,
+            maximumComparisonOutputBytes = 32,
+        )))
+        val reports = tempDir.resolve("reports")
+        assertFailsWith<IllegalArgumentException> {
+            BehaviorComparator(profile = selected, hostSafetyLimits = host).evaluate(
+                "rejected", Path.of("/missing-original"), Path.of("/missing-rebuilt"),
+                listOf(ProcessInput("one"), ProcessInput("two")), reports,
+            )
+        }
+        assertFalse(reports.exists())
+
+        val exhausted = ReconstructionHostSafetyLimits(base.budgets.copy(behavior = selected.budgets.behavior))
+        assertFailsWith<IllegalArgumentException> {
+            BehaviorComparator(profile = selected, hostSafetyLimits = exhausted).evaluate(
+                "exhausted", Path.of("/missing-original"), Path.of("/missing-rebuilt"),
+                listOf(ProcessInput("one", stdin = byteArrayOf(1, 2, 3, 4, 5))), reports,
+            )
+        }
+        assertFalse(reports.exists())
+
+        val original = compileC(tempDir, "profile-original", helloWorldSource())
+        val rebuilt = compileC(tempDir, "profile-rebuilt", helloWorldSource())
+        val report = BehaviorComparator(profile = selected, hostSafetyLimits = exhausted).compare(
+            "accepted", original, rebuilt, listOf(ProcessInput("one")), reports,
+        )
+        val policy = BehaviorEvidence.decode(report.reportPath.readBytes()).getValue("executionPolicy").jsonObject
+        assertEquals(selected.id, policy.getValue("profileId").jsonPrimitive.content)
+        assertEquals(selected.sha256, policy.getValue("profileSha256").jsonPrimitive.content)
+        assertEquals(2, policy.getValue("maximumCases").jsonPrimitive.int)
+        assertEquals(2, policy.getValue("hostSafetyBudgets").jsonObject.getValue("maximumCases").jsonPrimitive.int)
+    }
+
     @Test
     fun `completed programs exceeding stream or aggregate bounds preserve prior reports`() {
         val root = createTempDirectory("validation-output-bounds-")
