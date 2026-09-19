@@ -663,8 +663,12 @@ object SourceTreeGenerator {
                 schemaVersion == 6 && inputBinarySha256 == model.inputSha256 &&
                     modelSchemaVersion == model.schemaVersion && profileSha256 == profile.sha256 &&
                     accepted && issues.isEmpty() &&
-                    (!moduleClaimsAgentExecution(generator, reconstructorIdentity) ||
-                        modulePromptBudgetIsValid(promptCharacters?.toLong(), promptBudgetCharacters?.toLong(), profile)) &&
+                    modulePromptAttributionIsValid(
+                        moduleClaimsAgentExecution(generator, reconstructorIdentity),
+                        promptCharacters?.toLong(),
+                        promptBudgetCharacters?.toLong(),
+                        profile,
+                    ) &&
                     entityIds.size == entityIds.toSet().size &&
                     entityIds.toSet() == (module.functionIds + module.globalIds).toSet() &&
                     compilation?.passed == true &&
