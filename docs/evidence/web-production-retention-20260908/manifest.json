@@ -1,0 +1,69 @@
+{
+  "status": "passed",
+  "sourceCommit": "d89628ced05ee78e66199e4faddc1058246e1def",
+  "implementationCommit": "492a84cf",
+  "jvm": {
+    "tests": 298,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "command": "./gradlew -PfrontendNodeHome=/home/june/decomp_thing/build/tools/decomp-node-24.20.0/node-v24.20.0-linux-x64 test --tests 'decompengine.web.*' --tests 'decompengine.jobs.AgentProgressJournal*Test' --tests 'decompengine.jobs.WorkflowAttemptStoreTest' --tests 'decompengine.jobs.WorkflowPin*Test' distZip"
+  },
+  "frontend": {
+    "tests": 342,
+    "lint": "passed",
+    "typecheckedBundle": "passed",
+    "generatedDrift": "passed"
+  },
+  "contracts": {
+    "validAccepted": 49,
+    "invalidRejected": 41
+  },
+  "retainedXml": [
+    {
+      "file": "TEST-decompengine.web.WebProductionRetentionTest.xml",
+      "tests": 2,
+      "sha256": "f3aa11a9cc229f2d0b773c34623d7fa24970b83fc7f2e26788dcb7c75039f33d"
+    },
+    {
+      "file": "TEST-decompengine.web.WebProgressRetentionWorkerTest.xml",
+      "tests": 4,
+      "sha256": "c759d0a37be229c53d2f6942ba7ca8d5ecb6b63612080d408d0f6c18784f3a00"
+    }
+  ],
+  "browser": {
+    "report": "browser.json",
+    "sha256": "a6032863260a048c40158fcb71e509e842cc986e66451692e12e52a2654c8727",
+    "mode": "history",
+    "productionRetentionStatusVerified": true,
+    "pinAndUnpinVerified": true,
+    "shutdownConfirmed": true,
+    "cleanupConfirmed": true
+  },
+  "preliminaryFailures": [
+    {
+      "kind": "frontend compile error",
+      "resolution": "Corrected the validation helper before final frontend and JVM verification."
+    },
+    {
+      "kind": "browser fixture assertion",
+      "expected": "2026-09-05T00:00:00Z",
+      "resolution": "History now uses recent timestamps; compare the displayed instant with the actual seeded job timestamp. Same distribution archive passed after driver correction d89628ce."
+    }
+  ],
+  "policy": {
+    "spaDefaultEnabled": true,
+    "legacyDefaultEnabled": false,
+    "intervalMs": 1000,
+    "maximumUnitsPerCallback": 32,
+    "terminalEligibilityMs": 86400000,
+    "exactExpiryTimePromised": false
+  },
+  "fixtureExecution": "Owned inert records and callbacks; no binary analysis/provider/native workflow execution.",
+  "limitations": [
+    "Size/count bounds may omit history before timed cleanup.",
+    "Pins and active/pending resources may retain history beyond the threshold.",
+    "Process counters reset on restart and do not represent unique jobs or disk accounting.",
+    "Full job/evidence retention, audit presentation and denied-request auditing remain incomplete."
+  ]
+}

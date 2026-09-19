@@ -14,6 +14,7 @@ internal fun parseDoctorInvocation(args: List<String>, defaultOutput: Path): Doc
     var workflowOverride: AcpPreflightWorkflow? = null
     var output = defaultOutput
     var profile = ReconstructionProfiles.default
+    var showAuthMethods = false
     var index = 0
     fun nextValue(message: String): String = args.getOrNull(index + 1)
         ?: throw IllegalArgumentException(message)
@@ -38,6 +39,10 @@ internal fun parseDoctorInvocation(args: List<String>, defaultOutput: Path): Doc
                 output = Path.of(nextValue("--output requires a directory"))
                 index += 2
             }
+            "--auth-methods" -> {
+                showAuthMethods = true
+                index++
+            }
             "--profile" -> {
                 profile = ReconstructionProfiles.named(nextValue("--profile requires a profile id"))
                 index += 2
@@ -47,12 +52,14 @@ internal fun parseDoctorInvocation(args: List<String>, defaultOutput: Path): Doc
     }
     require(!toolsOnly || harnessOverride == null) { "--tools-only cannot be combined with --harness" }
     require(!toolsOnly || workflowOverride == null) { "--tools-only cannot be combined with --workflow" }
+    require(!toolsOnly || !showAuthMethods) { "--tools-only cannot be combined with --auth-methods" }
     return DoctorInvocation(
         DoctorOptions(
             outputDir = output,
             toolsOnly = toolsOnly,
             harnessOverride = harnessOverride,
             workflowOverride = workflowOverride,
+            showAuthMethods = showAuthMethods,
         ),
         profile,
     )
