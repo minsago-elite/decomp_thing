@@ -1,0 +1,22 @@
+{
+  "sourceCommit": "359f843cbe7d6895cf77fbd45cbe4ac8b5469a2b",
+  "worktreeDirty": false,
+  "gradleOffline": true,
+  "scope": "Session journal and abrupt owner-exit regression",
+  "suites": {
+    "decompengine.agent.AgentSessionJournalCrashTest": {
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "214efb28fbb8c434f2dc637b34a04acf675b9b3bd4ff185e88a2916afaad9f34"
+    },
+    "decompengine.agent.AgentSessionJournalTest": {
+      "tests": 13,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "7b8a187736a15e359e67483c493659dcb3ea8a7356f25a84b0bc5ca4f3b9dc93"
+    }
+  }
+}

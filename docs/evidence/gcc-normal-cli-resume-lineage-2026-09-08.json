@@ -1,0 +1,110 @@
+{
+  "schemaVersion": 1,
+  "issue": 927,
+  "recordedAtUtc": "2026-09-08T12:37:26Z",
+  "status": "implementation-evidence-only",
+  "scope": "Bounded source and fixture audit for normal GCC CLI interruption, retained checkpoint lineage, and same-owner resume. This record does not qualify a real compiler run, process containment, or production release.",
+  "sourceRevisionInspected": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "sourceSha256": {
+    "src/main/kotlin/decompengine/Main.kt": "33211d46124cc8b4e4f9afe173971cfcc599fdb55b4e1e44e6b918c46b720637",
+    "src/main/kotlin/decompengine/oracle/gcc/GccBundledCliCommand.kt": "3588017da3362901b43977f095b1e38427e03eeb0dcd36c47899f56fdeb7f35e",
+    "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationCoordinator.kt": "4ab8bc5bd7aaaddccd92a8317ecd2a9c79d86d794098623e58de6bae4df091a8",
+    "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationJournal.kt": "317c527fb09cf3def169f1d8c2ba4dc725ab264b1bb737e38c08f569ea6aa1f7",
+    "src/main/kotlin/decompengine/oracle/gcc/GccBundledAnalysisStateCapture.kt": "67e52992e76269f9f63352c0e8a74dc35ea19617e29cd8aeedab8dddf4e75122",
+    "src/main/kotlin/decompengine/oracle/gcc/GccBundledExportCapture.kt": "534f6a03bba25f6ddf3ed6069fd787c3ff3e7be56c9ac68bd1f404ac5176db7c"
+  },
+  "sourceObservations": [
+    {
+      "criterion": "The normal CLI selects the contained GCC owner and exposes checkpoint interruption/resume in one invocation.",
+      "status": "present-in-current-code",
+      "references": [
+        "src/main/kotlin/decompengine/Main.kt:41-65,495-496",
+        "src/main/kotlin/decompengine/oracle/gcc/GccBundledCliCommand.kt:10-50"
+      ],
+      "detail": "gcc-engine-plan calls GccBundledCliCommand.run. A selected checkpoint calls executeUntilCheckpoint and then resume on the same prepared owner before plan and result publication; the help text says this is within one process and is not cold recovery."
+    },
+    {
+      "criterion": "The interruption path retains an ordered prefix and stopped analysis-state manifest before resume preparation.",
+      "status": "present-in-current-code",
+      "references": [
+        "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationCoordinator.kt:148-177",
+        "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationJournal.kt:133-172"
+      ],
+      "detail": "The coordinator captures the interrupted export prefix, validates it after containment absence, captures the state directory, and journals interruption authorization, interrupted execution, prefix assessment, manifest, and captured-state summary in that order."
+    },
+    {
+      "criterion": "Resume is bound to the retained owner, state manifest, prior inputs, prior control identity, and a distinct resumed execution chain.",
+      "status": "present-in-current-code",
+      "references": [
+        "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationCoordinator.kt:181-218,220-293",
+        "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationJournal.kt:174-240"
+      ],
+      "detail": "Revalidation rejects changed retained state, prefix, in-flight fragments, or inputs. Resume requires the retained owner, uses RESUME_MANIFEST state and invocation version 4, protects the prior control/state, and records resume preparation, attachment, START authorization, execution, and export assessment with predecessor bindings."
+    },
+    {
+      "criterion": "Planning consumes the owner-bound resumed export and preserves containment absence checks.",
+      "status": "present-in-current-code",
+      "references": [
+        "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationCoordinator.kt:301-388",
+        "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationJournal.kt:243-275"
+      ],
+      "detail": "plan requires this owner's completed export, re-captures the model before planner START, binds the planner request to the operation/profile/model identities, and records planner execution and assessment only after unit, cgroup, and process absence."
+    }
+  ],
+  "fixtures": [
+    {
+      "path": "src/test/kotlin/decompengine/oracle/gcc/GccBundledCliQualificationTest.kt",
+      "sha256": "8a4991cff779a9ef16c403c88ec6b6fe1df16090fa3d4d1d21e59a33114312b7",
+      "declaredCoverage": [
+        "opt-in normal CLI cc1 fresh plus same-owner resume",
+        "opt-in normal CLI lto1 fresh plus same-owner resume",
+        "journal predecessor hashes, checkpoint reuse, model bytes, and planner bytes"
+      ],
+      "limitation": "The two cases require a provisioned installed application, profile, archive, genuine engine binaries, four disjoint scratch mounts, and a private evidence root. No qualification run is claimed by this record."
+    },
+    {
+      "path": "src/test/kotlin/decompengine/oracle/gcc/GccBundledContainedExecutionTest.kt",
+      "sha256": "c19860464d0030097bfbe87671ccb14f824a2eb019b0ecf5917d367c6631a423",
+      "declaredCoverage": "Authored multi-batch ELF fixture exercising checkpoint, same-owner resume, retained prior journal records, and fresh/resumed model and planner byte equality.",
+      "limitation": "This is a fixture-only direct coordinator path with an authored ELF and remains separate from normal installed cc1/lto1 CLI qualification."
+    },
+    {
+      "path": "oracle/gcc/16.2.0/compiler-engines.json",
+      "sha256": "e0ca60b7e856e9330e45fd58e61828313e8dd824413ee0df7ef76ee5d2b47bdc",
+      "companionSchema": {
+        "path": "oracle/gcc/compiler-engines.schema.json",
+        "sha256": "2dca9dda70f95641c5cafd3dae0edc382a3d1b783daed94bfb74ed439932264b"
+      },
+      "declaredCoverage": "Current cc1/lto1 benchmark profile and schema selected by the qualification fixture.",
+      "limitation": "Profile identity is an input commitment; it is not evidence that either engine was executed."
+    },
+    {
+      "path": "scripts/ci-qualify-gcc-engine-cli.sh",
+      "sha256": "87e491f3436c84a676b5e02a8e9437aa440b0c0a7f95d5a512b0b0ed64c365bc",
+      "declaredCoverage": "Required-mode runner for GccBundledCliQualificationTest with all hosted input and scratch variables checked before launch.",
+      "limitation": "The runner defines the required qualification boundary but has not been run for this record."
+    }
+  ],
+  "unverifiedCriteria": [
+    "No normal CLI run was force-interrupted after a durable checkpoint in this record; no exact stopped process, containment, or cgroup state was observed.",
+    "No same command and output directory were resumed after a process restart or cold recovery; the current CLI option resumes within one process and explicitly does not provide cold recovery.",
+    "No provisioned cc1 or lto1 run produced authenticated Kotlin/JVM evidence for real counts, plans, hashes, lifecycle identities, and resource use.",
+    "No hosted comparison.json, full-operation resource qualification, benchmark acceptance, or production release eligibility is claimed."
+  ],
+  "validation": {
+    "mode": "source-and-fixture-audit-only",
+    "testsExecuted": [],
+    "checks": [
+      "source paths and fixture paths inspected at sourceRevisionInspected",
+      "SHA-256 recorded for every listed code and fixture artifact"
+    ],
+    "decision": "Tests intentionally skipped per task instruction; this record must not be read as runtime or production qualification."
+  },
+  "disposition": {
+    "implementationStatus": "normal CLI interruption, retained state, same-owner resume, and journal lineage paths are present in the inspected tree",
+    "evidenceStatus": "bounded and incomplete",
+    "complete": false,
+    "benchmarkAccepted": false,
+    "releaseEligible": false
+  }
+}
