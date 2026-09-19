@@ -12,13 +12,13 @@ python3 -B -m unittest discover -s tests -p test_generic_leakage.py -v
 ```
 
 The scanner requires Python 3.9+ and Git. The standalone Gradle task runs the
-scanner without compiling or executing application code. Gradle `check` and
-`scripts/ci.sh` currently run the ordinary project checks only; they do not invoke
-this draft gate while the repository findings remain unresolved. Run
-`verifyReconstructionNeutrality` explicitly when you need the scanner result. Exit
-status is 0 for no findings, 1 for findings, and 2 for invalid policy or unreadable
-inputs. JSON output contains either the scan counts and sorted findings or an
-`error` field. Findings include path, line, rule, and matched text.
+scanner without compiling or executing application code. While the repository
+scan still fails on remaining migrations, the draft gate stays standalone: it is
+not wired into Gradle `check` or `scripts/ci.sh` until those findings are
+resolved. Exit status is 0 for no findings, 1 for findings, and
+2 for invalid policy or unreadable inputs. JSON output contains either the scan
+counts and sorted findings or an `error` field. Findings include path, line,
+rule, and matched text.
 
 ## Ownership and exceptions
 
@@ -31,16 +31,82 @@ under `oracle/gcc`; it records known benchmark artifacts, not arbitrary hashes.
 
 Within generic surfaces, rules detect selected C/header suffix operations,
 source/include and build-output paths, Make/Ninja/compiler names, C flags, and
-concrete adapter references. Each concrete adapter exemption names one exact
-file with its ownership rationale. A new `GeneratedC` filename does not acquire
-an exemption. Adapter ownership never exempts benchmark identity rules.
+concrete adapter references. The benchmark-version rule also recognizes
+`GCC_VERSION=` assignments, and the inventory scans Dockerfile variants such as
+`Dockerfile.dev` and `Dockerfile.ci`. Each concrete adapter exemption names one
+exact file with its ownership rationale. A new `GeneratedC` filename does not
+acquire an exemption. Adapter ownership never exempts benchmark identity rules.
 
 Compatibility defaults, closed adapter dispatch, and an installed compiler
 runtime component use exact literal allowances with a rule, expected occurrence
 count, and rationale. An allowance suppresses only matches entirely contained
 in its literal fragment. Duplicate, overlapping, stale, unused, or out-of-scope
-allowances fail the gate. Missing declared paths and unsupported policy fields
-also fail. Ownership changes therefore require an explicit policy review.
+allowances fail the gate. Generic and benchmark roots must be disjoint. Missing
+declared paths and unsupported policy fields also fail. Ownership changes
+therefore require an explicit policy review.
+
+Archive output omissions and strict build-control JSON locations come from
+`ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
+and web inventory consume an immutable copy. Preflight retains entry accounting,
+portable-path checks and link checks for omitted output trees. Source/hash
+manifests, required evidence and declared payload paths remain protected. The
+current adapters still use their existing output/control locations; alternate
+inventory-root fixtures establish transport behavior, not an end-to-end proof
+of a backend with relocated artifacts.
+
+Archive output omissions and strict build-control JSON locations come from
+`ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
+and web inventory consume an immutable copy. Preflight retains entry accounting,
+portable-path checks and link checks for omitted output trees. Source/hash
+manifests, required evidence and declared payload paths remain protected. The
+current adapters still use their existing output/control locations; alternate
+inventory-root fixtures establish transport behavior, not an end-to-end proof
+of a backend with relocated artifacts.
+
+Archive output omissions and strict build-control JSON locations come from
+`ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
+and web inventory consume an immutable copy. Preflight retains entry accounting,
+portable-path checks and link checks for omitted output trees. Source/hash
+manifests, required evidence and declared payload paths remain protected. The
+current adapters still use their existing output/control locations; alternate
+inventory-root fixtures establish transport behavior, not an end-to-end proof
+of a backend with relocated artifacts.
+
+Archive output omissions and strict build-control JSON locations come from
+`ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
+and web inventory consume an immutable copy. Preflight retains entry accounting,
+portable-path checks and link checks for omitted output trees. Source/hash
+manifests, required evidence and declared payload paths remain protected. The
+current adapters still use their existing output/control locations; alternate
+inventory-root fixtures establish transport behavior, not an end-to-end proof
+of a backend with relocated artifacts.
+
+Archive output omissions and strict build-control JSON locations come from
+`ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
+and web inventory consume an immutable copy. Preflight retains entry accounting,
+portable-path checks and link checks for omitted output trees. Source/hash
+manifests, required evidence and declared payload paths remain protected. The
+current adapters still use their existing output/control locations; alternate
+inventory-root fixtures establish transport behavior, not an end-to-end proof
+of a backend with relocated artifacts.
+
+Archive output omissions and strict build-control JSON locations come from
+`ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
+and web inventory consume an immutable copy. Preflight retains entry accounting,
+portable-path checks and link checks for omitted output trees. Source/hash
+manifests, required evidence and declared payload paths remain protected. The
+current adapters still use their existing output/control locations; alternate
+inventory-root fixtures establish transport behavior, not an end-to-end proof
+of a backend with relocated artifacts.
+
+Archive output omissions and strict build-control JSON locations come from
+`ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
+and web inventory consume an immutable copy. Preflight retains entry accounting,
+portable-path checks and link checks for omitted output trees. Source/hash
+manifests, required evidence and declared payload paths remain protected. The
+current adapters still use their existing output/control locations; alternate
+inventory-root fixtures establish transport behavior, not an end-to-end proof
+of a backend with relocated artifacts.
 
 Archive output omissions and strict build-control JSON locations come from
 `ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
