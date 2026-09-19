@@ -85,6 +85,7 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor() : G
         requireProductionQualification()
         val deadline = GeneratedCValidationDeadline(request.deadlineNanos, request.cancellation)
         deadline.check()
+        GeneratedCValidationProfile.requireIdentity(request.profileId, request.profileSha256, request.budget)
         require(request.label.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}"))) { "validation receipt label is invalid" }
         require(request.reportsDir.isAbsolute && request.reportsDir == request.reportsDir.normalize())
         val config = configuration

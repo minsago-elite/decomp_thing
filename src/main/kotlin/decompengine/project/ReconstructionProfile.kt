@@ -90,6 +90,13 @@ class ProjectFileDeclaration(
 
     internal fun matches(path: String): Boolean = pathMatcher.matches(path)
 
+    internal fun canMaterializeUnder(root: String): Boolean {
+        val rootDepth = requireNormalizedProjectPath(root, "project output root").split('/').size
+        val components = pathTemplate.split('/')
+        if (rootDepth > components.size) return false
+        return compileTemplateMatcher(components.take(rootDepth).joinToString("/")).matches(root)
+    }
+
     internal fun canonicalJson(): String = buildString {
         append('{')
         append("\"id\":").append(id.canonicalJsonString()).append(',')
@@ -208,6 +215,24 @@ data class ReconstructionBudgets(
 
 /** Host policy authorizes a requested profile without changing the profile's recorded identity. */
 class ReconstructionHostSafetyLimits(val maximum: ReconstructionBudgets) {
+    companion object {
+        /** Host admission defaults are independent of any requested reconstruction descriptor. */
+        val DEFAULT = ReconstructionHostSafetyLimits(ReconstructionBudgets(
+            exportWallClockMillis = 10L * 60 * 1_000,
+            exportMaximumResidentBytes = 4L * 1024 * 1024 * 1024,
+            plannerMaximumEntities = 250_000,
+            plannerMaximumDependencyEdges = 2_000_000,
+            plannerMaximumWorkUnits = 50_000_000,
+            maximumFunctionsPerModule = 24,
+            reconstructionMaximumContextCharacters = 120_000,
+            buildWallClockMillis = 10L * 60 * 1_000,
+            buildMaximumOutputBytes = 32L * 1024 * 1024,
+            archiveMaximumEntries = 100_000,
+            archiveMaximumFileBytes = 128L * 1024 * 1024,
+            archiveMaximumTotalBytes = 1024L * 1024 * 1024,
+        ))
+    }
+
     fun requireAllows(requested: ReconstructionBudgets) {
         require(requested.exportWallClockMillis <= maximum.exportWallClockMillis) {
             "requested export wall-clock budget exceeds the host safety limit"

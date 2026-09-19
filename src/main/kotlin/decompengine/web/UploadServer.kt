@@ -27,7 +27,7 @@ import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.EvidenceModuleReconstructor
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.project.ModuleReconstructor
-import decompengine.project.GeneratedCMakeReconstructionProfile
+import decompengine.project.ReconstructionProfiles
 import decompengine.project.ReconstructionProfile
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -174,7 +174,7 @@ class UploadServer(
     uiMode: WebUiMode = WebUiMode.LEGACY,
     basePath: String = "/",
     devFrontendOrigin: String? = null,
-    sourceProfiles: List<ReconstructionProfile> = listOf(GeneratedCMakeReconstructionProfile.descriptor),
+    sourceProfiles: List<ReconstructionProfile> = ReconstructionProfiles.builtIn,
     sensitiveValues: Collection<String> = System.getenv().values,
     private val listenBacklog: Int = 64,
     private val authenticationInspector: (decompengine.agent.AgentCancellation) -> decompengine.acp.AcpAuthenticationInventory = defaultWebAuthenticationInspector(),

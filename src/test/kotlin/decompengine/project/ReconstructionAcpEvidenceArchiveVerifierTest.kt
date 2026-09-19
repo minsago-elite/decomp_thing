@@ -178,7 +178,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         val temp = createTempDirectory("acp-archive-downgrade-")
         val project = createAgentProject(temp.resolve("project"), accepted = true)
         rewriteCheckpointAndManifest(project) { checkpoint ->
-            checkpoint.replaceFirst("\"schemaVersion\": 5", "\"schemaVersion\": 3")
+            checkpoint.replaceFirst("\"schemaVersion\": 6", "\"schemaVersion\": 3")
         }
 
         val failure = assertFailsWith<Exception> {
@@ -200,6 +200,9 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                 )
             },
             "flags" to { it.replace("\"-Werror\"", "\"-Wno-error\"") },
+            "binary" to { it.replace(Regex("\"inputBinarySha256\": \"[^\"]*\""), "\"inputBinarySha256\": \"other-input\"") },
+            "model-schema" to { it.replace(Regex("\"modelSchemaVersion\": [0-9]+"), "\"modelSchemaVersion\": 99") },
+            "profile" to { it.replace(Regex("\"profileSha256\": \"[^\"]*\""), "\"profileSha256\": \"${"0".repeat(64)}\"") },
             "missing" to { it.replace(Regex("\"compilation\": \\{[^\\n]*}"), "\"compilation\": null") },
         )
         mutations.forEach { (name, mutation) ->
@@ -215,7 +218,10 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         val temp = createTempDirectory("acp-archive-historical-v4-")
         val project = createAgentProject(temp.resolve("project"), accepted = true)
         rewriteCheckpointAndManifest(project) { checkpoint ->
-            checkpoint.replace("\"schemaVersion\": 5", "\"schemaVersion\": 4")
+            checkpoint.replace("\"schemaVersion\": 6", "\"schemaVersion\": 4")
+                .lineSequence().filterNot { line ->
+                    listOf("inputBinarySha256", "modelSchemaVersion", "profileSha256").any { "\"$it\":" in line }
+                }.joinToString("\n")
                 .replace(Regex("  \"compilation\": [^\\n]*\\n"), "")
         }
         ArchivalPackager.create(project, temp.resolve("historical.zip"))
