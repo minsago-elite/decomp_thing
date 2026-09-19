@@ -61,11 +61,6 @@ internal object GeneratedCBehaviorBuildPolicy : BehaviorBuildPolicy {
             maximumOutputBytes in 1..profile.budgets.buildMaximumOutputBytes) {
             "behavior build budgets exceed the selected profile"
         }
-        listOf("command", "declaredDependencies").forEach { name ->
-            require(contract.getValue(name).jsonArray.isNotEmpty())
-            contract.getValue(name).jsonArray.forEach { require(it.jsonPrimitive.isString) }
-        }
-        val parallelism = contract.integer("parallelism")
         val expected = when (profile.id) {
             GeneratedCMakeReconstructionProfile.PROFILE_ID -> {
                 val configuration = ProjectBuildConfiguration(
