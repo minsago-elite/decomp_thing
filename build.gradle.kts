@@ -1322,7 +1322,7 @@ tasks.test {
     dependsOn(":ghidra-bridge:stageBundle")
     val testInstalledGhidra = providers.environmentVariable("RUN_REAL_GHIDRA").orNull == "true" ||
         providers.environmentVariable("RUN_REAL_GHIDRA_CALL_SITES").orNull == "true"
-    if (testInstalledGhidra) dependsOn("installDist")
+    dependsOn("installDist")
     dependsOn(generateAcpGateHelperChecksum)
     dependsOn(generateLlvmBehaviorHelperChecksum)
     dependsOn(generateKotlinBootClasspathReference)
