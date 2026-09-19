@@ -13,9 +13,16 @@
     "src/main/kotlin/decompengine/web"
   ],
   "benchmarkRoots": [
-    "oracle/gcc",
-    "src/main/kotlin/decompengine/oracle/gcc",
-    "src/test/kotlin/decompengine/oracle/gcc"
+    "oracle",
+    "src/main/kotlin/decompengine/oracle",
+    "src/test/kotlin/decompengine/oracle",
+    "tests/oracle",
+    ".github/workflows/gcc-oracle-model.yml",
+    "scripts/fetch-gcc-oracle-source.py",
+    "scripts/generate-gcc-behavior-corpus.py",
+    "scripts/generate-gcc-compiler-engine-build-records.py",
+    "scripts/run-gcc-behavior-corpus.py",
+    "scripts/verify-gcc-oracle-source.py"
   ],
   "adapterFiles": [
     {
@@ -255,6 +262,139 @@
       "fragment": "gcc_runtime / 'cc1'",
       "count": 1,
       "reason": "Inventories the installed compiler runtime for generated-C provisioning; this expression does not select a benchmark artifact. Version and digest checks remain active."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-tool",
+      "fragment": "\"gcc\"",
+      "count": 1,
+      "reason": "MVP patch workflow compiles the reconstructed C fix with the default host compiler; the explicit command remains the workflow's authored validation contract."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-compiler-flag",
+      "fragment": "-std=c11",
+      "count": 1,
+      "reason": "MVP patch workflow compiles the proposed fix as C11 with its default host compiler; the language selection is part of the same authored validation contract."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-compiler-flag",
+      "fragment": "-Wall",
+      "count": 2,
+      "reason": "MVP patch workflow compiles the proposed fix with the default warning set and repeats the identical contract in its patch prompt."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-compiler-flag",
+      "fragment": "-Wextra",
+      "count": 2,
+      "reason": "MVP patch workflow compiles the proposed fix with the default warning set and repeats the identical contract in its patch prompt."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-compiler-flag",
+      "fragment": "-Werror",
+      "count": 3,
+      "reason": "MVP patch workflow treats warnings as errors in its sanitizer and release validation, records the evidence phrase, and repeats the identical contract in its patch prompt."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/RepairAcpEvidenceArchiveVerifier.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "GeneratedCRepairRuntimeConfiguration",
+      "count": 3,
+      "reason": "Existing repair verifier cross-checks declared runtime-tool roles and mount destinations against the registered generated-C repair runtime configuration; those verifier checks remain active."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/RepairAcpEvidenceArchiveVerifier.kt",
+      "rule": "generic-layout",
+      "fragment": "\"Makefile\"",
+      "count": 1,
+      "reason": "Existing repair verifier classifies the repaired release snapshot's declared build-file source by its exact path; the role and immutable-mode checks remain active."
+    },
+    {
+      "path": "src/test/kotlin/decompengine/analysis/BundledGhidraTest.kt",
+      "rule": "benchmark-version",
+      "fragment": "oracle/gcc/16.2.0/compiler-engines.json",
+      "count": 1,
+      "reason": "Opt-in Ghidra provenance authentication loads the GCC compiler engine profiles from the benchmark namespace; the assertion targets the bundled Ghidra release, not a benchmark artifact."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/ModuleCompilationPolicy.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "GeneratedCMakeReconstructionProfile",
+      "count": 2,
+      "reason": "Application-owned compilation policy validates the registered Make profile before dispatching the shared generated-C module validator."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/ModuleCompilationPolicy.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "GeneratedCModuleValidation",
+      "count": 2,
+      "reason": "Application-owned compilation policy dispatches both built-in and structurally registered profiles to the generated-C module validator."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/ModuleCompilationPolicy.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "GeneratedCNinjaReconstructionProfile",
+      "count": 1,
+      "reason": "Application-owned compilation policy recognizes the registered built-in Ninja profile as a generated-C module policy."
+    },
+    {
+      "path": "tests/test_generic_leakage.py",
+      "rule": "benchmark-version",
+      "fragment": "GCC_VERSION=16.2.0",
+      "count": 2,
+      "reason": "Scanner regression fixtures intentionally exercise the retained cross-oracle GCC version marker in both evidence forms."
+    },
+    {
+      "path": "docs/evidence/gcc-normal-cli-resume-lineage-2026-09-08.json",
+      "rule": "benchmark-version",
+      "fragment": "gcc/16.2.0",
+      "count": 1,
+      "reason": "Retained CLI resume lineage evidence records the authenticated GCC benchmark release."
+    },
+    {
+      "path": "docs/evidence/gcc-planner-model-policy-2026-09-08.json",
+      "rule": "benchmark-version",
+      "fragment": "gcc/16.2.0",
+      "count": 1,
+      "reason": "Retained planner model evidence records the authenticated GCC benchmark release."
+    },
+    {
+      "path": "docs/evidence/lto1-resume-equivalence-2026-09-08.json",
+      "rule": "benchmark-version",
+      "fragment": "gcc/16.2.0",
+      "count": 2,
+      "reason": "Retained lto1 equivalence evidence records the authenticated GCC benchmark release in its resume captures."
+    },
+    {
+      "path": "docs/evidence/lto1-resume-equivalence-2026-09-08.json",
+      "rule": "benchmark-target",
+      "fragment": "\"lto1\"",
+      "count": 1,
+      "reason": "Retained lto1 equivalence evidence names the authenticated benchmark target."
+    },
+    {
+      "path": "docs/evidence/lto1-resume-equivalence-2026-09-08.json",
+      "rule": "benchmark-hash",
+      "fragment": "255246e259b194e40fb3f053eafad5a9fdada983404bdae90fc1b9fddfa585e1",
+      "count": 1,
+      "reason": "Retained lto1 equivalence evidence preserves its authenticated artifact digest."
+    },
+    {
+      "path": "docs/evidence/lto1-resume-equivalence-2026-09-08.json",
+      "rule": "benchmark-hash",
+      "fragment": "35d73b94b8e33cd482095016de28ebaa4e71835720e39b7c5aa82206b562361f",
+      "count": 1,
+      "reason": "Retained lto1 equivalence evidence preserves its authenticated artifact digest."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/validation/BehaviorValidation.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "GeneratedCMakeReconstructionProfile",
+      "count": 2,
+      "reason": "Existing behavior validation checks the registered generated-C Make profile in retained validation paths."
     }
   ],
   "benchmarkCatalog": "oracle/gcc/reconstruction-neutrality-identities.json"
