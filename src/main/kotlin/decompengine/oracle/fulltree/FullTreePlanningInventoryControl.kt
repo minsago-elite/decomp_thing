@@ -58,7 +58,10 @@ sealed interface AuthenticatedFullTreePlanningRegistry {
     /** Resolves an authenticated A13 owner unit exactly; there is no nullable or catch-all fallback. */
     fun requireOwnerModule(ownerUnitId: String): FullTreePlanningSourceModule
 
-    /** Resolves the exact authenticated source-module population for one shard. */
+    /**
+     * Resolves the exact authenticated source-module population for one shard. This is planning
+     * ownership only; the returned module count is not an emitted-function denominator.
+     */
     fun requireOwnerModulesForShard(shardId: String): List<FullTreePlanningSourceModule>
 }
 
@@ -487,11 +490,8 @@ object FullTreePlanningInventoryControl {
                 }
             },
         )
-
-        private val sourceOnlyShardIds: Set<String> = Collections.unmodifiableSet(
-            LinkedHashSet<String>().apply {
-                state.sourceOnly.forEach { add(it.shardId) }
-            },
+        private val knownShardIds: Set<String> = Collections.unmodifiableSet(
+            (sourceModules.asSequence().map { it.shardId } + sourceOnlyUnits.asSequence().map { it.shardId }).toSet(),
         )
 
         override fun requireOwnerModule(ownerUnitId: String): FullTreePlanningSourceModule {
@@ -503,14 +503,15 @@ object FullTreePlanningInventoryControl {
         }
 
         override fun requireOwnerModulesForShard(shardId: String): List<FullTreePlanningSourceModule> {
-            if (!shardId.matches(SHARD_ID)) {
+            if (shardId.toByteArray(Charsets.UTF_8).size > MAXIMUM_SHARD_ID_BYTES || !shardId.matches(SHARD_ID)) {
                 throw FullTreeControlException("planning shard ID is invalid")
             }
-            modulesByShardId[shardId]?.let { return it }
-            if (shardId in sourceOnlyShardIds) {
-                return emptyList()
-            }
-            throw FullTreeControlException("planning shard ID is outside the authenticated inventory")
+            return modulesByShardId[shardId]
+                ?: if (shardId in knownShardIds) {
+                    emptyList()
+                } else {
+                    throw FullTreeControlException("planning shard ID is outside the authenticated inventory")
+                }
         }
 
         companion object {
@@ -620,6 +621,7 @@ private val SOURCE_ONLY_ORDER = Comparator<JsonObject> { left, right ->
 }
 private val COMPILATION_UNIT_ID = Regex("cu-[0-9a-f]{32}")
 private val SHARD_ID = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
+private const val MAXIMUM_SHARD_ID_BYTES = 2 * 255 + 11
 
 private const val PLANNING_SCHEMA = "full-tree-planning-inventory"
 private const val PLANNING_MAXIMUM_SOURCE_MODULES = 1_000_000

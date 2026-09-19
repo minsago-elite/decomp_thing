@@ -16,10 +16,10 @@ scanner without compiling or executing application code. While the repository
 scan still fails on remaining migrations, the draft gate stays standalone: it is
 not wired into Gradle `check` or `scripts/ci.sh` until those findings are
 resolved. Run the standalone task explicitly when validating the neutrality
-policy. Exit status is 0 for no findings, 1 for findings, and
-2 for invalid policy or unreadable inputs. JSON output contains either the scan
-counts and sorted findings or an `error` field. Findings include path, line,
-rule, and matched text.
+policy. Exit status is 0 for no findings, 1 for findings, and 2 for invalid
+policy or unreadable inputs. JSON output contains either the scan counts and
+sorted findings or an `error` field. Findings include path, line, rule, and
+matched text.
 
 ## Ownership and exceptions
 
@@ -39,69 +39,4 @@ an exemption. Adapter ownership never exempts benchmark identity rules.
 Compatibility defaults, closed adapter dispatch, and an installed compiler
 runtime component use exact literal allowances with a rule, expected occurrence
 count, and rationale. An allowance suppresses only matches entirely contained
-in its literal fragment. Duplicate, overlapping, stale, unused, or out-of-scope
-allowances fail the gate. Missing declared paths and unsupported policy fields
-also fail. Ownership changes therefore require an explicit policy review.
-
-Archive output omissions and strict build-control JSON locations come from
-`ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
-and web inventory consume an immutable copy. Preflight retains entry accounting,
-portable-path checks and link checks for omitted output trees. Source/hash
-manifests, required evidence and declared payload paths remain protected. The
-current adapters still use their existing output/control locations; alternate
-inventory-root fixtures establish transport behavior, not an end-to-end proof
-of a backend with relocated artifacts.
-
-## Scope and limits
-
-The inventory includes tracked files and nonignored untracked files. Ordinary
-unstaged deletions are omitted; declared policy paths must still exist. Ignore
-patterns do not exempt tracked files. The scanner supports the source, script,
-configuration and text suffixes listed in `TEXT_SUFFIXES`, plus Dockerfiles.
-Markdown documentation is exempt under #84. Unsupported binary formats are not
-decoded. This is a working-tree lexical check, not a semantic proof or an atomic
-repository snapshot; comments can match and indirect policy can escape a rule.
-
-Admission limits are 20,000 inventoried paths, 16 MiB per decoded file and
-128 MiB of scanned content. Git inventory has a 30-second timeout; its output is
-buffered before the path-count check. These limits do not establish a hard
-whole-process memory bound. Supported inputs must be UTF-8 regular files with
-ordinary directory ancestors.
-
-## Current migration state
-
-The repository scan passes on a clean checkout. Benchmark ownership covers the
-full declared oracle namespaces: the `oracle` tree, the JVM oracle namespaces
-and test mirrors, the GCC oracle CI workflow, its inventory and corpus scripts,
-and the Python oracle tests. Retained historical benchmark identities in LLVM
-reference evidence, shared recorded capture image digests, cross-oracle test
-references, MVP compiler assumptions, and repair runtime policy cross-checks
-use exact literal allowances with ownership rationales. Retained evidence must
-not be rewritten merely to satisfy the scanner. Counts make each pin
-regression-sensitive: a changed occurrence fails as a stale allowance instead
-of silently passing.
-
-`ReconstructionPipeline` now resolves its build adapter from the selected profile.
-Its profile overload admits host budgets and binds analyzer export limits before
-output, then forwards that profile and host policy through generation. Two exact
-single-occurrence allowances preserve the old generator and pipeline defaults;
-they do not exempt build dispatch. The analyzer now reads ELF metadata through
-bounded positional windows and checks it against the exported model's input
-identity. The analyzer summary and supplemental reports now use
-[bounded streaming publication](bounded-report-publication.md); complete phase
-resource bounds and other report consumers remain unfinished.
-
-Doctor's compiler/build probes and authored sanitizer sample now come from its
-selected registered adapter, through both the CLI and JVM API. The generic root
-covers the full Doctor package, which removed four findings; only the
-explicitly owned generated-C diagnostic implementation is registered as an
-adapter file. The repository scan passes with zero findings; the diagnostic
-executor still needs output/time bounds. See [profile-selected Doctor
-diagnostics](profiled-doctor-diagnostics.md).
-
-Passing the authored scanner tests and the repository scan verifies the declared
-detection and exemption behavior. It does not complete #84: the lexical gate is
-wired into Gradle `check` and `scripts/ci.sh` for the declared state, while the
-semantic migrations it describes — adapter-owned MVP and repair build
-knowledge, complete consumer migration, and production qualification — remain
-on the issue.
+within its declared literal.
