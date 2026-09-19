@@ -566,6 +566,7 @@ class UploadServer(
                 return
             }
             if (legacyJsonRead) requireJsonAccept(exchange)
+            if (exchange.requestMethod == "POST" && segments == listOf("jobs")) exchange.requestsLegacyJson()
             when {
                 exchange.requestMethod in setOf("GET", "HEAD") && segments.isEmpty() ->
                     renderJobDashboard(exchange)
