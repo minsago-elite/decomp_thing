@@ -1,0 +1,78 @@
+{
+  "status": "passed-with-intermittent-unrelated-shutdown-retry",
+  "sourceCommit": "ab4c3af85009097af7e01d89c5baf9153a34d8b6",
+  "issue": 471,
+  "parentIssue": 158,
+  "satisfiedParentCriteria": [
+    1,
+    4
+  ],
+  "verification": {
+    "kotlinCompilation": {
+      "command": "./gradlew compileTestKotlin --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx3072m -Pkotlin.compiler.execution.strategy=in-process -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets -x stageFrontend -x processResources",
+      "result": "passed"
+    },
+    "bunTestAssetPreparation": {
+      "bunVersion": "1.3.1",
+      "commands": [
+        "/home/june/.bun/bin/bun install --no-save --ignore-scripts --no-progress",
+        "/home/june/.bun/bin/bun ../scripts/generate-web-api.mjs --check",
+        "/home/june/.bun/bin/bun x tsc --noEmit",
+        "/home/june/.bun/bin/bun x vite build",
+        "/home/june/.bun/bin/bun scripts/bundle-report.mjs",
+        "/home/june/.bun/bin/bun scripts/web-asset-manifest.mjs build/frontend/dist 0.1.0 --write build/frontend/asset-manifest.json"
+      ],
+      "result": "passed",
+      "lockfileCommitted": false
+    },
+    "focusedJvm": {
+      "commandPrefix": "./gradlew test --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx3072m -Pkotlin.compiler.execution.strategy=in-process -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets -x stageFrontend -x processResources",
+      "tests": 140,
+      "failuresOnCombinedRun": 1,
+      "mutationFocusedTests": 62,
+      "mutationFocusedFailures": 0,
+      "remainingRouterAccessAndShutdownTests": 78,
+      "remainingRouterAccessAndShutdownFailures": 1,
+      "isolatedRetryTests": 1,
+      "isolatedRetryFailures": 0,
+      "suites": [
+        "decompengine.web.WebJobMutationBoundaryTest",
+        "decompengine.web.LegacyWebSessionTest",
+        "decompengine.web.WebApiControllerTest",
+        "decompengine.web.WebProgressPinControllerTest",
+        "decompengine.web.StreamingUploadServiceTest",
+        "decompengine.web.UploadUncertaintyHttpTest",
+        "decompengine.web.WebJobServiceTest",
+        "decompengine.web.WebProgressCutoverTest",
+        "decompengine.web.DurableWebWorkflowTest",
+        "decompengine.web.WebProgressRetentionWorkerTest",
+        "decompengine.web.UploadServerTest",
+        "decompengine.web.UploadServerSpaTest",
+        "decompengine.web.LocalWebAccessTest",
+        "decompengine.web.WebSessionControllerTest",
+        "decompengine.web.WebShutdownTest",
+        "decompengine.web.UploadServerShutdownTest"
+      ],
+      "intermittentRetry": {
+        "test": "decompengine.web.UploadServerTest.shutdown timeout retains store ownership until the worker exits and cleanup is retried",
+        "combinedRunFailure": "HTTP requests remain active after server stop",
+        "precedingBatch": "passed",
+        "immediateIsolatedRetry": "passed"
+      }
+    },
+    "staticAudit": {
+      "result": "passed",
+      "observations": [
+        "Production HTTP calls to uploadMultipartReceipt, start and requestProgressRetentionPinned occur only in WebJobMutationBoundary.",
+        "The only controller-adjacent direct report write is the admitted SourceTreeJobReconstructor workflow adapter.",
+        "git diff --check passed and no bun.lock is present."
+      ]
+    }
+  },
+  "limits": [
+    "The combined 140-test run exposed one timing-sensitive shutdown/drain failure; its preceding batch and immediate isolated retry passed. This evidence does not establish that failure's root cause or resolution.",
+    "Bun prepared the classpath SPA assets; the repository's pinned Node/npm Gradle frontend tasks were deliberately excluded, so this is not production frontend toolchain qualification.",
+    "No browser, native analysis or live provider ran.",
+    "Versioned workflow start, cancellation and retry remain unsupported and are owned by issues 484 through 486."
+  ]
+}
