@@ -369,60 +369,44 @@ class FullTreePlanningInventoryControlTest {
         }
 
     @Test
-    fun `llvm profiledata dispatch binds exact planning owners without an emitted denominator`() {
-        val profile = Path.of("oracle/llvm/22.1.6")
-        val registry = FullTreePlanningInventoryControl.loadAndValidate(
-            path = profile.resolve("full-tree-planning-inventory.json"),
-            scopePath = profile.resolve("full-tree-scope.json"),
-            sourceLockPath = profile.resolve("source-lock.json"),
-            artifactManifestPath = profile.resolve("oracle-manifest.json"),
-            buildRecordPath = profile.resolve("build-record.json"),
-            inventoryPath = profile.resolve("full-tree-inventory.json"),
-            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
-        )
+    fun `checked static analyzer shard binds all 190 source modules to exact owners`() =
+        inControlTemporaryDirectory { directory ->
+            val profile = Path.of("oracle/llvm/22.1.6")
+            val result = FullTreePlanningInventoryControl.generateAndPublish(
+                scopePath = profile.resolve("full-tree-scope.json"),
+                sourceLockPath = profile.resolve("source-lock.json"),
+                artifactManifestPath = profile.resolve("oracle-manifest.json"),
+                buildRecordPath = profile.resolve("build-record.json"),
+                inventoryPath = profile.resolve("full-tree-inventory.json"),
+                sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+                output = directory.resolve("full-tree-planning-inventory.json"),
+            )
 
-        val modules = registry.requireOwnerModulesForShard("llvm-lib-profiledata")
-        assertEquals(18, modules.size)
-        assertEquals(
-            listOf(
-                "source/llvm/lib/ProfileData/Coverage/CoverageMapping.cpp",
-                "source/llvm/lib/ProfileData/Coverage/CoverageMappingReader.cpp",
-                "source/llvm/lib/ProfileData/Coverage/CoverageMappingWriter.cpp",
-                "source/llvm/lib/ProfileData/DataAccessProf.cpp",
-                "source/llvm/lib/ProfileData/IndexedMemProfData.cpp",
-                "source/llvm/lib/ProfileData/InstrProf.cpp",
-                "source/llvm/lib/ProfileData/InstrProfCorrelator.cpp",
-                "source/llvm/lib/ProfileData/InstrProfReader.cpp",
-                "source/llvm/lib/ProfileData/ItaniumManglingCanonicalizer.cpp",
-                "source/llvm/lib/ProfileData/MemProf.cpp",
-                "source/llvm/lib/ProfileData/MemProfCommon.cpp",
-                "source/llvm/lib/ProfileData/MemProfRadixTree.cpp",
-                "source/llvm/lib/ProfileData/MemProfSummary.cpp",
-                "source/llvm/lib/ProfileData/PGOCtxProfReader.cpp",
-                "source/llvm/lib/ProfileData/ProfileSummaryBuilder.cpp",
-                "source/llvm/lib/ProfileData/SampleProf.cpp",
-                "source/llvm/lib/ProfileData/SampleProfReader.cpp",
-                "source/llvm/lib/ProfileData/SymbolRemappingReader.cpp",
-            ),
-            modules.map { it.sourcePath },
-        )
-        assertTrue(modules.all { it.moduleId == it.unitId && it.shardId == "llvm-lib-profiledata" })
-        assertEquals(
-            listOf(
-                "source/llvm/lib/ProfileData/GCOV.cpp",
-                "source/llvm/lib/ProfileData/InstrProfWriter.cpp",
-                "source/llvm/lib/ProfileData/MemProfReader.cpp",
-                "source/llvm/lib/ProfileData/MemProfSummaryBuilder.cpp",
-                "source/llvm/lib/ProfileData/PGOCtxProfWriter.cpp",
-                "source/llvm/lib/ProfileData/SampleProfWriter.cpp",
-            ),
-            registry.sourceOnlyUnits.filter { it.shardId == "llvm-lib-profiledata" }.map { it.sourcePath },
-        )
-        assertFailsWith<FullTreeControlException> {
-            registry.requireOwnerModulesForShard("llvm-lib-profiledata-missing")
+            val staticAnalyzer = result.registry.sourceModules.filter {
+                it.shardId == "clang-lib-staticanalyzer"
+            }
+            assertEquals(190, staticAnalyzer.size)
+            assertEquals(190, staticAnalyzer.map { it.sourcePath }.toSet().size)
+            assertEquals(190, staticAnalyzer.map { it.unitId }.toSet().size)
+            assertTrue(staticAnalyzer.all { it.sourceKind == "handwritten" })
+            assertTrue(
+                staticAnalyzer.all {
+                    it.sourcePath.startsWith("source/clang/lib/StaticAnalyzer/")
+                },
+            )
+            staticAnalyzer.forEach { module ->
+                assertEquals(module.unitId, module.moduleId)
+                assertEquals(
+                    FullTreeInventoryControl.compilationUnitId(module.sourcePath),
+                    module.unitId,
+                )
+                assertEquals(module, result.registry.requireOwnerModule(module.unitId))
+            }
+            assertEquals(
+                0,
+                result.registry.sourceOnlyUnits.count { it.shardId == "clang-lib-staticanalyzer" },
+            )
         }
-        assertTrue(registry.requireOwnerModulesForShard("llvm-tools-llvm-profdata").isEmpty())
-    }
 
     private fun generate(
         fixture: FullTreeControlFixture,
