@@ -67,13 +67,21 @@ class InstallationTest(unittest.TestCase):
     def test_resource_failure_precedes_archive_extraction(self):
         for bytes_available, inodes_available in ((1, 100000), (10**12, 1)):
             with self.subTest(bytes=bytes_available, inodes=inodes_available):
-                capacity = types.SimpleNamespace(f_bavail=bytes_available, f_frsize=1, f_favail=inodes_available)
+                capacity = types.SimpleNamespace(f_bavail=bytes_available, f_frsize=1,
+                                                 f_favail=inodes_available, f_files=100000)
                 with patch.object(install.os, "statvfs", return_value=capacity):
                     with self.assertRaisesRegex(RuntimeError, "--work-parent"):
                         install.prepare(self.archive, self.work, "test-owner")
                 self.assertEqual(list(self.work.iterdir()), [self.work / install.MARKER])
                 install.cleanup(self.work, "test-owner")
                 self.work.mkdir()
+
+    def test_unreported_inode_accounting_does_not_reject_dynamic_inode_filesystem(self):
+        capacity = types.SimpleNamespace(f_bavail=10**12, f_frsize=1, f_favail=0, f_files=0)
+        with patch.object(install.os, "statvfs", return_value=capacity):
+            result = install.prepare(self.archive, self.work, "test-owner")
+        self.assertFalse(result["resourceBudget"]["inodeAccountingAvailable"])
+        self.assertIsNone(result["resourceBudget"]["availableInodes"])
 
 
 if __name__ == "__main__":
