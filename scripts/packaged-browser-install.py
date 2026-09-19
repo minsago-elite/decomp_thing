@@ -41,7 +41,10 @@ def entries_and_budget(archive, destination):
         paths.update(str(PurePosixPath(*parts[:length])) for length in range(1, len(parts) + 1))
         expanded_bytes += entry.file_size
     available = os.statvfs(destination)
-    inode_accounting_available = available.f_files > 0
+    # Some filesystems report 0/0 because they do not expose a fixed inode
+    # quota. That is unknown capacity, not an exhausted quota; the byte budget
+    # remains mandatory. A reported positive total with no free inodes fails.
+    inode_accounting_available = not (getattr(available, "f_files", 0) == 0 and available.f_favail == 0)
     budget = {
         "expandedBytes": expanded_bytes,
         "requiredBytes": expanded_bytes + BYTE_RESERVE,

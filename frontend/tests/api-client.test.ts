@@ -85,6 +85,32 @@ describe('bounded v1 fetch client', () => {
     await expect(client.post('run', '/jobs/example/runs', document.kind, document.data, { csrfToken: 'a'.repeat(32), idempotencyKey: 'intent_example_123', ifMatch: '"version_1"' })).rejects.toMatchObject({ code: 'network_error', message: 'Web API request failed (network_error).' });
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
+  it('replays an ambiguous mutation only when its caller supplies the retained key', async () => {
+    const fetcher = vi.fn<typeof fetch>()
+      .mockRejectedValueOnce(Error('private transport detail'))
+      .mockResolvedValueOnce(response('progress-pin', 200, { 'X-Request-ID': 'request_pin_fixture' }))
+      .mockImplementationOnce(() => new Promise(() => undefined));
+    const client = createApiClient({ basePath: '/', fetch: fetcher });
+    const path = '/jobs/job_fixture/runs/run_fixture/progress-pin';
+    const settings = {
+      csrfToken: 'a'.repeat(43), idempotencyKey: 'retained_pin_intent_1', ifMatch: '"version_before"',
+    };
+    const mutate = (signal?: AbortSignal) => client.put('progressPin', path, 'progressPinRequest',
+      { pinned: true }, { ...settings, ...(signal ? { signal } : {}) });
+    await expect(mutate()).rejects.toMatchObject({ code: 'network_error' });
+    expect(fetcher).toHaveBeenCalledOnce();
+    await expect(mutate()).resolves.toMatchObject({ kind: 'progressPin' });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get('Idempotency-Key')).toBe(settings.idempotencyKey);
+    expect(new Headers(fetcher.mock.calls[1]?.[1]?.headers).get('Idempotency-Key')).toBe(settings.idempotencyKey);
+    expect(fetcher.mock.calls[1]?.[1]?.body).toBe(fetcher.mock.calls[0]?.[1]?.body);
+    const obsolete = new AbortController();
+    const pending = mutate(obsolete.signal);
+    obsolete.abort();
+    await expect(pending).rejects.toMatchObject({ code: 'aborted' });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(fetcher.mock.calls[2]?.[1]?.signal?.aborted).toBe(true);
+  });
   it('returns safe HTTP error code/status/request ID without server body diagnostics', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response('error-validation', 422));
     await expect(createApiClient({ basePath: '/', fetch: fetcher }).get('job', '/jobs/example')).rejects.toMatchObject({ code: 'http_error', status: 422, requestId: 'request_example_1', serverCode: 'VALIDATION_FAILED', message: 'Web API request failed (http_error).' });

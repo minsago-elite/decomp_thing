@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "issue": 604,
+  "parentIssue": 214,
+  "sourceCommit": "49e3e752",
+  "baseCommit": "2c88d6a8f909517cfb17cbec875167545ed59e6d",
+  "mergedBehaviorVerified": false,
+  "productionQualified": false,
+  "outcomes": ["successful", "empty", "partial", "interrupted", "failed", "denied", "unsupported"],
+  "verification": [
+    {
+      "check": "contracts/web/v1/verify.py",
+      "result": "53 positive fixtures accepted, 41 negative fixtures rejected, 7 outcome cases verified"
+    },
+    {
+      "check": "Bun generated API contract check, TypeScript noEmit, ESLint, Vite build",
+      "result": "passed"
+    },
+    {
+      "check": "Pinned Node 24 frontend Vitest full suite on Bun-installed dependencies",
+      "result": "363 passed, 0 failed on rerun"
+    },
+    {
+      "check": "Independent reviewer: Python verifier, Bun typecheck, focused outcome Vitest",
+      "result": "53 positive, 41 negative, 7 outcomes; typecheck passed; 8 focused tests passed"
+    }
+  ],
+  "runnerNotes": [
+    "The first full frontend run had one upload timing failure; that test passed alone and the full rerun passed.",
+    "Bun Vitest could not start reliably in this sandbox because localhost DNS is unavailable; the independent focused test used an explicit loopback Vitest host. Bun was used for dependency installation and static/build checks."
+  ],
+  "scopeLimits": [
+    "These are synthetic versioned wire fixtures, not evidence that the JVM production encoder emits the same cases through real HTTP.",
+    "No real credentials, private paths, or user binaries are included in the new outcome fixtures; the verifier checks these constraints.",
+    "The #214 tracker and its clock, scale, and Git fixture children remain separate work."
+  ]
+}

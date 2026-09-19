@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "issue": 711,
+  "recordedOn": "2026-09-08",
+  "status": "unresolved",
+  "scope": "One checked-repository evidence slice; not production qualification.",
+  "sourceCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "reference": {
+    "corpusId": "gcc-16-2-0-driver-behavior",
+    "corpusPath": "oracle/gcc/16.2.0/behavior-corpus.json",
+    "corpusSha256": "bcc1a14ca8c54f94106c943f0bc5698cb9af3151b7bf20a49ae3c8828baaad0e",
+    "evidencePath": "oracle/gcc/16.2.0/behavior-corpus-evidence.json",
+    "evidenceSha256": "9dcf787aea232615a1ff8721144b86bc1f5e9a2a7068fa9e9280db0bc4ad6803",
+    "reportedCases": 14,
+    "reportedPassed": 14,
+    "preprocessingCases": [
+      {
+        "id": "preprocess-file",
+        "status": "reference-passed",
+        "semanticScope": "mock-frontend forwarding",
+        "observedOutput": "18-byte MOCK-PREPROCESSED line"
+      },
+      {
+        "id": "preprocess-stdin",
+        "status": "reference-passed",
+        "semanticScope": "mock-frontend forwarding",
+        "observedOutput": "18-byte MOCK-PREPROCESSED line"
+      }
+    ]
+  },
+  "provenance": {
+    "referenceExecutableSha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4",
+    "oracleManifestSha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9",
+    "sourceLockSha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc",
+    "buildRecordSha256": "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
+  },
+  "productionGates": {
+    "completeRealPreprocessingAndDependencyCorpus": {
+      "status": "unavailable",
+      "reason": "The checked preprocessing cases stage a mock cc1 and do not cover real include search, macro definition or undefinition, language selection, diagnostics, or dependency output; #709 and #710 remain open."
+    },
+    "authenticatedReconstructedComparison": {
+      "status": "unavailable",
+      "reason": "The checked report is reference evidence only; no reconstructed candidate result, module source hashes, or per-case execution receipts are retained."
+    },
+    "releaseBlockingMismatchRetention": {
+      "status": "unresolved",
+      "reason": "Without the complete real corpus and candidate comparison, required-case mismatches cannot yet be evaluated or persisted as release blockers."
+    }
+  },
+  "runtimeBoundary": {
+    "executor": "exact-authenticated-oci-profile-required",
+    "liveReproduction": "unresolved",
+    "profileMismatchResult": "unavailable",
+    "oracleBoundary": "Reference observations are hash-bound and cannot be replaced by candidate output."
+  },
+  "applicationBoundary": "No analysis adapter or Ghidra dependency boundary is changed; production analysis remains isolated through the bundled Ghidra Java APIs without GHIDRA_HOME or external analyzeHeadless."
+}

@@ -1,0 +1,165 @@
+{
+  "dimensions": {
+    "callEdges": {
+      "oracle": {
+        "productionVerified": false,
+        "reasonCode": "no-authenticated-gcc-call-oracle",
+        "status": "unavailable"
+      },
+      "productionReplay": {
+        "evidence": "src/main/kotlin/decompengine/oracle/structural/StructuralReplayAdapterRegistry.kt",
+        "reasonCode": "production-registry-empty",
+        "status": "unavailable"
+      },
+      "recovery": {
+        "productionVerified": false,
+        "reasonCode": "no-authenticated-gcc-recovered-call-sites",
+        "status": "unavailable"
+      },
+      "status": "unavailable",
+      "threshold": {
+        "precisionAtLeast": 0.9,
+        "recallAtLeast": 0.9
+      }
+    },
+    "functionStarts": {
+      "currentScore": {
+        "productionVerified": false,
+        "reasonCode": "no-retained-current-recovered-model",
+        "status": "unavailable"
+      },
+      "historicalReference": {
+        "productionVerified": false,
+        "reason": "The documented score used schema-v1 model bytes whose exporter and loader provenance was not authenticated; those model and report bytes are not retained as current production inputs.",
+        "rich": {
+          "precision": {
+            "denominator": 3288,
+            "numerator": 3283
+          },
+          "recall": {
+            "denominator": 3284,
+            "numerator": 3283
+          }
+        },
+        "source": "docs/gcc-function-recovery-scoring.md",
+        "status": "historical-unattested",
+        "stripped": {
+          "precision": {
+            "denominator": 3272,
+            "numerator": 3268
+          },
+          "recall": {
+            "denominator": 3284,
+            "numerator": 3268
+          }
+        }
+      },
+      "oracle": {
+        "excluded": {
+          "compilerGenerated": 140,
+          "inlineOnly": 9420
+        },
+        "recordCount": 12844,
+        "scoreableFunctionCount": 3284,
+        "status": "available"
+      },
+      "status": "oracle-covered-recovery-unavailable",
+      "threshold": {
+        "precisionAtLeast": 0.95,
+        "recallAtLeast": 0.95
+      }
+    },
+    "survivingSymbolIdentity": {
+      "currentScore": {
+        "productionVerified": false,
+        "reasonCode": "no-retained-production-symbol-identity-report",
+        "status": "unavailable"
+      },
+      "oracle": {
+        "populationDefinition": "aliases whose stripped availability is surviving in the authenticated function oracle",
+        "status": "available",
+        "strippedSurvivingAliasCount": 6
+      },
+      "status": "oracle-population-known-recovery-unavailable",
+      "threshold": {
+        "identityRecovery": 1.0
+      }
+    }
+  },
+  "nextBoundary": {
+    "id": "gcc-structural-replay-call-edge-v1",
+    "ownerIssues": [
+      40,
+      681
+    ],
+    "qualificationBoundary": {
+      "forbiddenSubstitutes": [
+        "GHIDRA_HOME",
+        "external-analyzeHeadless"
+      ],
+      "reasonCode": "production-replay-adapter-not-registered",
+      "requiredAnalysisAuthority": "bundled-ghidra-jvm",
+      "status": "unavailable"
+    },
+    "requiredEvidence": [
+      "oracle-derived internal, external, indirect, unknown, and unobservable call facts",
+      "stable function-boundary mapping reused for caller and endpoint identities",
+      "per-edge exact, partial, missing, contradicted, and fabricated outcomes",
+      "retained exporter, loader, target, input, and replay receipt hashes"
+    ],
+    "requiredInputs": [
+      "authenticated GCC rich/stripped artifact binding from oracle-manifest.json",
+      "bundled Ghidra JVM exporter and loader identity with image-base receipt",
+      "recovered call-site/model snapshot bound to the same stripped artifact"
+    ],
+    "status": "unresolved"
+  },
+  "profile": {
+    "id": "gcc-driver-16.2.0",
+    "sourceRevision": "78d4ac73dd391005b895a6148cd9831e28e1208b",
+    "version": "16.2.0"
+  },
+  "provenance": {
+    "artifactManifest": {
+      "path": "oracle-manifest.json",
+      "sha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9"
+    },
+    "artifacts": {
+      "full": {
+        "bytes": 20713760,
+        "manifestPath": "artifacts/gcc-driver.full",
+        "path": "gcc-driver.full",
+        "sha256": "8009c7cfc4f66017aa932d86a6d4ec7f374e6ab7a01b3ef5ab3d2fcc78c2378b"
+      },
+      "stripped": {
+        "bytes": 2349296,
+        "manifestPath": "artifacts/gcc-driver.stripped",
+        "path": "gcc-driver.stripped",
+        "sha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4"
+      }
+    },
+    "buildRecord": {
+      "bytes": 3910,
+      "path": "build-record.json",
+      "sha256": "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
+    },
+    "exclusionProfile": {
+      "bytes": 21251,
+      "path": "function-recovery-exclusions.json",
+      "sha256": "71039d9d5462c54b920d3ebe2cd2aff855faf211389a4e86bab3158bca742031"
+    },
+    "functionOracle": {
+      "bytes": 12558460,
+      "path": "function-recovery-oracle.json",
+      "sha256": "b49b8a72a96580bd8727d9dc530753f40f78185a656f472ebe83a7a1f6fc9aae"
+    },
+    "sourceLock": {
+      "bytes": 3953,
+      "path": "source-lock.json",
+      "sha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc"
+    },
+    "status": "authenticated-oracle-inputs"
+  },
+  "reportId": "gcc-driver-accuracy-coverage-v1",
+  "schemaVersion": 1
+}

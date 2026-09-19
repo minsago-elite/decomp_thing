@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "id": "gcc-16-2-0-dependency-generation-reference",
+  "scope": "production",
+  "status": "unresolved",
+  "statusReason": "The authenticated pinned GCC execution environment is unavailable in this workspace.",
+  "provenance": {
+    "oracle": {
+      "id": "gcc-driver-16.2.0",
+      "version": "16.2.0",
+      "sourceRevision": "78d4ac73dd391005b895a6148cd9831e28e1208b"
+    },
+    "sourceLock": {
+      "path": "source-lock.json",
+      "sha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc"
+    },
+    "buildRecord": {
+      "path": "build-record.json",
+      "sha256": "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637",
+      "toolchainImageDigest": "sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248",
+      "platform": "linux/amd64"
+    },
+    "frontend": {
+      "role": "gcc-driver",
+      "path": "artifacts/gcc-driver.stripped",
+      "bytes": 2349296,
+      "sha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4"
+    }
+  },
+  "cases": [
+    {
+      "id": "dependency-source-c",
+      "status": "unresolved",
+      "arguments": ["-M", "source.c"],
+      "environment": {
+        "LC_ALL": "C",
+        "SOURCE_DATE_EPOCH": "1786060800",
+        "TZ": "UTC"
+      },
+      "includeSearch": {
+        "userIncludeDirectories": [],
+        "systemIncludeRoots": "unavailable"
+      },
+      "inputs": [
+        {
+          "path": "source.c",
+          "bytes": 29,
+          "sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949",
+          "origin": "oracle/gcc/16.2.0/behavior-corpus.json case compile-file"
+        }
+      ],
+      "output": {
+        "kind": "dependency-list",
+        "stream": "stdout",
+        "normalizations": [],
+        "expected": null
+      },
+      "unresolved": [
+        "reference stdout",
+        "reference stderr",
+        "reference exit code",
+        "authenticated execution receipt"
+      ]
+    }
+  ],
+  "productionGates": {
+    "pinnedContainerReplay": "unavailable",
+    "independentReferenceRepetition": "unavailable",
+    "reconstructedCandidateComparison": "unavailable"
+  }
+}

@@ -592,6 +592,22 @@ try {
     const home = await makeTarget();
     await cdp.call('Page.navigate', { url: `${origin}/nested/` }, home.sessionId);
     await ready(home, `document.querySelector('h1')?.textContent === 'Your work, with its evidence'`, 'rendered packaged home');
+    await ready(home, `document.activeElement === document.querySelector('main h1')`, 'home heading focus');
+    assert.equal(await evaluate(home, `document.querySelectorAll('main').length`), 1, 'Shell must expose one main landmark');
+    assert.equal(await evaluate(home, `document.title`), 'Jobs · Decomp Workbench');
+    await evaluate(home, `document.querySelector('.skip-link').focus()`);
+    const skip = await evaluate(home, `(() => {
+      const link = document.querySelector('.skip-link');
+      const box = link.getBoundingClientRect();
+      return { href: link.getAttribute('href'), visible: box.top >= 0 && box.bottom <= innerHeight,
+        outline: getComputedStyle(link).outlineWidth };
+    })()`);
+    assert.equal(skip.href, '#main');
+    assert.equal(skip.visible, true, 'Focused skip link must be visible');
+    assert.ok(parseFloat(skip.outline) >= 2, 'Focused skip link must have a visible outline');
+    await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', text: '\r', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, home.sessionId);
+    await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, home.sessionId);
+    await ready(home, `document.activeElement === document.querySelector('main') && location.hash === '#main'`, 'keyboard skip navigation');
     const homeIdentity = await evaluate(home, identityExpression);
     assert.equal(homeIdentity.buildId, manifest.buildId);
     assert.equal(homeIdentity.applicationVersion, manifest.applicationVersion);
@@ -600,17 +616,26 @@ try {
     assert.equal(presentation.bodyMargin, '0px');
     assert.equal(presentation.layout, 'grid');
     await capture(home, 'home.png');
-    await evaluate(home, `document.querySelector('a[href="/nested/upload"]').click()`);
-    await ready(home, `document.querySelector('h1')?.textContent === 'Upload a binary' && document.title === 'Upload a binary · Decomp Workbench'`, 'upload route navigation');
+    await evaluate(home, `document.querySelector('a[href="/nested/upload"]').focus()`);
+    await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', text: '\r', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, home.sessionId);
+    await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, home.sessionId);
+    await ready(home, `document.querySelector('h1')?.textContent === 'Upload a binary' && document.title === 'Upload a binary · Decomp Workbench' && document.activeElement === document.querySelector('main h1')`, 'keyboard upload route navigation and heading focus');
     assert.equal(home.requests.filter((request) => request.type === 'Document').length, 1, 'Upload client navigation reloaded the document');
     await cdp.call('Page.reload', {}, home.sessionId);
     await ready(home, `document.querySelector('h1')?.textContent === 'Upload a binary' && document.querySelector('nav[aria-label="Breadcrumbs"]')?.textContent.includes('All jobs')`, 'upload direct reload');
+    await ready(home, `document.activeElement === document.querySelector('main h1')`, 'direct upload heading focus');
     assert.equal(await evaluate(home, 'location.pathname'), '/nested/upload');
     assert.equal(home.requests.filter((request) => request.method !== 'GET').length, 0);
     report.uploadRoute = { clientNavigation: true, directReload: true, pageTitle: true, breadcrumbs: true, mutationRequests: 0 };
 
-    await evaluate(home, `document.querySelector('a[href="/nested/runtime"]').click()`);
-    await ready(home, `document.querySelector('h1')?.textContent === 'Runtime status' && document.body.innerText.includes(${JSON.stringify(manifest.buildId)})`, 'lazy packaged Runtime identity');
+    await evaluate(home, `document.querySelector('a[href="/nested/runtime"]').focus()`);
+    await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', text: '\r', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, home.sessionId);
+    await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, home.sessionId);
+    await ready(home, `document.querySelector('h1')?.textContent === 'Runtime status' && document.body.innerText.includes(${JSON.stringify(manifest.buildId)}) && document.activeElement === document.querySelector('main h1')`, 'lazy packaged Runtime identity and heading focus');
+    await evaluate(home, `history.back()`);
+    await ready(home, `location.pathname === '/nested/upload' && document.querySelector('main h1')?.textContent === 'Upload a binary' && document.activeElement === document.querySelector('main h1')`, 'browser Back restores upload heading focus');
+    await evaluate(home, `history.forward()`);
+    await ready(home, `location.pathname === '/nested/runtime' && document.querySelector('main h1')?.textContent === 'Runtime status' && document.activeElement === document.querySelector('main h1')`, 'browser Forward restores Runtime heading focus');
     const runtimeIdentity = await evaluate(home, identityExpression);
     assert.equal(runtimeIdentity.page, '/nested/runtime');
     assert.ok(runtimeIdentity.text.includes(manifest.applicationVersion));
@@ -624,7 +649,12 @@ try {
     const runtimeUrl = `${origin}/nested/assets/ui/${runtimeAsset.path}`;
     assert.ok(home.responses.some((entry) => entry.url === runtimeUrl && entry.status === 200));
     assert.ok(home.responses.some((entry) => entry.type === 'Stylesheet' && entry.status === 200));
-    report.home = { heading: 'Your work, with its evidence', ...presentation, identity: homeIdentity };
+    const ax = await cdp.call('Accessibility.getFullAXTree', {}, home.sessionId);
+    assert.equal(ax.nodes.filter((node) => !node.ignored && node.role?.value === 'main').length, 1, 'Accessibility tree must expose one main landmark');
+    assert.ok(ax.nodes.some((node) => !node.ignored && node.role?.value === 'heading' && node.name?.value === 'Runtime status'), 'Accessibility tree must expose the Runtime heading');
+    report.home = { heading: 'Your work, with its evidence', ...presentation, identity: homeIdentity,
+      accessibility: { mainLandmarks: 1, skipLinkKeyboard: true, visibleSkipFocus: true,
+        headingFocus: ['home', 'upload', 'direct-upload', 'runtime-lazy', 'back', 'forward'], accessibilityTree: true } };
     report.runtime = { identity: runtimeIdentity, lazyChunk: runtimeAsset.path, responseStatus: 200 };
     console.log('Packaged home, CSS/icon, lazy Runtime and exact manifest identities verified.');
 
@@ -766,7 +796,7 @@ try {
       assert.equal(row.href, '/nested/jobs/' + historyFixture.jobId);
       assert.equal(row.facts.Size, '64 bytes');
       assert.equal(Date.parse(row.facts.Created), Date.parse(JSON.parse(historyFixture.retained['job.json']).created_at));
-      assert.equal(row.facts['Workflow state'], 'completed');
+      assert.equal(row.facts['Workflow state'], 'Completed');
       assert.equal(row.facts['Latest attempt'], 'run_fixture_54');
       assert.equal(row.facts['Accepted revision'], 'No accepted revision recorded');
       assert.ok(row.facts.Updated);

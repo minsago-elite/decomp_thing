@@ -76,12 +76,14 @@ class InstallationTest(unittest.TestCase):
                 install.cleanup(self.work, "test-owner")
                 self.work.mkdir()
 
-    def test_unreported_inode_accounting_does_not_reject_dynamic_inode_filesystem(self):
-        capacity = types.SimpleNamespace(f_bavail=10**12, f_frsize=1, f_favail=0, f_files=0)
+    def test_unreported_inode_capacity_keeps_byte_budget_and_allows_extraction(self):
+        capacity = types.SimpleNamespace(f_bavail=10**12, f_frsize=1, f_files=0, f_favail=0)
         with patch.object(install.os, "statvfs", return_value=capacity):
-            result = install.prepare(self.archive, self.work, "test-owner")
-        self.assertFalse(result["resourceBudget"]["inodeAccountingAvailable"])
-        self.assertIsNone(result["resourceBudget"]["availableInodes"])
+            prepared = install.prepare(self.archive, self.work, "test-owner")
+        self.assertFalse(prepared["resourceBudget"]["inodeAccountingAvailable"])
+        self.assertIsNone(prepared["resourceBudget"]["availableInodes"])
+        self.assertGreater(prepared["resourceBudget"]["availableBytes"], prepared["resourceBudget"]["requiredBytes"])
+        install.cleanup(self.work, "test-owner")
 
 
 if __name__ == "__main__":

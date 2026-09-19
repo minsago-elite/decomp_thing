@@ -18,13 +18,14 @@ internal class WebApiController(
     private val access: LocalWebAccess,
     private val assets: EmbeddedWebAssets,
     private val jobs: WebJobService,
+    private val jobMutations: WebJobMutationBoundary,
     streamResources: WebStreamResources,
 ) {
     private val prefix = "${assets.basePath}api/v1/"
     private val applicationBuildId = applicationBuildId()
     private val sessions = WebSessionController(access)
     private val uploadProgress = WebUploadProgress()
-    private val progressPins = WebProgressPinController(access, jobs)
+    private val progressPins = WebProgressPinController(access, jobs, jobMutations)
     private val runPages = WebRunPages { jobId ->
         when (val inspection = jobs.inspectDurableJob(jobId)) {
             is decompengine.jobs.WorkflowJobInspection.Available -> inspection.snapshot
@@ -57,7 +58,7 @@ internal class WebApiController(
             when {
                 resource == "session" -> sessions.handle(exchange)
                 resource == "jobs" && exchange.requestMethod == "POST" -> {
-                    val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.multipartUpload()))
+                    val mutation = jobMutations.authorizeUpload(exchange)
                     requireNoWebApiQuery(exchange)
                     requireJsonAccept(exchange)
                     val key = singleUploadHeader(exchange, "Idempotency-Key")
@@ -67,9 +68,9 @@ internal class WebApiController(
                     if (length != null && (!length.matches(Regex("0|[1-9][0-9]{0,18}")) || length.toLongOrNull() == null)) throw WebAccessDenied(400, "INVALID_HEADER", "The upload Content-Length is invalid.")
                     val uploadId = singleUploadHeader(exchange, "X-Upload-ID")
                     if (uploadId != null && !uploadId.matches(Regex("[a-f0-9]{32}"))) throw WebAccessDenied(400, "INVALID_UPLOAD_ID", "Upload progress requires one canonical transfer identity.")
-                    val progress = uploadId?.let { uploadProgress.begin(session.sessionId, it, length?.toLong()?.takeIf { size -> size <= StreamingMultipartUpload.MAX_REQUEST_BYTES }) }
+                    val progress = uploadId?.let { uploadProgress.begin(mutation.sessionId, it, length?.toLong()?.takeIf { size -> size <= StreamingMultipartUpload.MAX_REQUEST_BYTES }) }
                     val result = try {
-                        jobs.uploadMultipartReceipt(exchange.requestBody, checkNotNull(singleUploadHeader(exchange, "Content-Type")), key, progress)
+                        mutation.uploadMultipartReceipt(exchange.requestBody, checkNotNull(singleUploadHeader(exchange, "Content-Type")), key, progress)
                             .also { progress?.finish(it.job.id) }
                     } finally { progress?.finish() }
                     exchange.responseHeaders.set("Location", "${assets.basePath}api/v1/jobs/${result.job.id}")
@@ -91,6 +92,9 @@ internal class WebApiController(
                 resource.matches(Regex("jobs/[^/]+/artifacts/[^/]+/content")) -> {
                     access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true))
                     requireNoWebApiQuery(exchange)
+                    if (!acceptsWebMediaType(exchange, "application/octet-stream")) {
+                        throw WebAccessDenied(406, "NOT_ACCEPTABLE", "This endpoint returns application/octet-stream.")
+                    }
                     if (exchange.requestHeaders.keys.any { it.equals("Range", true) || it.startsWith("If-", true) }) {
                         throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "This bounded artifact endpoint does not support Range or conditional requests.")
                     }
