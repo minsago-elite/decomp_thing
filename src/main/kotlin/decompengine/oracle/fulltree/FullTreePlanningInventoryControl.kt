@@ -6,6 +6,7 @@ import decompengine.oracle.core.OracleSchemas
 import java.nio.file.Path
 import java.util.Collections
 import java.util.LinkedHashMap
+import java.util.LinkedHashSet
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -487,6 +488,12 @@ object FullTreePlanningInventoryControl {
                 }
             },
         )
+        private val recognizedShardIds: Set<String> = Collections.unmodifiableSet(
+            LinkedHashSet<String>().apply {
+                sourceModules.forEach { add(it.shardId) }
+                sourceOnlyUnits.forEach { add(it.shardId) }
+            },
+        )
 
         override fun requireOwnerModule(ownerUnitId: String): FullTreePlanningSourceModule {
             if (!ownerUnitId.matches(COMPILATION_UNIT_ID)) {
@@ -500,8 +507,11 @@ object FullTreePlanningInventoryControl {
             if (!shardId.matches(SHARD_ID)) {
                 throw FullTreeControlException("planning shard ID is invalid")
             }
-            return modulesByShardId[shardId]
-                ?: throw FullTreeControlException("planning shard ID is outside the authenticated inventory")
+            modulesByShardId[shardId]?.let { return it }
+            if (recognizedShardIds.contains(shardId)) {
+                return emptyList()
+            }
+            throw FullTreeControlException("planning shard ID is outside the authenticated inventory")
         }
 
         companion object {

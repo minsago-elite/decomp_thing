@@ -1,0 +1,28 @@
+{
+  "sourceCommit": "66ed2359c243341ffafeb7524be450f7854fc9e8",
+  "worktreeDirty": false,
+  "scope": "Journal omission validation, best-effort adapter and CLI observer regression tests",
+  "suites": {
+    "decompengine.jobs.BestEffortProgressJournalTest": {
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "fb2d80445041347bf57d251cbdee1e43f6c1508ae24d2aaa49765c416cd79449"
+    },
+    "decompengine.RepairCliProgressTest": {
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "5fc77a83e01cb0c427ef9b04f292539cb96a97e50bd8e1a94b9d7449faff096a"
+    },
+    "decompengine.jobs.AgentProgressJournalTest": {
+      "tests": 15,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "6102c91d0e3fcc6b98b2dde0f82d6ec24a63059cffe1ca46b2ad5820db7fdc76"
+    }
+  }
+}

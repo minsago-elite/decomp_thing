@@ -199,21 +199,26 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         val peakResidentBytes = AtomicLong(0)
         val memoryExceeded = AtomicBoolean(false)
         val diagnosticsExceeded = AtomicBoolean(false)
+        val stopMemoryMonitor = AtomicBoolean(false)
         val tasks = ArrayList<CompletableFuture<*>>()
         var primaryFailure: Throwable? = null
         try {
             deadline.checkpoint("after worker launch")
             process.outputStream.close()
             val memoryMonitor = CompletableFuture.runAsync {
-                while (process.isAlive) {
-                    val observed = residentBytes(process)
-                    peakResidentBytes.accumulateAndGet(observed, ::maxOf)
-                    if (observed > limits.maximumResidentBytes) {
-                        memoryExceeded.set(true)
-                        terminateProcessTree(process, limits.terminationGrace)
-                        break
+                try {
+                    while (!stopMemoryMonitor.get() && process.isAlive) {
+                        val observed = residentBytes(process)
+                        peakResidentBytes.accumulateAndGet(observed, ::maxOf)
+                        if (observed > limits.maximumResidentBytes) {
+                            memoryExceeded.set(true)
+                            terminateProcessTree(process, limits.terminationGrace)
+                            break
+                        }
+                        TimeUnit.MILLISECONDS.sleep(25)
                     }
-                    Thread.sleep(25)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
                 }
             }.also(tasks::add)
             fun capture(stream: java.io.InputStream): CompletableFuture<ByteArray> = CompletableFuture.supplyAsync {
@@ -228,6 +233,8 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             val stderr = capture(process.errorStream)
             val completed = process.waitFor(deadline.remainingNanosOrZero(), TimeUnit.NANOSECONDS)
             if (!completed) terminateProcessTree(process, limits.terminationGrace)
+            stopMemoryMonitor.set(true)
+            memoryMonitor.get(1, TimeUnit.SECONDS)
             // Timeout diagnostics retain their separate five-second drain allowance.
             val drainDeadline = if (completed) deadline else AnalysisDeadline.start(
                 TimeUnit.SECONDS.toNanos(5), "Ghidra diagnostic drain",
@@ -236,7 +243,6 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                 task.get(drainDeadline.remainingNanosOrZero(), TimeUnit.NANOSECONDS)
             val stdoutBytes = await(stdout)
             val stderrBytes = await(stderr)
-            await(memoryMonitor)
             reports.resolve("ghidra_stdout.log").writeBytes(stdoutBytes)
             reports.resolve("ghidra_stderr.log").writeBytes(stderrBytes)
             reports.resolve("ghidra_resource_usage.json").writeText(
@@ -396,6 +402,10 @@ class ArchivalReconstructionService(
     fun reconstruct(binaryPath: Path, outputDir: Path): ArchivalReconstructionResult {
         if (Thread.interrupted()) throw InterruptedException("archival reconstruction cancelled")
         outputDir.createDirectories()
+        requireCompatibleProfile(outputDir)
+        outputDir.resolve("reconstruction.profile.json").writeText(
+            "{\"profileId\":\"${profile.id}\",\"profileSha256\":\"${profile.sha256}\"}\n",
+        )
         val observedBehavior = ReconstructionExplorationInput.read(
             outputDir, profile.budgets.reconstructionMaximumContextCharacters,
         )
@@ -457,5 +467,29 @@ class ArchivalReconstructionService(
             """.trimIndent() + "\n",
         )
         return ArchivalReconstructionResult(project, build, bundle)
+    }
+
+    /**
+     * Rejects reuse of an output directory whose recorded reconstruction used a different profile,
+     * so stale build-definition files from the previous profile cannot leak into the new archive.
+     */
+    private fun requireCompatibleProfile(outputDir: Path) {
+        val summary = outputDir.resolve("reconstruction.json")
+        val profileMarker = outputDir.resolve("reconstruction.profile.json")
+        val manifest = outputDir.resolve("source-tree").resolve("source_tree_manifest.json")
+        val recorded = listOf(profileMarker, summary, manifest).firstNotNullOfOrNull { path ->
+            if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) return@firstNotNullOfOrNull null
+            runCatching {
+                val text = Files.readString(path)
+                val id = Regex("\"profile(?:Id|_id)\"\\s*:\\s*\"([^\"]+)\"").find(text)?.groupValues?.get(1)
+                val digest = Regex("\"profileSha256\"\\s*:\\s*\"([^\"]+)\"").find(text)?.groupValues?.get(1)
+                if (id == null && digest == null) null else id to digest
+            }.getOrNull()
+        } ?: return
+        val (recordedId, recordedDigest) = recorded
+        require(recordedId == profile.id && recordedDigest == profile.sha256) {
+            "output directory was reconstructed with profile ${recordedId ?: "unknown"}; " +
+                "rerun with profile ${profile.id} in an empty directory or remove the existing output directory"
+        }
     }
 }

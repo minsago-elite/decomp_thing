@@ -1,0 +1,58 @@
+{
+  "sourceCommit": "682e8c7fdb6c8c24acbc106a00edffedd22f9776",
+  "worktreeDirty": false,
+  "requiredLiveContract": true,
+  "gradleOffline": true,
+  "scope": "Preview bounds and selected redaction consumers",
+  "suites": {
+    "decompengine.acp.AcpAuthenticationInventoryTest": {
+      "tests": 13,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "8027b3fa455086296ab57c1a74c9476deae13f2f52ed268775facee764bc48a2"
+    },
+    "decompengine.acp.AcpAgentHarnessTest": {
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "deed0fdee03524a8383d1ea4026f70069688254569170acaa71856d6894a0f4d"
+    },
+    "decompengine.acp.AcpCurrentConfigInventoryTest": {
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "8867ecb6a0735fbf238b9cb4b7706f1136894190342b3517877fad813d165efe"
+    },
+    "decompengine.doctor.DoctorTest": {
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "4fe847bb71f58ec1221b000e04113745ec6ca5c7b6ef612a09840647a83bba4a"
+    },
+    "decompengine.jobs.AgentProgressJournalTest": {
+      "tests": 15,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "83266c952123160eebd9931772ab1662aa85d5b110efe8f10342569c9fb693d8"
+    },
+    "decompengine.acp.AcpDoctorPreflightTest": {
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "94ba8b4a7a8740d469c081aa4678ea5cdcd563fcd4cce65b0ca8d4a6bfc0c19c"
+    },
+    "decompengine.web.WebAuthenticationInspectionTest": {
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "70e67ddb032efdb55c69e71630e95ad30aa764dc885b3d2689aef7702502713a"
+    }
+  }
+}
