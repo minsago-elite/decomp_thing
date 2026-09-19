@@ -1319,11 +1319,13 @@ distributions {
 tasks.test {
     useJUnitPlatform()
     if (providers.environmentVariable("DECOMP_REQUIRE_GCC_ENGINE_CLI").orNull == "true") {
-        // The real-engine CLI runs in this host JVM; this heap setting is not aggregate RSS qualification.
+        // The test JVM retains large captured records; this is not aggregate RSS qualification.
         maxHeapSize = "8g"
         outputs.upToDateWhen { false }
         outputs.cacheIf("live GCC CLI qualification must execute") { false }
     }
+    // The installed CLI smoke test exercises the packaged launcher.
+    dependsOn("installDist")
     dependsOn(stageOracleNativeLibraries)
     dependsOn(":ghidra-bridge:stageBundle")
     val testInstalledGhidra = providers.environmentVariable("RUN_REAL_GHIDRA").orNull == "true" ||
@@ -1592,9 +1594,19 @@ val verifyKotlinBootClasspathDistribution = tasks.register("verifyKotlinBootClas
     }
 }
 
+val verifyReconstructionNeutrality = tasks.register<Exec>("verifyReconstructionNeutrality") {
+    group = "verification"
+    description = "Checks declared generic surfaces and benchmark ownership without running project code"
+    // The scanner includes untracked, nonignored sources and validates stale exceptions on every run.
+    commandLine("python3", "-B", "scripts/check-generic-leakage.py")
+    workingDir(rootDir)
+}
+
 tasks.named("check") {
     dependsOn(testFrontendAssetManifest)
     dependsOn(verifyPackagedWeb)
+    // verifyReconstructionNeutrality stays a standalone draft gate (#84): the repository scan
+    // still fails on remaining ownership migrations, so it must not block `check` or ci.sh yet.
     dependsOn(verifyAcpGateHelperDistribution)
     dependsOn(verifyLlvmBehaviorHelperDistribution)
     dependsOn(verifyKotlinBootClasspathDistribution)

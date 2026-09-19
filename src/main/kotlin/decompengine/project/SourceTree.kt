@@ -80,8 +80,11 @@ data class ModuleReconstructionIssue(
 fun interface ModuleReconstructor {
     fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule
 
-    /** Stable identity used only to resume a deliberate unresolved result from the same strategy. */
+    /** Stable strategy identity used when resuming checkpoints. */
     fun cacheIdentity(): String = "custom"
+
+    /** Profile-bound strategies include their effective limits in checkpoint identity. */
+    fun cacheIdentity(profile: ReconstructionProfile): String = cacheIdentity()
 
     /** Agent-backed strategies may resume only checkpoints carrying authenticated execution evidence. */
     fun requiresExecutionEvidenceForCheckpointReuse(): Boolean = false
@@ -95,99 +98,6 @@ fun interface ModuleReconstructor {
         executionEvidenceSha256: String?,
     ) = Unit
 }
-
-/** Emits buildable evidence stubs by default; raw recovered C remains in the program model for later refinement. */
-class EvidenceModuleReconstructor(private val includeRecoveredC: Boolean = false) : ModuleReconstructor {
-    override fun cacheIdentity(): String = if (includeRecoveredC) "recovered-c:v2" else "evidence-only:v1"
-
-    override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule {
-        val functions = request.module.functionIds.map { id -> request.model.functions.single { it.id == id } }
-        val globals = request.module.globalIds.map { id -> request.model.globals.single { it.id == id } }
-        val source = buildString {
-            append("#include <stddef.h>\n#include \"modules/${request.module.id}.h\"\n#include \"${request.module.id}_internal.h\"\n")
-            request.dependencyHeaders.keys.sorted().forEach { header -> append("#include \"").append(header.removePrefix("include/")).append("\"\n") }
-            append('\n')
-            globals.forEach { global ->
-                append("/* ${global.id}; recovered global @ 0x${global.address.toString(16)} */\n")
-                append(globalDeclaration(global, external = false)).append("\n\n")
-            }
-            functions.forEach { function ->
-                append("/* ${function.id} @ 0x${function.address.toString(16)}; status=${function.status.name.lowercase()} */\n")
-                val recovered = function.decompiledC?.trim()?.takeIf(String::isNotEmpty)?.takeIf { includeRecoveredC }
-                    ?.let(::markNamedParametersUsed)
-                if (recovered != null) append(recovered).append("\n\n")
-                else append(stub(function)).append("\n\n")
-            }
-        }
-        val unresolved = if (includeRecoveredC) {
-            functions.filter { it.decompiledC.isNullOrBlank() }.map { function ->
-                ModuleReconstructionIssue(
-                    "recovered-c-unavailable",
-                    "normalized recovered C is unavailable for ${function.id}",
-                    listOf(function.id),
-                )
-            }
-        } else {
-            listOf(
-                ModuleReconstructionIssue(
-                    "evidence-only-placeholder",
-                    "evidence-only mode emits placeholders and does not accept implementations",
-                    request.module.functionIds + request.module.globalIds,
-                ),
-            ).filter { it.entityIds.isNotEmpty() }
-        }
-        return ReconstructedModule(
-            source = source,
-            generator = if (includeRecoveredC) "recovered-c" else "evidence-only",
-            promptSha256 = sha256(source.toByteArray()),
-            issues = unresolved,
-            retryable = false,
-        )
-    }
-
-    private fun stub(function: RecoveredFunction): String {
-        val prototype = normalizedPrototype(function)
-        val body = if (prototype.trimStart().startsWith("void ")) "    return;" else "    return 0;"
-        return markNamedParametersUsed("$prototype {\n$body\n}")
-    }
-
-    /** Keep strict warning builds honest without changing recovered behavior. */
-    private fun markNamedParametersUsed(source: String): String {
-        val bodyStart = source.indexOf('{')
-        if (bodyStart < 0) return source
-        val signature = source.substring(0, bodyStart)
-        val parametersStart = signature.indexOf('(')
-        val parametersEnd = signature.lastIndexOf(')')
-        if (parametersStart < 0 || parametersEnd <= parametersStart) return source
-        val cKeywords = setOf(
-            "auto", "char", "const", "double", "enum", "extern", "float", "inline", "int", "long",
-            "register", "restrict", "short", "signed", "static", "struct", "typedef", "union", "unsigned",
-            "void", "volatile", "_Atomic", "_Bool", "_Complex",
-        )
-        val names = signature.substring(parametersStart + 1, parametersEnd)
-            .split(',')
-            .mapNotNull { parameter ->
-                Regex("([A-Za-z_][A-Za-z0-9_]*)\\s*(?:\\[[^]]*])?\\s*$")
-                    .find(parameter.trim())?.groupValues?.get(1)
-            }
-            .filterNot(cKeywords::contains)
-            .distinct()
-        if (names.isEmpty()) return source
-        val body = source.substring(bodyStart + 1)
-        val missingUses = names.filterNot { name ->
-            Regex("\\(\\s*void\\s*\\)\\s*${Regex.escape(name)}\\s*;").containsMatchIn(body)
-        }
-        if (missingUses.isEmpty()) return source
-        return buildString(source.length + missingUses.sumOf { it.length + 14 }) {
-            append(source, 0, bodyStart + 1)
-            missingUses.forEach { name -> append("\n    (void)").append(name).append(';') }
-            append(source, bodyStart + 1, source.length)
-        }
-    }
-}
-
-/** Uses already-normalized recovered C, primarily for trusted fixtures and post-normalization pipelines. */
-class RecoveredCModuleReconstructor : ModuleReconstructor by EvidenceModuleReconstructor(includeRecoveredC = true)
 
 class BoundedLlmModuleReconstructor(
     private val harness: AgentHarness,
@@ -207,9 +117,16 @@ class BoundedLlmModuleReconstructor(
 
     init { require(maximumContextCharacters >= 4_096) }
 
-    override fun cacheIdentity(): String =
-        "agent:${harness.implementationIdentifier() ?: "unspecified"}:context-$maximumContextCharacters:" +
+    override fun cacheIdentity(): String = cacheIdentity(maximumContextCharacters)
+
+    override fun cacheIdentity(profile: ReconstructionProfile): String = cacheIdentity(contextBudget(profile))
+
+    private fun cacheIdentity(contextCharacters: Int): String =
+        "agent:${harness.implementationIdentifier() ?: "unspecified"}:context-$contextCharacters:" +
             "factory-${harnessProvenanceSha256 ?: "unbound"}:v2"
+
+    private fun contextBudget(profile: ReconstructionProfile): Int =
+        minOf(maximumContextCharacters, profile.budgets.reconstructionMaximumContextCharacters)
 
     override fun requiresExecutionEvidenceForCheckpointReuse(): Boolean = true
 
@@ -274,39 +191,9 @@ class BoundedLlmModuleReconstructor(
             ProjectFileRole.MODULE_IMPLEMENTATION in implementation.roles &&
             ProjectFileRole.EDITABLE in implementation.roles
         ) { "planned module target must match the profile-owned editable implementation" }
-        val localFunctions = request.module.functionIds.map { id -> request.model.functions.single { it.id == id } }
-        val localGlobals = request.module.globalIds.map { id -> request.model.globals.single { it.id == id } }
-        val functionEvidence = localFunctions.joinToString("\n\n") { function ->
-            "${function.id} @ 0x${function.address.toString(16)}\nprototype: ${function.prototype}\n" +
-                "calls: ${function.calls.sorted()}\nglobals: ${function.referencedGlobals.sorted()}\n" +
-                "strings: ${function.strings.sorted()}\ndecompilation:\n${function.decompiledC ?: "<unavailable>"}"
-        }
-        val globalEvidence = localGlobals.joinToString("\n") { global ->
-            "${global.id} @ 0x${global.address.toString(16)}: ${global.type} ${global.name}; " +
-                "initializer=${global.initializer ?: "<unavailable>"}; status=${global.status.name.lowercase()}"
-        }
-        val evidence = buildString {
-            append("module: ").append(request.module.id).append('\n')
-            append("ownership evidence: ").append(request.module.boundaryEvidence.sorted()).append("\n\n")
-            append("functions:\n").append(functionEvidence.ifBlank { "<none>" })
-            append("\n\nglobals:\n").append(globalEvidence.ifBlank { "<none>" })
-        }
-        val provenanceIds = (request.module.functionIds + request.module.globalIds).sorted()
-        val acceptance = """
-            The workflow validates your exact source bytes against the returned change set and owned entity IDs.
-            Preserve all required function and global definitions and use only declared shared interfaces.
-            Compiler gate (run by the workflow): ${GeneratedCModuleValidation.command(request.profile, target).joinToString(" ")}
-            Compiler warnings are errors. A completed agent turn is accepted only after policy and compiler validation.
-            Full-project build and behavioral validation remain separate release gates.
-        """.trimIndent()
-        val objective = """
-            Reconstruct exactly one C implementation unit at $target.
-            Preserve recovered behavior and suspicious operations. Do not invent file paths or edit headers.
-            Edit $target in the authorized workspace and keep provenance comments containing every owned entity ID:
-            ${provenanceIds.joinToString(", ")}
-            Do not use generic return-value placeholders or undefined decompiler types. If evidence is insufficient,
-            stop without claiming completion so the module is recorded as explicitly unresolved.
-        """.trimIndent() + "\n\n" + acceptance
+        val prompt = ReconstructionAdapters.resolve(request.profile).modulePrompt(request)
+        val objective = prompt.objective
+        val evidence = prompt.evidence
         val files = linkedMapOf(
             request.profile.layout.declaration("shared-interface").materialize() to request.sharedHeader,
             request.module.headerPath to request.moduleHeader,
@@ -322,11 +209,12 @@ class BoundedLlmModuleReconstructor(
             }
         }
         val contextSize = promptEvidence.length
-        if (contextSize > maximumContextCharacters) {
+        val contextBudget = contextBudget(request.profile)
+        if (contextSize > contextBudget) {
             throw ModuleContextBudgetExceededException(
                 request.module.id,
                 contextSize,
-                maximumContextCharacters,
+                contextBudget,
                 sha256(promptEvidence.toByteArray()),
             )
         }
@@ -382,7 +270,7 @@ class BoundedLlmModuleReconstructor(
                     invocationEvidence,
                     promptSha256,
                     contextSize,
-                    maximumContextCharacters,
+                    contextBudget,
                 )
             }
             require(execution.stopReason == AgentStopReason.COMPLETED) {
@@ -408,7 +296,7 @@ class BoundedLlmModuleReconstructor(
                 generator = "agent:${harness.implementationIdentifier() ?: "unspecified"}",
                 promptSha256 = promptSha256,
                 promptCharacters = contextSize,
-                promptBudgetCharacters = maximumContextCharacters,
+                promptBudgetCharacters = contextBudget,
                 agentExecutionEvidence = invocationEvidence,
             )
         } catch (failure: Exception) {
@@ -425,7 +313,7 @@ class BoundedLlmModuleReconstructor(
                 evidence = requireNotNull(invocationEvidence),
                 promptSha256 = promptSha256,
                 promptCharacters = contextSize,
-                promptBudgetCharacters = maximumContextCharacters,
+                promptBudgetCharacters = contextBudget,
                 cause = failure,
             )
         }
@@ -624,24 +512,57 @@ internal fun boundedCheckpointExecutionEvidenceSha256(
 internal const val MAXIMUM_CHECKPOINT_EXECUTION_EVIDENCE_BYTES: Int = 64 * 1024 * 1024
 
 object SourceTreeGenerator {
+    private const val INPUT_FINGERPRINT_PROVIDER = "module-reconstruction-input-v2"
+
     fun generate(
         model: RecoveredProgramModel,
         projectDir: Path,
-        planner: DeterministicModulePlanner = DeterministicModulePlanner(),
-        reconstructor: ModuleReconstructor = EvidenceModuleReconstructor(),
+        planner: DeterministicModulePlanner? = null,
+        reconstructor: ModuleReconstructor? = null,
+        overrides: Map<String, String> = emptyMap(),
+        observedBehavior: String? = null,
+        profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+        progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
+        onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
+    ): SourceTreeManifest = generate(
+        model = model,
+        projectDir = projectDir,
+        hostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+        planner = planner,
+        reconstructor = reconstructor,
+        overrides = overrides,
+        observedBehavior = observedBehavior,
+        profile = profile,
+        progress = progress,
+        onModuleProgress = onModuleProgress,
+    )
+
+    /** Explicit host policy can authorize a profile without changing its recorded budgets or identity. */
+    fun generate(
+        model: RecoveredProgramModel,
+        projectDir: Path,
+        hostSafetyLimits: ReconstructionHostSafetyLimits,
+        planner: DeterministicModulePlanner? = null,
+        reconstructor: ModuleReconstructor? = null,
         overrides: Map<String, String> = emptyMap(),
         observedBehavior: String? = null,
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
         progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
         onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
     ): SourceTreeManifest {
-        val plan = planner.plan(model, overrides)
-        val typesHeader = renderTypesHeader(model)
+        hostSafetyLimits.requireAllows(profile.budgets)
+        val adapter = ReconstructionAdapters.resolve(profile)
+        val selectedReconstructor = reconstructor ?: adapter.defaultReconstructor()
+        val compilationPolicy = adapter.compilation
+        val selectedPlanner = planner?.withProfileBounds(profile) ?: DeterministicModulePlanner.forProfile(profile)
+        val plan = selectedPlanner.plan(model, overrides)
+        val rendering = adapter.rendering(model, plan)
+        val typesHeader = rendering.sharedInterface()
         val typesHeaderPath = profile.layout.declaration("shared-interface").materialize()
         val typesHeaderFile = projectDir.resolve(typesHeaderPath)
         typesHeaderFile.parent.createDirectories()
         typesHeaderFile.writeText(typesHeader)
-        val headers = plan.modules.associate { module -> module.id to renderModuleHeader(module, model, plan) }
+        val headers = plan.modules.associate { module -> module.id to rendering.moduleInterface(module) }
         val moduleById = plan.modules.associateBy { it.id }
         val functionById = model.functions.associateBy { it.id }
         val functionOwners = plan.modules.flatMap { module -> module.functionIds.map { it to module.id } }.toMap()
@@ -654,7 +575,7 @@ object SourceTreeGenerator {
         }
         val headerHashes = headers.mapValues { sha256(it.value.toByteArray()) }
         val interfaceFingerprints = moduleInterfaceFingerprints(dependenciesByModule, headerHashes)
-        val privateHeaders = plan.modules.associate { module -> module.id to renderPrivateHeader(module, model, plan) }
+        val privateHeaders = plan.modules.associate { module -> module.id to rendering.privateInterface(module) }
         headers.forEach { (id, content) ->
             val path = profile.layout.declaration("module-interface").materialize(mapOf("module" to id))
             val file = projectDir.resolve(path)
@@ -699,6 +620,7 @@ object SourceTreeGenerator {
                 dependencyHeaders,
                 observedBehavior,
                 profile.sha256,
+                compilationPolicy.id,
             )
             val fingerprint = sha256(("transitive-interfaces-v2\n" + localFingerprint + "\n" +
                 interfaceFingerprints.getValue(module.id)).toByteArray())
@@ -729,11 +651,15 @@ object SourceTreeGenerator {
             }
             val recordedCheckpoint = readCheckpoint(checkpointPath)
             fun ModuleCheckpoint.hasCurrentModuleAcceptance(): Boolean =
-                schemaVersion == 5 && accepted && issues.isEmpty() &&
+                schemaVersion == 6 && inputBinarySha256 == model.inputSha256 &&
+                    modelSchemaVersion == model.schemaVersion && profileSha256 == profile.sha256 &&
+                    accepted && issues.isEmpty() &&
+                    (!moduleClaimsAgentExecution(generator, reconstructorIdentity) ||
+                        modulePromptBudgetIsValid(promptCharacters?.toLong(), promptBudgetCharacters?.toLong(), profile)) &&
                     entityIds.size == entityIds.toSet().size &&
                     entityIds.toSet() == (module.functionIds + module.globalIds).toSet() &&
                     compilation?.passed == true &&
-                    compilation.command == GeneratedCModuleValidation.command(profile, module.sourcePath)
+                    compilation.command == compilationPolicy.command(profile, module.sourcePath)
             val verifiedPreviousAcceptance = recordedCheckpoint?.takeIf {
                 it.hasCurrentModuleAcceptance() && sourcePath.exists() && sha256(sourcePath.readBytes()) == it.sourceSha256 &&
                     it.hasCurrentExecutionEvidence(projectDir, configuredExecutionEvidencePath, false)
@@ -752,16 +678,18 @@ object SourceTreeGenerator {
                 sessionEvidenceFingerprint = fingerprint,
                 acceptedSourceSha256 = verifiedPreviousAcceptance?.sourceSha256,
             )
-            val cacheIdentity = reconstructor.cacheIdentity()
+            val cacheIdentity = selectedReconstructor.cacheIdentity(profile)
             val cached = recordedCheckpoint?.takeIf { checkpoint ->
-                checkpoint.schemaVersion == 5 && checkpoint.fingerprint == fingerprint &&
+                checkpoint.schemaVersion == 6 && checkpoint.inputBinarySha256 == model.inputSha256 &&
+                    checkpoint.modelSchemaVersion == model.schemaVersion && checkpoint.profileSha256 == profile.sha256 &&
+                    checkpoint.fingerprint == fingerprint &&
                     sourcePath.exists() &&
                     sha256(sourcePath.readBytes()) == checkpoint.sourceSha256 &&
                     checkpoint.reconstructorIdentity == cacheIdentity &&
                     checkpoint.hasCurrentExecutionEvidence(
                         projectDir = projectDir,
                         configuredEvidencePath = configuredExecutionEvidencePath,
-                        evidenceRequired = reconstructor.requiresExecutionEvidenceForCheckpointReuse(),
+                        evidenceRequired = selectedReconstructor.requiresExecutionEvidenceForCheckpointReuse(),
                     ) &&
                     (if (checkpoint.accepted) checkpoint.hasCurrentModuleAcceptance() else !checkpoint.retryable)
             }
@@ -786,7 +714,7 @@ object SourceTreeGenerator {
                     return attemptEvidence
                 }
                 val attempted = try {
-                    reconstructor.reconstruct(request)
+                    selectedReconstructor.reconstruct(request)
                 } catch (interrupted: ModuleReconstructionInterruptedException) {
                     interrupted.agentExecutionEvidence?.let(::persistExecutionEvidence)
                     val executionEvidence = restoreAcceptedRevision()
@@ -812,11 +740,32 @@ object SourceTreeGenerator {
                 val executionEvidence = attempted.agentExecutionEvidence?.let(::persistExecutionEvidence)
                     ?: persistedExecutionEvidence
                 progress.phase(AgentWorkflowPhase.POLICY_CHECKING, module.id)
-                val issues = assessReconstruction(module, model, attempted, normalizedSource).toMutableList()
+                val issues = assessReconstruction(adapter, profile, module, model, attempted, normalizedSource, cacheIdentity).toMutableList()
                 writeAtomically(sourcePath, normalizedSource)
                 val compilation = if (issues.isEmpty()) {
                     progress.phase(AgentWorkflowPhase.BUILD_VALIDATING, module.id)
-                    GeneratedCModuleValidation.validate(projectDir, module.sourcePath, profile).also { validation ->
+                    val validation = try {
+                        compilationPolicy.validate(projectDir, module.sourcePath, profile)
+                    } catch (failure: Exception) {
+                        if (failure !is InterruptedException && !Thread.currentThread().isInterrupted) throw failure
+                        // Restore durable state before reinstating cancellation, since file
+                        // operations may otherwise abort immediately on the interrupted thread.
+                        Thread.interrupted()
+                        val interrupted = ModuleReconstructionInterruptedException(
+                            module.id, AgentStopReason.CANCELLED, "module compiler validation interrupted",
+                            attempted.agentExecutionEvidence, attempted.promptSha256,
+                            attempted.promptCharacters, attempted.promptBudgetCharacters,
+                        ).also { it.initCause(failure) }
+                        try {
+                            val retainedEvidence = restoreAcceptedRevision()
+                            writeInterruptionReport(attemptPath, module, fingerprint, cacheIdentity,
+                                sourcePath, recordedCheckpoint, interrupted, retainedEvidence)
+                        } finally {
+                            Thread.currentThread().interrupt()
+                        }
+                        throw interrupted
+                    }
+                    validation.also { validation ->
                         if (!validation.passed) issues += ModuleReconstructionIssue(
                             "module-compilation-${validation.outcome}",
                             "module compiler gate ${validation.outcome}; diagnostics SHA-256=${validation.diagnosticsSha256}",
@@ -827,6 +776,9 @@ object SourceTreeGenerator {
                 val accepted = issues.isEmpty()
                 val normalizedSourceSha256 = sha256(normalizedSource.toByteArray())
                 val candidateCheckpoint = ModuleCheckpoint(
+                    inputBinarySha256 = model.inputSha256,
+                    modelSchemaVersion = model.schemaVersion,
+                    profileSha256 = profile.sha256,
                     fingerprint = fingerprint,
                     sourceSha256 = normalizedSourceSha256,
                     generator = attempted.generator,
@@ -855,7 +807,7 @@ object SourceTreeGenerator {
                             + "\"previousAcceptedSourceSha256\":\"${previousAccepted.sourceSha256}\","
                             + "\"candidate\":${rejectedCheckpoint.toJson()}}\n",
                     )
-                    reconstructor.reconcileSessionCheckpoint(
+                    selectedReconstructor.reconcileSessionCheckpoint(
                         request, false, previousAccepted.sourceSha256,
                         executionEvidence?.requestSha256, executionEvidence?.sha256,
                     )
@@ -871,7 +823,7 @@ object SourceTreeGenerator {
             if (checkpoint.executionEvidencePath == null) configuredExecutionEvidenceFile?.deleteIfExists()
             attemptPath.deleteIfExists()
             projectDir.resolve("reports/modules/${module.id}.attempt.execution.json").deleteIfExists()
-            reconstructor.reconcileSessionCheckpoint(
+            selectedReconstructor.reconcileSessionCheckpoint(
                 request, checkpoint.accepted, checkpoint.sourceSha256,
                 checkpoint.executionRequestSha256, checkpoint.executionEvidenceSha256,
             )
@@ -899,6 +851,9 @@ object SourceTreeGenerator {
                 append("{\"sourcePath\":\"").append(module.sourcePath.jsonEscape()).append("\",")
                 append("\"sourceSha256\":\"").append(checkpoint.sourceSha256).append("\",")
                 append("\"inputFingerprint\":\"").append(checkpoint.fingerprint).append("\",")
+                append("\"inputFingerprintProvider\":\"").append(INPUT_FINGERPRINT_PROVIDER).append("\",")
+                append("\"inputBinarySha256\":\"").append(model.inputSha256.jsonEscape()).append("\",")
+                append("\"modelSchemaVersion\":").append(model.schemaVersion).append(',')
                 append("\"checkpointPath\":\"").append(checkpointEvidencePath.jsonEscape()).append("\",")
                 append("\"checkpointSha256\":\"").append(sha256(checkpointText.toByteArray())).append("\",")
                 append("\"acceptedImplementation\":").append(checkpoint.accepted).append(',')
@@ -922,30 +877,13 @@ object SourceTreeGenerator {
             onModuleProgress(index + 1, plan.modules.size, module.id)
         }
 
-        val hasRecoveredMain = model.functions.any { safeCName(it.name) == "main" }
-        if (!hasRecoveredMain) {
-            val entry = model.functions.firstOrNull { safeCName(it.name) == "decomp_engine_main" }
-                ?: model.functions.firstOrNull { safeCName(it.name) in setOf("entry", "recovered__start") }
-                ?: model.functions.minByOrNull { it.address }
-            val entryBody = entry?.let {
-                if (normalizedPrototype(it).startsWith("void ")) "${safeCName(it.name)}();\n    return 0;"
-                else "return ${safeCName(it.name)}();"
-            } ?: "return 0;"
-            val mainSource = """
-                #include "decomp_types.h"
-                ${entry?.let { "extern ${normalizedPrototype(it)};" } ?: ""}
-
-                int main(int argc, char **argv) {
-                    (void)argc;
-                    (void)argv;
-                    $entryBody
-                }
-            """.trimIndent() + "\n"
+        rendering.entrypoint()?.let { entrypoint ->
+            val mainSource = entrypoint.source
             val entrypointPath = profile.layout.declaration("entrypoint-implementation").materialize()
             val entrypointFile = projectDir.resolve(entrypointPath)
             entrypointFile.parent.createDirectories()
             entrypointFile.writeText(mainSource)
-            generated += evidence(profile, entrypointPath, mainSource, "planner", listOfNotNull(entry?.id))
+            generated += evidence(profile, entrypointPath, mainSource, "planner", entrypoint.entityIds)
         }
         val sourcePaths = generated.filter { entry ->
             try {
@@ -955,7 +893,7 @@ object SourceTreeGenerator {
                 false
             }
         }.map { it.path }.sorted()
-        val makefile = renderMakefile(sourcePaths, profile)
+        val makefile = rendering.buildDefinition(sourcePaths, profile)
         val makefilePath = profile.layout.declaration("build-definition").materialize()
         val makefileFile = projectDir.resolve(makefilePath)
         makefileFile.parent.createDirectories()
@@ -974,7 +912,7 @@ object SourceTreeGenerator {
         val confidence = renderConfidence(model, plan, unresolvedImplementations, moduleRevisionEvidence)
         projectDir.resolve(confidencePath).also { it.parent.createDirectories() }.writeText(confidence)
         generated += evidence(profile, confidencePath, confidence, "evidence", model.functions.map { it.id } + model.globals.map { it.id })
-        val toolchain = renderToolchain()
+        val toolchain = adapter.toolchainEvidence(profile)
         projectDir.resolve(toolchainPath).also { it.parent.createDirectories() }.writeText(toolchain)
         generated += evidence(profile, toolchainPath, toolchain, "environment", emptyList())
         val unresolvedMarkdown = renderUnresolvedMarkdown(model, plan, unresolvedImplementations)
@@ -992,80 +930,6 @@ object SourceTreeGenerator {
         )
         projectDir.resolve("source_tree_manifest.json").writeText(manifest.toJson())
         return manifest
-    }
-
-    private fun renderTypesHeader(model: RecoveredProgramModel): String = buildString {
-        append("#ifndef DECOMP_TYPES_H\n#define DECOMP_TYPES_H\n\n#include <stddef.h>\n#include <stdint.h>\n\n")
-        model.types.sortedBy { it.id }.forEach { type ->
-            append("/* ${type.id}; status=${type.status.name.lowercase()}")
-            type.sourceAddress?.let { append("; @ 0x${it.toString(16)}") }
-            append(" */\n").append(type.declaration.trim()).append("\n\n")
-        }
-        append("#endif\n")
-    }
-
-    private fun renderModuleHeader(module: PlannedModule, model: RecoveredProgramModel, plan: ModulePlan): String = buildString {
-        val guard = "DECOMP_MODULE_${module.id.uppercase()}_H"
-        append("#ifndef $guard\n#define $guard\n\n#include \"decomp_types.h\"\n\n")
-        module.globalIds.map { id -> model.globals.single { it.id == id } }.forEach { global ->
-            append(globalDeclaration(global, external = true)).append(" /* ${global.id} @ 0x${global.address.toString(16)} */\n")
-        }
-        if (module.globalIds.isNotEmpty()) append('\n')
-        val owner = plan.modules.flatMap { candidate -> candidate.functionIds.map { it to candidate.id } }.toMap()
-        val externallyCalled = model.functions.flatMap { caller -> caller.calls.filter { called -> owner[called] != owner[caller.id] } }.toSet()
-        module.functionIds.map { id -> model.functions.single { it.id == id } }
-            .filter { it.id in externallyCalled || safeCName(it.name) in setOf("main", "decomp_engine_main") }
-            .forEach { function ->
-            append(normalizedPrototype(function)).append("; /* ${function.id} @ 0x${function.address.toString(16)} */\n")
-        }
-        append("\n#endif\n")
-    }
-
-    private fun renderPrivateHeader(module: PlannedModule, model: RecoveredProgramModel, plan: ModulePlan): String = buildString {
-        val guard = "DECOMP_MODULE_${module.id.uppercase()}_INTERNAL_H"
-        val owner = plan.modules.flatMap { candidate -> candidate.functionIds.map { it to candidate.id } }.toMap()
-        val externallyCalled = model.functions.flatMap { caller -> caller.calls.filter { called -> owner[called] != owner[caller.id] } }.toSet()
-        append("#ifndef $guard\n#define $guard\n\n#include \"modules/${module.id}.h\"\n\n")
-        module.functionIds.map { id -> model.functions.single { it.id == id } }
-            .filterNot { it.id in externallyCalled || safeCName(it.name) in setOf("main", "decomp_engine_main") }
-            .forEach { function -> append(normalizedPrototype(function)).append("; /* private ${function.id} @ 0x${function.address.toString(16)} */\n") }
-        append("\n#endif\n")
-    }
-
-    private fun renderMakefile(sources: List<String>, profile: ReconstructionProfile): String {
-        val cflags = profile.adapterConfiguration["compiler-flags"]?.joinToString(" ")
-            ?: "-std=c11 -g -Wall -Wextra -Werror -Iinclude"
-        val cc = profile.adapterConfiguration["compiler-driver"]?.firstOrNull() ?: "gcc"
-        return listOf(
-            "CC ?= $cc",
-            "CFLAGS ?= $cflags",
-        "REPRODUCIBLE_CFLAGS := \"-ffile-prefix-map=${'$'}${'$'}PWD=.\" \"-fdebug-prefix-map=${'$'}${'$'}PWD=.\" \"-fmacro-prefix-map=${'$'}${'$'}PWD=.\"",
-        "TARGET ?= build/reconstructed",
-        "SOURCES := ${sources.joinToString(" ")}",
-        "ACTUAL_SOURCES := ${'$'}(sort ${'$'}(shell find src -type f -name '*.c'))",
-        "EXPECTED_SOURCES := ${'$'}(sort ${'$'}(SOURCES))",
-        "ifneq (${'$'}(ACTUAL_SOURCES),${'$'}(EXPECTED_SOURCES))",
-        "${'$'}(error source tree contains missing or unowned C files; expected '${'$'}(EXPECTED_SOURCES)', found '${'$'}(ACTUAL_SOURCES)')",
-        "endif",
-        "OBJECTS := ${'$'}(SOURCES:src/%.c=build/%.o)",
-        "",
-        "all: ${'$'}(TARGET)",
-        "",
-        "${'$'}(TARGET): ${'$'}(OBJECTS)",
-        "\t@echo \"[link] ${'$'}@\"",
-        "\t@${'$'}(CC) ${'$'}(CFLAGS) ${'$'}(REPRODUCIBLE_CFLAGS) ${'$'}(OBJECTS) -o ${'$'}@",
-        "",
-        "build/%.o: src/%.c",
-        "\t@mkdir -p ${'$'}(dir ${'$'}@)",
-        "\t@echo \"[compile] ${'$'}< -> ${'$'}@\"",
-        "\t@${'$'}(CC) ${'$'}(CFLAGS) ${'$'}(REPRODUCIBLE_CFLAGS) -MMD -MP -c ${'$'}< -o ${'$'}@",
-        "",
-        "clean:",
-        "\trm -rf build",
-        "",
-        "-include ${'$'}(OBJECTS:.o=.d)",
-        ".PHONY: all clean",
-    ).joinToString("\n", postfix = "\n")
     }
 
     private fun evidence(
@@ -1091,7 +955,7 @@ object SourceTreeGenerator {
     }
 
     private data class ModuleCheckpoint(
-        val schemaVersion: Int = 5,
+        val schemaVersion: Int = 6,
         val fingerprint: String,
         val sourceSha256: String,
         val generator: String,
@@ -1110,9 +974,14 @@ object SourceTreeGenerator {
         val executionTerminalOutcome: String? = null,
         val executionReleaseComplete: Boolean? = null,
         val compilation: ModuleCompilationEvidence? = null,
+        val inputBinarySha256: String? = null,
+        val modelSchemaVersion: Int? = null,
+        val profileSha256: String? = null,
     ) {
         init {
-            require(schemaVersion in 2..5) { "unsupported module checkpoint schemaVersion: $schemaVersion" }
+            require(schemaVersion < 6 || (inputBinarySha256 != null && modelSchemaVersion in setOf(1, 2) &&
+                profileSha256?.matches(Regex("[0-9a-f]{64}")) == true)) { "module checkpoint lacks input identity" }
+            require(schemaVersion in 2..6) { "unsupported module checkpoint schemaVersion: $schemaVersion" }
             require(schemaVersion < 5 || !accepted ||
                 (compilation?.passed == true && compilation.sourceSha256 == sourceSha256)
             ) { "accepted module checkpoint lacks successful compilation of its exact source bytes" }
@@ -1156,7 +1025,7 @@ object SourceTreeGenerator {
             evidenceRequired: Boolean,
         ): Boolean {
             val checkpointClaimsAgentExecution =
-                generator.startsWith("agent:") || reconstructorIdentity.startsWith("agent:")
+                moduleClaimsAgentExecution(generator, reconstructorIdentity)
             val evidencePath = executionEvidencePath
                 ?: return !evidenceRequired && !checkpointClaimsAgentExecution
 
@@ -1191,6 +1060,11 @@ object SourceTreeGenerator {
                 append("\n  \"executionReleaseComplete\": ")
                 append(executionReleaseComplete ?: "null").append(',')
             }
+            if (schemaVersion >= 6) {
+                append("\n  \"inputBinarySha256\": ").append(kotlinx.serialization.json.JsonPrimitive(inputBinarySha256)).append(',')
+                append("\n  \"modelSchemaVersion\": ").append(modelSchemaVersion).append(',')
+                append("\n  \"profileSha256\": ").append(kotlinx.serialization.json.JsonPrimitive(profileSha256)).append(',')
+            }
             append("\n  \"accepted\": ").append(accepted).append(',')
             if (schemaVersion >= 5) {
                 append("\n  \"compilation\": ").append(compilation?.toJson() ?: "null").append(',')
@@ -1218,12 +1092,26 @@ object SourceTreeGenerator {
         return runCatching {
             val root = Json.parseToJsonElement(path.readText()).jsonObject
             val schemaVersion = root["schemaVersion"]?.jsonPrimitive?.intOrNull ?: return null
-            if (schemaVersion !in setOf(2, 3, 4, 5)) return null
+            if (schemaVersion !in setOf(2, 3, 4, 5, 6)) return null
+            if (schemaVersion >= 6) {
+                require(root.getValue("schemaVersion") == kotlinx.serialization.json.JsonPrimitive(6))
+                require(root.getValue("inputBinarySha256").jsonPrimitive.isString)
+                require(root.getValue("profileSha256").jsonPrimitive.isString)
+                require(!root.getValue("modelSchemaVersion").jsonPrimitive.isString)
+                for (field in listOf("promptCharacters", "promptBudgetCharacters")) {
+                    root[field]?.takeUnless { it is JsonNull }?.jsonPrimitive?.let { value ->
+                        require(!value.isString && value.intOrNull != null) { "$field must be an integer" }
+                    }
+                }
+            }
             fun optionalString(name: String): String? = root[name]?.let { value ->
                 if (value is JsonNull) null else value.jsonPrimitive.content
             }
             ModuleCheckpoint(
                 schemaVersion = schemaVersion,
+                inputBinarySha256 = if (schemaVersion >= 6) optionalString("inputBinarySha256") else null,
+                modelSchemaVersion = if (schemaVersion >= 6) root["modelSchemaVersion"]?.jsonPrimitive?.intOrNull else null,
+                profileSha256 = if (schemaVersion >= 6) optionalString("profileSha256") else null,
                 fingerprint = root.getValue("fingerprint").jsonPrimitive.content,
                 sourceSha256 = root.getValue("sourceSha256").jsonPrimitive.content,
                 generator = root.getValue("generator").jsonPrimitive.content,
@@ -1365,7 +1253,7 @@ object SourceTreeGenerator {
         reconstructorIdentity: String,
         failure: Exception,
     ): ReconstructedModule {
-        val fallback = EvidenceModuleReconstructor().reconstruct(request)
+        val fallback = ReconstructionAdapters.resolve(request.profile).defaultReconstructor().reconstruct(request)
         val entityIds = request.module.functionIds + request.module.globalIds
         val agentOutcome = failure as? ModuleReconstructionAgentOutcomeException
         val code = when {
@@ -1380,7 +1268,8 @@ object SourceTreeGenerator {
             else -> "${failure::class.simpleName ?: "Exception"} during module reconstruction"
         }
         return fallback.copy(
-            generator = "unresolved:$reconstructorIdentity",
+            generator = if (failure is ModuleContextBudgetExceededException) "unresolved:profile-budget"
+                else "unresolved:$reconstructorIdentity",
             promptSha256 = agentOutcome?.promptSha256
                 ?: (failure as? ModuleContextBudgetExceededException)?.promptSha256
                 ?: fallback.promptSha256,
@@ -1395,17 +1284,20 @@ object SourceTreeGenerator {
     }
 
     private fun assessReconstruction(
+        adapter: ReconstructionAdapter,
+        profile: ReconstructionProfile,
         module: PlannedModule,
         model: RecoveredProgramModel,
         reconstructed: ReconstructedModule,
         source: String,
+        reconstructorIdentity: String,
     ): List<ModuleReconstructionIssue> {
         val entityIds = module.functionIds + module.globalIds
         val issues = reconstructed.issues.toMutableList()
         if (source.isBlank() && entityIds.isNotEmpty()) {
             issues += ModuleReconstructionIssue("empty-source", "module source is empty", entityIds)
         }
-        if (reconstructed.generator.startsWith("agent:")) {
+        if (moduleClaimsAgentExecution(reconstructed.generator, reconstructorIdentity)) {
             if (reconstructed.source != source) {
                 issues += ModuleReconstructionIssue(
                     "agent-source-normalization-changed-bytes",
@@ -1433,232 +1325,16 @@ object SourceTreeGenerator {
                     "agent prompt used $promptCharacters characters with a $promptBudget character budget",
                     entityIds,
                 )
+                !modulePromptBudgetIsValid(promptCharacters.toLong(), promptBudget.toLong(), profile) ->
+                    issues += ModuleReconstructionIssue(
+                        "prompt-budget-invalid",
+                        "agent prompt size or budget is outside the selected reconstruction profile",
+                        entityIds,
+                    )
             }
         }
-        val codeOnly = codeWithoutCommentsOrLiterals(source)
-        // The compiler gate resolves type names; spelling-only checks reject valid
-        // identifiers and explicitly defined typedefs.
-        module.functionIds.forEach { id ->
-            val function = model.functions.single { it.id == id }
-            if (!source.contains(id)) {
-                issues += ModuleReconstructionIssue(
-                    "missing-function-provenance",
-                    "candidate source does not attribute ${function.id}",
-                    listOf(function.id),
-                )
-            }
-            val body = findFunctionBody(source, safeCName(function.name))
-            if (body == null) {
-                issues += ModuleReconstructionIssue(
-                    "missing-function-definition",
-                    "candidate source does not define ${safeCName(function.name)} for ${function.id}",
-                    listOf(function.id),
-                )
-            } else if (
-                reconstructed.generator != "recovered-c" &&
-                genericReturnBody(body) &&
-                !recoveredEvidenceIsTrivial(function)
-            ) {
-                issues += ModuleReconstructionIssue(
-                    "generic-return-placeholder",
-                    "candidate implementation for ${function.id} is indistinguishable from the evidence-only return stub",
-                    listOf(function.id),
-                )
-            }
-        }
-        module.globalIds.forEach { id ->
-            val global = model.globals.single { it.id == id }
-            if (!source.contains(id)) {
-                issues += ModuleReconstructionIssue(
-                    "missing-global-provenance",
-                    "candidate source does not attribute $id",
-                    listOf(id),
-                )
-            }
-            if (!hasGlobalDefinition(codeOnly, safeCName(global.name))) {
-                issues += ModuleReconstructionIssue(
-                    "missing-global-definition",
-                    "candidate source does not define ${safeCName(global.name)} for $id",
-                    listOf(id),
-                )
-            }
-        }
+        issues += adapter.assess(module, model, reconstructed.generator, source)
         return issues.distinctBy { Triple(it.code, it.message, it.entityIds.sorted()) }
-    }
-
-    private fun findFunctionBody(source: String, functionName: String): String? {
-        val candidates = Regex("\\b${Regex.escape(functionName)}\\s*\\(").findAll(source)
-        candidates.forEach { candidate ->
-            val parameterStart = source.indexOf('(', candidate.range.first)
-            val parameterEnd = matchingDelimiter(source, parameterStart, '(', ')') ?: return@forEach
-            var bodyStart = parameterEnd + 1
-            while (bodyStart < source.length && source[bodyStart].isWhitespace()) bodyStart++
-            if (bodyStart >= source.length || source[bodyStart] != '{') return@forEach
-            val bodyEnd = matchingDelimiter(source, bodyStart, '{', '}') ?: return@forEach
-            return source.substring(bodyStart + 1, bodyEnd)
-        }
-        return null
-    }
-
-    private fun matchingDelimiter(source: String, start: Int, open: Char, close: Char): Int? {
-        var depth = 0
-        var index = start
-        var quoted: Char? = null
-        var escaped = false
-        var lineComment = false
-        var blockComment = false
-        while (index < source.length) {
-            val character = source[index]
-            val next = source.getOrNull(index + 1)
-            when {
-                lineComment -> if (character == '\n') lineComment = false
-                blockComment -> if (character == '*' && next == '/') {
-                    blockComment = false
-                    index++
-                }
-                quoted != null -> when {
-                    escaped -> escaped = false
-                    character == '\\' -> escaped = true
-                    character == quoted -> quoted = null
-                }
-                character == '/' && next == '/' -> {
-                    lineComment = true
-                    index++
-                }
-                character == '/' && next == '*' -> {
-                    blockComment = true
-                    index++
-                }
-                character == '"' || character == '\'' -> quoted = character
-                character == open -> depth++
-                character == close -> {
-                    depth--
-                    if (depth == 0) return index
-                }
-            }
-            index++
-        }
-        return null
-    }
-
-    private fun genericReturnBody(body: String): Boolean {
-        val withoutComments = body
-            .replace(Regex("/\\*.*?\\*/", setOf(RegexOption.DOT_MATCHES_ALL)), "")
-            .replace(Regex("//[^\\r\\n]*"), "")
-            .replace(Regex("\\s+"), "")
-        return withoutComments == "return0;" || withoutComments == "return;"
-    }
-
-    private fun recoveredEvidenceIsTrivial(function: RecoveredFunction): Boolean =
-        function.decompiledC?.let { recovered ->
-            findFunctionBody(recovered, function.name)?.let(::genericReturnBody)
-                ?: Regex("\\{\\s*return(?:\\s+0)?\\s*;\\s*}", RegexOption.DOT_MATCHES_ALL).containsMatchIn(recovered)
-        } == true
-
-    /**
-     * Preserve code layout while hiding tokens that occur only in comments and literals. This keeps
-     * acceptance checks from treating diagnostics such as "copied 1 byte" as C type declarations.
-     */
-    private fun codeWithoutCommentsOrLiterals(source: String): String = buildString(source.length) {
-        var index = 0
-        var lineComment = false
-        var blockComment = false
-        var quoted: Char? = null
-        var escaped = false
-        while (index < source.length) {
-            val character = source[index]
-            val next = source.getOrNull(index + 1)
-            when {
-                lineComment -> {
-                    append(if (character == '\n') '\n' else ' ')
-                    if (character == '\n') lineComment = false
-                }
-                blockComment -> {
-                    append(if (character == '\n') '\n' else ' ')
-                    if (character == '*' && next == '/') {
-                        append(' ')
-                        index++
-                        blockComment = false
-                    }
-                }
-                quoted != null -> {
-                    append(if (character == '\n') '\n' else ' ')
-                    when {
-                        escaped -> escaped = false
-                        character == '\\' -> escaped = true
-                        character == quoted -> quoted = null
-                    }
-                }
-                character == '/' && next == '/' -> {
-                    append("  ")
-                    index++
-                    lineComment = true
-                }
-                character == '/' && next == '*' -> {
-                    append("  ")
-                    index++
-                    blockComment = true
-                }
-                character == '"' || character == '\'' -> {
-                    append(' ')
-                    quoted = character
-                }
-                else -> append(character)
-            }
-            index++
-        }
-    }
-
-    /**
-     * Recognize a top-level C declarator for [name]. References in function bodies, parameters,
-     * array bounds, and other globals' initializers do not qualify as definitions.
-     */
-    private fun hasGlobalDefinition(code: String, name: String): Boolean {
-        val occurrences = Regex("\\b${Regex.escape(name)}\\b").findAll(code).iterator()
-        if (!occurrences.hasNext()) return false
-        var occurrence = occurrences.next()
-        var braceDepth = 0
-        var parenthesisDepth = 0
-        var bracketDepth = 0
-        var statementStart = 0
-        for (index in code.indices) {
-            if (index == occurrence.range.first) {
-                if (braceDepth == 0 && bracketDepth == 0) {
-                    val prefix = code.substring(statementStart, occurrence.range.first)
-                    val functionPointerDeclarator = parenthesisDepth == 1 && prefix.trimEnd().endsWith("(*")
-                    val declarationPrefix = parenthesisDepth == 0 || functionPointerDeclarator
-                    val hasType = Regex("[A-Za-z_]\\w*").containsMatchIn(prefix)
-                    val isExternal = Regex("\\bextern\\b").containsMatchIn(prefix)
-                    val suffix = code.substring(occurrence.range.last + 1).trimStart()
-                    val declaratorSuffix = when {
-                        functionPointerDeclarator -> suffix.startsWith(')')
-                        suffix.startsWith('(') -> false
-                        suffix.isEmpty() -> true
-                        else -> suffix.first() in setOf(';', '=', ',', '[')
-                    }
-                    if (declarationPrefix && hasType && !isExternal && '=' !in prefix && declaratorSuffix) {
-                        return true
-                    }
-                }
-                if (!occurrences.hasNext()) break
-                occurrence = occurrences.next()
-            }
-            when (code[index]) {
-                '{' -> braceDepth++
-                '}' -> {
-                    if (braceDepth > 0) braceDepth--
-                    if (braceDepth == 0) statementStart = index + 1
-                }
-                '(' -> parenthesisDepth++
-                ')' -> if (parenthesisDepth > 0) parenthesisDepth--
-                '[' -> bracketDepth++
-                ']' -> if (bracketDepth > 0) bracketDepth--
-                ';' -> if (braceDepth == 0 && parenthesisDepth == 0 && bracketDepth == 0) {
-                    statementStart = index + 1
-                }
-            }
-        }
-        return false
     }
 
     private fun writeAtomically(path: Path, content: String) {
@@ -1690,22 +1366,27 @@ object SourceTreeGenerator {
         dependencyHeaders: Map<String, String>,
         observedBehavior: String?,
         profileSha256: String,
+        compilerPolicyId: String,
     ): String {
-        val functions = module.functionIds.sorted().joinToString("\n") { id ->
-            val item = model.functions.single { it.id == id }
-            listOf(item.id, item.name, item.address.toString(), item.prototype, item.status.name, item.decompiledC.orEmpty(),
-                item.calls.sorted().joinToString(","), item.referencedGlobals.sorted().joinToString(","), item.strings.sorted().joinToString(",")).joinToString("|")
-        }
-        val globals = module.globalIds.sorted().joinToString("\n") { id -> model.globals.single { it.id == id }.toString() }
-        val types = module.typeIds.sorted().joinToString("\n") { id -> model.types.single { it.id == id }.toString() }
-        val dependencies = dependencyHeaders.toSortedMap().entries.joinToString("\n") { it.key + "\n" + it.value }
-        return sha256(
-            (
-                functions + "\n" + globals + "\n" + types + "\n" + sharedHeader + moduleHeader + privateHeader +
-                    dependencies + "\n" + observedBehavior.orEmpty() + "\n" + profileSha256 +
-                    "\n" + GeneratedCModuleValidation.POLICY_ID
-                ).toByteArray(),
+        val selectedModel = model.copy(
+            functions = module.functionIds.map { id -> model.functions.single { it.id == id } },
+            globals = module.globalIds.map { id -> model.globals.single { it.id == id } },
+            types = module.typeIds.map { id -> model.types.single { it.id == id } },
         )
+        val inputs = kotlinx.serialization.json.JsonObject(linkedMapOf(
+            "provider" to kotlinx.serialization.json.JsonPrimitive(INPUT_FINGERPRINT_PROVIDER),
+            "model" to Json.parseToJsonElement(selectedModel.toJson()),
+            "sharedHeader" to kotlinx.serialization.json.JsonPrimitive(sharedHeader),
+            "moduleHeader" to kotlinx.serialization.json.JsonPrimitive(moduleHeader),
+            "privateHeader" to kotlinx.serialization.json.JsonPrimitive(privateHeader),
+            "dependencyHeaders" to kotlinx.serialization.json.JsonObject(dependencyHeaders.toSortedMap().mapValues {
+                kotlinx.serialization.json.JsonPrimitive(it.value)
+            }),
+            "observedBehavior" to (observedBehavior?.let { kotlinx.serialization.json.JsonPrimitive(it) } ?: JsonNull),
+            "profileSha256" to kotlinx.serialization.json.JsonPrimitive(profileSha256),
+            "compilerPolicy" to kotlinx.serialization.json.JsonPrimitive(compilerPolicyId),
+        ))
+        return sha256(inputs.toString().toByteArray(Charsets.UTF_8))
     }
 
     private fun renderConfidence(
@@ -1761,25 +1442,6 @@ object SourceTreeGenerator {
         }
     }
 
-    private fun renderToolchain(): String {
-        fun version(command: String): String = runCatching {
-            ProcessBuilder(command, "--version").redirectErrorStream(true).start().let { process ->
-                val line = process.inputStream.bufferedReader().readLine().orEmpty()
-                process.waitFor()
-                line
-            }
-        }.getOrDefault("unavailable").replace("\\", "\\\\").replace("\"", "\\\"")
-        return """
-            {
-              "decompEngineVersion": "0.1.0",
-              "javaVersion": "${System.getProperty("java.version")}",
-              "gcc": "${version("gcc")}",
-              "make": "${version("make")}",
-              "note": "LLM model and prompt hashes are recorded per generated module when applicable."
-            }
-        """.trimIndent() + "\n"
-    }
-
     private fun renderUnresolvedMarkdown(
         model: RecoveredProgramModel,
         plan: ModulePlan,
@@ -1822,58 +1484,6 @@ object SourceTreeGenerator {
                 }
             }
         }
-    }
-}
-
-internal fun normalizedPrototype(function: RecoveredFunction): String {
-    val raw = normalizeGhidraTypes(function.prototype.trim().removeSuffix(";"))
-    val name = safeCName(function.name)
-    if (name == "main") return "int main(int argc, char **argv)"
-    val rawReturn = raw.substringBefore(function.name).trim()
-    val decompiledReturn = function.decompiledC?.trimStart()?.substringBefore(function.name)?.trim()?.substringAfterLast('\n')?.trim()
-    val returnType = decompiledReturn?.takeIf(::portableReturnType) ?: rawReturn.takeIf(::portableReturnType) ?: "int"
-    return "$returnType $name(void)"
-}
-
-private fun portableReturnType(value: String): Boolean = value.matches(
-    Regex("(void|char|short|int|long|float|double|size_t|u?int(8|16|32|64)_t)(\\s+long|\\s*\\*)*"),
-)
-
-private fun globalDeclaration(global: RecoveredGlobal, external: Boolean): String {
-    val type = normalizeGhidraTypes(global.type.trim())
-    val name = safeCName(global.name)
-    val array = Regex("^(.+)\\[(\\d+)]$").matchEntire(type)
-    val declaration = if (array == null) "$type $name" else "${array.groupValues[1]} $name[${array.groupValues[2]}]"
-    if (external) return "extern $declaration;"
-    val rawInitializer = global.initializer?.trim()?.split(Regex("\\s+"), limit = 2)?.first()
-    val aggregate = array != null || !portableReturnType(type.removeSuffix(" *").trim())
-    val initializer = when {
-        '*' in type -> "0"
-        aggregate -> rawInitializer?.takeIf { (it.startsWith('"') && it.endsWith('"')) || (it.startsWith('{') && it.endsWith('}')) } ?: "{0}"
-        rawInitializer?.matches(Regex("[0-9a-fA-F]+h")) == true -> "0x${rawInitializer.dropLast(1)}"
-        else -> rawInitializer?.takeIf {
-        it.matches(Regex("[-+]?(0x[0-9a-fA-F]+|0|[1-9][0-9]*)([uUlLfF]|[uU][lL])?")) ||
-            (it.startsWith('"') && it.endsWith('"')) || (it.startsWith('{') && it.endsWith('}'))
-        } ?: if (aggregate) "{0}" else "0"
-    }
-    return "$declaration = $initializer;"
-}
-
-private fun normalizeGhidraTypes(value: String): String = value
-    .replace(Regex("\\bundefined8\\b"), "uint64_t")
-    .replace(Regex("\\bundefined4\\b"), "uint32_t")
-    .replace(Regex("\\bundefined2\\b"), "uint16_t")
-    .replace(Regex("\\bundefined1\\b|\\bundefined\\b|\\bbyte\\b"), "uint8_t")
-    .replace(Regex("\\blonglong\\b"), "long long")
-    .replace(Regex("\\bpointer\\b"), "void *")
-
-internal fun safeCName(name: String): String {
-    val sanitized = name.replace(Regex("[^A-Za-z0-9_]+"), "_").ifBlank { "recovered" }
-    val collision = sanitized in setOf("_init", "_fini", "_start", "stdin", "stdout", "stderr") || sanitized.startsWith("__")
-    return when {
-        sanitized.first().isDigit() -> "fn_$sanitized"
-        collision -> "recovered_$sanitized"
-        else -> sanitized
     }
 }
 
