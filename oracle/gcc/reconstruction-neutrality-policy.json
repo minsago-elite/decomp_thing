@@ -267,20 +267,6 @@
       "reason": "Closed application-owned dispatch from the built-in Ninja profile identifier to its adapter implementation."
     },
     {
-      "path": "scripts/ci-prepare-generated-c-validation.py",
-      "rule": "benchmark-target",
-      "fragment": "gcc_runtime / 'cc1'",
-      "count": 1,
-      "reason": "Inventories the installed compiler runtime for generated-C provisioning; this expression does not select a benchmark artifact. Version and digest checks remain active."
-    },
-    {
-      "path": "src/test/kotlin/decompengine/analysis/BundledGhidraTest.kt",
-      "rule": "benchmark-version",
-      "fragment": "Path.of(\"oracle/gcc/16.2.0/compiler-engines.json\")",
-      "count": 1,
-      "reason": "Opt-in bundled Ghidra provenance test authenticates the packaged release against the declared GCC compiler-engine artifact by its canonical benchmark path; artifact digest verification remains active."
-    },
-    {
       "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
       "rule": "generic-tool",
       "fragment": "\"gcc\"",
