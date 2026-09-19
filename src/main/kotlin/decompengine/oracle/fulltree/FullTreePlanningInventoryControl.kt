@@ -487,10 +487,10 @@ object FullTreePlanningInventoryControl {
                 }
             },
         )
-        private val recognizedShardIds: Set<String> = Collections.unmodifiableSet(
+
+        private val sourceOnlyShardIds: Set<String> = Collections.unmodifiableSet(
             LinkedHashSet<String>().apply {
-                sourceModules.forEach { add(it.shardId) }
-                sourceOnlyUnits.forEach { add(it.shardId) }
+                state.sourceOnly.forEach { add(it.shardId) }
             },
         )
 
@@ -507,7 +507,7 @@ object FullTreePlanningInventoryControl {
                 throw FullTreeControlException("planning shard ID is invalid")
             }
             modulesByShardId[shardId]?.let { return it }
-            if (recognizedShardIds.contains(shardId)) {
+            if (shardId in sourceOnlyShardIds) {
                 return emptyList()
             }
             throw FullTreeControlException("planning shard ID is outside the authenticated inventory")
