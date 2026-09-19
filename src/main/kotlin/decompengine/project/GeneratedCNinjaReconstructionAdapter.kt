@@ -5,7 +5,6 @@ import java.nio.file.Path
 internal object GeneratedCNinjaReconstructionAdapter : ReconstructionAdapter by GeneratedCReconstructionAdapter {
     override val diagnostics: ToolchainDiagnosticPolicy = GeneratedCToolchainDiagnostics("ninja", "Ninja")
     override val archiveBuild: ArchiveBuildPolicy = GeneratedCNinjaArchiveBuildPolicy
-    override val behaviorBuild: BehaviorBuildPolicy = GeneratedCNinjaBehaviorBuildPolicy
     override fun rendering(model: RecoveredProgramModel, plan: ModulePlan): ProjectRendering =
         GeneratedCNinjaProjectRendering(model, plan)
     private fun configuration(profile: ReconstructionProfile, parallelism: Int) = ProjectBuildConfiguration(

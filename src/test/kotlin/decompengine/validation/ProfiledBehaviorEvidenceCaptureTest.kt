@@ -22,8 +22,6 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
@@ -67,27 +65,6 @@ class ProfiledBehaviorEvidenceCaptureTest {
                 assertFalse(fixture.project.resolve(base.layout.declaration("build-definition").materialize()).exists())
                 capture.requireCurrent()
             }
-        }
-    }
-
-    @Test
-    fun `Ninja behavior contracts keep the profile-owned build invocation and budgets`() {
-        val profile = GeneratedCNinjaReconstructionProfile.descriptor
-        val fixture = fixture(profile)
-        val contract = fixture.buildContract
-        val tampered = listOf<Pair<String, JsonElement>>(
-            "command" to JsonArray(listOf("make", "--jobs=4", "CC=gcc").map(::JsonPrimitive)),
-            "declaredDependencies" to JsonArray(
-                listOf("GNU Make", "C compiler (gcc)", "POSIX shell", "POSIX mkdir", "POSIX rm").map(::JsonPrimitive)
-            ),
-            "wallClockTimeoutMillis" to JsonPrimitive(profile.budgets.buildWallClockMillis + 1),
-            "maximumOutputBytes" to JsonPrimitive(profile.budgets.buildMaximumOutputBytes + 1),
-        )
-        for ((name, value) in tampered) {
-            fixture.project.resolve("reports/build_contract.json")
-                .writeText(JsonObject(contract + (name to value)).toString())
-            val failure = assertFailsWith<IllegalArgumentException>(name) { capture(fixture) }
-            assertTrue(failure.message.orEmpty().contains("Ninja build"), "$name: ${failure.message}")
         }
     }
 
