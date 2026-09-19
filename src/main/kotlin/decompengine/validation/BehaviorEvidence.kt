@@ -217,6 +217,20 @@ internal object BehaviorEvidence {
     fun requireProjectCurrent(record: JsonObject, context: BehaviorProjectContext) {
         val project = record.getValue("projectRevision") as? JsonObject
             ?: error("behavior report is not bound to a project revision")
+        require(project.string("profileId") == context.profile.id &&
+            project.string("profileSha256") == context.profile.sha256) {
+            "behavior evidence profile differs from the current project profile"
+        }
+        val policy = record.getValue("executionPolicy").jsonObject
+        if (record.integer("schemaVersion") >= 5) {
+            require(policy.string("profileId") == context.profile.id &&
+                policy.string("profileSha256") == context.profile.sha256) {
+                "behavior execution profile differs from the current project profile"
+            }
+            require(behaviorBudgets(policy.getValue("profileBudgets").jsonObject) == context.profile.budgets.behavior) {
+                "behavior evidence budgets differ from the current project profile"
+            }
+        }
         val capture = BehaviorEvidenceCapture()
         val rebuilt = context.projectDir.resolve(project.getValue("artifact").jsonObject.string("path"))
         require(capture.project(context, record.getValue("originalIdentity").jsonObject, rebuilt) == project) {

@@ -98,6 +98,8 @@ class BehaviorExecutionTimeoutException(message: String) : RuntimeException(mess
 
 class BehaviorExecutionOutcomeException(message: String) : RuntimeException(message)
 
+internal const val MAXIMUM_RECORDED_COMPARISON_BYTES: Long = 16L * 1024 * 1024
+
 internal fun rejectReservedWrapperExit(exitCode: Int) {
     if (exitCode !in 0..123) {
         throw BehaviorExecutionOutcomeException(
@@ -412,6 +414,11 @@ class BehaviorComparator(
         fileInputs: Map<String, Map<String, Path>> = emptyMap(),
         expectedCorpusSha256: String? = null,
     ): BehaviorComparisonReport {
+        if (profile != null && project != null) {
+            require(profile.id == project.profile.id && profile.sha256 == project.profile.sha256) {
+                "behavior comparator and project profiles differ"
+            }
+        }
         val selectedProfile = profile ?: project?.profile ?: GeneratedCMakeReconstructionProfile.descriptor
         val selectedHost = hostSafetyLimits ?: project?.hostSafetyLimits ?: ReconstructionHostSafetyLimits.DEFAULT
         val behaviorBudgets = selectedProfile.budgets.behavior
@@ -467,6 +474,9 @@ class BehaviorComparator(
             behaviorBudgets.maximumComparisonOutputBytes,
         )
         require(comparisonLimit > 0L) { "behavior comparison output bound must be positive" }
+        require(comparisonLimit <= MAXIMUM_RECORDED_COMPARISON_BYTES) {
+            "behavior comparison output bound exceeds the evidence transport limit"
+        }
         val policy = JsonObject(selectedSandbox.evidencePolicy(capture) +
             ("profileId" to JsonPrimitive(selectedProfile.id)) +
             ("profileSha256" to JsonPrimitive(selectedProfile.sha256)) +
