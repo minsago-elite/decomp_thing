@@ -1,0 +1,11 @@
+{
+  "apiVersion": 1,
+  "kind": "progressPin",
+  "requestId": "request_pin_fixture",
+  "data": {
+    "jobId": "job_fixture",
+    "runId": "run_fixture",
+    "version": "version_pin",
+    "pinned": 1
+  }
+}

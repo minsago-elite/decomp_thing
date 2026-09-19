@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.web.WebShutdownTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-09-05T16:05:04.570Z" hostname="whatsername" time="15.646">
+  <properties/>
+  <testcase name="abrupt JVM death releases ownership and recovery marks active and queued jobs interrupted()" classname="decompengine.web.WebShutdownTest" time="6.477"/>
+  <testcase name="uncooperative workers exhaust the grace period and remain interrupted on restart()" classname="decompengine.web.WebShutdownTest" time="8.17"/>
+  <testcase name="workers returning after shutdown cannot report successful completion()" classname="decompengine.web.WebShutdownTest" time="0.53"/>
+  <testcase name="JVM shutdown interrupts owned workers and persists discarded queued jobs()" classname="decompengine.web.WebShutdownTest" time="0.468"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

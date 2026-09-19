@@ -1,0 +1,153 @@
+{
+  "status": "passed",
+  "mode": "legacy",
+  "testDirectory": "/home/june/decomp_thing/build/packaged-browser-7HDicl",
+  "driverNode": "24.20.0",
+  "tools": {
+    "node": "/home/june/decomp_thing/build/tools/decomp-node-24.20.0/node-v24.20.0-linux-x64/bin/node",
+    "chrome": "/tmp/decomp-web-browser-pin-yp1jzpiy/installed/chrome",
+    "javaHome": "/opt/openjdk-bin-21",
+    "python": "/usr/bin/python3",
+    "chromeSha256": "2d18db9d8608b052b6a552ee00ec1e830f93692e928b65ecc67d693bd33fe801"
+  },
+  "requests": {
+    "legacy": [
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:33457/jobs/cccccccccccccccccccccccccccccccc",
+        "type": "Document"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:33457/assets/app.css",
+        "type": "Stylesheet"
+      },
+      {
+        "method": "GET",
+        "url": "data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.6'/%3E%3C/svg%3E",
+        "type": "Image"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:33457/favicon.ico",
+        "type": "Other"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:33457/api/jobs/cccccccccccccccccccccccccccccccc/events",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:33457/api/jobs/cccccccccccccccccccccccccccccccc",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:33457/api/jobs/cccccccccccccccccccccccccccccccc/events",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:33457/api/jobs/cccccccccccccccccccccccccccccccc/events",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:33457/api/jobs/cccccccccccccccccccccccccccccccc",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:33457/api/jobs/cccccccccccccccccccccccccccccccc/events",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:33457/api/jobs/cccccccccccccccccccccccccccccccc",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:33457/api/jobs/cccccccccccccccccccccccccccccccc/events",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:33457/api/jobs/cccccccccccccccccccccccccccccccc",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:33457/jobs/cccccccccccccccccccccccccccccccc",
+        "type": "Document"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:33457/assets/app.css",
+        "type": "Stylesheet"
+      },
+      {
+        "method": "GET",
+        "url": "data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.6'/%3E%3C/svg%3E",
+        "type": "Image"
+      }
+    ]
+  },
+  "workDirectory": "/home/june/decomp_thing/build/packaged-browser-work-Xa79Yh",
+  "archive": "llm_bin_patch-0.1.0.zip",
+  "archivePath": "/home/june/decomp_thing/build/distributions/llm_bin_patch-0.1.0.zip",
+  "archiveSha256": "8b6f9f4d7389fec0ac4dcce25a631a028d4e2285a9a89866b366745f107bcf00",
+  "applicationJar": "llm-bin-patch-0.1.0.jar",
+  "applicationJarSha256": "21309ec49df9dd1a28ab48c0346a6067a58646919051e57903924bdcea22fdb1",
+  "buildId": "323d13cfb9cbd17714252dde962b10ae4c329aa9601bce3c7fc0443b07755d09",
+  "applicationVersion": "0.1.0",
+  "resourceBudget": {
+    "expandedBytes": 956657001,
+    "requiredBytes": 1023765865,
+    "availableBytes": 98267086848,
+    "requiredInodes": 7768,
+    "availableInodes": 191937583
+  },
+  "unrelatedWorkingDirectory": "/home/june/decomp_thing/build/packaged-browser-work-Xa79Yh/unrelated working directory",
+  "basePath": "/",
+  "nodeOnApplicationPath": false,
+  "npmOnApplicationPath": false,
+  "readOnlyInstallation": true,
+  "origin": "http://127.0.0.1:33457",
+  "browserTempDirectory": "/home/june/decomp_thing/build/ct-WWZccy",
+  "browser": {
+    "protocolVersion": "1.3",
+    "product": "Chrome/149.0.7827.55",
+    "revision": "@3188f8a607ae7e067593be8aab7f02d2451fec07",
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/149.0.0.0 Safari/537.36",
+    "jsVersion": "14.9.207.21"
+  },
+  "browserSandboxDisabled": true,
+  "legacy": {
+    "initialHtml": true,
+    "pollingExecuted": true,
+    "privateDiagnosticsWithheld": true,
+    "privateEventFieldsWithheld": true,
+    "exactUsage": true,
+    "omissionCount": 2,
+    "missingJournalPreservesRows": true,
+    "validEmptyClearsRows": true,
+    "restoredJournalRecovers": true,
+    "reload": true,
+    "artifactMetadata": true,
+    "pageExceptions": 0,
+    "mutationRequests": 0,
+    "workflowAdmitted": false,
+    "testOwnedFixtureEdits": [
+      "status set to analyzing after startup",
+      "journal removed, emptied and restored"
+    ],
+    "finalJobInputArtifactBytesUnchanged": true,
+    "finalJournalMatchesOriginal": true
+  },
+  "installationUnchanged": true,
+  "shutdownConfirmed": true,
+  "workRetained": false,
+  "workCleanupConfirmed": true
+}

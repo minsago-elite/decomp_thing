@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.web.UploadServerShutdownTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-09-08T05:38:48.634Z" hostname="whatsername" time="0.411">
+  <properties/>
+  <testcase name="interrupted stop still drains admitted handlers and restores the interrupt flag()" classname="decompengine.web.UploadServerShutdownTest" time="0.154"/>
+  <testcase name="stop waits for an admitted handler and retains ownership until it leaves()" classname="decompengine.web.UploadServerShutdownTest" time="0.153"/>
+  <testcase name="request drain timeout preserves ownership and later cleanup permits retry()" classname="decompengine.web.UploadServerShutdownTest" time="0.104"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

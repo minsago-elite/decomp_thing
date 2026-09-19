@@ -1,0 +1,9 @@
+{
+  "verifiedSourceCommit": "24274a3",
+  "runBeforeCommit": true,
+  "tests": 13,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "reportSha256": "98de093eb5be37f0cfb6d6aee8c9056c2b994d5003fe983a1f7ae2294e4be463"
+}
