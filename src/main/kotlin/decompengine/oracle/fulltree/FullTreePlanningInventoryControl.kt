@@ -487,12 +487,11 @@ object FullTreePlanningInventoryControl {
                 }
             },
         )
-private val recognizedShardIds: Set<String> = Collections.unmodifiableSet(
+
+        private val sourceOnlyShardIds: Set<String> = Collections.unmodifiableSet(
             LinkedHashSet<String>().apply {
-                sourceModules.forEach { add(it.shardId) }
-                sourceOnlyUnits.forEach { add(it.shardId) }
+                state.sourceOnly.forEach { add(it.shardId) }
             },
-        )
         )
 
         override fun requireOwnerModule(ownerUnitId: String): FullTreePlanningSourceModule {
@@ -507,10 +506,8 @@ private val recognizedShardIds: Set<String> = Collections.unmodifiableSet(
             if (!shardId.matches(SHARD_ID)) {
                 throw FullTreeControlException("planning shard ID is invalid")
             }
-if (modulesByShardId[shardId] != null) {
-                return modulesByShardId.getValue(shardId)
-            }
-            if (shardId in recognizedShardIds) {
+            modulesByShardId[shardId]?.let { return it }
+            if (shardId in sourceOnlyShardIds) {
                 return emptyList()
             }
             throw FullTreeControlException("planning shard ID is outside the authenticated inventory")
@@ -622,6 +619,7 @@ private val SOURCE_ONLY_ORDER = Comparator<JsonObject> { left, right ->
     FULL_TREE_CODE_POINT_ORDER.compare(left.controlString("sourcePath"), right.controlString("sourcePath"))
 }
 private val COMPILATION_UNIT_ID = Regex("cu-[0-9a-f]{32}")
+private val SHARD_ID = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
 
 private const val PLANNING_SCHEMA = "full-tree-planning-inventory"
 private const val PLANNING_MAXIMUM_SOURCE_MODULES = 1_000_000
@@ -629,7 +627,6 @@ private const val PLANNING_MAXIMUM_CANDIDATE_SOURCE_UNITS = 200_000
 private const val PLANNING_MAXIMUM_OUTPUT_RECORDS = 203_000
 private const val PLANNING_MAXIMUM_WORK_UNITS = 500_000L
 private const val PLANNING_MAXIMUM_SERIALIZED_BYTES = 32 * 1024 * 1024
-private val SHARD_ID = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
 private val PLANNING_POLICY = JsonObject(
     mapOf(
         "id" to JsonPrimitive(PLANNING_SCHEMA),
