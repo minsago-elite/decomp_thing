@@ -625,17 +625,6 @@ private val SOURCE_ONLY_ORDER = Comparator<JsonObject> { left, right ->
     FULL_TREE_CODE_POINT_ORDER.compare(left.controlString("sourcePath"), right.controlString("sourcePath"))
 }
 private val COMPILATION_UNIT_ID = Regex("cu-[0-9a-f]{32}")
-private const val MAXIMUM_SHARD_ID_CHARACTERS = 250
-
-private fun isValidShardId(value: String): Boolean {
-    if (value.isEmpty() || value.length > MAXIMUM_SHARD_ID_CHARACTERS) return false
-    value.forEachIndexed { index, character ->
-        if (character !in 'a'..'z' && character !in '0'..'9' && character != '-') return false
-        if (character == '-' && (index == 0 || index == value.lastIndex || value[index - 1] == '-')) return false
-    }
-    return true
-}
-
 private fun requireValidShardId(value: String): String {
     if (!isValidShardId(value)) throw FullTreeControlException("planning shard ID is invalid")
     return value

@@ -399,6 +399,20 @@
       "fragment": "GeneratedCMakeReconstructionProfile",
       "count": 2,
       "reason": "Existing behavior validation checks the registered generated-C Make profile in retained validation paths."
+    },
+    {
+      "path": "docs/evidence/gcc-cli-inputs-intent-2026-09-08.json",
+      "rule": "benchmark-version",
+      "fragment": "gcc/16.2.0",
+      "count": 2,
+      "reason": "Retained GCC CLI input-intent evidence records the authenticated benchmark release in its two source references."
+    },
+    {
+      "path": "docs/evidence/gcc-cli-inputs-intent-2026-09-08.json",
+      "rule": "benchmark-version",
+      "fragment": "GCC 16.2.0",
+      "count": 1,
+      "reason": "Retained GCC CLI input-intent evidence records the authenticated benchmark release in human-readable form."
     }
   ],
   "benchmarkCatalog": "oracle/gcc/reconstruction-neutrality-identities.json"

@@ -70,17 +70,28 @@ ordinary directory ancestors.
 ## Current migration state
 
 The repository scan passes on a clean checkout. Benchmark ownership covers the
-full declared oracle namespaces: the `oracle` tree, the JVM oracle namespaces
-and test mirrors, the GCC oracle CI workflow, its inventory and corpus scripts,
-and the Python oracle tests. Retained historical benchmark identities in LLVM
-reference evidence, shared recorded capture image digests, cross-oracle test
-references, MVP compiler assumptions, and repair runtime policy cross-checks
-use exact literal allowances with ownership rationales. Retained evidence must
-not be rewritten merely to satisfy the scanner. Counts make each pin
-regression-sensitive: a changed occurrence fails as a stale allowance instead
-of silently passing.
+declared benchmark-specific oracle namespaces: GCC and LLVM oracle trees, the
+GCC oracle CI workflow and inventory/corpus scripts, the Python oracle tests,
+and the explicitly benchmark-owned shared LLVM behavior adapters. Retained
+historical benchmark identities in evidence, shared recorded capture image
+digests, cross-oracle test references, MVP compiler assumptions, and repair
+runtime policy cross-checks use exact literal allowances with ownership
+rationales. Retained evidence must not be rewritten merely to satisfy the
+scanner. Counts make each pin regression-sensitive: a changed occurrence fails
+as a stale allowance instead of silently passing.
+
+The neutrality gate is now part of the normal verification graph: Gradle
+`check` depends on `verifyReconstructionNeutrality`, and `scripts/ci.sh` invokes
+the same task alongside the JVM tests. The standalone command remains useful
+for focused policy validation.
+
+The clang full-tree planning inventory now binds the authenticated
+`clang-lib-parse` shard to all 18 handwritten source modules. Its owner lookup
+is exact and fail-closed; source-only units cannot acquire compilation-module
+ownership.
 
 `ReconstructionPipeline` now resolves its build adapter from the selected profile.
+
 Its profile overload admits host budgets and binds analyzer export limits before
 output, then forwards that profile and host policy through generation. Two exact
 single-occurrence allowances preserve the old generator and pipeline defaults;
