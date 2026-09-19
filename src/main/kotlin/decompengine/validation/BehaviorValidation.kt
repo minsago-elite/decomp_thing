@@ -165,19 +165,33 @@ object BwrapCapability {
 
     private fun probeJsonStatus(bwrapPath: Path): Boolean {
         if (!bwrapPath.exists()) return false
+        var process: Process? = null
+        var reader: Thread? = null
         return try {
-            val process = ProcessBuilder(listOf(bwrapPath.pathString, "--help"))
+            process = ProcessBuilder(listOf(bwrapPath.pathString, "--help"))
                 .redirectErrorStream(true)
                 .start()
             val output = AtomicReference<ByteArray>()
-            val reader = thread(start = true, isDaemon = true, name = "bwrap-help-probe") {
-                output.set(process.inputStream.readNBytes(256 * 1024))
+            reader = thread(start = true, isDaemon = true, name = "bwrap-help-probe") {
+                output.set(process!!.inputStream.readNBytes(256 * 1024))
             }
-            val completed = process.waitFor(3, TimeUnit.SECONDS)
-            if (!completed) process.destroyForcibly()
-            reader.join(1_000)
+            val completed = process!!.waitFor(3, TimeUnit.SECONDS)
+            if (!completed) process!!.destroyForcibly()
+            reader!!.join(1_000)
             completed && "--json-status-fd" in (output.get()?.decodeToString() ?: "")
+        } catch (interrupted: InterruptedException) {
+            process?.destroyForcibly()
+            process?.inputStream?.close()
+            reader?.interrupt()
+            try {
+                process?.waitFor()
+                reader?.join(1_000)
+            } finally {
+                Thread.currentThread().interrupt()
+            }
+            throw interrupted
         } catch (_: Exception) {
+            process?.destroyForcibly()
             false
         }
     }
