@@ -67,11 +67,22 @@ ordinary directory ancestors.
 
 ## Current migration state
 
-The initial repository run fails on remaining policy and ownership migrations.
-Examples include MVP compiler assumptions, repair runtime policy,
-benchmark scripts/tests/workflows, and retained historical
-benchmark identities in LLVM reference evidence. Retained evidence must not be
-rewritten merely to satisfy the scanner.
+The repository scan passes on a clean checkout. Benchmark ownership now covers
+the declared oracle namespaces: the `oracle` tree, the JVM oracle namespaces
+(`src/main/kotlin/decompengine/oracle` and its test mirror), the oracle Python
+test namespace `tests/oracle`, the GCC oracle model workflow, and the five
+benchmark source-lock and corpus scripts. Retained historical benchmark
+identities in LLVM reference evidence stay in place; retained evidence must not
+be rewritten merely to satisfy the scanner.
+
+Remaining pre-existing generic references in otherwise checked production and
+test code are pinned by exact literal allowances with expected occurrence
+counts: the MVP memory-safety patch workflow's host compiler flags and tool,
+the repair evidence verifier's comparison against the registered generated-C
+repair runtime configuration and its build-file source role, and the bundled
+Ghidra provenance test's pinned compiler-engine profile. Counts make each pin
+regression-sensitive: a changed occurrence fails as a stale allowance instead
+of silently passing.
 
 `ReconstructionPipeline` now resolves its build adapter from the selected profile.
 Its profile overload admits host budgets and binds analyzer export limits before
@@ -85,11 +96,14 @@ resource bounds and other report consumers remain unfinished.
 
 Doctor's compiler/build probes and authored sanitizer sample now come from its
 selected registered adapter, through both the CLI and JVM API. The generic root
-covers the full Doctor package. This removes four findings, leaving 80
-(67 benchmark and 13 generic); the diagnostic executor still needs output/time
-bounds. See [profile-selected Doctor diagnostics](profiled-doctor-diagnostics.md).
+covers the full Doctor package, which removed four findings; only the
+explicitly owned generated-C diagnostic implementation is registered as an
+adapter file. The diagnostic executor still needs output/time bounds. See
+[profile-selected Doctor diagnostics](profiled-doctor-diagnostics.md).
 
-Passing the authored scanner tests verifies its detection and exemption
-behavior. It does not make the repository scan pass or complete #84. Current
-scope and progress remain on the issue; the draft gate layer is not ready for
-integration while these findings remain.
+Passing the authored scanner tests and the repository scan verifies the
+declared detection and exemption behavior. It does not complete #84: the
+lexical gate is wired into Gradle `check` and `scripts/ci.sh` for the declared
+state, while the semantic migrations it describes — adapter-owned MVP and
+repair build knowledge, complete consumer migration, and production
+qualification — remain on the issue.

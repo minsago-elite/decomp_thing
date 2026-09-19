@@ -413,12 +413,20 @@ private fun runnerUsageError(message: String): Nothing {
 
 private fun runDoctor(args: List<String>) {
     val defaultOutput = Path.of(System.getenv("OUTPUT_DIR") ?: if (Files.isDirectory(Path.of("/output"))) "/output" else "output")
+    var showAuthMethods = false
+    var profileArgs = args
+    // parseDoctorInvocation rejects unknown flags, so extract --auth-methods first.
+    if ("--auth-methods" in args) {
+        showAuthMethods = true
+        profileArgs = args.filter { it != "--auth-methods" }
+    }
     val invocation = try {
-        parseDoctorInvocation(args, defaultOutput)
+        parseDoctorInvocation(profileArgs, defaultOutput)
     } catch (failure: IllegalArgumentException) {
         doctorUsageError(failure.message ?: "invalid doctor configuration")
     }
-    val report = Doctor().inspect(invocation.options, invocation.profile)
+    if (invocation.options.toolsOnly && showAuthMethods) doctorUsageError("--tools-only cannot be combined with --auth-methods")
+    val report = Doctor().inspect(invocation.options.copy(showAuthMethods = showAuthMethods), invocation.profile)
     report.checks.forEach { check ->
         val stream = if (check.passed) System.out else System.err
         stream.println("[${if (check.passed) "ok" else "failed"}] ${check.name}: ${check.detail}")

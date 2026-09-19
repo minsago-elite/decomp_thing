@@ -119,8 +119,13 @@ object BwrapCapability {
     private val cache = ConcurrentHashMap<String, Boolean>()
 
     fun networkIsolationSupported(bwrapPath: Path, timeoutPath: Path): Boolean =
-        cache.computeIfAbsent("${bwrapPath.pathString}|${timeoutPath.pathString}") {
+        cache.computeIfAbsent("${bwrapPath.pathString}|${timeoutPath.pathString}|net") {
             probe(bwrapPath, timeoutPath)
+        }
+
+    fun jsonStatusSupported(bwrapPath: Path): Boolean =
+        cache.computeIfAbsent(bwrapPath.pathString + "|json-status") {
+            probeJsonStatus(bwrapPath)
         }
 
     fun resetCache() {
@@ -151,6 +156,20 @@ object BwrapCapability {
                 .start()
             process.inputStream.readBytes()
             process.waitFor() == 0
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun probeJsonStatus(bwrapPath: Path): Boolean {
+        if (!bwrapPath.exists()) return false
+        return try {
+            val process = ProcessBuilder(listOf(bwrapPath.pathString, "--help"))
+                .redirectErrorStream(true)
+                .start()
+            val output = process.inputStream.readNBytes(256 * 1024).decodeToString()
+            process.waitFor(3, TimeUnit.SECONDS)
+            "--json-status-fd" in output
         } catch (_: Exception) {
             false
         }
@@ -212,6 +231,9 @@ class SandboxRunner(
     private fun runWithCompletion(executable: Path, input: ProcessInput, files: Map<String, Path>, channel: Path, deadline: Long): ProcessOutput {
         if (!bwrapPath.exists()) {
             throw SandboxUnavailableException("bubblewrap not found at ${bwrapPath.pathString}; sandboxed execution is mandatory")
+        }
+        if (!BwrapCapability.jsonStatusSupported(bwrapPath)) {
+            throw SandboxUnavailableException("bubblewrap at ${bwrapPath.pathString} lacks --json-status-fd; completion evidence is mandatory")
         }
         val command = behaviorSandboxCommand(executable, input.args, timeout.toMillis(), bwrapPath, timeoutPath, networkIsolation, files)
 
