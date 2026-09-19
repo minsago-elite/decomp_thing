@@ -253,14 +253,14 @@
     {
       "path": "src/main/kotlin/decompengine/project/ReconstructionAdapter.kt",
       "rule": "generic-adapter-reference",
-      "fragment": "GeneratedCMakeReconstructionProfile.PROFILE_ID -> GeneratedCReconstructionAdapter",
+      "fragment": "GeneratedCMakeReconstructionProfile.supports(profile) -> GeneratedCReconstructionAdapter",
       "count": 1,
-      "reason": "Closed application-owned dispatch from the built-in Make profile identifier to its adapter implementation."
+      "reason": "Closed application-owned dispatch from the built-in Make profile to its adapter implementation."
     },
     {
       "path": "src/main/kotlin/decompengine/project/ReconstructionAdapter.kt",
       "rule": "generic-adapter-reference",
-      "fragment": "GeneratedCNinjaReconstructionProfile.PROFILE_ID -> GeneratedCNinjaReconstructionAdapter",
+      "fragment": "profile.id == GeneratedCNinjaReconstructionProfile.PROFILE_ID -> GeneratedCNinjaReconstructionAdapter",
       "count": 1,
       "reason": "Closed application-owned dispatch from the built-in Ninja profile identifier to its adapter implementation."
     },
