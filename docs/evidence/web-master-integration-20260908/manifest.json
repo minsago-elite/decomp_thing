@@ -1,0 +1,36 @@
+{
+  "status": "passed",
+  "testedSourceCommit": "eb1180b6",
+  "identicalTreeMergeCommit": "f5cce3d8",
+  "masterIncluded": "411294a1",
+  "verification": {
+    "frontendTests": 351,
+    "frontendFailures": 0,
+    "lint": "passed",
+    "typecheckedBundle": "passed",
+    "selectedJvmTests": 298,
+    "jvmFailures": 0,
+    "jvmErrors": 0,
+    "jvmSkipped": 0,
+    "distributionArchiveBuilt": true,
+    "packagedBrowser": "passed"
+  },
+  "archiveSha256": "230f6a672ee4162a301457d29f88ef3c2fdae421c7de8dd6c9a84639771fb726",
+  "files": {
+    "browser.json": "52192b2fa94c1d3d36d1ff4ed41ae94241f49c52a15e48b1f51bad0f80c1ec46",
+    "upload-server-tests.xml": "54c0747402cfa6d3cb8a252c1a4e941478118b9cc7de19705557f6d7b58793f7"
+  },
+  "resolutions": [
+    "Preserve SPA/base-path/port validation/session handoff and doctor auth-method CLI options while integrating the upstream bundled CLI changes.",
+    "Use one peer-invalidation channel and retain generation-bound private request rejection alongside the new upload invalidation subscription.",
+    "Keep bounded supplied report reads; adopt upstream uncalibrated heuristic labels. Update a stale percentage assertion.",
+    "Preserve both normal peer logout and unannounced-revocation packaged browser scenarios.",
+    "Keep full authenticated shutdown, abrupt-exit and live-owner coverage when the older projection branch lands; final follow-up merge has identical tree."
+  ],
+  "limits": [
+    "Initial JVM run failed one stale percentage assertion; corrected assertion and all 298 selected tests passed on rerun.",
+    "New upstream A/B/C native workflow suites were not executed; this is D-series integration qualification.",
+    "Earlier intermittent SSE append timeout remains unresolved; this packaged run passed without relaxing the check.",
+    "Chrome uses test-only --no-sandbox; browser installation preservation, shutdown and owned-work cleanup passed."
+  ]
+}

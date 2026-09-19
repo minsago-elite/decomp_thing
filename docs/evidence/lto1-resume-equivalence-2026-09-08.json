@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "issue": 929,
+  "recordedAt": "2026-09-08",
+  "status": "unverified",
+  "scope": "Real lto1 normal-CLI interrupted/resumed versus independent fresh model and ownership-plan byte equivalence",
+  "sourceRevisionInspected": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "authorityBoundary": {
+    "realHostedSuccessClaimed": false,
+    "currentValidatorAuthority": "non-authoritative-byte-assessment",
+    "boundary": "The current validator accepts caller-supplied captured bytes; it does not prove that lto1 ran, was interrupted, resumed from disk, or used an independent fresh analysis state."
+  },
+  "lto1Profile": {
+    "path": "oracle/gcc/16.2.0/compiler-engines.json",
+    "sha256": "e0ca60b7e856e9330e45fd58e61828313e8dd824413ee0df7ef76ee5d2b47bdc",
+    "engine": "lto1",
+    "fullArtifact": {
+      "path": "artifacts/gcc-lto1.full",
+      "bytes": 362827816,
+      "sha256": "255246e259b194e40fb3f053eafad5a9fdada983404bdae90fc1b9fddfa585e1"
+    },
+    "strippedArtifact": {
+      "path": "artifacts/gcc-lto1.stripped",
+      "bytes": 40497008,
+      "sha256": "35d73b94b8e33cd482095016de28ebaa4e71835720e39b7c5aa82206b562361f"
+    },
+    "oracleManifestSha256": "5f7e686168d6a6e35ef3719d077b0bfb246085c2d3738835be13eeed5e0d0a41",
+    "buildRecordSha256": "581a983e307a0a02895f1e878659c7f7934045a7141ebe3821837145aa97c5a5",
+    "exporter": {
+      "version": 10,
+      "sha256": "dc0debe2808c2744792f736d150d25aaefd6a46fd90910af7175a454686c6ab9"
+    },
+    "ghidraArchiveSha256": "93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54",
+    "planner": "deterministic-module-planner-v1"
+  },
+  "retainedInputObservation": {
+    "path": "oracle/gcc/16.2.0/local-engine-byte-inventory.json",
+    "sha256": "aaffdfcb134b7e432abfda69055d4e598a538c05b79ad1b998ec242e16af8b39",
+    "sourceCommitInInventory": "6b6e5cd4a91654822c78e1aca37e109a685691d5",
+    "lto1BytesMatchManifest": true,
+    "productionVerified": false,
+    "benchmarkAccepted": false,
+    "releaseEligible": false,
+    "limitation": "Read-only local byte inventory; no authenticated process, runtime closure, or benchmark execution."
+  },
+  "contractEvidence": {
+    "validator": {
+      "path": "src/main/kotlin/decompengine/oracle/gcc/GccCompilerEngineResumeEvidence.kt",
+      "sha256": "6847fbfc2c0a29db362233cf1fb73fc385c385e982979b5e8a6b586b8043af6f",
+      "documentedContract": "For supplied raw bytes, validate an interrupted planning prefix, exact frozen-prefix checkpoint and fragment bytes, resumed reuse count, complete-run commitments, and byte-identical final program-model and bounded module-plan bytes."
+    },
+    "currentTestFixture": {
+      "path": "src/test/kotlin/decompengine/oracle/gcc/GccCompilerEngineResumeEvidenceValidationTest.kt",
+      "sha256": "fcd151d13c6ac4960a379fd817be5ccdc91ea346d7f128f92a7177d347a05ba5",
+      "cases": [
+        "interrupted 513-function prefix and resumed fresh outputs compare only as raw bytes",
+        "resume equivalence rejects frozen-prefix inventory reuse and final-output drift"
+      ],
+      "fixtureKind": "Synthetic Kotlin byte fixtures; no real lto1 output is retained by these tests."
+    },
+    "operationSurface": {
+      "path": "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationCoordinator.kt",
+      "sha256": "4ab8bc5bd7aaaddccd92a8317ecd2a9c79d86d794098623e58de6bae4df091a8",
+      "limitation": "The coordinator surface and same-owner resume route are implementation contracts; this record contains no executed lto1 operation receipts."
+    }
+  },
+  "unverifiedCriteria": [
+    "No real lto1 fresh, forced-interruption, and resumed normal-CLI legs were executed or retained.",
+    "No authenticated per-leg profile, binary, bundled-Ghidra, process, output, scratch, lifecycle, checkpoint, or predecessor-lineage receipts were produced.",
+    "No real resumed/fresh counts, state/checkpoint/model hashes, or independently derived ownership-plan hashes were compared.",
+    "No proof exists that the resumed model and deterministic ownership plan are byte-identical to an independent fresh run for real lto1.",
+    "No measured A10 wall-time, resident-memory, disk, inode, process-absence, cleanup, or whole-operation resource evidence is present.",
+    "Hosted production success and release eligibility remain unverified; the retained input inventory explicitly reports both as false."
+  ],
+  "validation": {
+    "testsRunForThisRecord": false,
+    "reason": "Bounded documentation checkpoint; tests were intentionally skipped and the gaps above remain explicit."
+  }
+}
