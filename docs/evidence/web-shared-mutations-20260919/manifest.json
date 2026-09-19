@@ -1,6 +1,6 @@
 {
-  "status": "passed-with-intermittent-unrelated-shutdown-retry",
-  "sourceCommit": "ab4c3af85009097af7e01d89c5baf9153a34d8b6",
+  "status": "passed",
+  "sourceCommit": "66b1ac3f078afcdbdf292270a9fea76c2f60a48b",
   "issue": 471,
   "parentIssue": 158,
   "satisfiedParentCriteria": [
@@ -28,13 +28,11 @@
     "focusedJvm": {
       "commandPrefix": "./gradlew test --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx3072m -Pkotlin.compiler.execution.strategy=in-process -x verifyFrontendToolchain -x frontendInstall -x frontendBuild -x generateFrontendAssetManifest -x verifyFrontendAssets -x stageFrontend -x processResources",
       "tests": 140,
-      "failuresOnCombinedRun": 1,
+      "failuresOnCombinedRun": 0,
       "mutationFocusedTests": 62,
       "mutationFocusedFailures": 0,
       "remainingRouterAccessAndShutdownTests": 78,
-      "remainingRouterAccessAndShutdownFailures": 1,
-      "isolatedRetryTests": 1,
-      "isolatedRetryFailures": 0,
+      "remainingRouterAccessAndShutdownFailures": 0,
       "suites": [
         "decompengine.web.WebJobMutationBoundaryTest",
         "decompengine.web.LegacyWebSessionTest",
@@ -53,24 +51,19 @@
         "decompengine.web.WebShutdownTest",
         "decompengine.web.UploadServerShutdownTest"
       ],
-      "intermittentRetry": {
-        "test": "decompengine.web.UploadServerTest.shutdown timeout retains store ownership until the worker exits and cleanup is retried",
-        "combinedRunFailure": "HTTP requests remain active after server stop",
-        "precedingBatch": "passed",
-        "immediateIsolatedRetry": "passed"
-      }
+      "result": "final combined rerun passed with 140 tests and no failures, skips, or errors"
     },
     "staticAudit": {
       "result": "passed",
       "observations": [
         "Production HTTP calls to uploadMultipartReceipt, start and requestProgressRetentionPinned occur only in WebJobMutationBoundary.",
+        "The existing public WebJobService.uploadMultipart compatibility entry point remains covered and delegates to the canonical receipt operation; no HTTP adapter calls it directly.",
         "The only controller-adjacent direct report write is the admitted SourceTreeJobReconstructor workflow adapter.",
         "git diff --check passed and no bun.lock is present."
       ]
     }
   },
   "limits": [
-    "The combined 140-test run exposed one timing-sensitive shutdown/drain failure; its preceding batch and immediate isolated retry passed. This evidence does not establish that failure's root cause or resolution.",
     "Bun prepared the classpath SPA assets; the repository's pinned Node/npm Gradle frontend tasks were deliberately excluded, so this is not production frontend toolchain qualification.",
     "No browser, native analysis or live provider ran.",
     "Versioned workflow start, cancellation and retry remain unsupported and are owned by issues 484 through 486."
