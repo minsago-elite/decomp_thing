@@ -91,6 +91,34 @@ export async function qualifyScale({ fixture, makeTarget, cdp, evaluate, ready, 
   assert.deepEqual(await evaluate(tab, rows), oldest);
   assert.equal(tab.requests.filter(request => request.url.endsWith('/api/v1/jobs')).length, readsBeforePrevious);
 
+  // Fail exactly one continuation: the retained rows and page label must remain
+  // truthful, and a keyboard user must not be stranded on the disabled control.
+  let failedContinuations = 0;
+  const interceptionErrors = [];
+  cdp.on('Fetch.requestPaused', (event) => {
+    const method = failedContinuations++ === 0 ? 'Fetch.failRequest' : 'Fetch.continueRequest';
+    const parameters = method === 'Fetch.failRequest'
+      ? { requestId: event.requestId, errorReason: 'Failed' } : { requestId: event.requestId };
+    cdp.call(method, parameters, tab.sessionId).catch(error => interceptionErrors.push(error.message));
+  }, tab.sessionId);
+  await cdp.call('Fetch.enable', { patterns: [{ urlPattern: `${browserOrigin}/nested/api/v1/jobs?*cursor=*`, requestStage: 'Request' }] }, tab.sessionId);
+  try {
+    await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Next page').focus()`);
+    await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', text: '\r', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, tab.sessionId);
+    await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, tab.sessionId);
+    await ready(tab, `document.querySelector('[role="alert"]')?.textContent.includes('Jobs could not be loaded.') &&
+      document.activeElement === document.querySelector('[role="alert"]')`, 'failed continuation focus recovery');
+    assert.equal(failedContinuations, 1);
+    assert.deepEqual(interceptionErrors, []);
+    assert.equal(await evaluate(tab, `document.querySelector('nav[aria-label="Job pages"] span')?.textContent`), 'Page 1');
+    assert.deepEqual(await evaluate(tab, rows), oldest);
+    assert.ok(await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Next page').disabled`));
+  } finally { await cdp.call('Fetch.disable', {}, tab.sessionId); }
+  await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Refresh jobs').click()`);
+  await ready(tab, `(${rows})[0] === ${JSON.stringify(oldest[0])} &&
+    document.activeElement.textContent === 'Job results' && !document.querySelector('[role="alert"]')`, 'explicit continuation recovery');
+  assert.deepEqual(await evaluate(tab, rows), oldest);
+
   await cdp.call('Page.reload', {}, tab.sessionId);
   await ready(tab, `(${rows})[0] === ${JSON.stringify(oldest[0])}`, 'oldest-first restored after reload');
   assert.deepEqual(await evaluate(tab, rows), oldest);
@@ -128,6 +156,9 @@ export async function qualifyScale({ fixture, makeTarget, cdp, evaluate, ready, 
   assert.deepEqual(tab.exceptions, []);
   assert.ok(tab.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
   return { persistedJobs: fixture.count, pages: 50, rowsPerPage: 200, reachableJobs: 10000,
-    exactOrder: true, keyboardPaginationFocus: true, searchReload: true, combinedNanosecondFiltersReload: true, oldestFirstPagesReloadReset: true, previousFirstPageRetained: true, narrowReflow: reflow, accessibleFilterNames: true, invalidDateDescriptionFocusRecovery: true, filterContrast, mutationRequests: 0,
+    exactOrder: true, keyboardPaginationFocus: true, failedContinuationRetainsPageAndFocus: true,
+    explicitContinuationRecovery: true, searchReload: true, combinedNanosecondFiltersReload: true,
+    oldestFirstPagesReloadReset: true, previousFirstPageRetained: true, narrowReflow: reflow,
+    accessibleFilterNames: true, invalidDateDescriptionFocusRecovery: true, filterContrast, mutationRequests: 0,
     peakBrowserHeapBytes, pageLatencyMs: timings.map(ms => Math.round(ms)), executionStarted: false };
 }

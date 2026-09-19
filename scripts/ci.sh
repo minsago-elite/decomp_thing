@@ -5,13 +5,13 @@ cd "$(dirname "$0")/.."
 
 echo "==> JVM/Kotlin checks"
 ./gradlew --no-daemon test
-
 # Draft reconstruction-neutrality gate: still fails on the documented #84
 # migration baseline (docs/reconstruction-neutrality.md), so CI reports it
-# without blocking until that baseline is clean.
+# without blocking until that baseline is clean. Invoke the scanner directly so
+# its documented infrastructure status is not collapsed by Gradle's Exec task.
 echo "==> Reconstruction neutrality gate (non-blocking draft)"
 set +e
-./gradlew --no-daemon verifyReconstructionNeutrality
+python3 -B scripts/check-generic-leakage.py
 neutrality_status=$?
 set -e
 case "$neutrality_status" in
