@@ -64,32 +64,25 @@ data class RecoveredProgramModel(
     fun isRecoveryUnresolved(status: RecoveryStatus): Boolean =
         schemaVersion == 2 || status != RecoveryStatus.RECOVERED
 
-    fun toJson(): String = toJson {}
+    fun toJson(): String = buildString {
+        append("{\n  \"schemaVersion\": ").append(schemaVersion)
+        append(",\n  \"inputSha256\": \"").append(inputSha256.json()).append("\",")
+        append("\n  \"functions\": [")
+        if (functions.isNotEmpty()) append('\n')
+        append(functions.sortedWith(compareBy<RecoveredFunction> { it.address }.thenBy { it.id }).joinToString(",\n") { function ->
+            """
 
-    /** Cooperative checkpoints do not preempt an individual sort, join, or library operation. */
-    internal fun toJson(checkpoint: (String) -> Unit): String = checkedModelStage("rendering program model", checkpoint) {
-        buildString {
-            append("{\n  \"schemaVersion\": ").append(schemaVersion)
-            append(",\n  \"inputSha256\": \"").append(inputSha256.json(checkpoint)).append("\",")
-            append("\n  \"functions\": [")
-            if (functions.isNotEmpty()) append('\n')
-            val sortedFunctions = checkedModelStage("sorting program model functions", checkpoint) {
-                functions.sortedWith(compareBy<RecoveredFunction> { it.address }.thenBy { it.id })
-            }
-            append(checkedModelStage("joining program model functions", checkpoint) {
-                sortedFunctions.joinToString(",\n") { function ->
-                    checkedModelStage("rendering program model function", checkpoint) {
-                        """
             {
               "id": "${function.id.json(checkpoint)}",
               "name": "${function.name.json(checkpoint)}",
               "address": "0x${function.address.toString(16)}",
-              "prototype": "${function.prototype.json(checkpoint)}",
+              "prototype": "${function.prototype.json()}",
               ${statusFields(function.status)},
-              "calls": [${function.calls.json(checkpoint)}],
-              "referencedGlobals": [${function.referencedGlobals.json(checkpoint)}],
-              "strings": [${function.strings.json(checkpoint)}],
-              "decompiledC": ${function.decompiledC?.let { "\"${it.json(checkpoint)}\"" } ?: "null"}
+              "calls": [${function.calls.sorted().joinToString(", ") { "\"${it.json()}\"" }}],
+              "referencedGlobals": [${function.referencedGlobals.sorted().joinToString(", ") { "\"${it.json()}\"" }}],
+              "strings": [${function.strings.sorted().joinToString(", ") { "\"${it.json()}\"" }}],
+              "decompiledC": ${function.decompiledC?.let { "\"${it.json()}\"" } ?: "null"}
+
             }""".trimIndent().prependIndent("    ")
                     }
                 }
@@ -107,8 +100,9 @@ data class RecoveredProgramModel(
               "id": "${global.id.json(checkpoint)}",
               "name": "${global.name.json(checkpoint)}",
               "address": "0x${global.address.toString(16)}",
-              "type": "${global.type.json(checkpoint)}",
-              "initializer": ${global.initializer?.let { "\"${it.json(checkpoint)}\"" } ?: "null"},
+              "type": "${global.type.json()}",
+              "initializer": ${global.initializer?.let { "\"${it.json()}\"" } ?: "null"},
+
               ${statusFields(global.status)}
             }""".trimIndent().prependIndent("    ")
                     }
@@ -164,56 +158,45 @@ object ProgramModelJson {
         val root = checkedModelStage("parsing program model JSON", checkpoint) { Json.parseToJsonElement(text).jsonObject }
         val schemaVersion = root.int("schemaVersion", 1)
         require(schemaVersion in 1..2) { "unsupported program model schemaVersion: $schemaVersion" }
-        val inputSha256 = root.string("inputSha256")
-        val functions = checkedModelStage("reading program model functions", checkpoint) {
-            root.array("functions").map { element ->
-                checkedModelStage("reading program model function", checkpoint) {
-                    val item = element.jsonObject
-                    RecoveredFunction(
-                        id = item.string("id"),
-                        name = item.string("name"),
-                        address = item.string("address").removePrefix("0x").toULong(16),
-                        prototype = item.string("prototype"),
-                        decompiledC = item["decompiledC"]?.jsonPrimitive?.contentOrNull,
-                        calls = item.stringSet("calls", checkpoint),
-                        referencedGlobals = item.stringSet("referencedGlobals", checkpoint),
-                        strings = item.stringSet("strings", checkpoint),
-                        status = readExtractionStatus(item, schemaVersion),
-                    )
-                }
-            }
-        }
-        val globals = checkedModelStage("reading program model globals", checkpoint) {
-            root.array("globals").map { element ->
-                checkedModelStage("reading program model global", checkpoint) {
-                    val item = element.jsonObject
-                    RecoveredGlobal(
-                        id = item.string("id"),
-                        name = item.string("name"),
-                        address = item.string("address").removePrefix("0x").toULong(16),
-                        type = item.string("type"),
-                        initializer = item["initializer"]?.jsonPrimitive?.contentOrNull,
-                        status = readExtractionStatus(item, schemaVersion),
-                    )
-                }
-            }
-        }
-        val types = checkedModelStage("reading program model types", checkpoint) {
-            root.array("types").map { element ->
-                checkedModelStage("reading program model type", checkpoint) {
-                    val item = element.jsonObject
-                    RecoveredType(
-                        id = item.string("id"),
-                        declaration = item.string("declaration"),
-                        sourceAddress = item["sourceAddress"]?.jsonPrimitive?.contentOrNull?.removePrefix("0x")?.toULong(16),
-                        status = readExtractionStatus(item, schemaVersion),
-                    )
-                }
-            }
-        }
-        return checkedModelStage("constructing program model", checkpoint) {
-            RecoveredProgramModel(schemaVersion, inputSha256, functions, globals, types)
-        }
+        return RecoveredProgramModel(
+            schemaVersion = schemaVersion,
+            inputSha256 = root.string("inputSha256"),
+            functions = root.array("functions").map { element ->
+                val item = element.jsonObject
+                RecoveredFunction(
+                    id = item.string("id"),
+                    name = item.string("name"),
+                    address = item.string("address").removePrefix("0x").toULong(16),
+                    prototype = item.string("prototype"),
+                    decompiledC = item["decompiledC"]?.jsonPrimitive?.contentOrNull,
+                    calls = item.stringSet("calls"),
+                    referencedGlobals = item.stringSet("referencedGlobals"),
+                    strings = item.stringSet("strings"),
+                    status = readExtractionStatus(item, schemaVersion),
+                )
+            },
+            globals = root.array("globals").map { element ->
+                val item = element.jsonObject
+                RecoveredGlobal(
+                    id = item.string("id"),
+                    name = item.string("name"),
+                    address = item.string("address").removePrefix("0x").toULong(16),
+                    type = item.string("type"),
+                    initializer = item["initializer"]?.jsonPrimitive?.contentOrNull,
+                    status = readExtractionStatus(item, schemaVersion),
+                )
+            },
+            types = root.array("types").map { element ->
+                val item = element.jsonObject
+                RecoveredType(
+                    id = item.string("id"),
+                    declaration = item.string("declaration"),
+                    sourceAddress = item["sourceAddress"]?.jsonPrimitive?.contentOrNull?.removePrefix("0x")?.toULong(16),
+                    status = readExtractionStatus(item, schemaVersion),
+                )
+            },
+        )
+
     }
 
     private fun readExtractionStatus(item: JsonObject, schemaVersion: Int): RecoveryStatus {
