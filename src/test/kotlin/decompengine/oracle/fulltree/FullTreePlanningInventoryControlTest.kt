@@ -19,6 +19,104 @@ import kotlinx.serialization.json.JsonPrimitive
 
 class FullTreePlanningInventoryControlTest {
     @Test
+    fun `clang crosstu dispatch binds its planning owner without an emitted denominator`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+
+        val modules = registry.requireOwnerModulesForShard("clang-lib-crosstu")
+        assertEquals(1, modules.size)
+        assertEquals(listOf("source/clang/lib/CrossTU/CrossTranslationUnit.cpp"), modules.map { it.sourcePath })
+        assertEquals(listOf("cu-f625ae498a1083e1b03965cb3de020fe"), modules.map { it.unitId })
+        assertTrue(
+            modules.all {
+                it.moduleId == it.unitId &&
+                    it.shardId == "clang-lib-crosstu" &&
+                    it.sourceKind == "handwritten" &&
+                    it.sourcePath.startsWith("source/clang/lib/CrossTU/")
+            },
+        )
+        assertTrue(registry.sourceOnlyUnits.none { it.shardId == "clang-lib-crosstu" })
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("clang-lib-crosstu-missing")
+        }
+    }
+
+    @Test
+    fun `clang edit and astmatchers dispatch bind planning owners`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+
+        val modules = registry.requireOwnerModulesForShard("clang-lib-edit")
+        assertEquals(3, modules.size)
+        assertEquals(3, modules.map { it.sourcePath }.toSet().size)
+        assertEquals(3, modules.map { it.unitId }.toSet().size)
+        assertEquals(
+            listOf(
+                "source/clang/lib/Edit/Commit.cpp",
+                "source/clang/lib/Edit/EditedSource.cpp",
+                "source/clang/lib/Edit/RewriteObjCFoundationAPI.cpp",
+            ),
+            modules.map { it.sourcePath },
+        )
+        assertEquals(
+            listOf(
+                "cu-cb75d98fdf0b55f07b167410656ad629",
+                "cu-46c62b03fc8997966338255294e7a604",
+                "cu-cef4178b823a5363559034a6c9345094",
+            ),
+            modules.map { it.unitId },
+        )
+        assertTrue(
+            modules.all {
+                it.moduleId == it.unitId &&
+                    it.shardId == "clang-lib-edit" &&
+                    it.sourceKind == "handwritten" &&
+                    it.sourcePath.startsWith("source/clang/lib/Edit/")
+            },
+        )
+        assertTrue(registry.sourceOnlyUnits.none { it.shardId == "clang-lib-edit" })
+        val astMatchers = registry.requireOwnerModulesForShard("clang-lib-astmatchers")
+        assertEquals(3, astMatchers.size)
+        assertTrue(astMatchers.all { it.shardId == "clang-lib-astmatchers" })
+        val sourceOnly = registry.sourceOnlyUnits.filter { it.shardId == "clang-lib-astmatchers" }
+        assertEquals(5, sourceOnly.size)
+        assertEquals(
+            listOf(
+                "source/clang/lib/ASTMatchers/Dynamic/Diagnostics.cpp",
+                "source/clang/lib/ASTMatchers/Dynamic/Marshallers.cpp",
+                "source/clang/lib/ASTMatchers/Dynamic/Parser.cpp",
+                "source/clang/lib/ASTMatchers/Dynamic/Registry.cpp",
+                "source/clang/lib/ASTMatchers/Dynamic/VariantValue.cpp",
+            ),
+            sourceOnly.map { it.sourcePath },
+        )
+        assertTrue(sourceOnly.all { it.reasonCode == "not-selected-by-authenticated-build-graph" })
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("clang-lib-edit-missing")
+        }
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("clang-lib-astmatchers-missing")
+        }
+    }
+
+
+    @Test
     fun `fixture planning inventory is closed exact and byte deterministic`() =
         inControlTemporaryDirectory { directory ->
             val fixture = createFullTreeControlFixture(directory.resolve("fixture"))
