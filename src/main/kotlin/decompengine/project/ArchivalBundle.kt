@@ -309,6 +309,9 @@ object ArchivalBundleVerifier {
                     validateRelativePath(normalizedName)
                     require(normalizedName.split('/').size <= maximumPathDepth) { "archive path exceeds its depth bound" }
                     if (normalizedName != HASH_MANIFEST) rejectPrivateOrCachedPath(normalizedName)
+                    require(!transport.excludes(normalizedName)) {
+                        "archive entry is covered by a transport output exclusion: ${entry.name}"
+                    }
                     require(normalizedName !in seen && seenPortable.add(portablePathKey(normalizedName))) {
                         "archive contains a duplicate or non-portable colliding path: ${entry.name}"
                     }
