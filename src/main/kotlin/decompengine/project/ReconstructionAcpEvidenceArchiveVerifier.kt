@@ -354,9 +354,14 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             promptCharacters <= promptBudgetCharacters) {
             "accepted module checkpoint prompt exceeds its recorded budget: $moduleId"
         }
-        if (accepted && moduleClaimsAgentExecution(generator, reconstructorIdentity)) {
-            require(modulePromptBudgetIsValid(promptCharacters, promptBudgetCharacters, profile)) {
-                "accepted agent checkpoint prompt budget is missing, invalid, or exceeds the reconstruction profile: $moduleId"
+        if (accepted) {
+            require(modulePromptAttributionIsValid(
+                moduleClaimsAgentExecution(generator, reconstructorIdentity),
+                promptCharacters,
+                promptBudgetCharacters,
+                profile,
+            )) {
+                "accepted checkpoint prompt attribution is missing, invalid, or exceeds the reconstruction profile: $moduleId"
             }
         }
         root.requiredBoolean("retryable", "module checkpoint")

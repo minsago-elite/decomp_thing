@@ -13,6 +13,8 @@ import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.io.path.createDirectories
@@ -163,8 +165,13 @@ object BwrapCapability {
         }
 
     fun networkIsolationSupported(bwrapPath: Path, timeoutPath: Path): Boolean =
-        cache.computeIfAbsent("${bwrapPath.pathString}|${timeoutPath.pathString}") {
+        cache.computeIfAbsent("${bwrapPath.pathString}|${timeoutPath.pathString}|net") {
             probe(bwrapPath, timeoutPath)
+        }
+
+    fun jsonStatusSupported(bwrapPath: Path): Boolean =
+        cache.computeIfAbsent(bwrapPath.pathString + "|json-status") {
+            probeJsonStatus(bwrapPath)
         }
 
     fun resetCache() {
@@ -196,6 +203,39 @@ object BwrapCapability {
             process.inputStream.readBytes()
             process.waitFor() == 0
         } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun probeJsonStatus(bwrapPath: Path): Boolean {
+        if (!bwrapPath.exists()) return false
+        var process: Process? = null
+        var reader: Thread? = null
+        return try {
+            process = ProcessBuilder(listOf(bwrapPath.pathString, "--help"))
+                .redirectErrorStream(true)
+                .start()
+            val output = AtomicReference<ByteArray>()
+            reader = thread(start = true, isDaemon = true, name = "bwrap-help-probe") {
+                output.set(process!!.inputStream.readNBytes(256 * 1024))
+            }
+            val completed = process!!.waitFor(3, TimeUnit.SECONDS)
+            if (!completed) process!!.destroyForcibly()
+            reader!!.join(1_000)
+            completed && "--json-status-fd" in (output.get()?.decodeToString() ?: "")
+        } catch (interrupted: InterruptedException) {
+            process?.destroyForcibly()
+            process?.inputStream?.close()
+            reader?.interrupt()
+            try {
+                process?.waitFor()
+                reader?.join(1_000)
+            } finally {
+                Thread.currentThread().interrupt()
+            }
+            throw interrupted
+        } catch (_: Exception) {
+            process?.destroyForcibly()
             false
         }
     }
@@ -262,6 +302,9 @@ class SandboxRunner(
         }
         if (!BwrapCapability.completionEvidenceSupported(bwrapPath)) {
             throw SandboxUnavailableException("bubblewrap at ${bwrapPath.pathString} must be version 0.11 or newer for terminal completion evidence")
+        }
+        if (!BwrapCapability.jsonStatusSupported(bwrapPath)) {
+            throw SandboxUnavailableException("bubblewrap at ${bwrapPath.pathString} lacks --json-status-fd; completion evidence is mandatory")
         }
         val command = behaviorSandboxCommand(executable, input.args, timeout.toMillis(), bwrapPath, timeoutPath, networkIsolation, files)
 

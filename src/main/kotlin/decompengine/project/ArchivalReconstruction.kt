@@ -389,10 +389,12 @@ class ArchivalReconstructionService(
 ) {
     init {
         hostSafetyLimits.requireAllows(profile.budgets)
+        require(analyzer is ExportBudgetedProgramModelAnalyzer) {
+            "archival reconstruction requires an analyzer that binds export budgets"
+        }
     }
 
     private val adapter = ReconstructionAdapters.resolve(profile)
-
     // Bind the admitted profile before analysis whenever the analyzer supports export budgets.
     // Plain test/deterministic analyzers remain valid and are responsible for their own limits.
     private val selectedAnalyzer: ProgramModelAnalyzer =

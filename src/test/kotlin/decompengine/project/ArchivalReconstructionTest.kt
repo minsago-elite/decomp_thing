@@ -25,7 +25,7 @@ class ArchivalReconstructionTest {
     fun `service recovers builds and packages a complete source tree`() {
         val temp = createTempDirectory("archival-service-")
         val binary = temp.resolve("input.elf").also { it.writeBytes(byteArrayOf(1, 2, 3)) }
-        val analyzer = ProgramModelAnalyzer { supplied, work ->
+        val analyzer = budgetedAnalyzer { supplied, work ->
             assertEquals(binary, supplied)
             assertTrue(work.toString().endsWith("analysis"))
             RecoveredProgramModel(
@@ -98,7 +98,7 @@ class ArchivalReconstructionTest {
         val profile = ReconstructionProfile(base.schemaVersion, base.id, layout, base.budgets, base.adapterConfiguration)
         val temp = createTempDirectory("declared-archive-reports-")
         val input = temp.resolve("input.bin").also { it.writeBytes(byteArrayOf(4, 5, 6)) }
-        val analyzer = ProgramModelAnalyzer { _, _ -> RecoveredProgramModel(
+        val analyzer = budgetedAnalyzer { _, _ -> RecoveredProgramModel(
             inputSha256 = sha256(input.toFile().readBytes()),
             functions = listOf(RecoveredFunction("fn_1000", "decomp_engine_main", 0x1000UL, "int decomp_engine_main(void)")),
         ) }
@@ -138,7 +138,7 @@ class ArchivalReconstructionTest {
         val profile = ReconstructionProfile(base.schemaVersion, base.id, base.layout,
             base.budgets.copy(reconstructionMaximumContextCharacters = 8), base.adapterConfiguration)
         var calls = 0
-        val analyzer = ProgramModelAnalyzer { _, _ -> calls++; error("must not analyze") }
+        val analyzer = budgetedAnalyzer { _, _ -> calls++; error("must not analyze") }
         val cases = listOf(
             "123456789".toByteArray() to IllegalArgumentException::class,
             "x".repeat(33).toByteArray() to decompengine.repair.RepairBudgetExceededException::class,
@@ -196,7 +196,7 @@ class ArchivalReconstructionTest {
         val profile = ReconstructionProfile(base.schemaVersion, base.id, base.layout, raised, base.adapterConfiguration)
         val digest = profile.sha256
         var calls = 0
-        val analyzer = ProgramModelAnalyzer { _, _ -> calls++; error("must not analyze") }
+        val analyzer = budgetedAnalyzer { _, _ -> calls++; error("must not analyze") }
         val failure = assertFailsWith<IllegalArgumentException> {
             ArchivalReconstructionService(analyzer, profile = profile)
         }
@@ -222,7 +222,7 @@ class ArchivalReconstructionTest {
         val temp = createTempDirectory("unsupported-service-")
         val output = temp.resolve("result")
         var calls = 0
-        val analyzer = ProgramModelAnalyzer { _, _ -> calls++; error("must not analyze") }
+        val analyzer = budgetedAnalyzer { _, _ -> calls++; error("must not analyze") }
         assertFailsWith<IllegalArgumentException> {
             ArchivalReconstructionService(analyzer, profile = profile).reconstruct(temp.resolve("unused"), output)
         }
