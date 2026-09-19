@@ -97,6 +97,19 @@ class ProjectFileDeclaration(
         return compileTemplateMatcher(components.take(rootDepth).joinToString("/")).matches(root)
     }
 
+    internal fun canMaterializeUnderCanonical(root: String): Boolean {
+        val canonicalTemplate = java.text.Normalizer.normalize(pathTemplate, java.text.Normalizer.Form.NFC)
+            .lowercase(java.util.Locale.ROOT)
+        val canonicalRoot = java.text.Normalizer.normalize(
+            requireNormalizedProjectPath(root, "project output root"),
+            java.text.Normalizer.Form.NFC,
+        ).lowercase(java.util.Locale.ROOT)
+        val rootDepth = canonicalRoot.split('/').size
+        val components = canonicalTemplate.split('/')
+        if (rootDepth > components.size) return false
+        return compileTemplateMatcher(components.take(rootDepth).joinToString("/")).matches(canonicalRoot)
+    }
+
     internal fun canonicalJson(): String = buildString {
         append('{')
         append("\"id\":").append(id.canonicalJsonString()).append(',')

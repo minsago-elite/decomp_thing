@@ -185,7 +185,7 @@ object ArchivalPackager {
             paths.forEach { path ->
                 if (path == projectDir) return@forEach
                 val relative = archiveRelativePath(projectDir, path)
-                if (transport.excludes(relative)) return@forEach
+                if (transport.excludes(portablePathKey(relative))) return@forEach
                 if (path.toAbsolutePath().normalize() == archiveAbsolute || relative == HASH_MANIFEST) {
                     return@forEach
                 }
@@ -315,6 +315,9 @@ object ArchivalBundleVerifier {
                     validateRelativePath(normalizedName)
                     require(normalizedName.split('/').size <= maximumPathDepth) { "archive path exceeds its depth bound" }
                     if (normalizedName != HASH_MANIFEST) rejectPrivateOrCachedPath(normalizedName)
+                    require(!transport.excludes(portablePathKey(normalizedName))) {
+                        "archive entry is covered by a transport output exclusion: ${entry.name}"
+                    }
                     require(normalizedName !in seen && seenPortable.add(portablePathKey(normalizedName))) {
                         "archive contains a duplicate or non-portable colliding path: ${entry.name}"
                     }
@@ -571,7 +574,7 @@ private fun preflightProjectTree(projectDir: Path, limits: ArchivalBundleLimits,
                 "archive project contains a non-portable colliding path: $relative"
             }
             require(!Files.isSymbolicLink(path)) { "archive project contains a symbolic link: $relative" }
-            if (transport.excludes(relative)) return@forEach
+            if (transport.excludes(portablePathKey(relative))) return@forEach
             if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) return@forEach
             require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
                 "archive project contains a non-regular file: $relative"
