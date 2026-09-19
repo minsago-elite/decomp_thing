@@ -67,11 +67,14 @@ ordinary directory ancestors.
 
 ## Current migration state
 
-The initial repository run fails on remaining policy and ownership migrations.
-Examples include MVP compiler assumptions, repair runtime policy,
-benchmark scripts/tests/workflows, and retained historical
-benchmark identities in LLVM reference evidence. Retained evidence must not be
-rewritten merely to satisfy the scanner.
+The declared benchmark roots now cover the Python oracle test suite and the GCC
+oracle model workflow, and one adapter ownership entry covers the shared
+generated-C build-contract budget checks. Exact literal allowances retain the
+GCC oracle pipeline scripts, the shared capture image digest inside LLVM
+reference evidence, the forbidden identity markers in the LLVM reference-input
+plan, the opt-in installed-release provenance check, MVP patch compiler
+tooling, and the repair archive runtime references. Retained evidence must not
+be rewritten merely to satisfy the scanner.
 
 `ReconstructionPipeline` now resolves its build adapter from the selected profile.
 Its profile overload admits host budgets and binds analyzer export limits before
@@ -85,11 +88,10 @@ resource bounds and other report consumers remain unfinished.
 
 Doctor's compiler/build probes and authored sanitizer sample now come from its
 selected registered adapter, through both the CLI and JVM API. The generic root
-covers the full Doctor package. This removes four findings, leaving 80
-(67 benchmark and 13 generic); the diagnostic executor still needs output/time
-bounds. See [profile-selected Doctor diagnostics](profiled-doctor-diagnostics.md).
+covers the full Doctor package. See
+[profile-selected Doctor diagnostics](profiled-doctor-diagnostics.md).
 
-Passing the authored scanner tests verifies its detection and exemption
-behavior. It does not make the repository scan pass or complete #84. Current
-scope and progress remain on the issue; the draft gate layer is not ready for
-integration while these findings remain.
+The committed tree scans clean, so the gate no longer stops `scripts/ci.sh`
+before the test suite. Passing the authored scanner tests verifies its
+detection and exemption behavior; it does not make the repository scan complete
+#84. Remaining semantic scope and progress stay on the issue.

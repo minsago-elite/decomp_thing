@@ -1,6 +1,9 @@
 package decompengine.project
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -13,6 +16,7 @@ import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class StrictProjectBuildTest {
@@ -29,7 +33,7 @@ class StrictProjectBuildTest {
         assertTrue(project.resolve("BUILDING.md").readText().contains(report.command.joinToString(" ").substringBefore("CFLAGS=")))
         assertTrue(project.resolve("BUILDING.md").readText().contains("does not require analysis caches"))
         val contract = Json.parseToJsonElement(project.resolve("reports/build_contract.json").readText()).jsonObject
-        assertEquals(2, contract.getValue("schemaVersion").jsonPrimitive.content.toInt())
+        assertEquals(3, contract.getValue("schemaVersion").jsonPrimitive.content.toInt())
         assertEquals("true", contract.getValue("warningsAsErrors").jsonPrimitive.content)
         assertEquals("true", contract.getValue("reproduciblePathMapping").jsonPrimitive.content)
         assertEquals("false", contract.getValue("apiCredentialsRequired").jsonPrimitive.content)
@@ -179,6 +183,33 @@ class StrictProjectBuildTest {
         assertFailsWith<IllegalArgumentException> {
             ProjectBuildConfiguration(cFlags = listOf("-std=c11", "-Werror", "-Wno-error"))
         }
+    }
+
+    @Test
+    fun `archived contract cannot relax the recorded warnings-as-errors configuration`() {
+        val project = createTempDirectory("strict-contract-flags-")
+        SourceTreeGenerator.generate(buildableModel(), project)
+        MakeProjectBuilder.build(project)
+        val path = project.resolve("reports/build_contract.json")
+        val original = path.readText()
+        val contract = Json.parseToJsonElement(original).jsonObject
+        val configuration = contract.getValue("configuration").jsonObject
+        val flags = configuration.getValue("cFlags").jsonArray
+        val changes = mapOf(
+            "relaxed warnings-as-errors" to JsonObject(contract + ("configuration" to JsonObject(
+                configuration + ("cFlags" to JsonArray(flags.filterNot { it.jsonPrimitive.content == "-Werror" }))))),
+            "disabling flag" to JsonObject(contract + ("configuration" to JsonObject(
+                configuration + ("cFlags" to JsonArray(flags + JsonPrimitive("-Wno-error")))))),
+            "unbound command" to JsonObject(contract + ("command" to JsonArray(listOf(JsonPrimitive("other-build-tool"))))),
+        )
+        for ((name, changed) in changes) {
+            path.writeText(changed.toString())
+            val archive = project.parent.resolve("rejected-$name.zip")
+            assertFailsWith<IllegalArgumentException>(name) { ArchivalPackager.create(project, archive) }
+            assertFalse(archive.exists(), name)
+        }
+        path.writeText(original)
+        ArchivalPackager.create(project, project.parent.resolve("accepted.zip"))
     }
 
     @Test

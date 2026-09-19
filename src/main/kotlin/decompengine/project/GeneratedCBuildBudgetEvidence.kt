@@ -7,7 +7,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 
-internal const val GENERATED_C_BUILD_CONTRACT_SCHEMA_VERSION = 2
+internal const val GENERATED_C_BUILD_CONTRACT_SCHEMA_VERSION = 3
 
 /** Checks the budget commitments retained by the shared generated-C build boundary. */
 internal fun JsonObject.requireGeneratedCBuildBudgetEvidence(profile: ReconstructionProfile) {
@@ -61,6 +61,31 @@ internal fun JsonObject.requireGeneratedCBuildBudgetEvidence(profile: Reconstruc
     require(configuredOutput in 1..profile.budgets.buildMaximumOutputBytes && configuredOutput <= hostOutput) {
         "build contract output limit exceeds an admitted ceiling"
     }
+
+    // The recorded configuration must satisfy the same compiler policy as the build
+    // invocation, and the recorded command must execute exactly that configuration.
+    val effective = ProjectBuildConfiguration(
+        makeExecutable = configuration.string("makeExecutable"),
+        compilerExecutable = configuration.string("compilerExecutable"),
+        cFlags = flags.map { it.jsonPrimitive.content },
+        parallelism = configuredParallelism.toInt(),
+        wallClockTimeoutMillis = configuredWallClock,
+        maximumOutputBytes = configuredOutput,
+        terminationGraceMillis = configuration.number("terminationGraceMillis"),
+        buildDefinition = configuration.string("buildDefinition"),
+    )
+    val command = getValue("command").jsonArray.map { element ->
+        element.jsonPrimitive.let { primitive ->
+            require(primitive.isString) { "build contract command must contain strings" }
+            primitive.content
+        }
+    }
+    val expectedCommand = when (profile.adapterConfiguration.getValue("build-system").single()) {
+        "gnu-make" -> effective.command()
+        "ninja" -> GeneratedCNinjaReconstructionAdapter.invocation(profile, effective.parallelism).command
+        else -> throw IllegalArgumentException("build contract build system is unsupported: ${profile.id}")
+    }
+    require(command == expectedCommand) { "build contract command differs from the effective configuration" }
 }
 
 private fun JsonObject.string(name: String): String = getValue(name).jsonPrimitive.also {
