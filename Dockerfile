@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM eclipse-temurin:21-jdk-jammy@sha256:55fb9bf738f9b5d9b4a6c01b39337e3070d3e27370dd3c478fd1d5d3cd2233c6d8 AS toolchain
+FROM eclipse-temurin:21-jdk-jammy@sha256:4cfc63a7118da9267c17e2c988e1599d83d5d64a3832a760f0e77c7e8f6b29f7 AS toolchain
 
 ARG ANGR_VERSION=9.2.213
 ARG BUBBLEWRAP_VERSION=0.11.2
