@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "kind": "full-tree-resumable-scale-contract-evidence",
+  "recordedAt": "2026-09-08",
+  "issue": 116,
+  "sourceCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "authority": "repository-contract-only",
+  "productionQualified": false,
+  "scope": {
+    "id": "clang-llvm-full-tree-22.1.6",
+    "scopeSha256": "48d15d0db12c67944473feae016123195cf9e1da37c5849d9131ba31248c4b57",
+    "inventorySha256": "6d96fc34506b3fbb7a0de2f9e2e77af26e7f513d016da59a2d0cee322bbd1306",
+    "sourceInventorySha256": "33e53beb62221888abbf5e198a4da2abe3b5c29c809bb90f1faff15c3829edc4",
+    "artifactManifestSha256": "5b6f6e923e05ae4d51aefab55c8028d543d05e76b25a7c075c4e884005ce6b40",
+    "sourceLockSha256": "179b1298b14ddb701c46eb1ed6a5bb0aa60ee01580bafcf5c555b1d13c994306",
+    "richArtifactSha256": "c36ea7da092273ee53d6955557cd8eb7dcd38da92e1f577249968330a275981a",
+    "strippedArtifactSha256": "65e57857bfaf9f98a552f2fd371938e11175158bc4c11c849bd6ecbfef30c006",
+    "inventoryIndexSha256": "95b00830d3ad2fe95ca8635806e03040c01ca1c93fe69c800eeb14a17bf2830d",
+    "compilationUnits": 2150,
+    "shards": 57,
+    "sourceCandidates": 4474,
+    "linkedSourceUnits": 2149,
+    "sourceOnlyUnits": 2325
+  },
+  "bounds": {
+    "perShard": {
+      "compilationUnits": 1000,
+      "cpuSeconds": 2400,
+      "entities": 320000,
+      "maximumResidentBytes": 4294967296,
+      "serializedBytes": 536870912,
+      "wallClockSeconds": 1200
+    },
+    "wholeRun": {
+      "compilationUnits": 3000,
+      "cpuSeconds": 7200,
+      "entities": 2500000,
+      "maximumResidentBytes": 17179869184,
+      "serializedBytes": 4294967296,
+      "wallClockSeconds": 1800
+    }
+  },
+  "contractPresent": [
+    "oracle/bounded_shards.py: canonical run, checkpoint, output and complete-index binding",
+    "oracle/full_tree_execution_evidence.py: per-shard usage and whole-run evidence publication",
+    "oracle/full_tree_determinism.py: byte comparison with worker concurrency excluded from the content contract"
+  ],
+  "unresolvedProductionGates": [
+    {
+      "gate": "production-start-and-all-shard-truth-execution",
+      "status": "unavailable",
+      "reason": "The repository facts establish contracts and fixtures, not a current production START, complete all-shard run, or recovered publication.",
+      "trackedBy": [116, 119, 120]
+    },
+    {
+      "gate": "dedicated-ext4-lifecycle-and-crash-recovery",
+      "status": "unavailable",
+      "reason": "DECOMP_TEST_ORACLE_EXT4_SCRATCH is not provisioned in this local environment; aggregate active-plus-residue accounting and terminal recovery remain open.",
+      "trackedBy": [138]
+    },
+    {
+      "gate": "authoritative-kotlin-scoring-and-release",
+      "status": "unresolved",
+      "reason": "Kotlin migration, recovered-model scoring, repeated production evidence and release integration remain open; Python paths are compatibility surfaces only.",
+      "trackedBy": [108, 112, 136]
+    }
+  ],
+  "evidenceLimit": "This record binds checked-in repository artifacts and declared contracts only. It does not claim a production run, hard OS resource enforcement, Ghidra export completion, oracle authority, scoring authority, or release eligibility."
+}
