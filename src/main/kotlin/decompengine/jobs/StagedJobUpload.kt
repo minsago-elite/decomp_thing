@@ -126,6 +126,10 @@ internal class StagedJobUpload(
         return try {
             val store = JobStore(root)
             store.get(id) // A missing/corrupt live job is unavailable; do not silently recreate it.
+            val retainedInput = readStableRegularFile(root, "$id/input.elf", 32L * 1024 * 1024)
+            val recordedInputSha = receipt.getValue("inputSha256").jsonPrimitive.content
+            require(retainedInput.bytes.size.toLong() == store.get(id).sizeBytes.toLong())
+            require(retainedInput.sha256 == recordedInputSha)
             val job = store.decodeJobRecord(id, receipt.getValue("job").jsonObject)
             require(job.status == "uploaded" && job.updatedAt == job.createdAt && job.statusMessage == null)
             val recordedIntent = hash(buildJsonObject {

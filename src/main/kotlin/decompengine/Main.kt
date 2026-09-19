@@ -5,6 +5,7 @@ import decompengine.exploration.CandidateInput
 import decompengine.exploration.CandidateSource
 import decompengine.doctor.Doctor
 import decompengine.doctor.DoctorOptions
+import decompengine.project.ReconstructionProfiles
 import decompengine.mvp.MvpPatchException
 import decompengine.mvp.MvpPatchOptions
 import decompengine.mvp.MvpPatchWorkflow
@@ -120,6 +121,7 @@ private fun gccEnginePlanUsageError(message: String): Nothing {
 }
 
 private fun runReconstruct(args: List<String>) {
+    var profile = ReconstructionProfiles.default
     var binary: Path? = null
     var output: Path? = null
     var evidenceOnly = false
@@ -131,6 +133,11 @@ private fun runReconstruct(args: List<String>) {
             "--output" -> {
                 if (index + 1 >= args.size) reconstructUsageError("--output requires a directory")
                 output = Path.of(args[index + 1]); index += 2
+            }
+            "--profile" -> {
+                if (index + 1 >= args.size) reconstructUsageError("--profile requires a registered profile ID")
+                profile = try { ReconstructionProfiles.named(args[index + 1]) } catch (e: IllegalArgumentException) { reconstructUsageError(e.message ?: "invalid reconstruction profile") }
+                index += 2
             }
             "--evidence-only" -> { evidenceOnly = true; index++ }
             "--max-context-chars" -> {
@@ -168,7 +175,7 @@ private fun runReconstruct(args: List<String>) {
         )
         val result = try {
             ArchivalReconstructionService(
-                GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor, progress = progress,
+                GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor, profile = profile, progress = progress,
             ).reconstruct(binary, output)
         } catch (failure: Exception) {
             progress.phase(AgentWorkflowPhase.FAILED)
@@ -214,7 +221,7 @@ internal fun selectReconstructionStrategy(
 
 private fun reconstructUsageError(message: String): Nothing {
     System.err.println(message)
-    System.err.println("usage: llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]")
+    System.err.println("usage: llm_bin_patch reconstruct <binary> --output <directory> [--profile generated-c-make-v1|generated-c-ninja-v1] [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]")
     kotlin.system.exitProcess(2)
 }
 
@@ -257,7 +264,7 @@ private fun runExplore(args: List<String>) {
     val report = AutomaticExplorer().explore(binary, seeds, reports)
     println(
         "exploration generated ${report.candidates.size} input(s), discovered " +
-            "${report.coverage.newSignatures.size} new output signature(s), confidence=${"%.4f".format(Locale.ROOT, report.confidence.score)}",
+            "${report.coverage.newSignatures.size} new output signature(s), uncalibrated exploration heuristic=${"%.4f".format(Locale.ROOT, report.confidence.score)}",
     )
     println("report: ${report.reportPath}")
 }
@@ -457,6 +464,7 @@ private fun runDoctor(args: List<String>) {
     var toolsOnly = false
     var harnessOverride: String? = null
     var workflowOverride: AcpPreflightWorkflow? = null
+    var profile = ReconstructionProfiles.default
     var output = Path.of(System.getenv("OUTPUT_DIR") ?: if (Files.isDirectory(Path.of("/output"))) "/output" else "output")
     var index = 0
     while (index < args.size) {
@@ -481,6 +489,11 @@ private fun runDoctor(args: List<String>) {
                 if (index + 1 >= args.size) doctorUsageError("--output requires a directory")
                 output = Path.of(args[index + 1]); index += 2
             }
+            "--profile" -> {
+                if (index + 1 >= args.size) doctorUsageError("--profile requires a registered profile ID")
+                profile = try { ReconstructionProfiles.named(args[index + 1]) } catch (e: IllegalArgumentException) { doctorUsageError(e.message ?: "invalid reconstruction profile") }
+                index += 2
+            }
             else -> doctorUsageError("unexpected argument: ${args[index]}")
         }
     }
@@ -497,6 +510,7 @@ private fun runDoctor(args: List<String>) {
             harnessOverride = harnessOverride,
             workflowOverride = workflowOverride,
         ),
+        profile,
     )
     report.checks.forEach { check ->
         val stream = if (check.passed) System.out else System.err
@@ -513,8 +527,8 @@ private fun runDoctor(args: List<String>) {
 
 private fun doctorUsageError(message: String): Nothing {
     System.err.println(message)
-    System.err.println("usage: llm_bin_patch doctor --tools-only [--output <directory>]")
-    System.err.println("   or: llm_bin_patch doctor [--output <directory>] [--harness acp|legacy-openai] [--workflow all|patch|reconstruct|repair|web]")
+    System.err.println("usage: llm_bin_patch doctor --tools-only [--profile generated-c-make-v1|generated-c-ninja-v1] [--output <directory>]")
+    System.err.println("   or: llm_bin_patch doctor [--profile generated-c-make-v1|generated-c-ninja-v1] [--output <directory>] [--harness acp|legacy-openai] [--workflow all|patch|reconstruct|repair|web]")
     kotlin.system.exitProcess(2)
 }
 

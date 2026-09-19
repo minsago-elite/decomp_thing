@@ -76,7 +76,7 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
   }
   async function submit() {
     const csrfToken = session.csrf();
-    if (!attempt || active.current || !csrfToken || !connected) return;
+    if (!attempt || active.current || !csrfToken || !connected || BigInt(attempt.file.size) >= maxBytes) return;
     try { recovery.save(attempt.ticket); setRetained(recovery.read()); }
     catch { setRetained(recovery.read()); setPhase('retry'); setMessage('Retry identity could not be saved. No upload was sent. Check tab storage and the retained upload context.'); return; }
     const controller = new AbortController(); active.current = controller;
@@ -139,7 +139,7 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
       <p id="upload-feedback" role="status">{message}</p>
       {phase === 'retry' && <p>Retry keeps the same job identity. Choosing another file discards that retry context; check Uploaded jobs first if the result is unknown.</p>}
       <div class="job-actions">
-        <button type="submit" disabled={!connected || !attempt || phase === 'pending'}>{phase === 'retry' ? 'Retry this upload' : 'Upload binary'}</button>
+        <button type="submit" disabled={!connected || !attempt || phase === 'pending' || (maxBytes > 0n && BigInt(attempt.file.size) >= maxBytes)}>{phase === 'retry' ? 'Retry this upload' : 'Upload binary'}</button>
         {phase === 'pending' && <button type="button" onClick={() => active.current?.abort()}>Stop transfer</button>}
         {phase === 'retry' && <button type="button" onClick={discard}>Choose another file</button>}
       </div>
