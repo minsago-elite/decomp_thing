@@ -706,7 +706,7 @@ class UploadServer(
     private fun handlePostJob(exchange: HttpExchange) {
         try {
             val mutation = jobMutations.authorizeUpload(exchange)
-            handleAuthorizedUploadRequest(exchange, mutation)
+            handleAuthorizedUploadRequest(exchange, mutation, requestDiagnosticOutput)
         } catch (exception: InvalidUploadException) {
             legacyError(exchange, 400, "INVALID_UPLOAD", "Upload a supported Linux ELF binary.", requestDiagnosticOutput) {
                 renderErrorPage(400, "Unsupported binary", "Upload a supported Linux ELF binary.")
@@ -835,7 +835,11 @@ private fun webOrigin(host: String, port: Int): String {
 }
 
 /** Legacy response adapter. Its caller must mint the typed mutation capability first. */
-internal fun handleAuthorizedUploadRequest(exchange: HttpExchange, mutation: AuthorizedWebJobUpload) {
+internal fun handleAuthorizedUploadRequest(
+    exchange: HttpExchange,
+    mutation: AuthorizedWebJobUpload,
+    requestDiagnosticOutput: (String) -> Unit = System.err::println,
+) {
     try {
         val declaredLength = exchange.requestHeaders.getFirst("Content-Length")?.toLongOrNull()
         require(declaredLength == null || declaredLength <= MAX_UPLOAD_BYTES) { "upload exceeds the 32 MiB limit" }
@@ -852,7 +856,7 @@ internal fun handleAuthorizedUploadRequest(exchange: HttpExchange, mutation: Aut
         exchange.responseHeaders.set("Location", "/jobs/${uncertain.jobId}")
         if (exchange.requestsLegacyJson()) {
             sendCorrelatedLegacyJsonProblem(exchange, 409, "RECOVERY_REQUIRED",
-                uploadPublicationProblem(uncertain.jobId).toString(), System.err::println)
+                uploadPublicationProblem(uncertain.jobId).toString(), requestDiagnosticOutput)
         } else {
             exchange.sendHtml(409, renderUploadPublicationUncertainPage(uncertain.jobId))
         }

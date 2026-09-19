@@ -2364,10 +2364,12 @@
         "workflow": {
           "type": "string",
           "enum": [
+            "build",
             "explore",
             "reconstruct",
             "reconstruction",
             "repair",
+            "validate",
             "unknown"
           ]
         },
