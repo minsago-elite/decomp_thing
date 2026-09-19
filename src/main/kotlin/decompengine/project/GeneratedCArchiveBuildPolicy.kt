@@ -14,6 +14,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import decompengine.repair.readStableRegularFile
 
 /** Existing generated-C/Make source and artifact verification for archival builds. */
 internal object GeneratedCArchiveBuildPolicy : ArchiveBuildPolicy {
@@ -35,7 +36,10 @@ internal object GeneratedCArchiveBuildPolicy : ArchiveBuildPolicy {
                     "archive project is missing required evidence: $relative"
                 }
         }
-        val contract = Json.parseToJsonElement(projectDir.resolve("reports/build_contract.json").readText()).jsonObject
+        val contract = Json.parseToJsonElement(
+            readStableRegularFile(projectDir, "reports/build_contract.json", ArchivalBundleLimits().maximumFileBytes.toLong()).bytes
+                .toString(Charsets.UTF_8),
+        ).jsonObject
         require(contract["schemaVersion"]?.jsonPrimitive?.intOrNull == GENERATED_C_BUILD_CONTRACT_SCHEMA_VERSION) {
             "archive build contract must use source-bound schema version $GENERATED_C_BUILD_CONTRACT_SCHEMA_VERSION"
         }

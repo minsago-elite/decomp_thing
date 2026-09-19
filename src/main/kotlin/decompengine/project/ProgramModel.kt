@@ -148,7 +148,7 @@ object ProgramModelJson {
             "program model must be canonical UTF-8"
         }
         val model = read(text, checkpoint)
-        val canonicalText = model.toJson()
+        val canonicalText = model.toJson(checkpoint)
         val canonical = checkedModelStage("encoding canonical program model", checkpoint) { canonicalText.toByteArray(Charsets.UTF_8) }
         require(checkedModelStage("comparing canonical program model", checkpoint) { MessageDigest.isEqual(bytes, canonical) }) {
             "program model must use exact canonical fields, entity order, sets, and bytes"

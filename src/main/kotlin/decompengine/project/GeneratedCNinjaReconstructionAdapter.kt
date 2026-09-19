@@ -54,11 +54,13 @@ internal object GeneratedCNinjaReconstructionAdapter : ReconstructionAdapter by 
         }
         val text = java.nio.file.Files.readString(definition)
         val lines = text.lineSequence().map { it.trim() }.toList()
-        require(lines.any { it == "cc = $expectedCompiler" }) {
-            "Ninja build definition compiler differs from the selected profile"
+        val compilerAssignments = lines.filter { it.startsWith("cc =") }
+        require(compilerAssignments == listOf("cc = $expectedCompiler")) {
+            "Ninja build definition compiler differs from the selected profile or is overridden"
         }
-        require(lines.any { it == "cflags = $expectedFlags" }) {
-            "Ninja build definition flags differ from the selected profile"
+        val flagAssignments = lines.filter { it.startsWith("cflags =") }
+        require(flagAssignments == listOf("cflags = $expectedFlags")) {
+            "Ninja build definition flags differ from the selected profile or are overridden"
         }
     }
 }
