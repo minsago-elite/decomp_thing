@@ -180,7 +180,8 @@ object ArchivalProjectAuditor {
                         "module checkpoint input identity differs from the audited model or profile"
                     }
                     require(checkpoint.boolean("accepted")) { "module checkpoint does not record acceptance" }
-                    if (moduleClaimsAgentExecution(checkpoint.string("generator"), checkpoint.string("reconstructorIdentity"))) {
+                    if (moduleClaimsAgentExecution(file.generator, checkpoint.string("reconstructorIdentity")) ||
+                        moduleClaimsAgentExecution(checkpoint.string("generator"), checkpoint.string("reconstructorIdentity"))) {
                         val promptCharacters = (checkpoint["promptCharacters"] as? JsonPrimitive)
                             ?.takeUnless { it.isString }?.longOrNull
                         val promptBudgetCharacters = (checkpoint["promptBudgetCharacters"] as? JsonPrimitive)
