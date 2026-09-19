@@ -80,13 +80,15 @@ declaration/descriptor pairs across Doctor, its option/report/probe types and th
 profile registry are retained. Additions are the profile-aware overload, its
 default-argument bridge and the registry's explicit default getter.
 
-The four Doctor neutrality findings are removed. The repository gate still fails
-with 80 findings: 67 benchmark references and 13 generic-policy findings. Its
-generic roots now include the entire Doctor package; only the explicitly owned
-generated-C diagnostic implementation is registered as an adapter file.
+The four Doctor neutrality findings are removed. The repository gate passes on
+a clean checkout: the policy declares the remaining benchmark-owned namespaces
+and pins the remaining pre-existing generic literals as exact counted
+allowances. Its generic roots include the entire Doctor package; only the
+explicitly owned generated-C diagnostic implementation is registered as an
+adapter file.
 
 Host budget admission does not establish diagnostic process resource bounds.
 `SystemCommandProbe` still reads complete command output and waits without a
-timeout. Bounding that executor, the remaining MVP/repair and benchmark policy,
-complete consumer migration and production qualification remain open under
+timeout. Bounding that executor, the MVP/repair and consumer migrations and
+production qualification remain open under
 [#84](https://github.com/minsago-elite/decomp_thing/issues/84).

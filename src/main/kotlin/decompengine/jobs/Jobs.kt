@@ -202,8 +202,10 @@ class JobStore(root: Path) {
                 }
                 selected.use { entry ->
                     require(!entry.identity.isSymbolicLink) { "archive source inventory contains a linked entry" }
-                    if (relative in layout.excludedOutputRoots) {
-                        require(entry.identity.isDirectory) { "archive build root is not a directory" }
+                    if (layout.excludes(relative)) {
+                        require(entry.identity.isDirectory || entry.identity.isRegularFile) {
+                            "archive source inventory contains a nonregular excluded entry"
+                        }
                     } else if (entry.identity.isDirectory) {
                         LinuxFilesystemSyscalls.openDirectoryAt(directory.fd, name).use { child ->
                             require(child.identity == entry.identity) { "archive source directory changed" }
