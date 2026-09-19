@@ -14,15 +14,19 @@ import decompengine.acp.AcpPreflightWorkflow
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.EvidenceModuleReconstructor
+import decompengine.project.GhidraHeadlessProgramModelAnalyzer
+import decompengine.project.GhidraProgramModelExportLimits
+import decompengine.project.GhidraProgramModelRecoveryMode
 import decompengine.project.ModuleReconstructor
 import decompengine.agent.AgentHarness
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowPhase
 import decompengine.jobs.BestEffortProgressJournal
 import decompengine.jobs.ProgressRedactor
-import decompengine.oracle.gcc.GccBundledCliCommand
-import decompengine.oracle.gcc.GccBundledCliOptions
+import decompengine.oracle.gcc.GccCompilerEnginePlanningService
 import decompengine.oracle.gcc.GccCompilerEngineProfiles
+import decompengine.oracle.gcc.authenticateGhidraInstallation
+import decompengine.analysis.BundledGhidra
 import decompengine.repair.RepairRuntimeConfiguration
 import decompengine.repair.SecureRepairRuntime
 import decompengine.validation.ProcessInput
@@ -52,27 +56,68 @@ fun main(args: Array<String>) {
 }
 
 private fun runGccEnginePlan(args: List<String>) {
-    val options = try {
-        GccBundledCliOptions.parse(args)
-    } catch (failure: IllegalArgumentException) {
-        gccEnginePlanUsageError(failure.message ?: "invalid gcc-engine-plan arguments")
+    var engineId: String? = null
+    var binary: Path? = null
+    var profilePath: Path? = null
+    var ghidraArchive: Path? = null
+    var output: Path? = null
+    var index = 0
+    while (index < args.size) {
+        when (args[index]) {
+            "--profile" -> {
+                if (index + 1 >= args.size) gccEnginePlanUsageError("--profile requires a file")
+                profilePath = Path.of(args[index + 1]); index += 2
+            }
+            "--ghidra-archive" -> {
+                if (index + 1 >= args.size) gccEnginePlanUsageError("--ghidra-archive requires a file")
+                ghidraArchive = Path.of(args[index + 1]); index += 2
+            }
+            "--output" -> {
+                if (index + 1 >= args.size) gccEnginePlanUsageError("--output requires a directory")
+                output = Path.of(args[index + 1]); index += 2
+            }
+            else -> {
+                if (args[index].startsWith("-")) gccEnginePlanUsageError("unexpected argument: ${args[index]}")
+                if (engineId == null) engineId = args[index]
+                else if (binary == null) binary = Path.of(args[index])
+                else gccEnginePlanUsageError("unexpected argument: ${args[index]}")
+                index++
+            }
+        }
     }
-    val result = GccBundledCliCommand.run(options, args)
-    println("engine: ${options.engineId}")
-    println("operation result: $result")
-    println("Model and plan paths and their digests are recorded in the result; scratch is retained.")
+    if (engineId == null || binary == null || profilePath == null ||
+        ghidraArchive == null || output == null
+    ) {
+        gccEnginePlanUsageError("gcc-engine-plan requires an engine, binary, profile, Ghidra provenance archive, and output")
+    }
+    val suite = GccCompilerEngineProfiles.load(profilePath)
+    val authenticatedGhidra = suite.analysis.authenticateGhidraInstallation(ghidraArchive, BundledGhidra.locate().release)
+    val reconstructionProfile = suite.reconstructionProfile()
+    val analyzer = GhidraHeadlessProgramModelAnalyzer(
+        GhidraProgramModelExportLimits.from(reconstructionProfile),
+        authenticatedGhidra.archiveSha256,
+        GhidraProgramModelRecoveryMode.fromWireName(suite.analysis.exporterMode),
+    )
+    val result = GccCompilerEnginePlanningService.diagnostic(analyzer).plan(suite, engineId, binary, output)
+    println("engine: ${result.engineId}")
+    println("program model: ${result.programModelPath}")
+    println("program model sha256: ${result.programModelSha256}")
+    println("module plan: ${result.modulePlanPath}")
+    println("module plan sha256: ${result.modulePlanSha256}")
+    println("non-authoritative assessment: ${result.assessmentPath}")
+    println("assessment sha256: ${result.assessmentSha256}")
+    println("wall clock milliseconds: ${result.wallClockMillis}")
+    println("maximum resident bytes observed: ${result.maximumResidentBytesObserved}")
 }
 
 private fun gccEnginePlanUsageError(message: String): Nothing {
     System.err.println(message)
     System.err.println(
-        "usage: llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> " +
-            "--profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount> " +
-            "[--resume-after-checkpoint <multiple-of-512>]",
+        "usage: llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> " +
+            "--ghidra-archive <file> --output <directory>",
     )
     kotlin.system.exitProcess(2)
 }
-
 
 private fun runReconstruct(args: List<String>) {
     var binary: Path? = null
