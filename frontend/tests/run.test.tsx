@@ -83,6 +83,33 @@ it('pages history with URL continuation and restores the first page through brow
   } finally { auth.dispose(); }
 });
 
+it('aborts an obsolete history-page request when browser navigation changes the cursor', async () => {
+  const auth = await session();
+  let finishPage: (value: unknown) => void = () => undefined;
+  const first = { data: {
+    jobId: sample.jobId, items: [{ ...sample, runId: 'run_latest' }],
+    page: { limit: 50, snapshotVersion: 'version_1', nextCursor: 'cursor_page_2' },
+  } };
+  transport.get.mockImplementation((_kind, path) => path.includes('cursor=')
+    ? new Promise(resolve => { finishPage = resolve; }) : Promise.resolve(first));
+  history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect(await screen.findByRole('link', { name: 'reconstruct: run_latest' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Next attempts' }));
+    await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(2));
+    const obsoleteSignal = transport.get.mock.calls[1]![2].signal;
+    await act(() => { history.back(); });
+    await waitFor(() => expect(obsoleteSignal.aborted).toBe(true));
+    await act(async () => { finishPage({ data: {
+      ...first.data, items: [{ ...sample, runId: 'run_obsolete' }],
+      page: { ...first.data.page, nextCursor: null },
+    } }); await Promise.resolve(); });
+    expect(screen.queryByRole('link', { name: 'reconstruct: run_obsolete' })).toBeNull();
+    expect(await screen.findByRole('link', { name: 'reconstruct: run_latest' })).toBeTruthy();
+  } finally { auth.dispose(); }
+});
+
 it('reads exploration evidence only on request and preserves producer limitations', async () => {
   const { ExplorationEvidence } = await import('../src/jobs/ExplorationEvidence');
   const data = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/report-exploration.json'), 'utf8')) as { data: Report };
