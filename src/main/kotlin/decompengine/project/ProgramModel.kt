@@ -228,6 +228,18 @@ object ProgramModelJson {
         return RecoveryStatus.valueOf(item.string(field).uppercase(Locale.ROOT))
     }
 
+    private fun readExtractionStatus(item: JsonObject, schemaVersion: Int): RecoveryStatus {
+        if (schemaVersion == 2) {
+            require("status" !in item) { "schema 2 uses extractionStatus, not historical status" }
+            val assessment = item.getValue("recoveryAssessment").jsonPrimitive
+            require(assessment.isString && assessment.content == "unassessed") {
+                "an extracted model cannot supply a scored recovery assessment"
+            }
+        }
+        val field = if (schemaVersion == 1) "status" else "extractionStatus"
+        return RecoveryStatus.valueOf(item.string(field).uppercase(Locale.ROOT))
+    }
+
     private fun JsonObject.string(name: String): String = getValue(name).jsonPrimitive.content
     private fun JsonObject.int(name: String, default: Int): Int = get(name)?.jsonPrimitive?.content?.toInt() ?: default
     private fun JsonObject.array(name: String) = getValue(name).jsonArray
