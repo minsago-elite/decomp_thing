@@ -82,7 +82,7 @@ class SourceGenerationHostAdmissionTest {
             val digest = profile.sha256
             var analysisCalls = 0
             var reconstructionCalls = 0
-            val analyzer = ProgramModelAnalyzer { supplied, _ ->
+            val analyzer = budgetedAnalyzer { supplied, _ ->
                 analysisCalls++
                 assertEquals(binary, supplied)
                 model(sha256(supplied.readBytes()))
