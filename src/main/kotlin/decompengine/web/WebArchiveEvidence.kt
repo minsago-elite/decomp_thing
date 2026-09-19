@@ -74,12 +74,12 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
                 ) { "archive payload differs from the current source tree: $relative" }
                 identity(observed)
             }
-            val contractSnapshot = store.readArtifact(jobId, "$reportPrefix/source-tree/${layout.contractPath}", MAXIMUM_FILE_BYTES)
+            val contractSnapshot = readArtifact(jobId, "$reportPrefix/source-tree/${layout.contractPath}", MAXIMUM_FILE_BYTES)
             requireSame(current.getValue(layout.contractPath), contractSnapshot)
             val contract = buildPolicy.parseContract(OracleJson.parse(contractSnapshot.bytes).jsonObject, source.profile)
             val artifact = contract.artifact
             require(artifact.getValue("path").jsonPrimitive.content == layout.artifactPath) { "archive build artifact path is invalid" }
-            val executable = store.readArtifact(jobId, "$reportPrefix/source-tree/${layout.artifactPath}", MAXIMUM_BYTES).let { snapshot ->
+            val executable = readArtifact(jobId, "$reportPrefix/source-tree/${layout.artifactPath}", MAXIMUM_BYTES).let { snapshot ->
                 require(artifact.getValue("sha256").jsonPrimitive.content == snapshot.sha256 &&
                     artifact.getValue("bytes").jsonPrimitive.longOrNull == snapshot.bytes.size.toLong()
                 ) { "archive build contract differs from the current rebuilt executable" }
@@ -90,7 +90,7 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
             }
             require(inventory == store.sourceArchiveInventory(jobId, transport, reportPrefix)) { "archive source inventory changed during verification" }
             require(source.manifestDocument == sources.read(jobId, reportPrefix).manifestDocument) { "archive source revision changed during verification" }
-            requireSame(executable, store.readArtifact(jobId, "$reportPrefix/source-tree/${layout.artifactPath}", MAXIMUM_BYTES))
+            requireSame(executable, readArtifact(jobId, "$reportPrefix/source-tree/${layout.artifactPath}", MAXIMUM_BYTES))
             requireSame(input, store.readInput(jobId))
             requireSame(identity(archive), readArtifact(jobId, "$reportPrefix/source-tree.zip", MAXIMUM_BYTES))
             return WebArchiveSnapshot(archive.bytes, archive.sha256, source.view.copy(archiveSha256 = archive.sha256), source.manifestDocument)

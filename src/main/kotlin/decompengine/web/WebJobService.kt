@@ -173,7 +173,7 @@ class WebJobService(
     }
 
     private fun writableStore(): WorkflowAttemptStore {
-        check(!closed && !stopping) { "The job service is stopped" }
+        if (closed || stopping) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
         requirePublicationAvailable()
         if (!initialized) initializeExistingStorage()
         return acquireAndRecover()
@@ -337,14 +337,11 @@ class WebJobService(
     internal fun expireProgressJournal(jobId: String, runId: String, protectedFromRetention: Boolean,
         retention: java.time.Duration = decompengine.jobs.AgentProgressJournalRetention.DEFAULT_TERMINAL_RETENTION,
     ): decompengine.jobs.ProgressRetentionResult {
-        requireInitializedRead()
-        if (stopping) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
-        requirePublicationAvailable()
+        val owner = writableStore()
         getAttempt(jobId, runId)
         // Terminal metadata can precede worker exit; keep all artifacts until work really releases.
         if (protectedFromRetention || active.containsKey(jobId) || uploads.isNotEmpty())
             return decompengine.jobs.ProgressRetentionResult.RETAINED
-        val owner = attempts ?: throw WebJobServiceException("JOB_NOT_FOUND", "The requested job is unavailable.")
         return try { owner.expireProgressJournal(jobId, runId, protectedFromRetention = false, retention = retention) }
         catch (failure: WorkflowStoreException) {
             throw WebJobServiceException(failure.code,
@@ -368,11 +365,8 @@ class WebJobService(
      */
     private fun <T> coordinatePinPublication(jobId: String, runId: String, command: (WorkflowAttemptStore) -> T,
         currentAttempt: (T) -> WorkflowAttempt): T {
-        requireInitializedRead()
-        if (stopping) throw WebJobServiceException("SERVICE_STOPPED", "The job service is stopping.")
-        requirePublicationAvailable()
+        val owner = writableStore()
         getAttempt(jobId, runId)
-        val owner = attempts ?: throw WebJobServiceException("JOB_NOT_FOUND", "The requested job is unavailable.")
         val task = (active[jobId] as? DurableTask)?.takeIf { it.attempt.runId == runId }
         return try {
             command(owner).also { result -> task?.attempt = currentAttempt(result) }
@@ -419,8 +413,10 @@ class WebJobService(
     }
 
     /** Multipart bytes are copied outside the service monitor; publication retains root ownership through completion. */
-    fun uploadMultipart(input: java.io.InputStream, contentType: String): Job = uploadMultipartReceipt(input, contentType).job
+    fun uploadMultipart(input: java.io.InputStream, contentType: String): Job =
+        uploadMultipartReceipt(input, contentType).job
 
+    /** Receipt-aware operation used by authenticated HTTP capabilities and idempotent uploads. */
     internal fun uploadMultipartReceipt(input: java.io.InputStream, contentType: String, idempotencyKey: String? = null, progress: WebUploadProgress.Transfer? = null): decompengine.jobs.PublishedJobUpload {
         val worker = Thread.currentThread()
         val finished = synchronized(this) {

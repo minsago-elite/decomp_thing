@@ -31,6 +31,7 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
   const Runtime = useMemo(() => lazyRoute(() => import('../routes/Runtime'), recovery), [recovery]);
   const location = useLocation();
   const main = useRef<HTMLElement>(null);
+  const focusedPath = useRef<string | null>(null);
   const [loading, setLoading] = useState(false);
   const homePath = appPath(basePath, '/');
   const runtimePath = appPath(basePath, '/runtime');
@@ -41,19 +42,32 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
   const isHistory = location.path.startsWith(`${basePath}/jobs/`) && /^[^/]+\/runs$/.test(location.path.slice(`${basePath}/jobs/`.length));
   const pageTitle = atHome ? 'Jobs' : location.path === uploadPath ? 'Upload a binary'
     : location.path === runtimePath ? 'Runtime status' : isJob ? 'Job overview' : isRun ? 'Workflow attempt' : isHistory ? 'Attempt history' : 'Page unavailable';
+
+  function focusRouteHeading(url: string) {
+    const path = new URL(url, window.location.origin).pathname.replace(/\/+$/g, '') || '/';
+    const currentPath = window.location.pathname.replace(/\/+$/g, '') || '/';
+    const routePath = location.path.replace(/\/+$/g, '') || '/';
+    if (path !== routePath || path !== currentPath || focusedPath.current === path) return;
+    const heading = main.current?.querySelector('h1');
+    if (!heading) return; // A lazy route will call viewReady after its heading commits.
+    if (!heading.hasAttribute('tabindex')) heading.setAttribute('tabindex', '-1');
+    heading.focus({ preventScroll: recovery.snapshot() !== 'ready' });
+    focusedPath.current = path;
+  }
+
   useLayoutEffect(() => {
     document.title = `${pageTitle} · Decomp Workbench`;
-    main.current?.focus({ preventScroll: recovery.snapshot() !== 'ready' });
-  }, [pageTitle, location.path, recovery]);
+    focusRouteHeading(location.url);
+  }, [pageTitle, location.path]);
 
-  function viewReady() {
+  function viewReady(url: string) {
     setLoading(false);
-    main.current?.focus({ preventScroll: recovery.snapshot() !== 'ready' });
+    focusRouteHeading(url);
   }
 
   return (
     <>
-      <a class="skip-link" href="#main">Skip to content</a>
+      <a class="skip-link" href="#main" onClick={() => main.current?.focus()}>Skip to content</a>
       <header class="app-header">
         <a class="brand" href={homePath} aria-label="Decomp Workbench home">
           <img src={mark} alt="" width="28" height="28" />
