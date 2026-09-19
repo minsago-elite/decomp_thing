@@ -43,6 +43,52 @@ class CheckedFullTreeInventoryTest(unittest.TestCase):
         self.assertEqual(57, inventory["counts"]["shards"])
         self.assertEqual(2150, sum(len(shard["unitIds"]) for shard in inventory["shards"]))
 
+    def test_clang_lib_ast_population_is_bound_before_implementation_generation(self) -> None:
+        scope = load_full_tree_scope(
+            CHECKED_SCOPE,
+            source_lock_path=CHECKED_SOURCE_LOCK,
+            artifact_manifest_path=CHECKED_MANIFEST,
+        )
+        inventory_payload = CHECKED_INVENTORY.read_bytes()
+        inventory = json.loads(inventory_payload)
+        validate_inventory(
+            inventory,
+            scope,
+            hashlib.sha256(CHECKED_SCOPE.read_bytes()).hexdigest(),
+        )
+
+        planning_path = REPOSITORY_ROOT / "oracle/llvm/22.1.6/full-tree-planning-inventory.json"
+        planning_payload = planning_path.read_bytes()
+        planning = json.loads(planning_payload)
+        planning_without_hash = {
+            key: value for key, value in planning.items() if key != "reportSha256"
+        }
+        self.assertEqual(
+            hashlib.sha256(canonical_json_bytes(planning_without_hash)).hexdigest(),
+            planning["reportSha256"],
+        )
+        self.assertEqual(
+            planning["oracle"]["inventoryArtifactSha256"],
+            hashlib.sha256(inventory_payload).hexdigest(),
+        )
+
+        ast_modules = [
+            module for module in planning["sourceModules"] if module["shardId"] == "clang-lib-ast"
+        ]
+        ast_units = [unit for unit in inventory["units"] if unit["shardId"] == "clang-lib-ast"]
+        self.assertEqual(110, len(ast_modules))
+        self.assertEqual(110, len(ast_units))
+        self.assertEqual(
+            {module["unitId"] for module in ast_modules},
+            {unit["id"] for unit in ast_units},
+        )
+        self.assertEqual(
+            {module["sourcePath"] for module in ast_modules},
+            {unit["sourcePath"] for unit in ast_units},
+        )
+        self.assertTrue(all(module["sourceKind"] == "handwritten" for module in ast_modules))
+        self.assertNotIn("acceptedImplementations", planning["counts"])
+
 
 class FullTreeInventoryTest(unittest.TestCase):
     def setUp(self) -> None:
