@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "issue": 707,
+  "status": "unresolved",
+  "qualification": "candidate-execution-required",
+  "oracle": {
+    "id": "gcc-driver-16.2.0",
+    "version": "16.2.0",
+    "sourceRevision": "78d4ac73dd391005b895a6148cd9831e28e1208b"
+  },
+  "reference": {
+    "corpusId": "gcc-16-2-0-driver-behavior",
+    "corpusSha256": "bcc1a14ca8c54f94106c943f0bc5698cb9af3151b7bf20a49ae3c8828baaad0e",
+    "evidenceSha256": "9dcf787aea232615a1ff8721144b86bc1f5e9a2a7068fa9e9280db0bc4ad6803",
+    "cases": [
+      {
+        "id": "metadata-version",
+        "referenceStatus": "passed",
+        "exitCode": 0,
+        "stdout": {"bytes": 222, "sha256": "dfdb19fc0bd5dcd763e010d1956430a417224539109108f61b231d1a296371ab", "normalizations": []},
+        "stderr": {"bytes": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "normalizations": []}
+      },
+      {
+        "id": "metadata-dumpversion",
+        "referenceStatus": "passed",
+        "exitCode": 0,
+        "stdout": {"bytes": 7, "sha256": "e9f8839c742db21d285464b01dfb2e572f802c366729873cdc4a296c8c3a01ea", "normalizations": []},
+        "stderr": {"bytes": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "normalizations": []}
+      },
+      {
+        "id": "metadata-dumpmachine",
+        "referenceStatus": "passed",
+        "exitCode": 0,
+        "stdout": {"bytes": 20, "sha256": "1c7da408e283702561a445e700b61c0f55a082230a3cfe323208841221274a6a", "normalizations": []},
+        "stderr": {"bytes": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "normalizations": []}
+      },
+      {
+        "id": "help-driver",
+        "referenceStatus": "passed",
+        "exitCode": 0,
+        "stdout": {"bytes": 4082, "sha256": "7a0250d66493c38ea6051e3492bf59779f6b43d516856299f73be753fc30a1b2", "normalizations": []},
+        "stderr": {"bytes": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "normalizations": []}
+      }
+    ]
+  },
+  "candidate": {
+    "status": "unresolved",
+    "requiredEvidence": [
+      "authenticated reconstructed execution under the pinned environment",
+      "candidate source, build, and executable provenance",
+      "byte-for-byte normalized stdout/stderr comparison"
+    ],
+    "productionGap": "The retained report is reference-oracle evidence only. No reconstructed candidate execution receipt or candidate source/build/executable identity is present, so these reference passes do not qualify issue #707."
+  }
+}

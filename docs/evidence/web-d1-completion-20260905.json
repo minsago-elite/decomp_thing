@@ -1,0 +1,33 @@
+{
+  "purpose": "D1 routing/cache/package completion audit; not all D-series release qualification",
+  "applicationSourceCommit": "d6867ae3696b656fa98383392858e042cf9a7953",
+  "uiBuildId": "323d13cfb9cbd17714252dde962b10ae4c329aa9601bce3c7fc0443b07755d09",
+  "packagedWeb": [
+    {
+      "archive": "llm_bin_patch-0.1.0.zip",
+      "buildId": "323d13cfb9cbd17714252dde962b10ae4c329aa9601bce3c7fc0443b07755d09",
+      "publicAssets": 7,
+      "nodeOnPath": false,
+      "readOnlyInstallation": true
+    },
+    {
+      "archive": "llm_bin_patch-0.1.0.tar",
+      "buildId": "323d13cfb9cbd17714252dde962b10ae4c329aa9601bce3c7fc0443b07755d09",
+      "publicAssets": 7,
+      "nodeOnPath": false,
+      "readOnlyInstallation": true
+    }
+  ],
+  "packagedWebLogSha256": "7b46894264bf9a0cdd5f4b8396cb47589e088d5b3a4ea7d87b8057692a31f585",
+  "webJournalTests": {
+    "tests": 163,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "frontendTests": 267,
+  "manifestAndUpgradeDriverTests": 11,
+  "basePathConsumerEvidence": "web-session-tabs-20260905.json",
+  "upgradeEvidence": "web-d1-upgrade-final-20260905.json",
+  "browserWorkersSupported": false
+}

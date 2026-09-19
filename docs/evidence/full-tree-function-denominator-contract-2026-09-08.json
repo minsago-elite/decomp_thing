@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "status": "fixture-only-evidence",
+  "scope": "full-tree-function-truth-v2",
+  "authorityBoundary": {
+    "truthProducer": "Kotlin raw-artifact reconciliation",
+    "candidateModels": "never an input to truth identity or assignment",
+    "releaseAuthority": false,
+    "ghidra": "not invoked by this contract; production analysis remains through bundled Java APIs"
+  },
+  "provenance": {
+    "sourceBaseCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+    "fixtureRoot": "src/test/resources/oracle/full-tree-function-truth-v2",
+    "fixtureProvenance": "src/test/resources/oracle/full-tree-function-truth-v2/PROVENANCE.txt",
+    "scopeSha256": "9f097308c076fbbc8822169db6088ecfa94e2a95449eb2434a39a60a3db6973e",
+    "truthIndexArtifactSha256": "9f6a6e61cee7a63e538fc76104fd0b51f564405ef31ba416b131248d00e9b907",
+    "truthIndexSha256": "321862d95175deb8a70d1fb316f5ef026a9e77a903d288260350c9e19c7e65ca",
+    "truthShard": "src/test/resources/oracle/full-tree-function-truth-v2/expected-truth/shards/generated-tools-clang.json",
+    "truthShardSha256": "02b3eb539f94248ee98621a819eb07701712ad3545f0715c52558328b5ebac56"
+  },
+  "denominatorContract": {
+    "emitted": {
+      "identity": "unique emitted RVA",
+      "records": 4,
+      "scoredRecords": 3,
+      "excludedRecords": 1,
+      "aliases": "typed DWARF/ELF evidence retained on the RVA record; an alias never creates another denominator record"
+    },
+    "nonEmitted": {
+      "identity": "reconciled declaration and alias evidence identity",
+      "records": 4,
+      "population": "unobservable",
+      "observations": 6,
+      "reasonCounts": {
+        "inline-no-emitted-range": 1,
+        "definition-no-emitted-range": 1,
+        "comdat-or-odr-selected-elsewhere": 2
+      },
+      "denominator": "never promoted into emitted-function scored records"
+    },
+    "specializedEvidence": {
+      "coalescedEmittedRvas": 1,
+      "thunkEmittedRvas": 1,
+      "selectedElsewhereIdentities": 2
+    }
+  },
+  "unresolved": [
+    {
+      "id": "template-pattern-and-instance-identity",
+      "state": "unresolved",
+      "reason": "the retained fixture has no explicit producer-owned template pattern or concrete-instantiation records"
+    },
+    {
+      "id": "inline-instance-ownership",
+      "state": "unresolved",
+      "reason": "inline-only no-range observations are explicitly unobservable, but concrete inline-instance ownership is not evidenced"
+    },
+    {
+      "id": "typed-comdat-selection-and-discard-reason",
+      "state": "unresolved",
+      "reason": "the fixture preserves coarse coalesced and selected-elsewhere reasons; raw section-group selection/discard evidence is absent"
+    },
+    {
+      "id": "normalized-thunk-target",
+      "state": "unresolved",
+      "reason": "the function fixture classifies a thunk, but does not establish its semantic target relationship"
+    }
+  ],
+  "productionGates": [
+    {
+      "id": "authenticated-production-full-tree-scan",
+      "state": "unavailable",
+      "reason": "the checked inputs are synthetic migration controls and are not a fresh authenticated production ELF/DWARF scan"
+    },
+    {
+      "id": "two-byte-identical-production-generations",
+      "state": "unavailable",
+      "reason": "the retained byte-identical replay is fixture-only; no new production generation was run"
+    },
+    {
+      "id": "retained-all-shard-runtime-and-scratch-authority",
+      "state": "unavailable",
+      "dependencies": ["#116", "#138"],
+      "reason": "scheduler lifecycle, ext4 lease, recovery, and aggregate cleanup evidence remain open"
+    },
+    {
+      "id": "authoritative-scoring-and-release",
+      "state": "unavailable",
+      "dependencies": ["#108", "#112", "#136"],
+      "reason": "this raw truth receipt explicitly grants no downstream scoring or release authority"
+    }
+  ]
+}

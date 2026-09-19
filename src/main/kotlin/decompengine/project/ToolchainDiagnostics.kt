@@ -11,6 +11,7 @@ internal interface ToolchainDiagnosticPolicy {
 internal interface PreparedToolchainDiagnostics {
     val versionProbes: List<ToolchainVersionProbe>
     fun checkCapabilities(commandProbe: CommandProbe): List<DoctorCheck>
+    fun checkCapabilities(commandProbe: CommandProbe, checkpoint: (String) -> Unit): List<DoctorCheck>
 }
 
 internal data class ToolchainVersionProbe(

@@ -1,0 +1,44 @@
+{
+  "status": "passed",
+  "sourceCommit": "8ce450a8ebbc1b85670d2553a8abe1a4c3fd172c",
+  "verification": {
+    "tests": 250,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "command": "./gradlew -PfrontendNodeHome=/home/june/decomp_thing/build/tools/decomp-node-24.20.0/node-v24.20.0-linux-x64 test --tests 'decompengine.web.*' --tests 'decompengine.jobs.AgentProgressJournal*Test' --tests 'decompengine.jobs.WorkflowAttemptStoreTest'",
+  "controlledCutovers": {
+    "rounds": 33,
+    "appendedObservations": 264,
+    "forcedBefore": 11,
+    "forcedAfter": 11,
+    "racing": 11,
+    "initialSnapshotsSucceeded": 33,
+    "interruptedReadFallbacksObserved": 0,
+    "pageLimit": 7,
+    "identicalRetryData": true
+  },
+  "sse": {
+    "atomicEvictionGapAndClose": true,
+    "gapDoesNotAdvanceCursor": true,
+    "freshSnapshotResumesLaterPublication": true,
+    "deliveredSequencesMatchPolling": true
+  },
+  "runtimeImplementationChanged": false,
+  "workflowExecutionStarted": false,
+  "fixtureLifecycleTransitionsOnly": true,
+  "notRepeated": [
+    "frontend tests",
+    "package build",
+    "packaged browser qualification"
+  ],
+  "limitations": [
+    "Controlled interleavings are not production load or slow-socket stress qualification.",
+    "Timed terminal-run event retention remains outstanding."
+  ],
+  "retainedXml": {
+    "file": "TEST-decompengine.web.WebProgressCutoverTest.xml",
+    "sha256": "851ed1fc6460320339f941ef3fc6a88dc856cf018af45a758b10017fc1ec3ac3"
+  }
+}

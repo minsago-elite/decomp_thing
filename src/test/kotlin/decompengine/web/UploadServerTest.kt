@@ -18,8 +18,11 @@ import decompengine.project.RecoveredFunction
 import decompengine.project.MakeProjectBuilder
 import decompengine.project.ArchivalPackager
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
-import java.net.HttpURLConnection
+import kotlinx.serialization.json.put
 import java.net.URI
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
@@ -41,8 +44,749 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 class UploadServerTest {
+    private val sessions = java.util.IdentityHashMap<UploadServer, Map<String, String>>()
+    private val followingClient = java.net.http.HttpClient.newBuilder().followRedirects(java.net.http.HttpClient.Redirect.NORMAL).build()
+    private val directClient = java.net.http.HttpClient.newHttpClient()
+
     @Test
-    fun `background diagnostics redact secrets before persistence and rendering`() {
+    fun `legacy transport rejects foreign origins and forwarded authority before operations`() {
+        var executions = 0
+        withServer(JobAnalyzer { _, _ -> executions++ }, JobReconstructor { _, _ -> executions++ }) { server, root ->
+            val id = uploadedJobId(server)
+            val record = root.resolve(id).resolve("job.json")
+            val original = record.readBytes()
+            val origin = "http://127.0.0.1:${server.serverPort}"
+            val client = java.net.http.HttpClient.newHttpClient()
+            fun transportRequest(method: String, path: String, headers: Map<String, String> = emptyMap()): java.net.http.HttpResponse<String> {
+                val builder = java.net.http.HttpRequest.newBuilder(URI(origin + path))
+                    .method(method, java.net.http.HttpRequest.BodyPublishers.noBody())
+                headers.forEach { (key, value) -> builder.header(key, value) }
+                return client.send(builder.build(), java.net.http.HttpResponse.BodyHandlers.ofString())
+            }
+            for ((header, value) in listOf("Origin" to "https://unconfigured.invalid", "Sec-Fetch-Site" to "cross-site",
+                "X-Forwarded-Host" to "unconfigured.invalid")) {
+                for ((method, path) in listOf("GET" to "/", "GET" to "/jobs/$id", "GET" to "/api/jobs/$id",
+                    "GET" to "/api/jobs/$id/events", "GET" to "/jobs/$id/artifacts/reports/missing.json",
+                    "POST" to "/jobs/$id/explore", "POST" to "/jobs/$id/reconstruct", "POST" to "/jobs")) {
+                    val response = transportRequest(method, path, mapOf(header to value))
+                    assertEquals(403, response.statusCode(), "$header $method $path")
+                    assertTrue(!response.body().contains(value))
+                }
+            }
+            for (path in listOf("/jobs", "/jobs/$id/explore", "/jobs/$id/reconstruct")) {
+                val missing = transportRequest("POST", path)
+                assertEquals(403, missing.statusCode())
+                assertTrue(missing.body().contains("Mutations require the exact application origin."))
+            }
+            assertEquals(401, transportRequest("GET", "/api/jobs/$id").statusCode())
+            val cookie = mapOf("Cookie" to checkNotNull(sessions[server]).getValue("Cookie"))
+            assertEquals(200, transportRequest("GET", "/api/jobs/$id", cookie + ("Origin" to origin)).statusCode())
+            assertEquals(200, transportRequest("GET", "/api/jobs/$id", cookie).statusCode())
+            assertContentEquals(original, record.readBytes())
+            assertEquals(0, executions)
+        }
+    }
+
+    @Test
+    fun `legacy nonloopback binding is unavailable without a qualified access profile`() {
+        val root = createTempDirectory("web-legacy-binding-").resolve("absent")
+        val failure = kotlin.test.assertFailsWith<IllegalArgumentException> {
+            UploadServer("0.0.0.0", 0, root)
+        }
+        assertTrue(failure.message.orEmpty().contains("loopback host"))
+        assertTrue(!root.exists())
+    }
+
+    @Test
+    fun `artifact display uses supplied metadata and service listing stays bounded`() = withServer { server, root ->
+        val id = uploadedJobId(server)
+        val job = decompengine.jobs.JobStore(root).get(id)
+        val reports = root.resolve(id).resolve("reports").createDirectories()
+        reports.resolve("stored.txt").writeText("stored")
+        reports.resolve("source-tree").createDirectories().resolve("excluded-source.txt").writeText("source")
+        reports.resolve("runs").createDirectories().resolve("excluded-run.txt").writeText("run")
+        val supplied = renderJob(job, artifacts = listOf(WebArtifactSummary("reports/supplied.txt", "supplied.txt", 3L * 1024 * 1024 * 1024)))
+        assertTrue(supplied.contains("supplied.txt"))
+        assertTrue(supplied.contains("3072.0 MiB"))
+        assertTrue(!supplied.contains("stored.txt"))
+        val unsupplied = renderJob(job)
+        assertTrue(unsupplied.contains("Artifact listing is unavailable"))
+        assertTrue(!unsupplied.contains("stored.txt"))
+        val listing = listLegacyArtifactSummaries(WebReportContext(reports))
+        assertEquals(listOf(WebArtifactSummary("reports/stored.txt", "stored.txt", 6)), listing)
+        val response = request(server, "GET", "/jobs/$id")
+        assertEquals(200, response.status)
+        assertTrue(response.body.decodeToString().contains("reports/stored.txt"))
+        assertTrue(response.body.decodeToString().contains("6 B"))
+        assertTrue(!response.body.decodeToString().contains("excluded-source.txt"))
+        assertTrue(!response.body.decodeToString().contains("excluded-run.txt"))
+        var nested = reports
+        repeat(33) { nested = nested.resolve("nested").createDirectories() }
+        val unavailable = request(server, "GET", "/jobs/$id")
+        assertEquals(200, unavailable.status)
+        assertTrue(unavailable.body.decodeToString().contains("Artifact listing is unavailable"))
+        assertEquals("stored", reports.resolve("stored.txt").readBytes().decodeToString())
+    }
+
+    @Test
+    fun `repair and reconstruction HTML use bounded supplied reports without renderer IO`() = withServer { server, root ->
+        val id = uploadedJobId(server)
+        val job = decompengine.jobs.JobStore(root).get(id)
+        val reports = root.resolve(id).resolve("reports").createDirectories()
+        val history = """{"iterations":[{"index":1,"failureKind":"fixture","summary":"supplied_history","succeeded":false}]}"""
+        val progress = """{"phase":"supplied_progress","completed":1,"total":2}"""
+        val paths = listOf(reports.resolve("repair_history.json"), reports.resolve("reconstruction_progress.json"))
+        paths[0].writeText(history.replace("supplied_history", "stored_history"))
+        paths[1].writeText(progress.replace("supplied_progress", "stored_progress"))
+        val before = paths.map { it.readBytes() }
+        val rendered = renderJob(job, repairHistory = Json.parseToJsonElement(history).jsonObject,
+            reconstructionProgress = Json.parseToJsonElement(progress).jsonObject)
+        assertTrue(rendered.contains("supplied_history") && rendered.contains("supplied_progress"))
+        assertTrue(!rendered.contains("stored_history") && !rendered.contains("stored_progress"))
+        val omitted = renderJob(job)
+        assertTrue(omitted.contains("Repair history is unavailable"))
+        assertTrue(omitted.contains("Reconstruction progress is unavailable"))
+        assertTrue(!omitted.contains("stored_history") && !omitted.contains("stored_progress"))
+        val loaded = request(server, "GET", "/jobs/$id")
+        assertEquals(200, loaded.status)
+        assertTrue(loaded.body.decodeToString().contains("stored_history"))
+        assertTrue(loaded.body.decodeToString().contains("stored_progress"))
+        paths.forEachIndexed { index, path -> assertContentEquals(before[index], path.readBytes()) }
+        for (invalid in listOf("PRIVATE_INVALID {", "x".repeat(1_048_577), "[]", "{\"phase\":1,\"phase\":2}")) {
+            paths.forEach { it.writeText(invalid) }
+            val response = request(server, "GET", "/jobs/$id")
+            assertEquals(200, response.status)
+            assertTrue(response.body.decodeToString().contains("Repair history is unavailable"))
+            assertTrue(response.body.decodeToString().contains("Reconstruction progress is unavailable"))
+            assertTrue(!response.body.decodeToString().contains("PRIVATE_INVALID"))
+            paths.forEach { assertEquals(invalid, it.readBytes().decodeToString()) }
+        }
+        paths.forEach { Files.delete(it) }
+        val absent = request(server, "GET", "/jobs/$id").body.decodeToString()
+        assertTrue(absent.contains("Repair history is unavailable") && absent.contains("Reconstruction progress is unavailable"))
+        paths.forEach { assertTrue(!it.exists()) }
+    }
+
+    @Test
+    fun `HTML exploration uses supplied data and bounded unavailable report reads`() = withServer { server, root ->
+        val id = uploadedJobId(server)
+        val job = decompengine.jobs.JobStore(root).get(id)
+        val reports = root.resolve(id).resolve("reports").createDirectories()
+        val report = reports.resolve("exploration.json")
+        val source = """{"confidence":{"score":0.63},"candidateCount":1,"expandedOutputSignatures":1,"newOutputSignatures":[],"candidates":[{"id":"supplied_case","source":"SEED","args":[],"stdinHex":""}],"observations":[]}"""
+        report.writeText(source.replace("supplied_case", "stored_case"))
+        val bytes = report.readBytes()
+        val rendered = renderJob(job, explorationReport = Json.parseToJsonElement(source).jsonObject)
+        assertTrue(rendered.contains("supplied_case"))
+        assertTrue(!rendered.contains("stored_case"))
+        val unsupplied = renderJob(job)
+        assertTrue(unsupplied.contains("The exploration report is unavailable"))
+        assertTrue(!unsupplied.contains("stored_case"))
+        val actual = request(server, "GET", "/jobs/$id")
+        assertEquals(200, actual.status)
+        assertTrue(actual.body.decodeToString().contains("stored_case"))
+        assertTrue(actual.body.decodeToString().contains("Exploration heuristic"))
+        assertTrue(actual.body.decodeToString().contains("0.630"))
+        assertTrue(actual.body.decodeToString().contains("Uncalibrated"))
+        assertContentEquals(bytes, report.readBytes())
+        for (invalid in listOf("PRIVATE_REPORT {", "x".repeat(1_048_577), "{\"confidence\":[]}", "{\"confidence\":{},\"confidence\":{}}")) {
+            report.writeText(invalid)
+            val response = request(server, "GET", "/jobs/$id")
+            assertEquals(200, response.status)
+            assertTrue(response.body.decodeToString().contains("The exploration report is unavailable"))
+            assertTrue(!response.body.decodeToString().contains("PRIVATE_REPORT"))
+            assertEquals(invalid, report.readBytes().decodeToString())
+        }
+        Files.delete(report)
+        assertTrue(request(server, "GET", "/jobs/$id").body.decodeToString().contains("The exploration report is unavailable"))
+        assertTrue(!report.exists())
+    }
+
+    @Test
+    fun `legacy report presentation treats every retained string as inert text`() = withServer { server, root ->
+        val id = uploadedJobId(server)
+        val original = decompengine.jobs.JobStore(root).get(id)
+        val marker = "\"><img src=x onerror=alert(1)>"
+        val exploration = buildJsonObject {
+            put("candidateCount", marker)
+            put("expandedOutputSignatures", marker)
+            put("newOutputSignatures", JsonArray(emptyList()))
+            put("candidates", JsonArray(listOf(buildJsonObject {
+                put("id", marker); put("source", marker); put("args", JsonArray(listOf(JsonPrimitive(marker))))
+                put("stdinHex", marker)
+            })))
+            put("observations", JsonArray(emptyList()))
+        }
+        val repair = buildJsonObject {
+            put("iterations", JsonArray(listOf(buildJsonObject {
+                put("index", marker); put("failureKind", marker); put("summary", marker); put("succeeded", false)
+            })))
+        }
+        val reconstruction = buildJsonObject {
+            put("phase", marker); put("completed", marker); put("total", marker); put("module", marker)
+        }
+        val html = renderJob(
+            original.copy(filename = marker, createdAt = marker, updatedAt = marker),
+            diagnostics = listOf(decompengine.jobs.WorkflowStoreDiagnostic(marker, marker)),
+            explorationReport = exploration,
+            repairHistory = repair,
+            reconstructionProgress = reconstruction,
+            artifacts = listOf(WebArtifactSummary("reports/$marker.md", marker, 1)),
+        )
+        val sourceHtml = renderSourceFile(original.copy(filename = marker), marker, marker)
+
+        assertTrue(!html.contains("<img"))
+        assertTrue(!html.contains("class=\"source-tag $marker"))
+        assertTrue(!html.contains("aria-label=\"Iteration $marker"))
+        assertTrue(html.contains("source-tag unknown"))
+        assertTrue(html.contains("&lt;img src=x onerror=alert(1)&gt;"))
+        assertTrue(!sourceHtml.contains("<img"))
+        assertTrue(sourceHtml.contains("&lt;img src=x onerror=alert(1)&gt;"))
+    }
+
+    @Test
+    fun `legacy artifact downloads sandbox active content and sanitize header filenames`() = withServer { server, root ->
+        val id = uploadedJobId(server)
+        val reports = root.resolve(id).resolve("reports").createDirectories()
+        val fixtures = listOf(
+            Triple("report name\".svg", "<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>", "application/octet-stream"),
+            Triple("generated.html", "<script>location.href='https://example.invalid'</script>", "application/octet-stream"),
+            Triple("generated.md", "[leave](javascript:alert(1))", "text/plain; charset=utf-8"),
+        )
+        fixtures.forEach { (filename, body, expectedContentType) ->
+            reports.resolve(filename).writeText(body)
+            val encoded = java.net.URLEncoder.encode(filename, Charsets.UTF_8).replace("+", "%20")
+
+            val response = request(server, "GET", "/jobs/$id/artifacts/reports/$encoded")
+
+            assertEquals(200, response.status)
+            assertEquals(body, response.body.decodeToString())
+            assertEquals(expectedContentType, response.contentType)
+            assertEquals("sandbox; default-src 'none'; base-uri 'none'; form-action 'none'", response.contentSecurityPolicy)
+            assertEquals("nosniff", response.contentTypeOptions)
+            assertEquals("no-referrer", response.referrerPolicy)
+            assertTrue(response.contentDisposition.orEmpty().startsWith("attachment;"))
+            assertTrue('\r' !in response.contentDisposition.orEmpty() && '\n' !in response.contentDisposition.orEmpty())
+        }
+        val disposition = request(server, "GET", "/jobs/$id/artifacts/reports/report%20name%22.svg").contentDisposition.orEmpty()
+        assertTrue(disposition.startsWith("attachment; filename=\"report_name_.svg\""))
+        assertTrue(disposition.contains("filename*=UTF-8''report%20name%22.svg"))
+    }
+
+    @Test
+    fun `attachment metadata cannot inject headers and uses RFC 5987 encoding`() {
+        val disposition = attachmentDisposition("report\r\nX-Injected: yes*.svg")
+
+        assertTrue('\r' !in disposition && '\n' !in disposition)
+        assertTrue(disposition.startsWith("attachment; filename=\"report__X-Injected__yes_.svg\""))
+        assertTrue(disposition.contains("filename*=UTF-8''report%0D%0AX-Injected%3A%20yes%2A.svg"))
+    }
+
+    @Test
+    fun `legacy JSON read routes negotiate methods and Accept before storage access`() = withServer { server, root ->
+        val id = uploadedJobId(server)
+        val record = root.resolve(id).resolve("job.json")
+        val reports = root.resolve(id).resolve("reports")
+        decompengine.jobs.AgentProgressJournal(reports, "reconstruct").use { }
+        val journal = reports.resolve(decompengine.jobs.AgentProgressJournal.FILE_NAME)
+        val jobBefore = record.readBytes()
+        val journalBefore = journal.readBytes()
+        for (path in listOf("/api/jobs/$id", "/api/jobs/$id/events")) {
+            for (accept in listOf("application/json", "application/json; charset=utf-8", "application/*", "*/*", "text/html, application/json;q=0.5", "APPLICATION/JSON")) {
+                val response = request(server, "GET", path, headers = mapOf("Accept" to accept))
+                assertEquals(200, response.status, accept)
+                assertEquals("application/json; charset=utf-8", response.contentType)
+            }
+            for (accept in listOf("text/html", "application/json;q=0, */*;q=1", "application/*;q=0, */*;q=1", "application/json;q=2")) {
+                val response = request(server, "GET", path, headers = mapOf("Accept" to accept))
+                assertEquals(406, response.status, accept)
+                assertTrue(response.body.decodeToString().contains("NOT_ACCEPTABLE"))
+                assertEquals("application/json; charset=utf-8", response.contentType)
+            }
+            val specificRejection = request(server, "GET", path,
+                headers = mapOf("Accept" to "application/json; charset=utf-8;q=0, application/json;q=1"))
+            assertEquals(406, specificRejection.status)
+            val oversized = request(server, "GET", path, headers = mapOf("Accept" to "x".repeat(513)))
+            assertEquals(400, oversized.status)
+            assertTrue(oversized.body.decodeToString().contains("INVALID_HEADER"))
+            for (method in listOf("POST", "PUT", "DELETE", "OPTIONS")) {
+                val response = request(server, method, path, headers = mapOf("Accept" to "text/html"))
+                assertEquals(405, response.status, method)
+                assertEquals("GET, HEAD", response.allow)
+                assertEquals("application/json; charset=utf-8", response.contentType)
+                assertEquals("no-store", response.cacheControl)
+                assertTrue(response.body.decodeToString().contains("METHOD_NOT_ALLOWED"))
+            }
+            val get = request(server, "GET", path, headers = mapOf("Accept" to "application/json"))
+            val head = request(server, "HEAD", path, headers = mapOf("Accept" to "application/json"))
+            assertEquals(200, head.status)
+            assertTrue(head.body.isEmpty())
+            assertEquals(get.contentLength, head.contentLength)
+        }
+        assertEquals(404, request(server, "POST", "/api/unknown", headers = mapOf("Accept" to "text/html")).status)
+        assertContentEquals(jobBefore, record.readBytes())
+        assertContentEquals(journalBefore, journal.readBytes())
+        // A damaged record must not turn a negotiation failure into a storage read failure.
+        record.writeText("PRIVATE_CORRUPTION {")
+        assertEquals(405, request(server, "DELETE", "/api/jobs/$id").status)
+        assertEquals(406, request(server, "GET", "/api/jobs/$id", headers = mapOf("Accept" to "text/html")).status)
+        assertEquals("PRIVATE_CORRUPTION {", record.readBytes().decodeToString())
+    }
+
+    @Test
+    fun `legacy JSON errors have fixed public messages and request identities`() {
+        withServer { server, root ->
+            val id = uploadedJobId(server)
+            val record = root.resolve(id).resolve("job.json")
+            val before = record.readBytes()
+            val cases = listOf(
+                Triple(request(server, "GET", "/api/PRIVATE_ROUTE_SENTINEL"), 404, "NOT_FOUND"),
+                Triple(request(server, "GET", "/api/jobs/PRIVATE_JOB_SENTINEL"), 404, "JOB_NOT_FOUND"),
+                Triple(request(server, "GET", "/api/jobs/$id/events?PRIVATE_QUERY_SENTINEL=x"), 400, "INVALID_REQUEST"),
+                Triple(upload(server, "PRIVATE_FILENAME_SENTINEL", byteArrayOf(1, 2, 3), true), 400, "INVALID_UPLOAD"),
+            ).toMutableList()
+            assertContentEquals(before, record.readBytes())
+            record.writeText("PRIVATE_STORAGE_SENTINEL { root=$root")
+            val corrupted = record.readBytes()
+            cases += Triple(request(server, "GET", "/api/jobs/$id"), 503, "JOB_STORAGE_UNAVAILABLE")
+            assertContentEquals(corrupted, record.readBytes())
+            val requestIds = mutableSetOf<String>()
+            cases.forEach { (response, status, code) ->
+                assertEquals(status, response.status)
+                assertEquals("application/json; charset=utf-8", response.contentType)
+                assertEquals("no-store", response.cacheControl)
+                val body = Json.parseToJsonElement(response.body.decodeToString()).jsonObject
+                assertEquals(setOf("requestId", "error"), body.keys)
+                val requestId = body.getValue("requestId").toString().trim('"')
+                assertEquals(requestId, response.requestId)
+                assertTrue(requestIds.add(requestId))
+                java.util.UUID.fromString(requestId)
+                val error = body.getValue("error").jsonObject
+                assertEquals(setOf("code", "message"), error.keys)
+                assertEquals("\"$code\"", error.getValue("code").toString())
+                listOf("PRIVATE_", root.toString(), "Exception", "<html").forEach {
+                    assertTrue(!response.body.decodeToString().contains(it), it)
+                }
+            }
+            val html = upload(server, "invalid.elf", byteArrayOf(1, 2, 3), false)
+            assertEquals(400, html.status)
+            assertEquals("text/html; charset=utf-8", html.contentType)
+        }
+    }
+
+    @Test
+    fun `legacy upload and job JSON omit private storage fields without changing persistence`() {
+        withServer { server, root ->
+            val uploaded = upload(server, "presentation.elf", elfFixture(), acceptJson = true)
+            assertEquals(201, uploaded.status)
+            val publicJob = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject
+            val id = publicJob.getValue("id").toString().trim('"')
+            val record = root.resolve(id).resolve("job.json")
+            val initialBytes = record.readBytes()
+            val persisted = Json.parseToJsonElement(initialBytes.decodeToString()).jsonObject
+            val publicKeys = setOf("id", "filename", "status", "created_at", "updated_at", "size_bytes", "metadata")
+            assertEquals(publicKeys, publicJob.keys)
+            publicKeys.forEach { assertEquals(persisted[it], publicJob[it], it) }
+            assertTrue(persisted.containsKey("binary_path"))
+            val read = request(server, "GET", "/api/jobs/$id")
+            assertEquals(200, read.status)
+            assertEquals(publicJob, Json.parseToJsonElement(read.body.decodeToString()))
+            assertContentEquals(initialBytes, record.readBytes())
+
+            // Old persisted diagnostics may contain secrets predating current redaction.
+            val diagnostic = "PRIVATE_DIAGNOSTIC_SENTINEL root=$root env=PRIVATE_ENV_VALUE"
+            decompengine.jobs.JobStore(root).updateStatus(id, "failed", diagnostic)
+            val failedBytes = record.readBytes()
+            val failed = request(server, "GET", "/api/jobs/$id")
+            assertEquals(200, failed.status)
+            val failedJob = Json.parseToJsonElement(failed.body.decodeToString()).jsonObject
+            assertEquals(publicKeys, failedJob.keys)
+            assertEquals("\"failed\"", failedJob.getValue("status").toString())
+            listOf(uploaded, read, failed).forEach { response ->
+                listOf(root.toString(), "binary_path", "status_message", "PRIVATE_DIAGNOSTIC_SENTINEL", "PRIVATE_ENV_VALUE").forEach {
+                    assertTrue(!response.body.decodeToString().contains(it), it)
+                }
+            }
+            val failedPage = request(server, "GET", "/jobs/$id")
+            assertEquals(200, failedPage.status)
+            assertTrue(failedPage.body.decodeToString().contains("Stored diagnostic details are withheld"))
+            listOf(root.toString(), "PRIVATE_DIAGNOSTIC_SENTINEL", "PRIVATE_ENV_VALUE").forEach {
+                assertTrue(!failedPage.body.decodeToString().contains(it))
+            }
+            assertTrue(failedBytes.decodeToString().contains("PRIVATE_DIAGNOSTIC_SENTINEL"))
+            assertContentEquals(failedBytes, record.readBytes())
+        }
+    }
+
+    @Test
+    fun `missing job workflow admissions return typed safe not found responses`() {
+        var executions = 0
+        withServer(JobAnalyzer { _, _ -> executions++ }, JobReconstructor { _, _ -> executions++ }) { server, root ->
+            for (workflow in listOf("explore", "reconstruct")) {
+                val response = request(server, "POST", "/jobs/${"a".repeat(32)}/$workflow", followRedirects = false)
+                assertEquals(404, response.status)
+                assertTrue(response.body.decodeToString().contains("JOB_NOT_FOUND"))
+                kotlin.test.assertFalse(response.body.decodeToString().contains(root.toString()))
+            }
+            assertEquals(0, executions)
+        }
+    }
+
+    @Test
+    fun `dashboard shows retained recovery data without exposing private files`() = withServer { server, root ->
+        val stage = Files.createDirectory(root.resolve(".upload-private-secret"))
+        val input = stage.resolve("input.elf")
+        input.writeText("private-content")
+        val page = request(server, "GET", "/")
+        assertEquals(200, page.status)
+        val html = page.body.decodeToString()
+        assertTrue(html.contains("Retained recovery files"))
+        assertTrue(html.contains("Observed 1 upload stages and 0 metadata temporary files; 15 observed bytes."))
+        assertTrue(html.contains("Files may still belong to active work."))
+        assertTrue(html.contains("No files were deleted."))
+        assertTrue(html.contains("href=\"/api/recovery\""))
+        assertTrue(!html.contains("private-secret"))
+        assertTrue(!html.contains("private-content"))
+        assertTrue(!html.contains(root.toString()))
+        assertEquals("private-content", input.readBytes().decodeToString())
+    }
+
+    @Test
+    fun `dashboard shows incomplete recovery inspection even with zero counted candidates`() = withServer { server, root ->
+        val unknown = root.resolve(".upload-unknown")
+        unknown.writeText("unknown-layout")
+        val page = request(server, "GET", "/")
+        assertEquals(200, page.status)
+        val html = page.body.decodeToString()
+        assertTrue(html.contains("At least 0 upload stages and 0 metadata temporary files"))
+        assertTrue(html.contains("Inspection is incomplete."))
+        assertTrue(html.contains("More files or bytes may remain"))
+        assertTrue(!html.contains("The scoped scan finished."))
+        assertEquals("unknown-layout", unknown.readBytes().decodeToString())
+    }
+
+    @Test
+    fun `recovery endpoint returns a read-only summary without private names or contents`() = withServer { server, root ->
+        val stage = Files.createDirectory(root.resolve(".upload-private-secret-name"))
+        val input = stage.resolve("input.elf")
+        input.writeText("private-content")
+        val response = request(server, "GET", "/api/recovery")
+        assertEquals(200, response.status)
+        val text = response.body.decodeToString()
+        val json = Json.parseToJsonElement(text).jsonObject
+        assertEquals("true", json["displayOnly"].toString())
+        assertEquals("true", json["inventoryComplete"].toString())
+        assertEquals("1", json["retainedUploadStages"].toString())
+        assertEquals("\"15\"", json["observedBytes"].toString())
+        assertTrue(!text.contains("private"))
+        assertTrue(!text.contains(root.toString()))
+        assertEquals("private-content", input.readBytes().decodeToString())
+    }
+
+    @Test
+    fun `shutdown discards caller-queued work and late delivery cannot alter a new owner state`() {
+        val dataDir = createTempDirectory("web-caller-queue-")
+        val queued = java.util.concurrent.CopyOnWriteArrayList<Runnable>()
+        val invocations = java.util.concurrent.atomic.AtomicInteger()
+        val executor = Executor { queued.add(it) }
+        val server = UploadServer("127.0.0.1", 0, dataDir,
+            analyzer = JobAnalyzer { _, _ -> invocations.incrementAndGet() }, executor = executor)
+        server.start()
+        try {
+            val uploaded = upload(server, "pending.elf", elfFixture(), acceptJson = true)
+            val id = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            assertEquals(1, queued.size)
+            server.stop()
+            val store = decompengine.jobs.JobStore(dataDir)
+            assertEquals("failed", store.get(id).status)
+            assertEquals("Server stopped before the operation started", store.get(id).statusMessage)
+            val restarted = UploadServer("127.0.0.1", 0, dataDir)
+            try {
+                restarted.start()
+                val replacement = store.updateStatus(id, "complete", "New owner state")
+                repeat(2) { queued.single().run() }
+                assertEquals(0, invocations.get())
+                assertEquals(replacement, store.get(id))
+                executor.execute { invocations.incrementAndGet() }
+                queued.last().run()
+                assertEquals(1, invocations.get())
+            } finally {
+                restarted.stop()
+            }
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun `late caller-owned worker completion releases ownership without a second stop`() {
+        val dataDir = createTempDirectory("web-caller-release-")
+        val started = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val finished = java.util.concurrent.CountDownLatch(1)
+        val executor = java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "caller-owned-worker")
+        }
+        val server = UploadServer("127.0.0.1", 0, dataDir, analyzer = JobAnalyzer { _, _ ->
+            started.countDown()
+            while (release.count != 0L) {
+                try { release.await() } catch (_: InterruptedException) { }
+            }
+            finished.countDown()
+        }, executor = executor)
+        server.start()
+        try {
+            val uploaded = upload(server, "late-worker.elf", elfFixture(), acceptJson = true)
+            val id = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            val stopped = kotlin.test.assertFailsWith<WebJobServiceException> { server.stop() }
+            assertEquals("SHUTDOWN_INCOMPLETE", stopped.code)
+            val store = decompengine.jobs.JobStore(dataDir)
+            assertEquals("analyzing", store.get(id).status)
+            val refused = kotlin.test.assertFailsWith<IllegalStateException> { UploadServer("127.0.0.1", 0, dataDir) }
+            assertEquals("Job store already has a live web server owner", refused.message)
+
+            release.countDown()
+            assertTrue(finished.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+            var replacement: UploadServer? = null
+            while (replacement == null) {
+                assertTrue(System.nanoTime() < deadline, "store ownership was not released after the worker exited")
+                try {
+                    replacement = UploadServer("127.0.0.1", 0, dataDir).also { it.start() }
+                } catch (_: IllegalStateException) {
+                    Thread.sleep(20)
+                }
+            }
+            try {
+                assertEquals("Server stopped before the operation reported completion", store.get(id).statusMessage)
+            } finally {
+                replacement.stop()
+            }
+        } finally {
+            release.countDown()
+            executor.shutdownNow()
+        }
+    @Test
+    fun `dashboard keeps an unreadable published job visible without leaking its contents`() {
+        val root = createTempDirectory("web-listing-admission-")
+        val server = UploadServer("127.0.0.1", 0, root)
+        server.start()
+        try {
+            val id = uploadedJobId(server)
+            val metadata = root.resolve(id).resolve("job.json")
+            val original = metadata.readBytes()
+            metadata.writeText("private-invalid-record")
+            val page = request(server, "GET", "/")
+            assertEquals(200, page.status)
+            val text = page.body.decodeToString()
+            assertTrue(text.contains("Unavailable job"))
+            assertTrue(!text.contains("private-invalid-record"))
+            assertTrue(!text.contains(root.toString()))
+            assertEquals("private-invalid-record", metadata.readBytes().decodeToString())
+            metadata.writeBytes(original)
+            assertEquals(200, request(server, "GET", "/").status)
+        } finally { server.stop() }
+    }
+
+    }
+
+    @Test
+    fun `early stop signal discards delivered queued work before cleanup takes the lifecycle lock`() {
+        val root = createTempDirectory("web-stop-admission-")
+        val queued = java.util.concurrent.CopyOnWriteArrayList<Runnable>()
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        val server = UploadServer("127.0.0.1", 0, root,
+            analyzer = JobAnalyzer { _, _ -> calls.incrementAndGet() }, executor = Executor { queued.add(it) })
+        server.start()
+        try {
+            val id = uploadedJobId(server)
+            assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            server.requestStop()
+            assertTrue(!server.withActiveRequest { error("stop-requested server admitted a request") })
+            repeat(2) { queued.single().run() }
+            assertEquals(0, calls.get())
+            val job = decompengine.jobs.JobStore(root).get(id)
+            assertEquals("failed", job.status)
+            assertEquals("Server stopped before the operation started", job.statusMessage)
+        } finally { server.stop() }
+    }
+
+    @Test
+    fun `early stop signal prevents successful completion publication before cleanup`() {
+        val root = createTempDirectory("web-stop-completion-")
+        lateinit var server: UploadServer
+        server = UploadServer("127.0.0.1", 0, root,
+            analyzer = JobAnalyzer { _, _ -> server.requestStop() }, executor = Executor { it.run() })
+        server.start()
+        try {
+            val id = uploadedJobId(server)
+            assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            val job = decompengine.jobs.JobStore(root).get(id)
+            assertEquals("failed", job.status)
+            assertEquals("Server stopped before the operation reported completion", job.statusMessage)
+        } finally { server.stop() }
+    }
+
+    @Test
+    fun `completion publication racing the stop signal is repaired to failed`() {
+        val root = createTempDirectory("web-completion-fence-")
+        val analyzing = java.util.concurrent.CountDownLatch(1)
+        lateinit var server: UploadServer
+        server = UploadServer("127.0.0.1", 0, root,
+            analyzer = JobAnalyzer { _, _ ->
+                analyzing.countDown()
+                check(server.requestStopSignalled().await(15, java.util.concurrent.TimeUnit.SECONDS))
+            }, executor = Executor { task ->
+                Thread(task, "web-stop-race-worker").apply { isDaemon = true; start() }
+            })
+        server.start()
+        try {
+            val id = uploadedJobId(server)
+            assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            assertTrue(analyzing.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            server.requestStop()
+            // The stop signal is published while the worker is mid-operation; the completion
+            // decision observes it and persists failed instead of a completed publication.
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+            var job = decompengine.jobs.JobStore(root).get(id)
+            while (job.status != "failed" && System.nanoTime() < deadline) {
+                Thread.sleep(20)
+                job = decompengine.jobs.JobStore(root).get(id)
+            }
+            assertEquals("failed", job.status)
+            assertEquals("Server stopped before the operation reported completion", job.statusMessage)
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun `claim that precedes the stop signal cannot invoke the operation`() {
+        val root = createTempDirectory("web-claim-fence-")
+        val queued = java.util.concurrent.CopyOnWriteArrayList<Runnable>()
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        val server = UploadServer("127.0.0.1", 0, root,
+            analyzer = JobAnalyzer { _, _ -> calls.incrementAndGet() }, executor = Executor { queued.add(it) })
+        server.start()
+        try {
+            val id = uploadedJobId(server)
+            assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            assertEquals(1, queued.size)
+            server.requestStop()
+            val runner = Thread { queued.single().run() }.apply { isDaemon = true; start() }
+            runner.join(15000)
+            assertEquals(0, calls.get())
+            val job = decompengine.jobs.JobStore(root).get(id)
+            assertEquals("failed", job.status)
+            assertEquals("Server stopped before the operation started", job.statusMessage)
+            server.stop()
+            val restarted = UploadServer("127.0.0.1", 0, root)
+            try {
+                restarted.start()
+            } finally {
+                restarted.stop()
+            }
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun `queued publication racing the stop signal is rejected and repaired`() {
+        val root = createTempDirectory("web-queued-fence-")
+        val queued = java.util.concurrent.CopyOnWriteArrayList<Runnable>()
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        val server = UploadServer("127.0.0.1", 0, root,
+            analyzer = JobAnalyzer { _, _ -> calls.incrementAndGet() }, executor = Executor { queued.add(it) })
+        server.start()
+        try {
+            val id = uploadedJobId(server)
+            server.requestStop()
+            val status = try { request(server, "POST", "/jobs/$id/explore", followRedirects = false).status }
+                catch (_: java.io.IOException) { 503 }
+            assertEquals(503, status)
+            assertEquals(0, queued.size)
+            assertEquals(0, calls.get())
+            val job = decompengine.jobs.JobStore(root).get(id)
+            // The submission was never admitted; the pending record is preserved for a later owner.
+            assertEquals("uploaded", job.status)
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun `stop signals the job service before waiting on the lifecycle lock`() {
+        val dataDir = createTempDirectory("web-stop-signal-order-")
+        val server = UploadServer("127.0.0.1", 0, dataDir)
+        server.start()
+        val stopThread = Thread { server.stop() }
+        try {
+            synchronized(server.lifecycleMonitor()) {
+                stopThread.start()
+                assertTrue(awaitBlockedIn("decompengine.web.UploadServer", "stop"),
+                    "stop() should wait on the lifecycle lock while it is held")
+                // The job service must already be signalled while stop() is still blocked:
+                // a queued callback or completing operation must observe shutdown before
+                // the lock frees.
+                assertTrue(server.jobServiceStopping(),
+                    "beginShutdown must be published before waiting on the lifecycle lock")
+            }
+            stopThread.join(10_000)
+            assertTrue(!stopThread.isAlive,
+                "stop() must complete once the lock is released; state=${stopThread.state} " +
+                    "frames=${stopThread.stackTrace.joinToString(" <- ") { "${it.className.substringAfterLast('.')}.${it.methodName}" }}")
+        } finally {
+            dataDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `shutdown timeout retains store ownership until the worker exits and cleanup is retried`() {
+        val dataDir = createTempDirectory("web-retained-owner-")
+        val started = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val server = UploadServer("127.0.0.1", 0, dataDir, analyzer = JobAnalyzer { _, _ ->
+            started.countDown()
+            while (release.count != 0L) {
+                try { release.await() } catch (_: InterruptedException) { }
+            }
+        })
+        server.start()
+        try {
+            val uploaded = upload(server, "waiting.elf", elfFixture(), acceptJson = true)
+            val id = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
+            assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            val timeout = kotlin.test.assertFailsWith<WebJobServiceException> { server.stop() }
+            assertEquals("SHUTDOWN_INCOMPLETE", timeout.code)
+            val refused = kotlin.test.assertFailsWith<IllegalStateException> { UploadServer("127.0.0.1", 0, dataDir) }
+            assertEquals("Job store already has a live web server owner", refused.message)
+            val store = decompengine.jobs.JobStore(dataDir)
+            assertEquals("analyzing", store.get(id).status)
+
+            release.countDown()
+            server.stop()
+            assertEquals("failed", store.get(id).status)
+            assertEquals("Server stopped before the operation reported completion", store.get(id).statusMessage)
+            val restarted = UploadServer("127.0.0.1", 0, dataDir)
+            try {
+                restarted.start()
+                assertEquals("Server stopped before the operation reported completion", store.get(id).statusMessage)
+            } finally {
+                restarted.stop()
+            }
+        } finally {
+            release.countDown()
+            server.stop()
+        }
+    }
+
+    @Test
+    fun `background diagnostics are redacted in storage and withheld from public rendering`() {
         val dataDir = createTempDirectory("web-private-diagnostic-")
         val configured = "configured-provider-credential"
         val bearer = "synthetic-bearer-value"
@@ -56,24 +800,48 @@ class UploadServerTest {
             val invalid = request(server, "GET", "/jobs/$configured")
             assertEquals(404, invalid.status)
             assertTrue(!invalid.body.decodeToString().contains(configured))
-            assertTrue(invalid.body.decodeToString().contains("[redacted]"))
+            assertTrue(invalid.body.decodeToString().contains("JOB_NOT_FOUND"))
             val uploaded = upload(server, "diagnostic.elf", elfFixture(), acceptJson = true)
             val id = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject["id"].toString().trim('"')
             assertEquals(303, request(server, "POST", "/jobs/$id/explore", followRedirects = false).status)
             val persisted = dataDir.resolve(id).resolve("job.json").readBytes().decodeToString()
             val api = request(server, "GET", "/api/jobs/$id").body.decodeToString()
             val page = request(server, "GET", "/jobs/$id").body.decodeToString()
-            listOf(persisted, api, page).forEach { text ->
+            listOf(persisted).forEach { text ->
                 listOf(configured, bearer, password).forEach { assertTrue(!text.contains(it)) }
                 assertTrue(text.contains("[redacted]"))
             }
-            assertTrue(!page.contains("<script>bad</script>"))
+            listOf(configured, bearer, password, "status_message", "binary_path").forEach {
+                assertTrue(!api.contains(it))
+            }
+            assertTrue(page.contains("Stored diagnostic details are withheld"))
+            listOf(configured, bearer, password, "Provider refused", "[redacted]", "bad</script>").forEach {
+                assertTrue(!page.contains(it))
+            }
             assertEquals(303, request(server, "POST", "/jobs/$id/reconstruct", followRedirects = false).status)
             val job = decompengine.jobs.JobStore(dataDir).get(id)
             assertEquals("failed", job.status)
             assertEquals("[oversized text omitted]", job.statusMessage)
         } finally {
             server.stop()
+        }
+    }
+
+    @Test
+    fun `dashboard keeps malformed jobs visible and detail returns a safe storage diagnostic`() {
+        withServer { server, root ->
+            val created = upload(server, "damaged.elf", elfFixture(), acceptJson = true)
+            val jobId = Json.parseToJsonElement(created.body.decodeToString()).jsonObject.getValue("id").toString().trim('"')
+            root.resolve(jobId).resolve("job.json").writeText("PRIVATE_CORRUPTION_SENTINEL {")
+            val dashboard = request(server, "GET", "/")
+            val detail = request(server, "GET", "/jobs/$jobId")
+            assertEquals(200, dashboard.status)
+            assertTrue(dashboard.body.decodeToString().contains(jobId))
+            assertTrue(dashboard.body.decodeToString().contains("CORRUPT_LEGACY_JOB"))
+            assertEquals(503, detail.status)
+            assertTrue(detail.body.decodeToString().contains("verified backup"))
+            kotlin.test.assertFalse(detail.body.decodeToString().contains("PRIVATE_CORRUPTION_SENTINEL"))
+            kotlin.test.assertFalse(detail.body.decodeToString().contains(root.toString()))
         }
     }
 
@@ -161,6 +929,28 @@ class UploadServerTest {
     }
 
     @Test
+    fun `progress refresh distinguishes hidden rows lost history and unreadable snapshots`() {
+        withServer { server, dataDir ->
+            val uploaded = upload(server, "progress-view.elf", elfFixture(), acceptJson = true)
+            val jobId = Json.parseToJsonElement(uploaded.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            val reports = dataDir.resolve(jobId).resolve("reports")
+            decompengine.jobs.AgentProgressJournal(reports, "reconstruction", maximumEvents = 40,
+                maximumQueuedEvents = 128).use { journal ->
+                repeat(50) { journal.phase(decompengine.agent.AgentWorkflowPhase.BUILD_VALIDATING, "module-$it") }
+            }
+            val page = request(server, "GET", "/jobs/$jobId").body.decodeToString()
+            assertTrue(page.contains("Some progress events were not retained."))
+            assertTrue(page.contains("Showing the latest 30 of 40 retained events."))
+            val rows = page.substringAfter("<ol id=\"agent-event-list\"").substringBefore("</ol>")
+            assertEquals(30, Regex("<li>").findAll(rows).count())
+            reports.resolve(decompengine.jobs.AgentProgressJournal.FILE_NAME).writeText("private broken journal")
+            val unavailable = request(server, "GET", "/jobs/$jobId").body.decodeToString()
+            assertTrue(unavailable.contains("Retained progress is unavailable. Missing data does not establish an empty history."))
+            assertTrue(!unavailable.contains("private broken journal"))
+        }
+    }
+
+    @Test
     fun `job event endpoint and refresh render the persisted bounded stream`() {
         withServer { server, dataDir ->
             val uploaded = upload(server, "progress.elf", elfFixture(), acceptJson = true)
@@ -209,6 +999,109 @@ class UploadServerTest {
     }
 
     @Test
+    fun `legacy progress withholds uncertified prose and unknown fields in JSON and HTML`() = withServer { server, root ->
+        val id = uploadedJobId(server)
+        val reports = root.resolve(id).resolve("reports").createDirectories()
+        val journal = reports.resolve(decompengine.jobs.AgentProgressJournal.FILE_NAME)
+        val roles = listOf("thought", "system", "assistant", "unknown")
+        val events = roles.mapIndexed { index, role ->
+            """{"sequence":$index,"kind":"message","role":"$role","text":"PRIVATE_MESSAGE_$role","textOmitted":false,"contentSha256":"${"a".repeat(64)}","futureField":{"nested":"PRIVATE_UNKNOWN"}}"""
+        } + """{"sequence":4,"kind":"plan","entryCount":1,"entries":[{"idSha256":"${"b".repeat(64)}","status":"pending","text":"PRIVATE_PLAN"}]}""" +
+            """{"sequence":5,"kind":"tool","text":"PRIVATE_TOOL","path":"/PRIVATE_HOST_ROOT/input","inputTokens":9223372036854775807,"taskId":{"nested":"PRIVATE_NESTED_LABEL"}}"""
+        journal.writeText("""{"schemaVersion":1,"displayOnly":true,"nextSequence":6,"queueDropped":0,"historyDropped":0,"truncated":false,"futureRoot":"PRIVATE_ROOT","events":[${events.joinToString(",") }]}""")
+        val original = journal.readBytes()
+        val response = request(server, "GET", "/api/jobs/$id/events")
+        assertEquals(200, response.status)
+        val projected = Json.parseToJsonElement(response.body.decodeToString()).jsonObject
+        assertEquals("1", projected.getValue("presentationOmittedFields").toString())
+        val rows = projected.getValue("events") as kotlinx.serialization.json.JsonArray
+        assertEquals(6, rows.size)
+        rows.take(4).forEachIndexed { index, item ->
+            val event = item.jsonObject
+            assertEquals(index.toString(), event.getValue("sequence").toString())
+            assertEquals("true", event.getValue("textOmitted").toString())
+            assertEquals("2", event.getValue("presentationOmittedFields").toString())
+            assertEquals("\"${"a".repeat(64)}\"", event.getValue("contentSha256").toString())
+        }
+        assertEquals("1", rows[4].jsonObject.getValue("entryCount").toString())
+        assertEquals("9223372036854775807", rows[5].jsonObject.getValue("inputTokens").toString())
+        val page = request(server, "GET", "/jobs/$id")
+        assertEquals(200, page.status)
+        assertTrue(page.body.decodeToString().contains("does not certify public visibility"))
+        assertTrue(page.body.decodeToString().contains("Some event fields withheld"))
+        listOf(response, page).forEach { assertTrue(!it.body.decodeToString().contains("PRIVATE_")) }
+        assertContentEquals(original, journal.readBytes())
+    }
+
+    @Test
+    fun `HTML progress renders only the supplied snapshot rather than reopening the journal`() = withServer { server, root ->
+        val id = uploadedJobId(server)
+        val reports = root.resolve(id).resolve("reports").createDirectories()
+        val snapshot = Json.parseToJsonElement("""{"schemaVersion":1,"displayOnly":true,"nextSequence":1,"queueDropped":0,"historyDropped":0,"truncated":false,"events":[{"sequence":0,"kind":"workflow_phase","phase":"supplied_snapshot_phase"}]}""").jsonObject
+        val path = reports.resolve(decompengine.jobs.AgentProgressJournal.FILE_NAME)
+        path.writeText(snapshot.toString().replace("supplied_snapshot_phase", "stored_snapshot_phase"))
+        val before = path.readBytes()
+        val job = decompengine.jobs.JobStore(root).get(id)
+        val supplied = renderJob(job, progressSnapshot = snapshot)
+        assertTrue(supplied.contains("supplied_snapshot_phase"))
+        assertTrue(!supplied.contains("stored_snapshot_phase"))
+        val absent = renderJob(job)
+        assertTrue(absent.contains("Retained progress is unavailable"))
+        assertTrue(!absent.contains("stored_snapshot_phase"))
+        assertContentEquals(before, path.readBytes())
+    }
+
+    @Test
+    fun `legacy progress distinguishes unavailable journals from a persisted empty journal`() = withServer { server, root ->
+        val id = uploadedJobId(server)
+        val record = root.resolve(id).resolve("job.json")
+        val original = record.readBytes()
+        val reports = root.resolve(id).resolve("reports")
+        val journal = reports.resolve(decompengine.jobs.AgentProgressJournal.FILE_NAME)
+        fun unavailable() {
+            val response = request(server, "GET", "/api/jobs/$id/events")
+            assertEquals(503, response.status)
+            assertEquals("application/json; charset=utf-8", response.contentType)
+            val body = Json.parseToJsonElement(response.body.decodeToString()).jsonObject
+            assertEquals("\"PROGRESS_UNAVAILABLE\"", body.getValue("error").jsonObject.getValue("code").toString())
+            listOf("PRIVATE_", root.toString(), "nextSequence", "events").forEach {
+                assertTrue(!response.body.decodeToString().contains(it), it)
+            }
+            val page = request(server, "GET", "/jobs/$id")
+            assertEquals(200, page.status)
+            assertTrue(page.body.decodeToString().contains("Retained progress is unavailable"))
+            assertTrue(!page.body.decodeToString().contains("PRIVATE_"))
+            assertContentEquals(original, record.readBytes())
+        }
+        unavailable()
+        assertTrue(!journal.exists())
+        reports.createDirectories()
+        for (contents in listOf("PRIVATE_DAMAGED_JOURNAL {", "x".repeat(2 * 1024 * 1024 + 1))) {
+            journal.writeText(contents)
+            val bytes = journal.readBytes()
+            unavailable()
+            assertContentEquals(bytes, journal.readBytes())
+        }
+        val empty = """{"schemaVersion":1,"displayOnly":true,"nextSequence":0,"queueDropped":0,"historyDropped":0,"truncated":false,"events":[]}"""
+        journal.writeText(empty)
+        val response = request(server, "GET", "/api/jobs/$id/events")
+        assertEquals(200, response.status)
+        assertEquals(Json.parseToJsonElement(empty), Json.parseToJsonElement(response.body.decodeToString()))
+        val emptyPage = request(server, "GET", "/jobs/$id")
+        assertTrue(emptyPage.body.decodeToString().contains("The retained journal currently contains no events."))
+        assertTrue(!emptyPage.body.decodeToString().contains("Retained progress is unavailable"))
+        assertEquals(empty, journal.readBytes().decodeToString())
+        assertContentEquals(original, record.readBytes())
+    }
+
+    @Test
+    fun `legacy event reads reject unknown attempt identities and extra query parameters`() = withServer { server, _ ->
+        val id = uploadedJobId(server)
+        assertEquals(404, request(server, "GET", "/api/jobs/$id/events?runId=run_missing").status)
+        assertEquals(400, request(server, "GET", "/api/jobs/$id/events?runId=run_missing&other=value").status)
+    }
+
+    @Test
     fun `upload page has ELF form`() {
         withServer { server, _ ->
             val response = request(server, "GET", "/")
@@ -218,6 +1111,7 @@ class UploadServerTest {
             assertTrue(response.body.decodeToString().contains("name=\"binary\""))
             assertTrue(response.body.decodeToString().contains("Binary reconstruction workbench"))
             assertTrue(response.body.decodeToString().contains("/assets/app.css"))
+            assertTrue(!response.body.decodeToString().contains("Retained recovery files"))
         }
     }
 
@@ -671,7 +1565,7 @@ class UploadServerTest {
             archivePath.writeBytes(corrupted)
             val invalid = request(server, "GET", download)
             assertEquals(400, invalid.status)
-            assertTrue(invalid.body.decodeToString().contains("source archive ZIP is invalid"))
+            assertTrue(invalid.body.decodeToString().contains("The request was invalid or the requested source or artifact is unavailable."))
             archivePath.writeBytes(updated.body)
 
             val copy = reports.resolve("copy.zip")
@@ -689,6 +1583,49 @@ class UploadServerTest {
     private fun uploadedJobId(server: UploadServer): String =
         Json.parseToJsonElement(upload(server, "boundary.elf", elfFixture(), acceptJson = true).body.decodeToString())
             .jsonObject.getValue("id").toString().trim('"')
+
+    private fun UploadServer.internalStore(): decompengine.jobs.JobStore =
+        UploadServer::class.java.getDeclaredField("store").apply { isAccessible = true }
+            .get(this) as decompengine.jobs.JobStore
+
+    private fun UploadServer.lifecycleMonitor(): Any =
+        UploadServer::class.java.getDeclaredField("lifecycleLock").apply { isAccessible = true }.get(this)
+
+    private fun UploadServer.jobServiceStopping(): Boolean =
+        (UploadServer::class.java.getDeclaredField("jobs").apply { isAccessible = true }.get(this) as WebJobService)
+            .let { service -> WebJobService::class.java.getDeclaredField("stopping").apply { isAccessible = true }.getBoolean(service) }
+
+    private fun awaitBlocked(thread: Thread?): Boolean {
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+        while (System.nanoTime() < deadline) {
+            if (thread?.state == Thread.State.BLOCKED) return true
+            Thread.sleep(10)
+        }
+        return false
+    }
+
+    private fun awaitJobStoreFrame(methodName: String): Boolean {
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+        while (System.nanoTime() < deadline) {
+            if (Thread.getAllStackTraces().values.any { frames ->
+                    frames.any { it.className == "decompengine.jobs.JobStore" && it.methodName == methodName }
+                }) return true
+            Thread.sleep(10)
+        }
+        return false
+    }
+
+    private fun awaitBlockedIn(className: String, methodName: String): Boolean {
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+        while (System.nanoTime() < deadline) {
+            if (Thread.getAllStackTraces().any { (thread, frames) ->
+                    thread.state == Thread.State.BLOCKED &&
+                        frames.any { it.className == className && it.methodName == methodName }
+                }) return true
+            Thread.sleep(10)
+        }
+        return false
+    }
 
     private fun writeManifest(
         tree: Path,
@@ -739,7 +1676,7 @@ class UploadServerTest {
     ) {
         val dataDir = createTempDirectory("web-jobs-")
         val directExecutor = Executor { command -> command.run() }
-        val server = UploadServer("127.0.0.1", 0, dataDir, analyzer, reconstructor, directExecutor, profiles)
+        val server = UploadServer("127.0.0.1", 0, dataDir, analyzer, reconstructor, directExecutor, sourceProfiles = profiles)
         server.start()
         try {
             block(server, dataDir)
@@ -777,20 +1714,22 @@ class UploadServerTest {
         headers: Map<String, String> = emptyMap(),
         followRedirects: Boolean = true,
     ): Response {
-        val connection = URI("http://127.0.0.1:${server.serverPort}$path").toURL().openConnection() as HttpURLConnection
-        connection.requestMethod = method
-        connection.instanceFollowRedirects = followRedirects
-        headers.forEach { (key, value) -> connection.setRequestProperty(key, value) }
-        if (body.isNotEmpty()) {
-            connection.doOutput = true
-            connection.outputStream.use { it.write(body) }
-        }
-        val status = connection.responseCode
-        val stream = if (status >= 400) connection.errorStream else connection.inputStream
-        return Response(status, stream?.readBytes() ?: ByteArray(0), connection.getHeaderField("Retry-After"), connection.getHeaderField("ETag"))
+        val origin = "http://127.0.0.1:${server.serverPort}"
+        val builder = java.net.http.HttpRequest.newBuilder(URI(origin + path)).method(method,
+            if (body.isEmpty()) java.net.http.HttpRequest.BodyPublishers.noBody() else java.net.http.HttpRequest.BodyPublishers.ofByteArray(body))
+        val effectiveHeaders = sessions.getOrPut(server) { legacySessionHeaders(server) } +
+            (if (method == "POST") mapOf("Origin" to origin, "Content-Type" to "application/json") else emptyMap()) + headers
+        effectiveHeaders.forEach { (key, value) -> builder.header(key, value) }
+        val response = (if (followRedirects) followingClient else directClient).send(builder.build(), java.net.http.HttpResponse.BodyHandlers.ofByteArray())
+        assertNoWebCors(response)
+        fun header(name: String): String? = response.headers().firstValue(name).orElse(null)
+        return Response(response.statusCode(), response.body(), header("Retry-After"), header("ETag"), header("Content-Type"),
+            header("Cache-Control"), header("X-Request-ID"), header("Allow"), header("Content-Length"),
+            header("Content-Disposition"), header("Content-Security-Policy"), header("X-Content-Type-Options"),
+            header("Referrer-Policy"))
     }
 
-    private data class Response(val status: Int, val body: ByteArray, val retryAfter: String? = null, val etag: String? = null)
+    private data class Response(val status: Int, val body: ByteArray, val retryAfter: String? = null, val etag: String? = null, val contentType: String? = null, val cacheControl: String? = null, val requestId: String? = null, val allow: String? = null, val contentLength: String? = null, val contentDisposition: String? = null, val contentSecurityPolicy: String? = null, val contentTypeOptions: String? = null, val referrerPolicy: String? = null)
 }
 
 private fun ByteArray.startsWith(prefix: ByteArray): Boolean =

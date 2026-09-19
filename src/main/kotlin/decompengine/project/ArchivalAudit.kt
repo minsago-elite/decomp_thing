@@ -35,8 +35,19 @@ data class ArchivalAudit(
     val observedPortableCorpusSha256: List<String> = emptyList(),
     val recoveryAssessment: JsonObject? = null,
     val moduleCompilationEvidence: Map<String, JsonObject> = emptyMap(),
+    internal val behaviorReportSha256: Map<String, String> = emptyMap(),
 ) {
     val provenanceComplete: Boolean get() = missingModelProvenance.isEmpty() && missingSourceProvenance.isEmpty()
+    val equivalence: EquivalenceAssessment
+        get() = assessEquivalence(
+            requiredCorpusSha256 = requiredCorpusSha256,
+            observedPortableCorpusSha256 = observedPortableCorpusSha256,
+            behaviorMatched = behaviorMatched,
+            behaviorEvidenceProblems = behaviorEvidenceProblems,
+            unresolvedBehaviorReportIds = unresolvedBehaviorReportIds,
+        )
+
+    // Retained for archive compatibility. A passing selected corpus is not a universal claim.
     val universalEquivalenceClaim: Boolean = false
 
     fun toJson(): String = """
@@ -51,6 +62,8 @@ data class ArchivalAudit(
           "requiredCorpusSha256": [${requiredCorpusSha256.joinToString(",") { JsonPrimitive(it).toString() }}],
           "observedPortableCorpusSha256": [${observedPortableCorpusSha256.joinToString(",") { JsonPrimitive(it).toString() }}],
           "behaviorMatched": ${behaviorMatched ?: "null"},
+          "equivalenceStatus": ${JsonPrimitive(equivalence.status.wireValue)},
+          "equivalenceBlockers": [${equivalence.blockers.joinToString(",") { JsonPrimitive(it).toString() }}],
           "sandboxReported": $sandboxReported,
           "networkIsolationObserved": [${networkIsolation.sorted().joinToString(",")}],
           "moduleSourceRevisions": [${moduleRevisionSha256.toSortedMap().entries.joinToString(",") { (id, hash) -> "{\"moduleId\":${JsonPrimitive(id)},\"sourceRevisionSha256\":${JsonPrimitive(hash)}}" }}],
@@ -352,6 +365,7 @@ object ArchivalProjectAuditor {
             requiredCorpusSha256 = requiredCorpora.sorted(),
             observedPortableCorpusSha256 = observedCorpora.toList(),
             recoveryAssessment = model.unassessedRecoveryAssessment(sha256(modelText.toByteArray(Charsets.UTF_8))),
+            behaviorReportSha256 = behaviorHashes.toMap(),
         )
         require(readStableRegularFile(projectDir, "source_tree_manifest.json", maximumFileBytes).sha256 == manifestSnapshot.sha256) {
             "audit manifest changed during verification"
