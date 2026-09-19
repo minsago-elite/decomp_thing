@@ -6,6 +6,7 @@ import decompengine.validation.BehaviorProjectContext
 import decompengine.validation.boolean
 import decompengine.validation.string
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.intOrNull
@@ -35,6 +36,7 @@ data class ArchivalAudit(
     val observedPortableCorpusSha256: List<String> = emptyList(),
     val recoveryAssessment: JsonObject? = null,
     val moduleCompilationEvidence: Map<String, JsonObject> = emptyMap(),
+    val moduleBehaviorEvidence: List<JsonObject> = emptyList(),
 ) {
     val provenanceComplete: Boolean get() = missingModelProvenance.isEmpty() && missingSourceProvenance.isEmpty()
     val universalEquivalenceClaim: Boolean = false
@@ -54,7 +56,7 @@ data class ArchivalAudit(
           "sandboxReported": $sandboxReported,
           "networkIsolationObserved": [${networkIsolation.sorted().joinToString(",")}],
           "moduleSourceRevisions": [${moduleRevisionSha256.toSortedMap().entries.joinToString(",") { (id, hash) -> "{\"moduleId\":${JsonPrimitive(id)},\"sourceRevisionSha256\":${JsonPrimitive(hash)}}" }}],
-          "moduleBehaviorEvidence": [],
+          "moduleBehaviorEvidence": [${moduleBehaviorEvidence.joinToString(",") { it.toString() }}],
           "moduleCompilationEvidenceProblems": {${moduleCompilationEvidenceProblems.toSortedMap().entries.joinToString(",") { (id, problem) -> "${JsonPrimitive(id)}:${JsonPrimitive(problem)}" }}},
           "moduleCompilationEvidence": ${JsonObject(moduleCompilationEvidence.toSortedMap())},
           "moduleExecutionCoverage": "not-observed",
@@ -325,6 +327,17 @@ object ArchivalProjectAuditor {
             problems["missing-corpus:$missing"] = "No current revision-bound report covers the required corpus"
         }
         val unresolvedBehavior = problems.keys + verifiedBehavior.filterValues { !it }.keys
+        val moduleBehaviorEvidence = moduleRevisions.toSortedMap().map { (moduleId, sourceRevisionSha256) ->
+            JsonObject(linkedMapOf(
+                "moduleId" to JsonPrimitive(moduleId),
+                "sourceRevisionSha256" to JsonPrimitive(sourceRevisionSha256),
+                "status" to JsonPrimitive("unknown"),
+                "reason" to JsonPrimitive("no revision-bound behavioral measurements attached"),
+                "coverage" to JsonNull,
+                "outputAgreement" to JsonNull,
+                "unobservedBehavior" to JsonPrimitive("unknown"),
+            ))
+        }
         val audit = ArchivalAudit(
             entityCount = entities.size,
             missingModelProvenance = missingModel,
@@ -352,6 +365,7 @@ object ArchivalProjectAuditor {
             requiredCorpusSha256 = requiredCorpora.sorted(),
             observedPortableCorpusSha256 = observedCorpora.toList(),
             recoveryAssessment = model.unassessedRecoveryAssessment(sha256(modelText.toByteArray(Charsets.UTF_8))),
+            moduleBehaviorEvidence = moduleBehaviorEvidence,
         )
         require(readStableRegularFile(projectDir, "source_tree_manifest.json", maximumFileBytes).sha256 == manifestSnapshot.sha256) {
             "audit manifest changed during verification"

@@ -23,6 +23,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
@@ -432,7 +433,11 @@ class BehaviorEvidenceTest {
         assertEquals(listOf("reports/probe.behavior.json"), audit.projectBehaviorReportIds)
         assertEquals(emptyList(), audit.unresolvedBehaviorReportIds)
         assertTrue(audit.networkIsolation.isEmpty())
-        assertTrue(audit.toJson().contains("\"moduleBehaviorEvidence\": []"))
+        val moduleBehavior = Json.parseToJsonElement(audit.toJson()).jsonObject.getValue("moduleBehaviorEvidence").jsonArray
+        assertTrue(moduleBehavior.isNotEmpty())
+        assertTrue(moduleBehavior.all { it.jsonObject.getValue("status").jsonPrimitive.content == "unknown" })
+        assertTrue(moduleBehavior.all { it.jsonObject.getValue("coverage") == JsonNull })
+        assertTrue(moduleBehavior.all { it.jsonObject.getValue("outputAgreement") == JsonNull })
         assertTrue(record.getValue("executionPolicy").jsonObject.string("assurance").contains("not-production-authority"))
     }
 
