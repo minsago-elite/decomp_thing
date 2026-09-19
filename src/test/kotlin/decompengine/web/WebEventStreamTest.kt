@@ -193,8 +193,8 @@ class WebEventStreamTest {
     @Test fun `a non-reading socket parks only its stream writer and lease releases capacity`() {
         val writer = AtomicReference<Thread>()
         val reads = AtomicInteger()
-        val labels = listOf("taskId", "workflowRunId", "revisionId", "phase", "status", "stopReason",
-            "failureKind", "role", "decision", "change", "wallClock", "reportedCostAmount", "reportedCostCurrency")
+        val digests = listOf("taskIdSha256", "workflowRunIdSha256", "revisionIdSha256", "requestSha256", "sessionIdSha256",
+            "toolCallIdSha256", "permissionIdSha256", "messageIdSha256", "acceptedRevisionSha256", "contentSha256", "afterSha256")
         val source = {
             writer.set(Thread.currentThread())
             // At most 64 expanding source windows, then a fixed tail: total offered data is bounded.
@@ -203,7 +203,11 @@ class WebEventStreamTest {
             val last = (step + 2) * 50 - 1
             val base = Json.parseToJsonElement(journal((first..last).toList()).decodeToString()).jsonObject
             JsonObject(base + ("events" to JsonArray(base.getValue("events").jsonArray.map { event ->
-                JsonObject(event.jsonObject + labels.associateWith { JsonPrimitive("x".repeat(533)) })
+                JsonObject(event.jsonObject + digests.associateWith { JsonPrimitive("a".repeat(64)) } + mapOf(
+                    "turnId" to JsonPrimitive("t".repeat(128)), "phase" to JsonPrimitive("accepted"),
+                    "status" to JsonPrimitive("completed"), "wallClock" to JsonPrimitive("PT1H"),
+                    "reportedCostAmount" to JsonPrimitive("1.25"), "reportedCostCurrency" to JsonPrimitive("USD"),
+                ))
             }))).toString().toByteArray().also { assertTrue(it.size <= 2 * 1024 * 1024) }
         }
         Fixture(lifetimeMs = 6000, source = source).use { f ->

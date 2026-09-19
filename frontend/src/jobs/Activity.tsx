@@ -26,7 +26,7 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
   const [rows, setRows] = useState<WebEvent[]>([]);
   const [error, setError] = useState('');
   const [group, setGroup] = useState<'all' | ActivityGroup>('all');
-  const [task, setTask] = useState('');
+  const [taskDigest, setTaskDigest] = useState('');
   const [reset, setReset] = useState(0);
   const position = useRef<{ initialized: boolean; cursor: string | null; rows: WebEvent[]; last: WebEvent | null }>({ initialized: false, cursor: null, rows: [], last: null });
   useEffect(() => {
@@ -136,7 +136,7 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
     return () => { controller.abort(); clearTimeout(timer); };
   }, [client, stream, jobId, runId, following, reset, availability.online, availability.visible]);
 
-  const visible = rows.filter(event => matchesActivity(event, group, task));
+  const visible = rows.filter(event => matchesActivity(event, group, taskDigest));
   return <section aria-labelledby="activity-title">
     <h2 id="activity-title">Retained activity</h2>
     <p>Journal observations do not establish validation or acceptance. Message text is withheld because the journal does not certify public visibility.</p>
@@ -160,10 +160,10 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
           <option value="usage">Usage and agent outcomes</option><option value="tools">Tools and changes</option><option value="other">Other observations</option>
         </select>
       </label>
-      <label>Task ID or digest contains
-        <input value={task} maxLength={533} onInput={event => setTask(event.currentTarget.value)} />
+      <label>Task digest contains
+        <input value={taskDigest} maxLength={64} onInput={event => setTaskDigest(event.currentTarget.value)} />
       </label>
-      <button type="button" onClick={() => { setGroup('all'); setTask(''); }}>Clear activity filters</button>
+      <button type="button" onClick={() => { setGroup('all'); setTaskDigest(''); }}>Clear activity filters</button>
       <p>Filters apply only to the current page and do not change the delivery position.</p>
     </fieldset>
     <p role="status">{!following ? 'Activity paused.' : !availability.online ? 'Browser reports offline. Activity reads are suspended.' : !availability.visible ? 'Background tab: activity reads are suspended.' : retry > 0 ? `Reconnecting activity: retry ${retry} of 4. Displayed observations may be stale.` : 'Following retained activity.'} {periodic && following && 'Using periodic refresh because streaming was unavailable.'} {visible.length} matching observations shown; {rows.length} of at most {capacity} observations retained on this page.</p>

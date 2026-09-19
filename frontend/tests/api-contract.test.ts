@@ -127,8 +127,8 @@ describe('generated v1 contract pipeline', () => {
 });
 
 describe('workflow observation authority', () => {
-  it('preserves display correlation and exact counts without promoting reported acceptance', () => {
-    const event = decodeContract(fixture('event-workflow-observation'));
+  it('preserves digest correlation and exact omission counts without promoting reported acceptance', () => {
+    const event = decodeContract(fixture('event-observation-public-metadata'));
     if (event.kind !== 'event' || event.type !== 'workflow.observation') throw Error('Expected observation');
     expect(event.sequence).toBe('9007199254740993');
     expect(event.agentSequence).toBe('9007199254740992');
@@ -136,9 +136,10 @@ describe('workflow observation authority', () => {
     expect(event.payload.fields.phase).toBe('accepted');
     expect(event.payload.authority).toBe('observations');
     expect(event.payload.writerId).not.toBe(event.runId);
-    expect(event.payload.fields.workflowRunId).not.toBe(event.runId);
+    expect(event.payload.fields.workflowRunIdSha256).toBe('a'.repeat(64));
+    expect(event.payload.fields).not.toHaveProperty('workflowRunId');
     expect(event.payload).not.toHaveProperty('acceptance');
-    expect(event.payload.omittedFieldCount).toBe('0');
+    expect(event.payload.omittedFieldCount).toBe('2');
   });
 });
 

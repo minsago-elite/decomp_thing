@@ -5,20 +5,19 @@
   "jobId": "1234567890abcdef1234567890abcdef",
   "runId": "run_example_1",
   "cursor": "cursor_example_2",
-  "sequence": "9007199254740993",
+  "sequence": "1",
   "occurredAt": "2026-09-05T00:00:00Z",
   "originRequestId": null,
   "agentInvocationId": null,
-  "agentSequence": "9007199254740992",
+  "agentSequence": "1",
   "payload": {
     "authority": "observations",
     "writerId": "writer_fixture_1",
     "workflow": "repair",
-    "observationKind": "plan",
+    "observationKind": "agent_finished",
     "fields": {
-      "entryCount": "9",
-      "entriesTruncated": true
+      "wallClock": "-PT1S"
     },
-    "omittedFieldCount": "3"
+    "omittedFieldCount": "0"
   }
 }

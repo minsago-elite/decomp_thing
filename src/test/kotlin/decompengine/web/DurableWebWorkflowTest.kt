@@ -590,7 +590,8 @@ class DurableWebWorkflowTest {
         override val limits = LIMITS
         override fun execute(context: DurableWebWorkflowContext) = action(context)
     }
-    private fun version(service: WebJobService, jobId: String) = (service.inspectDurableJob(jobId) as WorkflowJobInspection.Available).snapshot.version
+    private fun version(service: WebJobService, jobId: String) =
+        webJob(service.presentation(jobId)).getValue("version").jsonPrimitive.content
     private fun withRoot(action: (Path) -> Unit) {
         val root = createTempDirectory("durable-web-")
         try { action(root) } finally { root.toFile().deleteRecursively() }

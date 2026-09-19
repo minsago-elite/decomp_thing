@@ -95,20 +95,22 @@ class WebProgressPagesTest {
         assertTrue(sequences(page(pages, journal(listOf(Long.MAX_VALUE - 2)), "cursor=${huge.throughCursor}")).isEmpty())
     }
 
-    @Test fun `large observations split below the response byte ceiling without losing reachability`() {
+    @Test fun `maximal public observation metadata remains below the response byte ceiling`() {
         val pages = WebProgressPages()
         val source = Json.parseToJsonElement(journal((0L..199L).toList()).decodeToString()).jsonObject
-        // Exercise the byte ceiling with retained metadata; private prose is now withheld.
-        val labels = listOf("taskId", "workflowRunId", "revisionId", "phase", "status", "stopReason",
-            "failureKind", "role", "decision", "change", "wallClock", "reportedCostAmount", "reportedCostCurrency")
+        val digests = listOf("taskIdSha256", "workflowRunIdSha256", "revisionIdSha256", "requestSha256", "sessionIdSha256",
+            "toolCallIdSha256", "permissionIdSha256", "messageIdSha256", "acceptedRevisionSha256", "contentSha256", "afterSha256")
         val bytes = JsonObject(source + ("events" to JsonArray(source.getValue("events").jsonArray.map { item ->
-            JsonObject(item.jsonObject + labels.associateWith { JsonPrimitive("x".repeat(533)) })
+            JsonObject(item.jsonObject + digests.associateWith { JsonPrimitive("a".repeat(64)) } + mapOf(
+                "turnId" to JsonPrimitive("t".repeat(128)), "phase" to JsonPrimitive("accepted"),
+                "status" to JsonPrimitive("completed"), "wallClock" to JsonPrimitive("PT1H"),
+                "reportedCostAmount" to JsonPrimitive("1.25"), "reportedCostCurrency" to JsonPrimitive("USD"),
+            ))
         }))).toString().toByteArray()
         val first = page(pages, bytes, "limit=200")
         assertTrue(first.toString().toByteArray().size < 1_048_576)
-        assertTrue(first.getValue("hasMore").jsonPrimitive.boolean)
-        val second = page(pages, bytes, "limit=200&cursor=${cursor(first)}")
-        assertEquals((0..199).map(Int::toString), sequences(first) + sequences(second))
+        assertFalse(first.getValue("hasMore").jsonPrimitive.boolean)
+        assertEquals((0..199).map(Int::toString), sequences(first))
     }
 
     @Test fun `malformed journals and unsupported query parameters fail explicitly`() {

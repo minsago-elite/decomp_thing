@@ -17,7 +17,6 @@
     "observationKind": "workflow_run_state",
     "fields": {
       "phase": "accepted",
-      "workflowRunId": "workflow_fixture_1",
       "workflowRunIdSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "taskIdSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "turnId": "turn_fixture_1",
@@ -27,6 +26,6 @@
       "inputTokens": "18446744073709551615",
       "textOmitted": true
     },
-    "omittedFieldCount": "1"
+    "omittedFieldCount": "2"
   }
 }

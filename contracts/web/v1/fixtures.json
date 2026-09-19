@@ -236,7 +236,8 @@
     },
     {
       "file": "fixtures/event-workflow-observation.json",
-      "valid": true
+      "valid": false,
+      "reason": "A public observation cannot carry retained raw workflow identity or prose."
     },
     {
       "file": "fixtures/invalid-observation-authority.json",
@@ -260,15 +261,22 @@
     },
     {
       "file": "fixtures/event-observation-plan.json",
-      "valid": true
+      "valid": false,
+      "reason": "A public observation cannot carry retained plan-entry prose."
     },
     {
       "file": "fixtures/invalid-observation-plan-limit.json",
       "valid": false
     },
     {
+      "file": "fixtures/invalid-observation-negative-duration.json",
+      "valid": false,
+      "reason": "Public elapsed durations cannot be negative."
+    },
+    {
       "file": "fixtures/event-observation-truncated-preview.json",
-      "valid": true
+      "valid": false,
+      "reason": "A public observation cannot carry retained task identity or plan-entry prose, even when truncated."
     },
     {
       "file": "fixtures/snapshot-progress-omissions.json",

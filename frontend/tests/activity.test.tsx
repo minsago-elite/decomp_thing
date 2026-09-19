@@ -32,17 +32,17 @@ it('starts on request, preserves exact omissions and pause position, and dedupli
   expect(screen.getAllByRole('listitem')).toHaveLength(1);
 });
 
-it('withholds message content for every visibility role including thought and system', async () => {
+it('renders omission-only message metadata for every supported visibility role', async () => {
   const page = structuredClone(events);
-  page.data.items = ['thought', 'system', 'assistant', 'unknown'].map((role, index) => ({
+  page.data.items = (['thought', 'system', 'assistant', 'user'] as const).map((role, index) => ({
     ...page.data.items[0]!, sequence: String(index), cursor: `cursor_${index}`,
-    payload: { ...page.data.items[0]!.payload, observationKind: 'message', fields: { role, text: `secret_${role}` } },
+    payload: { ...page.data.items[0]!.payload, observationKind: 'message', fields: { role, textOmitted: true, contentSha256: String(index).repeat(64) } },
   }));
   page.data.nextCursor = 'cursor_3';
   transport.get.mockResolvedValueOnce(snapshot).mockResolvedValueOnce(page);
   mount(); fireEvent.click(screen.getByRole('button', { name: 'Follow activity' }));
   await waitFor(() => expect(screen.getAllByRole('listitem')).toHaveLength(4));
-  expect(document.body.textContent).not.toContain('secret_');
+  expect(screen.getAllByText(/Producer omitted text/)).toHaveLength(4);
 });
 
 it.each(['EVENT_GAP', 'PROGRESS_GAP'])('pauses on %s and explicitly resets history with a fresh snapshot', async serverCode => {
@@ -108,12 +108,12 @@ it('rejects a discontinuous continuation without changing the displayed position
   expect(screen.queryByText('Sequence 9007199254740995')).toBeNull();
 });
 
-it('filters categories and task references locally without discarding rows or moving the cursor', async () => {
+it('filters categories and task digests locally without discarding rows or moving the cursor', async () => {
   const page = structuredClone(events);
   const original = page.data.items[0]!;
-  page.data.items = ['workflow_phase', 'message', 'plan', 'tool', 'future_kind'].map((kind, index) => ({
+  page.data.items = (['workflow_phase', 'message', 'plan', 'tool', 'unknown'] as const).map((kind, index) => ({
     ...original, sequence: String(index), cursor: `cursor_${index}`,
-    payload: { ...original.payload, observationKind: kind, fields: { taskId: index % 2 ? 'task_odd' : 'task_even', taskIdSha256: 'a'.repeat(64), text: 'withheld_text' } },
+    payload: { ...original.payload, observationKind: kind, fields: { taskIdSha256: index % 2 ? 'a'.repeat(64) : 'b'.repeat(64), textOmitted: true } },
   }));
   page.data.nextCursor = 'cursor_4';
   transport.get.mockResolvedValueOnce(snapshot).mockResolvedValueOnce(page);
@@ -127,23 +127,22 @@ it('filters categories and task references locally without discarding rows or mo
     expect(screen.getByText(`Sequence ${index}`)).toBeTruthy();
   }
   expect(document.activeElement).toBe(select);
-  const task = screen.getByRole('textbox', { name: 'Task ID or digest contains' });
-  fireEvent.input(task, { target: { value: 'task_odd' } });
+  const task = screen.getByRole('textbox', { name: 'Task digest contains' });
+  fireEvent.input(task, { target: { value: 'a'.repeat(64) } });
   expect(screen.queryAllByRole('listitem')).toHaveLength(0);
   expect(screen.getByText('No matching observations on this page. Other retained pages have not been searched.')).toBeTruthy();
-  fireEvent.input(task, { target: { value: 'a'.repeat(64) } });
+  fireEvent.input(task, { target: { value: 'b'.repeat(64) } });
   expect(screen.getAllByRole('listitem')).toHaveLength(1);
   expect(transport.get).toHaveBeenCalledTimes(2);
   fireEvent.click(screen.getByRole('button', { name: 'Clear activity filters' }));
   expect(screen.getAllByRole('listitem')).toHaveLength(5);
-  expect(document.body.textContent).not.toContain('withheld_text');
   transport.get.mockResolvedValueOnce({ data: { items: [], nextCursor: 'cursor_4', hasMore: false } });
   fireEvent.click(screen.getByRole('button', { name: 'Resume activity' }));
   await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(3));
   expect(transport.get.mock.calls[2]![1]).toContain('after=cursor_4');
 });
 
-it('links the exact attempt and exposes available correlation without inventing evidence links', async () => {
+it('links the exact attempt and exposes digest-only correlation without inventing evidence links', async () => {
   const page = structuredClone(events);
   page.data.items[0]!.payload.fields.sessionIdSha256 = 'e'.repeat(64);
   page.data.items[0]!.payload.fields.toolCallIdSha256 = 'f'.repeat(64);
@@ -154,17 +153,19 @@ it('links the exact attempt and exposes available correlation without inventing 
   fireEvent.click(screen.getByText('Correlation details for sequence 9007199254740993'));
   expect(screen.getByText('e'.repeat(64))).toBeTruthy();
   expect(screen.getByText('f'.repeat(64))).toBeTruthy();
+  expect(screen.getByText('b'.repeat(64))).toBeTruthy();
+  expect(screen.getByText('d'.repeat(64))).toBeTruthy();
   expect(screen.getByText('turn_fixture_1')).toBeTruthy();
-  expect(screen.getByText(/Task: Not recorded. Revision: Not recorded/)).toBeTruthy();
+  expect(screen.getByText('Writer: writer_fixture_1.')).toBeTruthy();
   expect(screen.getByText(/Task, session and revision evidence pages are not available/)).toBeTruthy();
   expect(screen.getAllByRole('link')).toHaveLength(1);
 });
 
-it('does not infer an empty plan when entry metadata is absent', async () => {
+it('does not infer an empty plan when count metadata is absent', async () => {
   const page = structuredClone(events);
   page.data.items[0]!.payload.observationKind = 'plan';
   page.data.items[0]!.payload.fields = {};
   transport.get.mockResolvedValueOnce(snapshot).mockResolvedValueOnce(page);
   mount(); fireEvent.click(screen.getByRole('button', { name: 'Follow activity' }));
-  expect(await screen.findByText('Plan entries reported: Not recorded. Retained entry metadata: Not recorded.')).toBeTruthy();
+  expect(await screen.findByText('Plan entries reported: Not recorded. Entry details are omitted from public activity.')).toBeTruthy();
 });

@@ -1,9 +1,7 @@
 package decompengine.web
 
 import com.sun.net.httpserver.HttpExchange
-import decompengine.jobs.Job
 import decompengine.jobs.JobStoreException
-import decompengine.jobs.toJson
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -206,8 +204,8 @@ internal class WebApiController(
             access.sendDenied(exchange, WebAccessDenied(422, "INVALID_ELF", "Upload a supported ELF binary with a complete header."))
         } catch (failure: WebJobServiceException) {
             val status = if (failure.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else if (failure.code == "ARTIFACT_CHANGED") 409 else 503
-            access.sendDenied(exchange, WebAccessDenied(status, if (status == 404) "NOT_FOUND" else failure.code,
-                failure.message ?: "Job storage is unavailable."))
+            access.sendDenied(exchange, WebAccessDenied(status, if (status == 404) "NOT_FOUND" else publicWebDiagnosticCode(failure.code),
+                publicWebDiagnosticMessage(failure.code)))
         } catch (_: JobStoreException) {
             access.sendDenied(exchange, WebAccessDenied(404, "NOT_FOUND", "The requested job is unavailable."))
         } catch (_: Exception) {
@@ -273,48 +271,6 @@ internal class WebApiController(
         if (values.size != 1 || values.single().length > 256) throw WebAccessDenied(400, "INVALID_HEADER", "An upload header is duplicated or too long.")
         return values.single()
     }
-}
-
-internal fun webJob(presentation: WebJobPresentation): JsonObject {
-    val fields = webJob(presentation.job).toMutableMap()
-    val snapshot = presentation.snapshot ?: return JsonObject(fields)
-    fields["version"] = JsonPrimitive(snapshot.version)
-    val latest = snapshot.latestRun
-    if (latest != null) {
-        fields["status"] = JsonPrimitive(if (latest.state == decompengine.jobs.WorkflowRunState.CANCELLING) "running" else latest.state.wireName)
-        fields["latestRunId"] = JsonPrimitive(latest.runId)
-        fields["acceptedRevisionId"] = snapshot.acceptedRevision?.revisionId?.let(::JsonPrimitive) ?: JsonNull
-    } else if (presentation.legacyInterrupted) {
-        fields["status"] = JsonPrimitive("interrupted")
-    }
-    return JsonObject(fields)
-}
-
-internal fun webJob(job: Job): JsonObject = buildJsonObject {
-    require(job.sizeBytes >= 0) { "Invalid stored job size" }
-    put("jobId", job.id)
-    put("displayFilename", job.filename.take(255))
-    put("status", when (job.status) {
-        "uploaded", "queued", "failed" -> job.status
-        "analyzing" -> "running"
-        "complete" -> "completed"
-        else -> "unknown"
-    })
-    put("createdAt", job.createdAt)
-    put("updatedAt", job.updatedAt)
-    put("sizeBytes", job.sizeBytes.toString())
-    put("binary", buildJsonObject {
-        put("format", job.metadata.format)
-        put("endianness", job.metadata.endianness)
-        put("objectType", job.metadata.objectType)
-        put("machine", job.metadata.machine)
-        put("osAbi", job.metadata.osAbi)
-        put("entryPoint", "0x${job.metadata.entryPoint.toString(16)}")
-    })
-    put("version", MessageDigest.getInstance("SHA-256").digest(job.toJson().toString().toByteArray())
-        .joinToString("") { "%02x".format(it) })
-    put("latestRunId", JsonNull)
-    put("acceptedRevisionId", JsonNull)
 }
 
 private fun applicationBuildId(): String {

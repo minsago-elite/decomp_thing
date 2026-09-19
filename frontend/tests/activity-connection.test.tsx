@@ -32,8 +32,8 @@ async function advance(ms: number) { await act(async () => { await vi.advanceTim
 it('suspends hidden/offline reads and reconciles a fresh snapshot without replacing the cursor or selection', async () => {
   transport.get.mockResolvedValueOnce(snapshot).mockResolvedValueOnce(events);
   await start();
-  const task = screen.getByRole('textbox', { name: 'Task ID or digest contains' });
-  fireEvent.input(task, { target: { value: 'missing_task' } }); task.focus();
+  const taskDigest = screen.getByRole('textbox', { name: 'Task digest contains' });
+  fireEvent.input(taskDigest, { target: { value: 'missing_digest' } }); taskDigest.focus();
   await act(async () => { visible = false; document.dispatchEvent(new Event('visibilitychange')); await Promise.resolve(); });
   expect(transport.get.mock.calls[1]![2].signal.aborted).toBe(true);
   await advance(10000); expect(transport.get).toHaveBeenCalledTimes(2);
@@ -45,7 +45,7 @@ it('suspends hidden/offline reads and reconciles a fresh snapshot without replac
   await act(async () => { online = true; window.dispatchEvent(new Event('online')); await Promise.resolve(); });
   expect(transport.get.mock.calls[2]![0]).toBe('snapshot');
   expect(transport.get.mock.calls[3]![1]).toContain(`after=${events.data.nextCursor}`);
-  expect(task).toHaveProperty('value', 'missing_task'); expect(document.activeElement).toBe(task);
+  expect(taskDigest).toHaveProperty('value', 'missing_digest'); expect(document.activeElement).toBe(taskDigest);
   fireEvent.click(screen.getByRole('button', { name: 'Clear activity filters' }));
   expect(screen.getAllByRole('listitem')).toHaveLength(1);
 });

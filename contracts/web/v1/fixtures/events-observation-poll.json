@@ -23,7 +23,6 @@
           "observationKind": "workflow_run_state",
           "fields": {
             "phase": "accepted",
-            "workflowRunId": "workflow_fixture_1",
             "workflowRunIdSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "taskIdSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             "turnId": "turn_fixture_1",
@@ -31,9 +30,9 @@
             "revisionIdSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
             "acceptedRevisionSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
             "inputTokens": "18446744073709551615",
-            "text": "Synthetic display observation; acceptance requires independent evidence."
+            "textOmitted": true
           },
-          "omittedFieldCount": "0"
+          "omittedFieldCount": "2"
         }
       }
     ],

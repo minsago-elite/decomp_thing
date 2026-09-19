@@ -4,7 +4,7 @@ import type { ProgressObservation } from '../src/api/generated';
 import { ObservedUsage, durationSeconds } from '../src/jobs/ObservedUsage';
 
 const observation: ProgressObservation = { authority: 'observations', writerId: 'writer_usage', workflow: 'reconstruct', observationKind: 'agent_finished', fields: {}, omittedFieldCount: '0' };
-function show(fields: ProgressObservation['fields'], kind = 'agent_finished') {
+function show(fields: ProgressObservation['fields'], kind: ProgressObservation['observationKind'] = 'agent_finished') {
   return render(<ObservedUsage observation={{ ...observation, observationKind: kind, fields }} occurredAt="2026-09-05T00:00:00Z" sequence="9007199254740993" />);
 }
 it('preserves exact large reported counters with units, source and unknown measurement time', () => {
@@ -32,11 +32,14 @@ it('shows peer context occupancy as counts without deriving percentages or budge
   expect(screen.queryByRole('meter')).toBeNull();
   expect(document.body.textContent).not.toContain('%');
 });
-it.each([
-  ['limit_exhausted', undefined], ['cancelled', undefined], [undefined, 'timeout'], [undefined, 'resource_exhausted'], [undefined, 'process_crash'], [undefined, 'transport'], [undefined, 'future_failure'],
-])('retains distinct stop and failure classifications (%s, %s)', (stopReason, failureKind) => {
+const classifications = [
+  ['limit_exhausted', undefined], ['cancelled', undefined], [undefined, 'timeout'], [undefined, 'resource_exhausted'], [undefined, 'process_crash'], [undefined, 'transport'],
+] as const satisfies ReadonlyArray<readonly [ProgressObservation['fields']['stopReason'], ProgressObservation['fields']['failureKind']]>;
+it.each(classifications)('retains distinct stop and failure classifications (%s, %s)', (stopReason, failureKind) => {
   show({ ...(stopReason === undefined ? {} : { stopReason }), ...(failureKind === undefined ? {} : { failureKind }) });
-  expect(screen.getByText((stopReason ?? failureKind))).toBeTruthy();
+  const classification = stopReason ?? failureKind;
+  if (classification === undefined) throw new Error('Classification case must supply a stop reason or failure kind');
+  expect(screen.getByText(classification)).toBeTruthy();
   expect(screen.getByText(/attempt's durable outcome is shown separately/)).toBeTruthy();
 });
 it('does not reinterpret usage-shaped fields on unrelated observation kinds', () => {

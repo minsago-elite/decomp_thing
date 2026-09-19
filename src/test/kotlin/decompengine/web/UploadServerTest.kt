@@ -893,7 +893,7 @@ class UploadServerTest {
             assertEquals(200, response.status)
             assertTrue(response.body.decodeToString().contains("build_validating"))
             assertTrue(response.body.decodeToString().contains("\"displayOnly\":true"))
-            assertTrue(response.body.decodeToString().contains("\"workflowRunId\":\"run_00000001\""))
+            assertTrue(!response.body.decodeToString().contains("\"workflowRunId\":\"run_00000001\""))
             val page = request(server, "GET", "/jobs/$jobId").body.decodeToString()
             assertTrue(page.contains("Agent progress"))
             assertTrue(page.contains("build_validating"))
@@ -904,8 +904,8 @@ class UploadServerTest {
             assertTrue(rows.contains("elapsed: PT0.125S"))
             assertTrue(rows.contains("context used: 9223372036854775807"))
             assertTrue(rows.contains("reported cost: 0.125"))
-            assertTrue(rows.contains("run_00000001"))
-            assertTrue(rows.contains("revision-one"))
+            assertTrue(!rows.contains("run_00000001"))
+            assertTrue(!rows.contains("revision-one"))
             assertTrue(rows.contains("provisional") && rows.contains("exhausted"))
             assertTrue(!rows.contains("accepted source"))
         }
@@ -933,7 +933,7 @@ class UploadServerTest {
             val event = item.jsonObject
             assertEquals(index.toString(), event.getValue("sequence").toString())
             assertEquals("true", event.getValue("textOmitted").toString())
-            assertEquals("2", event.getValue("presentationOmittedFields").toString())
+            assertEquals(if (index == 3) "3" else "2", event.getValue("presentationOmittedFields").toString())
             assertEquals("\"${"a".repeat(64)}\"", event.getValue("contentSha256").toString())
         }
         assertEquals("1", rows[4].jsonObject.getValue("entryCount").toString())
@@ -950,17 +950,17 @@ class UploadServerTest {
     fun `HTML progress renders only the supplied snapshot rather than reopening the journal`() = withServer { server, root ->
         val id = uploadedJobId(server)
         val reports = root.resolve(id).resolve("reports").createDirectories()
-        val snapshot = Json.parseToJsonElement("""{"schemaVersion":1,"displayOnly":true,"nextSequence":1,"queueDropped":0,"historyDropped":0,"truncated":false,"events":[{"sequence":0,"kind":"workflow_phase","phase":"supplied_snapshot_phase"}]}""").jsonObject
+        val snapshot = Json.parseToJsonElement("""{"schemaVersion":1,"displayOnly":true,"nextSequence":1,"queueDropped":0,"historyDropped":0,"truncated":false,"events":[{"sequence":0,"kind":"workflow_phase","phase":"planning"}]}""").jsonObject
         val path = reports.resolve(decompengine.jobs.AgentProgressJournal.FILE_NAME)
-        path.writeText(snapshot.toString().replace("supplied_snapshot_phase", "stored_snapshot_phase"))
+        path.writeText(snapshot.toString().replace("planning", "behavior_validating"))
         val before = path.readBytes()
         val job = decompengine.jobs.JobStore(root).get(id)
         val supplied = renderJob(job, progressSnapshot = snapshot)
-        assertTrue(supplied.contains("supplied_snapshot_phase"))
-        assertTrue(!supplied.contains("stored_snapshot_phase"))
+        assertTrue(supplied.contains("planning"))
+        assertTrue(!supplied.contains("behavior_validating"))
         val absent = renderJob(job)
         assertTrue(absent.contains("Retained progress is unavailable"))
-        assertTrue(!absent.contains("stored_snapshot_phase"))
+        assertTrue(!absent.contains("behavior_validating"))
         assertContentEquals(before, path.readBytes())
     }
 
