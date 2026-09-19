@@ -382,6 +382,20 @@ class SourceTreeTest {
         assertTrue(report.getValue("modules").jsonArray.all {
             it.jsonObject.getValue("unresolvedImplementationIds").jsonArray.isEmpty()
         })
+        assertEquals("unavailable", report.getValue("productionRun").jsonObject.getValue("status").jsonPrimitive.content)
+        assertEquals(JsonNull, report.getValue("productionRun").jsonObject.getValue("identity"))
+        val receipts = report.getValue("implementationReceiptInventory").jsonArray
+        assertEquals(report.getValue("modules").jsonArray.size, receipts.size)
+        receipts.forEach { receipt ->
+            val entry = receipt.jsonObject
+            assertEquals("accepted", entry.getValue("status").jsonPrimitive.content)
+            val evidence = entry.getValue("evidence").jsonObject
+            assertEquals("scripted-valid", evidence.getValue("generator").jsonPrimitive.content)
+            assertEquals("custom", evidence.getValue("reconstructorIdentity").jsonPrimitive.content)
+            assertEquals(JsonNull, evidence.getValue("executionEvidencePath"))
+            assertEquals(JsonNull, evidence.getValue("executionEvidenceSha256"))
+            assertEquals("passed", evidence.getValue("compilation").jsonObject.getValue("outcome").jsonPrimitive.content)
+        }
         report.getValue("modules").jsonArray.forEach { entry ->
             val revision = entry.jsonObject.getValue("revisionEvidence").jsonObject
             val checkpointPath = revision.getValue("checkpointPath").jsonPrimitive.content
@@ -424,7 +438,7 @@ class SourceTreeTest {
         val manifest = SourceTreeGenerator.generate(recovered, project)
         assertTrue(manifest.unresolvedImplementationIds.isNotEmpty())
         val report = Json.parseToJsonElement(project.resolve("reports/confidence.json").readText()).jsonObject
-        assertEquals("2", report.getValue("schemaVersion").jsonPrimitive.content)
+        assertEquals("3", report.getValue("schemaVersion").jsonPrimitive.content)
         assertEquals("1.0000", report.getValue("projectScore").jsonPrimitive.content)
         val interpretation = report.getValue("scoreInterpretation").jsonObject
         assertEquals("structural-recovery", interpretation.getValue("kind").jsonPrimitive.content)
@@ -1063,6 +1077,17 @@ class SourceTreeTest {
         val checkpoint = project.resolve("reports/modules/parse.json").readText()
         assertTrue(checkpoint.contains("generic-return-placeholder"))
         assertTrue(checkpoint.contains("\"status\":\"unresolved\""))
+        val receipt = Json.parseToJsonElement(project.resolve("reports/confidence.json").readText())
+            .jsonObject.getValue("implementationReceiptInventory").jsonArray.single().jsonObject
+        assertEquals("unresolved", receipt.getValue("status").jsonPrimitive.content)
+        assertEquals(listOf("fn_0000000000401000"), receipt.getValue("entityIds").jsonArray.map { it.jsonPrimitive.content })
+        val evidence = receipt.getValue("evidence").jsonObject
+        assertTrue(evidence.getValue("promptSha256").jsonPrimitive.content.matches(Regex("[0-9a-f]{64}")))
+        assertTrue(evidence.getValue("promptCharacters").jsonPrimitive.content.toInt() > 0)
+        assertEquals(JsonNull, evidence.getValue("executionEvidencePath"))
+        assertEquals(JsonNull, evidence.getValue("executionEvidenceSha256"))
+        assertEquals("unavailable", Json.parseToJsonElement(project.resolve("reports/confidence.json").readText())
+            .jsonObject.getValue("productionRun").jsonObject.getValue("status").jsonPrimitive.content)
     }
 
     @Test
