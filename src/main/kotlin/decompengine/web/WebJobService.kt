@@ -413,6 +413,10 @@ class WebJobService(
     }
 
     /** Multipart bytes are copied outside the service monitor; publication retains root ownership through completion. */
+    fun uploadMultipart(input: java.io.InputStream, contentType: String): Job =
+        uploadMultipartReceipt(input, contentType).job
+
+    /** Receipt-aware operation used by authenticated HTTP capabilities and idempotent uploads. */
     internal fun uploadMultipartReceipt(input: java.io.InputStream, contentType: String, idempotencyKey: String? = null, progress: WebUploadProgress.Transfer? = null): decompengine.jobs.PublishedJobUpload {
         val worker = Thread.currentThread()
         val finished = synchronized(this) {
