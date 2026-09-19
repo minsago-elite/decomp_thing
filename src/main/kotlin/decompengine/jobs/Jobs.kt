@@ -290,7 +290,7 @@ class JobStore internal constructor(
                 selected.use { entry ->
                     require(!entry.identity.isSymbolicLink) { "archive source inventory contains a linked entry" }
                     if (relative in layout.excludedOutputRoots) {
-                        require(entry.identity.isDirectory) { "archive build root is not a directory" }
+                        // Omitted transport roots may be files (for example Ninja state files) or directories.
                     } else if (entry.identity.isDirectory) {
                         LinuxFilesystemSyscalls.openDirectoryAt(directory.fd, name).use { child ->
                             require(child.identity == entry.identity) { "archive source directory changed" }
