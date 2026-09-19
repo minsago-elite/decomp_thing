@@ -614,7 +614,7 @@ private val SOURCE_ONLY_ORDER = Comparator<JsonObject> { left, right ->
 }
 private val COMPILATION_UNIT_ID = Regex("cu-[0-9a-f]{32}")
 private val SHARD_ID = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
-private const val MAXIMUM_SHARD_ID_BYTES = 2 * 255 + 1
+private const val MAXIMUM_SHARD_ID_BYTES = 2 * 255 + 11
 
 private fun isValidShardId(shardId: String): Boolean {
     if (shardId.toByteArray(Charsets.UTF_8).size > MAXIMUM_SHARD_ID_BYTES) return false
