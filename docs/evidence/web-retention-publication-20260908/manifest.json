@@ -1,0 +1,41 @@
+{
+  "status": "passed",
+  "sourceCommit": "d0219a0fe531db7f3d25f60b5d7411257520f1ea",
+  "verification": {
+    "tests": 264,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "command": "./gradlew -PfrontendNodeHome=/home/june/decomp_thing/build/tools/decomp-node-24.20.0/node-v24.20.0-linux-x64 test --tests 'decompengine.web.*' --tests 'decompengine.jobs.AgentProgressJournal*Test' --tests 'decompengine.jobs.WorkflowAttemptStoreTest'",
+  "automaticExpiryEnabled": false,
+  "workflowExecutionStarted": false,
+  "injectedInterruptionPoints": [
+    "AFTER_TEMP_SYNC",
+    "AFTER_PENDING_SYNC",
+    "AFTER_EXCHANGE",
+    "AFTER_PUBLISH_SYNC",
+    "AFTER_UNLINK"
+  ],
+  "injectedIoFailurePoints": [
+    "AFTER_TEMP_SYNC",
+    "AFTER_EXCHANGE"
+  ],
+  "separateJvmWriterLockProbe": true,
+  "snapshotTransactionExcludesExpiry": true,
+  "retainedXml": {
+    "file": "TEST-decompengine.jobs.AgentProgressJournalMaintenanceTest.xml",
+    "tests": 8,
+    "sha256": "5a3fd0e78fa56adcda75a29cc71c88dd9a77048513cf350e7948668c153bf0f9"
+  },
+  "notRepeated": [
+    "frontend tests",
+    "package build",
+    "packaged browser qualification"
+  ],
+  "limitations": [
+    "Automatic scheduling, persistent pin/read-lease selection and service reporting remain unfinished.",
+    "Fault injection is not actual process termination, power loss or disk-full filesystem qualification.",
+    "Parent PR 421 has required-contract Node pin and Kotlin runtime-provisioning CI failures; local results do not qualify those lanes."
+  ]
+}
