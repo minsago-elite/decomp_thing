@@ -176,9 +176,10 @@ object ArchivalProjectAuditor {
         requiredCorpusSha256: Set<String> = emptySet(),
         hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
         publication: ArchivePublicationEvidence? = null,
+        limits: ArchivalBundleLimits = ArchivalBundleLimits(),
     ): ArchivalAudit {
         hostSafetyLimits.requireAllows(profile.budgets)
-        val effectiveLimits = ArchivalBundleLimits().constrainedTo(profile)
+        val effectiveLimits = limits.constrainedTo(profile)
         val publicationEvidence = publication ?: ArchivePublicationEvidence.forProfile(
             profile, hostSafetyLimits, effectiveLimits, "audited",
         )

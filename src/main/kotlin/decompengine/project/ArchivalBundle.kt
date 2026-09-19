@@ -105,7 +105,9 @@ object ArchivalPackager {
         val publication = ArchivePublicationEvidence.forProfile(
             profile, hostSafetyLimits, effectiveLimits, "prepared",
         )
-        val audit = ArchivalProjectAuditor.audit(projectDir, profile, requiredCorpora, hostSafetyLimits, publication)
+        val audit = ArchivalProjectAuditor.audit(
+            projectDir, profile, requiredCorpora, hostSafetyLimits, publication, effectiveLimits,
+        )
         require(audit.provenanceComplete) { "archive project has incomplete model or source provenance" }
         require(requiredCorpora.isEmpty() || audit.behaviorMatched == true) {
             "archive project does not satisfy the required behavior corpora"
