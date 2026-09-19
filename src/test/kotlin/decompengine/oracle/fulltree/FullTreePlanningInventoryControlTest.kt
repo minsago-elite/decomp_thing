@@ -188,6 +188,38 @@ class FullTreePlanningInventoryControlTest {
                 }
             }
         }
+    }
+
+    @Test
+    fun `clang installapi dispatch binds exact planning owners without an emitted denominator`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+
+        val modules = registry.requireOwnerModulesForShard("clang-lib-installapi")
+        assertEquals(1, modules.size)
+        assertEquals(
+            listOf("source/clang/lib/InstallAPI/HeaderFile.cpp"),
+            modules.map { it.sourcePath },
+        )
+        assertEquals(listOf("cu-d65fa95a55a39225eb8705c9be72d115"), modules.map { it.unitId })
+        assertTrue(modules.all { it.moduleId == it.unitId && it.shardId == "clang-lib-installapi" })
+        assertEquals(7, registry.sourceOnlyUnits.count { it.shardId == "clang-lib-installapi" })
+        assertEquals(emptyList(), registry.requireOwnerModulesForShard("clang-lib-cir"))
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("clang-lib-installapi-missing")
+        }
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("a-".repeat(5_000) + "a")
+        }
+    }
 
     @Test
     fun `checked clang sema shard binds all 86 source modules to exact owners`() =
