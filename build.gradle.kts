@@ -1447,6 +1447,8 @@ val verifyReconstructionNeutrality = tasks.register<Exec>("verifyReconstructionN
 }
 
 tasks.named("check") {
+    // verifyReconstructionNeutrality stays a standalone draft gate (#84): the repository scan
+    // still fails on remaining ownership migrations, so it must not block `check` or ci.sh yet.
     dependsOn(verifyAcpGateHelperDistribution)
     dependsOn(verifyLlvmBehaviorHelperDistribution)
     dependsOn(verifyKotlinBootClasspathDistribution)
