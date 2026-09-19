@@ -395,6 +395,30 @@ class WebApiControllerTest {
     }
 
     @Test
+    fun `v1 job reads reject private persisted ELF categories with a fixed diagnostic and unchanged bytes`() = withServer { server, store, jobId ->
+        val cookie = establish(server)
+        val headers = mapOf("Cookie" to cookie)
+        val record = store.get(jobId).binaryPath.parent.resolve("job.json")
+        val original = Json.parseToJsonElement(Files.readString(record)).jsonObject
+        val originalMetadata = original.getValue("metadata").jsonObject
+        val canary = "ENV_SECRET=/PRIVATE_HOST_ROOT IllegalStateException"
+        for (field in listOf("format", "endianness", "os_abi", "object_type", "machine")) {
+            val metadata = JsonObject(originalMetadata + (field to JsonPrimitive(canary)))
+            val injected = JsonObject(original + ("metadata" to metadata)).toString().toByteArray()
+            Files.write(record, injected)
+            val detail = request(server, "/workbench/api/v1/jobs/$jobId", headers = headers)
+            val list = request(server, "/workbench/api/v1/jobs", headers = headers)
+            assertError(detail, 503, "JOB_RECORD_UNAVAILABLE")
+            assertError(list, 503, "JOB_RECORD_UNAVAILABLE")
+            for (response in listOf(detail, list)) {
+                assertFalse(response.body().contains(canary))
+                assertFalse(response.body().contains(record.toString()))
+            }
+            kotlin.test.assertContentEquals(injected, Files.readAllBytes(record))
+        }
+    }
+
+    @Test
     fun `private job collection enforces filters envelopes and read-only admission`() = withServer { server, _, jobId ->
         val path = "/workbench/api/v1/jobs"
         assertError(request(server, path), 401, "SESSION_REQUIRED")

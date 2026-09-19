@@ -332,6 +332,35 @@ class UploadServerTest {
     }
 
     @Test
+    fun `legacy JSON and HTML reject private persisted ELF categories without rewriting the record`() = withServer { server, root ->
+        val id = uploadedJobId(server)
+        val record = root.resolve(id).resolve("job.json")
+        val original = kotlinx.serialization.json.Json.parseToJsonElement(record.readBytes().decodeToString()).jsonObject
+        val originalMetadata = original.getValue("metadata").jsonObject
+        val canary = "ENV_SECRET=/PRIVATE_HOST_ROOT IllegalStateException"
+        for (field in listOf("format", "endianness", "os_abi", "object_type", "machine")) {
+            val metadata = kotlinx.serialization.json.JsonObject(originalMetadata + (field to kotlinx.serialization.json.JsonPrimitive(canary)))
+            val injected = kotlinx.serialization.json.JsonObject(original + ("metadata" to metadata)).toString().toByteArray()
+            record.writeBytes(injected)
+            val json = request(server, "GET", "/api/jobs/$id")
+            val html = request(server, "GET", "/jobs/$id")
+            val dashboard = request(server, "GET", "/")
+            assertEquals(503, json.status, field)
+            assertEquals("\"JOB_RECORD_UNAVAILABLE\"", kotlinx.serialization.json.Json.parseToJsonElement(json.body.decodeToString())
+                .jsonObject.getValue("error").jsonObject.getValue("code").toString())
+            assertEquals(503, html.status, field)
+            assertEquals(200, dashboard.status, field)
+            for (response in listOf(json, html, dashboard)) {
+                assertTrue(!response.body.decodeToString().contains(canary), field)
+                assertTrue(!response.body.decodeToString().contains(root.toString()), field)
+            }
+            assertTrue(html.body.decodeToString().contains("JOB_RECORD_UNAVAILABLE"))
+            assertTrue(dashboard.body.decodeToString().contains("JOB_RECORD_UNAVAILABLE"))
+            assertContentEquals(injected, record.readBytes())
+        }
+    }
+
+    @Test
     fun `missing job workflow admissions return typed safe not found responses`() {
         var executions = 0
         withServer(JobAnalyzer { _, _ -> executions++ }, JobReconstructor { _, _ -> executions++ }) { server, root ->

@@ -1,5 +1,6 @@
 package decompengine.web
 
+import decompengine.binary.ElfMetadata
 import decompengine.jobs.Job
 import decompengine.jobs.WorkflowStoreDiagnostic
 import kotlinx.serialization.json.JsonNull
@@ -87,6 +88,7 @@ private data class WebPublicJobProjection(
     companion object {
         fun from(job: Job): WebPublicJobProjection {
             val metadata = job.metadata
+            requirePublicElfCategories(metadata)
             return WebPublicJobProjection(
                 id = job.id,
                 filename = job.filename,
@@ -128,7 +130,29 @@ internal fun webJob(presentation: WebJobPresentation): JsonObject {
     } else if (presentation.legacyInterrupted) {
         fields["status"] = JsonPrimitive("interrupted")
     }
-    return publicVersionedJob(JsonObject(fields))
+    val versioned = publicVersionedJob(JsonObject(fields))
+    if (snapshot.attempts.isEmpty()) return versioned
+    require(snapshot.version.matches(Regex("version_[a-f0-9]{32}"))) { "Invalid stored workflow version" }
+    return JsonObject(versioned + ("version" to JsonPrimitive(snapshot.version)))
+}
+
+/** Only exact ElfMetadataReader output categories may cross the public job boundary. */
+internal fun requirePublicElfCategories(metadata: ElfMetadata) {
+    fun unknown(value: String, maximum: Int, known: Set<Int>): Boolean {
+        val number = value.removePrefix("unknown(").removeSuffix(")")
+        if (value != "unknown($number)" || !number.matches(Regex("0|[1-9][0-9]*"))) return false
+        val parsed = number.toIntOrNull() ?: return false
+        return parsed in 0..maximum && parsed !in known
+    }
+    require(metadata.format in setOf("ELF32", "ELF64") &&
+        metadata.endianness in setOf("little", "big") &&
+        (metadata.osAbi in setOf("System V", "Linux") || unknown(metadata.osAbi, 255, setOf(0, 3))) &&
+        (metadata.objectType in setOf("relocatable", "executable", "shared", "core") ||
+            unknown(metadata.objectType, 65535, setOf(1, 2, 3, 4))) &&
+        (metadata.machine in setOf("x86", "ARM", "x86-64", "AArch64", "RISC-V") ||
+            unknown(metadata.machine, 65535, setOf(3, 40, 62, 183, 243)))) {
+        "Invalid stored ELF metadata"
+    }
 }
 
 private fun publicVersionedJob(fields: JsonObject): JsonObject {

@@ -357,7 +357,9 @@ public projection: `id`, `filename`, `status`, `created_at`, `updated_at`, `size
 are removed for privacy: stored diagnostic text can contain host paths, environment values or
 raw exceptions, including records predating redaction. No placeholder diagnostic is invented.
 ELF metadata keeps its existing field names and numeric types, including signed/numeric
-`entry_point`; this legacy shape is not a v1 DTO. Execution POSTs still redirect.
+`entry_point`; its five categorical strings must exactly match `ElfMetadataReader` output,
+otherwise the historical job is unavailable with a fixed diagnostic. This legacy shape is not
+a v1 DTO. Execution POSTs still redirect.
 The persistence serializer and stored `job.json` format are unchanged.
 The HTTP regression in `UploadServerTest` checks both responses, an old private diagnostic,
 exact public keys, retained field values and byte-for-byte preservation of stored records.

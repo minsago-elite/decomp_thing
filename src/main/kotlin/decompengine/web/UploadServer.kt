@@ -621,10 +621,11 @@ class UploadServer(
             }
         } catch (exception: WebJobServiceException) {
             val status = if (exception.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else 503
-            val code = if (status == 404 || exception.code in setOf("PROGRESS_UNAVAILABLE", "UPLOAD_CAPACITY")) exception.code else "JOB_STORAGE_UNAVAILABLE"
+            val code = if (status == 404 || exception.code in setOf("PROGRESS_UNAVAILABLE", "UPLOAD_CAPACITY", "JOB_RECORD_UNAVAILABLE")) exception.code else "JOB_STORAGE_UNAVAILABLE"
             legacyError(exchange, status, code, when (code) {
                 "PROGRESS_UNAVAILABLE" -> "The retained progress journal is unavailable. Missing data does not establish an empty history."
                 "UPLOAD_CAPACITY" -> "Upload capacity is temporarily unavailable. Retry shortly."
+                "JOB_RECORD_UNAVAILABLE" -> publicWebDiagnosticMessage(code)
                 "JOB_STORAGE_UNAVAILABLE" -> "Job storage is unavailable. Inspect storage before retrying."
                 else -> "The requested job or attempt is unavailable."
             }) {

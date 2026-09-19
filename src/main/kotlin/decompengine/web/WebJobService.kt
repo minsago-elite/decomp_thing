@@ -216,6 +216,10 @@ class WebJobService(
                 publicWebDiagnostic(jobId, inspected.diagnostic.code))
             val snapshot = (inspected as? WorkflowJobInspection.Available)?.snapshot
             val raw = store.get(jobId)
+            requirePublicElfCategories(raw.metadata)
+            if (snapshot != null && snapshot.attempts.isNotEmpty()) {
+                require(snapshot.version.matches(Regex("version_[a-f0-9]{32}"))) { "Invalid stored workflow version" }
+            }
             val latest = snapshot?.latestRun
             val legacyInterrupted = latest == null && snapshot?.legacy?.recoveredInterrupted == true &&
                 raw.status in setOf("queued", "analyzing") && active[jobId] !is LegacyTask

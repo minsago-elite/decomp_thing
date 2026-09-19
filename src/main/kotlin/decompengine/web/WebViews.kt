@@ -208,6 +208,7 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
     progressSnapshot: JsonObject? = null, explorationReport: JsonObject? = null,
     repairHistory: JsonObject? = null, reconstructionProgress: JsonObject? = null,
     artifacts: List<WebArtifactSummary>? = null): String {
+    requirePublicElfCategories(job.metadata)
     val reports = reportsFor(job, reportContext)
     val active = job.status in setOf("queued", "analyzing")
     val metadata = job.metadata.toJson().entries.joinToString("") { (key, value) ->
@@ -445,6 +446,7 @@ private fun renderJobList(jobs: List<Job>): String {
         </div>
     """.trimIndent()
     return "<div class=\"job-list\">" + jobs.joinToString("") { job ->
+        requirePublicElfCategories(job.metadata)
         """
         <a class="job-row" href="/jobs/${job.id}">
           <span class="file-glyph">ELF</span>
