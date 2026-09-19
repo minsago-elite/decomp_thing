@@ -179,6 +179,8 @@ class UploadServer(
     private val listenBacklog: Int = 64,
     private val authenticationInspector: (decompengine.agent.AgentCancellation) -> decompengine.acp.AcpAuthenticationInventory = defaultWebAuthenticationInspector(),
     private val requestShutdownTimeoutMs: Long = 1000,
+    // Test-owned clocks exercise expiry through the real HTTP/browser path; production uses the system clock.
+    webAccessClock: WebAccessClock? = null,
 ) {
     init {
         require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" }
@@ -228,7 +230,7 @@ class UploadServer(
     private val sourceEvidence = WebSourceEvidence(store, sourceProfiles, jobs::readArtifact)
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
     private val access = LocalWebAccess(LocalWebAccessConfiguration(webOrigin(host, server.address.port), basePath,
-        setOfNotNull(devFrontendOrigin)))
+        setOfNotNull(devFrontendOrigin)), webAccessClock ?: SystemWebAccessClock)
     private val legacySessions = WebSessionController(access)
     internal val streamResources = WebStreamResources()
     private val api = spaAssets?.let { WebApiController(access, it, jobs, streamResources) }
