@@ -138,8 +138,9 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
                 .values
                 .distinct()
                 .sorted(),
-            behaviorRootEntityIds = evidence.functions.filter {
-                it.name in profile.adapterConfiguration.getValue("entry-symbol-candidates")
+            behaviorRootEntityIds = evidence.functions.filter { function ->
+                val candidates = profile.adapterConfiguration.getValue("entry-symbol-candidates")
+                function.name in candidates || safeCName(function.name) in candidates
             }.map { it.id }.sorted(),
         )
     }
