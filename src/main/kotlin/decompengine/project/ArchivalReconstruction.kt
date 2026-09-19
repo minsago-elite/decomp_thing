@@ -199,21 +199,26 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         val peakResidentBytes = AtomicLong(0)
         val memoryExceeded = AtomicBoolean(false)
         val diagnosticsExceeded = AtomicBoolean(false)
+        val stopMemoryMonitor = AtomicBoolean(false)
         val tasks = ArrayList<CompletableFuture<*>>()
         var primaryFailure: Throwable? = null
         try {
             deadline.checkpoint("after worker launch")
             process.outputStream.close()
             val memoryMonitor = CompletableFuture.runAsync {
-                while (process.isAlive) {
-                    val observed = residentBytes(process)
-                    peakResidentBytes.accumulateAndGet(observed, ::maxOf)
-                    if (observed > limits.maximumResidentBytes) {
-                        memoryExceeded.set(true)
-                        terminateProcessTree(process, limits.terminationGrace)
-                        break
+                try {
+                    while (!stopMemoryMonitor.get() && process.isAlive) {
+                        val observed = residentBytes(process)
+                        peakResidentBytes.accumulateAndGet(observed, ::maxOf)
+                        if (observed > limits.maximumResidentBytes) {
+                            memoryExceeded.set(true)
+                            terminateProcessTree(process, limits.terminationGrace)
+                            break
+                        }
+                        Thread.sleep(25)
                     }
-                    Thread.sleep(25)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
                 }
             }.also(tasks::add)
             fun capture(stream: java.io.InputStream): CompletableFuture<ByteArray> = CompletableFuture.supplyAsync {
@@ -228,6 +233,8 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             val stderr = capture(process.errorStream)
             val completed = process.waitFor(deadline.remainingNanosOrZero(), TimeUnit.NANOSECONDS)
             if (!completed) terminateProcessTree(process, limits.terminationGrace)
+            stopMemoryMonitor.set(true)
+            memoryMonitor.get(1, TimeUnit.SECONDS)
             // Timeout diagnostics retain their separate five-second drain allowance.
             val drainDeadline = if (completed) deadline else AnalysisDeadline.start(
                 TimeUnit.SECONDS.toNanos(5), "Ghidra diagnostic drain",
