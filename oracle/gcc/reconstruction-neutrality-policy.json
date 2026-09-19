@@ -252,7 +252,6 @@
       "count": 1,
       "reason": "Application-owned registration of the built-in Ninja descriptor."
     },
-
     {
       "path": "src/main/kotlin/decompengine/project/ReconstructionAdapter.kt",
       "rule": "generic-adapter-reference",
