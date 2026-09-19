@@ -28,7 +28,9 @@ Verification on the #498 worktree:
   publication and stops progress polling with admission` (expected one `get`
   call, observed two). It also reproduces in the independent #499 worktree,
   which does not alter upload code; that test passes in isolation. This failure
-  is not counted as a pass or attributed to the #498 change.
+  is not counted as a pass or attributed to the #498 change. The upload-timer
+  issue is already tracked under #526; PR #1068 contains a fix on a stack
+  branch but is not yet in `master`. No duplicate issue or PR was created.
 - `git diff --check`: passed. Independent read-only review found no blocking
   regression in the focused dashboard change.
 
