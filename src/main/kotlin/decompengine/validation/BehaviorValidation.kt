@@ -118,6 +118,26 @@ data class SandboxOutputLimits(
 object BwrapCapability {
     private val cache = ConcurrentHashMap<String, Boolean>()
 
+    fun completionEvidenceSupported(bwrapPath: Path): Boolean =
+        cache.computeIfAbsent("completion|${bwrapPath.pathString}") {
+            try {
+                val output = ProcessBuilder(bwrapPath.pathString, "--version")
+                    .redirectErrorStream(true)
+                    .start()
+                    .let { process ->
+                        val text = process.inputStream.bufferedReader().use { it.readText() }
+                        if (process.waitFor() != 0) return@computeIfAbsent false
+                        text
+                    }
+                val match = Regex("\\bbubblewrap\\s+(\\d+)\\.(\\d+)").find(output) ?: return@computeIfAbsent false
+                val major = match.groupValues[1].toIntOrNull() ?: return@computeIfAbsent false
+                val minor = match.groupValues[2].toIntOrNull() ?: return@computeIfAbsent false
+                major > 0 || major == 0 && minor >= 11
+            } catch (_: Exception) {
+                false
+            }
+        }
+
     fun networkIsolationSupported(bwrapPath: Path, timeoutPath: Path): Boolean =
         cache.computeIfAbsent("${bwrapPath.pathString}|${timeoutPath.pathString}") {
             probe(bwrapPath, timeoutPath)
@@ -181,6 +201,9 @@ class SandboxRunner(
         if (!bwrapPath.exists()) {
             throw SandboxUnavailableException("bubblewrap not found at ${bwrapPath.pathString}; sandboxed execution is mandatory")
         }
+        if (!BwrapCapability.completionEvidenceSupported(bwrapPath)) {
+            throw SandboxUnavailableException("bubblewrap at ${bwrapPath.pathString} must be version 0.11 or newer for terminal completion evidence")
+        }
         return JsonObject(mapOf(
             "assurance" to JsonPrimitive("local-path-stability-checks-not-production-authority"),
             "environment" to JsonObject(mapOf("PATH" to JsonPrimitive("/usr/bin"))),
@@ -212,6 +235,9 @@ class SandboxRunner(
     private fun runWithCompletion(executable: Path, input: ProcessInput, files: Map<String, Path>, channel: Path, deadline: Long): ProcessOutput {
         if (!bwrapPath.exists()) {
             throw SandboxUnavailableException("bubblewrap not found at ${bwrapPath.pathString}; sandboxed execution is mandatory")
+        }
+        if (!BwrapCapability.completionEvidenceSupported(bwrapPath)) {
+            throw SandboxUnavailableException("bubblewrap at ${bwrapPath.pathString} must be version 0.11 or newer for terminal completion evidence")
         }
         val command = behaviorSandboxCommand(executable, input.args, timeout.toMillis(), bwrapPath, timeoutPath, networkIsolation, files)
 
