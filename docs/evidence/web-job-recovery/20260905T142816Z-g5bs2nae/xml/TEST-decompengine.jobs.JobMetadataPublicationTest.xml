@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.jobs.JobMetadataPublicationTest" tests="8" skipped="0" failures="0" errors="0" timestamp="2026-09-05T14:28:23.147Z" hostname="whatsername" time="0.186">
+  <properties/>
+  <testcase name="failure after replacement retains complete new metadata()" classname="decompengine.jobs.JobMetadataPublicationTest" time="0.018"/>
+  <testcase name="unforced private write preserves prior metadata()" classname="decompengine.jobs.JobMetadataPublicationTest" time="0.013"/>
+  <testcase name="failure before replacement preserves prior metadata()" classname="decompengine.jobs.JobMetadataPublicationTest" time="0.014"/>
+  <testcase name="failure before write preserves prior metadata()" classname="decompengine.jobs.JobMetadataPublicationTest" time="0.042"/>
+  <testcase name="failure before directory force retains complete new metadata()" classname="decompengine.jobs.JobMetadataPublicationTest" time="0.054"/>
+  <testcase name="partial private write preserves prior metadata()" classname="decompengine.jobs.JobMetadataPublicationTest" time="0.012"/>
+  <testcase name="failure after directory force retains complete new metadata()" classname="decompengine.jobs.JobMetadataPublicationTest" time="0.015"/>
+  <testcase name="forced private write preserves prior metadata()" classname="decompengine.jobs.JobMetadataPublicationTest" time="0.017"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
