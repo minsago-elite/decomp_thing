@@ -852,7 +852,7 @@ internal fun handleAuthorizedUploadRequest(exchange: HttpExchange, mutation: Aut
         exchange.responseHeaders.set("Location", "/jobs/${uncertain.jobId}")
         if (exchange.requestsLegacyJson()) {
             sendCorrelatedLegacyJsonProblem(exchange, 409, "RECOVERY_REQUIRED",
-                uploadPublicationProblem(uncertain.jobId).toString(), requestDiagnosticOutput)
+                uploadPublicationProblem(uncertain.jobId).toString(), System.err::println)
         } else {
             exchange.sendHtml(409, renderUploadPublicationUncertainPage(uncertain.jobId))
         }
