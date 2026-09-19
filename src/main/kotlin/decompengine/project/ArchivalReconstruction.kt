@@ -399,8 +399,12 @@ class ArchivalReconstructionService(
         val observedBehavior = ReconstructionExplorationInput.read(
             outputDir, profile.budgets.reconstructionMaximumContextCharacters,
         )
+        val selectedAnalyzer = (analyzer as? ExportBudgetedProgramModelAnalyzer)
+            ?.withExportBudgets(profile.budgets)
+            ?: analyzer
+        adapter.diagnostics.prepare(profile)
         progress.phase(AgentWorkflowPhase.ANALYZING)
-        val model = analyzer.analyze(binaryPath, outputDir.resolve("analysis"))
+        val model = selectedAnalyzer.analyze(binaryPath, outputDir.resolve("analysis"))
         val project = outputDir.resolve("source-tree")
         val progressPath = outputDir.resolve("reconstruction_progress.json")
         progressPath.writeText("{\"phase\":\"planning\",\"completed\":0,\"total\":0}\n")

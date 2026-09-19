@@ -1523,7 +1523,7 @@ object SourceTreeManifestReader {
     fun read(projectDir: Path, expectedProfile: ReconstructionProfile): SourceTreeManifest {
         val path = projectDir.resolve("source_tree_manifest.json")
         require(path.exists()) { "project is missing source_tree_manifest.json" }
-        val ceiling = minOf(expectedProfile.budgets.buildMaximumOutputBytes, Int.MAX_VALUE.toLong() - 1L)
+        val ceiling = minOf(expectedProfile.budgets.archiveMaximumFileBytes, Int.MAX_VALUE.toLong() - 1L)
         require(ceiling >= 1L) { "build output ceiling is invalid" }
         val snapshot = decompengine.repair.readStableRegularFile(projectDir, "source_tree_manifest.json", ceiling)
         require(snapshot.bytes.isNotEmpty()) { "source tree manifest must not be empty" }

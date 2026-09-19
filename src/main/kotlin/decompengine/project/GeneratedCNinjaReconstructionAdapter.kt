@@ -1,5 +1,6 @@
 package decompengine.project
 
+import decompengine.repair.readStableRegularFile
 import java.nio.file.Path
 
 internal object GeneratedCNinjaReconstructionAdapter : ReconstructionAdapter by GeneratedCReconstructionAdapter {
@@ -52,15 +53,25 @@ internal object GeneratedCNinjaReconstructionAdapter : ReconstructionAdapter by 
         require(size in 1..ceiling) {
             "Ninja build definition exceeds the admitted build output bound ($size bytes; limit=$ceiling)"
         }
-        val text = java.nio.file.Files.readString(definition)
-        val lines = text.lineSequence().map { it.trim() }.toList()
-        val compilerAssignments = lines.filter { it.startsWith("cc =") }
-        require(compilerAssignments == listOf("cc = $expectedCompiler")) {
+        val text = readStableRegularFile(projectDir, configuration.buildDefinition, ceiling).bytes
+            .toString(Charsets.UTF_8)
+        require(text.isNotEmpty()) { "Ninja build definition must not be empty" }
+        require(text.toByteArray(Charsets.UTF_8).size <= ceiling) {
+            "Ninja build definition exceeds the admitted build output bound"
+        }
+
+        val assignments = text.lineSequence().mapNotNull { line ->
+            NINJA_ASSIGNMENT.matchEntire(line)?.let { match ->
+                match.groupValues[1] to match.groupValues[2].trim()
+            }
+        }.groupBy({ it.first }, { it.second })
+        require(assignments["cc"] == listOf(expectedCompiler)) {
             "Ninja build definition compiler differs from the selected profile or is overridden"
         }
-        val flagAssignments = lines.filter { it.startsWith("cflags =") }
-        require(flagAssignments == listOf("cflags = $expectedFlags")) {
+        require(assignments["cflags"] == listOf(expectedFlags)) {
             "Ninja build definition flags differ from the selected profile or are overridden"
         }
     }
+
+    private val NINJA_ASSIGNMENT = Regex("^\\s*(cc|cflags)\\s*=\\s*(.*?)\\s*$")
 }
