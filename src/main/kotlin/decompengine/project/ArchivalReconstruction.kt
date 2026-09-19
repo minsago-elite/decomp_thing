@@ -389,6 +389,9 @@ class ArchivalReconstructionService(
 ) {
     init {
         hostSafetyLimits.requireAllows(profile.budgets)
+        require(analyzer is ExportBudgetedProgramModelAnalyzer) {
+            "archival reconstruction requires an analyzer that binds export budgets"
+        }
     }
 
     private val adapter = ReconstructionAdapters.resolve(profile)
