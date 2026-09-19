@@ -59,10 +59,6 @@
       "reason": "Ninja-specific generated-C archive build-record consistency policy."
     },
     {
-      "path": "src/main/kotlin/decompengine/project/GeneratedCNinjaBehaviorBuildPolicy.kt",
-      "reason": "Ninja-specific generated-C behavior evidence build-contract consistency policy."
-    },
-    {
       "path": "src/main/kotlin/decompengine/project/GeneratedCNinjaProjectRendering.kt",
       "reason": "Generated-C Ninja build-definition rendering."
     },

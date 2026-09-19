@@ -86,7 +86,8 @@ class ProfiledBehaviorEvidenceCaptureTest {
         for ((name, value) in tampered) {
             fixture.project.resolve("reports/build_contract.json")
                 .writeText(JsonObject(contract + (name to value)).toString())
-            assertFailsWith<IllegalArgumentException>(name) { capture(fixture) }
+            val failure = assertFailsWith<IllegalArgumentException>(name) { capture(fixture) }
+            assertTrue(failure.message.orEmpty().contains("Ninja build"), "$name: ${failure.message}")
         }
     }
 
