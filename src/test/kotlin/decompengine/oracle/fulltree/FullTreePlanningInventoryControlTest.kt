@@ -441,6 +441,19 @@ class FullTreePlanningInventoryControlTest {
             )
         }
 
+    @Test
+    fun `shard lookup rejects malformed and oversized identifiers without regex recursion`() =
+        inControlTemporaryDirectory { directory ->
+            val fixture = createFullTreeControlFixture(directory.resolve("fixture"))
+            val registry = generate(fixture, directory.resolve("planning.json")).registry
+            assertFailsWith<FullTreeControlException> {
+                registry.requireOwnerModulesForShard("a-" + "a-".repeat(5_000))
+            }
+            assertFailsWith<FullTreeControlException> {
+                registry.requireOwnerModulesForShard("a".repeat(522))
+            }
+        }
+
     private fun generate(
         fixture: FullTreeControlFixture,
         output: Path,

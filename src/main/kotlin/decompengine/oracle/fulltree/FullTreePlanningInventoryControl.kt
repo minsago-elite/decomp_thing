@@ -500,7 +500,7 @@ object FullTreePlanningInventoryControl {
         }
 
         override fun requireOwnerModulesForShard(shardId: String): List<FullTreePlanningSourceModule> {
-            if (!shardId.matches(SHARD_ID)) {
+            if (!isValidShardId(shardId)) {
                 throw FullTreeControlException("planning shard ID is invalid")
             }
             return modulesByShardId[shardId]
@@ -614,6 +614,12 @@ private val SOURCE_ONLY_ORDER = Comparator<JsonObject> { left, right ->
 }
 private val COMPILATION_UNIT_ID = Regex("cu-[0-9a-f]{32}")
 private val SHARD_ID = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
+private const val MAXIMUM_SHARD_ID_BYTES = 2 * 255 + 1
+
+private fun isValidShardId(shardId: String): Boolean {
+    if (shardId.toByteArray(Charsets.UTF_8).size > MAXIMUM_SHARD_ID_BYTES) return false
+    return SHARD_ID.matches(shardId)
+}
 
 private const val PLANNING_SCHEMA = "full-tree-planning-inventory"
 private const val PLANNING_MAXIMUM_SOURCE_MODULES = 1_000_000
