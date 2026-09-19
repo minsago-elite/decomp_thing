@@ -8,16 +8,22 @@ import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import java.nio.file.FileVisitResult
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.BasicFileAttributes
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /** A real Chrome/JVM journey, opt-in because ordinary unit-test hosts need not have Chrome. */
@@ -71,16 +77,24 @@ class BrowserSessionExpiryTest {
         val clock = TestClock()
         val server = UploadServer("127.0.0.1", 0, directory.resolve("jobs"),
             uiMode = WebUiMode.SPA, basePath = "/nested/", webAccessClock = clock)
-        var browser: Process? = null
+        val profile = createOwnedProfile()
+        var chromeProcess: Process? = null
+        var driver: Process? = null
         try {
             server.start()
+            chromeProcess = ProcessBuilder(chrome, "--headless=new", "--no-sandbox", "--disable-gpu", "--no-first-run",
+                "--no-default-browser-check", "--disable-background-networking", "--disable-extensions",
+                "--disable-default-apps", "--disable-sync", "--remote-debugging-port=0",
+                "--remote-debugging-address=127.0.0.1", "--user-data-dir=$profile", "about:blank")
+                .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                .redirectError(ProcessBuilder.Redirect.DISCARD).start()
             val errorFile = directory.resolve("browser-stderr.txt")
             val script = Path.of(System.getProperty("user.dir"), "scripts/check-session-expiry-browser.mjs")
-            browser = ProcessBuilder(runtime, script.toString(), chrome)
+            driver = ProcessBuilder(runtime, script.toString(), profile.toString())
                 .directory(Path.of(System.getProperty("user.dir")).toFile())
                 .redirectError(errorFile.toFile()).start()
-            val reader = BufferedReader(InputStreamReader(browser.inputStream))
-            val writer = browser.outputStream.bufferedWriter()
+            val reader = BufferedReader(InputStreamReader(driver.inputStream))
+            val writer = driver.outputStream.bufferedWriter()
             val first = server.issueBrowserBootstrap().token
             writer.write("${server.browserOrigin}/nested/#bootstrap=$first\n")
             writer.flush()
@@ -94,27 +108,95 @@ class BrowserSessionExpiryTest {
             writer.flush()
             assertEquals("reauthenticated", stage(reader), browserFailure(errorFile, first, fresh))
             writer.close()
-            assertEquals(0, if (browser.waitFor(15, TimeUnit.SECONDS)) browser.exitValue() else -1,
+            assertEquals(0, if (driver.waitFor(15, TimeUnit.SECONDS)) driver.exitValue() else -1,
                 browserFailure(errorFile, first, fresh))
             val publicDiagnostic = Files.readString(errorFile)
             assertFalse(publicDiagnostic.contains(first), "Initial token reached browser public diagnostics")
             assertFalse(publicDiagnostic.contains(fresh), "Fresh token reached browser public diagnostics")
         } finally {
-            browser?.let { process ->
-                if (process.isAlive) {
-                    process.destroy()
-                    if (!process.waitFor(5, TimeUnit.SECONDS)) {
-                        process.destroyForcibly()
-                        process.waitFor(5, TimeUnit.SECONDS)
-                    }
+            try { stopProcessTree(driver) } finally {
+                try { stopProcessTree(chromeProcess) } finally {
+                    try { deleteOwnedProfile(profile) } finally { server.stop() }
                 }
             }
-            server.stop()
         }
     }
 
-    private fun stage(reader: BufferedReader): String? = CompletableFuture.supplyAsync { reader.readLine() }
-        .get(40, TimeUnit.SECONDS)
+    @Test
+    fun `timed out driver cleanup stops owned processes and removes only its marked profile`() {
+        val sleeper = Path.of("/bin/sleep")
+        assumeTrue(Files.isExecutable(sleeper), "the cleanup fixture requires /bin/sleep")
+        val profile = createOwnedProfile()
+        Files.writeString(profile.resolve("History"), "test-only bootstrap history")
+        var driver: Process? = null
+        var chromeFixture: Process? = null
+        var driverPid = -1L
+        var chromePid = -1L
+        try {
+            driver = ProcessBuilder(sleeper.toString(), "30").start()
+            chromeFixture = ProcessBuilder(sleeper.toString(), "30").start()
+            driverPid = driver.pid()
+            chromePid = chromeFixture.pid()
+            val reader = BufferedReader(InputStreamReader(driver.inputStream))
+            assertFailsWith<TimeoutException> { stage(reader, 100) }
+        } finally {
+            try { stopProcessTree(driver) } finally {
+                try { stopProcessTree(chromeFixture) } finally { deleteOwnedProfile(profile) }
+            }
+        }
+        assertFalse(ProcessHandle.of(driverPid).map(ProcessHandle::isAlive).orElse(false))
+        assertFalse(ProcessHandle.of(chromePid).map(ProcessHandle::isAlive).orElse(false))
+        assertFalse(Files.exists(profile))
+    }
+
+    private fun stage(reader: BufferedReader, timeoutMs: Long = 40_000): String? {
+        val pending = CompletableFuture.supplyAsync { reader.readLine() }
+        try { return pending.get(timeoutMs, TimeUnit.MILLISECONDS) }
+        catch (failure: TimeoutException) { pending.cancel(true); throw failure }
+    }
+
+    private fun createOwnedProfile(): Path {
+        val profile = Files.createTempDirectory(directory, "chrome-profile-")
+        Files.writeString(profile.resolve(PROFILE_MARKER), PROFILE_MARKER_CONTENT, StandardOpenOption.CREATE_NEW)
+        return profile
+    }
+
+    private fun stopProcessTree(process: Process?) {
+        if (process == null) return
+        val root = process.toHandle()
+        val descendants = root.descendants().use { it.toList() }
+        if (process.isAlive) process.destroy()
+        if (!process.waitFor(5, TimeUnit.SECONDS)) process.destroyForcibly()
+        for (child in descendants.asReversed()) if (child.isAlive) child.destroyForcibly()
+        check(process.waitFor(5, TimeUnit.SECONDS)) { "Test-owned process did not exit" }
+        for (child in descendants) if (child.isAlive) child.onExit().get(5, TimeUnit.SECONDS)
+        check(descendants.none(ProcessHandle::isAlive)) { "Test-owned child process did not exit" }
+    }
+
+    private fun deleteOwnedProfile(profile: Path) {
+        check(profile.parent == directory && profile.fileName.toString().startsWith("chrome-profile-")) {
+            "Refusing to delete an unowned browser profile"
+        }
+        check(!Files.isSymbolicLink(profile) && Files.readString(profile.resolve(PROFILE_MARKER)) == PROFILE_MARKER_CONTENT) {
+            "Refusing to delete a browser profile without its test marker"
+        }
+        Files.walkFileTree(profile, object : SimpleFileVisitor<Path>() {
+            override fun visitFile(file: Path, attributes: BasicFileAttributes): FileVisitResult {
+                Files.delete(file)
+                return FileVisitResult.CONTINUE
+            }
+            override fun postVisitDirectory(dir: Path, failure: java.io.IOException?): FileVisitResult {
+                if (failure != null) throw failure
+                Files.delete(dir)
+                return FileVisitResult.CONTINUE
+            }
+        })
+    }
+
+    companion object {
+        private const val PROFILE_MARKER = ".decomp-session-expiry-owned"
+        private const val PROFILE_MARKER_CONTENT = "test-owned Chrome profile\n"
+    }
 
     private fun browserFailure(path: Path, vararg tokens: String): String {
         var diagnostic = Files.readString(path)

@@ -1,14 +1,13 @@
 // Opt-in, test-owned Chrome journey. The JVM test sends bootstrap URLs over stdin;
 // this driver never writes them to a process argument, report, or diagnostic.
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { promises as fs } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const chromeBinary = process.argv[2];
-assert.ok(chromeBinary, 'Chrome binary argument is required');
+// The JVM test owns Chrome and its marked profile, including on driver timeout or SIGKILL.
+const profile = process.argv[2];
+assert.ok(profile, 'Test-owned Chrome profile argument is required');
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity })[Symbol.asyncIterator]();
 async function nextLine() {
   const next = await lines.next();
@@ -60,22 +59,10 @@ class DevTools {
   }
 }
 
-let chrome;
 let socket;
 const sensitiveTokens = [];
-const profile = await fs.mkdtemp(join(tmpdir(), 'decomp-session-expiry-browser-'));
-const marker = join(profile, '.decomp-session-expiry-owned');
-await fs.writeFile(marker, 'test-owned Chrome profile\n', { flag: 'wx' });
 try {
-  chrome = spawn(chromeBinary, ['--headless=new', '--no-sandbox', '--disable-gpu', '--no-first-run',
-    '--no-default-browser-check', '--disable-background-networking', '--disable-extensions',
-    '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0',
-    '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], { stdio: 'ignore' });
-  let launchError;
-  chrome.once('error', error => { launchError = error; });
   const devToolsPort = await until(async () => {
-    if (launchError) throw new Error(`Chrome launch failed: ${launchError.message}`);
-    if (chrome.exitCode !== null || chrome.signalCode !== null) throw new Error('Chrome exited before DevTools was ready');
     return (await fs.readFile(join(profile, 'DevToolsActivePort'), 'utf8').catch(() => '')).split('\n')[0] || null;
   }, 'Chrome DevTools port');
   const version = await until(async () => fetch(`http://127.0.0.1:${devToolsPort}/json/version`).then(r => r.json()).catch(() => null), 'Chrome DevTools endpoint');
@@ -116,6 +103,7 @@ try {
   sensitiveTokens.push(firstToken);
   await cdp.call('Page.navigate', { url: firstUrl }, sessionId);
   await ready(`document.body.innerText.includes('Local session connected.')`, 'initial browser sign-in');
+  assert.equal(await evaluate('location.hash'), '', 'Initial sign-in fragment was not scrubbed before navigation');
   await cdp.call('Page.navigate', { url: first.origin + '/nested/runtime' }, sessionId);
   await ready(`document.querySelector('#server-runtime-title')?.textContent === 'Connected server'`, 'private runtime');
   assert.equal(await evaluate('location.hash'), '');
@@ -145,6 +133,7 @@ try {
   assert.ok(freshToken !== firstToken, 'Fresh operator link repeated the consumed token');
   await cdp.call('Page.navigate', { url: freshUrl }, sessionId);
   await ready(`document.body.innerText.includes('Local session connected.')`, 'explicit fresh-link reauthentication');
+  assert.equal(await evaluate('location.hash'), '', 'Fresh sign-in fragment was not scrubbed before navigation');
   await cdp.call('Page.navigate', { url: first.origin + '/nested/runtime' }, sessionId);
   await ready(`document.querySelector('#server-runtime-title')?.textContent === 'Connected server'`, 'private runtime after reauthentication');
   assert.equal(requests.filter(request => request.method === 'POST').length, 2);
@@ -163,15 +152,4 @@ try {
   process.exitCode = 1;
 } finally {
   socket?.close();
-  if (chrome && chrome.exitCode === null && chrome.signalCode === null) {
-    chrome.kill('SIGTERM');
-    try { await until(() => chrome.exitCode !== null || chrome.signalCode !== null, 'Chrome shutdown', 5000); }
-    catch {
-      chrome.kill('SIGKILL');
-      await until(() => chrome.exitCode !== null || chrome.signalCode !== null, 'Chrome forced shutdown', 5000);
-    }
-  }
-  if (await fs.readFile(marker, 'utf8').catch(() => null) === 'test-owned Chrome profile\n') {
-    await fs.rm(profile, { recursive: true, force: false });
-  }
 }
