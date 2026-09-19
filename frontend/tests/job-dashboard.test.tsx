@@ -25,6 +25,7 @@ it('renders only a bounded page of a 10000-job library and navigates without bac
   });
   render(<Dashboard basePath="/nested" />);
   expect(await screen.findByText('program-0.elf')).toBeTruthy();
+  expect(screen.getByText('Page 1')).toBeTruthy();
   expect(screen.getAllByRole('listitem')).toHaveLength(50);
   expect(screen.getByRole('link', { name: 'program-0.elf' }).getAttribute('href')).toBe('/nested/jobs/' + '0'.repeat(32));
   const next = screen.getByRole('button', { name: 'Next page' }); next.focus();
@@ -32,6 +33,7 @@ it('renders only a bounded page of a 10000-job library and navigates without bac
   expect(document.activeElement).toBe(next);
   fireEvent.click(next);
   expect(await screen.findByText('program-50.elf')).toBeTruthy();
+  expect(screen.getByText('Page 2')).toBeTruthy();
   expect(screen.queryByText('program-0.elf')).toBeNull();
   expect(screen.getAllByRole('listitem')).toHaveLength(50);
   expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Job results' }));
@@ -40,10 +42,46 @@ it('renders only a bounded page of a 10000-job library and navigates without bac
   fireEvent.click(screen.getByRole('button', { name: 'Previous page' }));
   expect(await screen.findByText('program-0.elf')).toBeTruthy();
   expect(screen.queryByText('program-10000.elf')).toBeNull();
+  expect(screen.getByText('Page 1')).toBeTruthy();
   expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Job results' }));
   expect(transport.get).toHaveBeenCalledTimes(2);
   fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
   expect(await screen.findByText('program-10000.elf')).toBeTruthy();
+  expect(transport.get).toHaveBeenCalledTimes(3);
+});
+
+it.each([
+  [410, 'CURSOR_EXPIRED', 'This page snapshot expired.'],
+  [503, 'LISTING_BUSY', 'Another job listing is in progress.'],
+])('keeps the displayed page truthful and restores keyboard focus after a failed %s continuation', async (status, code, message) => {
+  let rejectContinuation: (reason: unknown) => void = () => undefined;
+  transport.get.mockResolvedValueOnce(page([job(1)], 'next_page'))
+    .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectContinuation = reject; }))
+    .mockResolvedValueOnce(page([job(3)]));
+  render(<Dashboard basePath="" />);
+  expect(await screen.findByText('program-1.elf')).toBeTruthy();
+  const next = screen.getByRole('button', { name: 'Next page' });
+  next.focus();
+  fireEvent.click(next);
+  expect(screen.getByText('Page 1')).toBeTruthy();
+  expect(screen.getByText(/Loading jobs… Previously loaded rows remain below/)).toBeTruthy();
+  expect(screen.getByText('program-1.elf')).toBeTruthy();
+  await act(async () => { rejectContinuation(new ApiClientError('http_error', { status, serverCode: code })); await Promise.resolve(); });
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toContain(message);
+  expect(alert.textContent).toContain('Previously loaded rows are shown below; their state may be outdated.');
+  expect(screen.getByText('Page 1')).toBeTruthy();
+  expect(screen.queryByText('Page 2')).toBeNull();
+  expect(screen.getByText('program-1.elf')).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Previous page' })).toHaveProperty('disabled', true);
+  expect(screen.getByRole('button', { name: 'Next page' })).toHaveProperty('disabled', true);
+  await waitFor(() => expect(document.activeElement).toBe(alert));
+  expect(transport.get).toHaveBeenCalledTimes(2);
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  expect(await screen.findByText('program-3.elf')).toBeTruthy();
+  expect(screen.queryByText('program-1.elf')).toBeNull();
+  expect(screen.getByText('Page 1')).toBeTruthy();
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Job results' })));
   expect(transport.get).toHaveBeenCalledTimes(3);
 });
 
@@ -239,12 +277,18 @@ it('does not revive a retained first page after a continuation denies access', a
     .mockResolvedValueOnce(page([job(2)]));
   render(<Dashboard basePath="" />);
   expect(await screen.findByText('program-1.elf')).toBeTruthy();
-  fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
-  expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Access to this job library is unavailable. Check your local session.');
+  const next = screen.getByRole('button', { name: 'Next page' });
+  next.focus();
+  fireEvent.click(next);
+  const alert = await screen.findByRole('alert');
+  expect(alert).toHaveProperty('textContent', 'Access to this job library is unavailable. Check your local session.');
+  await waitFor(() => expect(document.activeElement).toBe(alert));
   expect(screen.queryByText('program-1.elf')).toBeNull();
+  expect(screen.getByText('No page available')).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Previous page' })).toHaveProperty('disabled', true);
   fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
   expect(await screen.findByText('program-2.elf')).toBeTruthy();
+  expect(screen.getByText('Page 1')).toBeTruthy();
   expect(transport.get).toHaveBeenCalledTimes(3);
 });
 
