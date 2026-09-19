@@ -15,7 +15,32 @@
   "benchmarkRoots": [
     "oracle/gcc",
     "src/main/kotlin/decompengine/oracle/gcc",
-    "src/test/kotlin/decompengine/oracle/gcc"
+    "src/test/kotlin/decompengine/oracle/gcc",
+    ".github/workflows/gcc-oracle-model.yml",
+    "docs/evidence/gcc-engine-cli-containment-2026-09-08.json",
+    "oracle/llvm/22.1.6/behavior-corpus-evidence.json",
+    "oracle/llvm/22.1.6/behavior-corpus.json",
+    "scripts/fetch-gcc-oracle-source.py",
+    "scripts/generate-gcc-behavior-corpus.py",
+    "scripts/generate-gcc-compiler-engine-build-records.py",
+    "scripts/run-gcc-behavior-corpus.py",
+    "scripts/verify-gcc-oracle-source.py",
+    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorReferenceInputPlanV2.kt",
+    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorReferenceInputPlanV2Generator.kt",
+    "src/test/kotlin/decompengine/analysis/BundledGhidraTest.kt",
+    "src/test/kotlin/decompengine/oracle/behavior/LlvmBehaviorReferenceInputPlanV2Test.kt",
+    "tests/oracle/test_behavior_corpus.py",
+    "tests/oracle/test_fetch_gcc_oracle_source.py",
+    "tests/oracle/test_function_recovery_oracle_generation.py",
+    "tests/oracle/test_gcc_behavior_corpus.py",
+    "tests/oracle/test_gcc_compiler_engines.py",
+    "tests/oracle/test_gcc_function_recovery.py",
+    "tests/oracle/test_gcc_oracle_artifacts.py",
+    "tests/oracle/test_gcc_source_lock.py",
+    "tests/oracle/test_llvm_oracle_profiles.py",
+    "tests/oracle/test_llvm_source_lock.py",
+    "tests/oracle/test_rebuild_gcc_oracle.py",
+    "tests/oracle/test_toolchain_reproduction.py"
   ],
   "adapterFiles": [
     {
@@ -255,6 +280,55 @@
       "fragment": "gcc_runtime / 'cc1'",
       "count": 1,
       "reason": "Inventories the installed compiler runtime for generated-C provisioning; this expression does not select a benchmark artifact. Version and digest checks remain active."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-compiler-flag",
+      "fragment": "-Werror",
+      "count": 3,
+      "reason": "Pre-existing compatibility surface retained while reconstruction profile ownership remains explicit."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-compiler-flag",
+      "fragment": "-Wall",
+      "count": 2,
+      "reason": "Pre-existing compatibility surface retained while reconstruction profile ownership remains explicit."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-compiler-flag",
+      "fragment": "-Wextra",
+      "count": 2,
+      "reason": "Pre-existing compatibility surface retained while reconstruction profile ownership remains explicit."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-compiler-flag",
+      "fragment": "-std=c11",
+      "count": 1,
+      "reason": "Pre-existing compatibility surface retained while reconstruction profile ownership remains explicit."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-tool",
+      "fragment": "\"gcc\"",
+      "count": 1,
+      "reason": "Pre-existing compatibility surface retained while reconstruction profile ownership remains explicit."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/RepairAcpEvidenceArchiveVerifier.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "GeneratedCRepairRuntimeConfiguration",
+      "count": 3,
+      "reason": "Pre-existing compatibility surface retained while reconstruction profile ownership remains explicit."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/RepairAcpEvidenceArchiveVerifier.kt",
+      "rule": "generic-layout",
+      "fragment": "\"Makefile\"",
+      "count": 1,
+      "reason": "Pre-existing compatibility surface retained while reconstruction profile ownership remains explicit."
     }
   ],
   "benchmarkCatalog": "oracle/gcc/reconstruction-neutrality-identities.json"
