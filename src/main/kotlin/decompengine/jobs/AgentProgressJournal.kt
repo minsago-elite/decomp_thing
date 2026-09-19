@@ -315,7 +315,7 @@ class AgentProgressJournal(
 
     companion object {
         const val FILE_NAME = "agent-progress.json"
-        private const val MAXIMUM_READ_BYTES = 2 * 1024 * 1024
+        internal const val MAXIMUM_READ_BYTES = 2 * 1024 * 1024
         private const val MAXIMUM_MESSAGE_CHARACTERS = 8192
 
         fun read(reportsDirectory: Path): JsonObject? {
@@ -323,6 +323,13 @@ class AgentProgressJournal(
             if (!Files.exists(path, NOFOLLOW_LINKS)) return null
             require(Files.isRegularFile(path, NOFOLLOW_LINKS)) { "progress snapshot is not a regular file" }
             val bytes = Files.newInputStream(path, NOFOLLOW_LINKS).use { it.readNBytes(MAXIMUM_READ_BYTES + 1) }
+            return decode(bytes)
+        }
+
+        /** Decode bytes already obtained through the caller's storage authority boundary.
+         * This validates the bounded display journal, not workflow acceptance or event completeness.
+         */
+        internal fun decode(bytes: ByteArray): JsonObject {
             require(bytes.size <= MAXIMUM_READ_BYTES) { "progress snapshot exceeds the read limit" }
             val result = OracleJson.parse(bytes, StrictJsonLimits(
                 maximumInputBytes = MAXIMUM_READ_BYTES,
