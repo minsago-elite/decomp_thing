@@ -161,6 +161,17 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                     return@forEach
                 }
 
+                // An agent identity is also retained on an undispatched unresolved fallback
+                // (for example, a prompt rejected before dispatch). Such a checkpoint has no
+                // accepted contribution or execution receipt and must remain buildable as
+                // unresolved output rather than being subjected to the release gate below.
+                if (source.acceptedImplementation != true || !checkpoint.accepted) {
+                    require(checkpoint.hasNoExecutionEvidence()) {
+                        "unresolved agent fallback retains ACP execution evidence: $moduleId"
+                    }
+                    return@forEach
+                }
+
                 require(source.acceptedImplementation == true && checkpoint.accepted) {
                     "agent-generated module is not accepted at the archive release gate: $moduleId"
                 }

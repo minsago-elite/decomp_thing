@@ -488,6 +488,9 @@ object FullTreePlanningInventoryControl {
                 sourceModules.groupBy { it.shardId }.forEach { (shardId, modules) ->
                     put(shardId, Collections.unmodifiableList(ArrayList(modules)))
                 }
+                sourceOnlyUnits.forEach { sourceOnly ->
+                    putIfAbsent(sourceOnly.shardId, emptyList())
+                }
             },
         )
 

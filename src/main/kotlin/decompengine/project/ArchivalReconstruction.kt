@@ -246,7 +246,6 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                 task.get(drainDeadline.remainingNanosOrZero(), TimeUnit.NANOSECONDS)
             val stdoutBytes = await(stdout)
             val stderrBytes = await(stderr)
-            await(memoryMonitor)
             reports.resolve("ghidra_stdout.log").writeBytes(stdoutBytes)
             reports.resolve("ghidra_stderr.log").writeBytes(stderrBytes)
             reports.resolve("ghidra_resource_usage.json").writeText(
