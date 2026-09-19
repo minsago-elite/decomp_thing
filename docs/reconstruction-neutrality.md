@@ -69,11 +69,13 @@ ordinary directory ancestors.
 
 ## Current migration state
 
-The initial repository run fails on remaining policy and ownership migrations.
-Examples include MVP compiler assumptions, repair runtime policy,
-benchmark scripts/tests/workflows, and retained historical
-benchmark identities in LLVM reference evidence. Retained evidence must not be
-rewritten merely to satisfy the scanner.
+The repository baseline scan passes. The GCC oracle CI workflow, its
+inventory and corpus scripts, and its Python oracle tests are declared
+benchmark-owned. Retained historical benchmark identities in LLVM reference
+evidence, shared recorded capture image digests, cross-oracle test
+references, MVP compiler assumptions, and repair runtime policy
+cross-checks use exact literal allowances with ownership rationales.
+Retained evidence must not be rewritten merely to satisfy the scanner.
 
 `ReconstructionPipeline` now resolves its build adapter from the selected profile.
 Its profile overload admits host budgets and binds analyzer export limits before
@@ -87,11 +89,10 @@ resource bounds and other report consumers remain unfinished.
 
 Doctor's compiler/build probes and authored sanitizer sample now come from its
 selected registered adapter, through both the CLI and JVM API. The generic root
-covers the full Doctor package. This removes four findings, leaving 80
-(67 benchmark and 13 generic); the diagnostic executor still needs output/time
+covers the full Doctor package. The repository scan passes with zero
+findings; the diagnostic executor still needs output/time
 bounds. See [profile-selected Doctor diagnostics](profiled-doctor-diagnostics.md).
 
 Passing the authored scanner tests verifies its detection and exemption
-behavior. It does not make the repository scan pass or complete #84. Current
-scope and progress remain on the issue; the draft gate layer is not ready for
-integration while these findings remain.
+behavior, and the repository scan passes with zero findings. That does not
+complete #84: current scope and progress remain on the issue.
