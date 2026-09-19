@@ -895,6 +895,9 @@ object SourceTreeGenerator {
         }.map { it.path }.sorted()
         val makefile = rendering.buildDefinition(sourcePaths, profile)
         val makefilePath = profile.layout.declaration("build-definition").materialize()
+        for (stale in listOf("Makefile", "build.ninja")) {
+            if (stale != makefilePath) projectDir.resolve(stale).deleteIfExists()
+        }
         val makefileFile = projectDir.resolve(makefilePath)
         makefileFile.parent.createDirectories()
         makefileFile.writeText(makefile)
