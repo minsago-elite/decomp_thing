@@ -412,6 +412,9 @@ class ArchivalReconstructionService(
         if (Thread.interrupted()) throw InterruptedException("archival reconstruction cancelled")
         outputDir.createDirectories()
         requireCompatibleProfile(outputDir)
+        outputDir.resolve("reconstruction.profile.json").writeText(
+            "{\"profileId\":\"${profile.id}\",\"profileSha256\":\"${profile.sha256}\"}\n",
+        )
         val observedBehavior = ReconstructionExplorationInput.read(
             outputDir, profile.budgets.reconstructionMaximumContextCharacters,
         )
@@ -475,15 +478,26 @@ class ArchivalReconstructionService(
         return ArchivalReconstructionResult(project, build, bundle)
     }
 
+    /**
+     * Rejects reuse of an output directory whose recorded reconstruction used a different profile,
+     * so stale build-definition files from the previous profile cannot leak into the new archive.
+     */
     private fun requireCompatibleProfile(outputDir: Path) {
         val summary = outputDir.resolve("reconstruction.json")
-        if (!Files.isRegularFile(summary, LinkOption.NOFOLLOW_LINKS)) return
-        val recordedId = runCatching {
-            Regex("\\\"profileId\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"")
-                .find(Files.readString(summary))?.groupValues?.get(1)
-        }.getOrNull() ?: return
-        require(recordedId == profile.id) {
-            "output directory was reconstructed with profile $recordedId; " +
+        val profileMarker = outputDir.resolve("reconstruction.profile.json")
+        val manifest = outputDir.resolve("source-tree").resolve("source_tree_manifest.json")
+        val recorded = listOf(profileMarker, summary, manifest).firstNotNullOfOrNull { path ->
+            if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) return@firstNotNullOfOrNull null
+            runCatching {
+                val text = Files.readString(path)
+                val id = Regex("\"profile(?:Id|_id)\"\\s*:\\s*\"([^\"]+)\"").find(text)?.groupValues?.get(1)
+                val digest = Regex("\"profileSha256\"\\s*:\\s*\"([^\"]+)\"").find(text)?.groupValues?.get(1)
+                if (id == null && digest == null) null else id to digest
+            }.getOrNull()
+        } ?: return
+        val (recordedId, recordedDigest) = recorded
+        require(recordedId == profile.id && recordedDigest == profile.sha256) {
+            "output directory was reconstructed with profile ${recordedId ?: "unknown"}; " +
                 "rerun with profile ${profile.id} in an empty directory or remove the existing output directory"
         }
     }
