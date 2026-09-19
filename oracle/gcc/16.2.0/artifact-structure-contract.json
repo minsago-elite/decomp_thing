@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 1,
+  "kind": "gcc-link-artifact-structure-contract-v1",
+  "issue": 714,
+  "status": "reference-contract-only",
+  "profile": "oracle/gcc/16.2.0",
+  "provenance": {
+    "sourceRevision": "78d4ac73dd391005b895a6148cd9831e28e1208b",
+    "sourceLockSha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc",
+    "buildRecordSha256": "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637",
+    "toolchainReproductionSha256": "5c2c159d7287305159a220a1260f6ff6bffe9ec78bb1cbe2fb24f85b68a7d4de",
+    "oracleManifest": {
+      "path": "oracle-manifest.json",
+      "sha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9"
+    },
+    "corpus": {
+      "path": "behavior-corpus.json",
+      "sha256": "bcc1a14ca8c54f94106c943f0bc5698cb9af3151b7bf20a49ae3c8828baaad0e",
+      "scope": "production",
+      "cases": 14
+    },
+    "referenceEvidence": {
+      "path": "behavior-corpus-evidence.json",
+      "sha256": "9dcf787aea232615a1ff8721144b86bc1f5e9a2a7068fa9e9280db0bc4ad6803",
+      "passedCases": 14
+    }
+  },
+  "authenticatedBoundary": {
+    "driver": {
+      "source": "oracle-manifest.json#/artifacts/stripped",
+      "path": "artifacts/gcc-driver.stripped",
+      "bytes": 2349296,
+      "sha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4"
+    },
+    "executor": {
+      "source": "behavior-corpus.json#/sandbox",
+      "backend": "oci-container-v1",
+      "imageDigest": "sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248",
+      "platform": "linux/amd64"
+    },
+    "analysisRuntime": {
+      "status": "not-used-by-this-record",
+      "requiredBoundary": "bundled-ghidra-java-api-worker",
+      "externalGhidraHomeOrAnalyzeHeadless": "forbidden"
+    }
+  },
+  "observedArtifacts": [
+    {
+      "caseId": "compile-file",
+      "path": "file.o",
+      "bytes": 15,
+      "sha256": "e5e021333c0fd167a18f93780b1a03bc65f0aef311d0232b24e6a2d06153e9a5",
+      "kind": "mock-object",
+      "status": "fixture-only",
+      "source": "behavior-corpus.json#/cases/compile-file/expected/artifacts/0"
+    },
+    {
+      "caseId": "linking",
+      "path": "linked.bin",
+      "bytes": 19,
+      "sha256": "611d8ceedfe67437b495a97682eaf5818f93b4c93eedbcddf72737c24b4f303a",
+      "kind": "mock-executable",
+      "status": "fixture-only",
+      "source": "behavior-corpus.json#/cases/linking/expected/artifacts/0"
+    }
+  ],
+  "requiredChecks": [
+    {
+      "id": "linked-artifact-format",
+      "artifact": "linked.bin",
+      "requirement": "Record an ELF header, class, byte order, machine, type, sections, and program headers.",
+      "status": "unresolved"
+    },
+    {
+      "id": "linked-artifact-symbols",
+      "artifact": "linked.bin",
+      "requirement": "Record the symbol tables and exact defined, undefined, binding, and visibility entries.",
+      "status": "unresolved"
+    },
+    {
+      "id": "linked-artifact-relocations",
+      "artifact": "linked.bin",
+      "requirement": "Record relocation sections, entries, target symbols, and dynamic relocation state.",
+      "status": "unresolved"
+    },
+    {
+      "id": "normalization-justification",
+      "artifact": "linked.bin",
+      "requirement": "List every ignored artifact field or byte range with an independently fixed reason.",
+      "declaredNormalizations": [],
+      "status": "unresolved"
+    }
+  ],
+  "unresolved": [
+    {
+      "gate": "real-linking-and-artifact-structure",
+      "reason": "The retained linking case emits MOCK-EXECUTABLE\\u0000v1\\n, not an ELF artifact, so format, symbol, and relocation checks cannot run."
+    },
+    {
+      "gate": "multi-file-linking",
+      "reason": "The current production-scoped corpus has no multi-file link workflow with independently retained artifact evidence."
+    },
+    {
+      "gate": "reconstructed-candidate-replay",
+      "reason": "No authenticated replay of an accepted reconstructed candidate is retained for comparison."
+    }
+  ],
+  "releaseEligible": false
+}

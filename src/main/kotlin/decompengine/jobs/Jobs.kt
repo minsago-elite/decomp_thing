@@ -7,9 +7,9 @@ import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.core.OracleJson
-import decompengine.project.ArchiveTransportLayout
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.oracle.core.StrictJsonException
+import decompengine.project.ArchiveTransportLayout
 import decompengine.repair.StableRegularFile
 import decompengine.repair.readStableRegularFile
 import java.io.IOException
@@ -271,19 +271,9 @@ class JobStore internal constructor(
         }
     }
 
-    private fun archiveLayoutForPrefix(reportPrefix: String): ArchiveTransportLayout {
-        require(reportPrefix == "reports" || reportPrefix.matches(Regex("reports/runs/[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "archive report prefix is invalid" }
-        return ArchiveTransportLayout(setOf("build"), emptySet())
-    }
-
-    internal fun sourceArchiveInventory(jobId: String, reportPrefix: String = "reports"): Map<String, LinuxFileIdentity> =
-        sourceArchiveInventory(jobId, reportPrefix, archiveLayoutForPrefix(reportPrefix))
-
-    internal fun sourceArchiveInventory(jobId: String, layout: ArchiveTransportLayout): Map<String, LinuxFileIdentity> =
-        sourceArchiveInventory(jobId, "reports", layout)
-
-    internal fun sourceArchiveInventory(jobId: String, reportPrefix: String, layout: ArchiveTransportLayout): Map<String, LinuxFileIdentity> {
+    internal fun sourceArchiveInventory(jobId: String, layout: ArchiveTransportLayout, reportPrefix: String = "reports"): Map<String, LinuxFileIdentity> {
         jobDirectory(jobId)
+        require(reportPrefix == "reports" || reportPrefix.matches(Regex("reports/runs/[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "archive report prefix is invalid" }
         val inventory = sortedMapOf<String, LinuxFileIdentity>()
         var entries = 1
         var regularFiles = 0
@@ -335,6 +325,12 @@ class JobStore internal constructor(
         }
         return inventory
     }
+
+    internal fun sourceArchiveInventory(jobId: String, reportPrefix: String = "reports"): Map<String, LinuxFileIdentity> =
+        sourceArchiveInventory(jobId, ArchiveTransportLayout(setOf("build"), emptySet()), reportPrefix)
+
+    internal fun sourceArchiveInventory(jobId: String, layout: ArchiveTransportLayout): Map<String, LinuxFileIdentity> =
+        sourceArchiveInventory(jobId, layout, "reports")
 
     @Synchronized
     fun recoverInterruptedJobs() = recoverInterruptedJobs { false }

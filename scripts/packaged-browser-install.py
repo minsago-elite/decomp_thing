@@ -41,15 +41,19 @@ def entries_and_budget(archive, destination):
         paths.update(str(PurePosixPath(*parts[:length])) for length in range(1, len(parts) + 1))
         expanded_bytes += entry.file_size
     available = os.statvfs(destination)
+    # Some filesystems report 0/0 because they do not expose a fixed inode
+    # quota. That is unknown capacity, not an exhausted quota; the byte budget
+    # remains mandatory. A reported positive total with no free inodes fails.
+    inodes_reported = not (getattr(available, "f_files", 0) == 0 and available.f_favail == 0)
     budget = {
         "expandedBytes": expanded_bytes,
         "requiredBytes": expanded_bytes + BYTE_RESERVE,
         "availableBytes": available.f_bavail * available.f_frsize,
         "requiredInodes": len(paths) + INODE_RESERVE,
-        "availableInodes": available.f_favail,
+        "availableInodes": available.f_favail if inodes_reported else None,
     }
     if (budget["availableBytes"] < budget["requiredBytes"]
-            or budget["availableInodes"] < budget["requiredInodes"]):
+            or (inodes_reported and budget["availableInodes"] < budget["requiredInodes"])):
         raise RuntimeError("Insufficient extraction resources; choose --work-parent on a filesystem "
                            "with room for one installation. " + json.dumps(budget, sort_keys=True))
     return entries, budget

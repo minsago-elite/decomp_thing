@@ -41,6 +41,7 @@ button, .button-link {
 main { padding: 3.5rem clamp(1.5rem, 5vw, 5rem); min-width: 0; }
 main:focus { outline: none; }
 main:focus-visible { outline: 3px solid #955c08; outline-offset: -5px; }
+main h1:focus { outline: 3px solid #955c08; outline-offset: 4px; }
 main section { max-width: 52rem; }
 .eyebrow { margin: 0 0 0.6rem; color: var(--accent); font-size: 0.8rem; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; }
 h1 { margin: 0 0 1rem; font-size: clamp(1.8rem, 3vw, 2.7rem); line-height: 1.15; font-weight: 650; letter-spacing: -0.03em; }

@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "issue": 124,
+  "status": "reference-only-unresolved",
+  "provenance": {
+    "corpus": {
+      "path": "oracle/llvm/22.1.6/behavior-corpus.json",
+      "scope": "production",
+      "caseCount": 48,
+      "sha256": "acaa7b33c390b2c9fde15b4e21b0a899ffff62fe98ce22226866272b4efe8d5b"
+    },
+    "report": {
+      "path": "oracle/llvm/22.1.6/behavior-corpus-evidence.json",
+      "sha256": "e9595bfd941c406d2c8fff618986e60dc0b810f1c384848b3ba540020ca00a6f",
+      "caseStatus": "passed"
+    }
+  },
+  "case": {
+    "id": "link-program",
+    "categories": ["artifacts", "linking", "produced-program"],
+    "input": {
+      "path": "source.c",
+      "bytes": 32,
+      "sha256": "d2ee72eea6fb9b6a2ce93777ac97e9f1d7183f9233923f434ff0d9f61a4aa9d5"
+    },
+    "arguments": [
+      "-nostdlib",
+      "-Wl,--build-id=none",
+      "-Wl,-e,answer",
+      "source.c",
+      "-o",
+      "program"
+    ],
+    "reference": {
+      "exitCode": 0,
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "artifact": {
+        "path": "program",
+        "present": true,
+        "bytes": 13544,
+        "mode": "0o755",
+        "sha256": "c27e992a5c6bea1c4c37254cc3737db7a74989de6f8a9753c877af7b6a44de4e"
+      }
+    }
+  },
+  "productionGap": {
+    "candidateObservation": "unavailable",
+    "artifactComparison": "unresolved",
+    "releaseEligible": false,
+    "missing": [
+      "authenticated candidate execution bound to the same input and case",
+      "IR, assembly, ELF, relocation, unwind, and ABI projections with justified omissions",
+      "mutation evidence for relocation, binding, instruction, unwind, and runtime changes"
+    ],
+    "authority": "reference observation only; this record does not authorize scoring or release"
+  }
+}

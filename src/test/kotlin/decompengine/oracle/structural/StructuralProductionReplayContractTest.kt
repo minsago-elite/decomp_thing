@@ -197,6 +197,24 @@ class StructuralProductionReplayContractTest {
     }
 
     @Test
+    fun `input binary hash alone is not recovered model provenance`() {
+        val fixture = ReplayFixture()
+        val receipts = fixture.receipts()
+        val binaryOnlyProvenance = receipts.model.model.copy(
+            provenanceSha256 = fixture.request.anchor.inputBinary.sha256,
+        )
+
+        assertTrue(binaryOnlyProvenance.provenanceSha256 != receipts.model.model.provenanceSha256)
+        assertFailsWith<StructuralProductionReplayException> {
+            StructuralProductionReplayContract.buildModelReceipt(
+                receipts.identity,
+                binaryOnlyProvenance,
+                fixture.limits,
+            )
+        }
+    }
+
+    @Test
     fun `strict runtime and entity bounds reject before receipt authority`() {
         val fixture = ReplayFixture()
         val receipts = fixture.receipts()

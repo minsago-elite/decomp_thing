@@ -53,6 +53,7 @@ internal fun parseDoctorInvocation(args: List<String>, defaultOutput: Path): Doc
     require(!(toolsOnly && showAuthMethods)) { "--tools-only cannot be combined with --auth-methods" }
     require(!toolsOnly || harnessOverride == null) { "--tools-only cannot be combined with --harness" }
     require(!toolsOnly || workflowOverride == null) { "--tools-only cannot be combined with --workflow" }
+    require(!toolsOnly || !showAuthMethods) { "--tools-only cannot be combined with --auth-methods" }
     return DoctorInvocation(
         DoctorOptions(
             outputDir = output,
