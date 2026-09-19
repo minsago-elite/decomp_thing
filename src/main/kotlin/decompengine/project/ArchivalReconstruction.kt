@@ -355,7 +355,13 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             }
         }
         handles.forEach { if (it.isAlive) it.destroyForcibly() }
-        handles.forEach { handle -> if (handle.isAlive) runCatching { handle.onExit().get(5, TimeUnit.SECONDS) } }
+        val forcibleExitDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        handles.forEach { handle ->
+            val remaining = forcibleExitDeadline - System.nanoTime()
+            if (handle.isAlive && remaining > 0) {
+                runCatching { handle.onExit().get(remaining, TimeUnit.NANOSECONDS) }
+            }
+        }
     }
 
     companion object {
@@ -405,6 +411,7 @@ class ArchivalReconstructionService(
     fun reconstruct(binaryPath: Path, outputDir: Path): ArchivalReconstructionResult {
         if (Thread.interrupted()) throw InterruptedException("archival reconstruction cancelled")
         outputDir.createDirectories()
+        requireCompatibleProfile(outputDir)
         val observedBehavior = ReconstructionExplorationInput.read(
             outputDir, profile.budgets.reconstructionMaximumContextCharacters,
         )
@@ -466,5 +473,18 @@ class ArchivalReconstructionService(
             """.trimIndent() + "\n",
         )
         return ArchivalReconstructionResult(project, build, bundle)
+    }
+
+    private fun requireCompatibleProfile(outputDir: Path) {
+        val summary = outputDir.resolve("reconstruction.json")
+        if (!Files.isRegularFile(summary, LinkOption.NOFOLLOW_LINKS)) return
+        val recordedId = runCatching {
+            Regex("\\\"profileId\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"")
+                .find(Files.readString(summary))?.groupValues?.get(1)
+        }.getOrNull() ?: return
+        require(recordedId == profile.id) {
+            "output directory was reconstructed with profile $recordedId; " +
+                "rerun with profile ${profile.id} in an empty directory or remove the existing output directory"
+        }
     }
 }
