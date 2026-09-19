@@ -53,7 +53,17 @@ const chromeBinary = values.chrome;
 await fs.mkdir(join(repo, 'build'), { recursive: true });
 assert.ok((await fs.stat(values['work-parent'])).isDirectory(), '--work-parent must already exist');
 if (values.mode === 'proxy') await fs.access(join(repo, 'frontend/node_modules/vite/bin/vite.js'));
-const safeDiagnostic = (value) => String(value).replaceAll(/#bootstrap=[A-Za-z0-9_-]+/g, '#bootstrap=[redacted]');
+const sensitiveValues = [];
+const safeDiagnostic = (value) => {
+  let safe = String(value).replaceAll(/#bootstrap=[A-Za-z0-9_-]+/g, '#bootstrap=[redacted]');
+  for (const sensitive of sensitiveValues) if (sensitive) safe = safe.replaceAll(sensitive, '[redacted]');
+  return safe;
+};
+const safeEvidence = (value) => {
+  if (Array.isArray(value)) return value.map(safeEvidence);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, safeEvidence(item)]));
+  return typeof value === 'string' ? safeDiagnostic(value) : value;
+};
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function fileHash(path) {
   const digest = createHash('sha256');
@@ -67,7 +77,7 @@ let vite;
 let work;
 let browserTmp;
 let lastTarget;
-const sensitiveValues = [];
+const targets = [];
 const profile = join(root, 'browser profile');
 const ownerToken = randomUUID();
 const installHelper = join(repo, 'scripts/packaged-browser-install.py');
@@ -191,20 +201,103 @@ async function connectDevTools(url, timeoutMs = 15000) {
   }
 }
 
-async function makeTarget() {
+async function makeTarget({ cspProbe = false } = {}) {
   const { targetId } = await cdp.call('Target.createTarget', { url: 'about:blank' });
   const { sessionId } = await cdp.call('Target.attachToTarget', { targetId, flatten: true });
-  const state = { targetId, sessionId, requests: [], responses: [], exceptions: [] };
-  lastTarget = state;
-  cdp.on('Network.requestWillBeSent', (event) => state.requests.push({ method: event.request.method, url: event.request.url.split('#')[0].split('?')[0], type: event.type }), sessionId);
-  cdp.on('Network.responseReceived', (event) => state.responses.push({ url: event.response.url.split('#')[0].split('?')[0], status: event.response.status, type: event.type }), sessionId);
+  const state = { targetId, sessionId, cspProbe, requests: [], responses: [], exceptions: [], requestUrls: new Map(),
+    cspViolations: [], cspLogEntries: [], cspBlockedRequests: [], cspIssues: [] };
+  targets.push(state);
+  if (!cspProbe) lastTarget = state;
+  cdp.on('Network.requestWillBeSent', (event) => {
+    const url = event.request.url.split('#')[0].split('?')[0];
+    state.requestUrls.set(event.requestId, url);
+    state.requests.push({ method: event.request.method, url, type: event.type });
+  }, sessionId);
+  cdp.on('Network.responseReceived', (event) => {
+    const response = { url: event.response.url.split('#')[0].split('?')[0], status: event.response.status, type: event.type };
+    if (event.type === 'Document') {
+      response.contentSecurityPolicy = Object.entries(event.response.headers)
+        .find(([name]) => name.toLowerCase() === 'content-security-policy')?.[1] ?? null;
+    }
+    state.responses.push(response);
+  }, sessionId);
+  cdp.on('Network.loadingFailed', (event) => {
+    if (event.blockedReason === 'csp') state.cspBlockedRequests.push({ requestId: event.requestId,
+      url: state.requestUrls.get(event.requestId) ?? null, errorText: event.errorText,
+      blockedReason: event.blockedReason, type: event.type });
+  }, sessionId);
   cdp.on('Runtime.exceptionThrown', (event) => state.exceptions.push(event.exceptionDetails.text), sessionId);
+  cdp.on('Runtime.bindingCalled', (event) => {
+    if (event.name !== '__decompRecordCspViolation') return;
+    try { state.cspViolations.push(JSON.parse(event.payload)); }
+    catch { state.cspViolations.push({ malformedPayload: String(event.payload) }); }
+  }, sessionId);
+  cdp.on('Log.entryAdded', ({ entry }) => {
+    if (/content[- ]security[- ]policy|refused to (?:load|execute|apply|connect|frame)|blocked by[^.]*\bcsp\b/i.test(entry.text)) {
+      state.cspLogEntries.push({ source: entry.source, level: entry.level, text: entry.text, url: entry.url ?? null, lineNumber: entry.lineNumber ?? null });
+    }
+  }, sessionId);
+  cdp.on('Audits.issueAdded', ({ issue }) => {
+    if (issue.code === 'ContentSecurityPolicyIssue') state.cspIssues.push(issue.details?.contentSecurityPolicyIssueDetails ?? issue);
+  }, sessionId);
   await cdp.call('Page.enable', {}, sessionId);
   await cdp.call('Runtime.enable', {}, sessionId);
   await cdp.call('Network.enable', {}, sessionId);
+  await cdp.call('Log.enable', {}, sessionId);
+  await cdp.call('Audits.enable', {}, sessionId);
+  await cdp.call('Runtime.addBinding', { name: '__decompRecordCspViolation' }, sessionId);
+  await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `addEventListener('securitypolicyviolation', event => {
+    globalThis.__decompRecordCspViolation(JSON.stringify({
+      blockedURI: event.blockedURI, columnNumber: event.columnNumber, disposition: event.disposition,
+      documentURI: event.documentURI, effectiveDirective: event.effectiveDirective,
+      lineNumber: event.lineNumber, originalPolicy: event.originalPolicy,
+      sourceFile: event.sourceFile, statusCode: event.statusCode, violatedDirective: event.violatedDirective,
+    }));
+  });` }, sessionId);
   await cdp.call('Network.setCacheDisabled', { cacheDisabled: true }, sessionId);
   await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false }, sessionId);
   return state;
+}
+
+function targetCspViolationCount(target) {
+  return target.cspViolations.length + target.cspLogEntries.length + target.cspBlockedRequests.length + target.cspIssues.length;
+}
+
+function cspEvidence() {
+  const productTargets = targets.filter((target) => !target.cspProbe);
+  const inspectedTargets = productTargets.map((target) => ({
+    documentRoutes: [...new Set(target.requests.filter((request) => request.type === 'Document').map((request) => new URL(request.url).pathname))],
+    documentPolicies: target.responses.filter((response) => response.type === 'Document').map((response) => ({
+      route: new URL(response.url).pathname, status: response.status, contentSecurityPolicy: response.contentSecurityPolicy,
+    })),
+    violationEvents: target.cspViolations,
+    securityLogEntries: target.cspLogEntries,
+    blockedRequests: target.cspBlockedRequests,
+    auditIssues: target.cspIssues,
+  }));
+  const documentPolicies = inspectedTargets.flatMap((target) => target.documentPolicies);
+  return safeEvidence({
+    inspectedTargets,
+    attachedTargetCount: inspectedTargets.length,
+    inspectedTargetCount: inspectedTargets.filter((target) => target.documentRoutes.length > 0).length,
+    documentResponseCount: documentPolicies.length,
+    missingPolicyDocuments: documentPolicies.filter((response) => !response.contentSecurityPolicy),
+    unsafePolicyDocuments: documentPolicies.filter((response) => /'unsafe-(?:inline|eval)'/.test(response.contentSecurityPolicy ?? '')),
+    violationCount: productTargets.reduce((count, target) => count + targetCspViolationCount(target), 0),
+    signals: ['SecurityPolicyViolationEvent', 'Log.entryAdded', 'Network.loadingFailed', 'Audits.issueAdded'],
+  });
+}
+
+async function qualifyCspDetector() {
+  const probe = await makeTarget({ cspProbe: true });
+  const html = "<!doctype html><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'none'\"><p id=\"probe-ready\">ready</p><script>globalThis.__cspProbeExecuted=true</script>";
+  await cdp.call('Page.navigate', { url: `data:text/html;charset=utf-8,${encodeURIComponent(html)}` }, probe.sessionId);
+  await ready(probe, `document.querySelector('#probe-ready')?.textContent === 'ready'`, 'CSP detector positive control');
+  await waitFor(() => targetCspViolationCount(probe) > 0, 'CSP detector signal');
+  assert.ok(await evaluate(probe, `typeof globalThis.__cspProbeExecuted === 'undefined'`), 'CSP detector probe script executed');
+  return { blockedInlineScript: true, observedSignalCount: targetCspViolationCount(probe),
+    signals: { violationEvents: probe.cspViolations.length, securityLogEntries: probe.cspLogEntries.length,
+      blockedRequests: probe.cspBlockedRequests.length, auditIssues: probe.cspIssues.length } };
 }
 
 async function evaluate(target, expression) {
@@ -333,9 +426,11 @@ try {
   cdp = new Protocol(socket);
   report.browser = await cdp.call('Browser.getVersion');
   report.browserSandboxDisabled = values['no-sandbox'];
+  report.cspDetectorProbe = await qualifyCspDetector();
   if (legacyFixture) {
     const tab = await makeTarget();
     const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find(part => part.startsWith(origin + '/login#bootstrap=')), 'legacy local bootstrap handoff');
+    sensitiveValues.push(new URL(bootstrapUrl).hash.slice('#bootstrap='.length));
     report.legacy = await qualifyLegacy({ fixture: legacyFixture, origin, bootstrapUrl, tab, cdp, evaluate, ready, makeTarget });
     report.requests.legacy = tab.requests;
   }
@@ -477,6 +572,22 @@ try {
     report.runtime = { identity: runtimeIdentity, lazyChunk: runtimeAsset.path, responseStatus: 200 };
     console.log('Packaged home, CSS/icon, lazy Runtime and exact manifest identities verified.');
 
+    const boundary = await makeTarget();
+    const missingRoute = '/nested/not-a-packaged-route';
+    await cdp.call('Page.navigate', { url: origin + '/nested/' }, boundary.sessionId);
+    await ready(boundary, `document.querySelector('h1')?.textContent === 'Your work, with its evidence'`, 'not-found fixture home');
+    await evaluate(boundary, `history.pushState({}, '', '${missingRoute}'); dispatchEvent(new PopStateEvent('popstate'))`);
+    await ready(boundary, `document.querySelector('h1')?.textContent === 'This page could not be found'`, 'packaged client not-found route');
+    await cdp.call('Page.reload', {}, boundary.sessionId);
+    await ready(boundary, `document.readyState === 'complete' && document.body.innerText.length > 0`, 'inert missing-route reload');
+    assert.ok(boundary.responses.some((response) => response.url === origin + missingRoute && response.status === 404));
+    const inertRoute = '/nested/api/v1/bootstrap';
+    await cdp.call('Page.navigate', { url: origin + inertRoute }, boundary.sessionId);
+    await ready(boundary, `document.contentType === 'application/json' && document.body.innerText.length > 0`, 'inert API navigation');
+    assert.ok(boundary.responses.some((response) => response.url === origin + inertRoute && response.status === 401));
+    assert.deepEqual(boundary.exceptions, []);
+    report.routeBoundaries = { notFoundClientNavigation: true, missingRouteReloadInert: true, inertJsonNavigation: true };
+
     const recovery = await makeTarget();
     const interceptionErrors = [];
     let intercepted = 0;
@@ -518,7 +629,7 @@ try {
     assert.equal(await fs.stat(data).then(() => true, () => false), populated, 'Public SPA browsing changed job-root existence');
     report.recovery = { interceptedLazyChunk: runtimeAsset.path, simulatedStatus: 404, warningCount: warning.notices, observationSeconds: 5, automaticReloads: 0, automaticChunkRetries: 0, explicitReloadDocumentRequests: 1, recoveredRuntime: true, mutationRequests: 0, noticeTitleWithinViewport: true };
     report.jobDataCreated = false;
-    report.requests = { normal: home.requests, recovery: recovery.requests };
+    report.requests = { normal: home.requests, boundary: boundary.requests, recovery: recovery.requests };
   }
 
   if (values.mode === 'proxy') {
@@ -759,6 +870,16 @@ try {
     report.requests.authenticated = authenticated.requests;
   }
 
+  // Let the final DevTools events drain before taking the evidence snapshot.
+  await delay(100);
+  report.contentSecurityPolicy = cspEvidence();
+  assert.equal(report.contentSecurityPolicy.violationCount, 0,
+    `Browser observed CSP violations: ${JSON.stringify(report.contentSecurityPolicy.inspectedTargets)}`);
+  assert.ok(report.contentSecurityPolicy.documentResponseCount > 0, 'No packaged Document response was inspected for CSP');
+  if (values.mode !== 'proxy') assert.deepEqual(report.contentSecurityPolicy.missingPolicyDocuments, [],
+    'A packaged production Document response omitted CSP');
+  assert.deepEqual(report.contentSecurityPolicy.unsafePolicyDocuments, [],
+    'A packaged Document response enabled unsafe-inline or unsafe-eval');
   assert.deepEqual(await snapshot(installation.app), installation.before, 'Read-only installation bytes changed');
   report.installationUnchanged = true;
 
@@ -766,6 +887,7 @@ try {
 
 } catch (error) {
   report.status = 'failed';
+  report.contentSecurityPolicy = cspEvidence();
   report.error = safeDiagnostic(error.stack);
   report.applicationError = safeDiagnostic(applicationError);
   report.browserError = safeDiagnostic(browserError);

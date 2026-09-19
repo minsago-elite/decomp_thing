@@ -125,6 +125,17 @@ inert navigation policy. Both classes consistently use `nosniff`,
 sandboxed. Served source/report/log bytes are plain text or attachments,
 including files whose names suggest active content (#176/#189).
 
+The packaged-browser gate records `SecurityPolicyViolationEvent`, matching
+Chrome security-log entries, CSP-blocked network requests and CSP audit issues
+for every attached application page. It first proves those listeners with an
+isolated inline-script violation, then excludes that positive control from the
+application total. Every production document navigation must expose a CSP
+header without `unsafe-inline` or `unsafe-eval`; the retained report identifies
+the exact routes and policies inspected. Bootstrap values are redacted before
+any violation detail is persisted. The current bundle creates no browser worker,
+so worker execution remains a packaging-policy bound rather than a claimed
+runtime qualification.
+
 Job metadata stores logical IDs and server-relative owned paths. Reopening old
 metadata never trusts its stored absolute `binary_path` for authorization. File
 services resolve IDs through an immutable manifest beneath an owned job/revision
