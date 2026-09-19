@@ -25,7 +25,8 @@ export class ApiClientError extends Error {
 const canonicalRequestId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export function apiFailureReference(error: unknown): string | undefined {
-  return error instanceof ApiClientError && error.requestId && canonicalRequestId.test(error.requestId)
+  return error instanceof ApiClientError && error.status !== undefined && error.status >= 400 && error.status <= 599
+    && error.requestId && canonicalRequestId.test(error.requestId)
     ? error.requestId : undefined;
 }
 

@@ -23,6 +23,9 @@ it.each([
 
 it('omits absent IDs and private response metadata', () => {
   expect(withApiFailureReference(message, new ApiClientError('network_error'))).toBe(message);
+  expect(withApiFailureReference(message, new ApiClientError('invalid_response', { status: 200, requestId: canonical }))).toBe(message);
   const failure = new ApiClientError('http_error', { requestId: canonical, serverCode: 'PRIVATE_DIAGNOSTIC' });
-  expect(withApiFailureReference(message, failure)).not.toContain('PRIVATE_DIAGNOSTIC');
+  expect(withApiFailureReference(message, failure)).toBe(message);
+  const loggedFailure = new ApiClientError('http_error', { status: 500, requestId: canonical, serverCode: 'PRIVATE_DIAGNOSTIC' });
+  expect(withApiFailureReference(message, loggedFailure)).not.toContain('PRIVATE_DIAGNOSTIC');
 });

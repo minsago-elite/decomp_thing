@@ -428,7 +428,8 @@ class UploadServer(
 
     private fun handleAuthenticationInspection(exchange: HttpExchange) {
         if (exchange.requestHeaders.getFirst("X-Decomp-Operator-Action") != "inspect-auth") {
-            exchange.sendJson(400, "{\"error\":\"Explicit operator inspection is required.\"}")
+            sendCorrelatedLegacyJsonProblem(exchange, 400, "OPERATOR_INSPECTION_REJECTED",
+                "{\"error\":\"Explicit operator inspection is required.\"}", requestDiagnosticOutput)
             return
         }
         val admission = synchronized(authenticationInspectionLock) {
@@ -464,7 +465,10 @@ class UploadServer(
                 }
             }
         }
-        exchange.sendJson(admission.first, admission.second)
+        if (admission.first >= 400) sendCorrelatedLegacyJsonProblem(exchange, admission.first,
+            if (admission.first == 503) "OPERATOR_INSPECTION_UNAVAILABLE" else "OPERATOR_INSPECTION_REJECTED",
+            admission.second, requestDiagnosticOutput)
+        else exchange.sendJson(admission.first, admission.second)
     }
 
     private fun authenticationInspectionSnapshot(result: String? = null): String = synchronized(authenticationInspectionLock) {
@@ -500,7 +504,8 @@ class UploadServer(
 
     private fun handleAuthenticationCancellation(exchange: HttpExchange) {
         if (exchange.requestHeaders.getFirst("X-Decomp-Operator-Action") != "cancel-auth-inspection") {
-            exchange.sendJson(400, "{\"error\":\"Explicit operator cancellation is required.\"}")
+            sendCorrelatedLegacyJsonProblem(exchange, 400, "OPERATOR_INSPECTION_REJECTED",
+                "{\"error\":\"Explicit operator cancellation is required.\"}", requestDiagnosticOutput)
             return
         }
         val requestedId = exchange.requestHeaders["X-Decomp-Inspection-Id"]?.singleOrNull()
@@ -518,7 +523,9 @@ class UploadServer(
                 }
             }
         }
-        exchange.sendJson(response.first, response.second)
+        if (response.first >= 400) sendCorrelatedLegacyJsonProblem(exchange, response.first,
+            "OPERATOR_INSPECTION_REJECTED", response.second, requestDiagnosticOutput)
+        else exchange.sendJson(response.first, response.second)
     }
 
     private fun routeAdmitted(exchange: HttpExchange) {
@@ -688,7 +695,7 @@ class UploadServer(
 
     private fun handlePostJob(exchange: HttpExchange) {
         try {
-            handleUploadRequest(exchange, jobs)
+            handleUploadRequest(exchange, jobs, requestDiagnosticOutput)
         } catch (exception: InvalidUploadException) {
             legacyError(exchange, 400, "INVALID_UPLOAD", "Upload a supported Linux ELF binary.", requestDiagnosticOutput) {
                 renderErrorPage(400, "Unsupported binary", "Upload a supported Linux ELF binary.")
@@ -816,7 +823,11 @@ private fun webOrigin(host: String, port: Int): String {
 }
 
 /** Shared HTTP upload handler; the server owns admission and general error redaction around it. */
-internal fun handleUploadRequest(exchange: HttpExchange, jobs: WebJobService) {
+internal fun handleUploadRequest(
+    exchange: HttpExchange,
+    jobs: WebJobService,
+    requestDiagnosticOutput: (String) -> Unit = System.err::println,
+) {
     try {
         val declaredLength = exchange.requestHeaders.getFirst("Content-Length")?.toLongOrNull()
         require(declaredLength == null || declaredLength <= MAX_UPLOAD_BYTES) { "upload exceeds the 32 MiB limit" }
@@ -832,7 +843,8 @@ internal fun handleUploadRequest(exchange: HttpExchange, jobs: WebJobService) {
         if (exception.code != "RECOVERY_REQUIRED" || uncertain == null) throw exception
         exchange.responseHeaders.set("Location", "/jobs/${uncertain.jobId}")
         if (exchange.requestsLegacyJson()) {
-            exchange.sendJson(409, uploadPublicationProblem(uncertain.jobId).toString())
+            sendCorrelatedLegacyJsonProblem(exchange, 409, "RECOVERY_REQUIRED",
+                uploadPublicationProblem(uncertain.jobId).toString(), requestDiagnosticOutput)
         } else {
             exchange.sendHtml(409, renderUploadPublicationUncertainPage(uncertain.jobId))
         }
