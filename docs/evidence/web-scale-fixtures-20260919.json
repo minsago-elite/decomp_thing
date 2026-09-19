@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "issue": 606,
+  "parentIssue": 214,
+  "sourceCommit": "21fab3a4928467803e49f4efb89c5776cf977072",
+  "generatedArtifactCommitted": false,
+  "profileSha256": "99796b1ddc6483754dd4221315eafb0ca03d58aaa7cf1219bccd589b0fa3e47c",
+  "manifestSha256": "57f35b13a4697863797ff8522086da464e012aaafa3cb2ada8dcdce19cc6e16a",
+  "payloadFiles": 10,
+  "payloadBytesPerRun": "144274904",
+  "independentGenerationRunsPerTest": 2,
+  "dataShape": {
+    "jobs": 10000,
+    "functions": 100000,
+    "sourceFiles": 25000,
+    "largeSourceBytes": 8388608,
+    "longLineBytes": 262144,
+    "logBytes": 67108864,
+    "events": 120000,
+    "historyEntries": 10000,
+    "changedFiles": 2000,
+    "refs": 200
+  },
+  "checks": [
+    "Two independently generated manifest byte sequences and streaming-verified payload summaries matched exactly.",
+    "Every generated payload matched its declared SHA-256 and byte length; NDJSON line counts matched the profile.",
+    "Representative first and last job, function, source and event records matched fixed synthetic identities and ordering.",
+    "A preexisting output directory was rejected without changing its manifest.",
+    "One modified payload was rejected while the independent control remained valid."
+  ],
+  "localVerification": [
+    {
+      "command": "/home/june/.bun/bin/bun test scripts/web-scale-fixtures.test.mjs",
+      "runtime": "Bun 1.3.1",
+      "result": "1 passed, 0 failed"
+    },
+    {
+      "command": "/tmp/decomp-node-24/bin/node --test scripts/web-scale-fixtures.test.mjs",
+      "runtime": "Node 24.20.0",
+      "result": "1 passed, 0 failed",
+      "note": "The sandbox denied the first nested Node process with EPERM; the same test passed when rerun with the required execution permission."
+    }
+  ],
+  "ciWired": true,
+  "ciResultAtCheckpoint": "not run on this unpushed branch",
+  "mergedBehaviorVerified": false,
+  "productionQualified": false,
+  "limitations": [
+    "This proves synthetic payload reproducibility and corruption detection, not schema-valid API DTOs or adapter materialization.",
+    "No actual persisted source tree, managed Git repository or live native/model workflow was generated or benchmarked.",
+    "The complete #214 fixture-family and JVM/frontend round-trip requirements remain separate work."
+  ]
+}

@@ -37,6 +37,8 @@ jobs:
           python3 -m pip install --requirement requirements/oracle-generation.txt
       - name: Validate versioned web contract fixtures
         run: python3 contracts/web/v1/verify.py | tee "$RUNNER_TEMP/frontend-ci/contracts.txt"
+      - name: Verify generated large web fixtures
+        run: node --test scripts/web-scale-fixtures.test.mjs | tee "$RUNNER_TEMP/frontend-ci/scale-fixtures-tests.txt"
       - name: Type-check frontend source and tests
         run: npm --prefix frontend run typecheck
       - name: Lint frontend source and tests
@@ -45,6 +47,8 @@ jobs:
         run: |
           npm --prefix frontend test -- --reporter=default --reporter=junit \
             --outputFile.junit="$RUNNER_TEMP/frontend-ci/component-tests.xml"
+      - name: Verify isolated Git and GitHub fixtures
+        run: node --test scripts/web-git-fixtures.test.mjs scripts/web-github-fixture-http.test.mjs | tee "$RUNNER_TEMP/frontend-ci/git-fixtures-tests.txt"
       - name: Build and verify the production asset inventory
         run: |
           npm --prefix frontend run build

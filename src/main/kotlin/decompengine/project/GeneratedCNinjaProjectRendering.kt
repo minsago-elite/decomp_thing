@@ -21,7 +21,9 @@ internal class GeneratedCNinjaProjectRendering(model: RecoveredProgramModel, pla
             rule verify_sources
               command = test "${'$'}${'$'}(find src -type f -name '*.c' | LC_ALL=C sort | tr '\n' ' ')" = '${sources.joinToString(" ")} '
               description = [inputs] Verify owned source inventory
-            build verify-sources: verify_sources
+            build force-verify-sources: phony
+            build verify-sources: verify_sources force-verify-sources
+
             rule compile
               command = ${'$'}cc ${'$'}cflags ${'$'}mappings -MMD -MF ${'$'}out.d -c ${'$'}in -o ${'$'}out
               depfile = ${'$'}out.d

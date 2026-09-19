@@ -1596,13 +1596,14 @@ val verifyKotlinBootClasspathDistribution = tasks.register("verifyKotlinBootClas
 
 val verifyReconstructionNeutrality = tasks.register<Exec>("verifyReconstructionNeutrality") {
     group = "verification"
-    description = "Checks declared generic surfaces and benchmark ownership without running project code (draft gate: not wired into check until the initial-run findings migrate)"
+    description = "Checks declared generic surfaces and benchmark ownership without running project code"
     // The scanner includes untracked, nonignored sources and validates stale exceptions on every run.
     commandLine("python3", "-B", "scripts/check-generic-leakage.py")
     workingDir(rootDir)
 }
 
 tasks.named("check") {
+    dependsOn(verifyReconstructionNeutrality)
     dependsOn(testFrontendAssetManifest)
     dependsOn(verifyPackagedWeb)
     dependsOn(verifyAcpGateHelperDistribution)
