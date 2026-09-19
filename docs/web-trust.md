@@ -89,11 +89,13 @@ forwarding headers (#155). The dev fixture server has no production credentials.
 
 ## Text, files and secrets
 
-The SPA inserts content as text nodes. Source highlighting works on escaped
-tokens; no `innerHTML`, executable Markdown, SVG/HTML preview, data-URL document
-embedding or automatic external-image loading. Untrusted external links require
-explicit user navigation and use `noopener noreferrer`; reject non-HTTP(S)
-schemes. Content cannot name JavaScript modules, CSS resources or worker URLs.
+The SPA inserts content as text nodes. The current legacy source view escapes
+generated source into plain `<pre><code>` text; there is no syntax-highlighter
+dependency or SPA source route yet. No `innerHTML`, executable Markdown,
+SVG/HTML preview, data-URL document embedding or automatic external-image
+loading is granted. Untrusted external links require explicit user navigation
+and use `noopener noreferrer`; reject non-HTTP(S) schemes. Content cannot name
+JavaScript modules, CSS resources or worker URLs.
 
 Production CSP restricts default/script/style/connect/worker to the application
 origin, denies objects, framing and base URI, and limits forms to self. The SPA
@@ -117,9 +119,11 @@ and remote fonts remain denied. The current production bundle emits no worker or
 downloadable font, but keeping those directives aligned with the packaging
 contract permits only future reviewed, manifest-owned same-origin outputs.
 
-Application documents receive that executable policy. Static assets, JSON,
-errors, redirects, event streams, source/report bytes and downloads receive an
-inert navigation policy. Both classes consistently use `nosniff`,
+SPA and legacy application documents, including rendered HTML error pages,
+receive that application policy; legacy pages authorize only their inventoried
+adapter scripts. Static assets, JSON and other non-HTML errors, redirects,
+event streams, source/report bytes and downloads receive the inert navigation
+policy. Both classes consistently use `nosniff`,
 `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and CSP
 `frame-ancestors 'none'`; generated downloadable material additionally remains
 sandboxed. Served source/report/log bytes are plain text or attachments,
@@ -127,9 +131,10 @@ including files whose names suggest active content (#176/#189).
 
 The packaged-browser gate records `SecurityPolicyViolationEvent`, matching
 Chrome security-log entries, CSP-blocked network requests and CSP audit issues
-for every attached application page. It first proves those listeners with an
-isolated inline-script violation, then excludes that positive control from the
-application total. Every production document navigation must expose a CSP
+for every attached application page. It first proves all four listeners with
+isolated inline-script and blocked-external-image violations, then excludes
+that positive control from the application total. Every production document
+request, including redirects, must correlate to a response with a CSP
 header without `unsafe-inline` or `unsafe-eval`; the retained report identifies
 the exact routes and policies inspected. Bootstrap values are redacted before
 any violation detail is persisted. The current bundle creates no browser worker,

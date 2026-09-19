@@ -201,27 +201,65 @@ async function connectDevTools(url, timeoutMs = 15000) {
   }
 }
 
+function responseHeader(response, name) {
+  const value = Object.entries(response.headers ?? {}).find(([candidate]) => candidate.toLowerCase() === name)?.[1];
+  return value === undefined ? null : String(value);
+}
+
+function responseSummary(response, source) {
+  return { responseRoute: new URL(response.url.split('#')[0].split('?')[0]).pathname,
+    status: response.status, contentSecurityPolicy: responseHeader(response, 'content-security-policy'), source };
+}
+
+function correlateDocumentResponse(state, requestId, response, source) {
+  const request = state.pendingDocumentRequests.get(requestId);
+  const summary = responseSummary(response, source);
+  if (!request) {
+    state.orphanDocumentResponses.push(summary);
+    return;
+  }
+  Object.assign(request, summary);
+  state.pendingDocumentRequests.delete(requestId);
+}
+
 async function makeTarget({ cspProbe = false } = {}) {
   const { targetId } = await cdp.call('Target.createTarget', { url: 'about:blank' });
   const { sessionId } = await cdp.call('Target.attachToTarget', { targetId, flatten: true });
   const state = { targetId, sessionId, cspProbe, requests: [], responses: [], exceptions: [], requestUrls: new Map(),
+    documentRequests: [], pendingDocumentRequests: new Map(), orphanDocumentResponses: [],
     cspViolations: [], cspLogEntries: [], cspBlockedRequests: [], cspIssues: [] };
   targets.push(state);
   if (!cspProbe) lastTarget = state;
   cdp.on('Network.requestWillBeSent', (event) => {
+    const priorDocument = state.pendingDocumentRequests.has(event.requestId);
+    if (event.redirectResponse && (event.type === 'Document' || priorDocument)) {
+      correlateDocumentResponse(state, event.requestId, event.redirectResponse, 'requestWillBeSent.redirectResponse');
+    }
+    const type = event.type ?? (priorDocument ? 'Document' : undefined);
     const url = event.request.url.split('#')[0].split('?')[0];
     state.requestUrls.set(event.requestId, url);
-    state.requests.push({ method: event.request.method, url, type: event.type });
+    state.requests.push({ method: event.request.method, url, type });
+    if (type === 'Document') {
+      const request = { requestId: event.requestId, sequence: state.documentRequests.length,
+        route: new URL(url).pathname, method: event.request.method, status: null,
+        contentSecurityPolicy: null, source: null, failure: null };
+      state.documentRequests.push(request);
+      state.pendingDocumentRequests.set(event.requestId, request);
+    }
   }, sessionId);
   cdp.on('Network.responseReceived', (event) => {
     const response = { url: event.response.url.split('#')[0].split('?')[0], status: event.response.status, type: event.type };
-    if (event.type === 'Document') {
-      response.contentSecurityPolicy = Object.entries(event.response.headers)
-        .find(([name]) => name.toLowerCase() === 'content-security-policy')?.[1] ?? null;
+    if (event.type === 'Document' || state.pendingDocumentRequests.has(event.requestId)) {
+      response.contentSecurityPolicy = responseHeader(event.response, 'content-security-policy');
+      correlateDocumentResponse(state, event.requestId, event.response, 'responseReceived');
     }
     state.responses.push(response);
   }, sessionId);
   cdp.on('Network.loadingFailed', (event) => {
+    if (event.type === 'Document') {
+      const request = state.pendingDocumentRequests.get(event.requestId);
+      if (request) request.failure = { errorText: event.errorText, blockedReason: event.blockedReason ?? null };
+    }
     if (event.blockedReason === 'csp') state.cspBlockedRequests.push({ requestId: event.requestId,
       url: state.requestUrls.get(event.requestId) ?? null, errorText: event.errorText,
       blockedReason: event.blockedReason, type: event.type });
@@ -265,22 +303,36 @@ function targetCspViolationCount(target) {
 
 function cspEvidence() {
   const productTargets = targets.filter((target) => !target.cspProbe);
-  const inspectedTargets = productTargets.map((target) => ({
-    documentRoutes: [...new Set(target.requests.filter((request) => request.type === 'Document').map((request) => new URL(request.url).pathname))],
-    documentPolicies: target.responses.filter((response) => response.type === 'Document').map((response) => ({
-      route: new URL(response.url).pathname, status: response.status, contentSecurityPolicy: response.contentSecurityPolicy,
-    })),
-    violationEvents: target.cspViolations,
-    securityLogEntries: target.cspLogEntries,
-    blockedRequests: target.cspBlockedRequests,
-    auditIssues: target.cspIssues,
-  }));
+  const inspectedTargets = productTargets.map((target) => {
+    const documentRequests = target.documentRequests.map(({ requestId: _requestId, ...request }) => request);
+    return {
+      documentRoutes: [...new Set(documentRequests.map((request) => request.route))],
+      documentRequests,
+      documentPolicies: documentRequests.filter((request) => request.source !== null),
+      unresolvedDocumentRequests: documentRequests.filter((request) => request.source === null),
+      orphanDocumentResponses: target.orphanDocumentResponses,
+      violationEvents: target.cspViolations,
+      securityLogEntries: target.cspLogEntries,
+      blockedRequests: target.cspBlockedRequests,
+      auditIssues: target.cspIssues,
+    };
+  });
+  const documentRequests = inspectedTargets.flatMap((target) => target.documentRequests);
   const documentPolicies = inspectedTargets.flatMap((target) => target.documentPolicies);
+  const unresolvedDocumentRequests = inspectedTargets.flatMap((target, targetIndex) =>
+    target.unresolvedDocumentRequests.map((request) => ({ targetIndex, ...request })));
+  const orphanDocumentResponses = inspectedTargets.flatMap((target, targetIndex) =>
+    target.orphanDocumentResponses.map((response) => ({ targetIndex, ...response })));
   return safeEvidence({
     inspectedTargets,
     attachedTargetCount: inspectedTargets.length,
     inspectedTargetCount: inspectedTargets.filter((target) => target.documentRoutes.length > 0).length,
+    documentRequestCount: documentRequests.length,
     documentResponseCount: documentPolicies.length,
+    unresolvedDocumentRequestCount: unresolvedDocumentRequests.length,
+    unresolvedDocumentRequests,
+    orphanDocumentResponseCount: orphanDocumentResponses.length,
+    orphanDocumentResponses,
     missingPolicyDocuments: documentPolicies.filter((response) => !response.contentSecurityPolicy),
     unsafePolicyDocuments: documentPolicies.filter((response) => /'unsafe-(?:inline|eval)'/.test(response.contentSecurityPolicy ?? '')),
     violationCount: productTargets.reduce((count, target) => count + targetCspViolationCount(target), 0),
@@ -290,12 +342,16 @@ function cspEvidence() {
 
 async function qualifyCspDetector() {
   const probe = await makeTarget({ cspProbe: true });
-  const html = "<!doctype html><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'none'\"><p id=\"probe-ready\">ready</p><script>globalThis.__cspProbeExecuted=true</script>";
+  const blockedImage = 'http://127.0.0.1/__csp_probe_blocked_image';
+  const html = `<!doctype html><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; img-src 'none'"><p id="probe-ready">ready</p><script>globalThis.__cspProbeExecuted=true</script><img src="${blockedImage}">`;
   await cdp.call('Page.navigate', { url: `data:text/html;charset=utf-8,${encodeURIComponent(html)}` }, probe.sessionId);
   await ready(probe, `document.querySelector('#probe-ready')?.textContent === 'ready'`, 'CSP detector positive control');
-  await waitFor(() => targetCspViolationCount(probe) > 0, 'CSP detector signal');
+  await waitFor(() => probe.cspViolations.length > 0 && probe.cspLogEntries.length > 0 &&
+    probe.cspBlockedRequests.length > 0 && probe.cspIssues.length > 0, 'all four CSP detector signals');
   assert.ok(await evaluate(probe, `typeof globalThis.__cspProbeExecuted === 'undefined'`), 'CSP detector probe script executed');
-  return { blockedInlineScript: true, observedSignalCount: targetCspViolationCount(probe),
+  assert.ok(probe.cspBlockedRequests.some((request) => request.url === blockedImage),
+    'CSP did not block the positive-control external image');
+  return { blockedInlineScript: true, blockedExternalImage: true, observedSignalCount: targetCspViolationCount(probe),
     signals: { violationEvents: probe.cspViolations.length, securityLogEntries: probe.cspLogEntries.length,
       blockedRequests: probe.cspBlockedRequests.length, auditIssues: probe.cspIssues.length } };
 }
@@ -586,7 +642,18 @@ try {
     await ready(boundary, `document.contentType === 'application/json' && document.body.innerText.length > 0`, 'inert API navigation');
     assert.ok(boundary.responses.some((response) => response.url === origin + inertRoute && response.status === 401));
     assert.deepEqual(boundary.exceptions, []);
-    report.routeBoundaries = { notFoundClientNavigation: true, missingRouteReloadInert: true, inertJsonNavigation: true };
+    const redirect = await makeTarget();
+    await cdp.call('Page.navigate', { url: origin + '/nested/runtime/' }, redirect.sessionId);
+    await ready(redirect, `location.pathname === '/nested/runtime' && document.querySelector('h1')?.textContent === 'Runtime status'`, 'packaged canonical route redirect');
+    const redirectHops = redirect.documentRequests;
+    assert.equal(redirectHops.length, 2, 'Canonical route redirect did not produce two Document request hops');
+    assert.deepEqual(redirectHops.map((hop) => [hop.route, hop.status, hop.source]), [
+      ['/nested/runtime/', 308, 'requestWillBeSent.redirectResponse'],
+      ['/nested/runtime', 200, 'responseReceived'],
+    ]);
+    assert.deepEqual(redirect.exceptions, []);
+    report.routeBoundaries = { notFoundClientNavigation: true, missingRouteReloadInert: true,
+      inertJsonNavigation: true, canonicalRedirectDocumentHops: 2 };
 
     const recovery = await makeTarget();
     const interceptionErrors = [];
@@ -629,7 +696,7 @@ try {
     assert.equal(await fs.stat(data).then(() => true, () => false), populated, 'Public SPA browsing changed job-root existence');
     report.recovery = { interceptedLazyChunk: runtimeAsset.path, simulatedStatus: 404, warningCount: warning.notices, observationSeconds: 5, automaticReloads: 0, automaticChunkRetries: 0, explicitReloadDocumentRequests: 1, recoveredRuntime: true, mutationRequests: 0, noticeTitleWithinViewport: true };
     report.jobDataCreated = false;
-    report.requests = { normal: home.requests, boundary: boundary.requests, recovery: recovery.requests };
+    report.requests = { normal: home.requests, boundary: boundary.requests, redirect: redirect.requests, recovery: recovery.requests };
   }
 
   if (values.mode === 'proxy') {
@@ -875,7 +942,13 @@ try {
   report.contentSecurityPolicy = cspEvidence();
   assert.equal(report.contentSecurityPolicy.violationCount, 0,
     `Browser observed CSP violations: ${JSON.stringify(report.contentSecurityPolicy.inspectedTargets)}`);
-  assert.ok(report.contentSecurityPolicy.documentResponseCount > 0, 'No packaged Document response was inspected for CSP');
+  assert.ok(report.contentSecurityPolicy.documentRequestCount > 0, 'No packaged Document request was inspected for CSP');
+  assert.equal(report.contentSecurityPolicy.documentResponseCount, report.contentSecurityPolicy.documentRequestCount,
+    'Not every packaged Document request was correlated to a response');
+  assert.deepEqual(report.contentSecurityPolicy.unresolvedDocumentRequests, [],
+    'A packaged Document request did not receive a correlated response');
+  assert.deepEqual(report.contentSecurityPolicy.orphanDocumentResponses, [],
+    'A packaged Document response did not correlate to its request');
   if (values.mode !== 'proxy') assert.deepEqual(report.contentSecurityPolicy.missingPolicyDocuments, [],
     'A packaged production Document response omitted CSP');
   assert.deepEqual(report.contentSecurityPolicy.unsafePolicyDocuments, [],
