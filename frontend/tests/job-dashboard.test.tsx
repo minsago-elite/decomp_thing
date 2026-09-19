@@ -165,10 +165,35 @@ it('opens an authenticated durable job deep link and clears metadata on logout',
     expect(await screen.findByRole('heading', { name: 'program-3.elf' })).toBeTruthy();
     expect(screen.getByText(selected.binary.entryPoint)).toBeTruthy();
     expect(screen.getByText(selected.sizeBytes + ' bytes')).toBeTruthy();
+    expect(screen.getByText('Not reported by the job API')).toBeTruthy();
+    expect(screen.getByText(/a report-artifact digest identifies different bytes/)).toBeTruthy();
     expect(transport.get).toHaveBeenCalledWith('job', '/jobs/' + selected.jobId, expect.anything());
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     expect(await screen.findByText('Connect a local session to view this job.')).toBeTruthy();
     expect(screen.queryByText('program-3.elf')).toBeNull();
+  } finally { session.dispose(); }
+});
+
+it.each([
+  new ApiClientError('http_error', { status: 503, serverCode: 'CORRUPT_LEGACY_JOB' }),
+  new ApiClientError('invalid_response'),
+])('shows a metadata limitation without fabricated binary values for %s', async failure => {
+  const bootstrap = (JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap }).data;
+  const session = createBrowserSession({
+    bootstrap: () => Promise.resolve({ ...bootstrap, basePath: '/nested/', sessionExpiresAt: new Date(Date.now() + 60000).toISOString() }),
+    exchange: vi.fn(), logout: () => Promise.resolve(),
+  }, '/nested');
+  const selected = job(3);
+  transport.get.mockRejectedValue(failure);
+  history.replaceState(null, '', '/nested/jobs/' + selected.jobId);
+  try {
+    await session.initialize({ kind: 'absent' });
+    render(<App basePath="/nested" session={session} />);
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent',
+      'Stored job metadata is unavailable or malformed. No binary facts can be shown; inspect job storage or retry after repair.');
+    expect(screen.queryByText('Binary metadata')).toBeNull();
+    expect(screen.queryByText('Entry address')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Refresh job' })).toBeTruthy();
   } finally { session.dispose(); }
 });
 
@@ -180,9 +205,9 @@ it('keeps exact row metadata and separates completion from accepted revisions', 
   const link = await screen.findByRole('link', { name: item.displayFilename });
   const row = within(link.closest('li')!);
   expect(row.getByText(item.sizeBytes + ' bytes')).toBeTruthy();
-  expect(row.getByText(item.createdAt)).toBeTruthy();
-  expect(row.getByText(item.updatedAt)).toBeTruthy();
-  expect(row.getByText('completed')).toBeTruthy();
+  expect(row.getByText('2026-09-05 00:00:00 UTC')).toHaveProperty('dateTime', item.createdAt);
+  expect(row.getByText('2026-09-05 01:00:00 UTC')).toHaveProperty('dateTime', item.updatedAt);
+  expect(row.getByText('Completed')).toBeTruthy();
   expect(row.getByText('run_latest')).toBeTruthy();
   expect(row.getByText('revision_prior')).toBeTruthy();
   expect(screen.getByText('1 jobs on this page. No total count is available.')).toBeTruthy();
