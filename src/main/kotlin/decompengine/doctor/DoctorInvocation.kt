@@ -15,7 +15,6 @@ internal fun parseDoctorInvocation(args: List<String>, defaultOutput: Path): Doc
     var workflowOverride: AcpPreflightWorkflow? = null
     var output = defaultOutput
     var profile = ReconstructionProfiles.default
-    var showAuthMethods = false
     var index = 0
     fun nextValue(message: String): String = args.getOrNull(index + 1)
         ?: throw IllegalArgumentException(message)
@@ -43,10 +42,6 @@ internal fun parseDoctorInvocation(args: List<String>, defaultOutput: Path): Doc
             "--output" -> {
                 output = Path.of(nextValue("--output requires a directory"))
                 index += 2
-            }
-            "--auth-methods" -> {
-                showAuthMethods = true
-                index++
             }
             "--profile" -> {
                 profile = ReconstructionProfiles.named(nextValue("--profile requires a profile id"))
