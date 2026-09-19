@@ -38,6 +38,22 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class SourceTreeTest {
     @Test
+    fun `rerun with the other profile removes the stale build definition`() {
+        val project = createTempDirectory("source-tree-profile-rerun-")
+        val model = oneModuleModel()
+        val makeProfile = GeneratedCMakeReconstructionProfile.descriptor
+        val ninjaProfile = GeneratedCNinjaReconstructionProfile.descriptor
+        SourceTreeGenerator.generate(model, project, reconstructor = validReconstructor(), profile = makeProfile)
+        assertTrue(project.resolve("Makefile").exists())
+        SourceTreeGenerator.generate(model, project, reconstructor = validReconstructor(), profile = ninjaProfile)
+        assertTrue(project.resolve("build.ninja").exists())
+        assertFalse(project.resolve("Makefile").exists(), "make-to-ninja rerun must not retain a stale Makefile")
+        SourceTreeGenerator.generate(model, project, reconstructor = validReconstructor(), profile = makeProfile)
+        assertTrue(project.resolve("Makefile").exists())
+        assertFalse(project.resolve("build.ninja").exists(), "ninja-to-make rerun must not retain a stale build.ninja")
+    }
+
+    @Test
     fun `module cache binds binary identity and model schema while reusing unchanged inputs`() {
         val project = createTempDirectory("source-tree-model-identity-")
         var calls = 0

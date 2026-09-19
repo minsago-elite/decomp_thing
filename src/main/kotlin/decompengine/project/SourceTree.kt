@@ -897,6 +897,16 @@ object SourceTreeGenerator {
         val makefilePath = profile.layout.declaration("build-definition").materialize()
         val makefileFile = projectDir.resolve(makefilePath)
         makefileFile.parent.createDirectories()
+        // A project directory rerun with the other built-in profile must not retain
+        // the previous profile's build definition; the packager archives every
+        // regular file outside build/, so delete inactive registered build
+        // definitions before writing the selected one.
+        for (candidate in ReconstructionProfiles.builtIn) {
+            val stalePath = candidate.layout.declaration("build-definition").materialize()
+            if (stalePath != makefilePath) {
+                projectDir.resolve(stalePath).deleteIfExists()
+            }
+        }
         makefileFile.writeText(makefile)
         generated += evidence(profile, makefilePath, makefile, "planner", emptyList())
 
