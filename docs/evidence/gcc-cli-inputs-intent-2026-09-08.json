@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-09-08T12:22:12Z",
+  "issue": 979,
+  "status": "implementation-evidence-only",
+  "scope": "Bounded source and fixture audit for immutable normal-CLI input admission and authenticated GCC production intent. This record does not qualify a production engine run.",
+  "sourceCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "sourceSha256": {
+    "src/main/kotlin/decompengine/Main.kt": "33211d46124cc8b4e4f9afe173971cfcc599fdb55b4e1e44e6b918c46b720637",
+    "src/main/kotlin/decompengine/oracle/gcc/GccBundledCliCommand.kt": "3588017da3362901b43977f095b1e38427e03eeb0dcd36c47899f56fdeb7f35e",
+    "src/main/kotlin/decompengine/oracle/gcc/GccBundledCliInvocation.kt": "3c762e83552c38a3782771ad77ba7cde6ef2701df8c173322a79cbed2c18eba5",
+    "src/main/kotlin/decompengine/oracle/gcc/GccBundledCliIntentBuilder.kt": "3c6b99043026f700d1ebd1a22c431a94567fa97cf43351a022c99123ce0fc66c",
+    "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationInputs.kt": "b7d0ea4aafe7ecea0e1e478021fdaa24a58c64db7d46a905a956f1d1822656ca",
+    "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationIntent.kt": "8952e2153a3cca29cedd8e0c68d7bdaca0894a9371796abdcb43a3f7b669aa19",
+    "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationCoordinator.kt": "4ab8bc5bd7aaaddccd92a8317ecd2a9c79d86d794098623e58de6bae4df091a8",
+    "src/main/kotlin/decompengine/oracle/gcc/GccRetainedCompilerEngineProfile.kt": "c627a6b5dbcd35ae3e71742b06e709d6e2c517b770222ac3d43eb7f95844e663",
+    "src/test/kotlin/decompengine/oracle/gcc/GccBundledCliCommandTest.kt": "bc924f7a2cfb8de68d8fe96ec5aeaa40a304c56abeb24008d332e3528ca94362",
+    "src/test/kotlin/decompengine/oracle/gcc/GccBundledCliIntentBuilderTest.kt": "d46a3386592b1017fcc126a4888bb64758266f58403876a4468fa96fe4e9cf3c",
+    "src/test/kotlin/decompengine/oracle/gcc/GccBundledCliQualificationTest.kt": "8a4991cff779a9ef16c403c88ec6b6fe1df16090fa3d4d1d21e59a33114312b7",
+    "oracle/gcc/16.2.0/compiler-engines.json": "e0ca60b7e856e9330e45fd58e61828313e8dd824413ee0df7ef76ee5d2b47bdc",
+    "oracle/gcc/compiler-engines.schema.json": "2dca9dda70f95641c5cafd3dae0edc382a3d1b783daed94bfb74ed439932264b"
+  },
+  "sourceObservations": [
+    {
+      "criterion": "Immutable CLI inputs, output/journal identity, scratch selection, and resume selection are admitted before START",
+      "status": "present-in-current-code",
+      "reference": "src/main/kotlin/decompengine/Main.kt:52-65; src/main/kotlin/decompengine/oracle/gcc/GccBundledCliInvocation.kt:12-99; src/main/kotlin/decompengine/oracle/gcc/GccBundledCliCommand.kt:11-49",
+      "detail": "Parsing rejects duplicate, unknown, missing, malformed, and conflicting options; the command requires canonical paths and an empty mode-0700 output, creates private inputs/journal directories, and publishes no-replace invocation.json with directory identities before intent preparation. The invocation binds the exact argv and checkpoint threshold and rechecks identities."
+    },
+    {
+      "criterion": "Mismatched artifacts and unavailable containment inputs fail before execution authorization",
+      "status": "present-in-current-code",
+      "reference": "src/main/kotlin/decompengine/oracle/gcc/GccBundledCliIntentBuilder.kt:19-115; src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationInputs.kt:70-140; src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationCoordinator.kt:576-650",
+      "detail": "Preflight checks disjoint canonical roots, the selected engine and archive byte identities, the profile checkpoint bound, bundled deployment/tool paths, exact artifact roles, invocation bytes, and dedicated scratch admission before execute() can reach a contained START."
+    },
+    {
+      "criterion": "Production intent is derived from retained profile and bundled deployment references",
+      "status": "present-in-current-code",
+      "reference": "src/main/kotlin/decompengine/oracle/gcc/GccRetainedCompilerEngineProfile.kt:11-139; src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationIntent.kt:34-114; src/main/kotlin/decompengine/oracle/gcc/GccBundledCliIntentBuilder.kt:36-105",
+      "detail": "StableControlFile snapshots retain the profile closure, engine/source/tool inputs, planner identity/version, reconstruction policy and digests. Intent binding compares every required role and budget against the retained profile and embeds the derived planner policy; it does not use hosted fixture identity records."
+    }
+  ],
+  "fixtureObservations": [
+    {
+      "reference": "src/test/kotlin/decompengine/oracle/gcc/GccBundledCliCommandTest.kt:19-109",
+      "status": "focused-fixture-available",
+      "detail": "Authored temporary binary/profile/archive files and private output/scratch directories cover option conflicts, canonical directory replacement, exact checkpoint selection, mismatched binary rejection, and unreachable checkpoint rejection before staging or leasing."
+    },
+    {
+      "reference": "src/test/kotlin/decompengine/oracle/gcc/GccBundledCliIntentBuilderTest.kt:13-72",
+      "status": "focused-fixture-available",
+      "detail": "The current deployment reference fixture checks ordered BOOT identities and defensive manifest bytes; authored wrong-engine, linked-input, repeated-root, invalid-engine, and repeated-staging cases remain empty before publication."
+    },
+    {
+      "reference": "oracle/gcc/16.2.0/compiler-engines.json; oracle/gcc/compiler-engines.schema.json",
+      "status": "current-profile-fixture",
+      "detail": "The exact retained profile is GCC 16.2.0 for x86_64-linux-gnu with exporter version 10, Ghidra 12.1.3, deterministic-module-planner v1, and explicit export/planner ceilings used by the code references above."
+    },
+    {
+      "reference": "src/test/kotlin/decompengine/oracle/gcc/GccBundledCliQualificationTest.kt:22-77",
+      "status": "opt-in-qualification-boundary",
+      "detail": "The only real-engine fixture requires separately provisioned installation, profile, archive, cc1/lto1 binaries, four scratch mounts, and an evidence root; its comparison remains benchmarkAccepted=false and releaseEligible=false."
+    }
+  ],
+  "unverifiedCriteria": [
+    "No provisioned production invocation or installed-launcher cc1/lto1 run was executed for this record.",
+    "No denied containment-prerequisite run, stale profile/engine/archive/tool mutation run, or later-invocation cold-recovery run was executed.",
+    "The authored fixtures do not establish real production intent provenance, real compiler execution, or hosted CLI qualification.",
+    "No whole-operation wall-clock, RSS, cleanup, benchmark-acceptance, or release-eligibility qualification was performed; parent issue #291 remains open."
+  ],
+  "validation": {
+    "mode": "source-and-fixture-audit-only",
+    "checksRun": [
+      "jq -e . docs/evidence/gcc-cli-inputs-intent-2026-09-08.json",
+      "git diff --check"
+    ],
+    "testsRun": [],
+    "limitation": "No broad or runtime tests were run for this documentation checkpoint."
+  },
+  "disposition": {
+    "implementationStatus": "immutable normal-CLI admission and retained production-intent construction are present in the inspected current code",
+    "evidenceStatus": "bounded and incomplete",
+    "complete": false,
+    "benchmarkAccepted": false,
+    "releaseEligible": false
+  }
+}
