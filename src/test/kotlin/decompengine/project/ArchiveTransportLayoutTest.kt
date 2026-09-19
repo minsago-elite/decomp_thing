@@ -17,7 +17,7 @@ class ArchiveTransportLayoutTest {
             val required = policy.requiredPaths(profile)
             val buildDefinition = profile.layout.declaration("build-definition").materialize()
 
-            assertEquals(setOf("build"), layout.excludedOutputRoots)
+            assertEquals(setOf("build", ".ninja_log", ".ninja_deps"), layout.excludedOutputRoots)
             assertEquals(setOf("reports/build_contract.json"), layout.strictBuildControlPaths)
             assertTrue(buildDefinition in required)
             assertTrue("reports/build_contract.json" in required)
