@@ -628,7 +628,6 @@ private const val PLANNING_MAXIMUM_CANDIDATE_SOURCE_UNITS = 200_000
 private const val PLANNING_MAXIMUM_OUTPUT_RECORDS = 203_000
 private const val PLANNING_MAXIMUM_WORK_UNITS = 500_000L
 private const val PLANNING_MAXIMUM_SERIALIZED_BYTES = 32 * 1024 * 1024
-private val SHARD_ID = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
 private val PLANNING_POLICY = JsonObject(
     mapOf(
         "id" to JsonPrimitive(PLANNING_SCHEMA),
