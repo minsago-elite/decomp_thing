@@ -26,7 +26,7 @@ test('independent roots produce the same isolated diverged history and disposabl
       `${Date.parse('2026-01-01T00:00:01Z') / 1000}|${Date.parse('2026-01-01T00:00:01Z') / 1000}`);
     console.log(`web-git-fixture: ${JSON.stringify({ state: first.state, commits: first.commits, branches: first.branches })}`);
     assert.throws(() => first.git('outside', ['status']), /Invalid Git fixture command/);
-    assert.throws(() => first.git('local', ['fetch', 'https://example.invalid/no-network']), /Git fixture command failed/);
+    assert.throws(() => first.git('local', ['fetch', 'https://example.invalid/no-network']), /transport 'https' not allowed/);
     await writeFile(join(first.paths.local, '.git/hooks/pre-commit'), '#!/bin/sh\nexit 97\n');
     await chmod(join(first.paths.local, '.git/hooks/pre-commit'), 0o700);
     await writeFile(join(first.paths.local, 'hook-check.txt'), 'Synthetic hook isolation check.\n');
