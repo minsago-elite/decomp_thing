@@ -1606,8 +1606,7 @@ val verifyReconstructionNeutrality = tasks.register<Exec>("verifyReconstructionN
 tasks.named("check") {
     dependsOn(testFrontendAssetManifest)
     dependsOn(verifyPackagedWeb)
-    // verifyReconstructionNeutrality remains a standalone draft gate (#84) until
-    // the repository-wide ownership migration makes the scanner pass.
+    dependsOn(verifyReconstructionNeutrality)
     dependsOn(verifyAcpGateHelperDistribution)
     dependsOn(verifyLlvmBehaviorHelperDistribution)
     dependsOn(verifyKotlinBootClasspathDistribution)
