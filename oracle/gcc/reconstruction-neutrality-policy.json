@@ -120,6 +120,10 @@
     {
       "path": "src/main/kotlin/decompengine/project/LinuxGeneratedCRepairValidationBoundary.kt",
       "reason": "Linux generated-C repair build validation implementation."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/web/UploadServer.kt",
+      "reason": "Web upload orchestration owns the explicit compatibility profile and reconstruction adapter selection."
     }
   ],
   "allowances": [
@@ -290,6 +294,13 @@
       "fragment": "\"Makefile\"",
       "count": 1,
       "reason": "Intentional generated-C adapter policy literal required by the existing reconstruction contract."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/web/WebArchiveEvidence.kt",
+      "rule": "generic-layout",
+      "fragment": "\"build/reconstructed\"",
+      "count": 1,
+      "reason": "Legacy archive verification retains the established reconstructed artifact path while validating archived build evidence."
     }
   ],
   "benchmarkCatalog": "oracle/gcc/reconstruction-neutrality-identities.json"
