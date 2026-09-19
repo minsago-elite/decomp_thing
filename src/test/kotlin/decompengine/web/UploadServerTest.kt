@@ -15,7 +15,11 @@ import decompengine.project.RecoveredFunction
 import decompengine.project.MakeProjectBuilder
 import decompengine.project.ArchivalPackager
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.put
 import java.net.URI
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
@@ -193,6 +197,86 @@ class UploadServerTest {
         Files.delete(report)
         assertTrue(request(server, "GET", "/jobs/$id").body.decodeToString().contains("The exploration report is unavailable"))
         assertTrue(!report.exists())
+    }
+
+    @Test
+    fun `legacy report presentation treats every retained string as inert text`() = withServer { server, root ->
+        val id = uploadedJobId(server)
+        val original = decompengine.jobs.JobStore(root).get(id)
+        val marker = "\"><img src=x onerror=alert(1)>"
+        val exploration = buildJsonObject {
+            put("candidateCount", marker)
+            put("expandedOutputSignatures", marker)
+            put("newOutputSignatures", JsonArray(emptyList()))
+            put("candidates", JsonArray(listOf(buildJsonObject {
+                put("id", marker); put("source", marker); put("args", JsonArray(listOf(JsonPrimitive(marker))))
+                put("stdinHex", marker)
+            })))
+            put("observations", JsonArray(emptyList()))
+        }
+        val repair = buildJsonObject {
+            put("iterations", JsonArray(listOf(buildJsonObject {
+                put("index", marker); put("failureKind", marker); put("summary", marker); put("succeeded", false)
+            })))
+        }
+        val reconstruction = buildJsonObject {
+            put("phase", marker); put("completed", marker); put("total", marker); put("module", marker)
+        }
+        val html = renderJob(
+            original.copy(filename = marker, createdAt = marker, updatedAt = marker),
+            diagnostics = listOf(decompengine.jobs.WorkflowStoreDiagnostic(marker, marker)),
+            explorationReport = exploration,
+            repairHistory = repair,
+            reconstructionProgress = reconstruction,
+            artifacts = listOf(WebArtifactSummary("reports/$marker.md", marker, 1)),
+        )
+        val sourceHtml = renderSourceFile(original.copy(filename = marker), marker, marker)
+
+        assertTrue(!html.contains("<img"))
+        assertTrue(!html.contains("class=\"source-tag $marker"))
+        assertTrue(!html.contains("aria-label=\"Iteration $marker"))
+        assertTrue(html.contains("source-tag unknown"))
+        assertTrue(html.contains("&lt;img src=x onerror=alert(1)&gt;"))
+        assertTrue(!sourceHtml.contains("<img"))
+        assertTrue(sourceHtml.contains("&lt;img src=x onerror=alert(1)&gt;"))
+    }
+
+    @Test
+    fun `legacy artifact downloads sandbox active content and sanitize header filenames`() = withServer { server, root ->
+        val id = uploadedJobId(server)
+        val reports = root.resolve(id).resolve("reports").createDirectories()
+        val fixtures = listOf(
+            Triple("report name\".svg", "<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>", "application/octet-stream"),
+            Triple("generated.html", "<script>location.href='https://example.invalid'</script>", "application/octet-stream"),
+            Triple("generated.md", "[leave](javascript:alert(1))", "text/plain; charset=utf-8"),
+        )
+        fixtures.forEach { (filename, body, expectedContentType) ->
+            reports.resolve(filename).writeText(body)
+            val encoded = java.net.URLEncoder.encode(filename, Charsets.UTF_8).replace("+", "%20")
+
+            val response = request(server, "GET", "/jobs/$id/artifacts/reports/$encoded")
+
+            assertEquals(200, response.status)
+            assertEquals(body, response.body.decodeToString())
+            assertEquals(expectedContentType, response.contentType)
+            assertEquals("sandbox; default-src 'none'; base-uri 'none'; form-action 'none'", response.contentSecurityPolicy)
+            assertEquals("nosniff", response.contentTypeOptions)
+            assertEquals("no-referrer", response.referrerPolicy)
+            assertTrue(response.contentDisposition.orEmpty().startsWith("attachment;"))
+            assertTrue('\r' !in response.contentDisposition.orEmpty() && '\n' !in response.contentDisposition.orEmpty())
+        }
+        val disposition = request(server, "GET", "/jobs/$id/artifacts/reports/report%20name%22.svg").contentDisposition.orEmpty()
+        assertTrue(disposition.startsWith("attachment; filename=\"report_name_.svg\""))
+        assertTrue(disposition.contains("filename*=UTF-8''report%20name%22.svg"))
+    }
+
+    @Test
+    fun `attachment metadata cannot inject headers and uses RFC 5987 encoding`() {
+        val disposition = attachmentDisposition("report\r\nX-Injected: yes*.svg")
+
+        assertTrue('\r' !in disposition && '\n' !in disposition)
+        assertTrue(disposition.startsWith("attachment; filename=\"report__X-Injected__yes_.svg\""))
+        assertTrue(disposition.contains("filename*=UTF-8''report%0D%0AX-Injected%3A%20yes%2A.svg"))
     }
 
     @Test
@@ -1606,10 +1690,12 @@ class UploadServerTest {
         assertNoWebCors(response)
         fun header(name: String): String? = response.headers().firstValue(name).orElse(null)
         return Response(response.statusCode(), response.body(), header("Retry-After"), header("ETag"), header("Content-Type"),
-            header("Cache-Control"), header("X-Request-ID"), header("Allow"), header("Content-Length"))
+            header("Cache-Control"), header("X-Request-ID"), header("Allow"), header("Content-Length"),
+            header("Content-Disposition"), header("Content-Security-Policy"), header("X-Content-Type-Options"),
+            header("Referrer-Policy"))
     }
 
-    private data class Response(val status: Int, val body: ByteArray, val retryAfter: String? = null, val etag: String? = null, val contentType: String? = null, val cacheControl: String? = null, val requestId: String? = null, val allow: String? = null, val contentLength: String? = null)
+    private data class Response(val status: Int, val body: ByteArray, val retryAfter: String? = null, val etag: String? = null, val contentType: String? = null, val cacheControl: String? = null, val requestId: String? = null, val allow: String? = null, val contentLength: String? = null, val contentDisposition: String? = null, val contentSecurityPolicy: String? = null, val contentTypeOptions: String? = null, val referrerPolicy: String? = null)
 }
 
 private fun ByteArray.startsWith(prefix: ByteArray): Boolean =
