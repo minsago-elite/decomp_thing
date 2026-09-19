@@ -70,6 +70,30 @@ class ModulePromptCompatibilityTest {
     }
 
     @Test
+    fun `candidate assessment records profile and usage budget violations independently`() {
+        val profile = withBudget(GeneratedCMakeReconstructionProfile.descriptor, 4096)
+        val project = createTempDirectory("candidate-dual-budget-violations-")
+        val reconstructor = object : ModuleReconstructor {
+            override fun cacheIdentity(): String = "custom"
+            override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule =
+                EvidenceModuleReconstructor(true).reconstruct(request).copy(
+                    generator = "custom", promptCharacters = 5000, promptBudgetCharacters = 4097,
+                )
+        }
+        val manifest = SourceTreeGenerator.generate(model(), project, profile = profile, reconstructor = reconstructor)
+        assertEquals(listOf("fn_alpha"), manifest.unresolvedImplementationIds)
+        val module = DeterministicModulePlanner(layout = profile.layout).plan(model()).modules.single()
+        val checkpoint = Json.parseToJsonElement(project.resolve(
+            profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id)),
+        ).readText()).jsonObject
+        val codes = checkpoint.getValue("issues").jsonArray.map {
+            it.jsonObject.getValue("code").jsonPrimitive.content
+        }
+        assertTrue("context-budget-exceeded" in codes)
+        assertTrue("prompt-budget-invalid" in codes)
+    }
+
+    @Test
     fun `exact profile prompt limit is dispatched and recorded on cancellation`() {
         for (base in ReconstructionProfiles.builtIn) {
             val profile = withBudget(base, 5515)
@@ -107,6 +131,13 @@ class ModulePromptCompatibilityTest {
             assertTrue(checkpoint.getValue("issues").jsonArray.any {
                 it.jsonObject.getValue("code").jsonPrimitive.content == "context-budget-exceeded"
             })
+            val generationEvidence = Json.parseToJsonElement(
+                project.resolve("reports/confidence.json").readText(),
+            ).jsonObject.getValue("sourceGenerationBudgetEvidence").jsonObject
+            val moduleEvidence = generationEvidence.getValue("modules").jsonArray.single().jsonObject
+            assertTrue(moduleEvidence.getValue("promptCharacters").jsonPrimitive.content.toInt() > 1)
+            assertEquals("1", moduleEvidence.getValue("promptBudgetCharacters").jsonPrimitive.content)
+            assertEquals("unresolved", moduleEvidence.getValue("outcome").jsonPrimitive.content)
         }
     }
 

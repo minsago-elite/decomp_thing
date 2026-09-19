@@ -34,8 +34,13 @@ class RuntimeInstallationTest(unittest.TestCase):
         (self.source / 'nested' / 'mode-marker').write_text('not executed\n')
         (self.source / 'nested' / 'mode-marker').chmod(0o755)
 
-    def invoke(self, prepare, target=None):
-        args = [str(target or self.target), self.run_id, self.attempt]
+    def invoke(self, prepare, target=None, deployment_kind='ghidra'):
+        selected_target = target or (self.target if deployment_kind == 'ghidra' else
+                                    Path(f'/var/lib/decomp-ci-{deployment_kind}-{self.run_id}-{self.attempt}'))
+        args = [str(selected_target), self.run_id, self.attempt, deployment_kind]
+
+        if deployment_kind not in ('ghidra', 'application'):
+            raise ValueError(deployment_kind)
         if prepare:
             args.insert(0, str(self.source))
         name = 'ci-prepare-bundled-ghidra-runtime.sh' if prepare else 'ci-release-bundled-ghidra-runtime.sh'
@@ -56,6 +61,14 @@ class RuntimeInstallationTest(unittest.TestCase):
         self.assertFalse(self.target.exists())
         self.success(self.invoke(False))
         self.assertEqual(0o777, Path('/opt').stat().st_mode & 0o777)
+
+    def test_application_deployment_kind_uses_exact_target(self):
+        result = self.invoke(True, deployment_kind='application')
+        self.success(result)
+        application_target = Path(f'/var/lib/decomp-ci-application-{self.run_id}-{self.attempt}')
+        self.assertTrue((application_target / 'bundle/a-marker.txt').is_file())
+        self.success(self.invoke(False, deployment_kind='application'))
+        self.assertFalse(application_target.exists())
 
     def test_every_ancestor_still_requires_trusted_permissions(self):
         for path in ('/', '/var', '/var/lib'):

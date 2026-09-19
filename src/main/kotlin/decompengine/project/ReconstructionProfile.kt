@@ -97,6 +97,15 @@ class ProjectFileDeclaration(
         return compileTemplateMatcher(components.take(rootDepth).joinToString("/")).matches(root)
     }
 
+    internal fun canMaterializeAbove(path: String): Boolean {
+        val normalizedPath = requireNormalizedProjectPath(path, "project path")
+        val pathComponents = normalizedPath.split('/')
+        val templateComponents = pathTemplate.split('/')
+        if (templateComponents.size > pathComponents.size) return false
+        return compileTemplateMatcher(templateComponents.joinToString("/"))
+            .matches(pathComponents.take(templateComponents.size).joinToString("/"))
+    }
+
     internal fun canonicalJson(): String = buildString {
         append('{')
         append("\"id\":").append(id.canonicalJsonString()).append(',')

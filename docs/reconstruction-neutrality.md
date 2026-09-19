@@ -12,8 +12,10 @@ python3 -B -m unittest discover -s tests -p test_generic_leakage.py -v
 ```
 
 The scanner requires Python 3.9+ and Git. The standalone Gradle task runs the
-scanner without compiling or executing application code. Gradle `check` and
-`scripts/ci.sh` include it. Exit status is 0 for no findings, 1 for findings, and
+scanner without compiling or executing application code. While the migration
+baseline below still reports findings, the task is deliberately not wired into
+Gradle `check`, and `scripts/ci.sh` runs it without failing the build. Exit
+status is 0 for no findings, 1 for findings, and
 2 for invalid policy or unreadable inputs. JSON output contains either the scan
 counts and sorted findings or an `error` field. Findings include path, line,
 rule, and matched text.
@@ -67,14 +69,22 @@ ordinary directory ancestors.
 
 ## Current migration state
 
-The declared benchmark roots now cover the Python oracle test suite and the GCC
-oracle model workflow, and one adapter ownership entry covers the shared
-generated-C build-contract budget checks. Exact literal allowances retain the
-GCC oracle pipeline scripts, the shared capture image digest inside LLVM
-reference evidence, the forbidden identity markers in the LLVM reference-input
-plan, the opt-in installed-release provenance check, MVP patch compiler
-tooling, and the repair archive runtime references. Retained evidence must not
+The repository scan passes on a clean checkout. Benchmark ownership now covers
+the declared oracle namespaces: the `oracle` tree, the JVM oracle namespaces
+(`src/main/kotlin/decompengine/oracle` and its test mirror), the oracle Python
+test namespace `tests/oracle`, the GCC oracle model workflow, and the five
+benchmark source-lock and corpus scripts. Retained historical benchmark
+identities in LLVM reference evidence stay in place; retained evidence must not
 be rewritten merely to satisfy the scanner.
+
+Remaining pre-existing generic references in otherwise checked production and
+test code are pinned by exact literal allowances with expected occurrence
+counts: the MVP memory-safety patch workflow's host compiler flags and tool,
+the repair evidence verifier's comparison against the registered generated-C
+repair runtime configuration and its build-file source role, and the bundled
+Ghidra provenance test's pinned compiler-engine profile. Counts make each pin
+regression-sensitive: a changed occurrence fails as a stale allowance instead
+of silently passing.
 
 `ReconstructionPipeline` now resolves its build adapter from the selected profile.
 Its profile overload admits host budgets and binds analyzer export limits before
@@ -88,10 +98,14 @@ resource bounds and other report consumers remain unfinished.
 
 Doctor's compiler/build probes and authored sanitizer sample now come from its
 selected registered adapter, through both the CLI and JVM API. The generic root
-covers the full Doctor package. See
+covers the full Doctor package, which removed four findings; only the
+explicitly owned generated-C diagnostic implementation is registered as an
+adapter file. The diagnostic executor still needs output/time bounds. See
 [profile-selected Doctor diagnostics](profiled-doctor-diagnostics.md).
 
-The committed tree scans clean, so the gate no longer stops `scripts/ci.sh`
-before the test suite. Passing the authored scanner tests verifies its
-detection and exemption behavior; it does not make the repository scan complete
-#84. Remaining semantic scope and progress stay on the issue.
+Passing the authored scanner tests and the repository scan verifies the
+declared detection and exemption behavior. It does not complete #84: the
+lexical gate is wired into Gradle `check` and `scripts/ci.sh` for the declared
+state, while the semantic migrations it describes — adapter-owned MVP and
+repair build knowledge, complete consumer migration, and production
+qualification — remain on the issue.
