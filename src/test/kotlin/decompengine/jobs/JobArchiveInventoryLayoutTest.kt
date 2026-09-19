@@ -22,6 +22,8 @@ class JobArchiveInventoryLayoutTest {
                 "build/source.txt",
                 "artifacts/sibling.txt",
                 "artifacts/obj/module.txt",
+                ".ninja_log",
+                ".ninja_deps",
             )
             files.forEach { relative ->
                 val path = tree.resolve(relative)
@@ -29,9 +31,9 @@ class JobArchiveInventoryLayoutTest {
                 path.writeText("Authored local inventory text: $relative\n")
             }
             val cases = listOf(
-                "artifacts" to setOf("notes.txt", "src/module.txt", "build/source.txt"),
-                "artifacts/obj" to setOf("notes.txt", "src/module.txt", "build/source.txt", "artifacts/sibling.txt"),
-                "build" to setOf("notes.txt", "src/module.txt", "artifacts/sibling.txt", "artifacts/obj/module.txt"),
+                "artifacts" to setOf("notes.txt", "src/module.txt", "build/source.txt", ".ninja_log", ".ninja_deps"),
+                "artifacts/obj" to setOf("notes.txt", "src/module.txt", "build/source.txt", "artifacts/sibling.txt", ".ninja_log", ".ninja_deps"),
+                "build" to setOf("notes.txt", "src/module.txt", "artifacts/sibling.txt", "artifacts/obj/module.txt", ".ninja_log", ".ninja_deps"),
             )
             for ((outputRoot, expectedFiles) in cases) {
                 val layout = ArchiveTransportLayout(
@@ -42,6 +44,19 @@ class JobArchiveInventoryLayoutTest {
                 assertEquals(expectedFiles, inventory.filterValues { it.isRegularFile }.keys, outputRoot)
                 assertTrue(inventory.keys.none { it == outputRoot || it.startsWith("$outputRoot/") }, outputRoot)
             }
+
+            val ninjaLayout = ArchiveTransportLayout(
+                excludedOutputRoots = setOf("build", ".ninja_log", ".ninja_deps"),
+                strictBuildControlPaths = emptySet(),
+            )
+            val ninjaInventory = store.sourceArchiveInventory(job.id, ninjaLayout)
+            assertEquals(
+                setOf("notes.txt", "src/module.txt", "artifacts/sibling.txt", "artifacts/obj/module.txt"),
+                ninjaInventory.filterValues { it.isRegularFile }.keys,
+            )
+            assertTrue(ninjaInventory.keys.none { it == ".ninja_log" || it == ".ninja_deps" || it == "build" })
+            assertTrue(ninjaInventory[".ninja_log"] == null)
+            assertTrue(ninjaInventory[".ninja_deps"] == null)
         } finally {
             root.toFile().deleteRecursively()
         }

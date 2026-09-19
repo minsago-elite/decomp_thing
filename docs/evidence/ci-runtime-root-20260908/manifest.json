@@ -1,0 +1,37 @@
+{
+  "status": "passed",
+  "sourceCommit": "b8cd8f4ede32f5e924632fff7c82ffa38bcff507",
+  "command": "python3 scripts/test-ci-bundled-runtime.py",
+  "tests": 5,
+  "failures": 0,
+  "qualification": "Actual embedded copy/release Python bodies; inert files in an isolated root user namespace",
+  "checks": [
+    "Writable opt does not prevent var/lib copy and cleanup",
+    "Every target ancestor still requires trusted permissions",
+    "Linked parent rejected",
+    "Marker mismatch preserves runtime",
+    "Interrupted-copy cleanup and exact target binding"
+  ],
+  "hostRuntimeDirectoriesModified": false,
+  "ghidraExecuted": false,
+  "fullHostedRuntimeQualified": false,
+  "sourceSha256": {
+    "scripts/ci-prepare-bundled-ghidra-runtime.sh": "c87130c261bb612aa74dac63d3e29b408dc03a6200b6efb645081a8a3d6a94d6",
+    "scripts/ci-release-bundled-ghidra-runtime.sh": "23047d7178cb5e8d2ae8ab1fb9e7f20d561dd59089fcb40dedf78d3921f83cd0",
+    "scripts/test-ci-bundled-runtime.py": "5c7d3f4e37951a8e4c543a87d43d9ded6bf033732a29e51e4c6bc2e509a0b095"
+  },
+  "log": {
+    "file": "tests.txt",
+    "sha256": "4cb546f121940d6fc0d856fa0267cf70be08ece5881481714504a934290e50f6"
+  },
+  "additionalValidation": [
+    "bash syntax",
+    "embedded Python syntax",
+    "workflow YAML and step ordering"
+  ],
+  "notRun": [
+    "host sudo provisioning",
+    "full packaged bundle copy",
+    "native analysis workflows"
+  ]
+}

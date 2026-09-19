@@ -58,7 +58,14 @@ sealed interface AuthenticatedFullTreePlanningRegistry {
     /** Resolves an authenticated A13 owner unit exactly; there is no nullable or catch-all fallback. */
     fun requireOwnerModule(ownerUnitId: String): FullTreePlanningSourceModule
 
+<<<<<<< HEAD
     /** Resolves the exact authenticated source-module population for one shard. */
+=======
+    /**
+     * Resolves the exact authenticated source-module population for one shard. This is planning
+     * ownership only; the returned module count is not an emitted-function denominator.
+     */
+>>>>>>> origin/a-series-shared-analysis-deadline
     fun requireOwnerModulesForShard(shardId: String): List<FullTreePlanningSourceModule>
 }
 
@@ -610,6 +617,7 @@ private val SOURCE_ONLY_ORDER = Comparator<JsonObject> { left, right ->
     FULL_TREE_CODE_POINT_ORDER.compare(left.controlString("sourcePath"), right.controlString("sourcePath"))
 }
 private val COMPILATION_UNIT_ID = Regex("cu-[0-9a-f]{32}")
+private val SHARD_ID = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
 
 private const val PLANNING_SCHEMA = "full-tree-planning-inventory"
 private const val PLANNING_MAXIMUM_SOURCE_MODULES = 1_000_000

@@ -1,0 +1,133 @@
+[
+  {
+    "file": "activity-connection.test.tsx",
+    "tests": [
+      {
+        "name": "suspends hidden/offline reads and reconciles a fresh snapshot without replacing the cursor or selection",
+        "status": "passed"
+      },
+      {
+        "name": "retries a transient read with jittered backoff and snapshot reconciliation",
+        "status": "passed"
+      },
+      {
+        "name": "stops after four retries and starts no further reads without explicit recovery",
+        "status": "passed"
+      },
+      {
+        "name": "clears private observations and does not retry access denial (401)",
+        "status": "passed"
+      },
+      {
+        "name": "clears private observations and does not retry access denial (403)",
+        "status": "passed"
+      },
+      {
+        "name": "discards an obsolete in-flight response after hiding and rejects changed snapshot identity",
+        "status": "passed"
+      }
+    ]
+  },
+  {
+    "file": "activity-stream.test.tsx",
+    "tests": [
+      {
+        "name": "streams from the catch-up cursor, deduplicates, and cancels on pause without changing focus",
+        "status": "passed"
+      },
+      {
+        "name": "deduplicates semantically identical JSON field ordering and continues the stream",
+        "status": "passed"
+      },
+      {
+        "name": "reconciles a snapshot after a leased EOF and resumes after the last displayed event",
+        "status": "passed"
+      },
+      {
+        "name": "falls back to bounded polling after two short failed connections without resetting position",
+        "status": "passed"
+      },
+      {
+        "name": "stops at exactly 200 rows and cancels before acknowledging the next queued event",
+        "status": "passed"
+      },
+      {
+        "name": "shows an explicit retention gap without advancing or silently falling back",
+        "status": "passed"
+      },
+      {
+        "name": "rejects a conflicting replay without displaying it",
+        "status": "passed"
+      },
+      {
+        "name": "clears observations on a streaming 401 without fallback",
+        "status": "passed"
+      },
+      {
+        "name": "clears observations on a streaming 403 without fallback",
+        "status": "passed"
+      },
+      {
+        "name": "cancels an active stream when the browser becomes hidden",
+        "status": "passed"
+      },
+      {
+        "name": "cancels an active stream when the browser becomes offline",
+        "status": "passed"
+      },
+      {
+        "name": "uses polling when the server explicitly reports exhausted stream capacity",
+        "status": "passed"
+      }
+    ]
+  },
+  {
+    "file": "activity.test.tsx",
+    "tests": [
+      {
+        "name": "starts on request, preserves exact omissions and pause position, and deduplicates replay without focus changes",
+        "status": "passed"
+      },
+      {
+        "name": "withholds message content for every visibility role including thought and system",
+        "status": "passed"
+      },
+      {
+        "name": "pauses on EVENT_GAP and explicitly resets history with a fresh snapshot",
+        "status": "passed"
+      },
+      {
+        "name": "pauses on PROGRESS_GAP and explicitly resets history with a fresh snapshot",
+        "status": "passed"
+      },
+      {
+        "name": "refuses cross-attempt content and aborts requests when unmounted",
+        "status": "passed"
+      },
+      {
+        "name": "preserves the display boundary and checks the next page starts contiguously (200)",
+        "status": "passed"
+      },
+      {
+        "name": "preserves the display boundary and checks the next page starts contiguously (201)",
+        "status": "passed"
+      },
+      {
+        "name": "rejects a discontinuous continuation without changing the displayed position",
+        "status": "passed"
+      },
+      {
+        "name": "filters categories and task references locally without discarding rows or moving the cursor",
+        "status": "passed"
+      },
+      {
+        "name": "links the exact attempt and exposes available correlation without inventing evidence links",
+        "status": "passed"
+      },
+      {
+        "name": "does not infer an empty plan when entry metadata is absent",
+        "status": "passed"
+      }
+    ]
+  }
+]

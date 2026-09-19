@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.acp.AcpAuthenticationInventoryTest" tests="16" skipped="0" failures="0" errors="0" timestamp="2026-09-05T18:44:31.206Z" hostname="whatsername" time="0.426">
+  <properties/>
+  <testcase name="commitment covers variant payloads metadata and unknown raw fields()" classname="decompengine.acp.AcpAuthenticationInventoryTest" time="0.088"/>
+  <testcase name="long private fragments are withheld at every alignment in operator previews()" classname="decompengine.acp.AcpAuthenticationInventoryTest" time="0.015"/>
+  <testcase name="control normalization precedes literal and credential preview redaction()" classname="decompengine.acp.AcpAuthenticationInventoryTest" time="0.005"/>
+  <testcase name="replacement-marker matches cannot cause unbounded intermediate preview growth()" classname="decompengine.acp.AcpAuthenticationInventoryTest" time="0.003"/>
+  <testcase name="logout advertisement remains independent of methods and execution support()" classname="decompengine.acp.AcpAuthenticationInventoryTest" time="0.0"/>
+  <testcase name="complete inventory limits include metadata unsupported payloads depth and aggregate size()" classname="decompengine.acp.AcpAuthenticationInventoryTest" time="0.02"/>
+  <testcase name="operator inventory preserves exact IDs but redacts display previews()" classname="decompengine.acp.AcpAuthenticationInventoryTest" time="0.003"/>
+  <testcase name="public commitments hide sensitive text while preserving same-scope comparisons()" classname="decompengine.acp.AcpAuthenticationInventoryTest" time="0.004"/>
+  <testcase name="unknown authentication variants stay unsupported()" classname="decompengine.acp.AcpAuthenticationInventoryTest" time="0.001"/>
+  <testcase name="numeric payload policy applies at the exact limit to metadata and unknown variants()" classname="decompengine.acp.AcpAuthenticationInventoryTest" time="0.008"/>
+  <testcase name="ambiguous and excessive advertisements fail with fixed diagnostics()" classname="decompengine.acp.AcpAuthenticationInventoryTest" time="0.001"/>
+  <testcase name="unpaired surrogates fail as authentication inventory errors()" classname="decompengine.acp.AcpAuthenticationInventoryTest" time="0.003"/>
+  <testcase name="empty and changed inventories have deterministic commitments()" classname="decompengine.acp.AcpAuthenticationInventoryTest" time="0.001"/>
+  <testcase name="preview truncation preserves supplementary Unicode boundaries()" classname="decompengine.acp.AcpAuthenticationInventoryTest" time="0.004"/>
+  <testcase name="inventory commitment scope changes across JVM restarts()" classname="decompengine.acp.AcpAuthenticationInventoryTest" time="0.225"/>
+  <testcase name="fragment filtering retains unrelated text at the full private value budget()" classname="decompengine.acp.AcpAuthenticationInventoryTest" time="0.033"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
