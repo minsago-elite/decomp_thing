@@ -127,6 +127,13 @@
   ],
   "allowances": [
     {
+      "path": "src/main/kotlin/decompengine/project/ModuleCompilationPolicy.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "GeneratedCModuleValidation",
+      "count": 1,
+      "reason": "Compatibility fallback for unknown profile identifiers remains within the application-owned generated-C validation adapter boundary."
+    },
+    {
       "path": "src/main/kotlin/decompengine/Main.kt",
       "rule": "generic-adapter-reference",
       "fragment": "import decompengine.project.GeneratedCMakeReconstructionProfile",
