@@ -80,8 +80,11 @@ data class ModuleReconstructionIssue(
 fun interface ModuleReconstructor {
     fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule
 
-    /** Stable identity used only to resume a deliberate unresolved result from the same strategy. */
+    /** Stable strategy identity used when resuming checkpoints. */
     fun cacheIdentity(): String = "custom"
+
+    /** Profile-bound strategies include their effective limits in checkpoint identity. */
+    fun cacheIdentity(profile: ReconstructionProfile): String = cacheIdentity()
 
     /** Agent-backed strategies may resume only checkpoints carrying authenticated execution evidence. */
     fun requiresExecutionEvidenceForCheckpointReuse(): Boolean = false
@@ -114,9 +117,16 @@ class BoundedLlmModuleReconstructor(
 
     init { require(maximumContextCharacters >= 4_096) }
 
-    override fun cacheIdentity(): String =
-        "agent:${harness.implementationIdentifier() ?: "unspecified"}:context-$maximumContextCharacters:" +
+    override fun cacheIdentity(): String = cacheIdentity(maximumContextCharacters)
+
+    override fun cacheIdentity(profile: ReconstructionProfile): String = cacheIdentity(contextBudget(profile))
+
+    private fun cacheIdentity(contextCharacters: Int): String =
+        "agent:${harness.implementationIdentifier() ?: "unspecified"}:context-$contextCharacters:" +
             "factory-${harnessProvenanceSha256 ?: "unbound"}:v2"
+
+    private fun contextBudget(profile: ReconstructionProfile): Int =
+        minOf(maximumContextCharacters, profile.budgets.reconstructionMaximumContextCharacters)
 
     override fun requiresExecutionEvidenceForCheckpointReuse(): Boolean = true
 
@@ -181,39 +191,9 @@ class BoundedLlmModuleReconstructor(
             ProjectFileRole.MODULE_IMPLEMENTATION in implementation.roles &&
             ProjectFileRole.EDITABLE in implementation.roles
         ) { "planned module target must match the profile-owned editable implementation" }
-        val localFunctions = request.module.functionIds.map { id -> request.model.functions.single { it.id == id } }
-        val localGlobals = request.module.globalIds.map { id -> request.model.globals.single { it.id == id } }
-        val functionEvidence = localFunctions.joinToString("\n\n") { function ->
-            "${function.id} @ 0x${function.address.toString(16)}\nprototype: ${function.prototype}\n" +
-                "calls: ${function.calls.sorted()}\nglobals: ${function.referencedGlobals.sorted()}\n" +
-                "strings: ${function.strings.sorted()}\ndecompilation:\n${function.decompiledC ?: "<unavailable>"}"
-        }
-        val globalEvidence = localGlobals.joinToString("\n") { global ->
-            "${global.id} @ 0x${global.address.toString(16)}: ${global.type} ${global.name}; " +
-                "initializer=${global.initializer ?: "<unavailable>"}; status=${global.status.name.lowercase()}"
-        }
-        val evidence = buildString {
-            append("module: ").append(request.module.id).append('\n')
-            append("ownership evidence: ").append(request.module.boundaryEvidence.sorted()).append("\n\n")
-            append("functions:\n").append(functionEvidence.ifBlank { "<none>" })
-            append("\n\nglobals:\n").append(globalEvidence.ifBlank { "<none>" })
-        }
-        val provenanceIds = (request.module.functionIds + request.module.globalIds).sorted()
-        val acceptance = """
-            The workflow validates your exact source bytes against the returned change set and owned entity IDs.
-            Preserve all required function and global definitions and use only declared shared interfaces.
-            Compiler gate (run by the workflow): ${ReconstructionCompilationPolicies.resolve(request.profile).command(request.profile, target).joinToString(" ")}
-            Compiler warnings are errors. A completed agent turn is accepted only after policy and compiler validation.
-            Full-project build and behavioral validation remain separate release gates.
-        """.trimIndent()
-        val objective = """
-            Reconstruct exactly one C implementation unit at $target.
-            Preserve recovered behavior and suspicious operations. Do not invent file paths or edit headers.
-            Edit $target in the authorized workspace and keep provenance comments containing every owned entity ID:
-            ${provenanceIds.joinToString(", ")}
-            Do not use generic return-value placeholders or undefined decompiler types. If evidence is insufficient,
-            stop without claiming completion so the module is recorded as explicitly unresolved.
-        """.trimIndent() + "\n\n" + acceptance
+        val prompt = ReconstructionAdapters.resolve(request.profile).modulePrompt(request)
+        val objective = prompt.objective
+        val evidence = prompt.evidence
         val files = linkedMapOf(
             request.profile.layout.declaration("shared-interface").materialize() to request.sharedHeader,
             request.module.headerPath to request.moduleHeader,
@@ -229,11 +209,12 @@ class BoundedLlmModuleReconstructor(
             }
         }
         val contextSize = promptEvidence.length
-        if (contextSize > maximumContextCharacters) {
+        val contextBudget = contextBudget(request.profile)
+        if (contextSize > contextBudget) {
             throw ModuleContextBudgetExceededException(
                 request.module.id,
                 contextSize,
-                maximumContextCharacters,
+                contextBudget,
                 sha256(promptEvidence.toByteArray()),
             )
         }
@@ -289,7 +270,7 @@ class BoundedLlmModuleReconstructor(
                     invocationEvidence,
                     promptSha256,
                     contextSize,
-                    maximumContextCharacters,
+                    contextBudget,
                 )
             }
             require(execution.stopReason == AgentStopReason.COMPLETED) {
@@ -315,7 +296,7 @@ class BoundedLlmModuleReconstructor(
                 generator = "agent:${harness.implementationIdentifier() ?: "unspecified"}",
                 promptSha256 = promptSha256,
                 promptCharacters = contextSize,
-                promptBudgetCharacters = maximumContextCharacters,
+                promptBudgetCharacters = contextBudget,
                 agentExecutionEvidence = invocationEvidence,
             )
         } catch (failure: Exception) {
@@ -332,7 +313,7 @@ class BoundedLlmModuleReconstructor(
                 evidence = requireNotNull(invocationEvidence),
                 promptSha256 = promptSha256,
                 promptCharacters = contextSize,
-                promptBudgetCharacters = maximumContextCharacters,
+                promptBudgetCharacters = contextBudget,
                 cause = failure,
             )
         }
@@ -536,7 +517,32 @@ object SourceTreeGenerator {
     fun generate(
         model: RecoveredProgramModel,
         projectDir: Path,
-        planner: DeterministicModulePlanner = DeterministicModulePlanner(),
+        planner: DeterministicModulePlanner? = null,
+        reconstructor: ModuleReconstructor? = null,
+        overrides: Map<String, String> = emptyMap(),
+        observedBehavior: String? = null,
+        profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+        progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
+        onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
+    ): SourceTreeManifest = generate(
+        model = model,
+        projectDir = projectDir,
+        hostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+        planner = planner,
+        reconstructor = reconstructor,
+        overrides = overrides,
+        observedBehavior = observedBehavior,
+        profile = profile,
+        progress = progress,
+        onModuleProgress = onModuleProgress,
+    )
+
+    /** Explicit host policy can authorize a profile without changing its recorded budgets or identity. */
+    fun generate(
+        model: RecoveredProgramModel,
+        projectDir: Path,
+        hostSafetyLimits: ReconstructionHostSafetyLimits,
+        planner: DeterministicModulePlanner? = null,
         reconstructor: ModuleReconstructor? = null,
         overrides: Map<String, String> = emptyMap(),
         observedBehavior: String? = null,
@@ -544,10 +550,12 @@ object SourceTreeGenerator {
         progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
         onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
     ): SourceTreeManifest {
+        hostSafetyLimits.requireAllows(profile.budgets)
         val adapter = ReconstructionAdapters.resolve(profile)
         val selectedReconstructor = reconstructor ?: adapter.defaultReconstructor()
         val compilationPolicy = adapter.compilation
-        val plan = planner.plan(model, overrides)
+        val selectedPlanner = planner?.withProfileBounds(profile) ?: DeterministicModulePlanner.forProfile(profile)
+        val plan = selectedPlanner.plan(model, overrides)
         val rendering = adapter.rendering(model, plan)
         val typesHeader = rendering.sharedInterface()
         val typesHeaderPath = profile.layout.declaration("shared-interface").materialize()
@@ -646,6 +654,8 @@ object SourceTreeGenerator {
                 schemaVersion == 6 && inputBinarySha256 == model.inputSha256 &&
                     modelSchemaVersion == model.schemaVersion && profileSha256 == profile.sha256 &&
                     accepted && issues.isEmpty() &&
+                    (!moduleClaimsAgentExecution(generator, reconstructorIdentity) ||
+                        modulePromptBudgetIsValid(promptCharacters?.toLong(), promptBudgetCharacters?.toLong(), profile)) &&
                     entityIds.size == entityIds.toSet().size &&
                     entityIds.toSet() == (module.functionIds + module.globalIds).toSet() &&
                     compilation?.passed == true &&
@@ -668,7 +678,7 @@ object SourceTreeGenerator {
                 sessionEvidenceFingerprint = fingerprint,
                 acceptedSourceSha256 = verifiedPreviousAcceptance?.sourceSha256,
             )
-            val cacheIdentity = selectedReconstructor.cacheIdentity()
+            val cacheIdentity = selectedReconstructor.cacheIdentity(profile)
             val cached = recordedCheckpoint?.takeIf { checkpoint ->
                 checkpoint.schemaVersion == 6 && checkpoint.inputBinarySha256 == model.inputSha256 &&
                     checkpoint.modelSchemaVersion == model.schemaVersion && checkpoint.profileSha256 == profile.sha256 &&
@@ -730,7 +740,7 @@ object SourceTreeGenerator {
                 val executionEvidence = attempted.agentExecutionEvidence?.let(::persistExecutionEvidence)
                     ?: persistedExecutionEvidence
                 progress.phase(AgentWorkflowPhase.POLICY_CHECKING, module.id)
-                val issues = assessReconstruction(adapter, module, model, attempted, normalizedSource).toMutableList()
+                val issues = assessReconstruction(adapter, profile, module, model, attempted, normalizedSource, cacheIdentity).toMutableList()
                 writeAtomically(sourcePath, normalizedSource)
                 val compilation = if (issues.isEmpty()) {
                     progress.phase(AgentWorkflowPhase.BUILD_VALIDATING, module.id)
@@ -1015,7 +1025,7 @@ object SourceTreeGenerator {
             evidenceRequired: Boolean,
         ): Boolean {
             val checkpointClaimsAgentExecution =
-                generator.startsWith("agent:") || reconstructorIdentity.startsWith("agent:")
+                moduleClaimsAgentExecution(generator, reconstructorIdentity)
             val evidencePath = executionEvidencePath
                 ?: return !evidenceRequired && !checkpointClaimsAgentExecution
 
@@ -1088,6 +1098,11 @@ object SourceTreeGenerator {
                 require(root.getValue("inputBinarySha256").jsonPrimitive.isString)
                 require(root.getValue("profileSha256").jsonPrimitive.isString)
                 require(!root.getValue("modelSchemaVersion").jsonPrimitive.isString)
+                for (field in listOf("promptCharacters", "promptBudgetCharacters")) {
+                    root[field]?.takeUnless { it is JsonNull }?.jsonPrimitive?.let { value ->
+                        require(!value.isString && value.intOrNull != null) { "$field must be an integer" }
+                    }
+                }
             }
             fun optionalString(name: String): String? = root[name]?.let { value ->
                 if (value is JsonNull) null else value.jsonPrimitive.content
@@ -1269,17 +1284,19 @@ object SourceTreeGenerator {
 
     private fun assessReconstruction(
         adapter: ReconstructionAdapter,
+        profile: ReconstructionProfile,
         module: PlannedModule,
         model: RecoveredProgramModel,
         reconstructed: ReconstructedModule,
         source: String,
+        reconstructorIdentity: String,
     ): List<ModuleReconstructionIssue> {
         val entityIds = module.functionIds + module.globalIds
         val issues = reconstructed.issues.toMutableList()
         if (source.isBlank() && entityIds.isNotEmpty()) {
             issues += ModuleReconstructionIssue("empty-source", "module source is empty", entityIds)
         }
-        if (reconstructed.generator.startsWith("agent:")) {
+        if (moduleClaimsAgentExecution(reconstructed.generator, reconstructorIdentity)) {
             if (reconstructed.source != source) {
                 issues += ModuleReconstructionIssue(
                     "agent-source-normalization-changed-bytes",
@@ -1307,6 +1324,12 @@ object SourceTreeGenerator {
                     "agent prompt used $promptCharacters characters with a $promptBudget character budget",
                     entityIds,
                 )
+                !modulePromptBudgetIsValid(promptCharacters.toLong(), promptBudget.toLong(), profile) ->
+                    issues += ModuleReconstructionIssue(
+                        "prompt-budget-invalid",
+                        "agent prompt size or budget is outside the selected reconstruction profile",
+                        entityIds,
+                    )
             }
         }
         issues += adapter.assess(module, model, reconstructed.generator, source)

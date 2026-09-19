@@ -90,6 +90,32 @@ class DeterministicModulePlanner(
         require(maximumWorkUnits > 0)
     }
 
+    /** Preserve stricter caller limits while binding generation to its admitted profile. */
+    internal fun withProfileBounds(profile: ReconstructionProfile): DeterministicModulePlanner {
+        for (id in listOf("module-implementation", "module-interface")) {
+            require(layout.declaration(id) == profile.layout.declaration(id)) {
+                "module planner $id declaration differs from the reconstruction profile"
+            }
+        }
+        return DeterministicModulePlanner(
+            maximumFunctionsPerModule = minOf(maximumFunctionsPerModule, profile.budgets.maximumFunctionsPerModule),
+            layout = profile.layout,
+            maximumEntities = minOf(maximumEntities, profile.budgets.plannerMaximumEntities),
+            maximumDependencyEdges = minOf(maximumDependencyEdges, profile.budgets.plannerMaximumDependencyEdges),
+            maximumWorkUnits = minOf(maximumWorkUnits, profile.budgets.plannerMaximumWorkUnits),
+        )
+    }
+
+    companion object {
+        internal fun forProfile(profile: ReconstructionProfile): DeterministicModulePlanner = DeterministicModulePlanner(
+            maximumFunctionsPerModule = profile.budgets.maximumFunctionsPerModule,
+            layout = profile.layout,
+            maximumEntities = profile.budgets.plannerMaximumEntities,
+            maximumDependencyEdges = profile.budgets.plannerMaximumDependencyEdges,
+            maximumWorkUnits = profile.budgets.plannerMaximumWorkUnits,
+        )
+    }
+
     fun plan(model: RecoveredProgramModel, overrides: Map<String, String> = emptyMap()): ModulePlan =
         planWithComplexity(model, overrides).plan
 

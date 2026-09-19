@@ -1,0 +1,261 @@
+{
+  "schemaVersion": 1,
+  "genericRoots": [
+    "src/main/kotlin/decompengine/Main.kt",
+    "src/main/kotlin/decompengine/acp",
+    "src/main/kotlin/decompengine/agent",
+    "src/main/kotlin/decompengine/analysis",
+    "src/main/kotlin/decompengine/doctor",
+    "src/main/kotlin/decompengine/mvp",
+    "src/main/kotlin/decompengine/project",
+    "src/main/kotlin/decompengine/repair",
+    "src/main/kotlin/decompengine/validation",
+    "src/main/kotlin/decompengine/web"
+  ],
+  "benchmarkRoots": [
+    "oracle/gcc",
+    "src/main/kotlin/decompengine/oracle/gcc",
+    "src/test/kotlin/decompengine/oracle/gcc"
+  ],
+  "adapterFiles": [
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCArchiveBuildPolicy.kt",
+      "reason": "Generated-C source inventory and build-contract policy used by archive packaging and verification."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCBehaviorBuildPolicy.kt",
+      "reason": "Generated-C build-contract parsing and source layout for local behavior evidence capture."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCBuildInvocation.kt",
+      "reason": "Generated-C build invocation arguments and the public Make builder compatibility facade."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCCandidateValidation.kt",
+      "reason": "Generated-C definition, provenance, and placeholder assessment."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCDeclarations.kt",
+      "reason": "Generated-C declaration normalization and C identifier rendering."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCEvidenceModuleReconstructor.kt",
+      "reason": "Generated-C recovered-source and explicitly unresolved placeholder rendering."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCMakeReconstructionProfile.kt",
+      "reason": "Built-in immutable generated-C/Make layout, compiler configuration, and requested budgets."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCModulePrompt.kt",
+      "reason": "Generated-C reconstruction prompt language and compiler instructions."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCModuleValidation.kt",
+      "reason": "Generated-C per-module compiler invocation and diagnostic policy."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCNinjaArchiveBuildPolicy.kt",
+      "reason": "Ninja-specific generated-C archive build-record consistency policy."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCNinjaProjectRendering.kt",
+      "reason": "Generated-C Ninja build-definition rendering."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCNinjaReconstructionAdapter.kt",
+      "reason": "Application-owned generated-C/Ninja implementation selected by the adapter registry."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCNinjaReconstructionProfile.kt",
+      "reason": "Built-in immutable generated-C/Ninja descriptor."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCProjectBuilder.kt",
+      "reason": "Generated-C build configuration, source ownership, process execution and build-contract rendering for the Make/Ninja adapters."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCProjectRendering.kt",
+      "reason": "Generated-C shared and module interfaces, entrypoint, and Make build-definition rendering."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCReconstructionAdapter.kt",
+      "reason": "Application-owned generated-C/Make implementation selected by the adapter registry."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCRepairProfile.kt",
+      "reason": "Generated-C repair indexing, source ownership, and repair validation strategy."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCRepairRuntimeConfiguration.kt",
+      "reason": "Generated-C repair runtime tool and deployment configuration."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCRepairRuntimeProvider.kt",
+      "reason": "Explicit service-provider registration for the generated-C repair runtime."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCRepairSourcePolicy.kt",
+      "reason": "Descriptor-bound generated-C repair and validation source permissions."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCToolchainDiagnostics.kt",
+      "reason": "Generated-C compiler/build version probes and authored sanitizer capability sample selected by the registered adapter."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCToolchainEvidence.kt",
+      "reason": "Bounded local version observations for the generated-C compiler and build tool."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCValidationSnapshot.kt",
+      "reason": "Generated-C repair validation workspace staging and snapshot policy."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/LinuxGeneratedCRepairValidationBoundary.kt",
+      "reason": "Linux generated-C repair build validation implementation."
+    }
+  ],
+  "allowances": [
+    {
+      "path": "src/main/kotlin/decompengine/Main.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "import decompengine.project.GeneratedCMakeReconstructionProfile",
+      "count": 1,
+      "reason": "CLI compatibility default descriptor import; profile selection remains explicit."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/Main.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "var profile = GeneratedCMakeReconstructionProfile.descriptor",
+      "count": 1,
+      "reason": "CLI compatibility default before named built-in profile selection."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/validation/BehaviorEvidence.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "import decompengine.project.GeneratedCMakeReconstructionProfile",
+      "count": 1,
+      "reason": "Import supporting the existing behavior project context compatibility default."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/validation/BehaviorEvidence.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "val profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor",
+      "count": 1,
+      "reason": "Existing behavior project context default; capture resolves the selected adapter."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/DeterministicModulePlanner.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "private val layout: ProjectLayoutProfile = GeneratedCMakeReconstructionProfile.descriptor.layout",
+      "count": 1,
+      "reason": "Existing standalone planner constructor default; generation applies its selected profile layout and ceilings."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/ArchivalAudit.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": ": ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor",
+      "count": 1,
+      "reason": "Existing public audit compatibility default; explicit profiles remain supported."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/ArchivalBundle.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": ": ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor",
+      "count": 2,
+      "reason": "Existing public package and extract compatibility defaults; explicit profiles remain supported."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/ArchivalBundle.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "ArchivalBundleLimits(),\n        GeneratedCMakeReconstructionProfile.descriptor,",
+      "count": 1,
+      "reason": "Thin path-based candidate-lineage compatibility wrapper delegates with its existing default descriptor."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/ArchivalBundle.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "ArchivalBundleLimits(),\n            GeneratedCMakeReconstructionProfile.descriptor,",
+      "count": 1,
+      "reason": "Thin pinned-input candidate-lineage compatibility wrapper delegates with its existing default descriptor."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/ArchivalReconstruction.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": ": ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor",
+      "count": 2,
+      "reason": "Existing bundled-analyzer factory and reconstruction-service compatibility defaults."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/SourceTree.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": ": ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor",
+      "count": 4,
+      "reason": "Existing request, generation-overload, and editable-path compatibility defaults; processing uses the selected profile."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/RecompilableProject.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": ": ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor",
+      "count": 1,
+      "reason": "Existing source-revision API descriptor default only; generic capture resolves the selected adapter."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/RecompilableProject.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "profile = GeneratedCMakeReconstructionProfile.descriptor,",
+      "count": 1,
+      "reason": "Existing project-generator signature delegates with its compatibility default descriptor; the profile overload forwards selected policy."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/RecompilableProject.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "val profile = GeneratedCMakeReconstructionProfile.descriptor",
+      "count": 1,
+      "reason": "Existing two-argument pipeline retains its compatibility default descriptor and resolves its registered build adapter."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/RepairAcpEvidenceArchiveVerifier.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "repairProfile: RepairIndexProfile = GeneratedCRepairIndexProfile",
+      "count": 1,
+      "reason": "Existing repair verifier default profile parameter only; concrete runtime-tool and Makefile role policy is not exempt."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/ReconstructionProfiles.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "val default: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor",
+      "count": 1,
+      "reason": "Application-owned explicit Make compatibility default, also included in the immutable built-in registry."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/ReconstructionProfiles.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "GeneratedCNinjaReconstructionProfile.descriptor,",
+      "count": 1,
+      "reason": "Application-owned registration of the built-in Ninja descriptor."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/ReconstructionAdapter.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "GeneratedCMakeReconstructionProfile.PROFILE_ID -> GeneratedCReconstructionAdapter",
+      "count": 1,
+      "reason": "Closed application-owned dispatch from the built-in Make profile identifier to its adapter implementation."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/ReconstructionAdapter.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "GeneratedCNinjaReconstructionProfile.PROFILE_ID -> GeneratedCNinjaReconstructionAdapter",
+      "count": 1,
+      "reason": "Closed application-owned dispatch from the built-in Ninja profile identifier to its adapter implementation."
+    },
+    {
+      "path": "scripts/ci-prepare-generated-c-validation.py",
+      "rule": "benchmark-target",
+      "fragment": "gcc_runtime / 'cc1'",
+      "count": 1,
+      "reason": "Inventories the installed compiler runtime for generated-C provisioning; this expression does not select a benchmark artifact. Version and digest checks remain active."
+    }
+  ],
+  "benchmarkCatalog": "oracle/gcc/reconstruction-neutrality-identities.json"
+}

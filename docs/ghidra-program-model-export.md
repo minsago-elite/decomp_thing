@@ -83,3 +83,28 @@ assessment or enter release. An output directory retaining the legacy
 `planning/compiler_engine_plan_evidence.json` fails before analysis instead of mixing old completion evidence with
 the schema-2 diagnostic. Descendant-JVM sampling is not cgroup resource evidence. ACP may later consume a
 separately authenticated plan read-only, but cannot author, validate, score, or certify it.
+
+## Worker diagnostics and cancellation
+
+`GhidraProgramModelExportLimits.maximumDiagnosticBytesPerStream` defaults to 16 MiB
+and can be reduced to a positive byte count. The 16 MiB ceiling is a separate host
+limit; the existing reconstruction profile still supplies export time and resident
+memory limits. Stdout and stderr are captured separately as bounded byte arrays.
+Exceeding either cap rejects the export and retains at most the configured byte
+count in each log. The resource report records the per-stream cap, retained byte
+counts and whether a diagnostic limit was exceeded. Raw-byte log writes preserve
+the cap even when diagnostics are not valid UTF-8.
+
+Process exit and normal diagnostic collection use the export's monotonic deadline.
+After a process timeout, collection gets up to five additional seconds to retain
+already-produced diagnostics. Existing termination grace and forced-exit waits are
+cleanup time outside the execution budget. Cancellation pending at entry creates
+no workspace; cancellation during execution propagates `InterruptedException` and
+cleans up the owned worker and streams. Partial decompilation checkpoints remain
+available for the existing resume workflow.
+
+`GhidraExportLifecycleTest` uses authored printf/sleep commands to check both stream
+caps, prelaunch cancellation and live worker cancellation. Selected existing exporter
+tests cover model reading, timeout diagnostics, parser size bounds and profile-derived
+limits. These local checks do not rerun historical GCC exports or qualify cc1/lto1
+fresh-versus-resumed semantic equivalence.

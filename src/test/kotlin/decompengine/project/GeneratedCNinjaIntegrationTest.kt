@@ -1,5 +1,8 @@
 package decompengine.project
 
+import decompengine.agent.AgentWorkflowProgress
+import decompengine.agent.AgentWorkflowPhase
+
 import java.nio.file.Files
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.createTempDirectory
@@ -36,8 +39,21 @@ class GeneratedCNinjaIntegrationTest {
         val temp = createTempDirectory("ninja-reconstruction-")
         val profile = GeneratedCNinjaReconstructionProfile.descriptor
         val analyzer = ProgramModelAnalyzer { _, _ -> model() }
-        val result = ArchivalReconstructionService(analyzer, RecoveredCModuleReconstructor(), profile)
+        val phases = mutableListOf<AgentWorkflowPhase>()
+        val progress = object : AgentWorkflowProgress by AgentWorkflowProgress.NONE {
+            override fun phase(phase: AgentWorkflowPhase, taskId: String?, acceptedRevisionSha256: String?) {
+                phases += phase
+            }
+        }
+        val result = ArchivalReconstructionService(analyzer, RecoveredCModuleReconstructor(), profile, progress = progress)
             .reconstruct(temp.resolve("authored-model-input"), temp.resolve("result"))
+        assertEquals(AgentWorkflowPhase.COMPLETED, phases.last())
+        assertTrue(requireNotNull(result.bundle.audit).unresolvedEntityIds.isEmpty())
+        val summary = Json.parseToJsonElement(temp.resolve("result/reconstruction.json").readText()).jsonObject
+        assertEquals("complete", summary.getValue("implementationStatus").jsonPrimitive.content)
+        assertEquals("0", summary.getValue("unresolvedEntityCount").jsonPrimitive.content)
+        val savedProgress = Json.parseToJsonElement(temp.resolve("result/reconstruction_progress.json").readText()).jsonObject
+        assertEquals("complete", savedProgress.getValue("phase").jsonPrimitive.content)
         assertEquals("ninja", result.build.command.first())
         assertFalse(result.projectDir.resolve("Makefile").exists())
         assertTrue(result.projectDir.resolve("build.ninja").exists())

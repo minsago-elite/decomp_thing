@@ -184,3 +184,106 @@ the plan to `reports/planning/modules.json`, compares planned IDs with build own
 and requires identical build contracts after archive extraction and rebuilding.
 This covers build ownership; the separate generated-C repair index still has
 its own default report-path assumptions.
+
+The archival reconstruction service derives its final implementation status from
+the audit produced during packaging. A successful build with any audited unresolved
+entity ends with the `UNRESOLVED` progress phase; its progress file uses `unresolved`.
+`reconstruction.json` records `implementationStatus` and `unresolvedEntityCount`
+alongside the independent build exit code. When the audited unresolved inventory is
+empty, the local implementation workflow uses `complete` / `COMPLETED`. This status
+does not assert calibrated recovery accuracy, behavior equivalence, production
+containment or release eligibility. Archives remain available for unresolved trees.
+
+The packager returns the audit with its bundle result so the service uses the same
+assessment without repeating the audit or reparsing its report. The service also
+uses the module count observed during generation rather than planning a second time
+for its final summary. Focused Make/Ninja service tests cover a buildable placeholder
+tree remaining unresolved and an accepted authored implementation reaching local
+completion, including the persisted summary and progress fields.
+
+`ArchivalReconstructionService`, direct source generation and the bundled model-analyzer factory default to
+`ReconstructionHostSafetyLimits.DEFAULT`, an independent immutable host policy.
+The service no longer copies the requested profile's budgets into its own admission
+ceiling. The default limits cover export time/memory, planner work and cardinality,
+module/context size, build time/output and archive inventory/bytes; their initial
+values admit both built-in profiles without changing either descriptor digest.
+Requests exceeding a default ceiling are rejected before analysis or reconstruction.
+
+A JVM host that explicitly authorizes different limits can pass the same
+`ReconstructionHostSafetyLimits` to `GhidraHeadlessProgramModelAnalyzer.bundled`
+and `ArchivalReconstructionService`. Direct generation also accepts an explicit
+host policy through an additive `SourceTreeGenerator.generate` overload; the
+original positional and trailing-lambda signature delegates with the default
+host policy. The service forwards the same policy it admitted at construction.
+This leaves requested budgets and profile
+identity unchanged rather than silently clamping them. The admission test checks
+an increased context request, both default entry points, unchanged identities and
+explicit host authorization. Individual phases still need their own measured
+resource enforcement; admission alone does not prove complete phase budgeting.
+
+Optional `exploration.json` is checked before analysis starts. The service reads a
+stable regular file under a byte bound of the smaller of 16 MiB and four times the
+profile's reconstruction context character limit, decodes strict UTF-8, then checks
+the decoded string length against that character limit. It rejects excessive or
+malformed input rather than truncating it or loading an unbounded report. Missing
+exploration input remains optional, and admitted text is forwarded unchanged.
+This text is prompt context; it does not authenticate behavioral claims or create
+measured behavior evidence. Complete module prompts retain their separate budget
+check after interfaces and other context are assembled.
+
+The service tests verify Unicode context forwarding and rejection of character
+excess, byte excess and malformed UTF-8 before analyzer invocation, source-tree
+creation or progress publication. Prelaunch cancellation is also checked before
+creating the reconstruction output directory.
+
+Generated-C module objectives and recovered function/global prompt formatting now
+belong to `GeneratedCModulePrompt`, selected through `ReconstructionAdapter`.
+Make and Ninja share that C-specific implementation. `BoundedLlmModuleReconstructor`
+retains the workflow-owned target/role checks, context-size gate, workspace rules,
+receipt capture, exact-change validation and rollback. Moving prompt formatting does
+not grant the adapter acceptance or filesystem authority.
+
+`ModulePromptCompatibilityTest` records an authored prompt from the pre-extraction
+production path and verifies its unchanged 5,515-character length and SHA-256 for
+both built-in profiles. Its deliberately oversized context is rejected before any
+agent invocation. This is prompt-byte and budget-gate compatibility evidence, not a
+live ACP interoperability result. Legacy request field names and the remaining
+profile-budget/neutrality migration are separate work.
+
+The complete module prompt now uses the smaller of the selected profile's
+`reconstructionMaximumContextCharacters` and the reconstructor's configured
+ceiling. That effective limit is recorded in results, cancellation reports,
+oversize diagnostics and the profile-aware reconstructor cache identity. Default
+profile identities remain unchanged; custom strategies retain their existing
+identity unless they opt into the profile-aware method.
+
+Accepted agent candidates, reused checkpoints, rollback baselines and archival
+checks require numeric prompt metadata with a nonnegative character count, a
+positive budget, and `characters <= budget <= profile limit`. Unresolved records
+may retain the size of an oversized prompt that was rejected before dispatch.
+The archive's exact factory and cache identity checks still apply. These checks
+establish budget consistency; they do not replace invocation-bound ACP evidence.
+
+Focused tests cover either ceiling being tighter, exact-limit dispatch to a
+cancelled test harness, default identity compatibility, and unresolved workflow
+reports that retain the selected limit without dispatching an agent. Candidate
+assessment also rejects an above-profile budget under each supported agent
+identity form before invoking the compiler.
+The auditor's metadata test covers missing and null values, numeric strings,
+negative values, zero budgets and exceeded limits while preserving unaffected
+module evidence. Its authored fixture supplies no ACP release receipt.
+
+Direct `SourceTreeGenerator.generate` calls select a planner from the admitted
+profile when no planner is supplied. The planner consumes the profile's entity,
+dependency-edge and work limits, maximum functions per module, and declared
+module implementation/interface paths. The archival service uses this same
+selection path.
+
+An explicitly supplied planner retains stricter limits; generation caps each of
+its four limits by the profile. Its module implementation and interface
+declarations must match the profile before traversal or source-tree writes.
+Compatible Make and Ninja module declarations remain interchangeable even though
+their build definitions differ. This binds planning policy to the selected
+profile; independent host admission remains a separate check and runs before
+direct generation selects or runs a planner, invokes reconstruction callbacks,
+or writes source-tree files.

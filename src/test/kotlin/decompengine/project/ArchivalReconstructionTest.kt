@@ -1,13 +1,18 @@
 package decompengine.project
 
+import decompengine.agent.AgentWorkflowProgress
+import decompengine.agent.AgentWorkflowPhase
+
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 
+import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
 import kotlin.io.path.readText
+import kotlin.io.path.writeText
 import kotlin.io.path.writeBytes
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -35,7 +40,30 @@ class ArchivalReconstructionTest {
                 "build-executable" to listOf("/usr/bin/make"),
                 "compiler-driver" to listOf("/usr/bin/cc"),
             ))
-        val result = ArchivalReconstructionService(analyzer, profile = profile).reconstruct(binary, temp.resolve("result"))
+        val phases = mutableListOf<AgentWorkflowPhase>()
+        val progress = object : AgentWorkflowProgress by AgentWorkflowProgress.NONE {
+            override fun phase(phase: AgentWorkflowPhase, taskId: String?, acceptedRevisionSha256: String?) {
+                phases += phase
+            }
+        }
+        val exploration = "{\"note\":\"authored 관찰\"}"
+        temp.resolve("result").createDirectories().resolve("exploration.json").writeText(exploration)
+        var observed: String? = null
+        val reconstructor = ModuleReconstructor { request ->
+            observed = request.observedBehavior
+            EvidenceModuleReconstructor().reconstruct(request)
+        }
+        val result = ArchivalReconstructionService(analyzer, reconstructor, profile = profile, progress = progress)
+            .reconstruct(binary, temp.resolve("result"))
+        assertEquals(exploration, observed)
+        val audit = requireNotNull(result.bundle.audit)
+        assertTrue(audit.unresolvedEntityIds.isNotEmpty())
+        assertEquals(AgentWorkflowPhase.UNRESOLVED, phases.last())
+        val summary = Json.parseToJsonElement(temp.resolve("result/reconstruction.json").readText()).jsonObject
+        assertEquals("unresolved", summary.getValue("implementationStatus").jsonPrimitive.content)
+        assertEquals(audit.unresolvedEntityIds.size.toString(), summary.getValue("unresolvedEntityCount").jsonPrimitive.content)
+        val savedProgress = Json.parseToJsonElement(temp.resolve("result/reconstruction_progress.json").readText()).jsonObject
+        assertEquals("unresolved", savedProgress.getValue("phase").jsonPrimitive.content)
 
         assertEquals(0, result.build.returnCode)
         assertEquals("/usr/bin/make", result.build.command.first())
@@ -102,6 +130,60 @@ class ArchivalReconstructionTest {
         assertEquals(contract, Json.parseToJsonElement(extracted.resolve("reports/build_contract.json").readText()).jsonObject)
         assertEquals(ArchivalProjectAuditor.audit(result.projectDir, profile).toJson(),
             ArchivalProjectAuditor.audit(extracted, profile).toJson())
+    }
+
+    @Test
+    fun `exploration input is bounded and decoded before analysis`() {
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val profile = ReconstructionProfile(base.schemaVersion, base.id, base.layout,
+            base.budgets.copy(reconstructionMaximumContextCharacters = 8), base.adapterConfiguration)
+        var calls = 0
+        val analyzer = ProgramModelAnalyzer { _, _ -> calls++; error("must not analyze") }
+        val cases = listOf(
+            "123456789".toByteArray() to IllegalArgumentException::class,
+            "x".repeat(33).toByteArray() to decompengine.repair.RepairBudgetExceededException::class,
+            byteArrayOf(0xc3.toByte(), 0x28) to java.nio.charset.CharacterCodingException::class,
+        )
+        for ((bytes, failureType) in cases) {
+            val output = createTempDirectory("exploration-preflight-")
+            output.resolve("exploration.json").writeBytes(bytes)
+            val failure = kotlin.test.assertFails {
+                ArchivalReconstructionService(analyzer, profile = profile).reconstruct(output.resolve("unused"), output)
+            }
+            assertTrue(failureType.isInstance(failure), "unexpected failure: $failure")
+            assertEquals(0, calls)
+            assertFalse(output.resolve("analysis").exists())
+            assertFalse(output.resolve("source-tree").exists())
+            assertFalse(output.resolve("reconstruction_progress.json").exists())
+        }
+    }
+
+    @Test
+    fun `requested profile budgets cannot raise the default host ceiling`() {
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val host = ReconstructionHostSafetyLimits.DEFAULT
+        val raised = base.budgets.copy(
+            reconstructionMaximumContextCharacters = host.maximum.reconstructionMaximumContextCharacters + 1,
+        )
+        val profile = ReconstructionProfile(base.schemaVersion, base.id, base.layout, raised, base.adapterConfiguration)
+        val digest = profile.sha256
+        var calls = 0
+        val analyzer = ProgramModelAnalyzer { _, _ -> calls++; error("must not analyze") }
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ArchivalReconstructionService(analyzer, profile = profile)
+        }
+        assertTrue(failure.message.orEmpty().contains("context budget exceeds the host safety limit"))
+        assertFailsWith<IllegalArgumentException> { GhidraHeadlessProgramModelAnalyzer.bundled(profile) }
+        assertEquals(0, calls)
+        assertEquals(digest, profile.sha256)
+        // A host caller can explicitly authorize another ceiling; this does not alter the request.
+        val explicitHost = ReconstructionHostSafetyLimits(raised)
+        ArchivalReconstructionService(analyzer, profile = profile, hostSafetyLimits = explicitHost)
+        GhidraHeadlessProgramModelAnalyzer.bundled(profile, explicitHost)
+        assertEquals(0, calls)
+        assertEquals(digest, profile.sha256)
+        assertEquals(base.budgets.reconstructionMaximumContextCharacters,
+            host.maximum.reconstructionMaximumContextCharacters)
     }
 
     @Test

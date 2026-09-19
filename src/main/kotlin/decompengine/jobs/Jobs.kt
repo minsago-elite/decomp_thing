@@ -7,6 +7,7 @@ import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.core.OracleJson
+import decompengine.project.ArchiveTransportLayout
 import decompengine.repair.StableRegularFile
 import decompengine.repair.readStableRegularFile
 import java.io.IOException
@@ -184,7 +185,7 @@ class JobStore(root: Path) {
         }
     }
 
-    internal fun sourceArchiveInventory(jobId: String): Map<String, LinuxFileIdentity> {
+    internal fun sourceArchiveInventory(jobId: String, layout: ArchiveTransportLayout): Map<String, LinuxFileIdentity> {
         jobDirectory(jobId)
         val inventory = sortedMapOf<String, LinuxFileIdentity>()
         var entries = 1
@@ -201,7 +202,7 @@ class JobStore(root: Path) {
                 }
                 selected.use { entry ->
                     require(!entry.identity.isSymbolicLink) { "archive source inventory contains a linked entry" }
-                    if (relative == "build") {
+                    if (relative in layout.excludedOutputRoots) {
                         require(entry.identity.isDirectory) { "archive build root is not a directory" }
                     } else if (entry.identity.isDirectory) {
                         LinuxFilesystemSyscalls.openDirectoryAt(directory.fd, name).use { child ->
