@@ -557,6 +557,7 @@ object SourceTreeGenerator {
         val selectedPlanner = planner?.withProfileBounds(profile) ?: DeterministicModulePlanner.forProfile(profile)
         val plan = selectedPlanner.plan(model, overrides)
         val rendering = adapter.rendering(model, plan)
+        requireProjectedArchiveEntryBudget(profile, plan.modules.size, rendering.entrypoint() != null)
         val typesHeader = rendering.sharedInterface()
         val typesHeaderPath = profile.layout.declaration("shared-interface").materialize()
         val typesHeaderFile = projectDir.resolve(typesHeaderPath)
@@ -930,6 +931,23 @@ object SourceTreeGenerator {
         )
         projectDir.resolve("source_tree_manifest.json").writeText(manifest.toJson())
         return manifest
+    }
+
+    private fun requireProjectedArchiveEntryBudget(
+        profile: ReconstructionProfile,
+        moduleCount: Int,
+        hasEntrypoint: Boolean,
+    ) {
+        // Each module writes a public header, private header, implementation, and
+        // checkpoint before archival packaging can enforce its entry limit. Reserve
+        // an additional slot for optional agent execution evidence, plus the fixed
+        // project evidence files and manifest.
+        val fixedEntries = 8 + if (hasEntrypoint) 1 else 0
+        val projectedEntries = moduleCount.toLong() * 5L + fixedEntries
+        require(projectedEntries <= profile.budgets.archiveMaximumEntries.toLong()) {
+            "projected generated file count $projectedEntries exceeds archive entry budget " +
+                "${profile.budgets.archiveMaximumEntries}"
+        }
     }
 
     private fun evidence(
