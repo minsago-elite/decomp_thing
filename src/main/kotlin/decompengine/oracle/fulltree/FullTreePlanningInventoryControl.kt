@@ -487,6 +487,9 @@ object FullTreePlanningInventoryControl {
                 }
             },
         )
+        private val knownShardIds: Set<String> = Collections.unmodifiableSet(
+            (sourceModules.asSequence().map { it.shardId } + sourceOnlyUnits.asSequence().map { it.shardId }).toSet(),
+        )
 
         override fun requireOwnerModule(ownerUnitId: String): FullTreePlanningSourceModule {
             if (!ownerUnitId.matches(COMPILATION_UNIT_ID)) {
@@ -501,7 +504,11 @@ object FullTreePlanningInventoryControl {
                 throw FullTreeControlException("planning shard ID is invalid")
             }
             return modulesByShardId[shardId]
-                ?: throw FullTreeControlException("planning shard ID is outside the authenticated inventory")
+                ?: if (shardId in knownShardIds) {
+                    emptyList()
+                } else {
+                    throw FullTreeControlException("planning shard ID is outside the authenticated inventory")
+                }
         }
 
         companion object {
