@@ -13,10 +13,12 @@ python3 -B -m unittest discover -s tests -p test_generic_leakage.py -v
 
 The scanner requires Python 3.9+ and Git. The standalone Gradle task runs the
 scanner without compiling or executing application code. Gradle `check` and
-`scripts/ci.sh` include it. Exit status is 0 for no findings, 1 for findings, and
-2 for invalid policy or unreadable inputs. JSON output contains either the scan
-counts and sorted findings or an `error` field. Findings include path, line,
-rule, and matched text.
+`scripts/ci.sh` currently run the ordinary project checks only; they do not invoke
+this draft gate while the repository findings remain unresolved. Run
+`verifyReconstructionNeutrality` explicitly when you need the scanner result. Exit
+status is 0 for no findings, 1 for findings, and 2 for invalid policy or unreadable
+inputs. JSON output contains either the scan counts and sorted findings or an
+`error` field. Findings include path, line, rule, and matched text.
 
 ## Ownership and exceptions
 

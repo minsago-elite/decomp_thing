@@ -119,6 +119,9 @@ class FullTreePlanningInventoryControlTest {
         assertFailsWith<FullTreeControlException> {
             registry.requireOwnerModulesForShard("clang-tools-driver-missing")
         }
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("a-".repeat(257))
+        }
     }
 
     @Test
