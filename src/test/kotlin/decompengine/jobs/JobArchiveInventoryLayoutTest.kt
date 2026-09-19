@@ -54,6 +54,15 @@ class JobArchiveInventoryLayoutTest {
                 setOf("notes.txt", "src/module.txt", "artifacts/sibling.txt", "artifacts/obj/module.txt"),
                 ninjaInventory.filterValues { it.isRegularFile }.keys,
             )
+
+            val caseVariantLayout = ArchiveTransportLayout(
+                excludedOutputRoots = setOf("BUILD"),
+                strictBuildControlPaths = emptySet(),
+            )
+            val caseVariantInventory = store.sourceArchiveInventory(job.id, caseVariantLayout)
+            assertTrue(caseVariantInventory.keys.none { it == "build" || it.startsWith("build/") })
+            assertTrue(caseVariantInventory["build"] == null)
+            assertTrue(caseVariantInventory["build/source.txt"] == null)
             assertTrue(ninjaInventory.keys.none { it == ".ninja_log" || it == ".ninja_deps" || it == "build" })
             assertTrue(ninjaInventory[".ninja_log"] == null)
             assertTrue(ninjaInventory[".ninja_deps"] == null)
