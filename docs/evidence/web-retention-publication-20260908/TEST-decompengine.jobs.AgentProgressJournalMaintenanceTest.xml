@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.jobs.AgentProgressJournalMaintenanceTest" tests="8" skipped="0" failures="0" errors="0" timestamp="2026-09-08T05:03:40.616Z" hostname="whatsername" time="0.343">
+  <properties/>
+  <testcase name="owned publication expires records and preserves durable metadata input and protected history()" classname="decompengine.jobs.AgentProgressJournalMaintenanceTest" time="0.081"/>
+  <testcase name="ambiguous pending publication is preserved for explicit recovery()" classname="decompengine.jobs.AgentProgressJournalMaintenanceTest" time="0.012"/>
+  <testcase name="interrupted publication converges after reopen at every durable boundary()" classname="decompengine.jobs.AgentProgressJournalMaintenanceTest" time="0.049"/>
+  <testcase name="active attempts and absent journals do not acquire a retention publication()" classname="decompengine.jobs.AgentProgressJournalMaintenanceTest" time="0.007"/>
+  <testcase name="publication IO failures preserve a valid journal and can be retried()" classname="decompengine.jobs.AgentProgressJournalMaintenanceTest" time="0.017"/>
+  <testcase name="linked journal entries are denied without changing their owned fixture target()" classname="decompengine.jobs.AgentProgressJournalMaintenanceTest" time="0.006"/>
+  <testcase name="live writer lease survives duplicate opens and excludes maintenance and another JVM()" classname="decompengine.jobs.AgentProgressJournalMaintenanceTest" time="0.061"/>
+  <testcase name="maintenance waits for the durable snapshot read transaction()" classname="decompengine.jobs.AgentProgressJournalMaintenanceTest" time="0.109"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
