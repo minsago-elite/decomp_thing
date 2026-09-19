@@ -52,11 +52,12 @@ The evidence is bound to these repository-controlled LLVM 22.1.6 artifacts:
 | `full-tree-planning-inventory.json` | `2bf9181f031e94304d63e184e5d2fb684623f981b655afb966a06db7c43be15a` |
 | `full-tree-source-inventory.json` | `33e53beb62221888abbf5e198a4da2abe3b5c29c809bb90f1faff15c3829edc4` |
 
-The compact JSON hash of the planning module row is
+The compact JSON hash of the one-element filtered planning-module-record
+array is
 `d9c7da77047dd0e7338988c9ca5553e591b514bd4e29f4e35121a75515cf82f4`. The
 inventory's ordered unit-ID hash is
 `83b4f6bc212226a9d8738898062a86b03b1f711e6e327e468fc0bbea5dbab2af`, and the
-compact linked source-record hash is
+compact hash of the one-element filtered linked-source-record array is
 `a3f60c25b4ba5b7ce055f7dedefbc386dcfea5b3f22674780dd47b37b53ee4f4`.
 
 The planning inventory contains 2,150 source modules across 57 shards. That
