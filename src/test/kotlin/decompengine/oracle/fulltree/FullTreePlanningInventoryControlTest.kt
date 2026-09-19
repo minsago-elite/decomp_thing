@@ -19,6 +19,66 @@ import kotlinx.serialization.json.JsonPrimitive
 
 class FullTreePlanningInventoryControlTest {
     @Test
+    fun `clang astmatchers dispatch binds linked owners and retains source-only evidence`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+
+        val modules = registry.requireOwnerModulesForShard("clang-lib-astmatchers")
+        assertEquals(3, modules.size)
+        assertEquals(3, modules.map { it.sourcePath }.toSet().size)
+        assertEquals(3, modules.map { it.unitId }.toSet().size)
+        assertEquals(
+            listOf(
+                "source/clang/lib/ASTMatchers/ASTMatchFinder.cpp",
+                "source/clang/lib/ASTMatchers/ASTMatchersInternal.cpp",
+                "source/clang/lib/ASTMatchers/LowLevelHelpers.cpp",
+            ),
+            modules.map { it.sourcePath },
+        )
+        assertEquals(
+            listOf(
+                "cu-c92b96b2a7deeb38aa0070c4ec3228e7",
+                "cu-7ea999cb15665cc462cbcd7cc46b6f4a",
+                "cu-eb1ca5e071877d61b8ce976f1c8e9427",
+            ),
+            modules.map { it.unitId },
+        )
+        assertTrue(
+            modules.all {
+                it.moduleId == it.unitId &&
+                    it.shardId == "clang-lib-astmatchers" &&
+                    it.sourceKind == "handwritten" &&
+                    it.sourcePath.startsWith("source/clang/lib/ASTMatchers/")
+            },
+        )
+
+        val sourceOnly = registry.sourceOnlyUnits.filter { it.shardId == "clang-lib-astmatchers" }
+        assertEquals(5, sourceOnly.size)
+        assertEquals(
+            listOf(
+                "source/clang/lib/ASTMatchers/Dynamic/Diagnostics.cpp",
+                "source/clang/lib/ASTMatchers/Dynamic/Marshallers.cpp",
+                "source/clang/lib/ASTMatchers/Dynamic/Parser.cpp",
+                "source/clang/lib/ASTMatchers/Dynamic/Registry.cpp",
+                "source/clang/lib/ASTMatchers/Dynamic/VariantValue.cpp",
+            ),
+            sourceOnly.map { it.sourcePath },
+        )
+        assertTrue(sourceOnly.all { it.reasonCode == "not-selected-by-authenticated-build-graph" })
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("clang-lib-astmatchers-missing")
+        }
+    }
+
+    @Test
     fun `fixture planning inventory is closed exact and byte deterministic`() =
         inControlTemporaryDirectory { directory ->
             val fixture = createFullTreeControlFixture(directory.resolve("fixture"))
