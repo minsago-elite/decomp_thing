@@ -92,13 +92,17 @@ class Doctor(
         for (probe in diagnostics.versionProbes) {
             checks += executableCheck(probe.name, probe.command, probe.remediation, toolchainProbe)
         }
+        // Run the adapter's compiler/sanitizer capability probe before unrelated host checks
+        // can consume the selected profile's contiguous toolchain budget. Keep its authored
+        // report position below Ghidra for compatibility with the doctor output contract.
+        val capabilityChecks = diagnostics.checkCapabilities(toolchainProbe, toolchainBudget::checkpoint)
         checks += executableCheck("binutils/readelf", listOf("readelf", "--version"), "Install binutils and ensure readelf is on PATH.")
         checks += executableCheck("binutils/strings", listOf("strings", "--version"), "Install binutils and ensure strings is on PATH.")
         checks += executableCheck("Python", listOf("python3", "--version"), "Install Python 3 and ensure python3 is on PATH.")
         val angrPython = environment["ANGR_PYTHON"]?.takeIf(String::isNotBlank) ?: "python3"
         checks += executableCheck("angr", listOf(angrPython, "-c", "import angr"), "Install angr for the configured Python interpreter or set ANGR_PYTHON.")
         checks += ghidraCheck(exportLimits)
-        checks += diagnostics.checkCapabilities(toolchainProbe, toolchainBudget::checkpoint)
+        checks += capabilityChecks
         requireDoctorActive()
         checks += bubblewrapCheck()
         checks += outputCheck(options.outputDir)
