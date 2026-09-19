@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM eclipse-temurin:21-jdk-jammy@sha256:55fb9bf738f5d9b4a6c01b39337e3070d3e27370dd3c478fd1d5d3cd2233c6d8 AS toolchain
+FROM eclipse-temurin:21-jdk-jammy@sha256:55fb9bf738f9b5d9b4a6c01b39337e3070d3e27370dd3c478fd1d5d3cd2233c6d8 AS toolchain
 
 ARG ANGR_VERSION=9.2.213
 ARG BUBBLEWRAP_VERSION=0.11.2
@@ -13,6 +13,9 @@ RUN apt-get update \
         ca-certificates \
         clang \
         curl \
+        libcap-dev \
+        libselinux1-dev \
+        libseccomp-dev \
         meson \
         ninja-build \
         python3 \
@@ -36,9 +39,6 @@ RUN apt-get update \
 
 ENV PATH="/usr/local/bin:${PATH}"
 RUN test "$(bwrap --version)" = "bubblewrap ${BUBBLEWRAP_VERSION}"
-
-COPY scripts/install-pinned-bubblewrap.sh /usr/local/bin/install-pinned-bubblewrap.sh
-RUN chmod 0755 /usr/local/bin/install-pinned-bubblewrap.sh
 
 FROM toolchain AS build
 
