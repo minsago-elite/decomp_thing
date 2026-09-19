@@ -69,7 +69,7 @@ interface WebAccessClock {
     fun nanoTime(): Long
 }
 
-private object SystemWebAccessClock : WebAccessClock {
+internal object SystemWebAccessClock : WebAccessClock {
     override fun instant(): Instant = Instant.now()
     override fun nanoTime(): Long = System.nanoTime()
 }
