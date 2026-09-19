@@ -92,6 +92,9 @@ internal class WebApiController(
                 resource.matches(Regex("jobs/[^/]+/artifacts/[^/]+/content")) -> {
                     access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true))
                     requireNoWebApiQuery(exchange)
+                    if (!acceptsWebMediaType(exchange, "application/octet-stream")) {
+                        throw WebAccessDenied(406, "NOT_ACCEPTABLE", "This endpoint returns application/octet-stream.")
+                    }
                     if (exchange.requestHeaders.keys.any { it.equals("Range", true) || it.startsWith("If-", true) }) {
                         throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "This bounded artifact endpoint does not support Range or conditional requests.")
                     }
