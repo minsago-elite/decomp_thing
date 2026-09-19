@@ -9,7 +9,6 @@ RUN apt-get update \
         binutils \
         bubblewrap \
         build-essential \
-        ninja-build \
         ca-certificates \
         clang \
         curl \
