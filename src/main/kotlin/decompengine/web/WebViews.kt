@@ -211,10 +211,6 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
     sourceTree: SourceTreeView? = null, sourceTreeUnavailable: Boolean = false,
     progressSnapshot: JsonObject? = null, explorationReport: JsonObject? = null,
     repairHistory: JsonObject? = null, reconstructionProgress: JsonObject? = null,
-<<<<<<< ours
-    artifacts: List<WebArtifactSummary>? = null): String {
-    requirePublicElfCategories(job.metadata)
-=======
     artifacts: List<WebArtifactSummary>? = null): String = renderJobDocument(
     job, reportContext, diagnostics, sourceTree, sourceTreeUnavailable, progressSnapshot, explorationReport,
     repairHistory, reconstructionProgress, artifacts,
@@ -226,7 +222,7 @@ internal fun renderJobDocument(job: Job, reportContext: WebReportContext? = null
     progressSnapshot: JsonObject? = null, explorationReport: JsonObject? = null,
     repairHistory: JsonObject? = null, reconstructionProgress: JsonObject? = null,
     artifacts: List<WebArtifactSummary>? = null): WebApplicationDocument {
->>>>>>> theirs
+    requirePublicElfCategories(job.metadata)
     val reports = reportsFor(job, reportContext)
     val active = job.status in setOf("queued", "analyzing")
     val metadata = job.metadata.toJson().entries.joinToString("") { (key, value) ->
