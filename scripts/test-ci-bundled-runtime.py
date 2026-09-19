@@ -35,7 +35,7 @@ class RuntimeInstallationTest(unittest.TestCase):
         (self.source / 'nested' / 'mode-marker').chmod(0o755)
 
     def invoke(self, prepare, target=None):
-        args = [str(target or self.target), self.run_id, self.attempt]
+        args = [str(target or self.target), self.run_id, self.attempt, 'ghidra']
         if prepare:
             args.insert(0, str(self.source))
         name = 'ci-prepare-bundled-ghidra-runtime.sh' if prepare else 'ci-release-bundled-ghidra-runtime.sh'
