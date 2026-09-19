@@ -223,7 +223,7 @@ worker termination, wrapper forwarding, and successful canonical model input
 larger than one 64 KiB chunk. They use ordinary authored data and local
 sleep/printf/touch commands; they do not run real Ghidra, compiler/ACP qualification
 or the broader security/full-tree/web suites. The repository neutrality gate
-still reports the same 80 known findings and remains failing.
+passes under the declared policy and allowances.
 
 The remaining matrix must cover actual section/symbol/name complexity, recovered
 model size and structure, and real bundled export/integration at supported

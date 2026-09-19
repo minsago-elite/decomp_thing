@@ -1,0 +1,19 @@
+{
+  "apiVersion": 1,
+  "kind": "gitPushRequest",
+  "data": {
+    "action": "git.push",
+    "worktreeId": "worktree_example_1",
+    "guards": {
+      "repositoryVersion": "repo_version_1",
+      "worktreeVersion": "worktree_version_1",
+      "expectedHeadObjectId": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "expectedRefId": "ref_main",
+      "expectedRefObjectId": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+    },
+    "remoteId": "remote_example_1",
+    "remoteRefId": "remote_ref_main",
+    "localObjectId": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "expectedRemoteObjectId": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+  }
+}
