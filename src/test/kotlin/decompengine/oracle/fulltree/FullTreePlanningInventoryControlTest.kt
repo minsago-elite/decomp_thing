@@ -421,6 +421,7 @@ class FullTreePlanningInventoryControlTest {
         assertFailsWith<FullTreeControlException> {
             registry.requireOwnerModulesForShard("llvm-lib-profiledata-missing")
         }
+        assertTrue(registry.requireOwnerModulesForShard("llvm-tools-llvm-profdata").isEmpty())
     }
 
     private fun generate(
