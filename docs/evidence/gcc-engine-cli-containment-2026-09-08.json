@@ -40,7 +40,7 @@
       "detail": "The fixture covers option selection, exact checkpoint selection, bound invocation identity, and preflight rejection; it does not run a real engine."
     },
     {
-      "reference": "src/test/kotlin/decompengine/oracle/gcc/GccBundledContainedExecutionTest.kt:157-213",
+      "reference": "src/test/kotlin/decompengine/oracle/gcc/GccBundledContainedExecutionTest.kt:157-225",
       "status": "declared-coverage-not-executed",
       "detail": "The authored multi-batch fixture exercises same-owner interruption/resume and fresh model/plan comparison when provisioned containment is available; it is fixture evidence, not benchmark acceptance."
     },
@@ -50,9 +50,9 @@
       "detail": "The opt-in cc1/lto1 CLI fixture compares fresh and same-owner resumed model/plan bytes and records benchmarkAccepted=false, releaseEligible=false, and no cold-recovery qualification."
     },
     {
-      "reference": "oracle/gcc/16.2.0/compiler-engines.json; oracle/gcc/compiler-engines.schema.json",
+      "reference": "oracle/gcc/16.2.0/compiler-engines.json; oracle/gcc/compiler-engines.schema.json (contextual schema)",
       "status": "current-profile-fixture",
-      "detail": "The current retained profile and schema are the exact profile inputs named by the coordinator tests; no new engine bytes or profile claims are introduced here."
+      "detail": "The retained profile is the exact profile input opened by the coordinator tests; the schema is included as contextual reference and is not claimed as a coordinator test input. No new engine bytes or profile claims are introduced here."
     }
   ],
   "unverifiedCriteria": [
