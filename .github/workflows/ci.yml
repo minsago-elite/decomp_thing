@@ -47,6 +47,8 @@ jobs:
         run: |
           npm --prefix frontend test -- --reporter=default --reporter=junit \
             --outputFile.junit="$RUNNER_TEMP/frontend-ci/component-tests.xml"
+      - name: Verify isolated Git and GitHub fixtures
+        run: node --test scripts/web-git-fixtures.test.mjs scripts/web-github-fixture-http.test.mjs | tee "$RUNNER_TEMP/frontend-ci/git-fixtures-tests.txt"
       - name: Build and verify the production asset inventory
         run: |
           npm --prefix frontend run build
