@@ -114,8 +114,12 @@ class FullTreePlanningInventoryControlTest {
         assertEquals(listOf("cu-d65fa95a55a39225eb8705c9be72d115"), modules.map { it.unitId })
         assertTrue(modules.all { it.moduleId == it.unitId && it.shardId == "clang-lib-installapi" })
         assertEquals(7, registry.sourceOnlyUnits.count { it.shardId == "clang-lib-installapi" })
+        assertEquals(emptyList(), registry.requireOwnerModulesForShard("clang-lib-cir"))
         assertFailsWith<FullTreeControlException> {
             registry.requireOwnerModulesForShard("clang-lib-installapi-missing")
+        }
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("a-".repeat(5_000) + "a")
         }
     }
 

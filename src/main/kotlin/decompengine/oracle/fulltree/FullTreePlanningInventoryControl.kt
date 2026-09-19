@@ -219,10 +219,11 @@ object FullTreePlanningInventoryControl {
 
         val sourceModules = inventoryUnits.map { unit ->
             val unitId = unit.controlString("id")
+            val shardId = requireValidShardId(unit.controlString("shardId"))
             JsonObject(
                 mapOf(
                     "moduleId" to JsonPrimitive(unitId),
-                    "shardId" to unit.getValue("shardId"),
+                    "shardId" to JsonPrimitive(shardId),
                     "sourceKind" to unit.getValue("sourceKind"),
                     "sourcePath" to unit.getValue("sourcePath"),
                     "unitId" to JsonPrimitive(unitId),
@@ -232,10 +233,11 @@ object FullTreePlanningInventoryControl {
         val sourceOnlyUnits = sourceUnits.asSequence()
             .filter { it.controlString("classification") == "source-only" }
             .map { unit ->
+                val shardId = requireValidShardId(unit.controlString("shardId"))
                 JsonObject(
                     mapOf(
                         "reasonCode" to unit.getValue("reasonCode"),
-                        "shardId" to unit.getValue("shardId"),
+                        "shardId" to JsonPrimitive(shardId),
                         "sourcePath" to unit.getValue("path"),
                     ),
                 )
@@ -506,7 +508,7 @@ object FullTreePlanningInventoryControl {
         }
 
         override fun requireOwnerModulesForShard(shardId: String): List<FullTreePlanningSourceModule> {
-            if (shardId.length > MAXIMUM_SHARD_ID_CHARACTERS || !shardId.matches(SHARD_ID)) {
+            if (!isValidShardId(shardId)) {
                 throw FullTreeControlException("planning shard ID is invalid")
             }
             modulesByShardId[shardId]?.let { return it }
@@ -623,6 +625,21 @@ private val SOURCE_ONLY_ORDER = Comparator<JsonObject> { left, right ->
 }
 private val COMPILATION_UNIT_ID = Regex("cu-[0-9a-f]{32}")
 private const val MAXIMUM_SHARD_ID_CHARACTERS = 250
+
+private fun isValidShardId(value: String): Boolean {
+    if (value.isEmpty() || value.length > MAXIMUM_SHARD_ID_CHARACTERS) return false
+    value.forEachIndexed { index, character ->
+        if (character !in 'a'..'z' && character !in '0'..'9' && character != '-') return false
+        if (character == '-' && (index == 0 || index == value.lastIndex || value[index - 1] == '-')) return false
+    }
+    return true
+}
+
+private fun requireValidShardId(value: String): String {
+    if (!isValidShardId(value)) throw FullTreeControlException("planning shard ID is invalid")
+    return value
+}
+
 
 private const val PLANNING_SCHEMA = "full-tree-planning-inventory"
 private const val PLANNING_MAXIMUM_SOURCE_MODULES = 1_000_000
