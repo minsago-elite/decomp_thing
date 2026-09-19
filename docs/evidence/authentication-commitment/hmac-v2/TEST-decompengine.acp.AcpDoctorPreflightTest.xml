@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.acp.AcpDoctorPreflightTest" tests="7" skipped="0" failures="0" errors="0" timestamp="2026-09-05T17:01:27.318Z" hostname="whatsername" time="11.351">
+  <properties/>
+  <testcase name="invalid authentication inventories fail preflight as protocol errors with cleanup()" classname="decompengine.acp.AcpDoctorPreflightTest" time="2.713"/>
+  <testcase name="preflight rejects version capability and process failures after verified cleanup()" classname="decompengine.acp.AcpDoctorPreflightTest" time="1.908"/>
+  <testcase name="cancelled preflight retains terminal receipt before launch and during initialize()" classname="decompengine.acp.AcpDoctorPreflightTest" time="1.554"/>
+  <testcase name="contained preflight inspects environment terminal and unknown methods without executing them()" classname="decompengine.acp.AcpDoctorPreflightTest" time="0.364"/>
+  <testcase name="doctor reports the bounded invalid authentication inventory reason()" classname="decompengine.acp.AcpDoctorPreflightTest" time="1.005"/>
+  <testcase name="doctor exposes authentication previews only through explicit prompt-free inspection()" classname="decompengine.acp.AcpDoctorPreflightTest" time="2.034"/>
+  <testcase name="preflight proves descendant cleanup and fails closed on shutdown output overflow()" classname="decompengine.acp.AcpDoctorPreflightTest" time="1.771"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

@@ -23,7 +23,7 @@ class ReconstructionProfileTest {
 
         assertEquals(original.canonicalJson(), rebuilt.canonicalJson())
         assertEquals(original.sha256, rebuilt.sha256)
-        assertEquals("a448a139a09f28ad9f2e08bfcebcb9d85765a0a557ebb11db6d7634bc145f28f", original.sha256)
+        assertEquals("c55ec914f9210cf19a0f0b88805c0192a347485a1bd50244845cd5af7f4151fb", original.sha256)
         assertTrue(original.sha256.matches(Regex("[0-9a-f]{64}")))
         assertNotEquals(
             original.sha256,

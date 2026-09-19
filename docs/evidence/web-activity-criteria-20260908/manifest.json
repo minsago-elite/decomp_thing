@@ -1,0 +1,42 @@
+{
+  "status": "passed",
+  "sourceCommit": "56ba7267012fc5ab8b2ffbcff8c9a4617c09b186",
+  "verification": {
+    "frontendTests": 343,
+    "failures": 0,
+    "lint": "passed",
+    "generatedTypecheck": "passed"
+  },
+  "selectedTests": {
+    "file": "activity-tests.json",
+    "count": 29,
+    "sha256": "e06d8a0bd3146b3a034817866407219fd104c8245ee56cb4bb37bf0f46a9668e"
+  },
+  "priorBrowserEvidence": {
+    "file": "../web-production-retention-20260908/browser.json",
+    "sha256": "a6032863260a048c40158fcb71e509e842cc986e66451692e12e52a2654c8727",
+    "applicable": "No application or browser-driver implementation changed in this checkpoint."
+  },
+  "issue175CriteriaVerified": [
+    2,
+    5
+  ],
+  "issue175CriteriaStillOpen": [
+    1,
+    3,
+    4,
+    6
+  ],
+  "runtimeChange": false,
+  "finding": "Schema projection already normalizes object member order; the new raw-wire regression confirms duplicate suppression and continued cursor ordering. No new comparison algorithm was required.",
+  "notRepeated": [
+    "JVM suite",
+    "distribution build",
+    "packaged browser qualification"
+  ],
+  "limitations": [
+    "The current stacked implementation is verified; this does not claim merge into master.",
+    "Complete stage scenarios, task/session/revision evidence pages, certified public messages and full progress qualification remain incomplete.",
+    "Retained accessibility evidence is automated browser/tree coverage, not manual assistive-technology qualification."
+  ]
+}
