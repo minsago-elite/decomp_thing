@@ -38,6 +38,7 @@ import kotlinx.serialization.json.put
 import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
 import java.net.URLDecoder
+import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 import java.util.concurrent.ArrayBlockingQueue
@@ -786,15 +787,13 @@ class UploadServer(
                 decode(query.removePrefix("sha256="))
             }
             val verified = archiveEvidence.read(jobId, expected, relativePath.removeSuffix("/source-tree.zip"))
-            exchange.responseHeaders.add("Content-Disposition", "attachment; filename=\"source-tree.zip\"")
             exchange.responseHeaders.add("ETag", "\"${verified.sha256}\"")
-            exchange.sendBytes(200, verified.bytes, "application/zip")
+            exchange.sendUntrustedAttachment(200, verified.bytes, "application/zip", "source-tree.zip")
             return
         }
         val artifact = jobs.readArtifact(jobId, relativePath, MAX_ARTIFACT_BYTES)
         val name = Path.of(relativePath).fileName
-        exchange.responseHeaders.add("Content-Disposition", "attachment; filename=\"${name.toString().replace("\"", "")}\"")
-        exchange.sendBytes(200, artifact.bytes, contentType(name))
+        exchange.sendUntrustedAttachment(200, artifact.bytes, contentType(name), name.toString())
     }
 
     private fun decode(value: String): String = URLDecoder.decode(value, StandardCharsets.UTF_8)
@@ -902,10 +901,12 @@ private fun HttpExchange.sendBytes(
     responseHeaders.add("Content-Type", contentType)
     responseHeaders.add("X-Content-Type-Options", "nosniff")
     responseHeaders.add("Referrer-Policy", "no-referrer")
-    responseHeaders.add(
-        "Content-Security-Policy",
-        "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'",
-    )
+    if (!responseHeaders.containsKey("Content-Security-Policy")) {
+        responseHeaders.add(
+            "Content-Security-Policy",
+            "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'",
+        )
+    }
     responseHeaders.add("Cache-Control", if (cache) "public, max-age=3600" else "no-store")
     responseHeaders.add("Content-Length", body.size.toString())
     if (requestMethod == "HEAD") {
@@ -915,6 +916,35 @@ private fun HttpExchange.sendBytes(
         sendResponseHeaders(status, body.size.toLong())
         responseBody.use { it.write(body) }
     }
+}
+
+private fun HttpExchange.sendUntrustedAttachment(
+    status: Int,
+    body: ByteArray,
+    contentType: String,
+    filename: String,
+) {
+    responseHeaders.set("Content-Disposition", attachmentDisposition(filename))
+    responseHeaders.set(
+        "Content-Security-Policy",
+        "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'",
+    )
+    sendBytes(status, body, contentType)
+}
+
+internal fun attachmentDisposition(filename: String): String {
+    val fallback = filename.asSequence()
+        .map { character ->
+            if (character.code in 0x21..0x7e && (character.isLetterOrDigit() || character in "._-")) character else '_'
+        }
+        .joinToString("")
+        .take(128)
+        .trim('.')
+        .ifBlank { "artifact.bin" }
+    val encoded = URLEncoder.encode(filename, StandardCharsets.UTF_8)
+        .replace("+", "%20")
+        .replace("*", "%2A")
+    return "attachment; filename=\"$fallback\"; filename*=UTF-8''$encoded"
 }
 
 private fun contentType(path: Path): String = when (path.fileName.toString().substringAfterLast('.', "")) {
