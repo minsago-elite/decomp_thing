@@ -898,6 +898,13 @@ object SourceTreeGenerator {
         val makefileFile = projectDir.resolve(makefilePath)
         makefileFile.parent.createDirectories()
         makefileFile.writeText(makefile)
+        // Remove the other built-in profile's build definition when rerunning into a
+        // directory previously generated with it. The stale file is outside the selected
+        // profile's manifest and source-revision binding but inside the archive payload,
+        // so it would otherwise ship an unaudited alternative rebuild path.
+        for (stale in KNOWN_BUILD_DEFINITIONS - makefilePath) {
+            projectDir.resolve(stale).deleteIfExists()
+        }
         generated += evidence(profile, makefilePath, makefile, "planner", emptyList())
 
         val programModelPath = profile.layout.declaration("program-model-evidence").materialize()
@@ -1774,3 +1781,7 @@ internal class UniqueJsonObjectKeyValidator(private val source: String) {
 }
 
 private const val MAXIMUM_MANIFEST_JSON_DEPTH = 64
+
+/** Build definitions owned by the built-in reconstruction profiles. Removing a stale one
+ * on profile switches keeps reruns from shipping an unaudited alternative rebuild path. */
+private val KNOWN_BUILD_DEFINITIONS = setOf("Makefile", "build.ninja")

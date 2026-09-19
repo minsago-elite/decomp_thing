@@ -123,4 +123,19 @@ class GeneratedCNinjaIntegrationTest {
         assertFailsWith<BuildException> { ReconstructionAdapters.resolve(profile).build(project, profile) }
         assertFalse(Files.exists(project.resolve("build/reconstructed")))
     }
+
+    @Test
+    fun `rerunning generation removes the previous profile build definition`() {
+        val project = createTempDirectory("profile-switch-")
+        val makeProfile = GeneratedCMakeReconstructionProfile.descriptor
+        val ninjaProfile = GeneratedCNinjaReconstructionProfile.descriptor
+        SourceTreeGenerator.generate(model(), project, reconstructor = RecoveredCModuleReconstructor(), profile = makeProfile)
+        assertTrue(project.resolve("Makefile").exists())
+        SourceTreeGenerator.generate(model(), project, reconstructor = RecoveredCModuleReconstructor(), profile = ninjaProfile)
+        assertTrue(project.resolve("build.ninja").exists())
+        assertFalse(project.resolve("Makefile").exists())
+        SourceTreeGenerator.generate(model(), project, reconstructor = RecoveredCModuleReconstructor(), profile = makeProfile)
+        assertTrue(project.resolve("Makefile").exists())
+        assertFalse(project.resolve("build.ninja").exists())
+    }
 }
