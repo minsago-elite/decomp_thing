@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.jobs.WorkflowAttemptStoreTest" tests="19" skipped="0" failures="0" errors="0" timestamp="2026-09-08T05:31:45.961Z" hostname="whatsername" time="0.408">
+  <properties/>
+  <testcase name="uncertain pin publication preserves the committed pin after reopen()" classname="decompengine.jobs.WorkflowAttemptStoreTest" time="0.004"/>
+  <testcase name="malformed legacy and workflow records stay isolated and keep their original bytes()" classname="decompengine.jobs.WorkflowAttemptStoreTest" time="0.001"/>
+  <testcase name="legacy records remain readable without inventing attempts or changing original bytes()" classname="decompengine.jobs.WorkflowAttemptStoreTest" time="0.001"/>
+  <testcase name="attempt identities workflow inputs and prior terminal outcomes survive retry and reopen()" classname="decompengine.jobs.WorkflowAttemptStoreTest" time="0.002"/>
+  <testcase name="corrupt accepted pointer cannot detach accepted history or silently confer acceptance()" classname="decompengine.jobs.WorkflowAttemptStoreTest" time="0.002"/>
+  <testcase name="crashes at every persistence boundary retain a complete old or new state and prior acceptance()" classname="decompengine.jobs.WorkflowAttemptStoreTest" time="0.009"/>
+  <testcase name="CAS prevents competing starts and state changes without losing the winner()" classname="decompengine.jobs.WorkflowAttemptStoreTest" time="0.003"/>
+  <testcase name="ordinary precommit failure preserves state postcommit failure returns success and uncertain rename requires reopen()" classname="decompengine.jobs.WorkflowAttemptStoreTest" time="0.003"/>
+  <testcase name="storage close waits for an active snapshot and rejects reads after ownership release()" classname="decompengine.jobs.WorkflowAttemptStoreTest" time="0.106"/>
+  <testcase name="attempt read transaction excludes lifecycle publication through local evidence capture()" classname="decompengine.jobs.WorkflowAttemptStoreTest" time="0.114"/>
+  <testcase name="failed snapshot callback releases transaction and foreign run never invokes callback()" classname="decompengine.jobs.WorkflowAttemptStoreTest" time="0.008"/>
+  <testcase name="malformed optional progress pins never become an unpinned default()" classname="decompengine.jobs.WorkflowAttemptStoreTest" time="0.004"/>
+  <testcase name="pin mutations use run CAS and no-op pins do not rewrite metadata()" classname="decompengine.jobs.WorkflowAttemptStoreTest" time="0.004"/>
+  <testcase name="deep malformed records and reserved nonregular entries fail without following upload paths()" classname="decompengine.jobs.WorkflowAttemptStoreTest" time="0.001"/>
+  <testcase name="legacy active records are interrupted without fabricating workflow type or run identity()" classname="decompengine.jobs.WorkflowAttemptStoreTest" time="0.007"/>
+  <testcase name="completed candidate publication and canonical acceptance remain separate across restart()" classname="decompengine.jobs.WorkflowAttemptStoreTest" time="0.013"/>
+  <testcase name="transition guards reject terminal rewrites wrong jobs and unstarted completion()" classname="decompengine.jobs.WorkflowAttemptStoreTest" time="0.009"/>
+  <testcase name="ownership lease excludes another server and releases only on close()" classname="decompengine.jobs.WorkflowAttemptStoreTest" time="0.101"/>
+  <testcase name="durable progress pin survives lifecycle transitions and restart and blocks expiry()" classname="decompengine.jobs.WorkflowAttemptStoreTest" time="0.005"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

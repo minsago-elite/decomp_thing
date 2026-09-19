@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.web.WebProgressRetentionWorkerTest" tests="1" skipped="0" failures="1" errors="0" timestamp="2026-09-08T06:15:23.089Z" hostname="whatsername" time="3.024">
+  <properties/>
+  <testcase name="blocked owner notification does not hold the executor termination lock()" classname="decompengine.web.WebProgressRetentionWorkerTest" time="3.017">
+    <failure message="java.util.concurrent.TimeoutException" type="java.util.concurrent.TimeoutException">java.util.concurrent.TimeoutException
+	at java.base/java.util.concurrent.FutureTask.get(FutureTask.java:204)
+	at decompengine.web.WebProgressRetentionWorkerTest.blocked owner notification does not hold the executor termination lock(WebProgressRetentionWorkerTest.kt:55)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+</failure>
+  </testcase>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

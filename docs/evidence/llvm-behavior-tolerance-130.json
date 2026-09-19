@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "issue": 130,
+  "recordedAtUtc": "2026-09-08",
+  "status": "partial",
+  "authority": "checked-reference-corpus-and-report-only",
+  "source": {
+    "profile": "oracle/llvm/22.1.6",
+    "corpus": {
+      "path": "oracle/llvm/22.1.6/behavior-corpus.json",
+      "id": "clang-22-1-6-driver-behavior",
+      "sha256": "acaa7b33c390b2c9fde15b4e21b0a899ffff62fe98ce22226866272b4efe8d5b",
+      "scope": "production",
+      "caseCount": 48
+    },
+    "report": {
+      "path": "oracle/llvm/22.1.6/behavior-corpus-evidence.json",
+      "sha256": "e9595bfd941c406d2c8fff618986e60dc0b810f1c384848b3ba540020ca00a6f",
+      "passedCases": 48
+    },
+    "executable": {
+      "bytes": 84561368,
+      "sha256": "65e57857bfaf9f98a552f2fd371938e11175158bc4c11c849bd6ecbfef30c006"
+    }
+  },
+  "authenticatedExecution": {
+    "backend": "oci-container-v1",
+    "resourcePolicyVersion": 1,
+    "imageDigest": "sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248",
+    "platform": "linux/amd64",
+    "isolation": "network-none-readonly-root-cap-drop-all-no-new-privileges-pid-ipc-private-cgroup-bounds",
+    "controlClientSha256": "e45381109c685311cf84c5e33a1aca7da81d6b55c0f9aed74091fc08c3a94f13",
+    "kernelVersion": "7.1.8-gentoo-dist-hardened",
+    "containerRuntime": "runc@1.4.3"
+  },
+  "limits": {
+    "timeoutMilliseconds": 10000,
+    "memoryBytes": 1073741824,
+    "processes": 128,
+    "stdoutBytes": 1048576,
+    "stderrBytes": 1048576,
+    "artifactBytes": 16777216,
+    "workspaceBytes": 33554432,
+    "workspaceEntries": 1024
+  },
+  "targetAndResourceAnchors": {
+    "resourceDirectory": {
+      "caseId": "metadata-resource-dir",
+      "arguments": ["-print-resource-dir"],
+      "stdoutBytes": 13,
+      "stdoutSha256": "9c3a5c7aa245bf8696f34e23d48ad2b66c6aa4851af77f04782e013aa91216f8",
+      "normalizations": [],
+      "declaredWorkspaceDirectories": ["include", "quoted", "system", "tmp"]
+    },
+    "targets": [
+      {
+        "caseId": "target-x86-macros",
+        "target": "x86_64-unknown-linux-gnu",
+        "exitCode": 0,
+        "stdoutBytes": 13334,
+        "stdoutSha256": "3cd02a91b23e50cd42cdf72d7f70147962f5cc9a118314f576f418448d37092d",
+        "normalizations": []
+      },
+      {
+        "caseId": "target-i386-object",
+        "target": "i386-unknown-linux-gnu",
+        "exitCode": 0,
+        "artifact": {
+          "path": "i386.o",
+          "bytes": 676,
+          "sha256": "52de188f05cf43b7fba39dccc44ac74bb04d906b945e7b4f2942709bb6c78acf",
+          "mode": "0o644"
+        },
+        "normalizations": []
+      },
+      {
+        "caseId": "target-unsupported-aarch64",
+        "target": "aarch64-unknown-linux-gnu",
+        "exitCode": 1,
+        "stderrBytes": 129,
+        "stderrSha256": "eabaea2b1ac71b1b6b8847bfaa8dc4c82baece22364b855dbae6ebb1a72c4d9a",
+        "artifact": {
+          "path": "aarch64.o",
+          "present": false
+        },
+        "normalizations": []
+      }
+    ]
+  },
+  "unavailableProductionGates": [
+    "three independent clean runs with canonical evidence-byte comparison",
+    "per-run wall time, peak RSS, process count, output bytes, and workspace consumption",
+    "absolute safety ceilings and regression ratios derived from repeated measurements",
+    "persistent timeout, OOM, process-leak, output-explosion, and flaky-mismatch failure ledger",
+    "complete target/CPU/feature matrix and separate bounded-CI versus full-production qualification"
+  ],
+  "boundary": {
+    "ghidra": "unchanged; this record grants no analysis or candidate authority",
+    "oracle": "reference bytes and authenticated sandbox descriptors remain the only authority",
+    "unresolvedStates": "partial evidence stays unresolved until the listed production gates are retained"
+  }
+}
