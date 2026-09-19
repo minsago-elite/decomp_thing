@@ -1,0 +1,10 @@
+test_copy_and_release_with_writable_opt (__main__.RuntimeInstallationTest.test_copy_and_release_with_writable_opt) ... ok
+test_every_ancestor_still_requires_trusted_permissions (__main__.RuntimeInstallationTest.test_every_ancestor_still_requires_trusted_permissions) ... ok
+test_interrupted_copy_cleanup_and_exact_target_binding (__main__.RuntimeInstallationTest.test_interrupted_copy_cleanup_and_exact_target_binding) ... ok
+test_linked_parent_is_rejected_without_touching_owned_alternate (__main__.RuntimeInstallationTest.test_linked_parent_is_rejected_without_touching_owned_alternate) ... ok
+test_marker_mismatch_preserves_copy_until_expected_marker_is_restored (__main__.RuntimeInstallationTest.test_marker_mismatch_preserves_copy_until_expected_marker_is_restored) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.380s
+
+OK
