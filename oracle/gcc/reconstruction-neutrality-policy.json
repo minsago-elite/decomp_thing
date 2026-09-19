@@ -382,6 +382,48 @@
       "fragment": "510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248",
       "count": 1,
       "reason": "Default test OCI image digest for the behavior corpus harness is the shared recorded capture image; an explicit environment override remains supported."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/ModuleCompilationPolicy.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "GeneratedCMakeReconstructionProfile",
+      "count": 2,
+      "reason": "Application-owned compilation policy validates the registered Make profile before dispatching the shared generated-C module validator."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/ModuleCompilationPolicy.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "GeneratedCModuleValidation",
+      "count": 2,
+      "reason": "Application-owned compilation policy dispatches both built-in and structurally registered profiles to the generated-C module validator."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/ModuleCompilationPolicy.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "GeneratedCNinjaReconstructionProfile",
+      "count": 1,
+      "reason": "Application-owned compilation policy recognizes the registered built-in Ninja profile as a generated-C module policy."
+    },
+    {
+      "path": "oracle/llvm/22.1.6/behavior-corpus-evidence.json",
+      "rule": "benchmark-version",
+      "fragment": "GCC_VERSION=16.2.0",
+      "count": 1,
+      "reason": "Retained LLVM evidence records the GCC compiler version used by its cross-oracle comparison capture."
+    },
+    {
+      "path": "oracle/llvm/22.1.6/behavior-corpus.json",
+      "rule": "benchmark-version",
+      "fragment": "GCC_VERSION=16.2.0",
+      "count": 1,
+      "reason": "Retained LLVM corpus records the GCC compiler version used by its cross-oracle comparison capture."
+    },
+    {
+      "path": "tests/test_generic_leakage.py",
+      "rule": "benchmark-version",
+      "fragment": "GCC_VERSION=16.2.0",
+      "count": 2,
+      "reason": "Scanner regression fixtures intentionally exercise the retained cross-oracle GCC version marker in both evidence forms."
     }
   ],
   "benchmarkCatalog": "oracle/gcc/reconstruction-neutrality-identities.json"
