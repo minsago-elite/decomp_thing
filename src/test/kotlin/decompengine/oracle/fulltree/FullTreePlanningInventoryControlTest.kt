@@ -19,7 +19,7 @@ import kotlinx.serialization.json.JsonPrimitive
 
 class FullTreePlanningInventoryControlTest {
     @Test
-    fun `clang basic dispatch binds all 73 planning owners without an emitted denominator`() {
+    fun `clang astmatchers dispatch binds linked owners and retains source-only evidence`() {
         val profile = Path.of("oracle/llvm/22.1.6")
         val registry = FullTreePlanningInventoryControl.loadAndValidate(
             path = profile.resolve("full-tree-planning-inventory.json"),
@@ -31,99 +31,50 @@ class FullTreePlanningInventoryControlTest {
             sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
         )
 
-        val modules = registry.requireOwnerModulesForShard("clang-lib-basic")
-        assertEquals(73, modules.size)
-        assertEquals(73, modules.map { it.sourcePath }.toSet().size)
-        assertEquals(73, modules.map { it.unitId }.toSet().size)
+        val modules = registry.requireOwnerModulesForShard("clang-lib-astmatchers")
+        assertEquals(3, modules.size)
+        assertEquals(3, modules.map { it.sourcePath }.toSet().size)
+        assertEquals(3, modules.map { it.unitId }.toSet().size)
         assertEquals(
             listOf(
-                "source/clang/lib/Basic/ASTSourceDescriptor.cpp",
-                "source/clang/lib/Basic/Attributes.cpp",
-                "source/clang/lib/Basic/Builtins.cpp",
-                "source/clang/lib/Basic/CLWarnings.cpp",
-                "source/clang/lib/Basic/CharInfo.cpp",
-                "source/clang/lib/Basic/CodeGenOptions.cpp",
-                "source/clang/lib/Basic/Cuda.cpp",
-                "source/clang/lib/Basic/DarwinSDKInfo.cpp",
-                "source/clang/lib/Basic/Diagnostic.cpp",
-                "source/clang/lib/Basic/DiagnosticIDs.cpp",
-                "source/clang/lib/Basic/DiagnosticOptions.cpp",
-                "source/clang/lib/Basic/ExpressionTraits.cpp",
-                "source/clang/lib/Basic/FileEntry.cpp",
-                "source/clang/lib/Basic/FileManager.cpp",
-                "source/clang/lib/Basic/FileSystemStatCache.cpp",
-                "source/clang/lib/Basic/IdentifierTable.cpp",
-                "source/clang/lib/Basic/LangOptions.cpp",
-                "source/clang/lib/Basic/LangStandards.cpp",
-                "source/clang/lib/Basic/MakeSupport.cpp",
-                "source/clang/lib/Basic/Module.cpp",
-                "source/clang/lib/Basic/NoSanitizeList.cpp",
-                "source/clang/lib/Basic/ObjCRuntime.cpp",
-                "source/clang/lib/Basic/OffloadArch.cpp",
-                "source/clang/lib/Basic/OpenCLOptions.cpp",
-                "source/clang/lib/Basic/OpenMPKinds.cpp",
-                "source/clang/lib/Basic/OperatorPrecedence.cpp",
-                "source/clang/lib/Basic/ParsedAttrInfo.cpp",
-                "source/clang/lib/Basic/ProfileList.cpp",
-                "source/clang/lib/Basic/SanitizerSpecialCaseList.cpp",
-                "source/clang/lib/Basic/Sanitizers.cpp",
-                "source/clang/lib/Basic/Sarif.cpp",
-                "source/clang/lib/Basic/SimpleTypoCorrection.cpp",
-                "source/clang/lib/Basic/SourceLocation.cpp",
-                "source/clang/lib/Basic/SourceManager.cpp",
-                "source/clang/lib/Basic/SourceMgrAdapter.cpp",
-                "source/clang/lib/Basic/Stack.cpp",
-                "source/clang/lib/Basic/StackExhaustionHandler.cpp",
-                "source/clang/lib/Basic/TargetID.cpp",
-                "source/clang/lib/Basic/TargetInfo.cpp",
-                "source/clang/lib/Basic/Targets.cpp",
-                "source/clang/lib/Basic/Targets/AArch64.cpp",
-                "source/clang/lib/Basic/Targets/AMDGPU.cpp",
-                "source/clang/lib/Basic/Targets/ARC.cpp",
-                "source/clang/lib/Basic/Targets/ARM.cpp",
-                "source/clang/lib/Basic/Targets/AVR.cpp",
-                "source/clang/lib/Basic/Targets/BPF.cpp",
-                "source/clang/lib/Basic/Targets/CSKY.cpp",
-                "source/clang/lib/Basic/Targets/DirectX.cpp",
-                "source/clang/lib/Basic/Targets/Hexagon.cpp",
-                "source/clang/lib/Basic/Targets/Lanai.cpp",
-                "source/clang/lib/Basic/Targets/LoongArch.cpp",
-                "source/clang/lib/Basic/Targets/M68k.cpp",
-                "source/clang/lib/Basic/Targets/MSP430.cpp",
-                "source/clang/lib/Basic/Targets/Mips.cpp",
-                "source/clang/lib/Basic/Targets/NVPTX.cpp",
-                "source/clang/lib/Basic/Targets/OSTargets.cpp",
-                "source/clang/lib/Basic/Targets/PPC.cpp",
-                "source/clang/lib/Basic/Targets/RISCV.cpp",
-                "source/clang/lib/Basic/Targets/SPIR.cpp",
-                "source/clang/lib/Basic/Targets/Sparc.cpp",
-                "source/clang/lib/Basic/Targets/SystemZ.cpp",
-                "source/clang/lib/Basic/Targets/TCE.cpp",
-                "source/clang/lib/Basic/Targets/VE.cpp",
-                "source/clang/lib/Basic/Targets/WebAssembly.cpp",
-                "source/clang/lib/Basic/Targets/X86.cpp",
-                "source/clang/lib/Basic/Targets/XCore.cpp",
-                "source/clang/lib/Basic/Targets/Xtensa.cpp",
-                "source/clang/lib/Basic/TokenKinds.cpp",
-                "source/clang/lib/Basic/TypeTraits.cpp",
-                "source/clang/lib/Basic/Version.cpp",
-                "source/clang/lib/Basic/Warnings.cpp",
-                "source/clang/lib/Basic/XRayInstr.cpp",
-                "source/clang/lib/Basic/XRayLists.cpp",
+                "source/clang/lib/ASTMatchers/ASTMatchFinder.cpp",
+                "source/clang/lib/ASTMatchers/ASTMatchersInternal.cpp",
+                "source/clang/lib/ASTMatchers/LowLevelHelpers.cpp",
             ),
             modules.map { it.sourcePath },
+        )
+        assertEquals(
+            listOf(
+                "cu-c92b96b2a7deeb38aa0070c4ec3228e7",
+                "cu-7ea999cb15665cc462cbcd7cc46b6f4a",
+                "cu-eb1ca5e071877d61b8ce976f1c8e9427",
+            ),
+            modules.map { it.unitId },
         )
         assertTrue(
             modules.all {
                 it.moduleId == it.unitId &&
-                    it.shardId == "clang-lib-basic" &&
+                    it.shardId == "clang-lib-astmatchers" &&
                     it.sourceKind == "handwritten" &&
-                    it.sourcePath.startsWith("source/clang/lib/Basic/")
+                    it.sourcePath.startsWith("source/clang/lib/ASTMatchers/")
             },
         )
-        assertTrue(registry.sourceOnlyUnits.none { it.shardId == "clang-lib-basic" })
+
+        val sourceOnly = registry.sourceOnlyUnits.filter { it.shardId == "clang-lib-astmatchers" }
+        assertEquals(5, sourceOnly.size)
+        assertEquals(
+            listOf(
+                "source/clang/lib/ASTMatchers/Dynamic/Diagnostics.cpp",
+                "source/clang/lib/ASTMatchers/Dynamic/Marshallers.cpp",
+                "source/clang/lib/ASTMatchers/Dynamic/Parser.cpp",
+                "source/clang/lib/ASTMatchers/Dynamic/Registry.cpp",
+                "source/clang/lib/ASTMatchers/Dynamic/VariantValue.cpp",
+            ),
+            sourceOnly.map { it.sourcePath },
+        )
+        assertTrue(sourceOnly.all { it.reasonCode == "not-selected-by-authenticated-build-graph" })
         assertFailsWith<FullTreeControlException> {
-            registry.requireOwnerModulesForShard("clang-lib-basic-missing")
+            registry.requireOwnerModulesForShard("clang-lib-astmatchers-missing")
         }
     }
 
@@ -201,6 +152,40 @@ class FullTreePlanningInventoryControlTest {
         }
 
     @Test
+    fun `clang format dispatch binds all 22 planning owners without an emitted denominator`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+
+        val modules = registry.requireOwnerModulesForShard("clang-lib-format")
+        assertEquals(22, modules.size)
+        assertEquals(22, modules.map { it.sourcePath }.toSet().size)
+        assertEquals(22, modules.map { it.unitId }.toSet().size)
+        assertTrue(
+            modules.all {
+                it.moduleId == it.unitId &&
+                    it.shardId == "clang-lib-format" &&
+                    it.sourceKind == "handwritten" &&
+                    it.sourcePath.startsWith("source/clang/lib/Format/")
+            },
+        )
+        assertEquals(
+            listOf("source/clang/lib/Format/MatchFilePath.cpp"),
+            registry.sourceOnlyUnits
+                .filter { it.shardId == "clang-lib-format" }
+                .map { it.sourcePath },
+        )
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("clang-lib-format-missing")
+        }
+    }
     fun `checked clang sema shard binds all 86 source modules to exact owners`() =
         inControlTemporaryDirectory { directory ->
             val profile = Path.of("oracle/llvm/22.1.6")
@@ -233,6 +218,163 @@ class FullTreePlanningInventoryControlTest {
                 result.registry.sourceOnlyUnits.count { it.shardId == "clang-lib-sema" },
             )
         }
+
+    @Test
+    fun `llvm analysis dispatch binds exact planning owners without an emitted denominator`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+
+        val modules = registry.requireOwnerModulesForShard("llvm-lib-analysis")
+        assertEquals(118, modules.size)
+        assertEquals(
+            listOf(
+                "source/llvm/lib/Analysis/AliasAnalysis.cpp",
+                "source/llvm/lib/Analysis/AliasAnalysisEvaluator.cpp",
+                "source/llvm/lib/Analysis/AliasSetTracker.cpp",
+                "source/llvm/lib/Analysis/AssumeBundleQueries.cpp",
+                "source/llvm/lib/Analysis/AssumptionCache.cpp",
+                "source/llvm/lib/Analysis/BasicAliasAnalysis.cpp",
+                "source/llvm/lib/Analysis/BlockFrequencyInfo.cpp",
+                "source/llvm/lib/Analysis/BlockFrequencyInfoImpl.cpp",
+                "source/llvm/lib/Analysis/BranchProbabilityInfo.cpp",
+                "source/llvm/lib/Analysis/CFG.cpp",
+                "source/llvm/lib/Analysis/CFGPrinter.cpp",
+                "source/llvm/lib/Analysis/CFGSCCPrinter.cpp",
+                "source/llvm/lib/Analysis/CGSCCPassManager.cpp",
+                "source/llvm/lib/Analysis/CallGraph.cpp",
+                "source/llvm/lib/Analysis/CallGraphSCCPass.cpp",
+                "source/llvm/lib/Analysis/CallPrinter.cpp",
+                "source/llvm/lib/Analysis/CaptureTracking.cpp",
+                "source/llvm/lib/Analysis/CmpInstAnalysis.cpp",
+                "source/llvm/lib/Analysis/CodeMetrics.cpp",
+                "source/llvm/lib/Analysis/ConstantFolding.cpp",
+                "source/llvm/lib/Analysis/ConstraintSystem.cpp",
+                "source/llvm/lib/Analysis/CostModel.cpp",
+                "source/llvm/lib/Analysis/CtxProfAnalysis.cpp",
+                "source/llvm/lib/Analysis/CycleAnalysis.cpp",
+                "source/llvm/lib/Analysis/DDG.cpp",
+                "source/llvm/lib/Analysis/DDGPrinter.cpp",
+                "source/llvm/lib/Analysis/DXILMetadataAnalysis.cpp",
+                "source/llvm/lib/Analysis/DXILResource.cpp",
+                "source/llvm/lib/Analysis/Delinearization.cpp",
+                "source/llvm/lib/Analysis/DemandedBits.cpp",
+                "source/llvm/lib/Analysis/DependenceAnalysis.cpp",
+                "source/llvm/lib/Analysis/DependenceGraphBuilder.cpp",
+                "source/llvm/lib/Analysis/DomConditionCache.cpp",
+                "source/llvm/lib/Analysis/DomPrinter.cpp",
+                "source/llvm/lib/Analysis/DomTreeUpdater.cpp",
+                "source/llvm/lib/Analysis/DominanceFrontier.cpp",
+                "source/llvm/lib/Analysis/EphemeralValuesCache.cpp",
+                "source/llvm/lib/Analysis/FloatingPointPredicateUtils.cpp",
+                "source/llvm/lib/Analysis/FunctionPropertiesAnalysis.cpp",
+                "source/llvm/lib/Analysis/GlobalsModRef.cpp",
+                "source/llvm/lib/Analysis/GuardUtils.cpp",
+                "source/llvm/lib/Analysis/HashRecognize.cpp",
+                "source/llvm/lib/Analysis/HeatUtils.cpp",
+                "source/llvm/lib/Analysis/IR2Vec.cpp",
+                "source/llvm/lib/Analysis/IRSimilarityIdentifier.cpp",
+                "source/llvm/lib/Analysis/IVDescriptors.cpp",
+                "source/llvm/lib/Analysis/IVUsers.cpp",
+                "source/llvm/lib/Analysis/ImportedFunctionsInliningStatistics.cpp",
+                "source/llvm/lib/Analysis/IndirectCallPromotionAnalysis.cpp",
+                "source/llvm/lib/Analysis/InlineAdvisor.cpp",
+                "source/llvm/lib/Analysis/InlineCost.cpp",
+                "source/llvm/lib/Analysis/InlineOrder.cpp",
+                "source/llvm/lib/Analysis/InstCount.cpp",
+                "source/llvm/lib/Analysis/InstructionPrecedenceTracking.cpp",
+                "source/llvm/lib/Analysis/InstructionSimplify.cpp",
+                "source/llvm/lib/Analysis/InteractiveModelRunner.cpp",
+                "source/llvm/lib/Analysis/KernelInfo.cpp",
+                "source/llvm/lib/Analysis/LastRunTrackingAnalysis.cpp",
+                "source/llvm/lib/Analysis/LazyBlockFrequencyInfo.cpp",
+                "source/llvm/lib/Analysis/LazyBranchProbabilityInfo.cpp",
+                "source/llvm/lib/Analysis/LazyCallGraph.cpp",
+                "source/llvm/lib/Analysis/LazyValueInfo.cpp",
+                "source/llvm/lib/Analysis/Lint.cpp",
+                "source/llvm/lib/Analysis/Loads.cpp",
+                "source/llvm/lib/Analysis/Local.cpp",
+                "source/llvm/lib/Analysis/LoopAccessAnalysis.cpp",
+                "source/llvm/lib/Analysis/LoopAnalysisManager.cpp",
+                "source/llvm/lib/Analysis/LoopCacheAnalysis.cpp",
+                "source/llvm/lib/Analysis/LoopInfo.cpp",
+                "source/llvm/lib/Analysis/LoopNestAnalysis.cpp",
+                "source/llvm/lib/Analysis/LoopPass.cpp",
+                "source/llvm/lib/Analysis/LoopUnrollAnalyzer.cpp",
+                "source/llvm/lib/Analysis/MLInlineAdvisor.cpp",
+                "source/llvm/lib/Analysis/MemDerefPrinter.cpp",
+                "source/llvm/lib/Analysis/MemoryBuiltins.cpp",
+                "source/llvm/lib/Analysis/MemoryDependenceAnalysis.cpp",
+                "source/llvm/lib/Analysis/MemoryLocation.cpp",
+                "source/llvm/lib/Analysis/MemoryProfileInfo.cpp",
+                "source/llvm/lib/Analysis/MemorySSA.cpp",
+                "source/llvm/lib/Analysis/MemorySSAUpdater.cpp",
+                "source/llvm/lib/Analysis/ModuleDebugInfoPrinter.cpp",
+                "source/llvm/lib/Analysis/ModuleSummaryAnalysis.cpp",
+                "source/llvm/lib/Analysis/MustExecute.cpp",
+                "source/llvm/lib/Analysis/ObjCARCAliasAnalysis.cpp",
+                "source/llvm/lib/Analysis/ObjCARCAnalysisUtils.cpp",
+                "source/llvm/lib/Analysis/ObjCARCInstKind.cpp",
+                "source/llvm/lib/Analysis/OptimizationRemarkEmitter.cpp",
+                "source/llvm/lib/Analysis/OverflowInstAnalysis.cpp",
+                "source/llvm/lib/Analysis/PHITransAddr.cpp",
+                "source/llvm/lib/Analysis/PhiValues.cpp",
+                "source/llvm/lib/Analysis/PostDominators.cpp",
+                "source/llvm/lib/Analysis/ProfileSummaryInfo.cpp",
+                "source/llvm/lib/Analysis/PtrUseVisitor.cpp",
+                "source/llvm/lib/Analysis/RegionInfo.cpp",
+                "source/llvm/lib/Analysis/RegionPass.cpp",
+                "source/llvm/lib/Analysis/RegionPrinter.cpp",
+                "source/llvm/lib/Analysis/ReplayInlineAdvisor.cpp",
+                "source/llvm/lib/Analysis/RuntimeLibcallInfo.cpp",
+                "source/llvm/lib/Analysis/ScalarEvolution.cpp",
+                "source/llvm/lib/Analysis/ScalarEvolutionAliasAnalysis.cpp",
+                "source/llvm/lib/Analysis/ScalarEvolutionDivision.cpp",
+                "source/llvm/lib/Analysis/ScalarEvolutionNormalization.cpp",
+                "source/llvm/lib/Analysis/ScopedNoAliasAA.cpp",
+                "source/llvm/lib/Analysis/StackLifetime.cpp",
+                "source/llvm/lib/Analysis/StackSafetyAnalysis.cpp",
+                "source/llvm/lib/Analysis/StaticDataProfileInfo.cpp",
+                "source/llvm/lib/Analysis/StructuralHash.cpp",
+                "source/llvm/lib/Analysis/TargetLibraryInfo.cpp",
+                "source/llvm/lib/Analysis/TargetTransformInfo.cpp",
+                "source/llvm/lib/Analysis/TensorSpec.cpp",
+                "source/llvm/lib/Analysis/TrainingLogger.cpp",
+                "source/llvm/lib/Analysis/TypeBasedAliasAnalysis.cpp",
+                "source/llvm/lib/Analysis/TypeMetadataUtils.cpp",
+                "source/llvm/lib/Analysis/UniformityAnalysis.cpp",
+                "source/llvm/lib/Analysis/ValueLattice.cpp",
+                "source/llvm/lib/Analysis/ValueLatticeUtils.cpp",
+                "source/llvm/lib/Analysis/ValueTracking.cpp",
+                "source/llvm/lib/Analysis/VectorUtils.cpp",
+            ),
+            modules.map { it.sourcePath },
+        )
+        assertTrue(modules.all { it.moduleId == it.unitId && it.shardId == "llvm-lib-analysis" })
+        assertEquals(
+            listOf(
+                "source/llvm/lib/Analysis/Analysis.cpp",
+                "source/llvm/lib/Analysis/DevelopmentModeInlineAdvisor.cpp",
+                "source/llvm/lib/Analysis/ModelUnderTrainingRunner.cpp",
+                "source/llvm/lib/Analysis/NoInferenceModelRunner.cpp",
+                "source/llvm/lib/Analysis/SyntheticCountsUtils.cpp",
+                "source/llvm/lib/Analysis/TFLiteUtils.cpp",
+                "source/llvm/lib/Analysis/Trace.cpp",
+            ),
+            registry.sourceOnlyUnits.filter { it.shardId == "llvm-lib-analysis" }.map { it.sourcePath },
+        )
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("llvm-lib-analysis-missing")
+        }
+    }
+
 
     @Test
     fun `shuffled stale forged and expanded planning documents fail closed`() =
