@@ -14,7 +14,11 @@ internal object GeneratedCBehaviorBuildPolicy : BehaviorBuildPolicy {
         contractPath = "reports/build_contract.json",
         artifactPath = "build/reconstructed",
         standaloneInputs = listOf(profile.layout.declaration("build-definition").materialize()),
-        sourceRoots = listOf("src", "include"),
+        sourceRoots = profile.layout.declarations
+            .filter { ProjectFileRole.BUILD_INPUT in it.roles && ProjectFileRole.BUILD_DEFINITION !in it.roles }
+            .mapNotNull { it.pathTemplate.substringBefore('/').takeIf { root -> root != it.pathTemplate } }
+            .distinct()
+            .sorted(),
     )
 
     override fun parseContract(contract: JsonObject, profile: ReconstructionProfile): BehaviorBuildContract {
@@ -29,8 +33,34 @@ internal object GeneratedCBehaviorBuildPolicy : BehaviorBuildPolicy {
             contract.boolean("reproduciblePathMapping") && !contract.boolean("apiCredentialsRequired") &&
             !contract.boolean("analysisCachesRequired") && contract.getValue("failedOwners").jsonArray.isEmpty()
         ) { "behavior requires a successful source-stable build contract" }
-        require(contract.integer("parallelism") in 1..256 && contract.count("wallClockTimeoutMillis") > 0 &&
-            contract.count("maximumOutputBytes") > 0)
+        val parallelism = contract.integer("parallelism")
+        val wallClockTimeoutMillis = contract.count("wallClockTimeoutMillis")
+        val maximumOutputBytes = contract.count("maximumOutputBytes")
+        require(parallelism in 1..256 && wallClockTimeoutMillis > 0 && maximumOutputBytes > 0)
+        val buildSystem = profile.adapterConfiguration["build-system"]?.singleOrNull()
+        val invocation = if (buildSystem == "ninja") {
+            GeneratedCNinjaReconstructionAdapter.invocation(profile, parallelism)
+        } else {
+            GeneratedCBuildInvocation.make(ProjectBuildConfiguration(
+                makeExecutable = profile.adapterConfiguration["build-executable"]?.singleOrNull() ?: "make",
+                compilerExecutable = profile.adapterConfiguration["compiler-driver"]?.singleOrNull() ?: "gcc",
+                parallelism = parallelism,
+                cFlags = profile.adapterConfiguration["compiler-flags"] ?: ProjectBuildConfiguration().cFlags,
+                wallClockTimeoutMillis = profile.budgets.buildWallClockMillis,
+                maximumOutputBytes = profile.budgets.buildMaximumOutputBytes,
+                buildDefinition = profile.layout.declaration("build-definition").materialize(),
+            ))
+        }
+        require(contract.getValue("command").jsonArray.map { it.jsonPrimitive.content } == invocation.command) {
+            "behavior build command differs from the selected profile"
+        }
+        require(contract.getValue("declaredDependencies").jsonArray.map { it.jsonPrimitive.content } == invocation.dependencies) {
+            "behavior build dependencies differ from the selected profile"
+        }
+        require(wallClockTimeoutMillis in 1..profile.budgets.buildWallClockMillis &&
+            maximumOutputBytes in 1..profile.budgets.buildMaximumOutputBytes) {
+            "behavior build budgets exceed the selected profile"
+        }
         listOf("command", "declaredDependencies").forEach { name ->
             require(contract.getValue(name).jsonArray.isNotEmpty())
             contract.getValue(name).jsonArray.forEach { require(it.jsonPrimitive.isString) }
