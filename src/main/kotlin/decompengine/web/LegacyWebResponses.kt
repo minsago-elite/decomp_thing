@@ -5,9 +5,13 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
-/** Retain the legacy upload Accept switch; API paths always return JSON errors. */
-internal fun com.sun.net.httpserver.HttpExchange.requestsLegacyJson(): Boolean =
-    (requestHeaders.getFirst("Accept") ?: "").contains("application/json")
+/** Prefer explicit JSON on the dual-format legacy upload, retaining HTML for absent or wildcard Accept. */
+internal fun com.sun.net.httpserver.HttpExchange.requestsLegacyJson(): Boolean {
+    val json = acceptsWebMediaType(this, "application/json")
+    val html = acceptsWebMediaType(this, "text/html")
+    if (!json && !html) throw WebAccessDenied(406, "NOT_ACCEPTABLE", "This endpoint returns text/html or application/json.")
+    return json && (acceptsWebMediaType(this, "application/json", explicit = true) || !html)
+}
 
 internal fun legacyError(
     exchange: com.sun.net.httpserver.HttpExchange,
@@ -19,7 +23,8 @@ internal fun legacyError(
 ) {
     val segments = exchange.requestURI.path.split('/').filter(String::isNotBlank)
     val json = segments.firstOrNull() == "api" ||
-        (exchange.requestMethod == "POST" && segments == listOf("jobs") && exchange.requestsLegacyJson())
+        (exchange.requestMethod == "POST" && segments == listOf("jobs") &&
+            try { exchange.requestsLegacyJson() } catch (_: WebAccessDenied) { false })
     if (!json) {
         exchange.sendHtml(status, html())
         return

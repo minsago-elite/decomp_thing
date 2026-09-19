@@ -101,7 +101,7 @@ internal fun publicWebProgressRecord(record: JsonObject): WebPublicProgressRecor
             })
             key == "reportedCostCurrency" -> {
                 val currency = text(value, 64)
-                if (currency.matches(Regex("[A-Z][A-Z0-9]{2,7}"))) put(key, currency) else omitted++
+                if (currency in setOf("AUD", "CAD", "CHF", "CNY", "EUR", "GBP", "JPY", "KRW", "USD")) put(key, currency) else omitted++
             }
             else -> omitted++
         }
@@ -109,7 +109,7 @@ internal fun publicWebProgressRecord(record: JsonObject): WebPublicProgressRecor
     }
     val writerId = record["runId"]?.let { text(it, 128).also { value -> require(value.matches(id)) { "invalid observation writer identity" } } }
     val workflow = record["workflow"]?.let { value ->
-        text(value, 64).takeIf { it in setOf("explore", "reconstruct", "reconstruction", "repair") } ?: "unknown"
+        text(value, 64).takeIf { it in setOf("build", "explore", "reconstruct", "reconstruction", "repair", "validate") } ?: "unknown"
     }
     val kindValue = text(record.getValue("kind"), 64)
     val kind = kindValue.takeIf { it in setOf("run_started", "task_started", "context_usage", "message", "plan", "tool", "permission",

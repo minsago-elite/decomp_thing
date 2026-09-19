@@ -45,6 +45,23 @@ it('renders omission-only message metadata for every supported visibility role',
   expect(screen.getAllByText(/Producer omitted text/)).toHaveLength(4);
 });
 
+it('renders retained labels as text without creating active markup or links', async () => {
+  const page = structuredClone(events);
+  const marker = '<img src=x onerror="location.href=\'https://example.invalid\'">';
+  const item = page.data.items[0]!;
+  item.payload.writerId = marker;
+  item.payload.fields = { phase: marker, status: marker, taskId: marker, revisionId: marker };
+  transport.get.mockResolvedValueOnce(snapshot).mockResolvedValueOnce(page);
+
+  mount(); fireEvent.click(screen.getByRole('button', { name: 'Follow activity' }));
+
+  expect(await screen.findByText(`Observed workflow_run_state: ${marker}`)).toBeTruthy();
+  expect(document.querySelector('img')).toBeNull();
+  expect(document.querySelector('[onerror]')).toBeNull();
+  expect(screen.getAllByRole('link')).toHaveLength(1);
+  expect(screen.getByRole('link').getAttribute('href')).toBe(`/nested/jobs/${item.jobId}/runs/${item.runId}`);
+});
+
 it.each(['EVENT_GAP', 'PROGRESS_GAP'])('pauses on %s and explicitly resets history with a fresh snapshot', async serverCode => {
   transport.get.mockResolvedValueOnce(snapshot).mockRejectedValueOnce(new ApiClientError('http_error', { serverCode, status: 410 }));
   mount(); fireEvent.click(screen.getByRole('button', { name: 'Follow activity' }));

@@ -82,6 +82,45 @@ it('shows a safe API correlation reference without exposing opaque response meta
   const alert = await screen.findByRole('alert');
   expect(alert.textContent).toContain(`Reference ID: ${requestId}.`);
   expect(alert.textContent).not.toContain('LISTING_BUSY');
+
+it.each([
+  {
+    name: 'empty library followed by transport failure', query: '', empty: 'No uploaded jobs yet.',
+    failure: new ApiClientError('timeout'), stale: 'The previous library snapshot was empty; current results are unknown until refresh succeeds.',
+  },
+  {
+    name: 'no matches followed by incomplete backend read', query: '?search=missing', empty: 'No jobs match these filters.',
+    failure: new ApiClientError('http_error', { status: 503, serverCode: 'JOB_RECORD_UNAVAILABLE' }),
+    stale: 'The previous filtered result had no matches; current results are unknown until refresh succeeds.',
+  },
+])('does not present $name as a fresh empty result', async ({ query, empty, failure, stale }) => {
+  history.replaceState(null, '', `/${query}`);
+  let resolveInitial: (value: ReturnType<typeof page>) => void = () => undefined;
+  let rejectRefresh: (reason: unknown) => void = () => undefined;
+  transport.get.mockImplementationOnce(() => new Promise(resolve => { resolveInitial = resolve; }))
+    .mockImplementationOnce(() => new Promise((_, reject) => { rejectRefresh = reject; }))
+    .mockResolvedValueOnce(page([job(5)]));
+  render(<Dashboard basePath="" />);
+  await waitFor(() => expect(transport.get).toHaveBeenCalledOnce());
+  expect(screen.getByRole('status').textContent).toBe('Loading jobs…');
+  expect(screen.queryByText(empty)).toBeNull();
+  await act(async () => { resolveInitial(page([])); await Promise.resolve(); });
+  expect(await screen.findByText(empty)).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(2));
+  expect(screen.getByRole('status').textContent).toContain('The previous empty result may be outdated.');
+  expect(screen.queryByText(empty)).toBeNull();
+  await act(async () => { rejectRefresh(failure); await Promise.resolve(); });
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toContain(stale);
+  if (failure.serverCode === 'JOB_RECORD_UNAVAILABLE') {
+    expect(alert.textContent).toContain('The server has not returned a partial library');
+  } else expect(alert.textContent).toContain('The server may be unavailable');
+  expect(screen.queryByText(empty)).toBeNull();
+  expect(screen.getByRole('status').textContent).not.toContain('0 jobs on this page');
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  expect(await screen.findByText('program-5.elf')).toBeTruthy();
+  expect(screen.queryByRole('alert')).toBeNull();
 });
 
 it('ignores late results after filter replacement and cancels reads on unmount', async () => {
@@ -134,10 +173,35 @@ it('opens an authenticated durable job deep link and clears metadata on logout',
     expect(await screen.findByRole('heading', { name: 'program-3.elf' })).toBeTruthy();
     expect(screen.getByText(selected.binary.entryPoint)).toBeTruthy();
     expect(screen.getByText(selected.sizeBytes + ' bytes')).toBeTruthy();
+    expect(screen.getByText('Not reported by the job API')).toBeTruthy();
+    expect(screen.getByText(/a report-artifact digest identifies different bytes/)).toBeTruthy();
     expect(transport.get).toHaveBeenCalledWith('job', '/jobs/' + selected.jobId, expect.anything());
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     expect(await screen.findByText('Connect a local session to view this job.')).toBeTruthy();
     expect(screen.queryByText('program-3.elf')).toBeNull();
+  } finally { session.dispose(); }
+});
+
+it.each([
+  new ApiClientError('http_error', { status: 503, serverCode: 'CORRUPT_LEGACY_JOB' }),
+  new ApiClientError('invalid_response'),
+])('shows a metadata limitation without fabricated binary values for %s', async failure => {
+  const bootstrap = (JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap }).data;
+  const session = createBrowserSession({
+    bootstrap: () => Promise.resolve({ ...bootstrap, basePath: '/nested/', sessionExpiresAt: new Date(Date.now() + 60000).toISOString() }),
+    exchange: vi.fn(), logout: () => Promise.resolve(),
+  }, '/nested');
+  const selected = job(3);
+  transport.get.mockRejectedValue(failure);
+  history.replaceState(null, '', '/nested/jobs/' + selected.jobId);
+  try {
+    await session.initialize({ kind: 'absent' });
+    render(<App basePath="/nested" session={session} />);
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent',
+      'Stored job metadata is unavailable or malformed. No binary facts can be shown; inspect job storage or retry after repair.');
+    expect(screen.queryByText('Binary metadata')).toBeNull();
+    expect(screen.queryByText('Entry address')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Refresh job' })).toBeTruthy();
   } finally { session.dispose(); }
 });
 
@@ -149,9 +213,9 @@ it('keeps exact row metadata and separates completion from accepted revisions', 
   const link = await screen.findByRole('link', { name: item.displayFilename });
   const row = within(link.closest('li')!);
   expect(row.getByText(item.sizeBytes + ' bytes')).toBeTruthy();
-  expect(row.getByText(item.createdAt)).toBeTruthy();
-  expect(row.getByText(item.updatedAt)).toBeTruthy();
-  expect(row.getByText('completed')).toBeTruthy();
+  expect(row.getByText('2026-09-05 00:00:00 UTC')).toHaveProperty('dateTime', item.createdAt);
+  expect(row.getByText('2026-09-05 01:00:00 UTC')).toHaveProperty('dateTime', item.updatedAt);
+  expect(row.getByText('Completed')).toBeTruthy();
   expect(row.getByText('run_latest')).toBeTruthy();
   expect(row.getByText('revision_prior')).toBeTruthy();
   expect(screen.getByText('1 jobs on this page. No total count is available.')).toBeTruthy();

@@ -177,3 +177,51 @@ The default final request-drain budget is one second, configurable through the c
 Three controlled admission fixtures cover a held handler, an interrupted stop caller, and a handler exceeding the drain deadline. They require ownership rejection while work remains, successful replacement after cleanup, closed request admission and interrupt preservation. They do not execute workflows or use external targets. This addresses the immediate ownership-check race that can explain the #224 timing-dependent failure; the original report did not identify which HTTP handler was still active.
 
 All 273 selected JVM tests pass, including the previously failing ownership/shutdown test. The [retained manifest and shutdown/server results](evidence/web-http-shutdown-drain-20260908/manifest.json) identify the tested source and hashes. Frontend/package/browser checks were not repeated for this server-lifetime change.
+
+## Shared mutation completion audit (#471)
+
+The currently supported persisted HTTP mutations now enter through one
+`WebJobMutationBoundary`. It first applies `LocalWebAccess`'s authenticated mutation policy and
+then returns a request-scoped, operation-specific capability backed by the single `WebJobService`
+instance. Each authorization method fixes its own HTTP policy; callers cannot supply a policy or
+use an upload capability for a workflow start or progress pin. The capabilities do not accept
+callbacks or filesystem paths. `WebJobService.writableStore` remains the common storage
+ownership, recovery, publication-failure and stopped-service gate. Worker terminal publication is
+a continuation of work already owned by that service, not a new HTTP admission.
+
+| HTTP surface | Shared authorization and service operation | Persisted effect |
+| --- | --- | --- |
+| Legacy `POST /jobs` | `authorizeUpload` (fixed multipart policy) → `AuthorizedWebJobUpload.uploadMultipartReceipt` | `StagedJobUpload` publishes one job; no idempotency key preserves deliberate legacy duplicate-upload behavior |
+| v1 `POST /api/v1/jobs` | the same fixed policy and upload capability operation | same staged publication, with the v1 idempotency key and upload-progress presentation |
+| Legacy `POST /jobs/J/explore` and `/reconstruct` | `authorizeLegacyStart` (fixed POST/JSON policy) → `AuthorizedLegacyWebJobStart.start` | service-owned legacy status transitions and report adapter execution |
+| v1 `PUT /api/v1/jobs/J/runs/R/progress-pin` | `authorizeProgressPin` (fixed PUT/JSON policy) → `AuthorizedWebProgressPin.request` | service-coordinated, version-bound attempt metadata and attributed receipt publication |
+
+The overlap that exists today—multipart job creation—therefore invokes the exact same receipt
+operation from both adapters. The other two command classes have no compatibility peer: v1
+workflow start remains unavailable and belongs to #484, while legacy exposes no progress-pin
+mutation. The bootstrap capability stays truthful and the unsupported v1 run POST returns 405;
+this audit does not invent either operation or claim future parity.
+
+Session exchange/logout mutate only `LocalWebAccess`, and legacy authentication-method
+inspection/cancellation mutate only bounded in-memory inspection state. They use the same access
+service but are not job-store commands. Startup recovery, shutdown completion and periodic
+retention are internal service lifecycle operations. Controllers do not edit `job.json`,
+`workflow-state.json`, upload receipts or retained report JSON directly. Workflow adapters may
+write within the service-selected report directory only after service-owned admission.
+
+Focused regressions prove both halves of the boundary. Denied legacy upload/explore/reconstruct
+requests leave the complete retained storage tree byte-identical and execute no adapter. Denied or
+invalid v1 uploads leave existing job metadata and identity inventory unchanged. Denied pin
+requests leave workflow metadata and audit entries unchanged. A direct boundary fixture proves
+that failed authorization consumes no multipart bytes, that cross-operation requests cannot mint
+the wrong capability, and that a capability minted before shutdown still cannot consume its body
+or publish a job after the service lifecycle closes.
+Existing same-store legacy → v1 → legacy upload parity continues to compare public fields and
+unchanged persisted bytes across restarts.
+
+This closes #158 criteria 1 and 4 for the mutation surface implemented at this checkpoint.
+Adding a later start, cancellation, retry, resume, deletion or Git command expands that surface
+and must use this boundary; this conclusion does not pre-approve those routes.
+
+These deterministic tests use inert ELF fixtures and injected callbacks. They do not run native
+analysis, a live provider or a browser, and do not qualify operations owned by #484–#486.

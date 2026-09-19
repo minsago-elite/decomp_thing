@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Synthetic D0 workload only. Production/API adapters are owned by #214.
+// Synthetic #606 workload only. Production/API adapters remain separate #214 work.
 import { createHash } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';

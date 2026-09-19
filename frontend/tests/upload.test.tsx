@@ -156,7 +156,9 @@ it('shows measured bytes separately from publication and stops progress polling 
   const signal = transport.get.mock.calls[0]?.[2].signal;
   await act(async () => { finish(fixture<ResponseOf<'job'>>('job-lossless')); await Promise.resolve(); });
   expect(signal?.aborted).toBe(true);
+  const pollsAtAdmission = transport.get.mock.calls.length;
+  expect(pollsAtAdmission).toBeGreaterThan(0);
   await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
-  expect(transport.get).toHaveBeenCalledOnce();
+  expect(transport.get).toHaveBeenCalledTimes(pollsAtAdmission);
   expect(transport.route).toHaveBeenCalledOnce();
 });

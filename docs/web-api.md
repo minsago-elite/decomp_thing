@@ -23,8 +23,10 @@ Responses contain `data`; errors contain `error`. SSE event records have their o
 origin correlation ID and are independent of the connection's request ID. Every HTTP response
 also carries `X-Request-ID`; that opaque ID contains no filename, token or user input.
 
-`Accept: application/json` (or `*/*`) selects JSON; streams require `text/event-stream`, and
-downloads use their declared media type or `application/octet-stream`. JSON mutation bodies require
+`Accept: application/json` (or `*/*`) selects JSON; streams require `text/event-stream`. The
+implemented raw exploration download responds as `application/octet-stream` and requires an
+Accept range admitting that response type; its report descriptor still identifies the underlying
+artifact as JSON. JSON mutation bodies require
 `Content-Type: application/json`; upload requires `multipart/form-data` with exactly one `binary`
 part. No request to `/api/**` receives SPA HTML, including unknown routes, malformed requests,
 exceptions and unsupported methods. Unsupported methods return `405` plus `Allow`; unsupported
@@ -423,14 +425,20 @@ ranges yield 406. Repeated Accept headers or a value over 512 characters yield 4
 remain JSON even when the client excludes JSON. All these responses use no-store caching.
 HTTP tests cover both route shapes, positive/negative media ranges, methods including HEAD,
 header limits and unchanged records, including negotiation before damaged storage inspection.
-The legacy upload Accept switch, mutation-route negotiation, deprecation links and shared
-session boundary remain migration work; upload behavior is unchanged by read negotiation.
+The legacy upload now negotiates its two existing representations before reading the body:
+explicitly admitted JSON (or `application/*` when HTML is not admitted) selects JSON, while an
+absent or `*/*` Accept retains the HTML form flow. A more-specific JSON `q=0` exclusion falls back
+to HTML when admitted; a request admitting neither representation returns 406. Repeated or
+oversized Accept values return 400. Its multipart Content-Type and session boundary remain in
+force. Full mutation-route migration and deprecation/successor links remain separate work.
 
 D2/D13 preserve the non-sensitive legacy success fields through the first D-series release and
 at least one subsequent minor release, while documenting removal of `binary_path`, applying the
 same session/content boundary and making API failures JSON. Do not silently change old numeric
 fields to strings; clients needing lossless values migrate to v1. Expose deprecation and successor
-links and publish the actual sunset release/date before removal. Existing persisted `job.json`
+links and publish the actual sunset release/date before removal. The legacy-mode server does not
+currently expose v1 job routes, so no successor link or sunset date is advertised prematurely.
+Existing persisted `job.json`
 files stay readable through a versioned, recoverable migration; public response changes do not
 rewrite raw report bytes. Legacy URLs redirect/map per the navigation/parity contract and never
 auto-start a workflow. Unsupported legacy automation dependencies receive a documented migration

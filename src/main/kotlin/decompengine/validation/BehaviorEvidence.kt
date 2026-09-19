@@ -4,8 +4,11 @@ import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.project.GeneratedCMakeReconstructionProfile
+import decompengine.project.BehaviorBuildLayout
+import decompengine.project.ReconstructionAdapters
 import decompengine.project.ReconstructionProfile
 import decompengine.project.SourceTreeManifestReader
+import decompengine.project.requireNormalizedProjectPath
 import decompengine.repair.readStableRegularFile
 import java.nio.file.Files
 import java.nio.file.LinkOption
@@ -66,6 +69,13 @@ internal class BehaviorEvidenceCapture {
     }
 
     fun project(context: BehaviorProjectContext, original: JsonObject, rebuilt: Path): JsonObject {
+        val buildPolicy = ReconstructionAdapters.resolve(context.profile).behaviorBuild
+        val layout = buildPolicy.layout(context.profile)
+        (listOf(layout.contractPath, layout.artifactPath) + layout.standaloneInputs + layout.sourceRoots).forEach {
+            requireNormalizedProjectPath(it, "behavior build evidence path")
+        }
+        require(layout.standaloneInputs.distinct().size == layout.standaloneInputs.size &&
+            layout.sourceRoots.distinct().size == layout.sourceRoots.size) { "behavior build inventory paths are duplicated" }
         val root = context.projectDir.toAbsolutePath().normalize()
         val manifestPath = root.resolve("source_tree_manifest.json")
         val manifestIdentity = file(manifestPath)
@@ -78,40 +88,17 @@ internal class BehaviorEvidenceCapture {
             require(identity.string("sha256") == entry.sha256) { "behavior project manifest differs from ${entry.path}" }
             JsonObject(identity + ("path" to JsonPrimitive(entry.path)))
         }
-        val contractPath = root.resolve("reports/build_contract.json")
+        val contractPath = root.resolve(layout.contractPath)
         val contractIdentity = file(contractPath)
-        val contract = document(contractPath)
-        require(contract.keys == setOf("schemaVersion", "command", "parallelism", "wallClockTimeoutMillis",
-            "maximumOutputBytes", "warningsAsErrors", "reproduciblePathMapping", "declaredDependencies",
-            "apiCredentialsRequired", "analysisCachesRequired", "returnCode", "sourceStableDuringBuild",
-            "sourceRevisionSha256", "sourceInputs", "artifact", "failedOwners", "modules")) {
-            "behavior build contract has missing or unknown fields"
-        }
-        require(contract.integer("schemaVersion") == 2 && contract.integer("returnCode") == 0 &&
-            contract.boolean("sourceStableDuringBuild") && contract.boolean("warningsAsErrors") &&
-            contract.boolean("reproduciblePathMapping") && !contract.boolean("apiCredentialsRequired") &&
-            !contract.boolean("analysisCachesRequired") && contract.getValue("failedOwners").jsonArray.isEmpty()
-        ) { "behavior requires a successful source-stable build contract" }
-        require(contract.integer("parallelism") in 1..256 && contract.count("wallClockTimeoutMillis") > 0 &&
-            contract.count("maximumOutputBytes") > 0)
-        listOf("command", "declaredDependencies").forEach { name ->
-            require(contract.getValue(name).jsonArray.isNotEmpty())
-            contract.getValue(name).jsonArray.forEach { require(it.jsonPrimitive.isString) }
-        }
-        contract.getValue("modules").jsonArray.forEach { element ->
-            val module = element.jsonObject
-            require(module.keys == setOf("id", "source", "diagnostics"))
-            module.keys.forEach { module.string(it) }
-        }
-        val inputs = sourceInputs(root)
+        val contract = buildPolicy.parseContract(document(contractPath), context.profile)
+        val inputs = sourceInputs(root, layout)
         val sourceRevision = behaviorSourceRevisionSha256(inputs)
-        require(contract.string("sourceRevisionSha256") == sourceRevision &&
-            contract.getValue("sourceInputs") == inputs
+        require(contract.sourceRevisionSha256 == sourceRevision &&
+            contract.sourceInputs == inputs
         ) { "behavior build contract does not match the current source revision" }
-        val artifact = contract.getValue("artifact").jsonObject
-        require(artifact.keys == setOf("path", "bytes", "sha256")) { "behavior build artifact fields are invalid" }
+        val artifact = contract.artifact
         val relative = artifact.string("path")
-        require(relative == "build/reconstructed" && root.resolve(relative) == rebuilt.toAbsolutePath().normalize()) {
+        require(relative == layout.artifactPath && root.resolve(relative) == rebuilt.toAbsolutePath().normalize()) {
             "behavior rebuilt executable is not the build-contract artifact"
         }
         require(JsonObject(artifact - "path") == executable(rebuilt)) { "behavior rebuilt executable differs from the build contract" }
@@ -128,10 +115,11 @@ internal class BehaviorEvidenceCapture {
         ))
     }
 
-    private fun sourceInputs(root: Path): JsonArray {
-        val paths = mutableListOf(root.resolve("Makefile"))
-        var entries = 1
-        for (name in listOf("src", "include")) {
+    private fun sourceInputs(root: Path, layout: BehaviorBuildLayout): JsonArray {
+        val paths = layout.standaloneInputs.mapTo(linkedSetOf(), root::resolve)
+        var entries = paths.size
+        require(entries <= MAXIMUM_FILES) { "behavior source inventory exceeds its entry bound" }
+        for (name in layout.sourceRoots) {
             val directory = root.resolve(name)
             if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) continue
             require(Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) { "behavior source root is not a directory: $name" }

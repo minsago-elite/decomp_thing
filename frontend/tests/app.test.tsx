@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/preact';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { describe, expect, it, vi } from 'vitest';
 import { App } from '../src/app/App';
 import { ViewBoundary } from '../src/shared/ViewBoundary';
@@ -18,6 +18,11 @@ describe('public workbench shell', () => {
     expect(screen.getByText(/does not read jobs or start workflows/)).toBeTruthy();
     expect(fetch).not.toHaveBeenCalled();
     expect(document.title).toBe('Jobs · Decomp Workbench');
+    expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1 }));
+    const skip = screen.getByRole('link', { name: 'Skip to content' });
+    skip.focus();
+    fireEvent.click(skip);
+    expect(document.activeElement).toBe(screen.getByRole('main'));
   });
 
   it('loads the split runtime route and returns with browser history', async () => {
@@ -26,11 +31,12 @@ describe('public workbench shell', () => {
     expect(await screen.findByRole('heading', { level: 1, name: 'Runtime status' })).toBeTruthy();
     expect(window.location.pathname).toBe('/runtime');
     expect(document.title).toBe('Runtime status · Decomp Workbench');
-    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('main')));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1, name: 'Runtime status' })));
     window.history.back();
     expect(await screen.findByRole('heading', { level: 1, name: 'Your work, with its evidence' })).toBeTruthy();
     expect(window.location.pathname).toBe('/');
     expect(document.title).toBe('Jobs · Decomp Workbench');
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1, name: 'Your work, with its evidence' })));
   });
 
   it('preserves the deployment prefix for direct routes and navigation', async () => {
@@ -57,8 +63,26 @@ describe('public workbench shell', () => {
     expect(screen.getByRole('link', { name: 'Workspace' }).getAttribute('aria-current')).toBe('page');
     window.history.back();
     expect(await screen.findByRole('heading', { level: 1, name: 'Upload a binary' })).toBeTruthy();
-    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('main')));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1, name: 'Upload a binary' })));
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('preserves keyboard focus across query-only history and background shell updates', async () => {
+    const view = render(<App />);
+    const navigation = screen.getByRole('link', { name: 'Upload' });
+    navigation.focus();
+    await act(() => {
+      window.history.pushState(null, '', '/?filter=recent');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    expect(document.activeElement).toBe(navigation);
+    view.rerender(<App />);
+    expect(document.activeElement).toBe(navigation);
+    await act(() => {
+      window.history.replaceState(null, '', '/');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    expect(document.activeElement).toBe(navigation);
   });
 
   it('keeps a version notice in view when focusing the next route', async () => {
@@ -68,7 +92,8 @@ describe('public workbench shell', () => {
     try {
       render(<App recovery={recovery} />);
       fireEvent.click(screen.getByRole('link', { name: 'Runtime status' }));
-      expect(await screen.findByRole('heading', { name: 'Runtime status' })).toBeTruthy();
+      const heading = await screen.findByRole('heading', { name: 'Runtime status' });
+      await waitFor(() => expect(document.activeElement).toBe(heading));
       expect(focus).toHaveBeenCalledWith({ preventScroll: true });
       expect(screen.getByRole('heading', { name: 'The application may have updated' })).toBeTruthy();
     } finally {

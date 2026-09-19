@@ -24,6 +24,16 @@ relationships such as report/artifact bindings, ordered poll pages and Git objec
 lengths for the declared object format. The `valid` field in `fixtures.json` describes
 schema/presentation validity, not whether the example was executed or accepted.
 
+`outcomes.json` is the versioned #604 index of seven deterministic web outcomes:
+successful, empty, partial, interrupted, failed, denied and unsupported. It refers
+to positive wire documents in the fixture manifest rather than duplicating them.
+The Python verifier checks the required kind and state for each outcome as well as
+schema validity, manifest membership and absence of credential/private-path/binary
+payload fields. `frontend/tests/api-outcomes.test.ts` decodes those same documents
+with generated frontend response types in CI. All identities, timestamps, names and
+digests are synthetic; the "accepted" report is a contract example, not actual
+release evidence. The index is fixed data, not a clock, identity or event factory.
+
 Keep changes to the source schema, positive/negative examples, field-provenance table
 and eventual DTO/type generation together. The schema permits values above JavaScript's
 safe integer range; bounded server admission still rejects resources beyond configured

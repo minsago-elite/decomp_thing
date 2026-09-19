@@ -1,0 +1,35 @@
+{
+  "issue": 474,
+  "status": "passed",
+  "scope": "existing frontend client and consuming-view cancellation/idempotency qualification",
+  "sourceCommit": "219391ed",
+  "baseCommit": "2c88d6a8f909517cfb17cbec875167545ed59e6d",
+  "mergedBehaviorVerified": false,
+  "productionQualified": false,
+  "date": "2026-09-19",
+  "criteria": {
+    "boundedDeadlines": "Existing v1 client enforces a 30-second default and 120-second maximum; upload uses 120 seconds and SSE uses a 45-second absolute deadline. Existing tests cover a fetch that ignores abort, stalled response bodies, stream suspension, and late responses.",
+    "obsoleteNavigation": "Every current v1 consuming view supplies an AbortSignal. The added history test uses browser back navigation while a cursor page is pending, asserts the old signal is aborted, and rejects its late page. Existing route, dashboard, upload, activity and session tests cover cleanup on unmount, selection changes, logout, visibility or offline changes.",
+    "mutationRetries": "The client performs one fetch per call and requires an idempotency key for non-session mutations. The added ambiguous-result test proves there is no automatic replay, and a caller-initiated replay sends the same body and retained key. Upload's existing recovery tests prove the same key survives explicit retry and view remount. Progress pin clears editability after an unconfirmed change and requires a fresh policy read before a new action. Session exchange and logout are specified single-use, non-retried exceptions."
+  },
+  "verification": {
+    "dependencyInstaller": "Bun 1.3.1, bun install --no-save",
+    "testRuntime": "Node 24.20.0 provisioned alongside Bun; direct Bun Vitest loopback/process execution was incompatible with this environment",
+    "fullFrontendSuites": 25,
+    "fullFrontendTests": 353,
+    "failures": 0,
+    "finalAffectedTests": 34,
+    "apiGenerationDrift": "passed, fc00bdccd0e4",
+    "typescript": "passed",
+    "eslint": "passed, zero warnings",
+    "viteProductionBuild": "passed",
+    "bundleBudget": "passed; initial JavaScript 30,505 gzip bytes of 51,200 budget and CSS 1,746 gzip bytes of 10,240 budget",
+    "gitDiffCheck": "passed"
+  },
+  "testAdjustment": "The upload polling assertion now records the number of polls when admission completes and verifies no additional poll afterward. The previous exact-one assertion was timing-dependent while an upload remained pending.",
+  "limits": [
+    "The added tests exercise in-process transport and component behavior; they are not packaged-browser or real-HTTP qualification.",
+    "No native analysis, live workflow, or production release ran.",
+    "The parent #159 and prerequisite tracker #158 remain open; this evidence closes only the focused #474 client criterion, not their other API/service gaps."
+  ]
+}

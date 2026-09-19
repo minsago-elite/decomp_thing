@@ -32,7 +32,8 @@ export function ExplorationEvidence({ jobId, runId, basePath }: { jobId: string;
     {error && <p role="alert">{error}</p>}
     {report && <>
       <p>Report state: {report.state}. Authority: {report.authority}.</p>
-      <ul aria-label="Evidence limitations">{report.limitations.map((text, index) => <li key={index}>{text}</li>)}</ul>
+      {report.limitations.length > 0 ? <ul aria-label="Evidence limitations">{report.limitations.map((text, index) => <li key={index}>{text}</li>)}</ul>
+        : report.state !== 'available' && <p role="status">This report is {report.state}; it cannot establish a successful result.</p>}
       {summary ? <dl class="job-facts">
         <dt>Candidate inputs</dt><dd>{summary.candidateCount}</dd>
         <dt>Expanded output signatures</dt><dd>{summary.expandedOutputSignatures}</dd>
@@ -43,7 +44,7 @@ export function ExplorationEvidence({ jobId, runId, basePath }: { jobId: string;
         <dt>New output signatures</dt><dd>{summary.confidence.newOutputSignatureCount}</dd>
         <dt>Producer reports sandboxing</dt><dd>{summary.confidence.sandboxed ? 'Yes' : 'No'}</dd>
         <dt>Producer reports network isolation</dt><dd>{summary.confidence.networkIsolated ? 'Yes' : 'No'}</dd>
-      </dl> : <p>No summary is available from these report bytes.</p>}
+      </dl> : <p role="status">No numeric summary is available from these report bytes. Missing or malformed values are not zero-valued results.</p>}
       {report.sourceArtifact && <>
         <p>Observed artifact: {report.sourceArtifact.sizeBytes} bytes. SHA-256: <code>{report.sourceArtifact.sha256}</code></p>
         <p>The digest identifies the observed bytes; it does not validate the producer's claims. Changed bytes require a refreshed report.</p>

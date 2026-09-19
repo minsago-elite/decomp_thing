@@ -17,7 +17,15 @@ private val publicErrorCodes = setOf(
     "SESSION_EXPIRED", "SESSION_LIMIT", "SESSION_REQUIRED", "STREAM_LIMIT", "UNSUPPORTED_HEADER",
     "UNSUPPORTED_MEDIA_TYPE", "UPLOAD_CAPACITY", "UPLOAD_ID_REUSED", "UPLOAD_RECEIPT_UNAVAILABLE",
     "UPLOAD_STORAGE", "UPLOAD_TOO_LARGE", "VALIDATION_FAILED", "VERSION_CONFLICT",
-    "UI_ASSET_NOT_FOUND", "UI_ASSET_UNAVAILABLE",
+    "UI_ASSET_NOT_FOUND", "UI_ASSET_UNAVAILABLE", "NOT_ACCEPTABLE", "STREAMS_DRAINING",
+    "UPLOAD_PROGRESS_CAPACITY", "LISTING_UNAVAILABLE", "CORRUPT_WORKFLOW_STATE",
+)
+
+private val diagnosticExecutor = java.util.concurrent.ThreadPoolExecutor(
+    1, 1, 0L, java.util.concurrent.TimeUnit.MILLISECONDS,
+    java.util.concurrent.ArrayBlockingQueue<Runnable>(256),
+    { task -> Thread(task, "decomp-web-diagnostics").apply { isDaemon = true } },
+    java.util.concurrent.ThreadPoolExecutor.DiscardPolicy(),
 )
 
 internal fun recordWebRequestFailure(
@@ -29,7 +37,7 @@ internal fun recordWebRequestFailure(
     if (!canonicalRequestId.matches(requestId)) return
     val safeStatus = status.takeIf { it in 400..599 } ?: 500
     val safeCode = code.takeIf(publicErrorCodes::contains) ?: "UNCLASSIFIED"
-    // An output failure cannot replace or delay the fixed public HTTP response.
-    try { output("web-http-failure request_id=$requestId status=$safeStatus code=$safeCode") }
-    catch (_: Exception) { }
+    val line = "web-http-failure request_id=$requestId status=$safeStatus code=$safeCode"
+    // Queueing is bounded and nonblocking, so a stalled sink cannot delay the response.
+    diagnosticExecutor.execute { try { output(line) } catch (_: Exception) { } }
 }

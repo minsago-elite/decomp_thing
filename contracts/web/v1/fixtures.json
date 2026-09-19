@@ -18,11 +18,23 @@
       "valid": true
     },
     {
+      "file": "fixtures/jobs-empty.json",
+      "valid": true
+    },
+    {
       "file": "fixtures/run-queued.json",
       "valid": true
     },
     {
       "file": "fixtures/run-completed-unaccepted.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/run-interrupted.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/run-failed.json",
       "valid": true
     },
     {
@@ -99,6 +111,10 @@
     },
     {
       "file": "fixtures/error-validation.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/error-denied.json",
       "valid": true
     },
     {
