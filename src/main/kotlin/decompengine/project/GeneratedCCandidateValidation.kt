@@ -61,14 +61,18 @@ internal object GeneratedCCandidateValidation {
     }
 
     private fun findFunctionBody(source: String, functionName: String): String? {
-        val candidates = Regex("\\b${Regex.escape(functionName)}\\s*\\(").findAll(source)
+        // Search the comment/literal-stripped view so a commented-out signature cannot be
+        // mistaken for an executable definition. The replacement preserves offsets, allowing
+        // the returned body to retain its original text for the placeholder check.
+        val codeOnly = codeWithoutCommentsOrLiterals(source)
+        val candidates = Regex("\\b${Regex.escape(functionName)}\\s*\\(").findAll(codeOnly)
         candidates.forEach { candidate ->
-            val parameterStart = source.indexOf('(', candidate.range.first)
-            val parameterEnd = matchingDelimiter(source, parameterStart, '(', ')') ?: return@forEach
+            val parameterStart = codeOnly.indexOf('(', candidate.range.first)
+            val parameterEnd = matchingDelimiter(codeOnly, parameterStart, '(', ')') ?: return@forEach
             var bodyStart = parameterEnd + 1
-            while (bodyStart < source.length && source[bodyStart].isWhitespace()) bodyStart++
-            if (bodyStart >= source.length || source[bodyStart] != '{') return@forEach
-            val bodyEnd = matchingDelimiter(source, bodyStart, '{', '}') ?: return@forEach
+            while (bodyStart < codeOnly.length && codeOnly[bodyStart].isWhitespace()) bodyStart++
+            if (bodyStart >= codeOnly.length || codeOnly[bodyStart] != '{') return@forEach
+            val bodyEnd = matchingDelimiter(codeOnly, bodyStart, '{', '}') ?: return@forEach
             return source.substring(bodyStart + 1, bodyEnd)
         }
         return null
@@ -203,6 +207,13 @@ internal object GeneratedCCandidateValidation {
                     val declarationPrefix = parenthesisDepth == 0 || functionPointerDeclarator
                     val hasType = Regex("[A-Za-z_]\\w*").containsMatchIn(prefix)
                     val isExternal = Regex("\\bextern\\b").containsMatchIn(prefix)
+                    // `struct name;`, `union name;`, `enum name;`, and typedefs declare
+                    // types/tags, not storage for the recovered global. A completed
+                    // `struct tag { ... } name;` still has the closing brace in its prefix
+                    // and is intentionally allowed below.
+                    val isTagOrTypedefDeclaration =
+                        Regex("\\b(?:struct|union|enum)\\s*$").containsMatchIn(prefix) ||
+                            Regex("\\btypedef\\b").containsMatchIn(prefix)
                     val suffix = code.substring(occurrence.range.last + 1).trimStart()
                     val declaratorSuffix = when {
                         functionPointerDeclarator -> suffix.startsWith(')')
@@ -210,7 +221,7 @@ internal object GeneratedCCandidateValidation {
                         suffix.isEmpty() -> true
                         else -> suffix.first() in setOf(';', '=', ',', '[')
                     }
-                    if (declarationPrefix && hasType && !isExternal && '=' !in prefix && declaratorSuffix) {
+                    if (declarationPrefix && hasType && !isExternal && !isTagOrTypedefDeclaration && '=' !in prefix && declaratorSuffix) {
                         return true
                     }
                 }
