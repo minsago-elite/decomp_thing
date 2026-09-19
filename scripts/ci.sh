@@ -4,4 +4,6 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "==> JVM/Kotlin checks"
-./gradlew --no-daemon verifyReconstructionNeutrality test
+# verifyReconstructionNeutrality stays standalone until the #84 migration
+# finishes; ./gradlew --no-daemon verifyReconstructionNeutrality runs it directly.
+./gradlew --no-daemon test

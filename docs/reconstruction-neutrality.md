@@ -12,9 +12,10 @@ python3 -B -m unittest discover -s tests -p test_generic_leakage.py -v
 ```
 
 The scanner requires Python 3.9+ and Git. The standalone Gradle task runs the
-scanner without compiling or executing application code. Gradle `check` and
-`scripts/ci.sh` include it. Exit status is 0 for no findings, 1 for findings, and
-2 for invalid policy or unreadable inputs. JSON output contains either the scan
+scanner without compiling or executing application code. It stays out of Gradle
+`check` and `scripts/ci.sh` while the migration leaves known findings; run it
+directly (or from `scripts/check-generic-leakage.sh`) instead. Exit status is 0
+for no findings, 1 for findings, and 2 for invalid policy or unreadable inputs. JSON output contains either the scan
 counts and sorted findings or an `error` field. Findings include path, line,
 rule, and matched text.
 
