@@ -119,6 +119,9 @@ class FullTreePlanningInventoryControlTest {
         assertFailsWith<FullTreeControlException> {
             registry.requireOwnerModulesForShard("llvm-lib-asmparser-missing")
         }
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard(("a-").repeat(2_000) + "a")
+        }
     }
 
     @Test
