@@ -285,7 +285,7 @@ class JobStore internal constructor(
         sourceArchiveInventory(jobId, reportPrefix, setOf("build"))
 
 
-    private fun sourceArchiveInventory(jobId: String, reportPrefix: String, excludedRoots: Set<String>): Map<String, LinuxFileIdentity>
+    private fun sourceArchiveInventory(jobId: String, reportPrefix: String, excludedRoots: Set<String>): Map<String, LinuxFileIdentity> {
         jobDirectory(jobId)
         require(reportPrefix == "reports" || reportPrefix.matches(Regex("reports/runs/[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "archive report prefix is invalid" }
         val inventory = sortedMapOf<String, LinuxFileIdentity>()
