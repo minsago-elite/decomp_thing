@@ -422,6 +422,7 @@ class EmbeddedWebAssets private constructor(
             exchange.responseHeaders.set("X-Content-Type-Options", "nosniff")
             exchange.responseHeaders.set("Referrer-Policy", "no-referrer")
             exchange.responseHeaders.set("X-Request-ID", requestId)
+            recordWebRequestFailure(requestId, status, code, System.err::println)
             try {
                 if (exchange.requestMethod == "HEAD") exchange.sendResponseHeaders(status, -1)
                 else {

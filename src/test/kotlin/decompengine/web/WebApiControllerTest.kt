@@ -14,6 +14,7 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -512,6 +513,51 @@ class WebApiControllerTest {
         assertEquals("null", rejected.getValue("jobId").toString())
     }
 
+    @Test
+    fun `v1 errors connect response IDs to redacted server diagnostics`() {
+        val diagnostics = CopyOnWriteArrayList<String>()
+        withServer(requestDiagnosticOutput = { diagnostics += it }) { server, _, jobId ->
+            val canary = "private_root_and_token_canary"
+            val path = "/workbench/api/v1/jobs/$jobId?untrusted=$canary"
+            val unauthenticated = request(server, path)
+            assertError(unauthenticated, 401, "SESSION_REQUIRED")
+            val deniedId = unauthenticated.headers().firstValue("X-Request-ID").orElseThrow()
+            assertEquals("web-http-failure request_id=$deniedId status=401 code=SESSION_REQUIRED", diagnostics.single())
+            val cookie = establish(server)
+            val rejectedQuery = request(server, path, headers = mapOf("Cookie" to cookie))
+            assertError(rejectedQuery, 400, "VALIDATION_FAILED")
+            val rejectedId = rejectedQuery.headers().firstValue("X-Request-ID").orElseThrow()
+            assertEquals("web-http-failure request_id=$rejectedId status=400 code=VALIDATION_FAILED", diagnostics.last())
+            assertEquals(2, diagnostics.size)
+            assertNotEquals(deniedId, rejectedId)
+            assertFalse(diagnostics.joinToString().contains(canary))
+            assertFalse(unauthenticated.body().contains(canary))
+            assertFalse(rejectedQuery.body().contains(canary))
+        }
+    }
+
+    @Test
+    fun `legacy JSON failures share the response ID with redacted server diagnostics`() {
+        val diagnostics = CopyOnWriteArrayList<String>()
+        val root = createTempDirectory("web-legacy-request-diagnostic-")
+        val server = UploadServer("127.0.0.1", 0, root, JobAnalyzer { _, _ -> error("Unexpected analysis") },
+            JobReconstructor { _, _ -> error("Unexpected reconstruction") },
+            requestDiagnosticOutput = { diagnostics += it })
+        server.start()
+        try {
+            val canary = "private_query_canary"
+            val response = request(server, "/api/jobs/${"a".repeat(32)}?untrusted=$canary")
+            assertEquals(401, response.statusCode())
+            val body = Json.parseToJsonElement(response.body()).jsonObject
+            val id = body.getValue("requestId").jsonPrimitive.content
+            assertEquals(id, response.headers().firstValue("X-Request-ID").orElseThrow())
+            assertEquals("SESSION_REQUIRED", body.getValue("error").jsonObject.getValue("code").jsonPrimitive.content)
+            assertEquals("web-http-failure request_id=$id status=401 code=SESSION_REQUIRED", diagnostics.single())
+            assertFalse(diagnostics.single().contains(canary))
+            assertFalse(response.body().contains(canary))
+        } finally { server.stop(); root.toFile().deleteRecursively() }
+    }
+
     private fun upload(server: UploadServer, bytes: ByteArray, headers: Map<String, String>, filename: String = "fixture.elf", boundary: String = "upload_api_fixture", path: String = "/workbench/api/v1/jobs"): HttpResponse<String> {
         val origin = "http://127.0.0.1:${server.serverPort}"
         val body = "--$boundary\r\nContent-Disposition: form-data; name=\"binary\"; filename=\"$filename\"\r\n\r\n".toByteArray() + bytes + "\r\n--$boundary--\r\n".toByteArray()
@@ -567,14 +613,16 @@ class WebApiControllerTest {
         return client.send(builder.build(), HttpResponse.BodyHandlers.ofString()).also(::assertNoWebCors)
     }
 
-    private fun withServer(block: (UploadServer, JobStore, String) -> Unit) {
+    private fun withServer(requestDiagnosticOutput: (String) -> Unit = System.err::println,
+                           block: (UploadServer, JobStore, String) -> Unit) {
         val root = createTempDirectory("web-api-")
         val store = JobStore(root)
         val binary = elfFixture().also { bytes -> repeat(8) { bytes[24 + it] = 0xff.toByte() } }
         val job = store.createFromUpload("synthetic.elf", binary)
         store.updateStatus(job.id, "uploaded", "PRIVATE_STATUS_SENTINEL")
         val server = UploadServer("127.0.0.1", 0, root, JobAnalyzer { _, _ -> error("Unexpected analysis") },
-            JobReconstructor { _, _ -> error("Unexpected reconstruction") }, uiMode = WebUiMode.SPA, basePath = "/workbench/")
+            JobReconstructor { _, _ -> error("Unexpected reconstruction") }, uiMode = WebUiMode.SPA, basePath = "/workbench/",
+            requestDiagnosticOutput = requestDiagnosticOutput)
         server.start()
         try { block(server, store, job.id) } finally { server.stop(); root.toFile().deleteRecursively() }
     }

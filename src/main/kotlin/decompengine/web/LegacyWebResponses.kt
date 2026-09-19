@@ -12,6 +12,7 @@ internal fun legacyError(
     status: Int,
     code: String,
     message: String,
+    requestDiagnosticOutput: (String) -> Unit = System.err::println,
     html: () -> String,
 ) {
     val segments = exchange.requestURI.path.split('/').filter(String::isNotBlank)
@@ -23,6 +24,7 @@ internal fun legacyError(
     }
     val requestId = java.util.UUID.randomUUID().toString()
     exchange.responseHeaders.set("X-Request-ID", requestId)
+    recordWebRequestFailure(requestId, status, code, requestDiagnosticOutput)
     exchange.sendJson(status, buildJsonObject {
         put("requestId", requestId)
         put("error", buildJsonObject {

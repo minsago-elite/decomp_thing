@@ -179,6 +179,7 @@ class UploadServer(
     private val listenBacklog: Int = 64,
     private val authenticationInspector: (decompengine.agent.AgentCancellation) -> decompengine.acp.AcpAuthenticationInventory = defaultWebAuthenticationInspector(),
     private val requestShutdownTimeoutMs: Long = 1000,
+    private val requestDiagnosticOutput: (String) -> Unit = System.err::println,
 ) {
     init {
         require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" }
@@ -228,7 +229,7 @@ class UploadServer(
     private val sourceEvidence = WebSourceEvidence(store, sourceProfiles, jobs::readArtifact)
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
     private val access = LocalWebAccess(LocalWebAccessConfiguration(webOrigin(host, server.address.port), basePath,
-        setOfNotNull(devFrontendOrigin)))
+        setOfNotNull(devFrontendOrigin)), requestDiagnosticOutput = requestDiagnosticOutput)
     private val legacySessions = WebSessionController(access)
     internal val streamResources = WebStreamResources()
     private val api = spaAssets?.let { WebApiController(access, it, jobs, streamResources) }
@@ -600,7 +601,7 @@ class UploadServer(
                     }
                     exchange.sendJson(200, readLegacyProgress(job.id, runId).toString())
                 }
-                else -> legacyError(exchange, 404, "NOT_FOUND", "The requested route does not exist.") {
+                else -> legacyError(exchange, 404, "NOT_FOUND", "The requested route does not exist.", requestDiagnosticOutput) {
                     renderErrorPage(404, "Page not found", "The requested route does not exist.")
                 }
             }
@@ -616,7 +617,7 @@ class UploadServer(
                 return
             }
 
-            legacyError(exchange, exception.status, exception.code, exception.message ?: "The request was invalid.") {
+            legacyError(exchange, exception.status, exception.code, exception.message ?: "The request was invalid.", requestDiagnosticOutput) {
                 renderErrorPage(exception.status, "Invalid request", exception.message ?: "The request was invalid.")
             }
         } catch (exception: WebJobServiceException) {
@@ -628,19 +629,19 @@ class UploadServer(
                 "JOB_RECORD_UNAVAILABLE" -> publicWebDiagnosticMessage(code)
                 "JOB_STORAGE_UNAVAILABLE" -> "Job storage is unavailable. Inspect storage before retrying."
                 else -> "The requested job or attempt is unavailable."
-            }) {
+            }, requestDiagnosticOutput) {
                 renderErrorPage(status, "Job storage unavailable", "${publicWebDiagnosticCode(exception.code)}: ${publicWebDiagnosticMessage(exception.code)}")
             }
         } catch (exception: JobStoreException) {
-            legacyError(exchange, 404, "JOB_NOT_FOUND", "The requested job is unavailable.") {
+            legacyError(exchange, 404, "JOB_NOT_FOUND", "The requested job is unavailable.", requestDiagnosticOutput) {
                 renderErrorPage(404, "Job not found", "The requested job is unavailable.")
             }
         } catch (exception: IllegalArgumentException) {
-            legacyError(exchange, 400, "INVALID_REQUEST", "The request was invalid.") {
+            legacyError(exchange, 400, "INVALID_REQUEST", "The request was invalid.", requestDiagnosticOutput) {
                 renderErrorPage(400, "Invalid request", "The request was invalid or the requested source or artifact is unavailable.")
             }
         } catch (exception: Exception) {
-            legacyError(exchange, 500, "INTERNAL_ERROR", "The operation failed.") {
+            legacyError(exchange, 500, "INTERNAL_ERROR", "The operation failed.", requestDiagnosticOutput) {
                 renderErrorPage(500, "Unexpected error", "The operation failed. Private diagnostic details are withheld.")
             }
         }
@@ -689,7 +690,7 @@ class UploadServer(
         try {
             handleUploadRequest(exchange, jobs)
         } catch (exception: InvalidUploadException) {
-            legacyError(exchange, 400, "INVALID_UPLOAD", "Upload a supported Linux ELF binary.") {
+            legacyError(exchange, 400, "INVALID_UPLOAD", "Upload a supported Linux ELF binary.", requestDiagnosticOutput) {
                 renderErrorPage(400, "Unsupported binary", "Upload a supported Linux ELF binary.")
             }
         }
