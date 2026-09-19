@@ -500,7 +500,7 @@ object FullTreePlanningInventoryControl {
         }
 
         override fun requireOwnerModulesForShard(shardId: String): List<FullTreePlanningSourceModule> {
-            if (shardId.length > MAXIMUM_SHARD_ID_LENGTH || !shardId.matches(SHARD_ID)) {
+            if (!isValidShardId(shardId)) {
                 throw FullTreeControlException("planning shard ID is invalid")
             }
             return modulesByShardId[shardId]
@@ -613,7 +613,6 @@ private val SOURCE_ONLY_ORDER = Comparator<JsonObject> { left, right ->
     FULL_TREE_CODE_POINT_ORDER.compare(left.controlString("sourcePath"), right.controlString("sourcePath"))
 }
 private val COMPILATION_UNIT_ID = Regex("cu-[0-9a-f]{32}")
-private val SHARD_ID = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
 
 private const val PLANNING_SCHEMA = "full-tree-planning-inventory"
 private const val PLANNING_MAXIMUM_SOURCE_MODULES = 1_000_000
@@ -621,8 +620,28 @@ private const val PLANNING_MAXIMUM_CANDIDATE_SOURCE_UNITS = 200_000
 private const val PLANNING_MAXIMUM_OUTPUT_RECORDS = 203_000
 private const val PLANNING_MAXIMUM_WORK_UNITS = 500_000L
 private const val PLANNING_MAXIMUM_SERIALIZED_BYTES = 32 * 1024 * 1024
-private const val MAXIMUM_SHARD_ID_LENGTH = 128
-private val SHARD_ID = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
+private fun isValidShardId(shardId: String): Boolean {
+    if (shardId.isEmpty() || shardId.first() == '-' || shardId.last() == '-') {
+        return false
+    }
+    var previousWasSeparator = false
+    shardId.forEach { character ->
+        if (character == '-') {
+            if (previousWasSeparator) {
+                return false
+            }
+            previousWasSeparator = true
+        } else {
+            if (character !in 'a'..'z' && character !in '0'..'9') {
+                return false
+            }
+            previousWasSeparator = false
+        }
+    }
+    return true
+}
+
+
 private val PLANNING_POLICY = JsonObject(
     mapOf(
         "id" to JsonPrimitive(PLANNING_SCHEMA),
