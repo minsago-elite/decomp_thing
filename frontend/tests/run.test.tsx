@@ -110,6 +110,19 @@ it('refuses evidence for another attempt without presenting its summary', async 
   expect(screen.queryByText('Producer confidence score')).toBeNull();
 });
 
+it.each(['invalid', 'partial', 'unknown'] as const)('marks %s exploration reports as unavailable instead of zero metrics', async state => {
+  const { ExplorationEvidence } = await import('../src/jobs/ExplorationEvidence');
+  const fixture = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/report-exploration.json'), 'utf8')) as { data: Report };
+  const report: Report = { ...fixture.data, state, summary: null, limitations: [] };
+  transport.get.mockResolvedValue({ data: report });
+  render(<ExplorationEvidence jobId={report.binding.jobId} runId={report.binding.runId!} basePath="/nested" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Read exploration evidence' }));
+  expect(await screen.findByText(`This report is ${state}; it cannot establish a successful result.`)).toBeTruthy();
+  expect(screen.getByText(/Missing or malformed values are not zero-valued results/)).toBeTruthy();
+  expect(screen.queryByText('Candidate inputs')).toBeNull();
+  expect(screen.queryByText('Producer confidence score')).toBeNull();
+});
+
 
 it('clears activity and cancels its reads on explicit session logout', async () => {
   const auth = await session();

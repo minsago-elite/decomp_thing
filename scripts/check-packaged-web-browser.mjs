@@ -588,7 +588,7 @@ try {
       assert.equal(row.href, '/nested/jobs/' + historyFixture.jobId);
       assert.equal(row.facts.Size, '64 bytes');
       assert.equal(Date.parse(row.facts.Created), Date.parse(JSON.parse(historyFixture.retained['job.json']).created_at));
-      assert.equal(row.facts['Workflow state'], 'completed');
+      assert.equal(row.facts['Workflow state'], 'Completed');
       assert.equal(row.facts['Latest attempt'], 'run_fixture_54');
       assert.equal(row.facts['Accepted revision'], 'No accepted revision recorded');
       assert.ok(row.facts.Updated);
