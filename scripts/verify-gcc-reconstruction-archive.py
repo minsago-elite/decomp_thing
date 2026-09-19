@@ -147,6 +147,8 @@ def _authenticate_controls(profile_path: Path, engine_id: str) -> tuple[dict[str
 
     record_path = root / engine["buildRecord"]
     record = _read_json(record_path, "cc1 build record")
+    if record != derived_records[engine_id]:
+        raise VerificationError("cc1 build record differs from the authenticated derived engine record")
     if record["oracle"]["id"] != "gcc-cc1-" + profile["benchmark"]["version"]:
         raise VerificationError("cc1 build record does not identify the selected engine")
     if record["outputs"]["stripped"] != engine["strippedArtifact"]:
@@ -231,6 +233,8 @@ def _verify_source_tree(root: Path, profile: dict[str, Any], control: dict[str, 
         or any(character not in SHA256 for character in source_manifest["profileSha256"])
     ):
         raise VerificationError("source tree manifest has no reconstruction-profile digest")
+    if source_manifest["profileSha256"] != control["profileSha256"]:
+        raise VerificationError("source tree manifest profile digest differs from the authenticated profile")
     model = _read_json(root / "reports/program_model.json", "program model evidence")
     if model.get("inputSha256") != control["strippedArtifactSha256"]:
         raise VerificationError("program model evidence is not bound to the authenticated cc1 input")
@@ -358,12 +362,17 @@ def _run_bounded_build(
         return returncode, total
     finally:
         selector.close()
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            pass
+        try:
+            process.wait(timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
         if process.poll() is None:
             try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except (OSError, ProcessLookupError):
-                pass
-            try:
+                process.kill()
                 process.wait(timeout=10)
             except (OSError, subprocess.TimeoutExpired):
                 pass
@@ -530,13 +539,16 @@ def verify_archive(profile_path: Path, engine_id: str, archive: Path, repeat_arc
         raise VerificationError("repeated archives must be distinct files, not the same inode")
     _bound_raw_archive(archive, "first reconstruction archive")
     _bound_raw_archive(repeat_archive, "repeat reconstruction archive")
-    first_snapshot = _snapshot_archive(archive, "first reconstruction archive")
-    repeat_snapshot = _snapshot_archive(repeat_archive, "repeat reconstruction archive")
+    first_snapshot: Path | None = None
+    repeat_snapshot: Path | None = None
     try:
+        first_snapshot = _snapshot_archive(archive, "first reconstruction archive")
+        repeat_snapshot = _snapshot_archive(repeat_archive, "repeat reconstruction archive")
         if first_snapshot.stat().st_size != repeat_snapshot.stat().st_size or not filecmp.cmp(
             first_snapshot, repeat_snapshot, shallow=False
         ):
             raise VerificationError("repeated accepted cc1 archives are not byte-identical")
+        assert first_snapshot is not None and repeat_snapshot is not None
         first = _extract_and_build(first_snapshot, "first reconstruction archive", profile, control)
         repeat = _extract_and_build(repeat_snapshot, "repeat reconstruction archive", profile, control)
         if _sha256_file(first_snapshot) != first["archiveSha256"] or _sha256_file(
@@ -545,6 +557,8 @@ def verify_archive(profile_path: Path, engine_id: str, archive: Path, repeat_arc
             raise VerificationError("archive snapshot changed during verification")
     finally:
         for snapshot in (first_snapshot, repeat_snapshot):
+            if snapshot is None:
+                continue
             try:
                 snapshot.unlink()
             except OSError:
@@ -598,6 +612,8 @@ def _publish_evidence(evidence: dict[str, Any], destination: Path, protected: li
             continue
         if resolved_destination == resolved_guarded:
             raise VerificationError("evidence destination must not overwrite a verifier input")
+    if destination.is_symlink():
+        raise VerificationError("evidence destination must be a regular non-symlink path")
     if resolved_destination.is_symlink():
         raise VerificationError("evidence destination must be a regular non-symlink path")
     if resolved_destination.exists() and not resolved_destination.is_file():

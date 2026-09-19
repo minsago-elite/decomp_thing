@@ -89,7 +89,7 @@ class GccReconstructionArchiveTest(unittest.TestCase):
         (project / "reports/build_contract.json").write_text(json.dumps(contract) + "\n", encoding="utf-8")
         source_manifest = {
             "profileId": "generated-c-make-v1-gcc-compiler-engines-16.2.0",
-            "profileSha256": "a" * 64,
+            "profileSha256": sha256_bytes(PROFILE.read_bytes()),
             "inputSha256": input_sha256 or self.expected_input,
             "files": [{"path": path, "sha256": sha256_bytes(value)} for path, value in sorted(files.items())],
         }
