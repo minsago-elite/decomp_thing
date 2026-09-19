@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "issue": 984,
+  "recordedAt": "2026-09-08",
+  "status": "unverified",
+  "scope": "Actual installed GCC engine CLI fresh/resume qualification",
+  "sourceRevisionInspected": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "provisionedInputs": {
+    "observedInThisWorktree": "none",
+    "requiredHostedEnvironmentVariables": [
+      "DECOMP_GCC_CLI_INSTALLATION",
+      "DECOMP_GCC_CLI_PROFILE",
+      "DECOMP_GCC_CLI_ARCHIVE",
+      "DECOMP_GCC_CLI_CC1_BINARY",
+      "DECOMP_GCC_CLI_LTO1_BINARY",
+      "DECOMP_GCC_CLI_CC1_FRESH_SCRATCH",
+      "DECOMP_GCC_CLI_CC1_RESUME_SCRATCH",
+      "DECOMP_GCC_CLI_LTO1_FRESH_SCRATCH",
+      "DECOMP_GCC_CLI_LTO1_RESUME_SCRATCH",
+      "DECOMP_GCC_CLI_EVIDENCE_ROOT"
+    ],
+    "requiredScratchProvisioning": [
+      "bash scripts/ci-prepare-oracle-ext4-scratch.sh --gcc-engine-cc1-fresh",
+      "bash scripts/ci-prepare-oracle-ext4-scratch.sh --gcc-engine-cc1-resume",
+      "bash scripts/ci-prepare-oracle-ext4-scratch.sh --gcc-engine-lto1-fresh",
+      "bash scripts/ci-prepare-oracle-ext4-scratch.sh --gcc-engine-lto1-resume"
+    ],
+    "requiredInstallationProvisioning": "bash scripts/ci-prepare-bundled-ghidra-runtime.sh --application",
+    "localEnvironmentObservation": "DECOMP_REQUIRE_GCC_ENGINE_CLI and all DECOMP_GCC_CLI_* variables were unset"
+  },
+  "exactCommand": {
+    "wrapper": "bash scripts/ci-qualify-gcc-engine-cli.sh",
+    "expanded": "DECOMP_REQUIRE_GCC_ENGINE_CLI=true /home/june/a-series-wt/issue-984/gradlew --no-daemon -p /home/june/a-series-wt/issue-984 test --tests decompengine.oracle.gcc.GccBundledCliQualificationTest"
+  },
+  "coverage": {
+    "testClass": "decompengine.oracle.gcc.GccBundledCliQualificationTest",
+    "cases": [
+      "cc1 normal CLI fresh and same-owner resume produce identical model and plan",
+      "lto1 normal CLI fresh and same-owner resume produce identical model and plan"
+    ],
+    "perEngineInvocations": [
+      "installed bin/llm_bin_patch gcc-engine-plan <engine> <binary> --profile <profile> --ghidra-archive <archive> --output <fresh-output> --scratch <fresh-scratch>",
+      "installed bin/llm_bin_patch gcc-engine-plan <engine> <binary> --profile <profile> --ghidra-archive <archive> --output <resumed-output> --scratch <resume-scratch> --resume-after-checkpoint 512"
+    ],
+    "recordedChecks": [
+      "installed launcher subprocess and bounded launcher evidence",
+      "CLI invocation, profile policy, journal lineage, export and planner bindings",
+      "fresh and resumed captured model bytes are identical",
+      "fresh and resumed captured module-plan bytes are identical",
+      "comparison records remain benchmarkAccepted=false and releaseEligible=false"
+    ]
+  },
+  "unverifiedQualifications": [
+    "No hosted CLI run or hosted success is claimed by this record.",
+    "No stale-input mutation run was executed for binary, profile, archive, policy, output, or scratch identities.",
+    "Denied-prerequisite behavior and output-lineage rejection were not exercised by the qualification runner.",
+    "Whole-operation resource accounting, cold recovery, deployment ownership, and production/release qualification remain unverified."
+  ],
+  "validation": {
+    "testsRunForThisRecord": false,
+    "reason": "Finalization requested without additional tests; this record is based on repository contract and local environment inspection."
+  }
+}

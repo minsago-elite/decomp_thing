@@ -12,10 +12,10 @@ python3 -B -m unittest discover -s tests -p test_generic_leakage.py -v
 ```
 
 The scanner requires Python 3.9+ and Git. The standalone Gradle task runs the
-scanner without compiling or executing application code. While the repository
-scan still fails on remaining migrations, the draft gate stays standalone: it is
-not wired into Gradle `check` or `scripts/ci.sh` until those findings are
-resolved. Exit status is 0 for no findings, 1 for findings, and
+scanner without compiling or executing application code. The Gradle `check` task
+does not include it yet; `scripts/ci.sh` keeps the gate off the required CI path
+until the repository scan passes (tracked by #84). Run the standalone task
+explicitly when validating the neutrality policy. Exit status is 0 for no findings, 1 for findings, and
 2 for invalid policy or unreadable inputs. JSON output contains either the scan
 counts and sorted findings or an `error` field. Findings include path, line,
 rule, and matched text.
@@ -31,82 +31,16 @@ under `oracle/gcc`; it records known benchmark artifacts, not arbitrary hashes.
 
 Within generic surfaces, rules detect selected C/header suffix operations,
 source/include and build-output paths, Make/Ninja/compiler names, C flags, and
-concrete adapter references. The benchmark-version rule also recognizes
-`GCC_VERSION=` assignments, and the inventory scans Dockerfile variants such as
-`Dockerfile.dev` and `Dockerfile.ci`. Each concrete adapter exemption names one
-exact file with its ownership rationale. A new `GeneratedC` filename does not
-acquire an exemption. Adapter ownership never exempts benchmark identity rules.
+concrete adapter references. Each concrete adapter exemption names one exact
+file with its ownership rationale. A new `GeneratedC` filename does not acquire
+an exemption. Adapter ownership never exempts benchmark identity rules.
 
 Compatibility defaults, closed adapter dispatch, and an installed compiler
 runtime component use exact literal allowances with a rule, expected occurrence
 count, and rationale. An allowance suppresses only matches entirely contained
 in its literal fragment. Duplicate, overlapping, stale, unused, or out-of-scope
-allowances fail the gate. Generic and benchmark roots must be disjoint. Missing
-declared paths and unsupported policy fields also fail. Ownership changes
-therefore require an explicit policy review.
-
-Archive output omissions and strict build-control JSON locations come from
-`ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
-and web inventory consume an immutable copy. Preflight retains entry accounting,
-portable-path checks and link checks for omitted output trees. Source/hash
-manifests, required evidence and declared payload paths remain protected. The
-current adapters still use their existing output/control locations; alternate
-inventory-root fixtures establish transport behavior, not an end-to-end proof
-of a backend with relocated artifacts.
-
-Archive output omissions and strict build-control JSON locations come from
-`ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
-and web inventory consume an immutable copy. Preflight retains entry accounting,
-portable-path checks and link checks for omitted output trees. Source/hash
-manifests, required evidence and declared payload paths remain protected. The
-current adapters still use their existing output/control locations; alternate
-inventory-root fixtures establish transport behavior, not an end-to-end proof
-of a backend with relocated artifacts.
-
-Archive output omissions and strict build-control JSON locations come from
-`ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
-and web inventory consume an immutable copy. Preflight retains entry accounting,
-portable-path checks and link checks for omitted output trees. Source/hash
-manifests, required evidence and declared payload paths remain protected. The
-current adapters still use their existing output/control locations; alternate
-inventory-root fixtures establish transport behavior, not an end-to-end proof
-of a backend with relocated artifacts.
-
-Archive output omissions and strict build-control JSON locations come from
-`ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
-and web inventory consume an immutable copy. Preflight retains entry accounting,
-portable-path checks and link checks for omitted output trees. Source/hash
-manifests, required evidence and declared payload paths remain protected. The
-current adapters still use their existing output/control locations; alternate
-inventory-root fixtures establish transport behavior, not an end-to-end proof
-of a backend with relocated artifacts.
-
-Archive output omissions and strict build-control JSON locations come from
-`ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
-and web inventory consume an immutable copy. Preflight retains entry accounting,
-portable-path checks and link checks for omitted output trees. Source/hash
-manifests, required evidence and declared payload paths remain protected. The
-current adapters still use their existing output/control locations; alternate
-inventory-root fixtures establish transport behavior, not an end-to-end proof
-of a backend with relocated artifacts.
-
-Archive output omissions and strict build-control JSON locations come from
-`ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
-and web inventory consume an immutable copy. Preflight retains entry accounting,
-portable-path checks and link checks for omitted output trees. Source/hash
-manifests, required evidence and declared payload paths remain protected. The
-current adapters still use their existing output/control locations; alternate
-inventory-root fixtures establish transport behavior, not an end-to-end proof
-of a backend with relocated artifacts.
-
-Archive output omissions and strict build-control JSON locations come from
-`ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
-and web inventory consume an immutable copy. Preflight retains entry accounting,
-portable-path checks and link checks for omitted output trees. Source/hash
-manifests, required evidence and declared payload paths remain protected. The
-current adapters still use their existing output/control locations; alternate
-inventory-root fixtures establish transport behavior, not an end-to-end proof
-of a backend with relocated artifacts.
+allowances fail the gate. Missing declared paths and unsupported policy fields
+also fail. Ownership changes therefore require an explicit policy review.
 
 Archive output omissions and strict build-control JSON locations come from
 `ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
@@ -135,11 +69,13 @@ ordinary directory ancestors.
 
 ## Current migration state
 
-The initial repository run fails on remaining policy and ownership migrations.
-Examples include MVP compiler assumptions, repair runtime policy,
-benchmark scripts/tests/workflows, and retained historical
-benchmark identities in LLVM reference evidence. Retained evidence must not be
-rewritten merely to satisfy the scanner.
+The repository baseline scan passes. The GCC oracle CI workflow, its
+inventory and corpus scripts, and its Python oracle tests are declared
+benchmark-owned. Retained historical benchmark identities in LLVM reference
+evidence, shared recorded capture image digests, cross-oracle test
+references, MVP compiler assumptions, and repair runtime policy
+cross-checks use exact literal allowances with ownership rationales.
+Retained evidence must not be rewritten merely to satisfy the scanner.
 
 `ReconstructionPipeline` now resolves its build adapter from the selected profile.
 Its profile overload admits host budgets and binds analyzer export limits before
@@ -153,11 +89,10 @@ resource bounds and other report consumers remain unfinished.
 
 Doctor's compiler/build probes and authored sanitizer sample now come from its
 selected registered adapter, through both the CLI and JVM API. The generic root
-covers the full Doctor package. This removes four findings, leaving 80
-(67 benchmark and 13 generic); the diagnostic executor still needs output/time
+covers the full Doctor package. The repository scan passes with zero
+findings; the diagnostic executor still needs output/time
 bounds. See [profile-selected Doctor diagnostics](profiled-doctor-diagnostics.md).
 
 Passing the authored scanner tests verifies its detection and exemption
-behavior. It does not make the repository scan pass or complete #84. Current
-scope and progress remain on the issue; the draft gate layer is not ready for
-integration while these findings remain.
+behavior, and the repository scan passes with zero findings. That does not
+complete #84: current scope and progress remain on the issue.
