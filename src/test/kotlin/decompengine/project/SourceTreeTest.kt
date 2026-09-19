@@ -38,6 +38,22 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class SourceTreeTest {
     @Test
+    fun `rerun with the other profile removes the stale build definition`() {
+        val project = createTempDirectory("source-tree-profile-rerun-")
+        val model = oneModuleModel()
+        val makeProfile = GeneratedCMakeReconstructionProfile.descriptor
+        val ninjaProfile = GeneratedCNinjaReconstructionProfile.descriptor
+        SourceTreeGenerator.generate(model, project, reconstructor = validReconstructor(), profile = makeProfile)
+        assertTrue(project.resolve("Makefile").exists())
+        SourceTreeGenerator.generate(model, project, reconstructor = validReconstructor(), profile = ninjaProfile)
+        assertTrue(project.resolve("build.ninja").exists())
+        assertFalse(project.resolve("Makefile").exists(), "make-to-ninja rerun must not retain a stale Makefile")
+        SourceTreeGenerator.generate(model, project, reconstructor = validReconstructor(), profile = makeProfile)
+        assertTrue(project.resolve("Makefile").exists())
+        assertFalse(project.resolve("build.ninja").exists(), "ninja-to-make rerun must not retain a stale build.ninja")
+    }
+
+    @Test
     fun `module cache binds binary identity and model schema while reusing unchanged inputs`() {
         val project = createTempDirectory("source-tree-model-identity-")
         var calls = 0
@@ -946,6 +962,34 @@ class SourceTreeTest {
         }
 
         SourceTreeGenerator.generate(input, project, reconstructor = refusing)
+    }
+
+    @Test
+    fun `accepted agent-free checkpoints revalidate recorded prompt budgets on reuse`() {
+        val project = createTempDirectory("source-tree-legacy-prompt-budget-")
+        val input = oneModuleModel()
+        SourceTreeGenerator.generate(
+            input,
+            project,
+            reconstructor = cacheReconstructor("scripted-valid", "scripted-legacy"),
+        )
+        val checkpoint = project.resolve("reports/modules/parse.json")
+        // A checkpoint accepted before prompt budgets were validated for custom reconstructors.
+        val overBudget = checkpoint.readText()
+            .replace("\"promptCharacters\": null", "\"promptCharacters\": 999999")
+            .replace("\"promptBudgetCharacters\": null", "\"promptBudgetCharacters\": 999999")
+        check(overBudget != checkpoint.readText()) { "test checkpoint did not record empty prompt metadata" }
+        checkpoint.writeText(overBudget)
+        var calls = 0
+        val reconstructor = cacheReconstructor("scripted-valid", "scripted-legacy") { calls++ }
+
+        SourceTreeGenerator.generate(input, project, reconstructor = reconstructor)
+
+        assertEquals(1, calls, "over-budget prompt metadata must not be reused as accepted")
+        assertTrue(checkpoint.readText().contains("\"promptCharacters\": null"))
+        assertTrue(checkpoint.readText().contains("\"accepted\": true"))
+        SourceTreeGenerator.generate(input, project, reconstructor = reconstructor)
+        assertEquals(1, calls, "repaired checkpoint must resume")
     }
 
     @Test
