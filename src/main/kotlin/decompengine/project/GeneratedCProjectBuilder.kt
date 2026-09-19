@@ -445,6 +445,7 @@ internal object GeneratedCProjectBuilder {
         environment.keys.filter { sensitive.containsMatchIn(it) }.toList().forEach(environment::remove)
         environment.remove("MAKEFLAGS")
         environment.remove("MFLAGS")
+        environment.remove("NINJA_STATUS")
         listOf(
             "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "LIBRARY_PATH", "COMPILER_PATH",
             "GCC_EXEC_PREFIX", "LD_PRELOAD", "CPPFLAGS", "LDFLAGS",

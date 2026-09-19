@@ -926,6 +926,14 @@ object SourceTreeGenerator {
         }.map { it.path }.sorted()
         val makefile = rendering.buildDefinition(sourcePaths, profile)
         val makefilePath = profile.layout.declaration("build-definition").materialize()
+        // A rerun with a different built-in profile must not leave the previous
+        // profile's generated build definition beside the new one. Both built-in
+        // generated-C profiles declare their definition under this id.
+        for (candidate in ReconstructionProfiles.builtIn.map {
+            it.layout.declaration("build-definition").materialize()
+        }.toSet()) {
+            if (candidate != makefilePath) projectDir.resolve(candidate).deleteIfExists()
+        }
         val makefileFile = projectDir.resolve(makefilePath)
         makefileFile.parent.createDirectories()
         // Only remove an inactive built-in definition when the previous manifest
