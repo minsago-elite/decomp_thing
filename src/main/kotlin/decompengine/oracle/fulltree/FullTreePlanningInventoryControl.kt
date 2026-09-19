@@ -641,20 +641,14 @@ private fun requireValidShardId(value: String): String {
     return value
 }
 
-private val SHARD_ID = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
-private const val MAXIMUM_SHARD_ID_BYTES = 2 * 255 + 11
-
-private fun isValidShardId(shardId: String): Boolean {
-    if (shardId.toByteArray(Charsets.UTF_8).size > MAXIMUM_SHARD_ID_BYTES) return false
-    return SHARD_ID.matches(shardId)
-}
-
 private const val PLANNING_SCHEMA = "full-tree-planning-inventory"
 private const val PLANNING_MAXIMUM_SOURCE_MODULES = 1_000_000
 private const val PLANNING_MAXIMUM_CANDIDATE_SOURCE_UNITS = 200_000
 private const val PLANNING_MAXIMUM_OUTPUT_RECORDS = 203_000
 private const val PLANNING_MAXIMUM_WORK_UNITS = 500_000L
 private const val PLANNING_MAXIMUM_SERIALIZED_BYTES = 32 * 1024 * 1024
+private const val MAXIMUM_SHARD_ID_CHARACTERS = 128
+private val SHARD_ID = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
 private val PLANNING_POLICY = JsonObject(
     mapOf(
         "id" to JsonPrimitive(PLANNING_SCHEMA),
