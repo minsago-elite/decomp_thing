@@ -1,0 +1,38 @@
+{
+  "status": "passed_on_unchanged_repeat",
+  "sourceCommit": "1aca4c3fa6b3a0c8610484adee7b9591cc7f8256",
+  "command": "./gradlew -PfrontendNodeHome=/home/june/decomp_thing/build/tools/decomp-node-24.20.0/node-v24.20.0-linux-x64 test --tests 'decompengine.web.*' --tests 'decompengine.jobs.AgentProgressJournal*Test' --tests 'decompengine.jobs.WorkflowAttemptStoreTest'",
+  "verification": {
+    "tests": 270,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "initialRun": {
+    "tests": 270,
+    "failures": 1,
+    "errors": 0,
+    "skipped": 0,
+    "retainedFailure": "initial-failure.json"
+  },
+  "retainedXml": [
+    {
+      "file": "TEST-decompengine.jobs.WorkflowAttemptStoreTest.xml",
+      "tests": 19,
+      "sha256": "57eb71d73861d507db4797650b39419e5be95b11cdefc4fd7f9a0c84dd2e1fa5"
+    },
+    {
+      "file": "TEST-decompengine.web.WebProgressCutoverTest.xml",
+      "tests": 4,
+      "sha256": "f11f95d45fbb375fac73de5e7126ba428971b73e37394ccf39a264bfecfb8124"
+    }
+  ],
+  "automaticExpiryEnabled": false,
+  "pinHttpApiEnabled": false,
+  "workflowExecutionStarted": false,
+  "limitations": [
+    "Initial shutdown cleanup failure remains unresolved under #224.",
+    "Pin commands/audit/UI, broader job policy, read leases and automatic scheduling remain unfinished.",
+    "Frontend/package/browser checks not repeated for internal storage policy."
+  ]
+}

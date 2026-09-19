@@ -776,11 +776,13 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
         return value
     }
 
-    private val LEGACY_PLAN_SCHEMA_VERSION = 1
-    private val PLAN_SCHEMA_VERSION = 2
-    private val BUILD_CONTRACT_SCHEMA_VERSION = 2
-    private val MAXIMUM_EVIDENCE_IDENTIFIER_CHARACTERS = 4_096
-    private val MAXIMUM_EVIDENCE_TEXT_CHARACTERS = 16 * 1024 * 1024
+    private const val LEGACY_PLAN_SCHEMA_VERSION = 1
+    private const val PLAN_SCHEMA_VERSION = 2
+    private const val BUILD_CONTRACT_SCHEMA_VERSION = 2
+    private const val MAXIMUM_EVIDENCE_IDENTIFIER_CHARACTERS = 4_096
+    private const val MAXIMUM_EVIDENCE_TEXT_CHARACTERS = 16 * 1024 * 1024
+    private const val MAKEFILE = "Makefile"
+    private const val TYPES_HEADER = "include/decomp_types.h"
     private val SHARED_BUILD_OWNERS = setOf("link", "project")
     private val PLAN_ROOT_KEYS = setOf("schemaVersion", "modules", "dependencyCycles")
     private val LEGACY_PLAN_MODULE_KEYS = setOf(

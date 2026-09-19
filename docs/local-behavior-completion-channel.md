@@ -25,7 +25,8 @@ and supplies descriptor 3 to Bubblewrap. Dynamic arguments remain separate argv
 values. The locally verified 0.11.x runtime and the 0.9.0 CI runtime close that
 descriptor in the sandbox child; the 0.6.x runtime image retains it in the
 application child, which does not change the parsed record shapes or the
-guarded terminal reporting. The local deadline
+guarded terminal reporting. The application child does not retain unrelated
+descriptors. The local deadline
 starts before launch; capture is bounded to 4 KiB and the temporary file and directory
 are removed on success or failure. Cleanup attempts both owned paths and preserves
 the execution error as primary if removal also fails. A cleanup failure after

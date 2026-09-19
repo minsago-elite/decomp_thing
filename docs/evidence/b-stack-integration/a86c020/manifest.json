@@ -1,0 +1,72 @@
+{
+  "verifiedSourceCommit": "a86c020",
+  "basePrHead": "8e9945103bb77b93489dea3b3430d3a141835ca1",
+  "masterParent": "01237cb64668e01daca4939a3b089ad677b4629c",
+  "legacyRunBeforeCommit": true,
+  "spaRunCleanCommit": true,
+  "nodeVersion": "24.20.0",
+  "npmVersion": "11.19.0",
+  "gradleOffline": true,
+  "groups": {
+    "legacy-service": {
+      "decompengine.web.WebShutdownTest": {
+        "tests": 4,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xmlSha256": "bb3ebba41e49d3b33661488452ede5b0c1de2a7fc1dc477912ef3bd8f70a73da"
+      },
+      "decompengine.web.UploadServerTest": {
+        "tests": 28,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xmlSha256": "8ea2b7b4e7439950e20535971255d77cab63a801faec3cbf2c01e955a1f5c476"
+      },
+      "decompengine.web.WebJobServiceTest": {
+        "tests": 12,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xmlSha256": "6347d67275fe4e44c1dbaa932c735c497de5ff25a130963fb8e86cede755028d"
+      },
+      "decompengine.web.UploadUncertaintyHttpTest": {
+        "tests": 1,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xmlSha256": "3d672bf0defcdbcb2b8c0ad9c24af56b58f2d6b348b00de4efd41f24449d5965"
+      },
+      "decompengine.web.WebRequestLifetimeTest": {
+        "tests": 1,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xmlSha256": "884ae34bb00f8cd10cd361e4016dedb3980556674549c389b473d23c83fc6060"
+      }
+    },
+    "spa-access": {
+      "decompengine.web.EmbeddedWebAssetsTest": {
+        "tests": 11,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xmlSha256": "1d2238585cad06a8a3c8290f0ff406da5dcfd771070ea26114603a4e9b1777bc"
+      },
+      "decompengine.web.LocalWebAccessTest": {
+        "tests": 19,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xmlSha256": "33d5aee98a1a0ea0dc80416c9664b7cec6e6426bf916ede4daf68438762a4ff1"
+      },
+      "decompengine.web.WebApiControllerTest": {
+        "tests": 11,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xmlSha256": "e7b2053f201cc8ed1e0fc4e926a3d72c4e16045afea27054bd373783e347b7f3"
+      }
+    }
+  }
+}
