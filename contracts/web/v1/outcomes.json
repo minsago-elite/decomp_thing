@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "cases": [
+    { "outcome": "successful", "fixture": "fixtures/report-accepted.json" },
+    { "outcome": "empty", "fixture": "fixtures/jobs-empty.json" },
+    { "outcome": "partial", "fixture": "fixtures/report-partial.json" },
+    { "outcome": "interrupted", "fixture": "fixtures/run-interrupted.json" },
+    { "outcome": "failed", "fixture": "fixtures/run-failed.json" },
+    { "outcome": "denied", "fixture": "fixtures/error-denied.json" },
+    { "outcome": "unsupported", "fixture": "fixtures/report-unsupported.json" }
+  ]
+}

@@ -11,6 +11,8 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
@@ -18,6 +20,80 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 class ArchivalAuditProvenanceTest {
+    @Test
+    fun `audit requires profile bounded numeric prompt metadata for accepted agent checkpoints`() {
+        val project = fixture(accepted = true)
+        val plan = Json.parseToJsonElement(project.resolve("reports/module_plan.json").readText()).jsonObject
+        val module = plan.getValue("modules").jsonArray.first().jsonObject
+        val id = module.getValue("id").jsonPrimitive.content
+        val path = "reports/modules/$id.json"
+        val checkpoint = Json.parseToJsonElement(project.resolve(path).readText()).jsonObject
+        val limit = GeneratedCMakeReconstructionProfile.descriptor.budgets.reconstructionMaximumContextCharacters
+        data class Case(val name: String, val characters: JsonElement?, val budget: JsonElement?, val valid: Boolean = false)
+        val cases = listOf(
+            Case("within bound", JsonPrimitive(1), JsonPrimitive(limit), true),
+            Case("exact bound", JsonPrimitive(limit), JsonPrimitive(limit), true),
+            Case("missing size", null, JsonPrimitive(limit)),
+            Case("missing budget", JsonPrimitive(1), null),
+            Case("null size", JsonNull, JsonPrimitive(limit)),
+            Case("null budget", JsonPrimitive(1), JsonNull),
+            Case("zero budget", JsonPrimitive(0), JsonPrimitive(0)),
+            Case("negative size", JsonPrimitive(-1), JsonPrimitive(limit)),
+            Case("negative budget", JsonPrimitive(0), JsonPrimitive(-1)),
+            Case("above profile", JsonPrimitive(1), JsonPrimitive(limit + 1)),
+            Case("size above budget", JsonPrimitive(2), JsonPrimitive(1)),
+            Case("string size", JsonPrimitive("1"), JsonPrimitive(limit)),
+            Case("string budget", JsonPrimitive(1), JsonPrimitive(limit.toString())),
+        )
+        // This exercises local audit metadata; the fixture contains no ACP release receipt.
+        for (case in cases) {
+            val changed = JsonObject(checkpoint.toMutableMap().apply {
+                put("reconstructorIdentity", JsonPrimitive("agent:local-audit-fixture"))
+                remove("promptCharacters")
+                remove("promptBudgetCharacters")
+                case.characters?.let { put("promptCharacters", it) }
+                case.budget?.let { put("promptBudgetCharacters", it) }
+            })
+            writeBoundFile(project, path, changed.toString())
+            val audit = ArchivalProjectAuditor.audit(project)
+            assertEquals(if (case.valid) emptySet() else setOf(id), audit.moduleCompilationEvidenceProblems.keys, case.name)
+            assertEquals(case.valid, id in audit.moduleCompilationEvidence, case.name)
+            assertEquals(
+                if (case.valid) emptyList() else module.getValue("functionIds").jsonArray.map { it.jsonPrimitive.content }.sorted(),
+                audit.unresolvedEntityIds,
+                case.name,
+            )
+            assertEquals(audit.moduleRevisionSha256.keys - setOf(id), audit.moduleCompilationEvidence.keys - setOf(id), case.name)
+        }
+    }
+
+    @Test
+    fun `audit retains exact accepted compiler records through archive extraction`() {
+        val project = fixture(accepted = true)
+        val audit = ArchivalProjectAuditor.audit(project)
+        assertEquals(audit.moduleRevisionSha256.keys, audit.moduleCompilationEvidence.keys)
+        for ((id, evidence) in audit.moduleCompilationEvidence) {
+            val source = project.resolve(evidence.getValue("sourcePath").jsonPrimitive.content)
+            val checkpoint = project.resolve(evidence.getValue("checkpointPath").jsonPrimitive.content)
+            assertEquals(sha256(Files.readAllBytes(source)), evidence.getValue("sourceSha256").jsonPrimitive.content)
+            assertEquals(audit.moduleRevisionSha256.getValue(id), evidence.getValue("sourceSha256").jsonPrimitive.content)
+            assertEquals(sha256(Files.readAllBytes(checkpoint)), evidence.getValue("checkpointSha256").jsonPrimitive.content)
+            val recorded = Json.parseToJsonElement(checkpoint.readText()).jsonObject
+            for (field in listOf("inputBinarySha256", "modelSchemaVersion", "profileSha256", "compilation")) {
+                assertEquals(recorded.getValue(field), evidence.getValue(field), field)
+            }
+        }
+        val report = Json.parseToJsonElement(audit.toJson()).jsonObject
+        assertEquals(JsonObject(audit.moduleCompilationEvidence), report.getValue("moduleCompilationEvidence"))
+        assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+        val archive = project.parent.resolve(project.fileName.toString() + ".zip")
+        ArchivalPackager.create(project, archive)
+        val extracted = project.parent.resolve(project.fileName.toString() + "-extracted")
+        ArchivalBundleVerifier.extractAndVerify(archive, extracted)
+        assertEquals(audit.moduleCompilationEvidence, ArchivalProjectAuditor.audit(extracted).moduleCompilationEvidence)
+        assertTrue(ArchivalProjectAuditor.audit(fixture()).moduleCompilationEvidence.isEmpty())
+    }
+
     @Test
     fun `historical recovered labels retain complete unassessed population bound to actual model bytes`() {
         val project = fixture(accepted = true)
@@ -77,8 +153,8 @@ class ArchivalAuditProvenanceTest {
 
     @Test
     fun `accepted flags cannot hide missing or mismatched compiler evidence`() {
-        for (change in listOf("missing", "foreign-source", "failed", "foreign-command", "old-schema", "future-schema",
-            "foreign-entity", "missing-entity", "duplicate-entity", "unresolved-entity", "unresolved-issue")) {
+        for (change in listOf("missing", "foreign-source", "failed", "foreign-command", "old-schema", "future-schema", "unbound-schema", "foreign-binary", "foreign-model-schema", "foreign-profile",
+            "diagnostic-hash", "diagnostic-count", "diagnostic-type", "compiler-extra", "foreign-entity", "missing-entity", "duplicate-entity", "unresolved-entity", "unresolved-issue")) {
             val project = fixture(accepted = true)
             assertTrue(ArchivalProjectAuditor.audit(project).moduleCompilationEvidenceProblems.isEmpty())
             val plan = Json.parseToJsonElement(project.resolve("reports/module_plan.json").readText()).jsonObject
@@ -89,11 +165,19 @@ class ArchivalAuditProvenanceTest {
             val compilation = checkpoint.getValue("compilation").jsonObject
             val statuses = checkpoint.getValue("entityStatuses").jsonArray
             val changed = when (change) {
+                "diagnostic-hash" -> checkpoint.withField("compilation", compilation.withField("diagnosticsSha256", JsonPrimitive("invalid")))
+                "diagnostic-count" -> checkpoint.withField("compilation", compilation.withField("diagnosticsBytes", JsonPrimitive(-1)))
+                "diagnostic-type" -> checkpoint.withField("compilation", compilation.withField("diagnosticsBytes", JsonPrimitive("0")))
+                "compiler-extra" -> checkpoint.withField("compilation", compilation.withField("extra", JsonPrimitive(true)))
                 "missing" -> JsonObject(checkpoint.filterKeys { it != "compilation" })
                 "foreign-source" -> checkpoint.withField("compilation", compilation.withField("sourceSha256", JsonPrimitive("0".repeat(64))))
                 "failed" -> checkpoint.withField("compilation", compilation.withField("outcome", JsonPrimitive("failed")))
                 "old-schema" -> checkpoint.withField("schemaVersion", JsonPrimitive(4))
-                "future-schema" -> checkpoint.withField("schemaVersion", JsonPrimitive(6))
+                "future-schema" -> checkpoint.withField("schemaVersion", JsonPrimitive(7))
+                "unbound-schema" -> checkpoint.withField("schemaVersion", JsonPrimitive(5))
+                "foreign-binary" -> checkpoint.withField("inputBinarySha256", JsonPrimitive("foreign-input"))
+                "foreign-model-schema" -> checkpoint.withField("modelSchemaVersion", JsonPrimitive(99))
+                "foreign-profile" -> checkpoint.withField("profileSha256", JsonPrimitive("0".repeat(64)))
                 "foreign-entity" -> checkpoint.withField("entityStatuses", JsonArray(listOf(
                     statuses.first().jsonObject.withField("id", JsonPrimitive("foreign-entity")))))
                 "missing-entity" -> checkpoint.withField("entityStatuses", JsonArray(emptyList()))
@@ -109,6 +193,7 @@ class ArchivalAuditProvenanceTest {
             writeBoundFile(project, path, changed.toString())
             val audit = ArchivalProjectAuditor.audit(project)
             assertEquals(setOf(id), audit.moduleCompilationEvidenceProblems.keys, change)
+            assertTrue(id !in audit.moduleCompilationEvidence, change)
             assertEquals(module.getValue("functionIds").jsonArray.map { it.jsonPrimitive.content }.sorted(), audit.unresolvedEntityIds, change)
             val report = Json.parseToJsonElement(audit.toJson()).jsonObject
             assertEquals(setOf(id), report.getValue("moduleCompilationEvidenceProblems").jsonObject.keys)

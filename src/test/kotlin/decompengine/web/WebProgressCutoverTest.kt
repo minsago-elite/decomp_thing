@@ -48,7 +48,8 @@ class WebProgressCutoverTest {
                 .resolve(AgentProgressJournal.FILE_NAME)
             publish(0, 0)
             path = "/cutover/api/v1/jobs/${job.id}/runs/${run.runId}"
-            val api = WebApiController(access, EmbeddedWebAssets.load(basePath = "/cutover/"), service, resources)
+            val api = WebApiController(access, EmbeddedWebAssets.load(basePath = "/cutover/"), service,
+                WebJobMutationBoundary(access, service), resources)
             server.executor = httpWorkers
             server.createContext("/") { exchange -> check(api.route(exchange)) }
             server.start()

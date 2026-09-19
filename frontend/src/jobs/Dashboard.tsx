@@ -105,6 +105,14 @@ export function Dashboard({ basePath }: { basePath: string }) {
       'aria-describedby': validationError?.field === key ? 'job-filter-error' : undefined };
   }
   const filtered = Object.entries(selection.filters).some(([key, value]) => key !== 'limit' && key !== 'sort' && value !== '');
+  const retainedEmpty = data?.items.length === 0;
+  const retainedNotice = !data ? '' : retainedEmpty
+    ? filtered
+      ? ' The previous filtered result had no matches; current results are unknown until refresh succeeds.'
+      : ' The previous library snapshot was empty; current results are unknown until refresh succeeds.'
+    : ' Previously loaded rows are shown below; their state may be outdated.';
+  const loadingStatus = retainedEmpty ? 'Loading jobs… The previous empty result may be outdated.'
+    : data ? 'Loading jobs… Previously loaded rows remain below.' : 'Loading jobs…';
   return <section aria-labelledby="job-library-title">
     <h2 id="job-library-title">Uploaded jobs</h2>
     <form ref={form} class="job-filters" onSubmit={event => { event.preventDefault(); apply(draft); }}>
@@ -124,12 +132,14 @@ export function Dashboard({ basePath }: { basePath: string }) {
     </form>
     {validationError && <p id="job-filter-error" role="alert" class="notice notice-error">{validationError.message}</p>}
     {!selection.valid && <p role="alert">The saved filters are invalid. Reset filters to load jobs.</p>}
-    {error && <p ref={errorNotice} role="alert" tabIndex={-1} class="notice notice-error">{error}{data && ' Previously loaded rows are shown below; their state may be outdated.'}</p>}
+    {error && <p ref={errorNotice} role="alert" tabIndex={-1} class="notice notice-error">{error}{retainedNotice}</p>}
     <div class="job-actions"><button type="button" disabled={phase === 'loading' || !selection.valid} onClick={reload}>Refresh jobs</button>
       <p>{selection.filters.sort === 'oldest' ? 'Oldest' : 'Newest'} jobs first. Completion does not establish validated reconstruction.</p></div>
     <h3 ref={results} tabIndex={-1}>Job results</h3>
-    <p role="status">{phase === 'loading' && selection.valid ? (data ? 'Loading jobs… Previously loaded rows remain below.' : 'Loading jobs…') : data ? `${data.items.length} jobs on this page. No total count is available.` : ''}</p>
-    {data?.items.length === 0 && <p>{filtered ? 'No jobs match these filters.' : 'No uploaded jobs yet.'}</p>}
+    <p role="status">{phase === 'loading' && selection.valid
+      ? loadingStatus
+      : phase === 'ready' && data ? `${data.items.length} jobs on this page. No total count is available.` : ''}</p>
+    {phase === 'ready' && retainedEmpty && <p>{filtered ? 'No jobs match these filters.' : 'No uploaded jobs yet.'}</p>}
     {data && <ul class="job-list" aria-label="Uploaded jobs">
       {data.items.map(job => <li key={job.jobId}>
         <h4><a href={jobPath(basePath, job.jobId)}>{job.displayFilename}</a></h4>

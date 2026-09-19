@@ -224,6 +224,7 @@ internal class StableControlFile private constructor(
     private val selectedChangeTime: FileTime,
     private val mutationWatch: MutationRegistration,
     private val readLease: ReadLeaseRegistration,
+    private val authenticationCheckpoint: (String) -> Unit,
 ) : AutoCloseable {
     private val initialSha256: String
     private var closed = false
@@ -239,8 +240,9 @@ internal class StableControlFile private constructor(
         get() = authenticatedSize
 
     init {
+        authenticationCheckpoint("before $label initial authentication")
         requireCurrentMetadata("$label initial selection")
-        initialSha256 = digest({}, "$label initial authentication")
+        initialSha256 = digest(authenticationCheckpoint, "$label initial authentication")
         requireCurrentMetadata("$label initial authentication")
     }
 
@@ -351,8 +353,9 @@ internal class StableControlFile private constructor(
 
     @Synchronized
     fun verifyUnchanged(label: String) {
+        authenticationCheckpoint("before $label terminal authentication")
         requireCurrentMetadata("$label before terminal authentication")
-        val terminalSha256 = digest({}, "$label terminal authentication")
+        val terminalSha256 = digest(authenticationCheckpoint, "$label terminal authentication")
         requireCurrentMetadata("$label after terminal authentication")
         if (terminalSha256 != initialSha256) {
             throw FullTreeControlException("$label changed bytes during use")
@@ -1103,11 +1106,27 @@ internal class StableControlFile private constructor(
         fun open(path: Path, maximumBytes: Long, label: String): StableControlFile =
             openDescriptorBound(path, maximumBytes, label, null)
 
+        /** Cooperative authentication checks; the callback is never invoked during close or cleanup. */
+        fun openWithCheckpoint(
+            path: Path,
+            maximumBytes: Long,
+            label: String,
+            checkpoint: (String) -> Unit,
+        ): StableControlFile = openDescriptorBoundWithCheckpoint(path, maximumBytes, label, null, checkpoint)
+
         private fun openDescriptorBound(
             path: Path,
             maximumBytes: Long,
             label: String,
             faultInjector: ((OpenFaultPoint) -> Unit)?,
+        ): StableControlFile = openDescriptorBoundWithCheckpoint(path, maximumBytes, label, faultInjector, {})
+
+        private fun openDescriptorBoundWithCheckpoint(
+            path: Path,
+            maximumBytes: Long,
+            label: String,
+            faultInjector: ((OpenFaultPoint) -> Unit)?,
+            checkpoint: (String) -> Unit,
         ): StableControlFile {
             val normalized = path.toAbsolutePath().normalize()
             if (normalized.fileName == null || normalized.parent == null) {
@@ -1232,6 +1251,7 @@ internal class StableControlFile private constructor(
                         selectedChangeTime,
                         openedMutationWatch,
                         openedReadLease,
+                        checkpoint,
                     ) as StableControlFile
                 } catch (failure: InvocationTargetException) {
                     throw failure.targetException
@@ -1474,7 +1494,7 @@ internal fun ByteArray.hex(): String = joinToString("") { byte ->
 private val CONTROL_SHA256 = Regex("[0-9a-f]{64}")
 private val STABLE_CONTROL_FILESYSTEM_ROOT = Path.of("/")
 private const val STABLE_CONTROL_BUFFER_BYTES = 1024 * 1024
-private const val STABLE_CONTROL_CONSTRUCTOR_PARAMETERS = 13
+private const val STABLE_CONTROL_CONSTRUCTOR_PARAMETERS = 14
 private const val STABLE_CONTROL_MAXIMUM_PARENT_COMPONENTS = 256
 private const val UNTRUSTED_CONTROL_WRITE_MODE = 0x12 // group/other write
 private val UNTRUSTED_CONTROL_WRITE_PERMISSIONS: Set<PosixFilePermission> = EnumSet.of(

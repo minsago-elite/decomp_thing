@@ -38,6 +38,136 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class SourceTreeTest {
     @Test
+    fun `module cache binds binary identity and model schema while reusing unchanged inputs`() {
+        val project = createTempDirectory("source-tree-model-identity-")
+        var calls = 0
+        val reconstructor = ModuleReconstructor { request ->
+            calls++
+            validReconstructor().reconstruct(request)
+        }
+        val original = oneModuleModel()
+        fun fingerprint(): String = Json.parseToJsonElement(project.resolve("reports/modules/parse.json").readText())
+            .jsonObject.getValue("fingerprint").jsonPrimitive.content
+        SourceTreeGenerator.generate(original, project, reconstructor = reconstructor)
+        assertEquals(1, calls)
+        val first = fingerprint()
+        SourceTreeGenerator.generate(original, project, reconstructor = reconstructor)
+        assertEquals(1, calls)
+        val nextBinary = original.copy(inputSha256 = sha256("another authored binary".toByteArray()))
+        SourceTreeGenerator.generate(nextBinary, project, reconstructor = reconstructor)
+        assertEquals(2, calls)
+        val second = fingerprint()
+        assertFalse(first == second)
+        val nextSchema = nextBinary.copy(schemaVersion = 2)
+        SourceTreeGenerator.generate(nextSchema, project, reconstructor = reconstructor)
+        assertEquals(3, calls)
+        assertFalse(second == fingerprint())
+        SourceTreeGenerator.generate(nextSchema, project, reconstructor = reconstructor)
+        assertEquals(3, calls)
+    }
+
+    @Test
+    fun `running compiler cancellation restores accepted revision and terminates its process`() {
+        val root = createTempDirectory("source-tree-running-compiler-")
+        val project = root.resolve("project")
+        val pause = root.resolve("pause")
+        val ready = root.resolve("ready")
+        val compiler = root.resolve("authored-compiler")
+        compiler.writeText("""
+            #!/bin/sh
+            if [ -f "$pause" ]; then
+                printf '%s\n' "${'$'}${'$'}" > "$ready"
+                exec /bin/sleep 10
+            fi
+            exec /usr/bin/cc "${'$'}@"
+        """.trimIndent() + "\n")
+        check(compiler.toFile().setExecutable(true, true))
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val profile = ReconstructionProfile(base.schemaVersion, base.id, base.layout, base.budgets,
+            base.adapterConfiguration + ("compiler-driver" to listOf(compiler.toString())))
+        val model = oneModuleModel()
+        SourceTreeGenerator.generate(model, project, reconstructor = validReconstructor(), profile = profile)
+        val paths = listOf("src/modules/parse.c", "reports/modules/parse.json", "source_tree_manifest.json")
+        val before = paths.associateWith { project.resolve(it).readBytes() }
+        pause.writeText("pause next compiler invocation")
+        val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+        val cancelled = java.util.concurrent.atomic.AtomicBoolean()
+        val candidate = ModuleReconstructor { request ->
+            validReconstructor().reconstruct(request).let { it.copy(source = it.source.replace("return 4096;", "return 8192;")) }
+        }
+        val worker = Thread {
+            try {
+                SourceTreeGenerator.generate(model, project, reconstructor = candidate,
+                    observedBehavior = "new observation", profile = profile)
+            } catch (error: Throwable) {
+                failure.set(error)
+            } finally {
+                cancelled.set(Thread.currentThread().isInterrupted)
+            }
+        }
+        var process: ProcessHandle? = null
+        try {
+            worker.start()
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
+            var pid: Long? = null
+            while (pid == null && worker.isAlive && System.nanoTime() < deadline) {
+                pid = if (Files.exists(ready)) ready.readText().trim().toLongOrNull() else null
+                if (pid == null) Thread.sleep(5)
+            }
+            process = ProcessHandle.of(requireNotNull(pid) { "compiler did not become ready: ${failure.get()}" }).orElseThrow()
+            assertTrue(process.isAlive)
+            assertTrue(project.resolve("src/modules/parse.c").readText().contains("return 8192;"))
+            assertFalse(before.getValue("src/modules/parse.c").contentEquals(project.resolve("src/modules/parse.c").readBytes()))
+            worker.interrupt()
+            worker.join(5000)
+            assertFalse(worker.isAlive, "cancelled generation must stop")
+            assertTrue(failure.get() is ModuleReconstructionInterruptedException, "unexpected failure: ${failure.get()}")
+            assertTrue(cancelled.get())
+            assertFalse(process.isAlive, "owned compiler must terminate")
+            paths.forEach { assertTrue(before.getValue(it).contentEquals(project.resolve(it).readBytes()), it) }
+            SourceTreeGenerator.generate(model, project, profile = profile, reconstructor = ModuleReconstructor {
+                error("accepted revision must remain reusable after compiler interruption")
+            })
+        } finally {
+            process?.let { if (it.isAlive) it.destroyForcibly() }
+            if (worker.isAlive) worker.interrupt()
+            worker.join(5000)
+        }
+    }
+
+    @Test
+    fun `compiler cancellation restores accepted revision and remains retryable`() {
+        val project = createTempDirectory("source-tree-compiler-cancelled-")
+        val originalModel = oneModuleModel()
+        SourceTreeGenerator.generate(originalModel, project, reconstructor = validReconstructor())
+        val paths = listOf("src/modules/parse.c", "reports/modules/parse.json", "source_tree_manifest.json")
+        val before = paths.associateWith { project.resolve(it).readBytes() }
+        val candidate = ModuleReconstructor { request ->
+            validReconstructor().reconstruct(request).let { it.copy(source = it.source.replace("return 4096;", "return 8192;")) }
+        }
+        val progress = object : decompengine.agent.AgentWorkflowProgress by decompengine.agent.AgentWorkflowProgress.NONE {
+            override fun phase(phase: decompengine.agent.AgentWorkflowPhase, taskId: String?, acceptedRevisionSha256: String?) {
+                if (phase == decompengine.agent.AgentWorkflowPhase.BUILD_VALIDATING) Thread.currentThread().interrupt()
+            }
+        }
+        try {
+            val interrupted = assertFailsWith<ModuleReconstructionInterruptedException> {
+                SourceTreeGenerator.generate(originalModel, project, reconstructor = candidate,
+                    observedBehavior = "retry candidate", progress = progress)
+            }
+            assertEquals(AgentStopReason.CANCELLED, interrupted.stopReason)
+            assertTrue(Thread.currentThread().isInterrupted)
+        } finally {
+            Thread.interrupted()
+        }
+        paths.forEach { assertTrue(before.getValue(it).contentEquals(project.resolve(it).readBytes()), it) }
+        assertTrue(project.resolve("reports/modules/parse.attempt.json").readText().contains("\"status\": \"interrupted\""))
+        SourceTreeGenerator.generate(originalModel, project, reconstructor = ModuleReconstructor {
+            error("cancelled compiler validation must preserve reusable accepted state")
+        })
+    }
+
+    @Test
     fun `explicit byte typedef is resolved by the compiler`() {
         val project = createTempDirectory("source-defined-byte-type-")
         val reconstructor = ModuleReconstructor {
@@ -259,6 +389,9 @@ class SourceTreeTest {
             val checkpoint = Json.parseToJsonElement(checkpointText).jsonObject
             assertEquals(sha256(checkpointText.toByteArray()), revision.getValue("checkpointSha256").jsonPrimitive.content)
             assertEquals(checkpoint.getValue("fingerprint"), revision.getValue("inputFingerprint"))
+            assertEquals("module-reconstruction-input-v2", revision.getValue("inputFingerprintProvider").jsonPrimitive.content)
+            assertEquals(recovered.inputSha256, revision.getValue("inputBinarySha256").jsonPrimitive.content)
+            assertEquals(recovered.schemaVersion.toString(), revision.getValue("modelSchemaVersion").jsonPrimitive.content)
             val source = project.resolve(revision.getValue("sourcePath").jsonPrimitive.content).readText()
             assertEquals(sha256(source.toByteArray()), revision.getValue("sourceSha256").jsonPrimitive.content)
             assertEquals("true", revision.getValue("acceptedImplementation").jsonPrimitive.content)
@@ -668,7 +801,8 @@ class SourceTreeTest {
 
     @Test
     fun `contradictory accepted checkpoints are neither reused nor offered as rollback baselines`() {
-        for (change in listOf("command", "owners", "duplicate", "status", "issues", "schema")) {
+        for (change in listOf("command", "owners", "duplicate", "status", "issues", "schema",
+            "unbound-schema", "binary", "model-schema", "profile", "string-schema")) {
             val project = createTempDirectory("source-checkpoint-acceptance-")
             val input = oneModuleModel()
             SourceTreeGenerator.generate(input, project, reconstructor = validReconstructor())
@@ -676,6 +810,11 @@ class SourceTreeTest {
             val checkpoint = Json.parseToJsonElement(path.readText()).jsonObject
             val statuses = checkpoint.getValue("entityStatuses").jsonArray
             val changed = when (change) {
+                "unbound-schema" -> JsonObject(checkpoint + ("schemaVersion" to JsonPrimitive(5)))
+                "binary" -> JsonObject(checkpoint + ("inputBinarySha256" to JsonPrimitive("other-input")))
+                "model-schema" -> JsonObject(checkpoint + ("modelSchemaVersion" to JsonPrimitive(99)))
+                "string-schema" -> JsonObject(checkpoint + ("modelSchemaVersion" to JsonPrimitive(input.schemaVersion.toString())))
+                "profile" -> JsonObject(checkpoint + ("profileSha256" to JsonPrimitive("0".repeat(64))))
                 "command" -> JsonObject(checkpoint + ("compilation" to JsonObject(
                     checkpoint.getValue("compilation").jsonObject + ("command" to JsonArray(listOf(JsonPrimitive("other-compiler")))))))
                 "owners" -> JsonObject(checkpoint + ("entityStatuses" to JsonArray(emptyList())))
@@ -710,13 +849,13 @@ class SourceTreeTest {
         val input = oneModuleModel()
         SourceTreeGenerator.generate(input, project, reconstructor = validReconstructor())
         val checkpoint = project.resolve("reports/modules/parse.json")
-        checkpoint.writeText(checkpoint.readText().replace("\"schemaVersion\": 5", "\"schemaVersion\": 4"))
+        checkpoint.writeText(checkpoint.readText().replace("\"schemaVersion\": 6", "\"schemaVersion\": 4"))
         var calls = 0
 
         SourceTreeGenerator.generate(input, project, reconstructor = validReconstructor { calls++ })
 
         assertEquals(1, calls)
-        assertTrue(checkpoint.readText().contains("\"schemaVersion\": 5"))
+        assertTrue(checkpoint.readText().contains("\"schemaVersion\": 6"))
         assertTrue(checkpoint.readText().contains("\"outcome\":\"passed\""))
     }
 
