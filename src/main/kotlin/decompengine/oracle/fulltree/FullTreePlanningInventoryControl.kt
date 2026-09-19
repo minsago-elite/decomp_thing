@@ -58,10 +58,7 @@ sealed interface AuthenticatedFullTreePlanningRegistry {
     /** Resolves an authenticated A13 owner unit exactly; there is no nullable or catch-all fallback. */
     fun requireOwnerModule(ownerUnitId: String): FullTreePlanningSourceModule
 
-    /**
-     * Resolves the exact authenticated source-module population for one shard. This is planning
-     * ownership only; the returned module count is not an emitted-function denominator.
-     */
+    /** Resolves the exact authenticated source-module population for one shard. */
     fun requireOwnerModulesForShard(shardId: String): List<FullTreePlanningSourceModule>
 }
 
@@ -490,6 +487,12 @@ object FullTreePlanningInventoryControl {
                 }
             },
         )
+        private val recognizedShardIds: Set<String> = Collections.unmodifiableSet(
+            LinkedHashSet<String>().apply {
+                sourceModules.forEach { add(it.shardId) }
+                sourceOnlyUnits.forEach { add(it.shardId) }
+            },
+        )
 
         override fun requireOwnerModule(ownerUnitId: String): FullTreePlanningSourceModule {
             if (!ownerUnitId.matches(COMPILATION_UNIT_ID)) {
@@ -503,8 +506,11 @@ object FullTreePlanningInventoryControl {
             if (!shardId.matches(SHARD_ID)) {
                 throw FullTreeControlException("planning shard ID is invalid")
             }
-            return modulesByShardId[shardId]
-                ?: throw FullTreeControlException("planning shard ID is outside the authenticated inventory")
+            modulesByShardId[shardId]?.let { return it }
+            if (recognizedShardIds.contains(shardId)) {
+                return emptyList()
+            }
+            throw FullTreeControlException("planning shard ID is outside the authenticated inventory")
         }
 
         companion object {
