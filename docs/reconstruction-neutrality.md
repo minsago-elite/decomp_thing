@@ -54,69 +54,6 @@ current adapters still use their existing output/control locations; alternate
 inventory-root fixtures establish transport behavior, not an end-to-end proof
 of a backend with relocated artifacts.
 
-Archive output omissions and strict build-control JSON locations come from
-`ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
-and web inventory consume an immutable copy. Preflight retains entry accounting,
-portable-path checks and link checks for omitted output trees. Source/hash
-manifests, required evidence and declared payload paths remain protected. The
-current adapters still use their existing output/control locations; alternate
-inventory-root fixtures establish transport behavior, not an end-to-end proof
-of a backend with relocated artifacts.
-
-Archive output omissions and strict build-control JSON locations come from
-`ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
-and web inventory consume an immutable copy. Preflight retains entry accounting,
-portable-path checks and link checks for omitted output trees. Source/hash
-manifests, required evidence and declared payload paths remain protected. The
-current adapters still use their existing output/control locations; alternate
-inventory-root fixtures establish transport behavior, not an end-to-end proof
-of a backend with relocated artifacts.
-
-Archive output omissions and strict build-control JSON locations come from
-`ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
-and web inventory consume an immutable copy. Preflight retains entry accounting,
-portable-path checks and link checks for omitted output trees. Source/hash
-manifests, required evidence and declared payload paths remain protected. The
-current adapters still use their existing output/control locations; alternate
-inventory-root fixtures establish transport behavior, not an end-to-end proof
-of a backend with relocated artifacts.
-
-Archive output omissions and strict build-control JSON locations come from
-`ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
-and web inventory consume an immutable copy. Preflight retains entry accounting,
-portable-path checks and link checks for omitted output trees. Source/hash
-manifests, required evidence and declared payload paths remain protected. The
-current adapters still use their existing output/control locations; alternate
-inventory-root fixtures establish transport behavior, not an end-to-end proof
-of a backend with relocated artifacts.
-
-Archive output omissions and strict build-control JSON locations come from
-`ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
-and web inventory consume an immutable copy. Preflight retains entry accounting,
-portable-path checks and link checks for omitted output trees. Source/hash
-manifests, required evidence and declared payload paths remain protected. The
-current adapters still use their existing output/control locations; alternate
-inventory-root fixtures establish transport behavior, not an end-to-end proof
-of a backend with relocated artifacts.
-
-Archive output omissions and strict build-control JSON locations come from
-`ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
-and web inventory consume an immutable copy. Preflight retains entry accounting,
-portable-path checks and link checks for omitted output trees. Source/hash
-manifests, required evidence and declared payload paths remain protected. The
-current adapters still use their existing output/control locations; alternate
-inventory-root fixtures establish transport behavior, not an end-to-end proof
-of a backend with relocated artifacts.
-
-Archive output omissions and strict build-control JSON locations come from
-`ArchiveBuildPolicy.transportLayout`. Packaging, preflight, snapshot extraction
-and web inventory consume an immutable copy. Preflight retains entry accounting,
-portable-path checks and link checks for omitted output trees. Source/hash
-manifests, required evidence and declared payload paths remain protected. The
-current adapters still use their existing output/control locations; alternate
-inventory-root fixtures establish transport behavior, not an end-to-end proof
-of a backend with relocated artifacts.
-
 ## Scope and limits
 
 The inventory includes tracked files and nonignored untracked files. Ordinary
@@ -153,9 +90,9 @@ resource bounds and other report consumers remain unfinished.
 
 Doctor's compiler/build probes and authored sanitizer sample now come from its
 selected registered adapter, through both the CLI and JVM API. The generic root
-covers the full Doctor package. This removes four findings, leaving 80
-(67 benchmark and 13 generic); the diagnostic executor still needs output/time
-bounds. See [profile-selected Doctor diagnostics](profiled-doctor-diagnostics.md).
+covers the full Doctor package. The diagnostic executor still needs output/time
+bounds. See [profile-selected Doctor diagnostics](profiled-doctor-diagnostics.md). #84
+tracks the remaining migration findings and progress.
 
 Passing the authored scanner tests verifies its detection and exemption
 behavior. It does not make the repository scan pass or complete #84. Current

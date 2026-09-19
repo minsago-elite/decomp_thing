@@ -914,7 +914,7 @@ object SourceTreeGenerator {
             })
         }
         staleBuildDefinitions.filter { it != makefilePath }.forEach { stale ->
-            projectDir.resolve(stale).deleteIfExists()
+            projectDir.resolve(stale).takeIf { Files.isRegularFile(it) }?.deleteIfExists()
         }
         val makefileFile = projectDir.resolve(makefilePath)
         makefileFile.parent.createDirectories()
