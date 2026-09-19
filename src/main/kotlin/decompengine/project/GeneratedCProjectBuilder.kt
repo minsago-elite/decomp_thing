@@ -199,7 +199,21 @@ internal object GeneratedCProjectBuilder {
             }
             reader = outputFuture
             val output = pollBuildOutput(process, ownedHandles, outputFuture, remaining())
-            if (!process.waitFor(remaining(), TimeUnit.NANOSECONDS)) throw TimeoutException()
+            // The output future may complete before the root exits. Keep polling the
+            // live root and refresh its descendants until it exits, so a late child is
+            // retained before it can be reparented and hidden from cleanup.
+            waitForBuildExit(process, ownedHandles, remaining())
+            // A successful root is not sufficient when an owned descendant outlives it:
+            // accepting the artifact would race a still-running child and cleanup would
+            // otherwise silently turn that partial build into a success.
+            refreshOwnedProcessTree(process, ownedHandles)
+            val lingering = ownedHandles.filter { it != process.toHandle() && it.isAlive }
+            if (lingering.isNotEmpty()) {
+                terminateBuildProcessTree(lingering, configuration.terminationGraceMillis)
+                throw BuildException(
+                    "generated project left owned descendants running after the build process exited",
+                )
+            }
             return process.exitValue() to output
         } catch (failure: Throwable) {
             val reported = when (failure) {
@@ -227,6 +241,33 @@ internal object GeneratedCProjectBuilder {
             cleanup { process.outputStream.close() }
             cleanup { process.errorStream.close() }
             cleanupFailure?.let { throw it }
+        }
+    }
+
+    /**
+     * Waits for the root while refreshing descendants. A single long `waitFor` would
+     * allow a child spawned after the initial snapshot to be reparented before cleanup
+     * can retain it.
+     */
+    private fun waitForBuildExit(
+        process: Process,
+        ownedHandles: MutableSet<ProcessHandle>,
+        budgetNanos: Long,
+    ) {
+        val deadline = System.nanoTime() + budgetNanos
+        while (process.isAlive) {
+            refreshOwnedProcessTree(process, ownedHandles)
+            val remaining = deadline - System.nanoTime()
+            if (remaining <= 0L) throw TimeoutException()
+            process.waitFor(minOf(remaining, TimeUnit.MILLISECONDS.toNanos(25)), TimeUnit.NANOSECONDS)
+        }
+        refreshOwnedProcessTree(process, ownedHandles)
+    }
+
+    private fun refreshOwnedProcessTree(process: Process, ownedHandles: MutableSet<ProcessHandle>) {
+        ownedHandles += process.toHandle()
+        ownedHandles.filter { it.isAlive }.forEach { parent ->
+            runCatching { ownedHandles += parent.descendants().toList() }
         }
     }
 
