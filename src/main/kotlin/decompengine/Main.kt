@@ -94,6 +94,7 @@ private fun runGccEnginePlan(args: List<String>) {
     val authenticatedGhidra = suite.analysis.authenticateGhidraInstallation(ghidraArchive, BundledGhidra.locate().release)
     val reconstructionProfile = suite.reconstructionProfile()
     val analyzer = GhidraHeadlessProgramModelAnalyzer(
+        BundledGhidra.at(authenticatedGhidra.home.parent),
         GhidraProgramModelExportLimits.from(reconstructionProfile),
         authenticatedGhidra.archiveSha256,
         GhidraProgramModelRecoveryMode.fromWireName(suite.analysis.exporterMode),
