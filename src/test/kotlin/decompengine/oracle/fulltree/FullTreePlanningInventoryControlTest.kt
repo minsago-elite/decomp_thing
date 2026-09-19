@@ -19,7 +19,7 @@ import kotlinx.serialization.json.JsonPrimitive
 
 class FullTreePlanningInventoryControlTest {
     @Test
-    fun `clang astmatchers dispatch binds linked owners and retains source-only evidence`() {
+    fun `clang edit and astmatchers dispatch bind planning owners`() {
         val profile = Path.of("oracle/llvm/22.1.6")
         val registry = FullTreePlanningInventoryControl.loadAndValidate(
             path = profile.resolve("full-tree-planning-inventory.json"),
@@ -31,35 +31,38 @@ class FullTreePlanningInventoryControlTest {
             sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
         )
 
-        val modules = registry.requireOwnerModulesForShard("clang-lib-astmatchers")
+        val modules = registry.requireOwnerModulesForShard("clang-lib-edit")
         assertEquals(3, modules.size)
         assertEquals(3, modules.map { it.sourcePath }.toSet().size)
         assertEquals(3, modules.map { it.unitId }.toSet().size)
         assertEquals(
             listOf(
-                "source/clang/lib/ASTMatchers/ASTMatchFinder.cpp",
-                "source/clang/lib/ASTMatchers/ASTMatchersInternal.cpp",
-                "source/clang/lib/ASTMatchers/LowLevelHelpers.cpp",
+                "source/clang/lib/Edit/Commit.cpp",
+                "source/clang/lib/Edit/EditedSource.cpp",
+                "source/clang/lib/Edit/RewriteObjCFoundationAPI.cpp",
             ),
             modules.map { it.sourcePath },
         )
         assertEquals(
             listOf(
-                "cu-c92b96b2a7deeb38aa0070c4ec3228e7",
-                "cu-7ea999cb15665cc462cbcd7cc46b6f4a",
-                "cu-eb1ca5e071877d61b8ce976f1c8e9427",
+                "cu-cb75d98fdf0b55f07b167410656ad629",
+                "cu-46c62b03fc8997966338255294e7a604",
+                "cu-cef4178b823a5363559034a6c9345094",
             ),
             modules.map { it.unitId },
         )
         assertTrue(
             modules.all {
                 it.moduleId == it.unitId &&
-                    it.shardId == "clang-lib-astmatchers" &&
+                    it.shardId == "clang-lib-edit" &&
                     it.sourceKind == "handwritten" &&
-                    it.sourcePath.startsWith("source/clang/lib/ASTMatchers/")
+                    it.sourcePath.startsWith("source/clang/lib/Edit/")
             },
         )
-
+        assertTrue(registry.sourceOnlyUnits.none { it.shardId == "clang-lib-edit" })
+        val astMatchers = registry.requireOwnerModulesForShard("clang-lib-astmatchers")
+        assertEquals(3, astMatchers.size)
+        assertTrue(astMatchers.all { it.shardId == "clang-lib-astmatchers" })
         val sourceOnly = registry.sourceOnlyUnits.filter { it.shardId == "clang-lib-astmatchers" }
         assertEquals(5, sourceOnly.size)
         assertEquals(
@@ -73,6 +76,9 @@ class FullTreePlanningInventoryControlTest {
             sourceOnly.map { it.sourcePath },
         )
         assertTrue(sourceOnly.all { it.reasonCode == "not-selected-by-authenticated-build-graph" })
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("clang-lib-edit-missing")
+        }
         assertFailsWith<FullTreeControlException> {
             registry.requireOwnerModulesForShard("clang-lib-astmatchers-missing")
         }
