@@ -12,10 +12,11 @@ python3 -B -m unittest discover -s tests -p test_generic_leakage.py -v
 ```
 
 The scanner requires Python 3.9+ and Git. The standalone Gradle task runs the
-scanner without compiling or executing application code. The Gradle `check` task
-does not include it yet; `scripts/ci.sh` keeps the gate off the required CI path
-until the repository scan passes (tracked by #84). Run the standalone task
-explicitly when validating the neutrality policy. Exit status is 0 for no findings, 1 for findings, and
+scanner without compiling or executing application code. While the repository
+scan still fails on remaining migrations, the draft gate stays standalone: it is
+not wired into Gradle `check` or `scripts/ci.sh` until those findings are
+resolved. Run the standalone task explicitly when validating the neutrality
+policy. Exit status is 0 for no findings, 1 for findings, and
 2 for invalid policy or unreadable inputs. JSON output contains either the scan
 counts and sorted findings or an `error` field. Findings include path, line,
 rule, and matched text.
@@ -69,13 +70,16 @@ ordinary directory ancestors.
 
 ## Current migration state
 
-The repository baseline scan passes. The GCC oracle CI workflow, its
-inventory and corpus scripts, and its Python oracle tests are declared
-benchmark-owned. Retained historical benchmark identities in LLVM reference
-evidence, shared recorded capture image digests, cross-oracle test
-references, MVP compiler assumptions, and repair runtime policy
-cross-checks use exact literal allowances with ownership rationales.
-Retained evidence must not be rewritten merely to satisfy the scanner.
+The repository scan passes on a clean checkout. Benchmark ownership covers the
+full declared oracle namespaces: the `oracle` tree, the JVM oracle namespaces
+and test mirrors, the GCC oracle CI workflow, its inventory and corpus scripts,
+and the Python oracle tests. Retained historical benchmark identities in LLVM
+reference evidence, shared recorded capture image digests, cross-oracle test
+references, MVP compiler assumptions, and repair runtime policy cross-checks
+use exact literal allowances with ownership rationales. Retained evidence must
+not be rewritten merely to satisfy the scanner. Counts make each pin
+regression-sensitive: a changed occurrence fails as a stale allowance instead
+of silently passing.
 
 `ReconstructionPipeline` now resolves its build adapter from the selected profile.
 Its profile overload admits host budgets and binds analyzer export limits before
@@ -89,10 +93,15 @@ resource bounds and other report consumers remain unfinished.
 
 Doctor's compiler/build probes and authored sanitizer sample now come from its
 selected registered adapter, through both the CLI and JVM API. The generic root
-covers the full Doctor package. The repository scan passes with zero
-findings; the diagnostic executor still needs output/time
-bounds. See [profile-selected Doctor diagnostics](profiled-doctor-diagnostics.md).
+covers the full Doctor package, which removed four findings; only the
+explicitly owned generated-C diagnostic implementation is registered as an
+adapter file. The repository scan passes with zero findings; the diagnostic
+executor still needs output/time bounds. See [profile-selected Doctor
+diagnostics](profiled-doctor-diagnostics.md).
 
-Passing the authored scanner tests verifies its detection and exemption
-behavior, and the repository scan passes with zero findings. That does not
-complete #84: current scope and progress remain on the issue.
+Passing the authored scanner tests and the repository scan verifies the declared
+detection and exemption behavior. It does not complete #84: the lexical gate is
+wired into Gradle `check` and `scripts/ci.sh` for the declared state, while the
+semantic migrations it describes — adapter-owned MVP and repair build
+knowledge, complete consumer migration, and production qualification — remain
+on the issue.
