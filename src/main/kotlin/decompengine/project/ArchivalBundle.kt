@@ -179,7 +179,7 @@ object ArchivalPackager {
             paths.forEach { path ->
                 if (path == projectDir) return@forEach
                 val relative = archiveRelativePath(projectDir, path)
-                if (transport.excludes(relative)) return@forEach
+                if (transport.excludes(portablePathKey(relative))) return@forEach
                 if (path.toAbsolutePath().normalize() == archiveAbsolute || relative == HASH_MANIFEST) {
                     return@forEach
                 }
@@ -568,7 +568,7 @@ private fun preflightProjectTree(projectDir: Path, limits: ArchivalBundleLimits,
                 "archive project contains a non-portable colliding path: $relative"
             }
             require(!Files.isSymbolicLink(path)) { "archive project contains a symbolic link: $relative" }
-            if (transport.excludes(relative)) return@forEach
+            if (transport.excludes(portablePathKey(relative))) return@forEach
             if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) return@forEach
             require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
                 "archive project contains a non-regular file: $relative"
