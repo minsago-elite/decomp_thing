@@ -174,6 +174,9 @@ class UploadServer(
     executor: Executor? = null,
     sourceProfiles: List<ReconstructionProfile> = ReconstructionProfiles.builtIn,
     sensitiveValues: Collection<String> = System.getenv().values,
+    uiMode: WebUiMode = WebUiMode.LEGACY,
+    basePath: String = "/",
+    devFrontendOrigin: String? = null,
     listenBacklog: Int = 64,
     uiMode: WebUiMode = WebUiMode.LEGACY,
     basePath: String = "/",
@@ -181,14 +184,15 @@ class UploadServer(
     private val spaAssets = when (uiMode) {
         WebUiMode.SPA -> {
             require(java.net.InetAddress.getByName(host).isLoopbackAddress) { "the SPA preview currently requires a loopback host" }
+            require(devFrontendOrigin == null || devFrontendOrigin.startsWith("http://") || devFrontendOrigin.startsWith("https://")) { "--dev-frontend-origin must be an absolute HTTP(S) origin" }
             EmbeddedWebAssets.load(basePath = basePath)
         }
         WebUiMode.LEGACY -> {
             require(basePath == "/") { "--base-path is supported by --ui spa" }
+            require(devFrontendOrigin == null) { "--dev-frontend-origin requires --ui spa" }
             null
         }
     }
-
     init {
         require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" }
     }
@@ -306,7 +310,15 @@ class UploadServer(
             } else assets.serveShell(exchange)
             return
         }
-        exchange.sendJson(404, "{\"error\":\"NOT_FOUND\"}")
+        val requestId = java.util.UUID.randomUUID().toString()
+        val body = buildJsonObject {
+            put("apiVersion", 1); put("kind", "error"); put("requestId", requestId)
+            put("error", buildJsonObject {
+                put("code", "NOT_FOUND"); put("message", "The requested route is unavailable."); put("retryable", false)
+            })
+        }
+        exchange.responseHeaders.set("X-Request-ID", requestId)
+        exchange.sendJson(404, Json.encodeToString(JsonElement.serializer(), body))
     }
 
     private fun handlePostJob(exchange: HttpExchange) {

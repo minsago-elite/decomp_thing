@@ -445,7 +445,15 @@ private fun runWeb(args: List<String>) {
     var dataDir = Path.of(".decomp_engine/jobs")
     var uiMode = WebUiMode.LEGACY
     var basePath = "/"
+            "--base-path" -> { basePath = args[index + 1]; index += 2 }
+            "--dev-frontend-origin" -> { devFrontendOrigin = args[index + 1]; index += 2 }
+            "--listen-backlog" -> { index += 2 }
+            else -> error("unknown web argument: ${args[index]}")
+        }
+    }
+    val server = UploadServer(host, port, dataDir, uiMode = uiMode, basePath = basePath, devFrontendOrigin = devFrontendOrigin, listenBacklog = listenBacklog)
     var index = 0
+
     while (index < args.size) {
         require(index + 1 < args.size) { "${args[index]} requires a value; see llm_bin_patch --help" }
         when (args[index]) {
@@ -460,12 +468,35 @@ private fun runWeb(args: List<String>) {
                 }
                 index += 2
             }
+<<<<<<< HEAD
             "--base-path" -> { basePath = args[index + 1]; index += 2 }
             "--listen-backlog" -> error("--listen-backlog is not supported with the web UI")
             else -> error("unknown web argument: ${args[index]}")
         }
     }
     val server = UploadServer(host, port, dataDir, uiMode = uiMode, basePath = basePath)
+=======
+            "--ui" -> {
+                uiMode = when (args.getOrNull(index + 1)) {
+                    "legacy" -> WebUiMode.LEGACY
+                    "spa" -> WebUiMode.SPA
+                    else -> error("--ui must be legacy or spa")
+                }
+                index += 2
+            }
+            "--base-path" -> {
+                basePath = args[index + 1]
+                index += 2
+            }
+            "--dev-frontend-origin" -> {
+                devFrontendOrigin = args[index + 1]
+                index += 2
+            }
+            else -> error("unknown web argument: ${args[index]}")
+        }
+    }
+    val server = UploadServer(host, port, dataDir, uiMode = uiMode, basePath = basePath, devFrontendOrigin = devFrontendOrigin, listenBacklog = listenBacklog)
+>>>>>>> d8386338 (fix(web): restore packaged SPA launch wiring)
     decompengine.web.startWebServerWithShutdownHook(server)
     val urlHost = if (':' in host && !host.startsWith('[')) "[$host]" else host
     println("Serving decomp_engine ${uiMode.name.lowercase()} UI on http://$urlHost:${server.serverPort}$basePath")
@@ -483,7 +514,7 @@ private fun printHelp() {
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
           llm_bin_patch reconstruct <binary> --output <directory> [--profile generated-c-make-v1|generated-c-ninja-v1] [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]
           llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
-          llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs]
+          llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173]
 
         Agent harness selection for doctor, patch, reconstruction, and repair:
           --harness acp            use the ACP agent provisioned by ACP_CONFIG_FILE (default)

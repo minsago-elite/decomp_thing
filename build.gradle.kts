@@ -2,6 +2,8 @@ import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.file.Files
+import java.nio.file.Path
+import java.io.File
 import java.nio.file.LinkOption
 import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.PosixFilePermissions
@@ -31,6 +33,52 @@ application {
     applicationName = "llm_bin_patch"
 }
 
+val frontendDirectory = layout.projectDirectory.dir("frontend")
+val frontendOutput = layout.buildDirectory.dir("frontend/dist")
+val frontendManifest = layout.buildDirectory.file("frontend/asset-manifest.json")
+val frontendResources = layout.buildDirectory.dir("generated/frontend-resources")
+val frontendNodeHome = providers.gradleProperty("frontendNodeHome")
+
+fun Exec.frontendNpm(vararg args: String) {
+    workingDir(frontendDirectory)
+    doFirst {
+        val home = frontendNodeHome.orNull?.let { Path.of(it) }
+        if (home != null) {
+            require(home.isAbsolute && Files.isExecutable(home.resolve("bin/node")) && Files.isRegularFile(home.resolve("bin/npm")))
+            environment("PATH", "${home.resolve("bin")}${File.pathSeparator}${System.getenv("PATH").orEmpty()}")
+        }
+        commandLine(home?.resolve("bin/npm")?.toString() ?: "npm", *args)
+    }
+}
+val verifyFrontendToolchain = tasks.register<Exec>("verifyFrontendToolchain") {
+    group = "verification"; description = "Checks the pinned frontend toolchain"
+    frontendNpm("run", "toolchain")
+}
+val frontendInstall = tasks.register<Exec>("frontendInstall") {
+    group = "build"; dependsOn(verifyFrontendToolchain); outputs.dir(frontendDirectory.dir("node_modules"))
+    frontendNpm("ci", "--ignore-scripts", "--no-audit", "--no-fund")
+}
+val frontendBuild = tasks.register<Exec>("frontendBuild") {
+    group = "build"; dependsOn(frontendInstall); outputs.dir(frontendOutput)
+    frontendNpm("run", "build")
+}
+val generateFrontendAssetManifest = tasks.register<Exec>("generateFrontendAssetManifest") {
+    group = "build"; dependsOn(frontendBuild); outputs.file(frontendManifest)
+    doFirst { commandLine(frontendNodeHome.orNull?.let { "$it/bin/node" } ?: "node", layout.projectDirectory.file("scripts/web-asset-manifest.mjs"), frontendOutput.get().asFile, project.version, "--write", frontendManifest.get().asFile) }
+}
+val verifyFrontendAssets = tasks.register<Exec>("verifyFrontendAssets") {
+    group = "verification"; dependsOn(generateFrontendAssetManifest)
+    doFirst { commandLine(frontendNodeHome.orNull?.let { "$it/bin/node" } ?: "node", layout.projectDirectory.file("scripts/web-asset-manifest.mjs"), frontendOutput.get().asFile, project.version, "--verify", frontendManifest.get().asFile) }
+}
+val stageFrontend = tasks.register<Sync>("stageFrontend") {
+    dependsOn(verifyFrontendAssets); from(frontendOutput) { into("decompengine/web/ui") }; from(frontendManifest) { into("decompengine/web/ui") }; into(frontendResources)
+    duplicatesStrategy = DuplicatesStrategy.FAIL
+}
+sourceSets.main { resources.srcDir(stageFrontend) }
+val verifyPackagedWeb = tasks.register<Exec>("verifyPackagedWeb") {
+    group = "verification"; description = "Verifies packaged web distributions"; dependsOn("distZip", "distTar")
+    doFirst { environment("JAVA_HOME", javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(21)) }.get().metadata.installationPath.asFile.absolutePath); commandLine("python3", layout.projectDirectory.file("scripts/check-packaged-web.py")) }
+}
 fun registerOracleJavaExecTask(
     taskName: String,
     taskDescription: String,
