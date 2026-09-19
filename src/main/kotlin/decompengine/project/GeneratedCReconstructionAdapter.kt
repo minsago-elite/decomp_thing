@@ -18,6 +18,7 @@ internal object GeneratedCReconstructionAdapter : ReconstructionAdapter {
         profile: ReconstructionProfile,
         hostSafetyLimits: ReconstructionHostSafetyLimits,
     ): BuildReport {
+        hostSafetyLimits.requireAllows(profile.budgets)
         val configuration = ProjectBuildConfiguration(
             makeExecutable = profile.adapterConfiguration["build-executable"]?.singleOrNull() ?: "make",
             compilerExecutable = profile.adapterConfiguration["compiler-driver"]?.singleOrNull() ?: "gcc",
@@ -45,6 +46,7 @@ internal object GeneratedCReconstructionAdapter : ReconstructionAdapter {
         require(text.lines().none {
             val directive = it.substringBefore('#').trimStart()
             directive.startsWith("include", ignoreCase = true) ||
+                directive.startsWith("sinclude", ignoreCase = true) ||
                 (directive.startsWith("-include", ignoreCase = true) && directive != "-include $(OBJECTS:.o=.d)")
         }) {
             "Make build definitions must not include external files"

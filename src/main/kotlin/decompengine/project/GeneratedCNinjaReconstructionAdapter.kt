@@ -32,6 +32,7 @@ internal object GeneratedCNinjaReconstructionAdapter : ReconstructionAdapter by 
         profile: ReconstructionProfile,
         hostSafetyLimits: ReconstructionHostSafetyLimits,
     ): BuildReport {
+        hostSafetyLimits.requireAllows(profile.budgets)
         val configuration = configuration(profile, 4)
         requireBuildDefinitionBindsConfiguration(projectDir, profile, configuration)
         return GeneratedCProjectBuilder.build(
