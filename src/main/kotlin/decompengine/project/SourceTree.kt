@@ -895,9 +895,14 @@ object SourceTreeGenerator {
         }.map { it.path }.sorted()
         val makefile = rendering.buildDefinition(sourcePaths, profile)
         val makefilePath = profile.layout.declaration("build-definition").materialize()
-        for (stale in listOf("Makefile", "build.ninja")) {
-            if (stale != makefilePath) projectDir.resolve(stale).deleteIfExists()
-        }
+        val previousBuildDefinitions = runCatching {
+            SourceTreeManifestReader.read(projectDir, profile).files
+                .filter { ProjectFileRole.BUILD_DEFINITION in it.roles }
+                .map(GeneratedFileEvidence::path)
+        }.getOrDefault(emptyList())
+        previousBuildDefinitions
+            .filter { it != makefilePath }
+            .forEach { projectDir.resolve(it).deleteIfExists() }
         val makefileFile = projectDir.resolve(makefilePath)
         makefileFile.parent.createDirectories()
         makefileFile.writeText(makefile)

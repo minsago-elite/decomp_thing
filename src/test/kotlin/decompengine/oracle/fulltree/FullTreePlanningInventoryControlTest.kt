@@ -19,6 +19,104 @@ import kotlinx.serialization.json.JsonPrimitive
 
 class FullTreePlanningInventoryControlTest {
     @Test
+    fun `clang crosstu dispatch binds its planning owner without an emitted denominator`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+
+        val modules = registry.requireOwnerModulesForShard("clang-lib-crosstu")
+        assertEquals(1, modules.size)
+        assertEquals(listOf("source/clang/lib/CrossTU/CrossTranslationUnit.cpp"), modules.map { it.sourcePath })
+        assertEquals(listOf("cu-f625ae498a1083e1b03965cb3de020fe"), modules.map { it.unitId })
+        assertTrue(
+            modules.all {
+                it.moduleId == it.unitId &&
+                    it.shardId == "clang-lib-crosstu" &&
+                    it.sourceKind == "handwritten" &&
+                    it.sourcePath.startsWith("source/clang/lib/CrossTU/")
+            },
+        )
+        assertTrue(registry.sourceOnlyUnits.none { it.shardId == "clang-lib-crosstu" })
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("clang-lib-crosstu-missing")
+        }
+    }
+
+    @Test
+    fun `clang edit and astmatchers dispatch bind planning owners`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+
+        val modules = registry.requireOwnerModulesForShard("clang-lib-edit")
+        assertEquals(3, modules.size)
+        assertEquals(3, modules.map { it.sourcePath }.toSet().size)
+        assertEquals(3, modules.map { it.unitId }.toSet().size)
+        assertEquals(
+            listOf(
+                "source/clang/lib/Edit/Commit.cpp",
+                "source/clang/lib/Edit/EditedSource.cpp",
+                "source/clang/lib/Edit/RewriteObjCFoundationAPI.cpp",
+            ),
+            modules.map { it.sourcePath },
+        )
+        assertEquals(
+            listOf(
+                "cu-cb75d98fdf0b55f07b167410656ad629",
+                "cu-46c62b03fc8997966338255294e7a604",
+                "cu-cef4178b823a5363559034a6c9345094",
+            ),
+            modules.map { it.unitId },
+        )
+        assertTrue(
+            modules.all {
+                it.moduleId == it.unitId &&
+                    it.shardId == "clang-lib-edit" &&
+                    it.sourceKind == "handwritten" &&
+                    it.sourcePath.startsWith("source/clang/lib/Edit/")
+            },
+        )
+        assertTrue(registry.sourceOnlyUnits.none { it.shardId == "clang-lib-edit" })
+        val astMatchers = registry.requireOwnerModulesForShard("clang-lib-astmatchers")
+        assertEquals(3, astMatchers.size)
+        assertTrue(astMatchers.all { it.shardId == "clang-lib-astmatchers" })
+        val sourceOnly = registry.sourceOnlyUnits.filter { it.shardId == "clang-lib-astmatchers" }
+        assertEquals(5, sourceOnly.size)
+        assertEquals(
+            listOf(
+                "source/clang/lib/ASTMatchers/Dynamic/Diagnostics.cpp",
+                "source/clang/lib/ASTMatchers/Dynamic/Marshallers.cpp",
+                "source/clang/lib/ASTMatchers/Dynamic/Parser.cpp",
+                "source/clang/lib/ASTMatchers/Dynamic/Registry.cpp",
+                "source/clang/lib/ASTMatchers/Dynamic/VariantValue.cpp",
+            ),
+            sourceOnly.map { it.sourcePath },
+        )
+        assertTrue(sourceOnly.all { it.reasonCode == "not-selected-by-authenticated-build-graph" })
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("clang-lib-edit-missing")
+        }
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("clang-lib-astmatchers-missing")
+        }
+    }
+
+
+    @Test
     fun `fixture planning inventory is closed exact and byte deterministic`() =
         inControlTemporaryDirectory { directory ->
             val fixture = createFullTreeControlFixture(directory.resolve("fixture"))
@@ -89,6 +187,72 @@ class FullTreePlanningInventoryControlTest {
                     registry.requireOwnerModule(FullTreeInventoryControl.compilationUnitId(sourceOnly.sourcePath))
                 }
             }
+        }
+    }
+
+    @Test
+    fun `clang installapi dispatch binds exact planning owners without an emitted denominator`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+
+        val modules = registry.requireOwnerModulesForShard("clang-lib-installapi")
+        assertEquals(1, modules.size)
+        assertEquals(
+            listOf("source/clang/lib/InstallAPI/HeaderFile.cpp"),
+            modules.map { it.sourcePath },
+        )
+        assertEquals(listOf("cu-d65fa95a55a39225eb8705c9be72d115"), modules.map { it.unitId })
+        assertTrue(modules.all { it.moduleId == it.unitId && it.shardId == "clang-lib-installapi" })
+        assertEquals(7, registry.sourceOnlyUnits.count { it.shardId == "clang-lib-installapi" })
+        assertEquals(emptyList(), registry.requireOwnerModulesForShard("clang-lib-cir"))
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("clang-lib-installapi-missing")
+        }
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("a-".repeat(5_000) + "a")
+        }
+    }
+
+    @Test
+    fun `checked clang sema shard binds all 86 source modules to exact owners`() =
+        inControlTemporaryDirectory { directory ->
+            val profile = Path.of("oracle/llvm/22.1.6")
+            val result = FullTreePlanningInventoryControl.generateAndPublish(
+                scopePath = profile.resolve("full-tree-scope.json"),
+                sourceLockPath = profile.resolve("source-lock.json"),
+                artifactManifestPath = profile.resolve("oracle-manifest.json"),
+                buildRecordPath = profile.resolve("build-record.json"),
+                inventoryPath = profile.resolve("full-tree-inventory.json"),
+                sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+                output = directory.resolve("full-tree-planning-inventory.json"),
+            )
+
+            val sema = result.registry.requireOwnerModulesForShard("clang-lib-sema")
+            assertEquals(86, sema.size)
+            assertEquals(86, sema.map { it.sourcePath }.toSet().size)
+            assertEquals(86, sema.map { it.unitId }.toSet().size)
+            assertTrue(sema.all { it.sourceKind == "handwritten" })
+            assertTrue(sema.all { it.sourcePath.startsWith("source/clang/lib/Sema/") })
+            sema.forEach { module ->
+                assertEquals(module.unitId, module.moduleId)
+                assertEquals(
+                    FullTreeInventoryControl.compilationUnitId(module.sourcePath),
+                    module.unitId,
+                )
+                assertEquals(module, result.registry.requireOwnerModule(module.unitId))
+            }
+            assertEquals(
+                0,
+                result.registry.sourceOnlyUnits.count { it.shardId == "clang-lib-sema" },
+            )
         }
 
     @Test
@@ -165,6 +329,7 @@ class FullTreePlanningInventoryControlTest {
             registry.requireOwnerModulesForShard("clang-lib-frontend-missing")
         }
     }
+
 
     @Test
     fun `shuffled stale forged and expanded planning documents fail closed`() =
@@ -441,6 +606,46 @@ class FullTreePlanningInventoryControlTest {
             ).map { byPath.getValue(it).moduleId }
             assertEquals(2, basenameCollision.toSet().size)
             assertEquals(2, truncatedSanitizerCollision.toSet().size)
+        }
+
+    @Test
+    fun `checked static analyzer shard binds all 190 source modules to exact owners`() =
+        inControlTemporaryDirectory { directory ->
+            val profile = Path.of("oracle/llvm/22.1.6")
+            val result = FullTreePlanningInventoryControl.generateAndPublish(
+                scopePath = profile.resolve("full-tree-scope.json"),
+                sourceLockPath = profile.resolve("source-lock.json"),
+                artifactManifestPath = profile.resolve("oracle-manifest.json"),
+                buildRecordPath = profile.resolve("build-record.json"),
+                inventoryPath = profile.resolve("full-tree-inventory.json"),
+                sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+                output = directory.resolve("full-tree-planning-inventory.json"),
+            )
+
+            val staticAnalyzer = result.registry.sourceModules.filter {
+                it.shardId == "clang-lib-staticanalyzer"
+            }
+            assertEquals(190, staticAnalyzer.size)
+            assertEquals(190, staticAnalyzer.map { it.sourcePath }.toSet().size)
+            assertEquals(190, staticAnalyzer.map { it.unitId }.toSet().size)
+            assertTrue(staticAnalyzer.all { it.sourceKind == "handwritten" })
+            assertTrue(
+                staticAnalyzer.all {
+                    it.sourcePath.startsWith("source/clang/lib/StaticAnalyzer/")
+                },
+            )
+            staticAnalyzer.forEach { module ->
+                assertEquals(module.unitId, module.moduleId)
+                assertEquals(
+                    FullTreeInventoryControl.compilationUnitId(module.sourcePath),
+                    module.unitId,
+                )
+                assertEquals(module, result.registry.requireOwnerModule(module.unitId))
+            }
+            assertEquals(
+                0,
+                result.registry.sourceOnlyUnits.count { it.shardId == "clang-lib-staticanalyzer" },
+            )
         }
 
     private fun generate(
