@@ -1,6 +1,7 @@
 package decompengine.project
 
 import decompengine.assessment.HeuristicScoreInterpretation
+import decompengine.repair.readStableRegularFile
 import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.agent.AgentAccessPolicy
@@ -896,9 +897,10 @@ object SourceTreeGenerator {
         val makefile = rendering.buildDefinition(sourcePaths, profile)
         val makefilePath = profile.layout.declaration("build-definition").materialize()
         val staleBuildDefinitions = buildSet {
-            projectDir.resolve("source_tree_manifest.json").takeIf { Files.isRegularFile(it) }?.let { manifestPath ->
+            projectDir.resolve("source_tree_manifest.json").takeIf { Files.isRegularFile(it) }?.let {
                 runCatching {
-                    Json.parseToJsonElement(manifestPath.readText()).jsonObject
+                    val manifest = readStableRegularFile(projectDir, "source_tree_manifest.json", MAXIMUM_SOURCE_TREE_MANIFEST_BYTES)
+                    Json.parseToJsonElement(manifest.bytes.decodeToString(throwOnInvalidSequence = true)).jsonObject
                         .getValue("files").jsonArray
                         .forEach { fileElement ->
                             val file = fileElement.jsonObject
@@ -913,9 +915,12 @@ object SourceTreeGenerator {
                 runCatching { registered.layout.declaration("build-definition").materialize() }.getOrNull()
             })
         }
-        staleBuildDefinitions.filter { it != makefilePath }.forEach { stale ->
-            projectDir.resolve(stale).takeIf { Files.isRegularFile(it) }?.deleteIfExists()
-        }
+        val currentGeneratedPaths = generated.mapTo(hashSetOf(), GeneratedFileEvidence::path)
+        staleBuildDefinitions
+            .filter { it != makefilePath && it !in currentGeneratedPaths }
+            .forEach { stale ->
+                projectDir.resolve(stale).takeIf { Files.isRegularFile(it) }?.deleteIfExists()
+            }
         val makefileFile = projectDir.resolve(makefilePath)
         makefileFile.parent.createDirectories()
         makefileFile.writeText(makefile)
@@ -1795,3 +1800,4 @@ internal class UniqueJsonObjectKeyValidator(private val source: String) {
 }
 
 private const val MAXIMUM_MANIFEST_JSON_DEPTH = 64
+private const val MAXIMUM_SOURCE_TREE_MANIFEST_BYTES = 16L * 1024 * 1024

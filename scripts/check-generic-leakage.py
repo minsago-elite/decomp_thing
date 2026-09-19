@@ -122,8 +122,9 @@ def load_policy(root: Path, relative: str) -> tuple[dict, re.Pattern]:
             regular_path(root, normalized_path(item), directory_allowed=True)
         require(len(roots) == len(set(roots)), f"{name} contains duplicate roots")
         require(not any(a != b and a.startswith(b + "/") for a in roots for b in roots), f"{name} contains overlapping roots")
-    require(set(policy["genericRoots"]).isdisjoint(policy["benchmarkRoots"]),
-            "genericRoots and benchmarkRoots must be disjoint")
+    require(all(not (a == b or a.startswith(b + "/") or b.startswith(a + "/"))
+            for a in policy["genericRoots"] for b in policy["benchmarkRoots"]),
+            "genericRoots and benchmarkRoots must be disjoint and non-overlapping")
     require(isinstance(policy["adapterFiles"], list), "adapterFiles must be a list")
     adapters = set()
     for entry in policy["adapterFiles"]:
