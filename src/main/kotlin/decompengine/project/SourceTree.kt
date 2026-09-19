@@ -514,6 +514,14 @@ internal const val MAXIMUM_CHECKPOINT_EXECUTION_EVIDENCE_BYTES: Int = 64 * 1024 
 object SourceTreeGenerator {
     private const val INPUT_FINGERPRINT_PROVIDER = "module-reconstruction-input-v2"
 
+    private data class ModuleGenerationBudgetObservation(
+        val moduleId: String,
+        val outcome: String,
+        val sourceBytes: Long,
+        val promptCharacters: Int?,
+        val promptBudgetCharacters: Int?,
+    )
+
     fun generate(
         model: RecoveredProgramModel,
         projectDir: Path,
@@ -608,6 +616,7 @@ object SourceTreeGenerator {
         }
         val unresolvedImplementations = sortedSetOf<String>()
         val moduleRevisionEvidence = mutableMapOf<String, String>()
+        val generationBudgetObservations = mutableListOf<ModuleGenerationBudgetObservation>()
 
         moduleDependencyOrder(dependenciesByModule).map(moduleById::getValue).forEachIndexed { index, module ->
             val dependencies = dependenciesByModule.getValue(module.id)
@@ -655,8 +664,12 @@ object SourceTreeGenerator {
                 schemaVersion == 6 && inputBinarySha256 == model.inputSha256 &&
                     modelSchemaVersion == model.schemaVersion && profileSha256 == profile.sha256 &&
                     accepted && issues.isEmpty() &&
-                    (!moduleClaimsAgentExecution(generator, reconstructorIdentity) ||
-                        modulePromptBudgetIsValid(promptCharacters?.toLong(), promptBudgetCharacters?.toLong(), profile)) &&
+                    modulePromptAttributionIsValid(
+                        moduleClaimsAgentExecution(generator, reconstructorIdentity),
+                        promptCharacters?.toLong(),
+                        promptBudgetCharacters?.toLong(),
+                        profile,
+                    ) &&
                     entityIds.size == entityIds.toSet().size &&
                     entityIds.toSet() == (module.functionIds + module.globalIds).toSet() &&
                     compilation?.passed == true &&
@@ -831,6 +844,13 @@ object SourceTreeGenerator {
             val normalizedSource = sourcePath.readText()
             val moduleEntityIds = module.functionIds + module.globalIds
             if (!checkpoint.accepted) unresolvedImplementations += moduleEntityIds
+            generationBudgetObservations += ModuleGenerationBudgetObservation(
+                moduleId = module.id,
+                outcome = if (checkpoint.accepted) "accepted" else "unresolved",
+                sourceBytes = normalizedSource.toByteArray().size.toLong(),
+                promptCharacters = checkpoint.promptCharacters,
+                promptBudgetCharacters = checkpoint.promptBudgetCharacters,
+            )
             progress.phase(
                 if (checkpoint.accepted) AgentWorkflowPhase.ACCEPTED else AgentWorkflowPhase.UNRESOLVED,
                 module.id,
@@ -910,7 +930,15 @@ object SourceTreeGenerator {
         projectDir.resolve(modulePlanPath).also { it.parent.createDirectories() }.writeText(plan.toJson())
         generated += evidence(profile, programModelPath, model.toJson(), "analysis", model.functions.map { it.id } + model.globals.map { it.id })
         generated += evidence(profile, modulePlanPath, plan.toJson(), "planner", model.functions.map { it.id } + model.globals.map { it.id })
-        val confidence = renderConfidence(model, plan, unresolvedImplementations, moduleRevisionEvidence)
+        val confidence = renderConfidence(
+            model,
+            plan,
+            unresolvedImplementations,
+            moduleRevisionEvidence,
+            profile,
+            hostSafetyLimits,
+            generationBudgetObservations,
+        )
         projectDir.resolve(confidencePath).also { it.parent.createDirectories() }.writeText(confidence)
         generated += evidence(profile, confidencePath, confidence, "evidence", model.functions.map { it.id } + model.globals.map { it.id })
         val toolchain = adapter.toolchainEvidence(profile)
@@ -1314,7 +1342,8 @@ object SourceTreeGenerator {
         if (source.isBlank() && entityIds.isNotEmpty()) {
             issues += ModuleReconstructionIssue("empty-source", "module source is empty", entityIds)
         }
-        if (moduleClaimsAgentExecution(reconstructed.generator, reconstructorIdentity)) {
+        val claimsAgentExecution = moduleClaimsAgentExecution(reconstructed.generator, reconstructorIdentity)
+        if (claimsAgentExecution) {
             if (reconstructed.source != source) {
                 issues += ModuleReconstructionIssue(
                     "agent-source-normalization-changed-bytes",
@@ -1329,25 +1358,33 @@ object SourceTreeGenerator {
                     entityIds,
                 )
             }
-            val promptCharacters = reconstructed.promptCharacters
-            val promptBudget = reconstructed.promptBudgetCharacters
-            when {
-                promptCharacters == null || promptBudget == null -> issues += ModuleReconstructionIssue(
+        }
+        val promptCharacters = reconstructed.promptCharacters
+        val promptBudget = reconstructed.promptBudgetCharacters
+        if (claimsAgentExecution || promptCharacters != null || promptBudget != null) {
+            if (promptCharacters == null || promptBudget == null) {
+                issues += ModuleReconstructionIssue(
                     "prompt-budget-unattributed",
                     "agent result does not record prompt size and configured budget",
                     entityIds,
                 )
-                promptCharacters > promptBudget -> issues += ModuleReconstructionIssue(
-                    "context-budget-exceeded",
-                    "agent prompt used $promptCharacters characters with a $promptBudget character budget",
-                    entityIds,
-                )
-                !modulePromptBudgetIsValid(promptCharacters.toLong(), promptBudget.toLong(), profile) ->
+            } else {
+                // Each violation is retained independently so recorded evidence shows both
+                // a usage overrun and a budget the selected profile never authorized.
+                if (promptCharacters > promptBudget) {
+                    issues += ModuleReconstructionIssue(
+                        "context-budget-exceeded",
+                        "agent prompt used $promptCharacters characters with a $promptBudget character budget",
+                        entityIds,
+                    )
+                }
+                if (!modulePromptBudgetIsValid(promptCharacters.toLong(), promptBudget.toLong(), profile)) {
                     issues += ModuleReconstructionIssue(
                         "prompt-budget-invalid",
                         "agent prompt size or budget is outside the selected reconstruction profile",
                         entityIds,
                     )
+                }
             }
         }
         issues += adapter.assess(module, model, reconstructed.generator, source)
@@ -1411,6 +1448,9 @@ object SourceTreeGenerator {
         plan: ModulePlan,
         unresolvedImplementations: Set<String>,
         moduleRevisionEvidence: Map<String, String>,
+        profile: ReconstructionProfile,
+        hostSafetyLimits: ReconstructionHostSafetyLimits,
+        generationBudgetObservations: List<ModuleGenerationBudgetObservation>,
     ): String {
         fun score(status: RecoveryStatus) = when (status) {
             RecoveryStatus.RECOVERED -> 1.0
@@ -1455,6 +1495,36 @@ object SourceTreeGenerator {
             append("\n  ],\n  \"unresolvedRecoveryEntityIds\": ").append(idsJson(unresolvedRecovery))
             append(",\n  \"unresolvedImplementationIds\": ").append(idsJson(unresolvedImplementations))
             append(",\n  \"unresolvedEntityIds\": ").append(idsJson(unresolvedRecovery + unresolvedImplementations))
+            append(",\n  \"sourceGenerationBudgetEvidence\": {")
+            append("\n    \"schemaVersion\": 1,")
+            append("\n    \"selectedProfile\": {")
+            append("\n      \"id\":\"").append(profile.id.jsonEscape()).append("\",")
+            append("\n      \"sha256\":\"").append(profile.sha256).append("\",")
+            append("\n      \"descriptor\":").append(profile.canonicalJson())
+            append("\n    },")
+            append("\n    \"hostSafetyLimits\":{")
+            append("\n      \"budgets\":").append(hostSafetyLimits.maximum.canonicalJson())
+            append("\n    },")
+            append("\n    \"admission\":{\"profileWithinHost\":true},")
+            append("\n    \"outcome\":{")
+            append("\n      \"plannedModules\":").append(plan.modules.size).append(',')
+            append("\n      \"completedModules\":").append(generationBudgetObservations.size).append(',')
+            append("\n      \"acceptedModules\":").append(generationBudgetObservations.count { it.outcome == "accepted" }).append(',')
+            append("\n      \"unresolvedModules\":").append(generationBudgetObservations.count { it.outcome == "unresolved" })
+            append("\n    },")
+            append("\n    \"modules\":[")
+            append(generationBudgetObservations.sortedBy { it.moduleId }.joinToString(",") { observation ->
+                "\n      {\"moduleId\":\"${observation.moduleId.jsonEscape()}\",\"outcome\":\"${observation.outcome}\"," +
+                    "\"sourceBytes\":${observation.sourceBytes}," +
+                    "\"promptCharacters\":${observation.promptCharacters ?: "null"}," +
+                    "\"promptBudgetCharacters\":${observation.promptBudgetCharacters ?: "null"}}"
+            })
+            append("\n    ],")
+            append("\n    \"limitations\":[")
+            append("\"profile and host ceilings are local admission commitments; this record does not authenticate production execution\",")
+            append("\"prompt usage is retained only when the selected reconstructor reports it; null is not a measured prompt\",")
+            append("\"module outcomes and source byte counts are local generation observations, not behavioral equivalence evidence\"")
+            append("]\n  }")
             append("\n}\n")
         }
     }
