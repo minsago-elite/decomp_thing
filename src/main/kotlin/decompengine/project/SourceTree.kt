@@ -898,10 +898,14 @@ object SourceTreeGenerator {
         // A project directory may be reused under another built-in profile. Remove
         // its old build definition before publishing the newly selected one so an
         // alternate build system cannot remain in the archive payload.
+        val activeDeclaredPaths = profile.layout.declarations
+            .filter { !it.pathTemplate.contains('{') }
+            .map { declaration -> declaration.materialize() }
+            .toSet()
         ReconstructionProfiles.builtIn
             .map { it.layout.declaration("build-definition").materialize() }
             .distinct()
-            .filter { it != makefilePath }
+            .filter { it != makefilePath && it !in activeDeclaredPaths }
             .forEach { projectDir.resolve(it).deleteIfExists() }
         val makefileFile = projectDir.resolve(makefilePath)
         makefileFile.parent.createDirectories()

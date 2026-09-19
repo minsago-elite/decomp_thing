@@ -279,7 +279,7 @@ class JobStore internal constructor(
         reportPrefix: String,
         layout: ArchiveTransportLayout,
     ): Map<String, LinuxFileIdentity> =
-        sourceArchiveInventory(jobId, reportPrefix, layout.excludedOutputRoots.ifEmpty { setOf("build") })
+        sourceArchiveInventory(jobId, reportPrefix, layout.excludedOutputRoots)
 
     internal fun sourceArchiveInventory(jobId: String, reportPrefix: String = "reports"): Map<String, LinuxFileIdentity> =
         sourceArchiveInventory(jobId, reportPrefix, setOf("build"))
