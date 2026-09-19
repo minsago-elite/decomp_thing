@@ -47,6 +47,7 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
   const limits = state?.status === 'authenticated' ? state.runtime.limits : null;
   const maxBytes = limits ? BigInt(limits.maxUploadBytes) : 0n;
   const connected = state?.status === 'authenticated' && maxBytes > 0n;
+  const exceedsEnvelope = attempt !== null && maxBytes > 0n && BigInt(attempt.file.size) >= maxBytes;
 
   useLayoutEffect(() => {
     if (phase === 'idle' && focusPicker.current) { focusPicker.current = false; input.current?.focus(); }
@@ -70,13 +71,19 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
     if (retained.kind === 'pending' && (retained.ticket.filename !== file.name || retained.ticket.size !== file.size)) {
       setMessage('Choose the original filename and size to retry this upload, or explicitly discard its recovery context.'); return;
     }
-    setAttempt({ file, ticket: retained.kind === 'pending' ? retained.ticket : recovery.ticket(file, crypto.randomUUID().replaceAll('-', '')) });
-    setMessage(BigInt(file.size) >= maxBytes && maxBytes > 0n
-      ? 'This file leaves no room for multipart overhead within the server limit. Choose a smaller file.' : '');
+    const tooLarge = maxBytes > 0n && BigInt(file.size) >= maxBytes;
+    setAttempt(tooLarge ? null : { file, ticket: retained.kind === 'pending' ? retained.ticket : recovery.ticket(file, crypto.randomUUID().replaceAll('-', '')) });
+    setMessage(tooLarge
+      ? 'This file cannot fit within the complete request limit. Choose a smaller file.' : '');
   }
   async function submit() {
     const csrfToken = session.csrf();
     if (!attempt || active.current || !csrfToken || !connected) return;
+    if (BigInt(attempt.file.size) >= maxBytes) {
+      setMessage('This file cannot fit within the complete request limit. Choose a smaller file.');
+      setAttempt(null);
+      return;
+    }
     try { recovery.save(attempt.ticket); setRetained(recovery.read()); }
     catch { setRetained(recovery.read()); setPhase('retry'); setMessage('Retry identity could not be saved. No upload was sent. Check tab storage and the retained upload context.'); return; }
     const controller = new AbortController(); active.current = controller;
@@ -139,7 +146,7 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
       <p id="upload-feedback" role="status">{message}</p>
       {phase === 'retry' && <p>Retry keeps the same job identity. Choosing another file discards that retry context; check Uploaded jobs first if the result is unknown.</p>}
       <div class="job-actions">
-        <button type="submit" disabled={!connected || !attempt || phase === 'pending'}>{phase === 'retry' ? 'Retry this upload' : 'Upload binary'}</button>
+        <button type="submit" disabled={!connected || !attempt || exceedsEnvelope || phase === 'pending'}>{phase === 'retry' ? 'Retry this upload' : 'Upload binary'}</button>
         {phase === 'pending' && <button type="button" onClick={() => active.current?.abort()}>Stop transfer</button>}
         {phase === 'retry' && <button type="button" onClick={discard}>Choose another file</button>}
       </div>

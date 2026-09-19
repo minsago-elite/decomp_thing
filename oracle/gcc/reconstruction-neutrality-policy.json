@@ -15,7 +15,15 @@
   "benchmarkRoots": [
     "oracle/gcc",
     "src/main/kotlin/decompengine/oracle/gcc",
-    "src/test/kotlin/decompengine/oracle/gcc"
+    "src/test/kotlin/decompengine/oracle/gcc",
+    ".github",
+    "scripts",
+    "tests",
+    "oracle/llvm",
+    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorReferenceInputPlanV2.kt",
+    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorReferenceInputPlanV2Generator.kt",
+    "src/test/kotlin/decompengine/oracle/behavior/LlvmBehaviorReferenceInputPlanV2Test.kt",
+    "src/test/kotlin/decompengine/analysis/BundledGhidraTest.kt"
   ],
   "adapterFiles": [
     {
@@ -116,20 +124,6 @@
     }
   ],
   "allowances": [
-    {
-      "path": "src/main/kotlin/decompengine/Main.kt",
-      "rule": "generic-adapter-reference",
-      "fragment": "import decompengine.project.GeneratedCMakeReconstructionProfile",
-      "count": 1,
-      "reason": "CLI compatibility default descriptor import; profile selection remains explicit."
-    },
-    {
-      "path": "src/main/kotlin/decompengine/Main.kt",
-      "rule": "generic-adapter-reference",
-      "fragment": "var profile = GeneratedCMakeReconstructionProfile.descriptor",
-      "count": 1,
-      "reason": "CLI compatibility default before named built-in profile selection."
-    },
     {
       "path": "src/main/kotlin/decompengine/validation/BehaviorEvidence.kt",
       "rule": "generic-adapter-reference",
@@ -250,11 +244,60 @@
       "reason": "Closed application-owned dispatch from the built-in Ninja profile identifier to its adapter implementation."
     },
     {
-      "path": "scripts/ci-prepare-generated-c-validation.py",
-      "rule": "benchmark-target",
-      "fragment": "gcc_runtime / 'cc1'",
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-compiler-flag",
+      "fragment": "-Werror",
+      "count": 3,
+      "reason": "Existing MVP compiler validation flags are intentionally toolchain-specific."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-compiler-flag",
+      "fragment": "-Wall",
+      "count": 2,
+      "reason": "Existing MVP compiler validation flags are intentionally toolchain-specific."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-compiler-flag",
+      "fragment": "-Wextra",
+      "count": 2,
+      "reason": "Existing MVP compiler validation flags are intentionally toolchain-specific."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-compiler-flag",
+      "fragment": "-std=c11",
       "count": 1,
-      "reason": "Inventories the installed compiler runtime for generated-C provisioning; this expression does not select a benchmark artifact. Version and digest checks remain active."
+      "reason": "Existing MVP compiler validation language mode is intentionally toolchain-specific."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-tool",
+      "fragment": "\"gcc\"",
+      "count": 1,
+      "reason": "Existing MVP compiler validation tool selection is intentionally toolchain-specific."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/RepairAcpEvidenceArchiveVerifier.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "GeneratedCRepairRuntimeConfiguration",
+      "count": 3,
+      "reason": "Existing repair verifier binds the generated-C runtime provider explicitly."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/RepairAcpEvidenceArchiveVerifier.kt",
+      "rule": "generic-layout",
+      "fragment": "\"Makefile\"",
+      "count": 1,
+      "reason": "Existing repair verifier validates the generated-C Makefile build contract."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/web/UploadServer.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "GeneratedCMakeReconstructionProfile",
+      "count": 2,
+      "reason": "Existing upload compatibility defaults bind the generated-C adapter explicitly."
     }
   ],
   "benchmarkCatalog": "oracle/gcc/reconstruction-neutrality-identities.json"

@@ -124,16 +124,23 @@ internal class StagedJobUpload(
         } catch (_: Exception) { throw UploadReceiptUnavailable() }
         if (receipt.getValue("intentSha256").jsonPrimitive.content != intent) throw UploadIdempotencyConflict()
         return try {
+            val recordedSha = receipt.getValue("inputSha256").jsonPrimitive.content
+            val recordedSize = receipt.getValue("job").jsonObject.getValue("size_bytes").jsonPrimitive.int
+            val retainedInput = readStableRegularFile(root, "$id/input.elf", 32L * 1024 * 1024)
+            require(retainedInput.sha256 == recordedSha && retainedInput.bytes.size == recordedSize) {
+                "retained upload input does not match its receipt"
+            }
             val store = JobStore(root)
             store.get(id) // A missing/corrupt live job is unavailable; do not silently recreate it.
             val job = store.decodeJobRecord(id, receipt.getValue("job").jsonObject)
+            require(job.sizeBytes == retainedInput.bytes.size)
             require(job.status == "uploaded" && job.updatedAt == job.createdAt && job.statusMessage == null)
             val recordedIntent = hash(buildJsonObject {
                 put("version", 1); put("filename", job.filename)
-                put("inputSha256", receipt.getValue("inputSha256").jsonPrimitive.content); put("sizeBytes", job.sizeBytes.toString())
+                put("inputSha256", recordedSha); put("sizeBytes", job.sizeBytes.toString())
             }.toString().toByteArray())
             require(recordedIntent == intent)
-            PublishedJobUpload(job, receipt.getValue("inputSha256").jsonPrimitive.content, replayed = true)
+            PublishedJobUpload(job, recordedSha, replayed = true)
         } catch (_: Exception) { throw UploadReceiptUnavailable() }
     }
 
