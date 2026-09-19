@@ -1605,8 +1605,9 @@ val verifyReconstructionNeutrality = tasks.register<Exec>("verifyReconstructionN
 tasks.named("check") {
     dependsOn(testFrontendAssetManifest)
     dependsOn(verifyPackagedWeb)
-    // verifyReconstructionNeutrality stays a standalone draft gate (#84): the repository scan
-    // still fails on remaining ownership migrations, so it must not block `check` or ci.sh yet.
+    // Keep the lexical neutrality gate in the normal verification graph so new
+    // generic identity leaks cannot bypass the declared ownership policy.
+    dependsOn(verifyReconstructionNeutrality)
     dependsOn(verifyAcpGateHelperDistribution)
     dependsOn(verifyLlvmBehaviorHelperDistribution)
     dependsOn(verifyKotlinBootClasspathDistribution)

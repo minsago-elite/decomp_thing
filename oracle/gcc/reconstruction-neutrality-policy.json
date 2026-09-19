@@ -13,16 +13,20 @@
     "src/main/kotlin/decompengine/web"
   ],
   "benchmarkRoots": [
-    "oracle",
-    "src/main/kotlin/decompengine/oracle",
-    "src/test/kotlin/decompengine/oracle",
-    "tests/oracle",
+    "oracle/gcc",
+    "oracle/llvm",
     ".github/workflows/gcc-oracle-model.yml",
+    "tests/oracle",
     "scripts/fetch-gcc-oracle-source.py",
     "scripts/generate-gcc-behavior-corpus.py",
     "scripts/generate-gcc-compiler-engine-build-records.py",
     "scripts/run-gcc-behavior-corpus.py",
-    "scripts/verify-gcc-oracle-source.py"
+    "scripts/verify-gcc-oracle-source.py",
+    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorReferenceInputPlanV2.kt",
+    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorReferenceInputPlanV2Generator.kt",
+    "src/test/kotlin/decompengine/oracle/behavior/LlvmBehaviorReferenceInputPlanV2Test.kt",
+    "src/main/kotlin/decompengine/oracle/gcc",
+    "src/test/kotlin/decompengine/oracle/gcc"
   ],
   "adapterFiles": [
     {
@@ -268,28 +272,28 @@
       "rule": "generic-tool",
       "fragment": "\"gcc\"",
       "count": 1,
-      "reason": "MVP patch workflow compiles the reconstructed C fix with the default host compiler; the explicit command remains the workflow's authored validation contract."
+      "reason": "MVP patch workflow is the application-owned compatibility path for validating a proposed C patch with the host toolchain; this explicit command is retained until compiler selection is adapter-owned."
     },
     {
       "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
       "rule": "generic-compiler-flag",
       "fragment": "-std=c11",
       "count": 1,
-      "reason": "MVP patch workflow compiles the proposed fix as C11 with its default host compiler; the language selection is part of the same authored validation contract."
+      "reason": "MVP patch workflow's application-owned compatibility contract validates proposed fixes as C11; language selection remains migration debt until the selected reconstruction adapter supplies it."
     },
     {
       "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
       "rule": "generic-compiler-flag",
       "fragment": "-Wall",
       "count": 2,
-      "reason": "MVP patch workflow compiles the proposed fix with the default warning set and repeats the identical contract in its patch prompt."
+      "reason": "MVP patch workflow's application-owned validation contract enables the standard warning set in compilation and prompt guidance; warning policy remains migration debt until adapter-owned."
     },
     {
       "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
       "rule": "generic-compiler-flag",
       "fragment": "-Wextra",
       "count": 2,
-      "reason": "MVP patch workflow compiles the proposed fix with the default warning set and repeats the identical contract in its patch prompt."
+      "reason": "MVP patch workflow's application-owned validation contract enables the standard warning set in compilation and prompt guidance; warning policy remains migration debt until adapter-owned."
     },
     {
       "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
@@ -303,14 +307,14 @@
       "rule": "generic-adapter-reference",
       "fragment": "GeneratedCRepairRuntimeConfiguration",
       "count": 3,
-      "reason": "Existing repair verifier cross-checks declared runtime-tool roles and mount destinations against the registered generated-C repair runtime configuration; those verifier checks remain active."
+      "reason": "Repair evidence verification is application-owned: it cross-checks declared runtime-tool roles and mount destinations against the registered generated-C repair configuration while adapter migration remains incomplete."
     },
     {
       "path": "src/main/kotlin/decompengine/project/RepairAcpEvidenceArchiveVerifier.kt",
       "rule": "generic-layout",
       "fragment": "\"Makefile\"",
       "count": 1,
-      "reason": "Existing repair verifier classifies the repaired release snapshot's declared build-file source by its exact path; the role and immutable-mode checks remain active."
+      "reason": "Repair evidence verification is application-owned: it classifies the repaired release snapshot's declared build-file source by exact path while preserving role and immutable-mode checks."
     },
     {
       "path": "src/test/kotlin/decompengine/analysis/BundledGhidraTest.kt",
