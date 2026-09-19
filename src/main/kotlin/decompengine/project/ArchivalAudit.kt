@@ -6,6 +6,7 @@ import decompengine.validation.BehaviorProjectContext
 import decompengine.validation.boolean
 import decompengine.validation.string
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.intOrNull
@@ -73,6 +74,19 @@ internal fun snapshotRequiredBehaviorCorpora(required: Set<String>): Set<String>
     val snapshot = required.toSet()
     require(snapshot.all { it.matches(Regex("[0-9a-f]{64}")) }) { "audit required corpus identities must be lowercase SHA-256" }
     return snapshot
+}
+
+/**
+ * A present non-null checkpoint prompt field must be an integer, matching the
+ * extracted-archive verifier: malformed custom attribution (strings, booleans,
+ * fractional numbers) is rejected instead of collapsing to unattributed.
+ */
+internal fun JsonObject.optionalCheckpointLong(name: String): Long? {
+    val element = this[name] ?: return null
+    if (element is JsonNull) return null
+    val primitive = element as? JsonPrimitive ?: throw IllegalArgumentException("module checkpoint $name must be an integer or null")
+    require(!primitive.isString) { "module checkpoint $name must be an integer or null" }
+    return primitive.longOrNull ?: throw IllegalArgumentException("module checkpoint $name must be an integer or null")
 }
 
 object ArchivalProjectAuditor {
@@ -182,8 +196,8 @@ object ArchivalProjectAuditor {
                     require(checkpoint.boolean("accepted")) { "module checkpoint does not record acceptance" }
                     require(modulePromptAttributionIsValid(
                         moduleClaimsAgentExecution(checkpoint.string("generator"), checkpoint.string("reconstructorIdentity")),
-                        (checkpoint["promptCharacters"] as? JsonPrimitive)?.takeUnless { it.isString }?.longOrNull,
-                        (checkpoint["promptBudgetCharacters"] as? JsonPrimitive)?.takeUnless { it.isString }?.longOrNull,
+                        checkpoint.optionalCheckpointLong("promptCharacters"),
+                        checkpoint.optionalCheckpointLong("promptBudgetCharacters"),
                         profile,
                     )) {
                         "accepted checkpoint prompt attribution is missing, invalid, or exceeds the reconstruction profile"

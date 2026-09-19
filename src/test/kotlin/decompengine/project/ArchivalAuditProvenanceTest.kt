@@ -85,6 +85,10 @@ class ArchivalAuditProvenanceTest {
             Case("missing budget", JsonPrimitive(1), null),
             Case("above profile", JsonPrimitive(1), JsonPrimitive(limit + 1)),
             Case("size above budget", JsonPrimitive(2), JsonPrimitive(1)),
+            Case("string size", JsonPrimitive("1"), JsonPrimitive(limit)),
+            Case("string budget", JsonPrimitive(1), JsonPrimitive(limit.toString())),
+            Case("boolean size", JsonPrimitive(true), JsonPrimitive(limit)),
+            Case("boolean budget", JsonPrimitive(1), JsonPrimitive(false)),
         )
         // The fixture records a custom (non-agent) reconstructor identity; accepted metadata
         // beyond the profile must fail the audit exactly like an agent checkpoint's would.
