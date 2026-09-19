@@ -76,7 +76,8 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
             }
             val contractSnapshot = readArtifact(jobId, "$reportPrefix/source-tree/${layout.contractPath}", MAXIMUM_FILE_BYTES)
             requireSame(current.getValue(layout.contractPath), contractSnapshot)
-            val contract = buildPolicy.parseContract(OracleJson.parse(contractSnapshot.bytes).jsonObject, source.profile)
+            val parsedContract = OracleJson.parse(contractSnapshot.bytes).jsonObject
+            val contract = buildPolicy.parseContract(parsedContract, source.profile)
             val artifact = contract.artifact
             require(artifact.getValue("path").jsonPrimitive.content == layout.artifactPath) { "archive build artifact path is invalid" }
             val executable = readArtifact(jobId, "$reportPrefix/source-tree/${layout.artifactPath}", MAXIMUM_BYTES).let { snapshot ->

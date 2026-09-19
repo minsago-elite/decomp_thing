@@ -17,7 +17,7 @@ class ArchiveTransportLayoutTest {
             val required = policy.requiredPaths(profile)
             val buildDefinition = profile.layout.declaration("build-definition").materialize()
 
-            assertEquals(setOf("build"), layout.excludedOutputRoots)
+            assertEquals(setOf("build", ".ninja_log", ".ninja_deps"), layout.excludedOutputRoots)
             assertEquals(setOf("reports/build_contract.json"), layout.strictBuildControlPaths)
             assertTrue(buildDefinition in required)
             assertTrue("reports/build_contract.json" in required)
@@ -77,6 +77,17 @@ class ArchiveTransportLayoutTest {
         }
         layout.requireRetainsDeclarations(listOf("build-{module}/unit.txt", "src/{module}/unit.txt",
             "scratch/objects/{module}.txt", "{module}.txt").map(::declaration))
+    }
+
+    @Test
+    fun `ninja transport omits build history state files`() {
+        val layout = GeneratedCNinjaArchiveBuildPolicy.transportLayout(GeneratedCNinjaReconstructionProfile.descriptor)
+
+        assertTrue(layout.excludes("build"))
+        assertTrue(layout.excludes("build/reconstructed"))
+        assertTrue(layout.excludes(".ninja_log"))
+        assertTrue(layout.excludes(".ninja_deps"))
+        assertFalse(layout.excludes("reports/build_contract.json"))
     }
 
     @Test

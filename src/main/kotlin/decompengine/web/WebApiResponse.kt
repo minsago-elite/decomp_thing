@@ -37,6 +37,5 @@ internal fun sendWebApiResponse(exchange: HttpExchange, status: Int, kind: Strin
 internal fun webApiHeaders(exchange: HttpExchange, requestId: String) {
     exchange.responseHeaders.set("X-Request-ID", requestId)
     exchange.responseHeaders.set("Cache-Control", "no-store")
-    exchange.responseHeaders.set("Referrer-Policy", "no-referrer")
-    exchange.responseHeaders.set("X-Content-Type-Options", "nosniff")
+    exchange.applyWebSecurityHeaders()
 }
