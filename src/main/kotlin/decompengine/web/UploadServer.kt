@@ -562,7 +562,7 @@ class UploadServer(
             }
             access.authorize(exchange, policy)
             if (exchange.requestURI.rawPath == "/login") {
-                exchange.sendHtml(200, renderLegacyLogin())
+                exchange.sendHtml(200, renderLegacyLogin(), listOf(LEGACY_LOGIN_SCRIPT))
                 return
             }
             if (legacyJsonRead) requireJsonAccept(exchange)
@@ -612,7 +612,7 @@ class UploadServer(
             access.deniedHeaders(exchange, exception)
             if (exception.status == 401 && !exchange.requestURI.path.startsWith("/api/") &&
                 exchange.requestMethod in setOf("GET", "HEAD")) {
-                exchange.sendHtml(401, renderLegacyLogin())
+                exchange.sendHtml(401, renderLegacyLogin(), listOf(LEGACY_LOGIN_SCRIPT))
                 return
             }
 
@@ -647,7 +647,7 @@ class UploadServer(
 
     private fun renderJobDashboard(exchange: HttpExchange) {
         val inspections = jobs.listInspections()
-        exchange.sendHtml(200, renderDashboard(
+        exchange.sendHtml(200, renderDashboardDocument(
             inspections.filterIsInstance<WebJobInspection.Available>().map { it.presentation.job },
             inspections.filterIsInstance<WebJobInspection.Unavailable>().map { it.diagnostic },
             store.recoveryInventory(),
@@ -674,6 +674,7 @@ class UploadServer(
                 val query = exchange.requestURI.rawQuery?.let { "?$it" }.orEmpty()
                 exchange.responseHeaders.set("Location", canonical + query)
                 exchange.responseHeaders.set("Cache-Control", "no-store")
+                exchange.applyWebSecurityHeaders()
                 exchange.sendResponseHeaders(308, -1)
                 exchange.close()
             } else {
@@ -735,7 +736,7 @@ class UploadServer(
         val source = runCatching { archiveEvidence.read(jobId, reportPrefix = view.reports.artifactPrefix).source }
             .recoverCatching { sourceEvidence.read(jobId, view.reports.artifactPrefix).view() }
         val progress = runCatching { readLegacyProgress(jobId, view.reports.runId) }.getOrNull()
-        exchange.sendHtml(200, renderJob(view.job, view.reports, view.diagnostics, source.getOrNull(), source.isFailure,
+        exchange.sendHtml(200, renderJobDocument(view.job, view.reports, view.diagnostics, source.getOrNull(), source.isFailure,
             progressSnapshot = progress,
             explorationReport = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.EXPLORATION),
             repairHistory = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.REPAIR_HISTORY),
@@ -882,13 +883,27 @@ private fun java.io.InputStream.readLimited(maxBytes: Long): ByteArray {
 }
 
 private fun HttpExchange.redirect(location: String) {
-    responseHeaders.add("Location", location)
+    responseHeaders.set("Location", location)
+    responseHeaders.set("Cache-Control", "no-store")
+    applyWebSecurityHeaders()
     sendResponseHeaders(303, -1)
     close()
 }
 
-internal fun HttpExchange.sendHtml(status: Int, body: String) =
-    sendBytes(status, body.toByteArray(StandardCharsets.UTF_8), "text/html; charset=utf-8")
+internal fun HttpExchange.sendHtml(status: Int, document: WebApplicationDocument) =
+    sendHtml(status, document.body, document.trustedInlineScripts)
+
+internal fun HttpExchange.sendHtml(
+    status: Int,
+    body: String,
+    trustedInlineScripts: Iterable<String> = listOf(LEGACY_SESSION_SCRIPT),
+) =
+    sendBytes(
+        status,
+        body.toByteArray(StandardCharsets.UTF_8),
+        "text/html; charset=utf-8",
+        contentSecurityPolicy = webApplicationContentSecurityPolicy(trustedInlineScripts),
+    )
 
 internal fun HttpExchange.sendJson(status: Int, body: String) =
     sendBytes(status, body.toByteArray(StandardCharsets.UTF_8), "application/json; charset=utf-8")
@@ -898,16 +913,12 @@ private fun HttpExchange.sendBytes(
     body: ByteArray,
     contentType: String,
     cache: Boolean = false,
+    contentSecurityPolicy: String = WEB_INERT_CONTENT_SECURITY_POLICY,
 ) {
-    responseHeaders.add("Content-Type", contentType)
-    responseHeaders.add("X-Content-Type-Options", "nosniff")
-    responseHeaders.add("Referrer-Policy", "no-referrer")
-    responseHeaders.add(
-        "Content-Security-Policy",
-        "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'",
-    )
-    responseHeaders.add("Cache-Control", if (cache) "public, max-age=3600" else "no-store")
-    responseHeaders.add("Content-Length", body.size.toString())
+    responseHeaders.set("Content-Type", contentType)
+    applyWebSecurityHeaders(contentSecurityPolicy)
+    responseHeaders.set("Cache-Control", if (cache) "public, max-age=3600" else "no-store")
+    responseHeaders.set("Content-Length", body.size.toString())
     if (requestMethod == "HEAD") {
         sendResponseHeaders(status, -1)
         close()

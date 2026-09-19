@@ -96,11 +96,34 @@ explicit user navigation and use `noopener noreferrer`; reject non-HTTP(S)
 schemes. Content cannot name JavaScript modules, CSS resources or worker URLs.
 
 Production CSP restricts default/script/style/connect/worker to the application
-origin, denies objects, framing and base URI, and limits forms to self. Do not
-require inline scripts/styles or `eval`; nonces are only a separately reviewed
-exception. Assets, API responses, errors and downloads use `nosniff` and
-`Referrer-Policy: no-referrer`. Served source/report/log bytes are plain text or
-attachments, including files whose names suggest active content (#176/#189).
+origin, denies objects, framing and base URI, and limits forms to self. The SPA
+requires no inline scripts/styles or `eval`. During the separately inventoried
+legacy migration, the response policy authorizes only the exact trusted adapter
+script bytes with per-response SHA-256 source expressions. The renderer supplies
+that script inventory before HTML assembly; the server never discovers or hashes
+scripts from the final document, so an escaping regression cannot add an
+authorized script. The policy never enables
+`unsafe-inline`, `unsafe-eval`, a nonce, an inline style, or an event-handler
+exception. Removing those legacy adapters remains part of retiring legacy HTML.
+
+The remaining resource directives are deliberately narrow and local. `style-src
+'self'` is required for Vite's extracted stylesheet and the legacy
+`/assets/app.css`; neither document uses inline style. `img-src data:` is limited
+to the packaged shell's data-URL SVG favicon and the legacy stylesheet's data-URL
+SVG texture, while ordinary images remain same-origin. `worker-src 'self'` and
+`font-src 'self'` are the upper bounds for statically bundled worker and font
+outputs covered by the packaged asset inventory; blob workers, downloaded code,
+and remote fonts remain denied. The current production bundle emits no worker or
+downloadable font, but keeping those directives aligned with the packaging
+contract permits only future reviewed, manifest-owned same-origin outputs.
+
+Application documents receive that executable policy. Static assets, JSON,
+errors, redirects, event streams, source/report bytes and downloads receive an
+inert navigation policy. Both classes consistently use `nosniff`,
+`Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and CSP
+`frame-ancestors 'none'`; generated downloadable material additionally remains
+sandboxed. Served source/report/log bytes are plain text or attachments,
+including files whose names suggest active content (#176/#189).
 
 Job metadata stores logical IDs and server-relative owned paths. Reopening old
 metadata never trusts its stored absolute `binary_path` for authorization. File
