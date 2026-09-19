@@ -15,7 +15,9 @@ internal fun requireBehaviorFileNames(names: Collection<String>) {
     for (name in names) {
         val parts = name.split('/')
         require(name.length in 1..256 && '\\' !in name && '\u0000' !in name && parts.size <= 16 &&
-            parts.none { it in setOf("", ".", "..") }) { "behavior input name must be a bounded relative path" }
+            parts.none { it in setOf("", ".", "..") } && parts.all { it.encodeToByteArray().size <= 255 }) {
+            "behavior input name must be a bounded relative path"
+        }
         require((1 until parts.size).none { parts.take(it).joinToString("/") in paths }) {
             "behavior input file names conflict with parent directories"
         }

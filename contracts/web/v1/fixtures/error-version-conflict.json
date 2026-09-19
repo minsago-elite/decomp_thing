@@ -1,0 +1,12 @@
+{
+  "apiVersion": 1,
+  "kind": "error",
+  "requestId": "request_example_2",
+  "error": {
+    "code": "VERSION_CONFLICT",
+    "message": "The resource changed. Refresh before reviewing a new action.",
+    "retryable": false,
+    "details": [],
+    "retryAfterMs": null
+  }
+}
