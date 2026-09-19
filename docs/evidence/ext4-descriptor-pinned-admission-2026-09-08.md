@@ -10,12 +10,12 @@ is claimed.
 
 | Artifact | SHA-256 | Relevant anchors |
 | --- | --- | --- |
-| `src/main/kotlin/decompengine/acp/LinuxFilesystemSyscalls.kt` | `0c17ccf5daba696f9358ec45a3be81d979e0b920` | `filesystemCapacity:145-185` |
-| `src/main/kotlin/decompengine/oracle/fulltree/FullTreeDiskScratchAuthority.kt` | `85ef34986dff47ea26cbb5f7f5694bb66ccc74db` | `acquireDedicatedFilesystem:1445-1539`; `requireMountCurrent:1678-1731`; policy constants: `2123-2138` |
-| `src/test/kotlin/decompengine/acp/LinuxFilesystemSyscallsTest.kt` | `3f56a14067a625140efd384c0c1963865371296f` | pinned-capacity fixture: `17-31` |
-| `src/test/kotlin/decompengine/oracle/fulltree/FullTreeDiskScratchAuthorityTest.kt` | `2caf501caa8486d755784aaab1e0b3e8e7b37384` | mount parser: `31-64`; ordinary-directory refusal: `234-256`; conditional ext4 fixture: `258-431` |
-| `scripts/ci-prepare-oracle-ext4-scratch.sh` | `511e3572d24a4748c8865150778acea668651302` | ext4 image and mount setup: `49-70` |
-| `scripts/oracle-ext4-scratch-profile.sh` | `e8629040ee46387e590433f271e0d3921dad3fab` | default `64M`/`4096` profile: `3-7` |
+| `src/main/kotlin/decompengine/acp/LinuxFilesystemSyscalls.kt` | `163ced0dddb0efd26921b5eebf364e6df63f34eaa5dc01f2dae8753b4e5a25c9` | `filesystemCapacity:145-185` |
+| `src/main/kotlin/decompengine/oracle/fulltree/FullTreeDiskScratchAuthority.kt` | `eadc6c791d6848bf87999814e5b2af71b963277609351eba6df86c74cae18cde` | `acquireDedicatedFilesystem:1445-1539`; `requireMountCurrent:1678-1731`; policy constants: `2123-2138` |
+| `src/test/kotlin/decompengine/acp/LinuxFilesystemSyscallsTest.kt` | `8006f6d7530be7092e02ed10fdeb22c634cbdb46edc29587914d2dfd1305acbd` | pinned-capacity fixture: `17-31` |
+| `src/test/kotlin/decompengine/oracle/fulltree/FullTreeDiskScratchAuthorityTest.kt` | `a6e47340eed9877e593616f43dee7be386cdcdf0f10c4329d9de8699f5c56606` | mount parser: `31-64`; ordinary-directory refusal: `234-256`; conditional ext4 fixture: `258-431` |
+| `scripts/ci-prepare-oracle-ext4-scratch.sh` | `3de1723fe1702c468582873d64fe23840c7006bded70c7364c0289c14369b3a3` | ext4 image and mount setup: `49-70` |
+| `scripts/oracle-ext4-scratch-profile.sh` | `9eec7d0b1d16c550c0cb9471f72f71f4d36554b4c9966c18e47273812ce2f03f` | default `64M`/`4096` profile: `3-7` |
 
 `filesystemCapacity` calls Linux `fstatvfs` on an already authenticated
 directory descriptor, converts block counters to byte counters, and compares
