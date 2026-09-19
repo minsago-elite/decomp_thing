@@ -326,6 +326,12 @@ class JobStore internal constructor(
         return inventory
     }
 
+    internal fun sourceArchiveInventory(jobId: String, reportPrefix: String = "reports"): Map<String, LinuxFileIdentity> =
+        sourceArchiveInventory(jobId, ArchiveTransportLayout(setOf("build"), emptySet()), reportPrefix)
+
+    internal fun sourceArchiveInventory(jobId: String, layout: ArchiveTransportLayout): Map<String, LinuxFileIdentity> =
+        sourceArchiveInventory(jobId, layout, "reports")
+
     @Synchronized
     fun recoverInterruptedJobs() = recoverInterruptedJobs { false }
 

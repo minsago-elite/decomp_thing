@@ -239,6 +239,7 @@ object ProgramModelJson {
         }
         return checkedModelStage("constructing program model set", checkpoint) { strings.toSet() }
     }
+    private fun JsonObject.stringSet(name: String): Set<String> = stringSet(name) {}
 }
 
 data class PlannedModule(

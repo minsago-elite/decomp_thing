@@ -965,6 +965,34 @@ class SourceTreeTest {
     }
 
     @Test
+    fun `accepted agent-free checkpoints revalidate recorded prompt budgets on reuse`() {
+        val project = createTempDirectory("source-tree-legacy-prompt-budget-")
+        val input = oneModuleModel()
+        SourceTreeGenerator.generate(
+            input,
+            project,
+            reconstructor = cacheReconstructor("scripted-valid", "scripted-legacy"),
+        )
+        val checkpoint = project.resolve("reports/modules/parse.json")
+        // A checkpoint accepted before prompt budgets were validated for custom reconstructors.
+        val overBudget = checkpoint.readText()
+            .replace("\"promptCharacters\": null", "\"promptCharacters\": 999999")
+            .replace("\"promptBudgetCharacters\": null", "\"promptBudgetCharacters\": 999999")
+        check(overBudget != checkpoint.readText()) { "test checkpoint did not record empty prompt metadata" }
+        checkpoint.writeText(overBudget)
+        var calls = 0
+        val reconstructor = cacheReconstructor("scripted-valid", "scripted-legacy") { calls++ }
+
+        SourceTreeGenerator.generate(input, project, reconstructor = reconstructor)
+
+        assertEquals(1, calls, "over-budget prompt metadata must not be reused as accepted")
+        assertTrue(checkpoint.readText().contains("\"promptCharacters\": null"))
+        assertTrue(checkpoint.readText().contains("\"accepted\": true"))
+        SourceTreeGenerator.generate(input, project, reconstructor = reconstructor)
+        assertEquals(1, calls, "repaired checkpoint must resume")
+    }
+
+    @Test
     fun `checkpoint evidence path mismatch is rejected before touching the named file`() {
         val project = createTempDirectory("source-tree-evidence-path-mismatch-")
         val input = oneModuleModel()
