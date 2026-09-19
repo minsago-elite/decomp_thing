@@ -30,11 +30,11 @@ order. The linked source-record hash is over the 148 matching records from
 unit-ID hash, these bind the module IDs, source paths, source kinds, and shard
 ownership without substituting a planning count for an emitted-function count.
 
-For reproducibility, all hashes in this document are SHA-256 of UTF-8 bytes. The
-planning-selection and linked-source-record values above hash the compact JSON
-array followed by exactly one LF byte (`0a`); the unit-ID hash and the
-source-only-path hash hash their compact JSON arrays with no trailing bytes.
-No pretty-printing, spaces, or platform-specific newline conversion is used.
+For reproducibility, all hashes in this document are SHA-256 of UTF-8 bytes. Every
+compact JSON array named below is hashed with exactly one LF byte (`0a`) appended:
+the unit-ID array, planning-selection array, linked-source-record array, and
+source-only-path array. No pretty-printing, spaces, or platform-specific newline
+conversion is used.
 
 The source inventory also retains 44 `source-only` paths in this shard. They
 have no compilation-unit ID and are marked
