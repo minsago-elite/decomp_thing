@@ -1,0 +1,16 @@
+{
+  "apiVersion": 1,
+  "kind": "workflowStartRequest",
+  "data": {
+    "workflow": "explore",
+    "inputRevisionId": null,
+    "harnessCapabilityId": null,
+    "limits": {
+      "wallClockMs": "60000",
+      "idleMs": "15000",
+      "maxOutputBytes": "1048576",
+      "maxToolCalls": "16"
+    },
+    "executeCommand": "synthetic-disallowed-field"
+  }
+}

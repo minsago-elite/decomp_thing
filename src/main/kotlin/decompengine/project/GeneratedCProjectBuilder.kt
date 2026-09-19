@@ -170,6 +170,14 @@ internal object GeneratedCProjectBuilder {
         val budget = TimeUnit.MILLISECONDS.toNanos(configuration.wallClockTimeoutMillis)
         fun remaining(): Long = maxOf(0L, budget - (System.nanoTime() - started))
         val process = builder.start()
+        // Snapshot the owned process tree while the root is alive: descendants that
+        // inherit the output pipe keep it open after the root exits, and once the
+        // root is dead they are reparented and no longer discoverable via its
+        // handle. Retaining the snapshot lets a blocked output drain terminate
+        // every owned child instead of waiting for the deadline.
+        val ownedHandles = LinkedHashSet<ProcessHandle>()
+        ownedHandles += process.toHandle()
+        ownedHandles += process.toHandle().descendants().toList()
         var reader: CompletableFuture<String>? = null
         var primaryFailure: Throwable? = null
         try {
@@ -190,8 +198,22 @@ internal object GeneratedCProjectBuilder {
                 output.toString(Charsets.UTF_8)
             }
             reader = outputFuture
-            val output = outputFuture.get(remaining(), TimeUnit.NANOSECONDS)
-            if (!process.waitFor(remaining(), TimeUnit.NANOSECONDS)) throw TimeoutException()
+            val output = pollBuildOutput(process, ownedHandles, outputFuture, remaining())
+            // The output future may complete before the root exits. Keep polling the
+            // live root and refresh its descendants until it exits, so a late child is
+            // retained before it can be reparented and hidden from cleanup.
+            waitForBuildExit(process, ownedHandles, remaining())
+            // A successful root is not sufficient when an owned descendant outlives it:
+            // accepting the artifact would race a still-running child and cleanup would
+            // otherwise silently turn that partial build into a success.
+            refreshOwnedProcessTree(process, ownedHandles)
+            val lingering = ownedHandles.filter { it != process.toHandle() && it.isAlive }
+            if (lingering.isNotEmpty()) {
+                terminateBuildProcessTree(lingering, configuration.terminationGraceMillis)
+                throw BuildException(
+                    "generated project left owned descendants running after the build process exited",
+                )
+            }
             return process.exitValue() to output
         } catch (failure: Throwable) {
             val reported = when (failure) {
@@ -213,7 +235,7 @@ internal object GeneratedCProjectBuilder {
                     if (previous == null) cleanupFailure = failure else previous.addSuppressed(failure)
                 }
             }
-            cleanup { terminateBuildProcess(process, configuration.terminationGraceMillis) }
+            cleanup { terminateBuildProcessTree(ownedHandles, configuration.terminationGraceMillis) }
             cleanup { reader?.cancel(true) }
             cleanup { process.inputStream.close() }
             cleanup { process.outputStream.close() }
@@ -222,9 +244,97 @@ internal object GeneratedCProjectBuilder {
         }
     }
 
+    /**
+     * Waits for the root while refreshing descendants. A single long `waitFor` would
+     * allow a child spawned after the initial snapshot to be reparented before cleanup
+     * can retain it.
+     */
+    private fun waitForBuildExit(
+        process: Process,
+        ownedHandles: MutableSet<ProcessHandle>,
+        budgetNanos: Long,
+    ) {
+        val deadline = System.nanoTime() + budgetNanos
+        while (process.isAlive) {
+            refreshOwnedProcessTree(process, ownedHandles)
+            val remaining = deadline - System.nanoTime()
+            if (remaining <= 0L) throw TimeoutException()
+            process.waitFor(minOf(remaining, TimeUnit.MILLISECONDS.toNanos(25)), TimeUnit.NANOSECONDS)
+        }
+        refreshOwnedProcessTree(process, ownedHandles)
+    }
+
+    private fun refreshOwnedProcessTree(process: Process, ownedHandles: MutableSet<ProcessHandle>) {
+        ownedHandles += process.toHandle()
+        ownedHandles.filter { it.isAlive }.forEach { parent ->
+            runCatching { ownedHandles += parent.descendants().toList() }
+        }
+    }
+
+    /**
+     * Drains build output while refreshing the retained descendant snapshot. When the
+     * root process has exited but inherited output keeps the pipe open, the retained
+     * descendants are terminated instead of waiting out the full wall-clock budget.
+     */
+    private fun pollBuildOutput(
+        process: Process,
+        ownedHandles: MutableSet<ProcessHandle>,
+        outputFuture: CompletableFuture<String>,
+        budgetNanos: Long,
+    ): String {
+        val started = System.nanoTime()
+        while (true) {
+            ownedHandles.filter { it.isAlive }.forEach { parent ->
+                runCatching { ownedHandles += parent.descendants().toList() }
+            }
+            try {
+                val elapsed = System.nanoTime() - started
+                val remaining = budgetNanos - elapsed
+                if (remaining <= 0L) throw TimeoutException()
+                // Bound each wait so descendants spawned after the previous snapshot are
+                // observed before the root can exit and orphan them.
+                val pollInterval = minOf(remaining, TimeUnit.MILLISECONDS.toNanos(25))
+                return outputFuture.get(pollInterval, TimeUnit.NANOSECONDS)
+            } catch (failure: TimeoutException) {
+                val elapsed = System.nanoTime() - started
+                if (elapsed >= budgetNanos) throw failure
+                if (!process.isAlive) {
+                    // The root exited but an inherited pipe holder keeps the drain open;
+                    // kill the retained tree now so cleanup can observe every owned child.
+                    terminateBuildProcessTree(ownedHandles, 0)
+                    val drainDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                    while (!outputFuture.isDone && System.nanoTime() < drainDeadline) {
+                        Thread.sleep(5)
+                    }
+                    if (outputFuture.isDone) {
+                        return try {
+                            outputFuture.get()
+                        } catch (completed: ExecutionException) {
+                            throw completed.cause ?: completed
+                        }
+                    }
+                    throw BuildException(
+                        "generated project build left background output open after the build process exited; " +
+                            "owned descendants were terminated",
+                    )
+                }
+                // Root still alive: keep polling so newly spawned descendants join the
+                // retained snapshot before the root can exit and orphan them.
+                Thread.sleep(10)
+            }
+        }
+    }
+
     internal fun terminateBuildProcess(process: Process, graceMillis: Long) {
-        val handles = (process.toHandle().descendants().toList().asReversed() + process.toHandle()).distinct()
-        handles.forEach { if (it.isAlive) it.destroy() }
+        val handles = LinkedHashSet<ProcessHandle>()
+        handles += process.toHandle()
+        runCatching { handles += process.toHandle().descendants().toList() }
+        terminateBuildProcessTree(handles, graceMillis)
+    }
+
+    private fun terminateBuildProcessTree(handles: Collection<ProcessHandle>, graceMillis: Long) {
+        val ordered = (handles.toList().asReversed() + handles.firstOrNull()).filterNotNull().distinct()
+        ordered.forEach { if (it.isAlive) it.destroy() }
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(graceMillis)
         handles.forEach { handle ->
             val remaining = deadline - System.nanoTime()

@@ -90,6 +90,7 @@ internal object KotlinContainedCommandKeeper {
                                 val stdoutReader = readers.submit { stdout.capture(process.inputStream) }
                                 val stderrReader = readers.submit { stderr.capture(process.errorStream) }
                                 var status = "EXITED"
+                                var forcibleTerminationConfirmed = false
                                 while (process.isAlive) {
                                     stdout.requireHealthy()
                                     stderr.requireHealthy()
@@ -118,6 +119,10 @@ internal object KotlinContainedCommandKeeper {
                                 if (process.isAlive) {
                                     process.destroyForcibly()
                                     require(process.waitFor(5L, TimeUnit.SECONDS)) { "contained command child survived its bounded kill" }
+                                    forcibleTerminationConfirmed = true
+                                }
+                                require(status != "INTERRUPTED" || forcibleTerminationConfirmed) {
+                                    "contained command was not forcibly terminated after interruption"
                                 }
                                 stdoutReader.get(5L, TimeUnit.SECONDS)
                                 stderrReader.get(5L, TimeUnit.SECONDS)
