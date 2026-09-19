@@ -31,8 +31,34 @@ internal object GeneratedCNinjaReconstructionAdapter : ReconstructionAdapter by 
         hostSafetyLimits: ReconstructionHostSafetyLimits,
     ): BuildReport {
         val configuration = configuration(profile, 4)
+        requireBuildDefinitionBindsConfiguration(projectDir, profile, configuration)
         return GeneratedCProjectBuilder.build(
             projectDir, configuration, profile, invocation(profile, configuration.parallelism), hostSafetyLimits,
         )
+    }
+
+    internal fun requireBuildDefinitionBindsConfiguration(
+        projectDir: Path,
+        profile: ReconstructionProfile,
+        configuration: ProjectBuildConfiguration = configuration(profile, 4),
+    ) {
+        val expectedCompiler = profile.adapterConfiguration.getValue("compiler-driver").single()
+        val expectedFlags = profile.adapterConfiguration.getValue("compiler-flags").joinToString(" ")
+        val definition = projectDir.resolve(configuration.buildDefinition)
+        if (!java.nio.file.Files.isRegularFile(definition, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return
+        val ceiling = minOf(configuration.maximumOutputBytes, Int.MAX_VALUE.toLong() - 1L)
+        require(ceiling >= 1L) { "build output ceiling is invalid" }
+        val size = java.nio.file.Files.size(definition)
+        require(size in 1..ceiling) {
+            "Ninja build definition exceeds the admitted build output bound ($size bytes; limit=$ceiling)"
+        }
+        val text = java.nio.file.Files.readString(definition)
+        val lines = text.lineSequence().map { it.trim() }.toList()
+        require(lines.any { it == "cc = $expectedCompiler" }) {
+            "Ninja build definition compiler differs from the selected profile"
+        }
+        require(lines.any { it == "cflags = $expectedFlags" }) {
+            "Ninja build definition flags differ from the selected profile"
+        }
     }
 }

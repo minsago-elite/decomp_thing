@@ -64,25 +64,32 @@ data class RecoveredProgramModel(
     fun isRecoveryUnresolved(status: RecoveryStatus): Boolean =
         schemaVersion == 2 || status != RecoveryStatus.RECOVERED
 
-    fun toJson(): String = buildString {
-        append("{\n  \"schemaVersion\": ").append(schemaVersion)
-        append(",\n  \"inputSha256\": \"").append(inputSha256.json()).append("\",")
-        append("\n  \"functions\": [")
-        if (functions.isNotEmpty()) append('\n')
-        append(functions.sortedWith(compareBy<RecoveredFunction> { it.address }.thenBy { it.id }).joinToString(",\n") { function ->
-            """
+    fun toJson(): String = toJson {}
 
+    /** Cooperative checkpoints do not preempt an individual sort, join, or library operation. */
+    internal fun toJson(checkpoint: (String) -> Unit): String = checkedModelStage("rendering program model", checkpoint) {
+        buildString {
+            append("{\n  \"schemaVersion\": ").append(schemaVersion)
+            append(",\n  \"inputSha256\": \"").append(inputSha256.json(checkpoint)).append("\",")
+            append("\n  \"functions\": [")
+            if (functions.isNotEmpty()) append('\n')
+            val sortedFunctions = checkedModelStage("sorting program model functions", checkpoint) {
+                functions.sortedWith(compareBy<RecoveredFunction> { it.address }.thenBy { it.id })
+            }
+            append(checkedModelStage("joining program model functions", checkpoint) {
+                sortedFunctions.joinToString(",\n") { function ->
+                    checkedModelStage("rendering program model function", checkpoint) {
+                        """
             {
               "id": "${function.id.json(checkpoint)}",
               "name": "${function.name.json(checkpoint)}",
               "address": "0x${function.address.toString(16)}",
-              "prototype": "${function.prototype.json()}",
+              "prototype": "${function.prototype.json(checkpoint)}",
               ${statusFields(function.status)},
-              "calls": [${function.calls.sorted().joinToString(", ") { "\"${it.json()}\"" }}],
-              "referencedGlobals": [${function.referencedGlobals.sorted().joinToString(", ") { "\"${it.json()}\"" }}],
-              "strings": [${function.strings.sorted().joinToString(", ") { "\"${it.json()}\"" }}],
-              "decompiledC": ${function.decompiledC?.let { "\"${it.json()}\"" } ?: "null"}
-
+              "calls": [${function.calls.json(checkpoint)}],
+              "referencedGlobals": [${function.referencedGlobals.json(checkpoint)}],
+              "strings": [${function.strings.json(checkpoint)}],
+              "decompiledC": ${function.decompiledC?.let { "\"${it.json(checkpoint)}\"" } ?: "null"}
             }""".trimIndent().prependIndent("    ")
                     }
                 }
@@ -100,9 +107,8 @@ data class RecoveredProgramModel(
               "id": "${global.id.json(checkpoint)}",
               "name": "${global.name.json(checkpoint)}",
               "address": "0x${global.address.toString(16)}",
-              "type": "${global.type.json()}",
-              "initializer": ${global.initializer?.let { "\"${it.json()}\"" } ?: "null"},
-
+              "type": "${global.type.json(checkpoint)}",
+              "initializer": ${global.initializer?.let { "\"${it.json(checkpoint)}\"" } ?: "null"},
               ${statusFields(global.status)}
             }""".trimIndent().prependIndent("    ")
                     }
@@ -142,7 +148,7 @@ object ProgramModelJson {
             "program model must be canonical UTF-8"
         }
         val model = read(text, checkpoint)
-        val canonicalText = model.toJson(checkpoint)
+        val canonicalText = model.toJson()
         val canonical = checkedModelStage("encoding canonical program model", checkpoint) { canonicalText.toByteArray(Charsets.UTF_8) }
         require(checkedModelStage("comparing canonical program model", checkpoint) { MessageDigest.isEqual(bytes, canonical) }) {
             "program model must use exact canonical fields, entity order, sets, and bytes"
@@ -169,9 +175,9 @@ object ProgramModelJson {
                     address = item.string("address").removePrefix("0x").toULong(16),
                     prototype = item.string("prototype"),
                     decompiledC = item["decompiledC"]?.jsonPrimitive?.contentOrNull,
-                    calls = item.stringSet("calls"),
-                    referencedGlobals = item.stringSet("referencedGlobals"),
-                    strings = item.stringSet("strings"),
+                    calls = item.stringSet("calls", checkpoint),
+                    referencedGlobals = item.stringSet("referencedGlobals", checkpoint),
+                    strings = item.stringSet("strings", checkpoint),
                     status = readExtractionStatus(item, schemaVersion),
                 )
             },

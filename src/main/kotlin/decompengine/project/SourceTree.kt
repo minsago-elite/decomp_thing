@@ -1523,6 +1523,12 @@ object SourceTreeManifestReader {
     fun read(projectDir: Path, expectedProfile: ReconstructionProfile): SourceTreeManifest {
         val path = projectDir.resolve("source_tree_manifest.json")
         require(path.exists()) { "project is missing source_tree_manifest.json" }
+        val ceiling = minOf(expectedProfile.budgets.buildMaximumOutputBytes, Int.MAX_VALUE.toLong() - 1L)
+        require(ceiling >= 1L) { "build output ceiling is invalid" }
+        val size = java.nio.file.Files.size(path)
+        require(size in 1..ceiling) {
+            "source tree manifest exceeds the admitted build output bound ($size bytes; limit=$ceiling)"
+        }
         return parse(path.readText(), expectedProfile)
     }
 
