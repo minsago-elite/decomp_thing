@@ -35,8 +35,10 @@ internal fun JsonObject.requireGeneratedCBuildBudgetEvidence(profile: Reconstruc
         "makeExecutable", "compilerExecutable", "parallelism", "cFlags",
         "wallClockTimeoutMillis", "maximumOutputBytes", "terminationGraceMillis", "buildDefinition",
     )) { "build contract configuration is incomplete" }
-    require(configuration.string("makeExecutable").isNotBlank())
-    require(configuration.string("compilerExecutable").isNotBlank())
+    val makeExecutable = configuration.string("makeExecutable")
+    val compilerExecutable = configuration.string("compilerExecutable")
+    require(makeExecutable.isNotBlank())
+    require(compilerExecutable.isNotBlank())
     require(configuration.string("buildDefinition") == profile.layout.declaration("build-definition").materialize()) {
         "build contract build definition differs from the selected profile"
     }
@@ -51,6 +53,12 @@ internal fun JsonObject.requireGeneratedCBuildBudgetEvidence(profile: Reconstruc
     val configuredWallClock = configuration.number("wallClockTimeoutMillis")
     val configuredOutput = configuration.number("maximumOutputBytes")
     require(configuration.number("terminationGraceMillis") in 0..30_000)
+    require(flags.none { it == "-w" || it.startsWith("-Wno-error") && it.isNotBlank() }) {
+        "build contract compiler flags cannot disable warnings-as-errors"
+    }
+    require(flags.any { it == "-Werror" }) {
+        "build contract compiler flags must enable warnings-as-errors"
+    }
     require(configuredWallClock == number("wallClockTimeoutMillis") &&
         configuredOutput == number("maximumOutputBytes")) {
         "build contract effective limits are inconsistent with its configuration"
@@ -65,8 +73,8 @@ internal fun JsonObject.requireGeneratedCBuildBudgetEvidence(profile: Reconstruc
     // The recorded configuration must satisfy the same compiler policy as the build
     // invocation, and the recorded command must execute exactly that configuration.
     val effective = ProjectBuildConfiguration(
-        makeExecutable = configuration.string("makeExecutable"),
-        compilerExecutable = configuration.string("compilerExecutable"),
+        makeExecutable = makeExecutable,
+        compilerExecutable = compilerExecutable,
         cFlags = flags.map { it.jsonPrimitive.content },
         parallelism = configuredParallelism.toInt(),
         wallClockTimeoutMillis = configuredWallClock,

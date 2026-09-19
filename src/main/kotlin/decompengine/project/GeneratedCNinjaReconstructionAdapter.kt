@@ -9,6 +9,7 @@ internal object GeneratedCNinjaReconstructionAdapter : ReconstructionAdapter by 
     override fun rendering(model: RecoveredProgramModel, plan: ModulePlan): ProjectRendering =
         GeneratedCNinjaProjectRendering(model, plan)
     private fun configuration(profile: ReconstructionProfile, parallelism: Int) = ProjectBuildConfiguration(
+        makeExecutable = profile.adapterConfiguration.getValue("build-executable").single(),
         parallelism = parallelism,
         compilerExecutable = profile.adapterConfiguration.getValue("compiler-driver").single(),
         cFlags = profile.adapterConfiguration.getValue("compiler-flags"),
@@ -55,6 +56,9 @@ internal object GeneratedCNinjaReconstructionAdapter : ReconstructionAdapter by 
         }
         val text = readStableRegularFile(projectDir, configuration.buildDefinition, ceiling).bytes
             .toString(Charsets.UTF_8)
+        require(text.lineSequence().none { it.substringBefore('#').trimStart().startsWith("include ") || it.substringBefore('#').trimStart().startsWith("subninja ") }) {
+            "Ninja build definitions must not include external files"
+        }
         require(text.isNotEmpty()) { "Ninja build definition must not be empty" }
         require(text.toByteArray(Charsets.UTF_8).size <= ceiling) {
             "Ninja build definition exceeds the admitted build output bound"
