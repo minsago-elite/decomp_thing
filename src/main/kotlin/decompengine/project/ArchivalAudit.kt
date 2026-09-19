@@ -294,8 +294,8 @@ object ArchivalProjectAuditor {
                 }
                 val record = BehaviorEvidence.decode(snapshot.bytes)
                 val current = currentProjectRecord
+                BehaviorEvidence.requireProjectCurrent(record, BehaviorProjectContext(projectDir, profile))
                 if (current == null) {
-                    BehaviorEvidence.requireProjectCurrent(record, BehaviorProjectContext(projectDir, profile))
                     currentProjectRecord = record
                 } else {
                     require(record.getValue("projectRevision") == current.getValue("projectRevision")) {

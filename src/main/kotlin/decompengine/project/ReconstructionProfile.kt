@@ -239,7 +239,13 @@ data class BehaviorValidationBudgets(
         require(maximumComparisonOutputBytes >= maximumAggregateOutputBytes) {
             "behavior comparison output budget must cover one execution"
         }
+        require(maximumComparisonOutputBytes <= 16L * 1024 * 1024) {
+            "behavior comparison output budget exceeds the evidence transport limit"
+        }
         require(maximumStdinBytes > 0) { "behavior stdin budget must be positive" }
+        require(maximumStdinBytes <= 8L * 1024 * 1024) {
+            "behavior stdin budget exceeds the evidence transport limit"
+        }
         require(maximumArgumentBytes > 0) { "behavior argument budget must be positive" }
         require(maximumInputFileBytes > 0) { "behavior input-file byte budget must be positive" }
         require(maximumInputFiles > 0) { "behavior input-file count budget must be positive" }
