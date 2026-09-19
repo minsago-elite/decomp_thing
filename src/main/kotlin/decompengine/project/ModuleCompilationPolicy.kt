@@ -11,6 +11,9 @@ internal interface ModuleCompilationPolicy {
 
 /** Registration is application-owned; profile data cannot supply executable policy code. */
 internal object ReconstructionCompilationPolicies {
-    fun resolve(profile: ReconstructionProfile): ModuleCompilationPolicy =
+    fun resolve(profile: ReconstructionProfile): ModuleCompilationPolicy = try {
         ReconstructionAdapters.resolve(profile).compilation
+    } catch (_: IllegalArgumentException) {
+        GeneratedCModuleValidation
+    }
 }

@@ -10,6 +10,32 @@ import kotlin.io.path.exists
 
 class ArchiveTransportLayoutTest {
     @Test
+    fun `registered generated C profiles keep build controls and payload separate from outputs`() {
+        for (profile in ReconstructionProfiles.builtIn) {
+            val policy = ReconstructionAdapters.resolve(profile).archiveBuild
+            val layout = policy.transportLayout(profile)
+            val required = policy.requiredPaths(profile)
+            val buildDefinition = profile.layout.declaration("build-definition").materialize()
+
+            assertEquals(setOf("build"), layout.excludedOutputRoots)
+            assertEquals(setOf("reports/build_contract.json"), layout.strictBuildControlPaths)
+            assertTrue(buildDefinition in required)
+            assertTrue("reports/build_contract.json" in required)
+            assertTrue("ARCHIVE_MANIFEST.sha256" in required)
+            assertTrue("ARCHIVE_README.md" in required)
+            assertFalse(layout.excludes(buildDefinition))
+            assertFalse(layout.excludes("reports/build_contract.json"))
+            assertTrue(layout.excludes("build/reconstructed"))
+
+            profile.layout.declarations
+                .filter { ProjectFileRole.ARCHIVE_PAYLOAD in it.roles }
+                .forEach { declaration ->
+                    assertFalse(layout.excludedOutputRoots.any(declaration::canMaterializeUnder), declaration.pathTemplate)
+                }
+        }
+    }
+
+    @Test
     fun `archive rejects omitted declared inputs before creating output paths`() {
         val root = createTempDirectory("archive-layout-admission-")
         try {

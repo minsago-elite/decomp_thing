@@ -7,6 +7,8 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.file.Files
+import java.nio.file.LinkOption.NOFOLLOW_LINKS
+import java.nio.file.Path
 import java.time.Duration
 import java.util.concurrent.Executor
 import kotlin.io.path.createTempDirectory
@@ -28,6 +30,7 @@ class LegacyWebSessionTest {
         val job = store.createFromUpload("private-fixture.elf", elfFixture())
         val record = root.resolve(job.id).resolve("job.json")
         val before = Files.readAllBytes(record)
+        val storageBefore = storageSnapshot(root)
         val origin = "http://127.0.0.1:${server.serverPort}"
         val client = HttpClient.newHttpClient()
         fun request(path: String, method: String = "GET", headers: Map<String, String> = emptyMap()): HttpResponse<String> {
@@ -60,13 +63,28 @@ class LegacyWebSessionTest {
                 assertEquals(403, request(path, "POST", base + session + ("X-CSRF-Token" to "invalid")).statusCode())
             }
             assertContentEquals(before, Files.readAllBytes(record))
+            assertEquals(storageBefore, storageSnapshot(root), "denied legacy mutations must not create or rewrite retained state")
             assertEquals(0, executions)
             val logout = request("/api/v1/session", "DELETE", session + mapOf("Origin" to origin, "Content-Type" to "application/json"))
             assertEquals(204, logout.statusCode())
             assertTrue(logout.headers().firstValue("Set-Cookie").orElseThrow().contains("Max-Age=0"))
             for (path in paths + "/api/v1/session/csrf") assertEquals(401, request(path, headers = cookie).statusCode(), path)
             assertContentEquals(before, Files.readAllBytes(record))
+            assertEquals(storageBefore, storageSnapshot(root), "session logout must not rewrite job storage")
             assertEquals(0, executions)
         } finally { server.stop(); root.toFile().deleteRecursively() }
+    }
+
+    private fun storageSnapshot(root: Path): Map<String, Pair<String, List<Byte>>> = Files.walk(root).use { paths ->
+        paths.iterator().asSequence().filter { it != root }.associate { path ->
+            val kind = when {
+                Files.isRegularFile(path, NOFOLLOW_LINKS) -> "file"
+                Files.isDirectory(path, NOFOLLOW_LINKS) -> "directory"
+                Files.isSymbolicLink(path) -> "symlink"
+                else -> "other"
+            }
+            root.relativize(path).toString() to (kind to
+                if (kind == "file") Files.readAllBytes(path).toList() else emptyList())
+        }
     }
 }

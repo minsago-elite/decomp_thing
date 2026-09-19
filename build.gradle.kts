@@ -1603,6 +1603,7 @@ val verifyReconstructionNeutrality = tasks.register<Exec>("verifyReconstructionN
 }
 
 tasks.named("check") {
+    dependsOn(verifyReconstructionNeutrality)
     dependsOn(testFrontendAssetManifest)
     dependsOn(verifyPackagedWeb)
     dependsOn(verifyAcpGateHelperDistribution)

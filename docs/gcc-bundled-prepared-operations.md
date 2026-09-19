@@ -101,6 +101,17 @@ the exact profile paths and loop-device detachment. These helpers do not replace
 Kotlin lifecycle validation or establish crash recovery. Their privileged engine
 mount paths still require provisioned-host qualification.
 
+The trusted provisioner can stage the complete installation with
+`bash scripts/ci-prepare-bundled-ghidra-runtime.sh --application`. This copies
+`installDist` into a distinct root-owned deployment and publishes
+`DECOMP_GCC_CLI_INSTALLATION` for subsequent steps. It uses the same bounded,
+descriptor-relative copy and ownership marker as the Ghidra-only fixture mode.
+The installed CLI resolves its references relative to this complete installation;
+the Ghidra-only fixture environment variable does not redirect it.
+
+After confirmed worker absence, the matching trusted teardown command is
+`bash scripts/ci-release-bundled-ghidra-runtime.sh --application`. It requires the
+same run identity and checks the exact application target and ownership marker.
 The application mode's privileged copy/release still requires host qualification.
 
 Provision the reviewed root-owned JVM/system libraries, native helpers and bundled
