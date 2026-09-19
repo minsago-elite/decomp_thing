@@ -26,6 +26,7 @@ import decompengine.repair.RepairRuntimeConfiguration
 import decompengine.repair.SecureRepairRuntime
 import decompengine.validation.ProcessInput
 import decompengine.web.UploadServer
+import decompengine.web.WebUiMode
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Locale
@@ -441,34 +442,33 @@ private fun doctorUsageError(message: String): Nothing {
 private fun runWeb(args: List<String>) {
     var host = "127.0.0.1"
     var port = 8000
-    var listenBacklog = 64
     var dataDir = Path.of(".decomp_engine/jobs")
+    var uiMode = WebUiMode.LEGACY
+    var basePath = "/"
     var index = 0
     while (index < args.size) {
+        require(index + 1 < args.size) { "${args[index]} requires a value; see llm_bin_patch --help" }
         when (args[index]) {
-            "--host" -> {
-                host = args[index + 1]
+            "--host" -> { host = args[index + 1]; index += 2 }
+            "--port" -> { port = args[index + 1].toInt(); index += 2 }
+            "--data-dir" -> { dataDir = Path.of(args[index + 1]); index += 2 }
+            "--ui" -> {
+                uiMode = when (args[index + 1]) {
+                    "legacy" -> WebUiMode.LEGACY
+                    "spa" -> WebUiMode.SPA
+                    else -> error("--ui must be legacy or spa")
+                }
                 index += 2
             }
-            "--port" -> {
-                port = args[index + 1].toInt()
-                index += 2
-            }
-            "--listen-backlog" -> {
-                listenBacklog = args.getOrNull(index + 1)?.toIntOrNull()
-                    ?: error("--listen-backlog requires an integer between 1 and 4096")
-                index += 2
-            }
-            "--data-dir" -> {
-                dataDir = Path.of(args[index + 1])
-                index += 2
-            }
+            "--base-path" -> { basePath = args[index + 1]; index += 2 }
+            "--listen-backlog" -> error("--listen-backlog is not supported with the web UI")
             else -> error("unknown web argument: ${args[index]}")
         }
     }
-    val server = UploadServer(host, port, dataDir, listenBacklog = listenBacklog)
+    val server = UploadServer(host, port, dataDir, uiMode = uiMode, basePath = basePath)
     decompengine.web.startWebServerWithShutdownHook(server)
-    println("Serving decomp_engine upload UI on http://$host:${server.serverPort}")
+    val urlHost = if (':' in host && !host.startsWith('[')) "[$host]" else host
+    println("Serving decomp_engine ${uiMode.name.lowercase()} UI on http://$urlHost:${server.serverPort}$basePath")
 }
 
 private fun printHelp() {

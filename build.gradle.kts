@@ -1436,6 +1436,20 @@ val verifyKotlinBootClasspathDistribution = tasks.register("verifyKotlinBootClas
     }
 }
 
+val packagedWebJava = javaToolchains.launcherFor {
+    languageVersion.set(JavaLanguageVersion.of(21))
+}
+val verifyPackagedWeb = tasks.register<Exec>("verifyPackagedWeb") {
+    group = "verification"
+    description = "Launches relocated read-only ZIP/TAR distributions with Node absent from runtime PATH"
+    dependsOn(tasks.named("distZip"), tasks.named("distTar"))
+    inputs.file(layout.projectDirectory.file("scripts/check-packaged-web.py"))
+    doFirst {
+        environment("JAVA_HOME", packagedWebJava.get().metadata.installationPath.asFile.absolutePath)
+        commandLine("python3", layout.projectDirectory.file("scripts/check-packaged-web.py").asFile.absolutePath)
+    }
+}
+
 val verifyReconstructionNeutrality = tasks.register<Exec>("verifyReconstructionNeutrality") {
     group = "verification"
     description = "Checks declared generic surfaces and benchmark ownership without running project code"
@@ -1445,7 +1459,7 @@ val verifyReconstructionNeutrality = tasks.register<Exec>("verifyReconstructionN
 }
 
 tasks.named("check") {
-    dependsOn(verifyReconstructionNeutrality)
+    dependsOn(verifyPackagedWeb)
     dependsOn(verifyAcpGateHelperDistribution)
     dependsOn(verifyLlvmBehaviorHelperDistribution)
     dependsOn(verifyKotlinBootClasspathDistribution)
