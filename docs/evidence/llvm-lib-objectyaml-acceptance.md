@@ -19,7 +19,7 @@ inventory agree that all five are linked units with the following ownership:
 | `cu-75ad75e87ea10d04fb519f7258966d1c` | `source/llvm/lib/ObjectYAML/ELFYAML.cpp` |
 | `cu-c72554b2f962cc42e86e00ccbf9d3e26` | `source/llvm/lib/ObjectYAML/YAML.cpp` |
 
-The source inventory also records 23 source-only files in this exact shard.
+The source inventory also records 24 source-only files in this exact shard.
 They are explicit non-owning records with the authenticated build-graph reason:
 
 | Source-only path | Reason |
@@ -52,7 +52,7 @@ They are explicit non-owning records with the authenticated build-graph reason:
 These records establish the current module and linked compilation-unit
 population before dispatch. The five-module planning count is source ownership
 context; it is not an emitted-function or accepted-implementation denominator.
-The 23 source-only rows remain explicit non-owning evidence.
+The 24 source-only rows remain explicit non-owning evidence.
 
 ## Acceptance state
 
