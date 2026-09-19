@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, lstat, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { lstat } from 'node:fs/promises';
 import test from 'node:test';
 import { createWebGitFixture } from './web-git-fixtures.mjs';
 import { createFakeGitHubFixture } from './web-github-fixture.mjs';
@@ -21,23 +20,48 @@ test('independent roots produce the same isolated diverged history and disposabl
     assert.equal(first.git('local', ['show', 'main:local.txt']).stdout, 'local-only fixture change\n');
     assert.equal(first.git('local', ['show', 'origin/main:remote.txt']).stdout, 'remote-only fixture change\n');
     assert.equal(first.git('local', ['remote', 'get-url', 'origin']).stdout.trim(), first.paths.remote);
+    assert.equal(first.git('local', ['config', '--get', 'core.hooksPath']).stdout.trim(), '/dev/null');
     assert.equal((await lstat(first.paths.root)).mode & 0o777, 0o700);
     assert.equal(first.git('local', ['log', '-1', '--format=%at|%ct']).stdout.trim(),
       `${Date.parse('2026-01-01T00:00:01Z') / 1000}|${Date.parse('2026-01-01T00:00:01Z') / 1000}`);
     console.log(`web-git-fixture: ${JSON.stringify({ state: first.state, commits: first.commits, branches: first.branches })}`);
-    assert.throws(() => first.git('outside', ['status']), /Invalid Git fixture command/);
-    assert.throws(() => first.git('local', ['fetch', 'https://example.invalid/no-network']), /transport 'https' not allowed/);
-    await writeFile(join(first.paths.local, '.git/hooks/pre-commit'), '#!/bin/sh\nexit 97\n');
-    await chmod(join(first.paths.local, '.git/hooks/pre-commit'), 0o700);
-    await writeFile(join(first.paths.local, 'hook-check.txt'), 'Synthetic hook isolation check.\n');
-    first.git('local', ['add', '--', 'hook-check.txt']);
-    first.git('local', ['commit', '-m', 'fixture: hooks remain disabled']);
+    assert.throws(() => first.git('outside', ['status']), /Unsupported Git fixture inspection/);
+    for (const args of [
+      ['-C', '/tmp/decomp-d-607', 'rev-parse', '--show-toplevel'],
+      ['--git-dir', '/tmp/decomp-d-607/.git', 'status'],
+      ['--git-dir=/tmp/decomp-d-607/.git', 'status'],
+      ['--work-tree', '/tmp/decomp-d-607', 'status'],
+      ['-c', 'core.hooksPath=/tmp', 'status'],
+      ['--config-env', 'core.hooksPath=PATH', 'status'],
+      ['status', '--git-dir=/tmp/decomp-d-607/.git'],
+      ['status', '--work-tree=/tmp/decomp-d-607'],
+      ['status', '--config-env=core.hooksPath=PATH'],
+      ['show', 'main:README.md', '--output=/tmp/escape'],
+      ['diff', '--no-index', '/etc/hosts', '/etc/passwd'],
+      ['worktree', 'add', '/tmp/escape'],
+      ['fetch', 'https://example.invalid/no-network'],
+      ['config', '--global', 'user.name'],
+      ['config', '--file', '/tmp/escape', 'user.name', 'Escape'],
+      ['commit', '-m', 'outside mutation'],
+    ]) assert.throws(() => first.git('local', args), /Unsupported Git fixture inspection/);
   } finally {
     await first.dispose();
     await second.dispose();
   }
   await assert.rejects(lstat(first.paths.root), { code: 'ENOENT' });
   await assert.rejects(lstat(second.paths.root), { code: 'ENOENT' });
+});
+
+test('a fixture-owned executable hook cannot run during deterministic construction', async () => {
+  const guarded = await createWebGitFixture({ poisonHooks: true });
+  const control = await createWebGitFixture();
+  try {
+    assert.deepEqual(guarded.commits, control.commits);
+    assert.equal(guarded.git('local', ['config', '--get', 'core.hooksPath']).stdout.trim(), '/dev/null');
+  } finally {
+    await guarded.dispose();
+    await control.dispose();
+  }
 });
 
 test('conflicted history leaves a real unmerged index and deterministic branch tips', async () => {
