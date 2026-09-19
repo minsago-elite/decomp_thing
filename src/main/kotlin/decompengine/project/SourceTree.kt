@@ -938,12 +938,12 @@ object SourceTreeGenerator {
         moduleCount: Int,
         hasEntrypoint: Boolean,
     ) {
-        // Each module writes a public header, private header, implementation, and
-        // checkpoint before archival packaging can enforce its entry limit. Reserve
-        // an additional slot for optional agent execution evidence, plus the fixed
-        // project evidence files and manifest.
+        // Each module writes a public header, private header, implementation,
+        // checkpoint, optional agent execution evidence, and (during the generated
+        // project build) an owner diagnostic. Reserve slots for the fixed project
+        // evidence files, build diagnostics, and manifest as well.
         val fixedEntries = 8 + if (hasEntrypoint) 1 else 0
-        val projectedEntries = moduleCount.toLong() * 5L + fixedEntries
+        val projectedEntries = moduleCount.toLong() * 6L + fixedEntries
         require(projectedEntries <= profile.budgets.archiveMaximumEntries.toLong()) {
             "projected generated file count $projectedEntries exceeds archive entry budget " +
                 "${profile.budgets.archiveMaximumEntries}"

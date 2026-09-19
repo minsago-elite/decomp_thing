@@ -34,8 +34,13 @@ class RuntimeInstallationTest(unittest.TestCase):
         (self.source / 'nested' / 'mode-marker').write_text('not executed\n')
         (self.source / 'nested' / 'mode-marker').chmod(0o755)
 
-    def invoke(self, prepare, target=None):
-        args = [str(target or self.target), self.run_id, self.attempt]
+    def invoke(self, prepare, target=None, deployment_kind='ghidra'):
+        selected_target = target or (self.target if deployment_kind == 'ghidra' else
+                                    Path(f'/var/lib/decomp-ci-{deployment_kind}-{self.run_id}-{self.attempt}'))
+        args = [str(selected_target), self.run_id, self.attempt, deployment_kind]
+
+        if deployment_kind not in ('ghidra', 'application'):
+            raise ValueError(deployment_kind)
         if prepare:
             args.insert(0, str(self.source))
         name = 'ci-prepare-bundled-ghidra-runtime.sh' if prepare else 'ci-release-bundled-ghidra-runtime.sh'
