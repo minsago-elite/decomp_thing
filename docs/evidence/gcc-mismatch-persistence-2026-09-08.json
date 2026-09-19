@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "recordKind": "gcc-reproducible-mismatch-ledger",
+  "issue": 717,
+  "recordedOnUtc": "2026-09-08",
+  "evidenceBasis": {
+    "repositoryCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+    "profileId": "gcc-16-2-0-driver-behavior",
+    "sourceRevision": "78d4ac73dd391005b895a6148cd9831e28e1208b",
+    "module": "driver-release",
+    "archivedInputs": [
+      {
+        "path": "oracle/gcc/16.2.0/source-lock.json",
+        "sha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc"
+      },
+      {
+        "path": "oracle/gcc/16.2.0/behavior-corpus.json",
+        "sha256": "bcc1a14ca8c54f94106c943f0bc5698cb9af3151b7bf20a49ae3c8828baaad0e"
+      },
+      {
+        "path": "oracle/gcc/16.2.0/oracle-manifest.json",
+        "sha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9"
+      },
+      {
+        "path": "oracle/gcc/16.2.0/build-record.json",
+        "sha256": "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
+      }
+    ],
+    "observation": {
+      "path": "oracle/gcc/16.2.0/behavior-corpus-evidence.json",
+      "sha256": "9dcf787aea232615a1ff8721144b86bc1f5e9a2a7068fa9e9280db0bc4ad6803",
+      "scope": "authenticated-retained-reference-only",
+      "cases": 14,
+      "passed": 14
+    }
+  },
+  "identity": {
+    "rule": "sha256(decomp-gcc-mismatch-v1 + newline + profileId + newline + caseSet + newline + dimension + newline + module)",
+    "id": "gcc-mismatch-86e89054c79bdc755e97c604528ac364628eb108da314a2b8bcacf9b0de9be39",
+    "caseSet": "all-required-cases",
+    "dimension": "candidate-observation",
+    "module": "driver-release",
+    "revisionIndependent": true
+  },
+  "entry": {
+    "state": "unresolved",
+    "kind": "missing-candidate-evidence",
+    "oracleSourceRevision": "78d4ac73dd391005b895a6148cd9831e28e1208b",
+    "candidateSourceRevision": null,
+    "observedCandidateMismatch": false,
+    "persistsAcrossRevisions": true,
+    "blocksRelease": true,
+    "reason": "The repository retains an authenticated GCC reference corpus and 14/14 reference observations, but no authenticated reconstructed candidate executable, module acceptance, or candidate observation report. This record preserves the unresolved evidence state without inventing a candidate mismatch."
+  },
+  "authorityBoundary": {
+    "oracleEvidence": "retained-authenticated-reference-only",
+    "candidateEvidence": "must-be-independently-authenticated",
+    "releaseDecision": "unresolved-until-candidate-comparison",
+    "presentationMayAuthorizeRelease": false,
+    "analysis": {
+      "provider": "bundled-ghidra-java-api",
+      "isolatedWorkerRequired": true,
+      "externalGhidraHomeRequired": false,
+      "externalAnalyzeHeadlessAllowed": false
+    }
+  },
+  "productionGap": "Production qualification remains unavailable. The retained facts do not include an authenticated reconstructed source/archive identity, module-level candidate revision, candidate behavior observations, repeated clean reruns, or the complete #40/#42/#45/#50/#51-#53 evidence set required by parent issue #54."
+}
