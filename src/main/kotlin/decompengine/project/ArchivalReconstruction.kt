@@ -396,6 +396,7 @@ class ArchivalReconstructionService(
     fun reconstruct(binaryPath: Path, outputDir: Path): ArchivalReconstructionResult {
         if (Thread.interrupted()) throw InterruptedException("archival reconstruction cancelled")
         outputDir.createDirectories()
+        requireCompatibleProfile(outputDir)
         val observedBehavior = ReconstructionExplorationInput.read(
             outputDir, profile.budgets.reconstructionMaximumContextCharacters,
         )
@@ -457,5 +458,22 @@ class ArchivalReconstructionService(
             """.trimIndent() + "\n",
         )
         return ArchivalReconstructionResult(project, build, bundle)
+    }
+
+    /**
+     * Rejects reuse of an output directory whose recorded reconstruction used a different profile,
+     * so stale build-definition files from the previous profile cannot leak into the new archive.
+     */
+    private fun requireCompatibleProfile(outputDir: Path) {
+        val summary = outputDir.resolve("reconstruction.json")
+        if (!Files.isRegularFile(summary, LinkOption.NOFOLLOW_LINKS)) return
+        val recordedId = runCatching {
+            val text = Files.readString(summary)
+            Regex("\"profileId\"\\s*:\\s*\"([^\"]+)\"").find(text)?.groupValues?.get(1)
+        }.getOrNull() ?: return
+        require(recordedId == profile.id) {
+            "output directory was reconstructed with profile $recordedId; " +
+                "rerun with profile ${profile.id} in an empty directory or remove the existing output directory"
+        }
     }
 }
