@@ -1,40 +1,36 @@
-# `clang-lib-support` acceptance evidence
+# `clang-lib-sema` acceptance evidence
 
 This checkpoint records the authenticated source ownership boundary for issue
-#1014. It is evidence for bounded planning and dispatch only; it does not claim
+#1011. It is evidence for bounded planning and dispatch only; it does not claim
 that an implementation has been generated, accepted, merged, or qualified for
 production.
 
 ## Authenticated population
 
-The LLVM 22.1.6 inventories bind `clang-lib-support` to exactly one linked,
-handwritten compilation unit:
-
-| Module/unit ID | Source path |
-| --- | --- |
-| `cu-38bb844b1c3bc8647e35cbf5ecbc5cb6` | `source/clang/lib/Support/RISCVVIntrinsicUtils.cpp` |
-
-The authenticated source inventory contains no source-only record for this
-shard. The module row establishes planning ownership context; it is not an
-emitted-function or accepted-implementation denominator.
+The LLVM 22.1.6 scope, inventory, planning inventory, and source inventory bind
+`clang-lib-sema` to exactly 86 linked, handwritten compilation units under
+`source/clang/lib/Sema/`. The authenticated source inventory contains no
+source-only record for this shard. The focused control test checks the exact
+module count, unique source and unit identities, source boundary, derived
+compilation-unit IDs, and owner lookup for every row.
 
 The planning registry now exposes an exact shard-owner lookup. It rejects
 invalid and unknown shard IDs, returns only authenticated linked/generated
 modules, and does not authorize implementation acceptance or turn module
-ownership into an emitted-function count.
+ownership into an emitted-function denominator.
 
 ## Acceptance state and remaining gaps
 
 No shard-specific authenticated emitted-function population, generated source,
 ACP invocation receipt, compiler or validation receipt, behavioral receipt, or
-retained accepted checkpoint is present in this slice. The linked unit
-therefore remains unresolved and release-blocking under #1014.
+retained accepted checkpoint is present in this slice. The 86 linked units
+therefore remain unresolved and release-blocking under #1011.
 
-Required work still must derive the current emitted population for this exact
-owner, generate every required implementation through the qualified bounded ACP
-workflow, and retain per-module source plus ACP/validation receipts. Unresolved
-entities must remain explicit blockers. ABI, calls, globals, names, and
-cross-shard ownership interfaces require the existing validation and
+Required work still must bind the current emitted population before dispatch,
+generate every required implementation through the qualified bounded ACP
+workflow, and retain exact per-module source plus ACP/validation receipts.
+Unresolved entities must remain explicit blockers. ABI, calls, globals, names,
+and cross-shard ownership interfaces require the existing validation and
 invalidation authorities. Placeholder returns, abort/no-op bodies, undeclared
 shims, and reduced denominators cannot count as accepted implementations.
 
@@ -52,16 +48,8 @@ The evidence is bound to these repository-controlled LLVM 22.1.6 artifacts:
 | `full-tree-planning-inventory.json` | `2bf9181f031e94304d63e184e5d2fb684623f981b655afb966a06db7c43be15a` |
 | `full-tree-source-inventory.json` | `33e53beb62221888abbf5e198a4da2abe3b5c29c809bb90f1faff15c3829edc4` |
 
-The compact JSON hash of the one-element filtered planning-module-record
-array (the preimage is the JSON array `[{...}]`, not the object alone) is
-`d9c7da77047dd0e7338988c9ca5553e591b514bd4e29f4e35121a75515cf82f4`. The
-inventory's ordered unit-ID hash is
-`83b4f6bc212226a9d8738898062a86b03b1f711e6e327e468fc0bbea5dbab2af`, and the
-compact hash of the one-element filtered linked-source-record array (the preimage is the JSON array `[{...}]`, not the object alone) is
-`a3f60c25b4ba5b7ce055f7dedefbc386dcfea5b3f22674780dd47b37b53ee4f4`.
-
 The planning inventory contains 2,150 source modules across 57 shards. That
 repository-wide planning count is context only and grants no acceptance or
 release authority.
 
-Refs #1014
+Refs #1011
