@@ -13,9 +13,16 @@
     "src/main/kotlin/decompengine/web"
   ],
   "benchmarkRoots": [
-    "oracle/gcc",
-    "src/main/kotlin/decompengine/oracle/gcc",
-    "src/test/kotlin/decompengine/oracle/gcc"
+    "oracle",
+    "src/main/kotlin/decompengine/oracle",
+    "src/test/kotlin/decompengine/oracle",
+    "tests/oracle",
+    ".github/workflows/gcc-oracle-model.yml",
+    "scripts/fetch-gcc-oracle-source.py",
+    "scripts/generate-gcc-behavior-corpus.py",
+    "scripts/generate-gcc-compiler-engine-build-records.py",
+    "scripts/run-gcc-behavior-corpus.py",
+    "scripts/verify-gcc-oracle-source.py"
   ],
   "adapterFiles": [
     {
@@ -255,6 +262,62 @@
       "fragment": "gcc_runtime / 'cc1'",
       "count": 1,
       "reason": "Inventories the installed compiler runtime for generated-C provisioning; this expression does not select a benchmark artifact. Version and digest checks remain active."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-compiler-flag",
+      "fragment": "-Werror",
+      "count": 3,
+      "reason": "Pre-existing MVP memory-safety patch verification compiles its patched C with warnings as errors and names that policy in retained evidence and prompt text; no reconstruction adapter dispatch is involved."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-compiler-flag",
+      "fragment": "-Wall",
+      "count": 2,
+      "reason": "Pre-existing MVP patch verification compile flag set and patch-prompt instruction; the MVP evidence flow predates the neutrality policy."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-compiler-flag",
+      "fragment": "-Wextra",
+      "count": 2,
+      "reason": "Pre-existing MVP patch verification compile flag set and patch-prompt instruction; the MVP evidence flow predates the neutrality policy."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-compiler-flag",
+      "fragment": "-std=c11",
+      "count": 1,
+      "reason": "Pre-existing MVP patch verification C dialect selection for its own compile evidence flow."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-tool",
+      "fragment": "\"gcc\"",
+      "count": 1,
+      "reason": "Pre-existing MVP patch verification invokes the host C compiler directly for its own evidence flow; it is not a reconstruction adapter implementation."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/RepairAcpEvidenceArchiveVerifier.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "GeneratedCRepairRuntimeConfiguration",
+      "count": 3,
+      "reason": "Repair evidence verification compares archived runtime-tool records against the registered generated-C repair adapter's runtime configuration; adapter registration remains explicit."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/RepairAcpEvidenceArchiveVerifier.kt",
+      "rule": "generic-layout",
+      "fragment": "\"Makefile\"",
+      "count": 1,
+      "reason": "Repair evidence verification classifies the archived generated-C repair validation snapshot's build-file source role."
+    },
+    {
+      "path": "src/test/kotlin/decompengine/analysis/BundledGhidraTest.kt",
+      "rule": "benchmark-version",
+      "fragment": "gcc/16.2.0",
+      "count": 1,
+      "reason": "Bundled Ghidra provenance test loads the pinned benchmark compiler-engine profile to authenticate the installed bundled release."
     }
   ],
   "benchmarkCatalog": "oracle/gcc/reconstruction-neutrality-identities.json"
