@@ -1344,23 +1344,29 @@ object SourceTreeGenerator {
         val promptCharacters = reconstructed.promptCharacters
         val promptBudget = reconstructed.promptBudgetCharacters
         if (claimsAgentExecution || promptCharacters != null || promptBudget != null) {
-            when {
-                promptCharacters == null || promptBudget == null -> issues += ModuleReconstructionIssue(
+            if (promptCharacters == null || promptBudget == null) {
+                issues += ModuleReconstructionIssue(
                     "prompt-budget-unattributed",
                     "agent result does not record prompt size and configured budget",
                     entityIds,
                 )
-                promptCharacters > promptBudget -> issues += ModuleReconstructionIssue(
-                    "context-budget-exceeded",
-                    "agent prompt used $promptCharacters characters with a $promptBudget character budget",
-                    entityIds,
-                )
-                !modulePromptBudgetIsValid(promptCharacters.toLong(), promptBudget.toLong(), profile) ->
+            } else {
+                // Each violation is retained independently so recorded evidence shows both
+                // a usage overrun and a budget the selected profile never authorized.
+                if (promptCharacters > promptBudget) {
+                    issues += ModuleReconstructionIssue(
+                        "context-budget-exceeded",
+                        "agent prompt used $promptCharacters characters with a $promptBudget character budget",
+                        entityIds,
+                    )
+                }
+                if (!modulePromptBudgetIsValid(promptCharacters.toLong(), promptBudget.toLong(), profile)) {
                     issues += ModuleReconstructionIssue(
                         "prompt-budget-invalid",
                         "agent prompt size or budget is outside the selected reconstruction profile",
                         entityIds,
                     )
+                }
             }
         }
         issues += adapter.assess(module, model, reconstructed.generator, source)

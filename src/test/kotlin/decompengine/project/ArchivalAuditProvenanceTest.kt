@@ -68,6 +68,46 @@ class ArchivalAuditProvenanceTest {
     }
 
     @Test
+    fun `audit requires profile bounded prompt metadata for accepted custom checkpoints`() {
+        val project = fixture(accepted = true)
+        val plan = Json.parseToJsonElement(project.resolve("reports/module_plan.json").readText()).jsonObject
+        val module = plan.getValue("modules").jsonArray.first().jsonObject
+        val id = module.getValue("id").jsonPrimitive.content
+        val path = "reports/modules/$id.json"
+        val checkpoint = Json.parseToJsonElement(project.resolve(path).readText()).jsonObject
+        val limit = GeneratedCMakeReconstructionProfile.descriptor.budgets.reconstructionMaximumContextCharacters
+        data class Case(val name: String, val characters: JsonElement?, val budget: JsonElement?, val valid: Boolean = false)
+        val cases = listOf(
+            Case("no metadata", null, null, true),
+            Case("within bound", JsonPrimitive(1), JsonPrimitive(limit), true),
+            Case("exact bound", JsonPrimitive(limit), JsonPrimitive(limit), true),
+            Case("missing size", null, JsonPrimitive(limit)),
+            Case("missing budget", JsonPrimitive(1), null),
+            Case("above profile", JsonPrimitive(1), JsonPrimitive(limit + 1)),
+            Case("size above budget", JsonPrimitive(2), JsonPrimitive(1)),
+        )
+        // The fixture records a custom (non-agent) reconstructor identity; accepted metadata
+        // beyond the profile must fail the audit exactly like an agent checkpoint's would.
+        for (case in cases) {
+            val changed = JsonObject(checkpoint.toMutableMap().apply {
+                remove("promptCharacters")
+                remove("promptBudgetCharacters")
+                case.characters?.let { put("promptCharacters", it) }
+                case.budget?.let { put("promptBudgetCharacters", it) }
+            })
+            writeBoundFile(project, path, changed.toString())
+            val audit = ArchivalProjectAuditor.audit(project)
+            assertEquals(if (case.valid) emptySet() else setOf(id), audit.moduleCompilationEvidenceProblems.keys, case.name)
+            assertEquals(case.valid, id in audit.moduleCompilationEvidence, case.name)
+            assertEquals(
+                if (case.valid) emptyList() else module.getValue("functionIds").jsonArray.map { it.jsonPrimitive.content }.sorted(),
+                audit.unresolvedEntityIds,
+                case.name,
+            )
+        }
+    }
+
+    @Test
     fun `audit retains exact accepted compiler records through archive extraction`() {
         val project = fixture(accepted = true)
         val audit = ArchivalProjectAuditor.audit(project)
