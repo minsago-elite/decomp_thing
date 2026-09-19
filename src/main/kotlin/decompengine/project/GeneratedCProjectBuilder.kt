@@ -248,7 +248,12 @@ internal object GeneratedCProjectBuilder {
             }
             try {
                 val elapsed = System.nanoTime() - started
-                return outputFuture.get(maxOf(0L, budgetNanos - elapsed), TimeUnit.NANOSECONDS)
+                val remaining = budgetNanos - elapsed
+                if (remaining <= 0L) throw TimeoutException()
+                // Bound each wait so descendants spawned after the previous snapshot are
+                // observed before the root can exit and orphan them.
+                val pollInterval = minOf(remaining, TimeUnit.MILLISECONDS.toNanos(25))
+                return outputFuture.get(pollInterval, TimeUnit.NANOSECONDS)
             } catch (failure: TimeoutException) {
                 val elapsed = System.nanoTime() - started
                 if (elapsed >= budgetNanos) throw failure
