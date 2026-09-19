@@ -13,6 +13,8 @@ import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.io.path.createDirectories
@@ -167,9 +169,14 @@ object BwrapCapability {
             val process = ProcessBuilder(listOf(bwrapPath.pathString, "--help"))
                 .redirectErrorStream(true)
                 .start()
-            val output = process.inputStream.readNBytes(256 * 1024).decodeToString()
-            process.waitFor(3, TimeUnit.SECONDS)
-            "--json-status-fd" in output
+            val output = AtomicReference<ByteArray>()
+            val reader = thread(start = true, isDaemon = true, name = "bwrap-help-probe") {
+                output.set(process.inputStream.readNBytes(256 * 1024))
+            }
+            val completed = process.waitFor(3, TimeUnit.SECONDS)
+            if (!completed) process.destroyForcibly()
+            reader.join(1_000)
+            completed && "--json-status-fd" in (output.get()?.decodeToString() ?: "")
         } catch (_: Exception) {
             false
         }

@@ -7,6 +7,7 @@ import java.io.InputStreamReader
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.Properties
@@ -81,7 +82,9 @@ class BundledGhidra private constructor(val root: Path) {
         val records = Files.newInputStream(manifest, LinkOption.NOFOLLOW_LINKS).use { input ->
             BufferedReader(InputStreamReader(
                 CheckpointInputStream(input, checkpoint, "bundled Ghidra checksum manifest"),
-                StandardCharsets.UTF_8,
+                StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT),
             )).readLines()
         }
         checkpoint("after reading bundled Ghidra checksum manifest")
