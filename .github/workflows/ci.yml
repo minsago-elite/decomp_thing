@@ -42,6 +42,8 @@ jobs:
           node scripts/generate-web-api.mjs --check
           node --test scripts/generate-web-api.test.mjs \
             | tee "$RUNNER_TEMP/frontend-ci/api-drift-tests.txt"
+      - name: Verify generated large web fixtures
+        run: node --test scripts/web-scale-fixtures.test.mjs | tee "$RUNNER_TEMP/frontend-ci/scale-fixtures-tests.txt"
       - name: Type-check frontend source and tests
         run: npm --prefix frontend run typecheck
       - name: Lint frontend source and tests
@@ -50,6 +52,8 @@ jobs:
         run: |
           npm --prefix frontend test -- --reporter=default --reporter=junit \
             --outputFile.junit="$RUNNER_TEMP/frontend-ci/component-tests.xml"
+      - name: Verify isolated Git and GitHub fixtures
+        run: node --test scripts/web-git-fixtures.test.mjs scripts/web-github-fixture-http.test.mjs | tee "$RUNNER_TEMP/frontend-ci/git-fixtures-tests.txt"
       - name: Build and verify the production asset inventory
         run: |
           npm --prefix frontend run build

@@ -72,7 +72,7 @@ object ElfSymbolInventoryReader {
         var cursor = dynsym.offset.toInt()
         repeat(symCount) {
             if (cursor + symSize.toInt() > bytes.size) return@repeat
-            val sym = readSymbol(buffer, cursor, elfClass, symSize.toInt())
+            val sym = readSymbol(buffer, cursor, elfClass)
             cursor += symSize.toInt()
             if (sym.shndx == SHN_UNDEF && sym.nameOffset != 0) {
                 val name = readString(strtabBytes, sym.nameOffset)
@@ -179,7 +179,7 @@ object ElfSymbolInventoryReader {
         return null
     }
 
-    private fun readSymbol(buffer: ByteBuffer, offset: Int, elfClass: Int, entrySize: Int): RawSymbol {
+    private fun readSymbol(buffer: ByteBuffer, offset: Int, elfClass: Int): RawSymbol {
         buffer.position(offset)
         val nameOffset = buffer.int
         return if (elfClass == 2) {
@@ -191,11 +191,11 @@ object ElfSymbolInventoryReader {
             RawSymbol(nameOffset, info and 0xf, info ushr 4, shndx, size)
         } else {
             buffer.int // st_value
-            buffer.int // st_size
+            val size = buffer.int.toUInt().toULong()
             val info = buffer.get().toInt() and 0xff
             buffer.get() // st_other
             val shndx = buffer.short.toUShort().toInt()
-            RawSymbol(nameOffset, info and 0xf, info ushr 4, shndx, entrySize.toULong())
+            RawSymbol(nameOffset, info and 0xf, info ushr 4, shndx, size)
         }
     }
 

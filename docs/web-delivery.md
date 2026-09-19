@@ -55,6 +55,17 @@ are an explicit profile in `contracts/web/scale-profile-v1.json`, fixed timestam
 and deterministic IDs; no random clock, external download, native analyzer,
 provider or uploaded executable is used.
 
+Run `node scripts/verify-web-scale-fixtures.mjs build/web-scale-a` to stream-check
+the declared inventory, record counts, payload lengths and SHA-256 digests against
+the checked-in profile. The required frontend CI job also runs
+`node --test scripts/web-scale-fixtures.test.mjs`: it generates two complete
+datasets in fresh temporary directories, compares their manifests and verified
+payload summaries, checks representative records and sizes, and rejects an
+existing output or corrupted payload. The temporary payloads are removed after
+the test; only the generator, profile and small verification evidence are kept
+in Git. This proves deterministic synthetic bytes, not API-schema compatibility,
+real persisted source/Git adapters or production performance.
+
 The generator emits 10,000 job records, 100,000 functions with addresses above the
 JavaScript safe-integer boundary, 25,000 source-tree file records with deterministic
 text content, an 8 MiB source file, a 256 KiB single line, 64 MiB of logs, 120,000

@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-09-08T12:56:56Z",
+  "issue": 49,
+  "scope": "Bounded atomic repair/revision evidence at the current repository scale boundary; this record is not GCC production qualification.",
+  "sourceBaseCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "sourceSha256": {
+    "src/main/kotlin/decompengine/repair/ModuleRevisionGraph.kt": "8fb30ebd98ac91e4431dd5a2b8f3679d20a333611ff99dda18d566d3864d72b6",
+    "src/test/kotlin/decompengine/repair/ModuleRevisionGraphTest.kt": "c5fc84d0a13c90e14093798fbb9398bc2ec0bf6a825617e56c960c345eadd08b",
+    "src/test/kotlin/decompengine/repair/RepairRunSemanticsTest.kt": "1eb4112a84e8cf0d14a9fbc148c811df030c475f6e9a53cbf37136efc8c9f209",
+    "docs/repair-run-state.md": "30418d1fd435f9df45974bcb69cf5648d4be31e503f8573500f9665100190033",
+    "docs/repair-revision-graph.md": "8b0118fd1d10f5db8cf9042e0ddf1af6c6ea9c7e3672b493e5c24e37ad3e4bdf"
+  },
+  "observations": {
+    "indexScale": {
+      "test": "decompengine.repair.ModuleRevisionGraphTest.sparse index selects bounded context for more than five thousand functions",
+      "fixture": "synthetic generated-C index",
+      "modules": 256,
+      "functionsPerModule": 20,
+      "indexedFunctions": 5120,
+      "selectedSeedModules": ["module_0255"],
+      "selectedDependencyModules": ["module_0254"],
+      "contextFilesUpperBoundAtDefaultBudget": 6,
+      "productionScaleQualified": false,
+      "limitation": "This exercises dependency-limited context selection only; it is not a real GCC driver inventory or repair run."
+    },
+    "atomicRevision": {
+      "publicationRecoveryTest": "decompengine.repair.ModuleRevisionGraphTest.durable graph publication crash points recover an exact pending attempt",
+      "publicationRecoveryFaultPoints": 2,
+      "publicationRecoveryResult": "pending attempt is durably recovered as rejected and the exact accepted source bytes remain installed",
+      "rollbackRecoveryTest": "decompengine.repair.RepairRunSemanticsTest.interrupted canonical publication restores exact baseline before recording terminal recovery",
+      "rollbackRecoveryResult": "interrupted promotion leaves the canonical baseline byte-identical and does not create a fully accepted head",
+      "provisionalLineageTest": "decompengine.repair.RepairRunSemanticsTest.restart retains a verified provisional snapshot as nonaccepted interrupted evidence",
+      "provisionalLineageResult": "provisional candidate bytes remain addressable as evidence while canonical source and fully accepted head remain unchanged"
+    }
+  },
+  "focusedValidation": {
+    "command": "./gradlew --no-daemon test --tests 'decompengine.repair.ModuleRevisionGraphTest.sparse index selects bounded context for more than five thousand functions' --tests 'decompengine.repair.ModuleRevisionGraphTest.durable graph publication crash points recover an exact pending attempt' --tests 'decompengine.repair.RepairRunSemanticsTest.interrupted canonical publication restores exact baseline before recording terminal recovery' --tests 'decompengine.repair.RepairRunSemanticsTest.restart retains a verified provisional snapshot as nonaccepted interrupted evidence'",
+    "tests": 4,
+    "failures": 0,
+    "errors": 0,
+    "skips": 0,
+    "result": "passed"
+  },
+  "unavailableProductionGates": [
+    "#236 contained production snapshot/build/behavior provider and qualification",
+    "#701 complete descriptor-pinned historical behavior-evidence publication reconciliation",
+    "#702 bounded repair on the real declared GCC driver inventory with independent resource accounting",
+    "#703 production-shaped restart rollback and accepted-head recovery"
+  ],
+  "productionQualified": false,
+  "unresolved": [
+    "No real GCC driver source/function inventory was repaired.",
+    "No production compiler, behavior oracle, ACP agent, or full-process resource receipt is asserted by this record.",
+    "The focused validator uses repository test authority and does not qualify the bundled Ghidra or strict contained validation boundary."
+  ]
+}

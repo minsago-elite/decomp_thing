@@ -7,6 +7,10 @@ import decompengine.acp.AcpAgentHarness
 import decompengine.acp.AcpPreflightWorkflow
 import decompengine.agent.AgentExecutionException
 import decompengine.analysis.BundledGhidra
+import decompengine.project.ReconstructionAdapters
+import decompengine.project.ReconstructionHostSafetyLimits
+import decompengine.project.ReconstructionProfile
+import decompengine.project.ReconstructionProfiles
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -15,10 +19,10 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
 import java.util.Locale
+import java.util.concurrent.CancellationException
 import kotlin.io.path.createDirectories
 import kotlin.io.path.isDirectory
 import kotlin.io.path.pathString
-import kotlin.io.path.writeText
 
 data class DoctorOptions(
     val outputDir: Path,
@@ -63,24 +67,57 @@ class Doctor(
     private val commandProbe: CommandProbe = SystemCommandProbe,
     private val connectivityProbe: ConnectivityProbe = HttpConnectivityProbe(),
 ) {
-    fun inspect(options: DoctorOptions): DoctorReport {
+    fun inspect(options: DoctorOptions): DoctorReport = inspect(options, ReconstructionProfiles.default)
+
+    fun inspect(
+        options: DoctorOptions,
+        profile: ReconstructionProfile,
+        hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+    ): DoctorReport {
+        requireDoctorActive()
+        hostSafetyLimits.requireAllows(profile.budgets)
+        val diagnostics = ReconstructionAdapters.resolve(profile).diagnostics.prepare(profile)
+        val hostProbeLimits = CommandProbeLimits()
+        val toolchainLimits = hostProbeLimits.copy(
+            maximumWallClockMillis = minOf(hostProbeLimits.maximumWallClockMillis, profile.budgets.buildWallClockMillis),
+            maximumOutputBytes = minOf(hostProbeLimits.maximumOutputBytes.toLong(), profile.budgets.buildMaximumOutputBytes).toInt(),
+        )
+        val exportLimits = hostProbeLimits.copy(
+            maximumWallClockMillis = minOf(hostProbeLimits.maximumWallClockMillis, profile.budgets.exportWallClockMillis),
+        )
         val checks = mutableListOf<DoctorCheck>()
         checks += executableCheck("Java", listOf("java", "-version"), "Install a Java 21 runtime and ensure java is on PATH.")
-        checks += executableCheck("GCC", listOf("gcc", "--version"), "Install GCC and ensure gcc is on PATH.")
-        checks += executableCheck("Make", listOf("make", "--version"), "Install Make and ensure make is on PATH.")
+        val toolchainBudget = CommandProbeBudget(toolchainLimits)
+        val toolchainProbe = boundedProbe(toolchainBudget)
+        for (probe in diagnostics.versionProbes) {
+            checks += executableCheck(probe.name, probe.command, probe.remediation, toolchainProbe)
+        }
+        // Run the adapter's compiler/sanitizer capability probe before unrelated host checks
+        // can consume the selected profile's contiguous toolchain budget. Keep its authored
+        // report position below Ghidra for compatibility with the doctor output contract.
+        val capabilityChecks = diagnostics.checkCapabilities(toolchainProbe, toolchainBudget::checkpoint)
         checks += executableCheck("binutils/readelf", listOf("readelf", "--version"), "Install binutils and ensure readelf is on PATH.")
         checks += executableCheck("binutils/strings", listOf("strings", "--version"), "Install binutils and ensure strings is on PATH.")
         checks += executableCheck("Python", listOf("python3", "--version"), "Install Python 3 and ensure python3 is on PATH.")
         val angrPython = environment["ANGR_PYTHON"]?.takeIf(String::isNotBlank) ?: "python3"
         checks += executableCheck("angr", listOf(angrPython, "-c", "import angr"), "Install angr for the configured Python interpreter or set ANGR_PYTHON.")
-        checks += ghidraCheck()
-        checks += sanitizerCheck()
+        checks += ghidraCheck(exportLimits)
+        checks += capabilityChecks
+        requireDoctorActive()
         checks += bubblewrapCheck()
         checks += outputCheck(options.outputDir)
+        checks += DoctorCheck("reconstruction profile", true, "Selected ${profile.id}; sha256=${profile.sha256}")
+        checks += DoctorCheck("diagnostic limits", true,
+            "Local command ceiling: ${hostProbeLimits.maximumWallClockMillis} ms and ${hostProbeLimits.maximumOutputBytes} combined output bytes; " +
+                "toolchain group: ${toolchainLimits.maximumWallClockMillis} ms and ${toolchainLimits.maximumOutputBytes} combined output bytes; " +
+                "bundled Ghidra preparation/probe: ${exportLimits.maximumWallClockMillis} ms; " +
+                "command cleanup allowance: ${hostProbeLimits.cleanupMillis} ms. " +
+                if (commandProbe is BudgetedCommandProbe) "Owned command execution enforces these limits."
+                else "Injected command callbacks receive cooperative before/after checks only.")
         if (!options.toolsOnly) {
             val harnessSelection = runCatching {
                 AcpHarnessFactory.fromEnvironment(withHarnessOverride(options.harnessOverride))
-            }
+            }.onFailure { requireDoctorActive(it) }
             checks += agentHarnessChecks(
                 harnessSelection,
                 options.workflowOverride ?: AcpPreflightWorkflow.ALL,
@@ -90,17 +127,38 @@ class Doctor(
                 checks += llmChecks()
             }
         }
+        requireDoctorActive()
         return DoctorReport(checks)
     }
 
-    private fun executableCheck(name: String, command: List<String>, remediation: String): DoctorCheck =
-        runCatching { commandProbe.run(command, null) }.fold(
-            onSuccess = { result ->
-                if (result.exitCode == 0) DoctorCheck(name, true, result.output.firstLineOr("available"))
-                else DoctorCheck(name, false, "$remediation Probe exited ${result.exitCode}: ${result.output.firstLineOr("no output")}")
-            },
-            onFailure = { DoctorCheck(name, false, "$remediation ${it.message.orEmpty()}".trim()) },
-        )
+    private fun executableCheck(
+        name: String,
+        command: List<String>,
+        remediation: String,
+        probe: CommandProbe = boundedProbe(CommandProbeBudget(CommandProbeLimits())),
+    ): DoctorCheck = try {
+        requireDoctorActive()
+        val result = probe.run(command, null)
+        if (result.exitCode == 0) DoctorCheck(name, true, result.output.firstLineOr("available"))
+        else DoctorCheck(name, false, "$remediation Probe exited ${result.exitCode}: ${result.output.firstLineOr("no output")}")
+    } catch (failure: Exception) {
+        requireDoctorActive(failure)
+        DoctorCheck(name, false, "$remediation ${failure.message.orEmpty()}".trim())
+    }
+
+    private fun boundedProbe(budget: CommandProbeBudget): CommandProbe = CommandProbe { command, directory ->
+        budget.checkpoint("before command probe")
+        val result = if (commandProbe is BudgetedCommandProbe) {
+            commandProbe.run(command, directory, budget)
+        } else {
+            commandProbe.run(command, directory).also {
+                budget.checkpoint("after injected command probe")
+                chargeInjectedOutput(it.output, budget)
+            }
+        }
+        budget.checkpoint("after command probe")
+        result
+    }
 
     private fun agentHarnessChecks(
         selection: Result<AcpHarnessSelection>,
@@ -137,6 +195,7 @@ class Doctor(
                             result.stableDescriptor,
                         )
                     } catch (failure: Exception) {
+                        requireDoctorActive(failure)
                         DoctorCheck(
                             "ACP preflight",
                             false,
@@ -157,6 +216,7 @@ class Doctor(
             }
         },
         onFailure = { failure ->
+            requireDoctorActive(failure)
             listOf(
                 DoctorCheck(
                     "ACP harness",
@@ -199,43 +259,19 @@ class Doctor(
         }
     }
 
-    private fun ghidraCheck(): DoctorCheck {
-        return runCatching { commandProbe.run(BundledGhidra.locate().probeCommand(), null) }.fold(
-            onSuccess = { result ->
-                if (result.exitCode == 0) {
-                    DoctorCheck("Ghidra", true, "Bundled Ghidra ${BundledGhidra.VERSION} direct API initialized successfully")
-                } else {
-                    DoctorCheck("Ghidra", false, "Bundled Ghidra could not initialize; verify the application JDK and bundle. ${result.output.firstLineOr("exit ${result.exitCode}")}")
-                }
-            },
-            onFailure = { DoctorCheck("Ghidra", false, "Bundled Ghidra is unavailable; reinstall the complete application distribution. ${it.message}") },
-        )
-    }
-
-    private fun sanitizerCheck(): DoctorCheck {
-        val directory = runCatching { Files.createTempDirectory("llm-bin-patch-doctor-") }.getOrElse {
-            return DoctorCheck("GCC sanitizers", false, "Could not create a temporary directory to test AddressSanitizer/UBSan: ${it.message}")
+    private fun ghidraCheck(limits: CommandProbeLimits): DoctorCheck = try {
+        val budget = CommandProbeBudget(limits)
+        budget.checkpoint("before bundled Ghidra preparation")
+        val command = BundledGhidra.locate().probeCommand(budget::checkpoint)
+        val result = boundedProbe(budget).run(command, null)
+        if (result.exitCode == 0) {
+            DoctorCheck("Ghidra", true, "Bundled Ghidra ${BundledGhidra.VERSION} direct API initialized successfully")
+        } else {
+            DoctorCheck("Ghidra", false, "Bundled Ghidra could not initialize; verify the application JDK and bundle. ${result.output.firstLineOr("exit ${result.exitCode}")}")
         }
-        return try {
-            val source = directory.resolve("probe.c")
-            val binary = directory.resolve("probe")
-            source.writeText("int main(void) { return 0; }\n")
-            val compile = commandProbe.run(
-                listOf("gcc", "-std=c11", "-fsanitize=address,undefined", "-fno-omit-frame-pointer", source.pathString, "-o", binary.pathString),
-                directory,
-            )
-            if (compile.exitCode != 0) {
-                DoctorCheck("GCC sanitizers", false, "GCC could not link an AddressSanitizer/UBSan probe; install sanitizer runtime libraries. ${compile.output.firstLineOr("no compiler output")}")
-            } else {
-                val run = commandProbe.run(listOf(binary.pathString), directory)
-                if (run.exitCode == 0) DoctorCheck("GCC sanitizers", true, "AddressSanitizer and UBSan probe compiled and ran")
-                else DoctorCheck("GCC sanitizers", false, "The sanitizer probe exited ${run.exitCode}; verify sanitizer runtime libraries. ${run.output.firstLineOr("no output")}")
-            }
-        } catch (failure: Exception) {
-            DoctorCheck("GCC sanitizers", false, "Could not compile and run the sanitizer probe: ${failure.message}")
-        } finally {
-            directory.toFile().deleteRecursively()
-        }
+    } catch (failure: Exception) {
+        requireDoctorActive(failure)
+        DoctorCheck("Ghidra", false, "Bundled Ghidra is unavailable; reinstall the complete application distribution. ${failure.message}")
     }
 
     private fun bubblewrapCheck(): DoctorCheck {
@@ -248,14 +284,17 @@ class Doctor(
     }
 
     private fun outputCheck(output: Path): DoctorCheck {
+        requireDoctorActive()
         val normalized = output.toAbsolutePath().normalize()
         return try {
             normalized.createDirectories()
             require(normalized.isDirectory()) { "path is not a directory" }
             val probe = Files.createTempFile(normalized, ".doctor-", ".tmp")
             Files.delete(probe)
+            requireDoctorActive()
             DoctorCheck("output directory", true, "writable at ${normalized.pathString}")
         } catch (failure: Exception) {
+            requireDoctorActive(failure)
             DoctorCheck("output directory", false, "Make ${normalized.pathString} an existing writable directory: ${failure.message}")
         }
     }
@@ -279,7 +318,10 @@ class Doctor(
         checks += if (validBaseUrl && apiKey.isNotBlank()) {
             runCatching { connectivityProbe.check(requireNotNull(baseUrl), apiKey) }.fold(
                 onSuccess = { DoctorCheck("LLM connectivity", true, it) },
-                onFailure = { DoctorCheck("LLM connectivity", false, "Could not authenticate to ${baseUrl.host}: ${it.message}. Check BASE_URL, API_KEY, proxy, and network access.") },
+                onFailure = {
+                    requireDoctorActive(it)
+                    DoctorCheck("LLM connectivity", false, "Could not authenticate to ${baseUrl.host}: ${it.message}. Check BASE_URL, API_KEY, proxy, and network access.")
+                },
             )
         } else {
             DoctorCheck("LLM connectivity", false, "Connectivity was not attempted because BASE_URL or API_KEY is invalid.")
@@ -288,14 +330,36 @@ class Doctor(
     }
 }
 
-private object SystemCommandProbe : CommandProbe {
-    override fun run(command: List<String>, workingDirectory: Path?): CommandProbeResult {
-        val process = ProcessBuilder(command)
-            .directory(workingDirectory?.toFile())
-            .redirectErrorStream(true)
-            .start()
-        val output = process.inputStream.bufferedReader().readText()
-        return CommandProbeResult(process.waitFor(), output)
+private object SystemCommandProbe : BudgetedCommandProbe by BoundedSystemCommandProbe()
+
+private fun requireDoctorActive(failure: Throwable? = null) {
+    if (failure is InterruptedException || failure is CancellationException || failure is Error) throw failure
+    if (Thread.currentThread().isInterrupted) {
+        throw InterruptedException("Doctor inspection cancelled").also { if (failure != null) it.initCause(failure) }
+    }
+}
+
+/** Legacy injected callbacks own their allocation; count UTF-8 without making another full output copy. */
+private fun chargeInjectedOutput(output: String, budget: CommandProbeBudget) {
+    var offset = 0
+    while (offset < output.length) {
+        budget.checkpoint("while checking injected command output")
+        var bytes = 0
+        val end = minOf(output.length, offset + 1024)
+        while (offset < end) {
+            val character = output[offset++]
+            bytes += when {
+                character.code < 0x80 -> 1
+                character.code < 0x800 -> 2
+                character.isHighSurrogate() && offset < output.length && output[offset].isLowSurrogate() -> {
+                    offset++
+                    4
+                }
+                character.isSurrogate() -> 1 // Charset UTF-8's replacement for an unpaired UTF-16 code unit.
+                else -> 3
+            }
+        }
+        budget.consumeOutputBytes(bytes)
     }
 }
 

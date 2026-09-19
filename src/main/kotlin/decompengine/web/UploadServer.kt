@@ -27,7 +27,7 @@ import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.EvidenceModuleReconstructor
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.project.ModuleReconstructor
-import decompengine.project.GeneratedCMakeReconstructionProfile
+import decompengine.project.ReconstructionProfiles
 import decompengine.project.ReconstructionProfile
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -38,6 +38,7 @@ import kotlinx.serialization.json.put
 import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
 import java.net.URLDecoder
+import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 import java.util.concurrent.ArrayBlockingQueue
@@ -174,7 +175,7 @@ class UploadServer(
     uiMode: WebUiMode = WebUiMode.LEGACY,
     basePath: String = "/",
     devFrontendOrigin: String? = null,
-    sourceProfiles: List<ReconstructionProfile> = listOf(GeneratedCMakeReconstructionProfile.descriptor),
+    sourceProfiles: List<ReconstructionProfile> = ReconstructionProfiles.builtIn,
     sensitiveValues: Collection<String> = System.getenv().values,
     private val listenBacklog: Int = 64,
     private val authenticationInspector: (decompengine.agent.AgentCancellation) -> decompengine.acp.AcpAuthenticationInventory = defaultWebAuthenticationInspector(),
@@ -229,9 +230,10 @@ class UploadServer(
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
     private val access = LocalWebAccess(LocalWebAccessConfiguration(webOrigin(host, server.address.port), basePath,
         setOfNotNull(devFrontendOrigin)))
+    private val jobMutations = WebJobMutationBoundary(access, jobs)
     private val legacySessions = WebSessionController(access)
     internal val streamResources = WebStreamResources()
-    private val api = spaAssets?.let { WebApiController(access, it, jobs, streamResources) }
+    private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources) }
     private val requestExecutor = ThreadPoolExecutor(
         16, 16, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(64),
         { task -> Thread(task, "decomp-web-http").apply { isDaemon = true } },
@@ -553,6 +555,10 @@ class UploadServer(
                 (segments.size == 3 || segments[3] == "events")
             val publicPage = exchange.requestURI.rawPath in setOf("/login", "/assets/app.css")
             val mutation = exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")
+            val legacyJobMutation = exchange.requestMethod == "POST" && (
+                segments == listOf("jobs") ||
+                    (segments.size == 3 && segments[0] == "jobs" && segments[2] in setOf("explore", "reconstruct"))
+                )
             val policy = when {
                 publicPage -> WebEndpointPolicy.publicRead()
                 legacyJsonRead -> WebEndpointPolicy.privateRead(allowHead = true)
@@ -560,12 +566,16 @@ class UploadServer(
                 mutation -> WebEndpointPolicy.jsonMutation(exchange.requestMethod)
                 else -> WebEndpointPolicy.privateRead(allowHead = true)
             }
-            access.authorize(exchange, policy)
+            // Persisted job mutations authorize through WebJobMutationBoundary in their handler.
+            // Other requests, including in-memory operator actions and unknown mutation routes,
+            // still receive the ordinary shared access policy here.
+            if (!legacyJobMutation) access.authorize(exchange, policy)
             if (exchange.requestURI.rawPath == "/login") {
                 exchange.sendHtml(200, renderLegacyLogin())
                 return
             }
             if (legacyJsonRead) requireJsonAccept(exchange)
+            if (exchange.requestMethod == "POST" && segments == listOf("jobs")) exchange.requestsLegacyJson()
             when {
                 exchange.requestMethod in setOf("GET", "HEAD") && segments.isEmpty() ->
                     renderJobDashboard(exchange)
@@ -583,9 +593,9 @@ class UploadServer(
                 exchange.requestMethod in setOf("GET", "HEAD") && segments.size == 2 && segments[0] == "jobs" ->
                     handleJob(exchange, decode(segments[1]))
                 exchange.requestMethod == "POST" && segments.size == 3 && segments[0] == "jobs" && segments[2] == "explore" ->
-                    handleExplore(exchange, decode(segments[1]))
+                    handleExplore(exchange, segments[1])
                 exchange.requestMethod == "POST" && segments.size == 3 && segments[0] == "jobs" && segments[2] == "reconstruct" ->
-                    handleReconstruct(exchange, decode(segments[1]))
+                    handleReconstruct(exchange, segments[1])
                 exchange.requestMethod in setOf("GET", "HEAD") && segments.size >= 4 && segments[0] == "jobs" && segments[2] == "source" ->
                     handleSource(exchange, decode(segments[1]), segments.drop(3).joinToString("/").let(::decode))
                 exchange.requestMethod in setOf("GET", "HEAD") && segments.size >= 4 && segments[0] == "jobs" && segments[2] == "artifacts" ->
@@ -686,7 +696,8 @@ class UploadServer(
 
     private fun handlePostJob(exchange: HttpExchange) {
         try {
-            handleUploadRequest(exchange, jobs)
+            val mutation = jobMutations.authorizeUpload(exchange)
+            handleAuthorizedUploadRequest(exchange, mutation)
         } catch (exception: InvalidUploadException) {
             legacyError(exchange, 400, "INVALID_UPLOAD", "Upload a supported Linux ELF binary.") {
                 renderErrorPage(400, "Unsupported binary", "Upload a supported Linux ELF binary.")
@@ -694,20 +705,23 @@ class UploadServer(
         }
     }
 
-    private fun handleExplore(exchange: HttpExchange, jobId: String) {
-        schedule(exchange, jobId, WebWorkflow.EXPLORE)
+    private fun handleExplore(exchange: HttpExchange, encodedJobId: String) {
+        val mutation = jobMutations.authorizeLegacyStart(exchange)
+        schedule(exchange, mutation, decode(encodedJobId), WebWorkflow.EXPLORE)
     }
 
-    private fun handleReconstruct(exchange: HttpExchange, jobId: String) {
-        schedule(exchange, jobId, WebWorkflow.RECONSTRUCT)
+    private fun handleReconstruct(exchange: HttpExchange, encodedJobId: String) {
+        val mutation = jobMutations.authorizeLegacyStart(exchange)
+        schedule(exchange, mutation, decode(encodedJobId), WebWorkflow.RECONSTRUCT)
     }
 
     private fun schedule(
         exchange: HttpExchange,
+        mutation: AuthorizedLegacyWebJobStart,
         jobId: String,
         workflow: WebWorkflow,
     ) {
-        when (jobs.start(jobId, workflow)) {
+        when (mutation.start(jobId, workflow)) {
             is WebWorkflowAdmission.Started -> exchange.redirect("/jobs/$jobId")
             WebWorkflowAdmission.AlreadyRunning -> exchange.sendHtml(
                 409, renderErrorPage(409, "Analysis already running", "This job already has an active background operation."),
@@ -786,15 +800,13 @@ class UploadServer(
                 decode(query.removePrefix("sha256="))
             }
             val verified = archiveEvidence.read(jobId, expected, relativePath.removeSuffix("/source-tree.zip"))
-            exchange.responseHeaders.add("Content-Disposition", "attachment; filename=\"source-tree.zip\"")
             exchange.responseHeaders.add("ETag", "\"${verified.sha256}\"")
-            exchange.sendBytes(200, verified.bytes, "application/zip")
+            exchange.sendUntrustedAttachment(200, verified.bytes, "application/zip", "source-tree.zip")
             return
         }
         val artifact = jobs.readArtifact(jobId, relativePath, MAX_ARTIFACT_BYTES)
         val name = Path.of(relativePath).fileName
-        exchange.responseHeaders.add("Content-Disposition", "attachment; filename=\"${name.toString().replace("\"", "")}\"")
-        exchange.sendBytes(200, artifact.bytes, contentType(name))
+        exchange.sendUntrustedAttachment(200, artifact.bytes, contentType(name), name.toString())
     }
 
     private fun decode(value: String): String = URLDecoder.decode(value, StandardCharsets.UTF_8)
@@ -813,13 +825,13 @@ private fun webOrigin(host: String, port: Int): String {
     return "http://$authority:$port"
 }
 
-/** Shared HTTP upload handler; the server owns admission and general error redaction around it. */
-internal fun handleUploadRequest(exchange: HttpExchange, jobs: WebJobService) {
+/** Legacy response adapter. Its caller must mint the typed mutation capability first. */
+internal fun handleAuthorizedUploadRequest(exchange: HttpExchange, mutation: AuthorizedWebJobUpload) {
     try {
         val declaredLength = exchange.requestHeaders.getFirst("Content-Length")?.toLongOrNull()
         require(declaredLength == null || declaredLength <= MAX_UPLOAD_BYTES) { "upload exceeds the 32 MiB limit" }
         val contentType = exchange.requestHeaders.getFirst("Content-Type") ?: ""
-        val job = jobs.uploadMultipart(exchange.requestBody, contentType)
+        val job = mutation.uploadMultipartReceipt(exchange.requestBody, contentType).job
         if (exchange.requestsLegacyJson()) {
             exchange.sendJson(201, encodeJob(job))
         } else {
@@ -902,10 +914,12 @@ private fun HttpExchange.sendBytes(
     responseHeaders.add("Content-Type", contentType)
     responseHeaders.add("X-Content-Type-Options", "nosniff")
     responseHeaders.add("Referrer-Policy", "no-referrer")
-    responseHeaders.add(
-        "Content-Security-Policy",
-        "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'",
-    )
+    if (!responseHeaders.containsKey("Content-Security-Policy")) {
+        responseHeaders.add(
+            "Content-Security-Policy",
+            "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'",
+        )
+    }
     responseHeaders.add("Cache-Control", if (cache) "public, max-age=3600" else "no-store")
     responseHeaders.add("Content-Length", body.size.toString())
     if (requestMethod == "HEAD") {
@@ -915,6 +929,35 @@ private fun HttpExchange.sendBytes(
         sendResponseHeaders(status, body.size.toLong())
         responseBody.use { it.write(body) }
     }
+}
+
+private fun HttpExchange.sendUntrustedAttachment(
+    status: Int,
+    body: ByteArray,
+    contentType: String,
+    filename: String,
+) {
+    responseHeaders.set("Content-Disposition", attachmentDisposition(filename))
+    responseHeaders.set(
+        "Content-Security-Policy",
+        "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'",
+    )
+    sendBytes(status, body, contentType)
+}
+
+internal fun attachmentDisposition(filename: String): String {
+    val fallback = filename.asSequence()
+        .map { character ->
+            if (character.code in 0x21..0x7e && (character.isLetterOrDigit() || character in "._-")) character else '_'
+        }
+        .joinToString("")
+        .take(128)
+        .trim('.')
+        .ifBlank { "artifact.bin" }
+    val encoded = URLEncoder.encode(filename, StandardCharsets.UTF_8)
+        .replace("+", "%20")
+        .replace("*", "%2A")
+    return "attachment; filename=\"$fallback\"; filename*=UTF-8''$encoded"
 }
 
 private fun contentType(path: Path): String = when (path.fileName.toString().substringAfterLast('.', "")) {

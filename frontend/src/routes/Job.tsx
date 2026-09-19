@@ -23,7 +23,11 @@ function JobDetails({ jobId, basePath }: { jobId: string; basePath: string }) {
       }
     }).catch((failure: unknown) => {
       if (!controller.signal.aborted) setError(failure instanceof ApiClientError && failure.status === 404
-        ? 'This job is unavailable. It may have been removed.' : 'Job metadata could not be loaded. Check the local session and server.');
+        ? 'This job is unavailable. It may have been removed.'
+        : failure instanceof ApiClientError && (['CORRUPT_LEGACY_JOB', 'JOB_RECORD_UNAVAILABLE'].includes(failure.serverCode ?? '')
+          || ['invalid_json', 'invalid_response', 'unsupported_contract'].includes(failure.code))
+          ? 'Stored job metadata is unavailable or malformed. No binary facts can be shown; inspect job storage or retry after repair.'
+          : 'Job metadata could not be loaded. Check the local session and server.');
     }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => { controller.abort(); };
   }, [client, jobId, refresh]);
@@ -41,9 +45,10 @@ function JobDetails({ jobId, basePath }: { jobId: string; basePath: string }) {
         <dt>Format</dt><dd>{job.binary.format}</dd><dt>Machine</dt><dd>{job.binary.machine}</dd>
         <dt>Endianness</dt><dd>{job.binary.endianness}</dd><dt>Object type</dt><dd>{job.binary.objectType}</dd>
         <dt>OS ABI</dt><dd>{job.binary.osAbi}</dd><dt>Entry address</dt><dd><code>{job.binary.entryPoint}</code></dd>
+        <dt>Input SHA-256</dt><dd>Not reported by the job API</dd>
       </dl>
       <p>Completion is an attempt outcome. Only the recorded accepted revision identifies accepted reconstruction.</p>
-      <p>The attempt page retains its exact identity as newer work is recorded. Evidence views are not connected yet. No input digest is reported by this API.</p>
+      <p>The attempt page retains its exact identity as newer work is recorded. Evidence views are not connected yet. The job API does not supply an input-file digest; a report-artifact digest identifies different bytes.</p>
       <a href={appPath(basePath, '/runtime')}>View reported workflow availability</a>
     </>}
   </>;
