@@ -120,3 +120,16 @@ release the writer after a display failure and preserves the calling thread's in
   --tests decompengine.web.UploadServerTest \
   --tests decompengine.web.SourceTreeJobReconstructorTest
 ```
+
+The legacy web integration selects progress through the durable job service's report
+context. An explicit `runId` stays bound to that attempt's reports directory for both
+rendered progress and `/api/jobs/{jobId}/events?runId=...`; unknown attempts or extra
+query parameters are rejected. Progress remains display-only. The SPA's v1 evidence
+and workflow capability gates are unchanged by this compatibility view.
+
+Web shutdown marks admission as stopping before draining HTTP requests. Owned workers
+receive one shutdown interruption; the service preserves its job-root lease until
+workers actually exit. Final legacy status writes clear and restore the interrupt flag
+around atomic metadata publication. Restart projects interrupted legacy work through
+the durable service while preserving its historical job.json bytes. CLI shutdown uses
+the bounded shutdown hook and reports incomplete cleanup explicitly.
