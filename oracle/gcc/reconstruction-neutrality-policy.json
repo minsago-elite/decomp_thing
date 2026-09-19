@@ -1,5 +1,6 @@
 {
   "schemaVersion": 1,
+  "benchmarkCatalog": "oracle/gcc/reconstruction-neutrality-identities.json",
   "genericRoots": [
     "src/main/kotlin/decompengine/Main.kt",
     "src/main/kotlin/decompengine/acp",
@@ -14,23 +15,19 @@
   ],
   "benchmarkRoots": [
     "oracle/gcc",
+    "oracle/llvm",
     "src/main/kotlin/decompengine/oracle/gcc",
+    "src/main/kotlin/decompengine/oracle/behavior",
     "src/test/kotlin/decompengine/oracle/gcc",
-    ".github/workflows/gcc-oracle-model.yml",
+    "src/test/kotlin/decompengine/oracle/behavior",
+    "tests/oracle",
     "scripts/fetch-gcc-oracle-source.py",
     "scripts/generate-gcc-behavior-corpus.py",
     "scripts/generate-gcc-compiler-engine-build-records.py",
     "scripts/run-gcc-behavior-corpus.py",
     "scripts/verify-gcc-oracle-source.py",
-    "tests/oracle/test_fetch_gcc_oracle_source.py",
-    "tests/oracle/test_function_recovery_oracle_generation.py",
-    "tests/oracle/test_gcc_behavior_corpus.py",
-    "tests/oracle/test_gcc_compiler_engines.py",
-    "tests/oracle/test_gcc_function_recovery.py",
-    "tests/oracle/test_gcc_oracle_artifacts.py",
-    "tests/oracle/test_gcc_source_lock.py",
-    "tests/oracle/test_rebuild_gcc_oracle.py",
-    "tests/oracle/test_toolchain_reproduction.py"
+    ".github/workflows/gcc-oracle-model.yml",
+    "docs/evidence"
   ],
   "adapterFiles": [
     {
@@ -251,20 +248,6 @@
       "reason": "Application-owned registration of the built-in Ninja descriptor."
     },
     {
-      "path": "src/main/kotlin/decompengine/project/ReconstructionAdapter.kt",
-      "rule": "generic-adapter-reference",
-      "fragment": "GeneratedCMakeReconstructionProfile.supports(profile) -> GeneratedCReconstructionAdapter",
-      "count": 1,
-      "reason": "Closed application-owned dispatch from the built-in Make profile to its adapter implementation."
-    },
-    {
-      "path": "src/main/kotlin/decompengine/project/ReconstructionAdapter.kt",
-      "rule": "generic-adapter-reference",
-      "fragment": "profile.id == GeneratedCNinjaReconstructionProfile.PROFILE_ID -> GeneratedCNinjaReconstructionAdapter",
-      "count": 1,
-      "reason": "Closed application-owned dispatch from the built-in Ninja profile identifier to its adapter implementation."
-    },
-    {
       "path": "scripts/ci-prepare-generated-c-validation.py",
       "rule": "benchmark-target",
       "fragment": "gcc_runtime / 'cc1'",
@@ -273,115 +256,73 @@
     },
     {
       "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
-      "rule": "generic-tool",
-      "fragment": "\"gcc\"",
-      "count": 1,
-      "reason": "MVP patch workflow compiles the reconstructed C fix with the default host compiler; the explicit command remains the workflow's authored validation contract."
-    },
-    {
-      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
       "rule": "generic-compiler-flag",
-      "fragment": "-std=c11",
-      "count": 1,
-      "reason": "MVP patch workflow compiles the proposed fix as C11 with its default host compiler; the language selection is part of the same authored validation contract."
+      "fragment": "-Werror",
+      "count": 3,
+      "reason": "MVP memory-safety patch workflow compiles the reconstructed candidate with warnings-as-errors for sanitizer and release validation."
     },
     {
       "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
       "rule": "generic-compiler-flag",
       "fragment": "-Wall",
       "count": 2,
-      "reason": "MVP patch workflow compiles the proposed fix with the default warning set and repeats the identical contract in its patch prompt."
+      "reason": "MVP memory-safety patch workflow enables baseline warnings when compiling the reconstructed candidate."
     },
     {
       "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
       "rule": "generic-compiler-flag",
       "fragment": "-Wextra",
       "count": 2,
-      "reason": "MVP patch workflow compiles the proposed fix with the default warning set and repeats the identical contract in its patch prompt."
+      "reason": "MVP memory-safety patch workflow enables extra warnings when compiling the reconstructed candidate."
     },
     {
       "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
       "rule": "generic-compiler-flag",
-      "fragment": "-Werror",
-      "count": 3,
-      "reason": "MVP patch workflow treats warnings as errors in its sanitizer and release validation, records the evidence phrase, and repeats the identical contract in its patch prompt."
+      "fragment": "-std=c11",
+      "count": 1,
+      "reason": "MVP memory-safety patch workflow compiles the reconstructed candidate as C11."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-tool",
+      "fragment": "\"gcc\"",
+      "count": 1,
+      "reason": "MVP memory-safety patch workflow invokes the host C compiler to validate the reconstructed candidate."
     },
     {
       "path": "src/main/kotlin/decompengine/project/RepairAcpEvidenceArchiveVerifier.kt",
       "rule": "generic-adapter-reference",
       "fragment": "GeneratedCRepairRuntimeConfiguration",
       "count": 3,
-      "reason": "Existing repair verifier cross-checks declared runtime-tool roles and mount destinations against the registered generated-C repair runtime configuration; those verifier checks remain active."
+      "reason": "Repair evidence verifier resolves the registered validation runtime tool directory and role names."
     },
     {
       "path": "src/main/kotlin/decompengine/project/RepairAcpEvidenceArchiveVerifier.kt",
       "rule": "generic-layout",
       "fragment": "\"Makefile\"",
       "count": 1,
-      "reason": "Existing repair verifier classifies the repaired release snapshot's declared build-file source by its exact path; the role and immutable-mode checks remain active."
+      "reason": "Repair validation source role distinguishes the build file from reconstructed sources."
     },
     {
       "path": "src/test/kotlin/decompengine/analysis/BundledGhidraTest.kt",
       "rule": "benchmark-version",
       "fragment": "oracle/gcc/16.2.0/compiler-engines.json",
       "count": 1,
-      "reason": "Opt-in Ghidra provenance authentication loads the GCC compiler engine profiles from the benchmark namespace; the assertion targets the bundled Ghidra release, not a benchmark artifact."
+      "reason": "Opt-in installed-Ghidra provenance check loads the benchmark compiler-engine profile for authentication."
     },
     {
-      "path": "oracle/llvm/22.1.6/behavior-corpus.json",
-      "rule": "benchmark-hash",
-      "fragment": "510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248",
+      "path": "src/main/kotlin/decompengine/project/ReconstructionAdapter.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "GeneratedCMakeReconstructionProfile.supports(profile)",
       "count": 1,
-      "reason": "Retained LLVM behavior corpus capture metadata records the shared recorded OCI capture image digest; retained evidence is not rewritten to satisfy the scanner."
+      "reason": "Closed application-owned dispatch from the built-in Make profile to its adapter implementation."
     },
     {
-      "path": "oracle/llvm/22.1.6/behavior-corpus-evidence.json",
-      "rule": "benchmark-hash",
-      "fragment": "510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248",
+      "path": "src/main/kotlin/decompengine/project/ReconstructionAdapter.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "profile.id == GeneratedCNinjaReconstructionProfile.PROFILE_ID",
       "count": 1,
-      "reason": "Retained LLVM behavior corpus evidence records the shared recorded OCI capture image digest; retained evidence is not rewritten to satisfy the scanner."
-    },
-    {
-      "path": "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorReferenceInputPlanV2.kt",
-      "rule": "benchmark-hash",
-      "fragment": "510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248",
-      "count": 2,
-      "reason": "Retained forbidden-output markers reject reference plans and decoded blobs containing the retired recorded capture image digest; the catalog identity is never referenced as LLVM evidence."
-    },
-    {
-      "path": "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorReferenceInputPlanV2Generator.kt",
-      "rule": "benchmark-hash",
-      "fragment": "510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248",
-      "count": 1,
-      "reason": "Retained generator path guard rejects output paths containing the retired recorded capture image digest; the catalog identity is never referenced as generated plan material."
-    },
-    {
-      "path": "src/test/kotlin/decompengine/oracle/behavior/LlvmBehaviorReferenceInputPlanV2Test.kt",
-      "rule": "benchmark-hash",
-      "fragment": "510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248",
-      "count": 1,
-      "reason": "Retained test constant pins the retired recorded capture image digest that generated plans must keep rejecting."
-    },
-    {
-      "path": "tests/oracle/test_llvm_source_lock.py",
-      "rule": "benchmark-version",
-      "fragment": "oracle/gcc/16.2.0/source-lock.json",
-      "count": 1,
-      "reason": "Cross-oracle dispatch test asserts the GCC source lock still resolves to the GCC project identity while the LLVM lock selects the LLVM project."
-    },
-    {
-      "path": "tests/oracle/test_llvm_oracle_profiles.py",
-      "rule": "benchmark-hash",
-      "fragment": "510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248",
-      "count": 1,
-      "reason": "Asserts the LLVM sandbox profile pins the shared recorded OCI capture image digest from the benchmark catalog."
-    },
-    {
-      "path": "tests/oracle/test_behavior_corpus.py",
-      "rule": "benchmark-hash",
-      "fragment": "510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248",
-      "count": 1,
-      "reason": "Default test OCI image digest for the behavior corpus harness is the shared recorded capture image; an explicit environment override remains supported."
+      "reason": "Closed application-owned dispatch from the built-in Ninja profile identifier to its adapter implementation."
     },
     {
       "path": "src/main/kotlin/decompengine/project/ModuleCompilationPolicy.kt",
@@ -405,26 +346,32 @@
       "reason": "Application-owned compilation policy recognizes the registered built-in Ninja profile as a generated-C module policy."
     },
     {
-      "path": "oracle/llvm/22.1.6/behavior-corpus-evidence.json",
-      "rule": "benchmark-version",
-      "fragment": "GCC_VERSION=16.2.0",
-      "count": 1,
-      "reason": "Retained LLVM evidence records the GCC compiler version used by its cross-oracle comparison capture."
-    },
-    {
-      "path": "oracle/llvm/22.1.6/behavior-corpus.json",
-      "rule": "benchmark-version",
-      "fragment": "GCC_VERSION=16.2.0",
-      "count": 1,
-      "reason": "Retained LLVM corpus records the GCC compiler version used by its cross-oracle comparison capture."
-    },
-    {
       "path": "tests/test_generic_leakage.py",
       "rule": "benchmark-version",
       "fragment": "GCC_VERSION=16.2.0",
       "count": 2,
       "reason": "Scanner regression fixtures intentionally exercise the retained cross-oracle GCC version marker in both evidence forms."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/ReconstructionAdapter.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "GeneratedCReconstructionAdapter",
+      "count": 1,
+      "reason": "Application-owned adapter dispatch uses the registered generated-C implementations."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/validation/BehaviorValidation.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "GeneratedCMakeReconstructionProfile",
+      "count": 2,
+      "reason": "Application-owned validation recognizes the registered generated-C Make profile."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/ReconstructionAdapter.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "GeneratedCNinjaReconstructionAdapter",
+      "count": 1,
+      "reason": "Application-owned adapter dispatch uses the registered generated-C Ninja implementation."
     }
-  ],
-  "benchmarkCatalog": "oracle/gcc/reconstruction-neutrality-identities.json"
+  ]
 }
