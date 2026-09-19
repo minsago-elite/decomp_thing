@@ -182,10 +182,12 @@ def scan_repository(root: Path, policy_path: str = "oracle/gcc/reconstruction-ne
         # Markdown documentation is an explicit exception in #84; unsupported binary formats are not decoded.
         if path.suffix.lower() not in TEXT_SUFFIXES and path.name != "Dockerfile" and path.suffix != ".Dockerfile":
             continue
-        benchmark_owned = within(relative, policy["benchmarkRoots"])
         generic = within(relative, policy["genericRoots"]) and relative not in adapters
+        # Generic and benchmark-identity rules both apply only on the declared
+        # generic surfaces; benchmark-owned locations declare their own
+        # ownership and must not trip the neutrality gate.
         selected = {name: pattern for name, pattern in rules.items()
-                    if generic and name.startswith("generic-") or not benchmark_owned and name.startswith("benchmark-")}
+                    if generic and (name.startswith("generic-") or name.startswith("benchmark-"))}
         if not selected:
             continue
         # Git's cached inventory retains ordinary unstaged deletions. Policy-owned

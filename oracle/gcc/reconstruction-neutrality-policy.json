@@ -250,11 +250,60 @@
       "reason": "Closed application-owned dispatch from the built-in Ninja profile identifier to its adapter implementation."
     },
     {
-      "path": "scripts/ci-prepare-generated-c-validation.py",
-      "rule": "benchmark-target",
-      "fragment": "gcc_runtime / 'cc1'",
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-compiler-flag",
+      "fragment": "-Werror, AddressSanitizer",
       "count": 1,
-      "reason": "Inventories the installed compiler runtime for generated-C provisioning; this expression does not select a benchmark artifact. Version and digest checks remain active."
+      "reason": "Authored MVP evidence label describing the sanitizer build; the compiler invocation uses explicit list literals below."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-tool",
+      "fragment": "mutableListOf(\"gcc\", \"-std=c11\"",
+      "count": 1,
+      "reason": "Authored MVP C11 compile invocation; the generic tool and standard flag are the intended literal surface."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-compiler-flag",
+      "fragment": "-std=c11",
+      "count": 1,
+      "reason": "Authored MVP C11 compile invocation standard flag; listed alongside the explicit tool literal."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-compiler-flag",
+      "fragment": "-Wall\", \"-Wextra\")",
+      "count": 1,
+      "reason": "Authored MVP C11 compile invocation warning flags; listed alongside the explicit tool literal."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-compiler-flag",
+      "fragment": "command += \"-Werror\"",
+      "count": 1,
+      "reason": "Authored MVP warnings-as-errors escalation appended after the explicit compile invocation."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "rule": "generic-compiler-flag",
+      "fragment": "-Wall -Wextra -Werror",
+      "count": 1,
+      "reason": "Authored MVP reconstruction prompt compiler requirement; prompt text, not a selected toolchain."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/RepairAcpEvidenceArchiveVerifier.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "GeneratedCRepairRuntimeConfiguration",
+      "count": 3,
+      "reason": "Authored repair validation runtime role, directory, and name lookups against the registered generated-C runtime configuration."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/RepairAcpEvidenceArchiveVerifier.kt",
+      "rule": "generic-layout",
+      "fragment": "if (path == \"Makefile\")",
+      "count": 1,
+      "reason": "Authored repair validation source role check distinguishing the build file from ordinary sources."
     }
   ],
   "benchmarkCatalog": "oracle/gcc/reconstruction-neutrality-identities.json"
