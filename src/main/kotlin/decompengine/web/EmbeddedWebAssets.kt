@@ -68,8 +68,7 @@ class EmbeddedWebAssets private constructor(
         exchange.responseHeaders.set("Content-Length", asset.sizeBytes.toString())
         exchange.responseHeaders.set("Cache-Control", "public, max-age=31536000, immutable")
         exchange.responseHeaders.set("ETag", etag)
-        exchange.responseHeaders.set("X-Content-Type-Options", "nosniff")
-        exchange.responseHeaders.set("Referrer-Policy", "no-referrer")
+        exchange.applyWebSecurityHeaders()
         if (etagMatches(exchange.requestHeaders.getFirst("If-None-Match"), etag)) {
             exchange.sendResponseHeaders(304, -1)
             exchange.close()
@@ -140,9 +139,7 @@ class EmbeddedWebAssets private constructor(
         exchange.responseHeaders.set("Content-Type", "text/html; charset=utf-8")
         exchange.responseHeaders.set("Content-Length", html.size.toString())
         exchange.responseHeaders.set("Cache-Control", "no-store")
-        exchange.responseHeaders.set("X-Content-Type-Options", "nosniff")
-        exchange.responseHeaders.set("Referrer-Policy", "no-referrer")
-        exchange.responseHeaders.set("Content-Security-Policy", SHELL_CSP)
+        exchange.applyWebSecurityHeaders(WEB_APPLICATION_CONTENT_SECURITY_POLICY)
         try {
             if (exchange.requestMethod == "HEAD") {
                 exchange.sendResponseHeaders(200, -1)
@@ -170,9 +167,6 @@ class EmbeddedWebAssets private constructor(
         private const val MAX_FILE_BYTES = 16L * 1024 * 1024
         private const val MAX_TOTAL_BYTES = 64L * 1024 * 1024
         private const val BUFFER_BYTES = 64 * 1024
-        private const val SHELL_CSP = "default-src 'none'; script-src 'self'; style-src 'self'; " +
-            "img-src 'self'; font-src 'self'; connect-src 'self'; worker-src 'self'; " +
-            "base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"
         private val SHA256 = Regex("[0-9a-f]{64}")
         private val SAFE_SEGMENT = Regex("[A-Za-z0-9_.-]+")
         private val MEDIA_TYPES = mapOf(
@@ -419,8 +413,7 @@ class EmbeddedWebAssets private constructor(
             exchange.responseHeaders.set("Content-Type", "application/json; charset=utf-8")
             exchange.responseHeaders.set("Content-Length", payload.size.toString())
             exchange.responseHeaders.set("Cache-Control", "no-store")
-            exchange.responseHeaders.set("X-Content-Type-Options", "nosniff")
-            exchange.responseHeaders.set("Referrer-Policy", "no-referrer")
+            exchange.applyWebSecurityHeaders()
             exchange.responseHeaders.set("X-Request-ID", requestId)
             try {
                 if (exchange.requestMethod == "HEAD") exchange.sendResponseHeaders(status, -1)

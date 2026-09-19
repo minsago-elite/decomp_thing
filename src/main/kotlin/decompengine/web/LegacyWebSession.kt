@@ -6,7 +6,9 @@ internal fun renderLegacyLogin(): String = """<!doctype html>
 <title>Local session · decomp_engine</title><link rel="stylesheet" href="/assets/app.css"></head>
 <body><main class="shell"><h1>Open a local session</h1>
 <p id="session-message" role="status">Open the session link printed by the running application. Restart the application to obtain a new link if it has expired.</p>
-<a href="/">Continue with an existing session</a></main><script>
+<a href="/">Continue with an existing session</a></main><script>$LEGACY_LOGIN_SCRIPT</script></body></html>"""
+
+internal val LEGACY_LOGIN_SCRIPT = """
 (() => {
   const fragment = location.hash;
   history.replaceState(null, '', location.pathname + location.search);
@@ -21,7 +23,7 @@ internal fun renderLegacyLogin(): String = """<!doctype html>
       location.replace('/');
     }).catch(() => { message.textContent = 'This session link is unavailable or expired. Open a new link from the running application.'; });
 })();
-</script></body></html>"""
+""".trimIndent()
 
 /** CSRF stays in the document closure. A failed mutation is never automatically retried. */
 internal val LEGACY_SESSION_SCRIPT = """

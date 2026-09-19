@@ -44,16 +44,21 @@ def entries_and_budget(archive, destination):
     # Some filesystems report 0/0 because they do not expose a fixed inode
     # quota. That is unknown capacity, not an exhausted quota; the byte budget
     # remains mandatory. A reported positive total with no free inodes fails.
-    inodes_reported = not (getattr(available, "f_files", 0) == 0 and available.f_favail == 0)
+    inode_accounting_available = not (getattr(available, "f_files", 0) == 0 and available.f_favail == 0)
     budget = {
         "expandedBytes": expanded_bytes,
         "requiredBytes": expanded_bytes + BYTE_RESERVE,
         "availableBytes": available.f_bavail * available.f_frsize,
         "requiredInodes": len(paths) + INODE_RESERVE,
-        "availableInodes": available.f_favail if inodes_reported else None,
+        # Btrfs reports zero total/free inodes because it allocates them dynamically.
+        # Treat only that explicit sentinel as unavailable accounting; a filesystem
+        # with a reported inode total and zero free inodes must still fail closed.
+        "availableInodes": available.f_favail if inode_accounting_available else None,
+        "inodeAccountingAvailable": inode_accounting_available,
     }
     if (budget["availableBytes"] < budget["requiredBytes"]
-            or (inodes_reported and budget["availableInodes"] < budget["requiredInodes"])):
+            or (inode_accounting_available
+                and budget["availableInodes"] < budget["requiredInodes"])):
         raise RuntimeError("Insufficient extraction resources; choose --work-parent on a filesystem "
                            "with room for one installation. " + json.dumps(budget, sort_keys=True))
     return entries, budget
