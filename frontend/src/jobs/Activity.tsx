@@ -1,6 +1,6 @@
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { ApiClientError } from '../api/client';
+import { ApiClientError, withApiFailureReference } from '../api/client';
 import type { Snapshot, WebEvent } from '../api/generated';
 import { ActivityReceiptAge } from './ActivityReceiptAge';
 import type { ActivityReceiptTime } from './ActivityReceiptAge';
@@ -121,14 +121,14 @@ export function Activity({ jobId, runId, basePath }: { jobId: string; runId: str
         if (failure instanceof ApiClientError && (failure.status === 401 || failure.status === 403)) {
           position.current = { initialized: false, cursor: null, rows: [], last: null }; setRows([]); setSnapshot(null); setLastRead(null);
         }
-        setError(failure instanceof ApiClientError && failure.status === 401
+        setError(withApiFailureReference(failure instanceof ApiClientError && failure.status === 401
           ? 'The local session expired or is unavailable. Reconnect the session before reading activity.'
           : failure instanceof ApiClientError && failure.status === 403
           ? 'Activity access was denied. Check the local session and server.'
           : transient ? 'Activity reconnect attempts were exhausted. Displayed observations may be stale; read a fresh history to retry.'
           : failure instanceof ApiClientError && ['EVENT_GAP', 'PROGRESS_GAP'].includes(failure.serverCode ?? '')
           ? 'Retained history has a gap. Read a fresh history to establish a new position.'
-          : 'Activity could not be verified. Displayed observations may be stale; read a fresh history or check the local session.');
+          : 'Activity could not be verified. Displayed observations may be stale; read a fresh history or check the local session.', failure));
         setFollowing(false);
       }
     };

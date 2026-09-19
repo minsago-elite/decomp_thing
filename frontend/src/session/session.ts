@@ -1,4 +1,4 @@
-import { ApiClientError } from '../api/errors';
+import { ApiClientError, apiFailureReference } from '../api/errors';
 import type { Bootstrap, Session } from '../api/generated';
 import { normalizeBasePath } from '../app/paths';
 import { createInvalidationChannel } from './invalidationChannel';
@@ -15,8 +15,8 @@ export type RuntimeSnapshot = Pick<Bootstrap, 'applicationBuildId' | 'uiBuildId'
 export type SessionState =
   | { status: 'public' | 'checking' | 'signing-out' }
   | { status: 'authenticated'; expiresAt: string; runtime: RuntimeSnapshot }
-  | { status: 'required'; reason: 'missing' | 'expired' | 'bootstrap-required' | 'bootstrap-expired' | 'invalid-link' | 'signed-out' | 'session-changed' }
-  | { status: 'unavailable'; reason: 'connection' | 'configuration' | 'logout-unconfirmed' | 'removal-failed' };
+  | { status: 'required'; reason: 'missing' | 'expired' | 'bootstrap-required' | 'bootstrap-expired' | 'invalid-link' | 'signed-out' | 'session-changed'; referenceId?: string }
+  | { status: 'unavailable'; reason: 'connection' | 'configuration' | 'logout-unconfirmed' | 'removal-failed'; referenceId?: string };
 
 /** Session/CSRF material stays in this page's closure and never enters UI snapshots. */
 export function createBrowserSession(gateway: SessionGateway, basePath: string) {
@@ -61,12 +61,14 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
   function failed(error: unknown, logout = false) {
     forget();
     const code = error instanceof ApiClientError ? error.serverCode : undefined;
-    if (code === 'SESSION_REQUIRED') publish({ status: 'required', reason: 'missing' });
-    else if (code === 'SESSION_EXPIRED') publish({ status: 'required', reason: 'expired' });
-    else if (code === 'BOOTSTRAP_REQUIRED') publish({ status: 'required', reason: 'bootstrap-required' });
-    else if (code === 'BOOTSTRAP_EXPIRED') publish({ status: 'required', reason: 'bootstrap-expired' });
-    else if (code === 'HOST_DENIED' || code === 'ORIGIN_DENIED') publish({ status: 'unavailable', reason: 'configuration' });
-    else publish({ status: 'unavailable', reason: logout ? 'logout-unconfirmed' : 'connection' });
+    const id = apiFailureReference(error);
+    const reference = id ? { referenceId: id } : {};
+    if (code === 'SESSION_REQUIRED') publish({ status: 'required', reason: 'missing', ...reference });
+    else if (code === 'SESSION_EXPIRED') publish({ status: 'required', reason: 'expired', ...reference });
+    else if (code === 'BOOTSTRAP_REQUIRED') publish({ status: 'required', reason: 'bootstrap-required', ...reference });
+    else if (code === 'BOOTSTRAP_EXPIRED') publish({ status: 'required', reason: 'bootstrap-expired', ...reference });
+    else if (code === 'HOST_DENIED' || code === 'ORIGIN_DENIED') publish({ status: 'unavailable', reason: 'configuration', ...reference });
+    else publish({ status: 'unavailable', reason: logout ? 'logout-unconfirmed' : 'connection', ...reference });
   }
   function authenticated(bootstrap: Bootstrap) {
     if (disposed) return;
@@ -187,7 +189,8 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
           || !['SESSION_REQUIRED', 'SESSION_EXPIRED'].includes(error.serverCode ?? '')) return;
         invalidatePending();
         forget();
-        publish({ status: 'required', reason: error.serverCode === 'SESSION_EXPIRED' ? 'expired' : 'missing' });
+        const id = apiFailureReference(error);
+        publish({ status: 'required', reason: error.serverCode === 'SESSION_EXPIRED' ? 'expired' : 'missing', ...(id ? { referenceId: id } : {}) });
       };
     },
     subscribe(listener: (state: SessionState) => void) {

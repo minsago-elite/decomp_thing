@@ -45,7 +45,7 @@ export function SessionStatus({ session }: { session: BrowserSession }) {
   }
   const removalFailed = state.status === 'unavailable' && state.reason === 'removal-failed';
   return <aside class="session-notice notice" aria-label="Local session" role="status">
-    <p>{explanation(state)}</p>
+    <p>{explanation(state)}{'referenceId' in state && state.referenceId && <> Reference ID: <code>{state.referenceId}</code>.</>}</p>
     {!removalFailed && <button type="button" onClick={() => { void session.refresh(); }}>Check session</button>}
   </aside>;
 }

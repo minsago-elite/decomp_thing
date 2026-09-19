@@ -37,8 +37,9 @@ class UploadUncertaintyHttpTest {
         service.uploadPublisher = StagedJobUpload(root, fault = { point ->
             if (point == UploadPublishPoint.AFTER_RENAME) throw IOException(privateDiagnostic)
         })
+        val diagnostics = java.util.concurrent.CopyOnWriteArrayList<String>()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 4)
-        server.createContext("/jobs") { handleUploadRequest(it, service) }
+        server.createContext("/jobs") { handleUploadRequest(it, service) { line -> diagnostics += line } }
         server.start()
         try {
             val boundary = "decomp-uncertain-upload"
@@ -71,10 +72,15 @@ class UploadUncertaintyHttpTest {
                     assertEquals(id, problem["job_id"]!!.jsonPrimitive.content)
                     assertEquals(location, problem["job_url"]!!.jsonPrimitive.content)
                     assertEquals("false", problem["retry_upload"].toString())
+                    val requestId = problem.getValue("requestId").jsonPrimitive.content
+                    assertEquals(requestId, connection.getHeaderField("X-Request-ID"))
+                    assertEquals("web-http-failure request_id=$requestId status=409 code=RECOVERY_REQUIRED", diagnostics.single())
+                    assertFalse(diagnostics.single().contains(privateDiagnostic))
                 } else {
                     assertTrue(connection.contentType.startsWith("text/html"))
                     assertTrue(response.contains("href=\"$location\""))
                     assertTrue(response.contains("Check job"))
+                    assertTrue(diagnostics.isEmpty())
                 }
                 val published = JobStore(root).get(id)
                 assertEquals("uploaded", published.status)

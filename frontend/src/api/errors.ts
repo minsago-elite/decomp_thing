@@ -18,3 +18,20 @@ export class ApiClientError extends Error {
     this.serverCode = metadata.serverCode;
   }
 }
+
+// The server generates lowercase UUID request IDs. Transport-valid opaque IDs are
+// deliberately not suitable for display: only this known diagnostic shape may
+// cross into user-facing text.
+const canonicalRequestId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+export function apiFailureReference(error: unknown): string | undefined {
+  return error instanceof ApiClientError && error.status !== undefined && error.status >= 400 && error.status <= 599
+    && error.requestId && canonicalRequestId.test(error.requestId)
+    ? error.requestId : undefined;
+}
+
+/** Append only a vetted correlation ID to a fixed, locally authored message. */
+export function withApiFailureReference(message: string, error: unknown): string {
+  const requestId = apiFailureReference(error);
+  return requestId ? `${message} Reference ID: ${requestId}.` : message;
+}

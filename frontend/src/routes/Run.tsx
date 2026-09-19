@@ -1,7 +1,7 @@
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useState } from 'preact/hooks';
 import type { Run as RunData } from '../api/generated';
-import { ApiClientError } from '../api/client';
+import { ApiClientError, withApiFailureReference } from '../api/client';
 import { jobPath, runPath } from '../app/paths';
 import type { BrowserSession } from '../session/session';
 import { Activity } from '../jobs/Activity';
@@ -24,8 +24,8 @@ function Details({ jobId, runId, basePath, session }: { jobId: string; runId: st
       }
       setRun(response.data);
     }).catch((failure: unknown) => {
-      if (!controller.signal.aborted) setError(failure instanceof ApiClientError && failure.status === 404
-        ? 'This attempt is unavailable for this job.' : 'The attempt could not be loaded. Check the local session and server.');
+      if (!controller.signal.aborted) setError(withApiFailureReference(failure instanceof ApiClientError && failure.status === 404
+        ? 'This attempt is unavailable for this job.' : 'The attempt could not be loaded. Check the local session and server.', failure));
     }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => { controller.abort(); };
   }, [client, jobId, runId, refresh]);

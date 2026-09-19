@@ -50,6 +50,17 @@ it('offers a read-only check after expiry without replaying an exchange', async 
   expect(gateway.bootstrap).toHaveBeenCalledTimes(2);
 });
 
+it('shows only a canonical reference for a failed session request', async () => {
+  const requestId = '123e4567-e89b-42d3-a456-426614174000';
+  const { session, gateway } = setup();
+  gateway.bootstrap.mockRejectedValueOnce(new ApiClientError('http_error', {
+    serverCode: 'SESSION_EXPIRED', status: 401, requestId,
+  }));
+  await session.initialize({ kind: 'absent' });
+  expect((await screen.findByText(/Your local session expired/)).textContent).toContain(`Reference ID: ${requestId}.`);
+  expect(session.snapshot()).toEqual({ status: 'required', reason: 'expired', referenceId: requestId });
+});
+
 it('contains a failed logout and gives an explicit check without automatic retries', async () => {
   const { session, gateway } = setup();
   await session.initialize({ kind: 'absent' });

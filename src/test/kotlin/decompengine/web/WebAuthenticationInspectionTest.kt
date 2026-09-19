@@ -15,6 +15,29 @@ import kotlinx.serialization.json.*
 
 class WebAuthenticationInspectionTest {
     private val sessions = java.util.IdentityHashMap<UploadServer, Map<String, String>>()
+    @Test fun `operator JSON rejections correlate to redacted server diagnostics`() {
+        val diagnostics = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val server = UploadServer("127.0.0.1", 0, createTempDirectory("web-auth-correlation-"),
+            requestDiagnosticOutput = { diagnostics += it })
+        server.start()
+        try {
+            val privateAction = "private-operator-token-canary"
+            val denied = request(server, "/api/operator/auth-methods", true, action = privateAction)
+            assertEquals(400, denied.statusCode())
+            val deniedId = Json.parseToJsonElement(denied.body()).jsonObject.getValue("requestId").jsonPrimitive.content
+            assertEquals(deniedId, denied.headers().firstValue("X-Request-ID").orElseThrow())
+            assertEquals("web-http-failure request_id=$deniedId status=400 code=OPERATOR_INSPECTION_REJECTED", diagnostics.single())
+
+            val conflict = request(server, "/api/operator/auth-methods/cancel", true, action = "cancel-auth-inspection")
+            assertEquals(409, conflict.statusCode())
+            val conflictId = Json.parseToJsonElement(conflict.body()).jsonObject.getValue("requestId").jsonPrimitive.content
+            assertEquals(conflictId, conflict.headers().firstValue("X-Request-ID").orElseThrow())
+            assertEquals("web-http-failure request_id=$conflictId status=409 code=OPERATOR_INSPECTION_REJECTED", diagnostics.last())
+            assertEquals(2, diagnostics.size)
+            assertFalse(diagnostics.joinToString().contains(privateAction))
+        } finally { server.stop(0) }
+    }
+
     @Test fun `shutdown waits for cancelled inspection cleanup before returning`() {
         val entered = java.util.concurrent.CountDownLatch(1)
         val cancelled = java.util.concurrent.CountDownLatch(1)

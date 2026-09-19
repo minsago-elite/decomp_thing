@@ -137,6 +137,7 @@ class LocalWebAccess(
     val configuration: LocalWebAccessConfiguration,
     private val clock: WebAccessClock = SystemWebAccessClock,
     private val random: SecureRandom = SecureRandom(),
+    private val requestDiagnosticOutput: (String) -> Unit = System.err::println,
 ) : AutoCloseable {
     private class BootstrapRecord(val digest: ByteArray, val issuedTick: Long)
     private class SessionRecord(
@@ -291,6 +292,7 @@ class LocalWebAccess(
         exchange.responseHeaders.set("X-Content-Type-Options", "nosniff")
         exchange.responseHeaders.set("X-Request-ID", requestId)
         deniedHeaders(exchange, failure)
+        recordWebRequestFailure(requestId, failure.status, failure.code, requestDiagnosticOutput)
         try {
             if (exchange.requestMethod == "HEAD") exchange.sendResponseHeaders(failure.status, -1)
             else {

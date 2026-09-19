@@ -1,7 +1,7 @@
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso/router';
-import { ApiClientError } from '../api/client';
+import { ApiClientError, withApiFailureReference } from '../api/client';
 import type { Runs } from '../api/generated';
 import { jobPath, runPath } from '../app/paths';
 import type { BrowserSession } from '../session/session';
@@ -34,10 +34,10 @@ function History({ jobId, basePath }: { jobId: string; basePath: string }) {
     }).catch((failure: unknown) => {
       if (controller.signal.aborted) return;
       if (failure instanceof ApiClientError && [401, 403, 404].includes(failure.status ?? 0)) {
-        setData(null); setError('Attempt history is unavailable. Check the job and local session.');
+        setData(null); setError(withApiFailureReference('Attempt history is unavailable. Check the job and local session.', failure));
       } else if (failure instanceof ApiClientError && ['CURSOR_EXPIRED', 'INVALID_CURSOR'].includes(failure.serverCode ?? '')) {
-        setError('Attempt history changed or this page expired. Refresh history to begin again.');
-      } else setError('Attempt history could not be loaded. Retry this read.');
+        setError(withApiFailureReference('Attempt history changed or this page expired. Refresh history to begin again.', failure));
+      } else setError(withApiFailureReference('Attempt history could not be loaded. Retry this read.', failure));
     }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => { controller.abort(); };
   }, [client, jobId, cursor, validQuery, refresh]);
