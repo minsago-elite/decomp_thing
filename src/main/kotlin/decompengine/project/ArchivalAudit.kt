@@ -182,8 +182,15 @@ object ArchivalProjectAuditor {
         val publicationEvidence = publication ?: ArchivePublicationEvidence.forProfile(
             profile, hostSafetyLimits, effectiveLimits, "audited",
         )
-        require(publicationEvidence.profileId == profile.id && publicationEvidence.profileSha256 == profile.sha256) {
-            "archive publication evidence does not match the selected profile"
+        val expectedPublication = ArchivePublicationEvidence.forProfile(
+            profile, hostSafetyLimits, effectiveLimits, publicationEvidence.outcome,
+        )
+        require(publicationEvidence.profileId == expectedPublication.profileId &&
+            publicationEvidence.profileSha256 == expectedPublication.profileSha256 &&
+            publicationEvidence.profileLimits == expectedPublication.profileLimits &&
+            publicationEvidence.hostLimits == expectedPublication.hostLimits &&
+            publicationEvidence.effectiveLimits == expectedPublication.effectiveLimits) {
+            "archive publication evidence does not match the selected profile or effective budgets"
         }
         val compilationPolicy = ReconstructionCompilationPolicies.resolve(profile)
         val requiredCorpora = snapshotRequiredBehaviorCorpora(requiredCorpusSha256)

@@ -296,6 +296,7 @@ object ArchivalBundleVerifier {
         profile: ReconstructionProfile,
         hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
     ): VerifiedArchiveExtraction {
+        hostSafetyLimits.requireAllows(profile.budgets)
         require(Files.isRegularFile(archivePath, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(archivePath)) {
             "archive must be a regular non-symbolic-link file"
         }
@@ -593,6 +594,7 @@ private fun archiveRelativePath(root: Path, path: Path): String =
 private fun preflightProjectTree(projectDir: Path, limits: ArchivalBundleLimits, transport: ArchiveTransportLayout) {
     val portablePaths = mutableSetOf<String>()
     var entryCount = 0
+    var totalBytes = 0L
     Files.walk(projectDir).use { paths ->
         paths.forEach { path ->
             if (path == projectDir) return@forEach
@@ -612,6 +614,14 @@ private fun preflightProjectTree(projectDir: Path, limits: ArchivalBundleLimits,
                 "archive project contains a non-regular file: $relative"
             }
             rejectPrivateOrCachedPath(relative)
+            val size = Files.size(path)
+            require(size <= limits.maximumFileBytes) {
+                "archive payload exceeds the file limit: $relative"
+            }
+            totalBytes = Math.addExact(totalBytes, size)
+            require(totalBytes <= limits.maximumTotalBytes) {
+                "archive exceeds ${limits.maximumTotalBytes} payload bytes"
+            }
         }
     }
 }
