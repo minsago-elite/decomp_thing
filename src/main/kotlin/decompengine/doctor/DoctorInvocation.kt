@@ -26,10 +26,6 @@ internal fun parseDoctorInvocation(args: List<String>, defaultOutput: Path): Doc
                 toolsOnly = true
                 index++
             }
-            "--auth-methods" -> {
-                showAuthMethods = true
-                index++
-            }
             "--harness" -> {
                 harnessOverride = nextValue("--harness requires acp or legacy-openai")
                 index += 2
