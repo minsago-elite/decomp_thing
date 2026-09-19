@@ -409,17 +409,21 @@ class WebApiControllerTest {
     }
 
     @Test
-    fun `authenticated streamed upload returns durable identity and replays without overwriting later status`() = withServer { server, store, _ ->
+    fun `authenticated streamed upload returns durable identity and replays without overwriting later status`() = withServer { server, store, existingJobId ->
         val cookie = establish(server)
         val csrf = assertEnvelope(request(server, "/workbench/api/v1/bootstrap", headers = mapOf("Cookie" to cookie)), 200, "bootstrap")
             .getValue("csrfToken").jsonPrimitive.content
         val key = "fixture_upload_api_key"
         val headers = mapOf("Cookie" to cookie, "X-CSRF-Token" to csrf, "Idempotency-Key" to key)
+        val existingRecord = Files.readAllBytes(store.storageRoot.resolve(existingJobId).resolve("job.json"))
         assertError(upload(server, elfFixture(), emptyMap()), 401, "SESSION_REQUIRED")
         assertError(upload(server, elfFixture(), headers - "X-CSRF-Token"), 403, "CSRF_DENIED")
         assertError(upload(server, elfFixture(), headers - "Idempotency-Key"), 400, "INVALID_IDEMPOTENCY_KEY")
         assertError(upload(server, elfFixture(), headers + ("Origin" to "http://invalid.example")), 403, "ORIGIN_DENIED")
         assertError(upload(server, byteArrayOf(1, 2, 3), headers), 422, "INVALID_ELF")
+        assertEquals(listOf(existingJobId), store.jobIds())
+        kotlin.test.assertContentEquals(existingRecord,
+            Files.readAllBytes(store.storageRoot.resolve(existingJobId).resolve("job.json")))
         val created = upload(server, elfFixture(), headers)
         val original = assertEnvelope(created, 201, "job")
         val id = original.getValue("jobId").jsonPrimitive.content
