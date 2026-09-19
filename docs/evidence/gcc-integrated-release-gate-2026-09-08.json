@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "recordKind": "gcc-integrated-release-gate",
+  "issue": 728,
+  "parentIssue": 57,
+  "recordedOnUtc": "2026-09-08",
+  "evidenceBasis": {
+    "repositoryCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+    "corpus": {
+      "path": "oracle/gcc/16.2.0/behavior-corpus.json",
+      "sha256": "bcc1a14ca8c54f94106c943f0bc5698cb9af3151b7bf20a49ae3c8828baaad0e",
+      "id": "gcc-16-2-0-driver-behavior",
+      "scope": "production",
+      "requiredCaseCount": 14,
+      "requiredCaseIds": [
+        "assembly-file",
+        "compile-file",
+        "compile-stdin",
+        "diagnostic-invalid-input",
+        "diagnostic-invalid-option",
+        "environment-search-path",
+        "help-driver",
+        "linking",
+        "metadata-dumpmachine",
+        "metadata-dumpversion",
+        "metadata-version",
+        "preprocess-file",
+        "preprocess-stdin",
+        "response-file"
+      ]
+    },
+    "referenceEvidence": {
+      "path": "oracle/gcc/16.2.0/behavior-corpus-evidence.json",
+      "sha256": "9dcf787aea232615a1ff8721144b86bc1f5e9a2a7068fa9e9280db0bc4ad6803",
+      "cases": 14,
+      "passed": 14,
+      "status": "reference-only"
+    }
+  },
+  "contract": {
+    "decision": "blocked",
+    "releaseEligible": false,
+    "requiredCaseRule": "Every required integrated candidate case must have authenticated evidence with status passed; missing, skipped, unresolved, failed, stale, untrusted, or reference-only status blocks release.",
+    "candidateComparison": "unavailable",
+    "failClosedStates": [
+      "missing",
+      "skipped",
+      "unresolved",
+      "failed",
+      "stale",
+      "untrusted",
+      "reference-only"
+    ]
+  },
+  "unavailableProductionGates": [
+    {
+      "id": "reconstructed-driver-and-engines",
+      "issues": [725],
+      "status": "unavailable",
+      "reason": "The checked repository retains oracle and planning inputs, but no accepted reconstructed driver, cc1, and lto1 candidate qualification is recorded."
+    },
+    {
+      "id": "candidate-case-comparisons",
+      "issues": [726],
+      "status": "unavailable",
+      "reason": "The 14 passed observations are reference evidence; authenticated reconstructed candidate observations for the required cases are absent."
+    },
+    {
+      "id": "clean-repeated-integrated-runs",
+      "issues": [727],
+      "status": "unavailable",
+      "reason": "No complete integrated candidate workflow has been retained across clean bounded repetitions."
+    }
+  ],
+  "authorityBoundary": {
+    "releaseDecision": "authenticated-verifier-required",
+    "oracleEvidence": "retained-authenticated-reference-only",
+    "candidateEvidence": "must-be-independent-and-provenance-bound",
+    "analysisProvider": "application-bundled-ghidra-java-api",
+    "isolatedWorkerRequired": true,
+    "externalGhidraHomeAllowed": false,
+    "externalAnalyzeHeadlessAllowed": false
+  }
+}

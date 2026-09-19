@@ -2,14 +2,10 @@ package decompengine.project
 
 import decompengine.oracle.fulltree.StableControlFile
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonNull
-import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.longOrNull
 import java.io.BufferedInputStream
 import java.io.InputStream
 import java.io.OutputStream
@@ -35,6 +31,7 @@ data class ArchivalBundle(
     val archivePath: Path,
     val archiveSha256: String,
     val payloadFiles: List<String>,
+    val audit: ArchivalAudit? = null,
 )
 
 data class ArchivalBundleLimits(
@@ -70,12 +67,14 @@ object ArchivalPackager {
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
         requiredCorpusSha256: Set<String> = emptySet(),
     ): ArchivalBundle {
+        val archiveBuild = ReconstructionAdapters.resolve(profile).archiveBuild
+        val transport = archiveBuild.checkedTransportLayout(profile)
         val requiredCorpora = snapshotRequiredBehaviorCorpora(requiredCorpusSha256)
         require(!Files.isSymbolicLink(projectDir)) { "archive project root must not be a symbolic link" }
         require(projectDir.resolve("source_tree_manifest.json").isRegularFile(LinkOption.NOFOLLOW_LINKS)) {
             "project is missing source_tree_manifest.json"
         }
-        preflightProjectTree(projectDir, limits)
+        preflightProjectTree(projectDir, limits, transport)
         val projectBase = projectDir.toRealPath()
         val archiveAbsolute = archivePath.toAbsolutePath().normalize()
         val archiveLexicalParent = archiveAbsolute.parent
@@ -92,7 +91,7 @@ object ArchivalPackager {
         require(!Files.isSymbolicLink(archivePath) && !Files.isSymbolicLink(archiveDestination)) {
             "archive output must not be a symbolic link: $archivePath"
         }
-        validateSuccessfulBuild(projectDir)
+        archiveBuild.validate(projectDir, profile, requireArtifact = true)
         val audit = ArchivalProjectAuditor.audit(projectDir, profile, requiredCorpora)
         require(audit.provenanceComplete) { "archive project has incomplete model or source provenance" }
         require(requiredCorpora.isEmpty() || audit.behaviorMatched == true) {
@@ -106,11 +105,11 @@ object ArchivalPackager {
 
             This project was reconstructed from a binary using evidence-backed analysis and may not be universally equivalent to the original.
 
-            Build with the exact parallel warnings-as-errors command in `BUILDING.md`. The recovered program model, module plan, confidence, unresolved entities, build logs, and per-module provenance are under `reports/`.
+            ${archiveBuild.rebuildInstructions}
             Verify payload hashes with `ARCHIVE_MANIFEST.sha256` before use.
             """.trimIndent() + "\n",
         )
-        val payload = collectPayload(projectDir, archiveDestination, limits)
+        val payload = collectPayload(projectDir, archiveDestination, limits, transport)
         validateSourceManifest(projectDir, payload.associateBy { it.relativePath }, profile)
         val archivedBehaviorHashes = payload.asSequence()
             .filter { it.relativePath.endsWith(".behavior.json") }
@@ -170,13 +169,14 @@ object ArchivalPackager {
         } finally {
             Files.deleteIfExists(temporaryArchive)
         }
-        return ArchivalBundle(archivePath, digestFile(archiveDestination), payload.map { it.relativePath })
+        return ArchivalBundle(archivePath, digestFile(archiveDestination), payload.map { it.relativePath }, audit)
     }
 
     private fun collectPayload(
         projectDir: Path,
         archiveAbsolute: Path,
         limits: ArchivalBundleLimits,
+        transport: ArchiveTransportLayout,
     ): List<ArchivePayload> {
         val files = mutableListOf<ArchivePayload>()
         val portablePaths = mutableSetOf(portablePathKey(HASH_MANIFEST))
@@ -185,7 +185,7 @@ object ArchivalPackager {
             paths.forEach { path ->
                 if (path == projectDir) return@forEach
                 val relative = archiveRelativePath(projectDir, path)
-                if (relative == "build" || relative.startsWith("build/")) return@forEach
+                if (transport.excludes(relative)) return@forEach
                 if (path.toAbsolutePath().normalize() == archiveAbsolute || relative == HASH_MANIFEST) {
                     return@forEach
                 }
@@ -281,6 +281,8 @@ object ArchivalBundleVerifier {
         strictControlJson: Boolean = false,
     ): VerifiedArchiveExtraction {
         require(maximumPathDepth in 1..2048) { "archive path depth bound is invalid" }
+        val archiveBuild = ReconstructionAdapters.resolve(profile).archiveBuild
+        val transport = archiveBuild.checkedTransportLayout(profile)
         val targetBase = targetDir.toAbsolutePath().normalize()
         val targetExisted = Files.exists(targetBase, LinkOption.NOFOLLOW_LINKS)
         require(!Files.isSymbolicLink(targetBase)) { "archive target must not be a symbolic link" }
@@ -363,12 +365,13 @@ object ArchivalBundleVerifier {
                 require(digestFile(staging.resolve(relative)) == hash) { "archive payload hash mismatch: $relative" }
             }
             if (strictControlJson) {
-                for (relative in listOf("source_tree_manifest.json", "reports/build_contract.json", "reports/program_model.json")) {
+                for (relative in setOf("source_tree_manifest.json",
+                    profile.layout.declaration("program-model-evidence").materialize()) + transport.strictBuildControlPaths) {
                     val snapshot = decompengine.repair.readStableRegularFile(staging, relative, 4L * 1024 * 1024)
                     decompengine.oracle.core.OracleJson.parse(snapshot.bytes)
                 }
             }
-            validateSuccessfulBuild(staging, requireArtifact = false)
+            archiveBuild.validate(staging, profile, requireArtifact = false)
             val payload = expected.map { (relative, hash) ->
                 val path = staging.resolve(relative)
                 ArchivePayload(relative, path, Files.size(path), hash, 0)
@@ -403,111 +406,13 @@ object ArchivalBundleVerifier {
     )
 }
 
-private val requiredArchivePaths = setOf(
-    "ARCHIVE_README.md",
-    "BUILDING.md",
-    "Makefile",
-    "UNRESOLVED.md",
-    "reports/archival_audit.json",
-    "reports/build.log",
-    "reports/build_contract.json",
-    "reports/confidence.json",
-    "reports/module_plan.json",
-    "reports/program_model.json",
-    "reports/toolchain.json",
-    "source_tree_manifest.json",
-)
-
-private fun validateSuccessfulBuild(projectDir: Path, requireArtifact: Boolean = true) {
-    requiredArchivePaths.filterNot { it == "ARCHIVE_README.md" || it == "reports/archival_audit.json" }
-        .forEach { relative ->
-            require(projectDir.resolve(relative).isRegularFile(LinkOption.NOFOLLOW_LINKS)) {
-                "archive project is missing required evidence: $relative"
-            }
-    }
-    val contract = Json.parseToJsonElement(projectDir.resolve("reports/build_contract.json").readText()).jsonObject
-    require(contract["schemaVersion"]?.jsonPrimitive?.intOrNull == 2) {
-        "archive build contract must use source-bound schema version 2"
-    }
-    require(contract["returnCode"]?.jsonPrimitive?.intOrNull == 0) { "archive build contract is not successful" }
-    require(contract["sourceStableDuringBuild"]?.jsonPrimitive?.booleanOrNull == true) {
-        "archive build contract does not prove stable source inputs"
-    }
-    require(contract["warningsAsErrors"]?.jsonPrimitive?.booleanOrNull == true) {
-        "archive build contract does not enforce warnings-as-errors"
-    }
-    require(contract["reproduciblePathMapping"]?.jsonPrimitive?.booleanOrNull == true) {
-        "archive build contract does not map workstation paths reproducibly"
-    }
-    require(contract["apiCredentialsRequired"]?.jsonPrimitive?.booleanOrNull == false) {
-        "archive build contract requires API credentials"
-    }
-    require(contract["analysisCachesRequired"]?.jsonPrimitive?.booleanOrNull == false) {
-        "archive build contract requires analysis caches"
-    }
-    val recordedInputs = contract["sourceInputs"]?.jsonArray?.map { element ->
-        val item = element.jsonObject
-        val relative = item["path"]?.jsonPrimitive?.content ?: error("archive build source input is missing path")
-        validateRelativePath(relative)
-        val bytes = item["bytes"]?.jsonPrimitive?.longOrNull
-            ?: error("archive build source input is missing byte length: $relative")
-        val hash = item["sha256"]?.jsonPrimitive?.content
-            ?: error("archive build source input is missing SHA-256: $relative")
-        require(bytes >= 0 && hash.matches(Regex("[a-f0-9]{64}"))) {
-            "archive build source input is invalid: $relative"
-        }
-        BuildSourceInput(relative, bytes, hash)
-    } ?: error("archive build contract is missing source inputs")
-    require(recordedInputs == recordedInputs.sortedBy { it.path } && recordedInputs.map { it.path }.distinct().size == recordedInputs.size) {
-        "archive build source inputs must be unique and sorted"
-    }
-    val observedRevision = captureBuildSourceRevision(projectDir)
-    require(recordedInputs == observedRevision.inputs) { "archive build contract does not match the current source inputs" }
-    val recordedRevision = contract["sourceRevisionSha256"]?.jsonPrimitive?.content
-    require(recordedRevision == observedRevision.sha256) {
-        "archive build contract does not match the current source revision"
-    }
-    val artifactElement = contract["artifact"]
-    require(artifactElement != null && artifactElement !is JsonNull) {
-        "successful archive build contract is missing its artifact identity"
-    }
-    val artifact = artifactElement.jsonObject
-    val artifactPath = artifact["path"]?.jsonPrimitive?.content
-        ?: error("archive build artifact is missing path")
-    validateRelativePath(artifactPath)
-    require(artifactPath == "build/reconstructed") { "archive build artifact path is unexpected: $artifactPath" }
-    val artifactBytes = artifact["bytes"]?.jsonPrimitive?.longOrNull
-        ?: error("archive build artifact is missing byte length")
-    val artifactSha256 = artifact["sha256"]?.jsonPrimitive?.contentOrNull
-        ?: error("archive build artifact is missing SHA-256")
-    require(artifactBytes > 0 && artifactSha256.matches(Regex("[a-f0-9]{64}"))) {
-        "archive build artifact identity is invalid"
-    }
-    if (requireArtifact) {
-        val artifactFile = projectDir.resolve(artifactPath)
-        require(Files.isRegularFile(artifactFile, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(artifactFile)) {
-            "archive build artifact is missing or unsafe: $artifactPath"
-        }
-        require(Files.size(artifactFile) == artifactBytes && digestFile(artifactFile) == artifactSha256) {
-            "archive build artifact does not match its build contract"
-        }
-    }
-    contract["modules"]?.jsonArray.orEmpty().forEach { element ->
-        val diagnostics = element.jsonObject["diagnostics"]?.jsonPrimitive?.content
-            ?: error("archive build contract module is missing diagnostics")
-        validateRelativePath(diagnostics)
-        require(projectDir.resolve(diagnostics).isRegularFile(LinkOption.NOFOLLOW_LINKS)) {
-            "archive build contract diagnostics are missing: $diagnostics"
-        }
-    }
-}
-
 private fun validateSourceManifest(
     projectDir: Path,
     payload: Map<String, ArchivePayload>,
     expectedProfile: ReconstructionProfile,
 ): VerifiedCandidateArchiveSourceLineage {
-    requiredArchivePaths.forEach { relative ->
+    val archiveBuild = ReconstructionAdapters.resolve(expectedProfile).archiveBuild
+    archiveBuild.requiredPaths(expectedProfile).forEach { relative ->
         require(relative in payload) {
             "archive payload is missing required evidence: $relative"
         }
@@ -517,7 +422,8 @@ private fun validateSourceManifest(
     require(oracleSha256.matches(Regex("[a-f0-9]{64}"))) {
         "source tree manifest has an invalid oracle SHA-256"
     }
-    val modelOracleSha256 = Json.parseToJsonElement(projectDir.resolve("reports/program_model.json").readText())
+    val modelPath = expectedProfile.layout.declaration("program-model-evidence").materialize()
+    val modelOracleSha256 = Json.parseToJsonElement(projectDir.resolve(modelPath).readText())
         .jsonObject["inputSha256"]?.jsonPrimitive?.contentOrNull
         ?: error("program model is missing its oracle identity")
     require(modelOracleSha256 == oracleSha256) {
@@ -547,11 +453,10 @@ private fun validateSourceManifest(
         repairLineage = repairLineage,
     )
     val sourceManifestPayload = requireNotNull(payload["source_tree_manifest.json"])
-    val sourceRevision = captureBuildSourceRevision(projectDir)
+    val sourceRevision = archiveBuild.sourceRevision(projectDir, expectedProfile)
     val archivedBuildInputs = payload.values.asSequence()
         .filter { item ->
-            item.relativePath == "Makefile" || item.relativePath.startsWith("src/") ||
-                item.relativePath.startsWith("include/")
+            archiveBuild.isBuildInput(expectedProfile, item.relativePath)
         }
         .map { item -> BuildSourceInput(item.relativePath, item.size, item.sha256) }
         .sortedBy(BuildSourceInput::path)
@@ -611,7 +516,7 @@ private fun copyAndVerify(item: ArchivePayload, zip: ZipOutputStream) {
     }
 }
 
-private fun digestFile(path: Path): String {
+internal fun digestFile(path: Path): String {
     val digest = MessageDigest.getInstance("SHA-256")
     BufferedInputStream(Files.newInputStream(path)).use { input ->
         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
@@ -626,7 +531,7 @@ private fun digestFile(path: Path): String {
 
 private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 
-private fun validateRelativePath(relative: String) {
+internal fun validateRelativePath(relative: String) {
     require(
         relative.isNotBlank() && !relative.startsWith('/') &&
             relative.length <= 4_096 &&
@@ -650,7 +555,7 @@ private fun portablePathKey(relative: String): String =
 private fun archiveRelativePath(root: Path, path: Path): String =
     path.relativeTo(root).joinToString("/") { it.toString() }
 
-private fun preflightProjectTree(projectDir: Path, limits: ArchivalBundleLimits) {
+private fun preflightProjectTree(projectDir: Path, limits: ArchivalBundleLimits, transport: ArchiveTransportLayout) {
     val portablePaths = mutableSetOf<String>()
     var entryCount = 0
     Files.walk(projectDir).use { paths ->
@@ -666,7 +571,7 @@ private fun preflightProjectTree(projectDir: Path, limits: ArchivalBundleLimits)
                 "archive project contains a non-portable colliding path: $relative"
             }
             require(!Files.isSymbolicLink(path)) { "archive project contains a symbolic link: $relative" }
-            if (relative == "build" || relative.startsWith("build/")) return@forEach
+            if (transport.excludes(relative)) return@forEach
             if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) return@forEach
             require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
                 "archive project contains a non-regular file: $relative"

@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "identity": {
+    "name": "authored-neutrality-scanner-fixture",
+    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  },
+  "version": "gcc-91.4.2",
+  "target": "gcc-compiler-engines-v3"
+}

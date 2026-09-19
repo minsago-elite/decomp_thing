@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "issue": 137,
+  "recordedAt": "2026-09-08",
+  "repositoryRevision": "bf250156",
+  "authority": "non-authoritative-repository-fact-record",
+  "facts": [
+    {
+      "source": "src/main/resources/ghidra_scripts/ExportProgramModel.java",
+      "claim": "The schema-2 exporter binds a whole-program planning semantic state and batch commitments before reuse or publication; legacy schema-1 state is rejected."
+    },
+    {
+      "source": "src/main/kotlin/decompengine/oracle/gcc/GccCompilerEngineResumeEvidence.kt",
+      "claim": "The bounded state, interrupted-prefix, and resumed/fresh byte assessments are explicitly non-authoritative and do not establish process execution, interruption, disk resume, or fresh analysis-state independence."
+    },
+    {
+      "source": "src/main/kotlin/decompengine/oracle/gcc/GccBundledOperationCoordinator.kt",
+      "claim": "The contained coordinator retains interrupted analysis state, export-prefix evidence, control identity, and same-owner resume lineage, while operation results keep complete and releaseEligible false."
+    },
+    {
+      "source": "src/main/kotlin/decompengine/oracle/gcc/GccBundledCliCommand.kt",
+      "claim": "The normal CLI command has source-level fresh or checkpoint/resume branches followed by owned planning and publication; this record contains no production execution receipt."
+    }
+  ],
+  "productionGate": {
+    "complete": false,
+    "releaseEligible": false,
+    "unavailable": [
+      "forced interruption and exact contained process/absence evidence for the normal CLI",
+      "independent fresh and resumed real cc1 and lto1 runs with byte-identical authenticated models and derived plans",
+      "semantic-drift qualification across saved-project/reload and future-batch boundaries",
+      "dedicated ext4 scratch, whole-operation A10 resource accounting, and reproducible hosted publication evidence"
+    ],
+    "interpretation": "This record documents source contracts and the unresolved production boundary. It does not authorize reuse, certify an oracle result, or close issue #137."
+  }
+}

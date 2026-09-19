@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 1,
+  "recordKind": "gcc-driver-archive-identity",
+  "issue": 50,
+  "recordedOnUtc": "2026-09-08",
+  "evidenceBasis": {
+    "repositoryCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+    "profileId": "generated-c-make-v1",
+    "profileSha256": "a448a139a09f28ad9f2e08bfcebcb9d85765a0a557ebb11db6d7634bc145f28f"
+  },
+  "oracle": {
+    "status": "available",
+    "sourceRevision": "78d4ac73dd391005b895a6148cd9831e28e1208b",
+    "manifest": {
+      "path": "oracle/gcc/16.2.0/oracle-manifest.json",
+      "bytes": 60269,
+      "sha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9"
+    },
+    "artifacts": [
+      {
+        "path": "oracle/gcc/16.2.0/artifacts/gcc-driver.full",
+        "bytes": 20713760,
+        "sha256": "8009c7cfc4f66017aa932d86a6d4ec7f374e6ab7a01b3ef5ab3d2fcc78c2378b"
+      },
+      {
+        "path": "oracle/gcc/16.2.0/artifacts/gcc-driver.stripped",
+        "bytes": 2349296,
+        "sha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4"
+      }
+    ]
+  },
+  "productionArchiveGate": {
+    "status": "unavailable",
+    "productionArchive": {
+      "status": "unavailable",
+      "path": null,
+      "bytes": null,
+      "sha256": null
+    },
+    "sourceTreeManifest": {
+      "status": "unavailable",
+      "path": null,
+      "bytes": null,
+      "sha256": null
+    },
+    "archivePayloadManifest": {
+      "status": "unavailable",
+      "path": null,
+      "bytes": null,
+      "sha256": null
+    },
+    "requiredBindings": [
+      {
+        "name": "acceptedReconstructedSourceRevision",
+        "status": "unresolved",
+        "reason": "No accepted production reconstructed GCC driver source tree is retained in this repository."
+      },
+      {
+        "name": "completePayloadInventory",
+        "status": "unresolved",
+        "reason": "The production source, archive manifest, reconstruction receipts, validation reports, and unresolved inventory are unavailable as one retained payload."
+      },
+      {
+        "name": "twoIndependentArchiveRoots",
+        "status": "unresolved",
+        "reason": "No production archive pair is retained for byte comparison."
+      },
+      {
+        "name": "credentialFreeCacheFreeCleanRebuild",
+        "status": "unresolved",
+        "reason": "A fixture clean rebuild exists in focused tests; the accepted production archive has not been rebuilt in the required isolated environment."
+      }
+    ],
+    "reason": "The retained oracle pair and archive infrastructure do not constitute a production reconstructed-driver archive. No production archive claim is made without its source tree and ARCHIVE_MANIFEST.sha256."
+  },
+  "reproducibility": {
+    "production": {
+      "status": "unresolved",
+      "independentRoots": {
+        "status": "unresolved",
+        "required": 2,
+        "verified": 0
+      },
+      "archiveBytes": {
+        "status": "unresolved",
+        "byteIdentical": null
+      },
+      "cleanRebuild": {
+        "status": "unresolved",
+        "networkIsolated": null,
+        "credentialsFree": null,
+        "cachesFree": null
+      }
+    },
+    "fixture": {
+      "status": "observed",
+      "testClass": "decompengine.project.ArchivalBundleTest",
+      "testCases": [
+        "identical source trees produce byte-identical verified archives",
+        "separately rooted builds produce identical artifacts contracts and archives"
+      ],
+      "scope": "Synthetic generated-C fixture only; this does not qualify the GCC production archive."
+    }
+  }
+}

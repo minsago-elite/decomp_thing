@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "issue": 55,
+  "recordedAtUtc": "2026-09-08",
+  "status": "implementation-evidence-only",
+  "scope": "Checked cc1/lto1 planning inputs, budgets, provenance, and production gates; this record does not claim a compiler-engine run.",
+  "sourceCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "authority": {
+    "complete": false,
+    "productionVerified": false,
+    "releaseEligible": false,
+    "boundary": "The Kotlin path may authenticate supplied profile and artifact bytes and assess supplied planning bytes. Caller-supplied assessments, local inventories, and structural preflights cannot authorize oracle truth or release."
+  },
+  "profile": {
+    "path": "oracle/gcc/16.2.0/compiler-engines.json",
+    "sha256": "e0ca60b7e856e9330e45fd58e61828313e8dd824413ee0df7ef76ee5d2b47bdc",
+    "benchmark": "gcc-compiler-engines-16.2.0",
+    "target": "x86_64-linux-gnu",
+    "analysis": {
+      "exporter": "decompengine-ghidra-program-model-v10",
+      "exporterSha256": "dc0debe2808c2744792f736d150d25aaefd6a46fd90910af7175a454686c6ab9",
+      "mode": "planning",
+      "bundledGhidra": "12.1.3 PUBLIC",
+      "ghidraArchiveSha256": "93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54",
+      "planner": "deterministic-module-planner-v1"
+    },
+    "budgets": {
+      "exportWallClockSeconds": 1800,
+      "exportMaximumResidentBytes": 17179869184,
+      "plannerMaximumEntities": 500000,
+      "plannerMaximumDependencyEdges": 8000000,
+      "plannerMaximumWorkUnits": 200000000
+    },
+    "provenance": {
+      "sourceLock": ["oracle/gcc/16.2.0/source-lock.json", "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc"],
+      "baseBuildRecord": ["oracle/gcc/16.2.0/build-record.json", "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"],
+      "toolchainReproduction": ["oracle/gcc/16.2.0/toolchain-reproduction.json", "5c2c159d7287305159a220a1260f6ff6bffe9ec78bb1cbe2fb24f85b68a7d4de"]
+    }
+  },
+  "engines": [
+    {
+      "id": "cc1",
+      "buildRecordSha256": "f6b2711d4f82562195acebe7250d7dc62eb9425af4f736736e0ea69b65103e8e",
+      "oracleManifestSha256": "dbef520c025d268f5126229ace8ad5b08a15722573d45b5e1ab934611905abb4",
+      "fullArtifact": {"bytes": 374477144, "sha256": "ba9b2f314bfb3d92a172e67f8ce993a2e98b9bc14aabf00ff6d58e4631037621"},
+      "strippedArtifact": {"bytes": 41935768, "sha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"}
+    },
+    {
+      "id": "lto1",
+      "buildRecordSha256": "581a983e307a0a02895f1e878659c7f7934045a7141ebe3821837145aa97c5a5",
+      "oracleManifestSha256": "5f7e686168d6a6e35ef3719d077b0bfb246085c2d3738835be13eeed5e0d0a41",
+      "fullArtifact": {"bytes": 362827816, "sha256": "255246e259b194e40fb3f053eafad5a9fdada983404bdae90fc1b9fddfa585e1"},
+      "strippedArtifact": {"bytes": 40497008, "sha256": "35d73b94b8e33cd482095016de28ebaa4e71835720e39b7c5aa82206b562361f"}
+    }
+  ],
+  "retainedInputObservation": {
+    "path": "oracle/gcc/16.2.0/local-engine-byte-inventory.json",
+    "sha256": "aaffdfcb134b7e432abfda69055d4e598a538c05b79ad1b998ec242e16af8b39",
+    "benchmarkAccepted": false,
+    "productionVerified": false,
+    "releaseEligible": false,
+    "scratchObservation": "No ext4 filesystem was mounted in the observed host namespace.",
+    "limitation": "Read-only local byte inventory; no authenticated process, root-owned deployment, runtime closure, or benchmark execution."
+  },
+  "unavailableProductionGates": [
+    "Contained fresh cc1/lto1 export and whole-operation wall/RSS/disk/inode evidence.",
+    "Normal-CLI forced interruption, same-owner resume, and byte-identical independent fresh model/plan evidence (#137).",
+    "Exactly-once ownership plus independently replayed function/global/type structural scoring; the production adapter registry remains empty.",
+    "Root-owned bundled deployment and dedicated ext4 scratch/output lease qualification; ordinary-directory fallback is not admitted.",
+    "Reconstructed engine archives and an integrated reconstructed toolchain."
+  ],
+  "consumers": "Downstream ACP may read accepted evidence only; it cannot create, validate, score, or certify cc1/lto1 oracle truth."
+}
