@@ -116,25 +116,49 @@ data class SandboxOutputLimits(
 }
 
 object BwrapCapability {
+    private const val VERSION_PROBE_TIMEOUT_MILLIS = 2_000L
+    private const val MAXIMUM_VERSION_OUTPUT_BYTES = 64 * 1024
     private val cache = ConcurrentHashMap<String, Boolean>()
 
     fun completionEvidenceSupported(bwrapPath: Path): Boolean =
         cache.computeIfAbsent("completion|${bwrapPath.pathString}") {
-            try {
-                val output = ProcessBuilder(bwrapPath.pathString, "--version")
+            val process = try {
+                ProcessBuilder(bwrapPath.pathString, "--version")
                     .redirectErrorStream(true)
                     .start()
-                    .let { process ->
-                        val text = process.inputStream.bufferedReader().use { it.readText() }
-                        if (process.waitFor() != 0) return@computeIfAbsent false
-                        text
-                    }
-                val match = Regex("\\bbubblewrap\\s+(\\d+)\\.(\\d+)").find(output) ?: return@computeIfAbsent false
+            } catch (_: Exception) {
+                return@computeIfAbsent false
+            }
+            val reader = Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "bubblewrap-version-probe").apply { isDaemon = true }
+            }
+            val output = reader.submit<ByteArray> {
+                process.inputStream.use { it.readNBytes(MAXIMUM_VERSION_OUTPUT_BYTES + 1) }
+            }
+            try {
+                if (!process.waitFor(VERSION_PROBE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
+                    process.destroyForcibly()
+                    return@computeIfAbsent false
+                }
+                if (process.exitValue() != 0) return@computeIfAbsent false
+                val bytes = output.get(1, TimeUnit.SECONDS)
+                if (bytes.size > MAXIMUM_VERSION_OUTPUT_BYTES) return@computeIfAbsent false
+                val text = bytes.decodeToString()
+                val match = Regex("\\bbubblewrap\\s+(\\d+)\\.(\\d+)").find(text)
+                    ?: return@computeIfAbsent false
                 val major = match.groupValues[1].toIntOrNull() ?: return@computeIfAbsent false
                 val minor = match.groupValues[2].toIntOrNull() ?: return@computeIfAbsent false
                 major > 0 || major == 0 && minor >= 11
             } catch (_: Exception) {
+                process.destroyForcibly()
                 false
+            } finally {
+                output.cancel(true)
+                reader.shutdownNow()
+                process.inputStream.close()
+                process.errorStream.close()
+                process.outputStream.close()
+                if (process.isAlive) process.destroyForcibly()
             }
         }
 
