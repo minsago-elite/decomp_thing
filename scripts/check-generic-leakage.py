@@ -17,10 +17,10 @@ MAXIMUM_FILE_BYTES = 16 * 1024 * 1024
 MAXIMUM_TOTAL_BYTES = 128 * 1024 * 1024
 TEXT_SUFFIXES = {".kt", ".java", ".kts", ".py", ".sh", ".json", ".yaml", ".yml", ".toml", ".properties", ".txt", ".c", ".h"}
 RULES = {
-    "benchmark-version": re.compile(r"\bgcc[-_/ :][0-9]+(?:\.[0-9]+){1,2}\b", re.IGNORECASE),
+    "benchmark-version": re.compile(r"\b(?:gcc[-_/ :]\s*|gcc_version=)[0-9]+(?:\.[0-9]+){1,2}\b", re.IGNORECASE),
     "benchmark-target": re.compile(r'''["'](?:cc1|cc1plus|lto1|gcc-(?:elf-)?driver|gcc-compiler-engines?)(?:-v[0-9]+)?["']'''),
     "generic-suffix": re.compile(r'''(?:endsWith|removeSuffix|matches|glob)\s*\(\s*["'](?:\*|\\)?\.(?:c|h)["']'''),
-    "generic-layout": re.compile(r'''["'](?:Makefile|build/reconstructed|(?:src|include)(?:/[^"'\r\n]*)?)["']'''),
+    "generic-layout": re.compile(r'''["'](?:Makefile|build/reconstructed(?:/[^"'\r\n]*)?|(?:src|include)(?:/[^"'\r\n]*)?)["']'''),
     "generic-tool": re.compile(r'''["'](?:make|ninja|gcc|cc|clang|clang\+\+)["']'''),
     "generic-compiler-flag": re.compile(r"(?<![A-Za-z0-9_])-(?:std=c[A-Za-z0-9+]*|Werror|Wall|Wextra|fsyntax-only|Iinclude)\b"),
     "generic-adapter-reference": re.compile(r"\b(?:GeneratedC[A-Za-z0-9_]*|MakeProjectBuilder|ProjectBuildConfiguration|RecoveredCModuleReconstructor)\b"),
@@ -122,6 +122,8 @@ def load_policy(root: Path, relative: str) -> tuple[dict, re.Pattern]:
             regular_path(root, normalized_path(item), directory_allowed=True)
         require(len(roots) == len(set(roots)), f"{name} contains duplicate roots")
         require(not any(a != b and a.startswith(b + "/") for a in roots for b in roots), f"{name} contains overlapping roots")
+    require(set(policy["genericRoots"]).isdisjoint(policy["benchmarkRoots"]),
+            "genericRoots and benchmarkRoots must be disjoint")
     require(isinstance(policy["adapterFiles"], list), "adapterFiles must be a list")
     adapters = set()
     for entry in policy["adapterFiles"]:
@@ -180,7 +182,8 @@ def scan_repository(root: Path, policy_path: str = "oracle/gcc/reconstruction-ne
     for relative in inventory(root):
         path = PurePosixPath(relative)
         # Markdown documentation is an explicit exception in #84; unsupported binary formats are not decoded.
-        if path.suffix.lower() not in TEXT_SUFFIXES and path.name != "Dockerfile" and path.suffix != ".Dockerfile":
+        if path.suffix.lower() not in TEXT_SUFFIXES and not (
+                path.name == "Dockerfile" or path.name.startswith("Dockerfile.") or path.suffix == ".Dockerfile"):
             continue
         benchmark_owned = within(relative, policy["benchmarkRoots"])
         generic = within(relative, policy["genericRoots"]) and relative not in adapters
@@ -200,6 +203,7 @@ def scan_repository(root: Path, policy_path: str = "oracle/gcc/reconstruction-ne
         require(result.scanned_bytes <= MAXIMUM_TOTAL_BYTES, "repository scan exceeds its aggregate byte bound")
         line_starts = [0] + [match.end() for match in re.finditer("\n", content)]
         spans: dict[str, list[tuple[int, int, int]]] = {}
+        all_spans: list[tuple[int, int, int]] = []
         for index, entry in enumerate(allowances):
             if entry["path"] != relative:
                 continue
@@ -208,9 +212,11 @@ def scan_repository(root: Path, policy_path: str = "oracle/gcc/reconstruction-ne
             require(len(occurrences) == entry["count"], f"stale allowance count: {relative}: {entry['rule']}: expected {entry['count']}, found {len(occurrences)}")
             existing = spans.setdefault(entry["rule"], [])
             for occurrence in occurrences:
-                require(not any(occurrence.start() < end and start < occurrence.end() for start, end, _ in existing),
+                require(not any(occurrence.start() < end and start < occurrence.end() for start, end, _ in all_spans),
                         f"overlapping literal allowances: {relative}: {entry['rule']}")
-                existing.append((occurrence.start(), occurrence.end(), index))
+                span = (occurrence.start(), occurrence.end(), index)
+                existing.append(span)
+                all_spans.append(span)
         for name, pattern in selected.items():
             for match in pattern.finditer(content):
                 permitted = [index for start, end, index in spans.get(name, []) if start <= match.start() and match.end() <= end]

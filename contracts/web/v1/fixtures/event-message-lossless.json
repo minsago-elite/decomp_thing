@@ -1,0 +1,19 @@
+{
+  "apiVersion": 1,
+  "kind": "event",
+  "type": "agent.message",
+  "jobId": "1234567890abcdef1234567890abcdef",
+  "runId": "run_example_1",
+  "cursor": "cursor_example_1",
+  "sequence": "9007199254740993",
+  "occurredAt": "2026-09-05T00:00:00Z",
+  "originRequestId": "request_example_1",
+  "agentInvocationId": "invocation_example_1",
+  "agentSequence": "9007199254740993",
+  "payload": {
+    "messageId": "message_example_1",
+    "role": "ASSISTANT",
+    "textDelta": "Inspecting synthetic source evidence.",
+    "completed": false
+  }
+}

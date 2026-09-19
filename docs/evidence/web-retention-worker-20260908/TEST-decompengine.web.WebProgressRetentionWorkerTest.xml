@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.web.WebProgressRetentionWorkerTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-09-08T05:51:24.737Z" hostname="whatsername" time="0.188">
+  <properties/>
+  <testcase name="periodic reads never create storage or acquire ownership for a missing root()" classname="decompengine.web.WebProgressRetentionWorkerTest" time="0.033"/>
+  <testcase name="stopped worker remains non-idle until its callback releases()" classname="decompengine.web.WebProgressRetentionWorkerTest" time="0.022"/>
+  <testcase name="opt-in service maintenance expires eligible runs preserves pins and isolates malformed journals()" classname="decompengine.web.WebProgressRetentionWorkerTest" time="0.133"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
