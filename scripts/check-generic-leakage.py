@@ -191,8 +191,13 @@ def scan_repository(root: Path, policy_path: str = "oracle/gcc/reconstruction-ne
         # Git's cached inventory retains ordinary unstaged deletions. Policy-owned
         # paths are checked separately by load_policy and still must exist.
         try:
-            (root / relative).lstat()
+            candidate = root / relative
+            file_mode = candidate.lstat().st_mode
         except FileNotFoundError:
+            continue
+        # Symlinked shared schemas are inventory entries, not independently owned
+        # source files; regular_path still rejects them for policy declarations.
+        if stat.S_ISLNK(file_mode):
             continue
         content, size = read_text(root, relative)
         result.scanned_files += 1

@@ -24,6 +24,11 @@ internal class GccBundledCheckpointTrigger(val minimumCompletedFunctions: Long) 
         check(observed == null) { "GCC checkpoint trigger was already selected" }
         if (progress == null) return null
         require(progress.reused == 0L) { "fresh GCC progress unexpectedly reused prior records" }
+        if (progress.phase == "planning") {
+            require(progress.total > minimumCompletedFunctions) {
+                "GCC planning checkpoint threshold exceeds the observed function total"
+            }
+        }
         if (progress.phase != "planning" || progress.completed < minimumCompletedFunctions ||
             progress.completed >= progress.total) return null
         require(progress.completed % 512L == 0L) { "GCC planning progress is not at a whole checkpoint" }
