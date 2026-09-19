@@ -903,7 +903,9 @@ object SourceTreeGenerator {
         // definitions before writing the selected one.
         for (candidate in ReconstructionProfiles.builtIn) {
             val stalePath = candidate.layout.declaration("build-definition").materialize()
-            if (stalePath != makefilePath) {
+            if (stalePath != makefilePath && !runCatching {
+                    profile.layout.declarationForPath(stalePath)
+                }.isSuccess) {
                 projectDir.resolve(stalePath).deleteIfExists()
             }
         }
