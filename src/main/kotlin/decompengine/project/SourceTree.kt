@@ -895,10 +895,25 @@ object SourceTreeGenerator {
         }.map { it.path }.sorted()
         val makefile = rendering.buildDefinition(sourcePaths, profile)
         val makefilePath = profile.layout.declaration("build-definition").materialize()
-        val registeredBuildDefinitions = ReconstructionProfiles.builtIn.mapNotNull { registered ->
-            runCatching { registered.layout.declaration("build-definition").materialize() }.getOrNull()
-        }.toSet()
-        registeredBuildDefinitions.filter { it != makefilePath }.forEach { stale ->
+        val staleBuildDefinitions = buildSet {
+            projectDir.resolve("source_tree_manifest.json").takeIf { Files.isRegularFile(it) }?.let { manifestPath ->
+                runCatching {
+                    Json.parseToJsonElement(manifestPath.readText()).jsonObject
+                        .getValue("files").jsonArray
+                        .forEach { fileElement ->
+                            val file = fileElement.jsonObject
+                            val roles = file.getValue("roles").jsonArray.map { it.jsonPrimitive.content }
+                            if (ProjectFileRole.BUILD_DEFINITION.wireName in roles) {
+                                add(requireNormalizedProjectPath(file.getValue("path").jsonPrimitive.content, "stale build-definition path"))
+                            }
+                        }
+                }
+            }
+            addAll(ReconstructionProfiles.builtIn.mapNotNull { registered ->
+                runCatching { registered.layout.declaration("build-definition").materialize() }.getOrNull()
+            })
+        }
+        staleBuildDefinitions.filter { it != makefilePath }.forEach { stale ->
             projectDir.resolve(stale).deleteIfExists()
         }
         val makefileFile = projectDir.resolve(makefilePath)
