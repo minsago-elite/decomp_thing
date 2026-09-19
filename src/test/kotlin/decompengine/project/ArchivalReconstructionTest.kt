@@ -159,6 +159,34 @@ class ArchivalReconstructionTest {
     }
 
     @Test
+    fun `service binds admitted profile budgets for budgeted analyzers`() {
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val profile = ReconstructionProfile(base.schemaVersion, base.id, base.layout,
+            base.budgets.copy(exportWallClockMillis = 1234, exportMaximumResidentBytes = 5678),
+            base.adapterConfiguration)
+        var selectedBudgets: ReconstructionBudgets? = null
+        var analyzed = false
+        val analyzer = object : ExportBudgetedProgramModelAnalyzer {
+            override fun withExportBudgets(budgets: ReconstructionBudgets): ProgramModelAnalyzer {
+                selectedBudgets = budgets
+                return ProgramModelAnalyzer { _, _ ->
+                    analyzed = true
+                    RecoveredProgramModel(inputSha256 = "00".repeat(32), functions = emptyList())
+                }
+            }
+
+            override fun analyze(binaryPath: java.nio.file.Path, workDir: java.nio.file.Path): RecoveredProgramModel {
+                error("service should select the budget-bound analyzer")
+            }
+        }
+        val temp = createTempDirectory("archival-budget-binding-")
+        val input = temp.resolve("input.bin").also { it.writeBytes(byteArrayOf(1)) }
+        ArchivalReconstructionService(analyzer, profile = profile).reconstruct(input, temp.resolve("result"))
+        assertEquals(profile.budgets, selectedBudgets)
+        assertTrue(analyzed)
+    }
+
+    @Test
     fun `requested profile budgets cannot raise the default host ceiling`() {
         val base = GeneratedCMakeReconstructionProfile.descriptor
         val host = ReconstructionHostSafetyLimits.DEFAULT

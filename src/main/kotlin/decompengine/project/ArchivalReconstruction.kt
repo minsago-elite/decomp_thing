@@ -393,6 +393,11 @@ class ArchivalReconstructionService(
 
     private val adapter = ReconstructionAdapters.resolve(profile)
 
+    // Bind the admitted profile before analysis whenever the analyzer supports export budgets.
+    // Plain test/deterministic analyzers remain valid and are responsible for their own limits.
+    private val selectedAnalyzer: ProgramModelAnalyzer =
+        (analyzer as? ExportBudgetedProgramModelAnalyzer)?.withExportBudgets(profile.budgets) ?: analyzer
+
     fun reconstruct(binaryPath: Path, outputDir: Path): ArchivalReconstructionResult {
         if (Thread.interrupted()) throw InterruptedException("archival reconstruction cancelled")
         outputDir.createDirectories()
@@ -400,7 +405,7 @@ class ArchivalReconstructionService(
             outputDir, profile.budgets.reconstructionMaximumContextCharacters,
         )
         progress.phase(AgentWorkflowPhase.ANALYZING)
-        val model = analyzer.analyze(binaryPath, outputDir.resolve("analysis"))
+        val model = selectedAnalyzer.analyze(binaryPath, outputDir.resolve("analysis"))
         val project = outputDir.resolve("source-tree")
         val progressPath = outputDir.resolve("reconstruction_progress.json")
         progressPath.writeText("{\"phase\":\"planning\",\"completed\":0,\"total\":0}\n")
