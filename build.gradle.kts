@@ -1598,8 +1598,7 @@ val verifyReconstructionNeutrality = tasks.register<Exec>("verifyReconstructionN
     group = "verification"
     description = "Checks declared generic surfaces and benchmark ownership without running project code"
     // The scanner includes untracked, nonignored sources and validates stale exceptions on every run.
-    // Stays standalone: the repository scan still fails pending the #84 migration, so wiring it
-    // into `check` or scripts/ci.sh would make every verification run unconditionally red.
+    // Keep this command explicit so the repository-wide neutrality policy remains visible in CI.
     commandLine("python3", "-B", "scripts/check-generic-leakage.py")
     workingDir(rootDir)
 }
@@ -1607,6 +1606,7 @@ val verifyReconstructionNeutrality = tasks.register<Exec>("verifyReconstructionN
 tasks.named("check") {
     dependsOn(testFrontendAssetManifest)
     dependsOn(verifyPackagedWeb)
+    dependsOn(verifyReconstructionNeutrality)
     dependsOn(verifyAcpGateHelperDistribution)
     dependsOn(verifyLlvmBehaviorHelperDistribution)
     dependsOn(verifyKotlinBootClasspathDistribution)
