@@ -487,10 +487,10 @@ object FullTreePlanningInventoryControl {
                 }
             },
         )
-        private val recognizedShardIds: Set<String> = Collections.unmodifiableSet(
+
+        private val sourceOnlyShardIds: Set<String> = Collections.unmodifiableSet(
             LinkedHashSet<String>().apply {
-                sourceModules.forEach { add(it.shardId) }
-                sourceOnlyUnits.forEach { add(it.shardId) }
+                state.sourceOnly.forEach { add(it.shardId) }
             },
         )
 
@@ -507,7 +507,7 @@ object FullTreePlanningInventoryControl {
                 throw FullTreeControlException("planning shard ID is invalid")
             }
             modulesByShardId[shardId]?.let { return it }
-            if (recognizedShardIds.contains(shardId)) {
+            if (shardId in sourceOnlyShardIds) {
                 return emptyList()
             }
             throw FullTreeControlException("planning shard ID is outside the authenticated inventory")
@@ -627,7 +627,6 @@ private const val PLANNING_MAXIMUM_CANDIDATE_SOURCE_UNITS = 200_000
 private const val PLANNING_MAXIMUM_OUTPUT_RECORDS = 203_000
 private const val PLANNING_MAXIMUM_WORK_UNITS = 500_000L
 private const val PLANNING_MAXIMUM_SERIALIZED_BYTES = 32 * 1024 * 1024
-private val SHARD_ID = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
 private val PLANNING_POLICY = JsonObject(
     mapOf(
         "id" to JsonPrimitive(PLANNING_SCHEMA),
