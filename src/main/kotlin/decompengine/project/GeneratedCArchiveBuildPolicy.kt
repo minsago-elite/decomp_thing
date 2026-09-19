@@ -40,8 +40,11 @@ internal object GeneratedCArchiveBuildPolicy : ArchiveBuildPolicy {
                 }
         }
         val contract = Json.parseToJsonElement(
-            readStableRegularFile(projectDir, "reports/build_contract.json", ArchivalBundleLimits().maximumFileBytes.toLong()).bytes
-                .toString(Charsets.UTF_8),
+            readStableRegularFile(
+                projectDir,
+                "reports/build_contract.json",
+                minOf(profile.budgets.archiveMaximumFileBytes, ArchivalBundleLimits().maximumFileBytes.toLong()),
+            ).bytes.toString(Charsets.UTF_8),
         ).jsonObject
         require(contract["schemaVersion"]?.jsonPrimitive?.intOrNull == GENERATED_C_BUILD_CONTRACT_SCHEMA_VERSION) {
             "archive build contract must use source-bound schema version $GENERATED_C_BUILD_CONTRACT_SCHEMA_VERSION"
