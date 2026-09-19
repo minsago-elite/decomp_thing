@@ -982,7 +982,7 @@ object SourceTreeGenerator {
         )
         profile.layout.declarations.forEach { declaration ->
             workflowOwned.forEach { path ->
-                require(!declaration.canMaterializeUnder(path) && !path.startsWith(declaration.pathTemplate.removeSuffix("/{module}"))) {
+                require(!declaration.canMaterializeUnder(path) && !declaration.canMaterializeAbove(path)) {
                     "profile declaration ${declaration.id} collides with workflow-owned path $path"
                 }
             }
