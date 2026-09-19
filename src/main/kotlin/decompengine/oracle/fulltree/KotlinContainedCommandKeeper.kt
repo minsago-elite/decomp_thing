@@ -120,6 +120,12 @@ internal object KotlinContainedCommandKeeper {
                                     process.destroyForcibly()
                                     require(process.waitFor(5L, TimeUnit.SECONDS)) { "contained command child survived its bounded kill" }
                                     forcibleTerminationConfirmed = true
+                                } else if (status == "INTERRUPTED") {
+                                    // The child may have exited naturally after the authenticated
+                                    // interrupt observation but before the kill attempt. In that
+                                    // race, publish its ordinary exit rather than failing closed
+                                    // without an outcome.
+                                    status = "EXITED"
                                 }
                                 require(status != "INTERRUPTED" || forcibleTerminationConfirmed) {
                                     "contained command was not forcibly terminated after interruption"
