@@ -3,20 +3,42 @@
 FROM eclipse-temurin:21-jdk-jammy@sha256:55fb9bf738f5d9b4a6c01b39337e3070d3e27370dd3c478fd1d5d3cd2233c6d8 AS toolchain
 
 ARG ANGR_VERSION=9.2.213
+ARG BUBBLEWRAP_VERSION=0.11.2
+ARG BUBBLEWRAP_SHA256=69abc30005d2186baf7737feacd8da35633b93cf5af38838ecff17c5f8e924f6
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         binutils \
-        bubblewrap \
         build-essential \
         ca-certificates \
         clang \
         curl \
+        meson \
+        ninja-build \
         python3 \
         python3-pip \
+        tar \
         unzip \
+        xz-utils \
+    && curl --fail --location --silent --show-error --retry 3 \
+        --output /tmp/bubblewrap.tar.xz \
+        "https://github.com/containers/bubblewrap/releases/download/v${BUBBLEWRAP_VERSION}/bubblewrap-${BUBBLEWRAP_VERSION}.tar.xz" \
+    && printf '%s  %s\\n' "${BUBBLEWRAP_SHA256}" /tmp/bubblewrap.tar.xz | sha256sum --check --strict \
+    && mkdir -p /tmp/bubblewrap-src \
+    && tar -xJf /tmp/bubblewrap.tar.xz --strip-components=1 -C /tmp/bubblewrap-src \
+    && meson setup /tmp/bubblewrap-build /tmp/bubblewrap-src --prefix=/usr/local --buildtype=release \
+    && meson compile -C /tmp/bubblewrap-build \
+    && meson install -C /tmp/bubblewrap-build \
+    && /usr/local/bin/bwrap --version \
+    && rm -rf /tmp/bubblewrap.tar.xz /tmp/bubblewrap-src /tmp/bubblewrap-build \
     && python3 -m pip install --no-cache-dir "angr==${ANGR_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/usr/local/bin:${PATH}"
+RUN test "$(bwrap --version)" = "bubblewrap ${BUBBLEWRAP_VERSION}"
+
+COPY scripts/install-pinned-bubblewrap.sh /usr/local/bin/install-pinned-bubblewrap.sh
+RUN chmod 0755 /usr/local/bin/install-pinned-bubblewrap.sh
 
 FROM toolchain AS build
 
