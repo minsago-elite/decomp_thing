@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "issue": 607,
+  "parentIssue": 214,
+  "sourceCommit": "6d326fffef092e7bd0c7925700f720cf115448da",
+  "baseCommit": "2c88d6a8f909517cfb17cbec875167545ed59e6d",
+  "mergedBehaviorVerified": false,
+  "productionQualified": false,
+  "fixture": {
+    "remoteTransport": "file only, private temporary bare repository",
+    "branches": ["main", "feature"],
+    "states": ["diverged", "conflicted with three-stage unmerged index"],
+    "independentHistoryRootsCompared": 2,
+    "divergedCommits": {
+      "base": "a750a39db6e6c777270ab9c37dd1f787ba17645c",
+      "local": "f86b9d5a51b03c2fba16ba9e3710c76da7452dd6",
+      "remote": "d18f2bb749518c8a3d2357a4908e79946173d906"
+    },
+    "fakeProvider": "deterministic PR create/list/detail/state, duplicate rejection, fake-token gate, loopback adapter, no real credentials"
+  },
+  "verification": [
+    {
+      "command": "/home/june/.bun/bin/bun test scripts/web-git-fixtures.test.mjs",
+      "runtime": "Bun 1.3.1",
+      "result": "3 passed, 0 failed"
+    },
+    {
+      "command": "/tmp/decomp-node-24/bin/node --test scripts/web-git-fixtures.test.mjs scripts/web-github-fixture-http.test.mjs",
+      "runtime": "Node 24.20.0",
+      "result": "4 passed, 0 failed",
+      "note": "The sandbox blocked Node's nested test processes on the first attempt; the required-permission rerun passed."
+    }
+  ],
+  "ciWired": true,
+  "ciResultAtCheckpoint": "not run on this unpushed branch",
+  "limits": [
+    "The fake PR API is a test double, not complete GitHub protocol coverage.",
+    "No production Git adapter, UI, source/revision acceptance, external remote, or real credential was exercised.",
+    "The parent #214 and its other focused children remain open."
+  ]
+}
