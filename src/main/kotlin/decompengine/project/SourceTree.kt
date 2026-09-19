@@ -560,6 +560,7 @@ object SourceTreeGenerator {
     ): SourceTreeManifest {
         hostSafetyLimits.requireAllows(profile.budgets)
         val adapter = ReconstructionAdapters.resolve(profile)
+        requireWorkflowOwnedPathsAreReserved(profile)
         val selectedReconstructor = reconstructor ?: adapter.defaultReconstructor()
         val compilationPolicy = adapter.compilation
         val selectedPlanner = planner?.withProfileBounds(profile) ?: DeterministicModulePlanner.forProfile(profile)
@@ -617,6 +618,7 @@ object SourceTreeGenerator {
         val unresolvedImplementations = sortedSetOf<String>()
         val moduleRevisionEvidence = mutableMapOf<String, String>()
         val generationBudgetObservations = mutableListOf<ModuleGenerationBudgetObservation>()
+        var generatedSourceBytes = 0L
 
         moduleDependencyOrder(dependenciesByModule).map(moduleById::getValue).forEachIndexed { index, module ->
             val dependencies = dependenciesByModule.getValue(module.id)
@@ -842,6 +844,14 @@ object SourceTreeGenerator {
                 checkpoint.executionRequestSha256, checkpoint.executionEvidenceSha256,
             )
             val normalizedSource = sourcePath.readText()
+            val sourceBytes = normalizedSource.toByteArray().size.toLong()
+            require(sourceBytes <= profile.budgets.archiveMaximumFileBytes) {
+                "generated source for module ${module.id} exceeds archive file byte budget"
+            }
+            generatedSourceBytes = Math.addExact(generatedSourceBytes, sourceBytes)
+            require(generatedSourceBytes <= profile.budgets.archiveMaximumTotalBytes) {
+                "generated module sources exceed aggregate archive byte budget"
+            }
             val moduleEntityIds = module.functionIds + module.globalIds
             if (!checkpoint.accepted) unresolvedImplementations += moduleEntityIds
             generationBudgetObservations += ModuleGenerationBudgetObservation(
@@ -959,6 +969,24 @@ object SourceTreeGenerator {
         )
         projectDir.resolve("source_tree_manifest.json").writeText(manifest.toJson())
         return manifest
+    }
+
+    private fun requireWorkflowOwnedPathsAreReserved(profile: ReconstructionProfile) {
+        val workflowOwned = listOf(
+            "BUILDING.md",
+            "source_tree_manifest.json",
+            "reports/build.log",
+            "reports/build_contract.json",
+            "reports/archival_audit.json",
+            "build/reconstructed",
+        )
+        profile.layout.declarations.forEach { declaration ->
+            workflowOwned.forEach { path ->
+                require(!declaration.canMaterializeUnder(path) && !path.startsWith(declaration.pathTemplate.removeSuffix("/{module}"))) {
+                    "profile declaration ${declaration.id} collides with workflow-owned path $path"
+                }
+            }
+        }
     }
 
     private fun requireProjectedArchiveEntryBudget(

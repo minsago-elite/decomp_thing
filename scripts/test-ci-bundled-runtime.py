@@ -62,6 +62,14 @@ class RuntimeInstallationTest(unittest.TestCase):
         self.success(self.invoke(False))
         self.assertEqual(0o777, Path('/opt').stat().st_mode & 0o777)
 
+    def test_application_deployment_kind_uses_exact_target(self):
+        result = self.invoke(True, deployment_kind='application')
+        self.success(result)
+        application_target = Path(f'/var/lib/decomp-ci-application-{self.run_id}-{self.attempt}')
+        self.assertTrue((application_target / 'bundle/a-marker.txt').is_file())
+        self.success(self.invoke(False, deployment_kind='application'))
+        self.assertFalse(application_target.exists())
+
     def test_every_ancestor_still_requires_trusted_permissions(self):
         for path in ('/', '/var', '/var/lib'):
             original = Path(path).stat().st_mode & 0o777
