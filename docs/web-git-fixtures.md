@@ -8,7 +8,12 @@ published as remote `feature`, ready for an optional PR test. Use
 `createWebGitFixture({ state: 'conflicted' })` to leave `shared.txt` in a real
 three-stage unmerged index after a conflicting merge attempt. The `commits`,
 `branches`, `paths`, and `git(repository, args)` properties expose the fixture
-without making a real user repository a test input.
+without making a real user repository a test input. `git()` permits only a
+small audited set of read-only inspections; it rejects Git global options,
+config/work-tree overrides, output files, mutation commands and arbitrary
+network targets before starting a process. Exercise mutations through the
+adapter under test, pointed at the fixture-owned paths. Future inspection
+forms require explicit review rather than widening this helper generically.
 
 ```js
 import { createWebGitFixture } from './scripts/web-git-fixtures.mjs';
@@ -46,7 +51,8 @@ config, disables hooks and signing, forbids non-file transport, fixes authors
 and dates, and bounds command time/output. Generated roots are distinct and
 removed only by their own `dispose()`. Tests compare exact commit IDs across
 independent roots, exercise both clean divergence and actual conflict stages,
-verify hook and network suppression, and check the fake PR lifecycle through
+prove an executable fixture hook is skipped, reject public-helper repository
+and network escapes, and check the fake PR lifecycle through
 both its in-process handler and the loopback adapter. The CI frontend job runs
 the Node test suite and retains its output. Bun also runs the process-only
 suite locally; the loopback test uses the repository-pinned Node runtime.

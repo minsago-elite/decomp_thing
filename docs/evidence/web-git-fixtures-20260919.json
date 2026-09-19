@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "issue": 607,
   "parentIssue": 214,
-  "sourceCommit": "6d326fffef092e7bd0c7925700f720cf115448da",
+  "sourceCommit": "675fe0f7302d150fba6c20d2aa565f3fbedec7f9",
   "baseCommit": "2c88d6a8f909517cfb17cbec875167545ed59e6d",
   "mergedBehaviorVerified": false,
   "productionQualified": false,
@@ -16,18 +16,20 @@
       "local": "f86b9d5a51b03c2fba16ba9e3710c76da7452dd6",
       "remote": "d18f2bb749518c8a3d2357a4908e79946173d906"
     },
-    "fakeProvider": "deterministic PR create/list/detail/state, duplicate rejection, fake-token gate, loopback adapter, no real credentials"
+    "fakeProvider": "deterministic PR create/list/detail/state, duplicate rejection, fake-token gate, loopback adapter, no real credentials",
+    "publicGitHelper": "audited read-only inspections only; repository/work-tree/config/output/network/mutation escape forms rejected before Git starts",
+    "poisonHookControl": "an executable fixture-owned pre-commit hook exits 97, but deterministic construction still succeeds with unchanged commit IDs"
   },
   "verification": [
     {
       "command": "/home/june/.bun/bin/bun test scripts/web-git-fixtures.test.mjs",
       "runtime": "Bun 1.3.1",
-      "result": "3 passed, 0 failed"
+      "result": "4 passed, 0 failed"
     },
     {
       "command": "/tmp/decomp-node-24/bin/node --test scripts/web-git-fixtures.test.mjs scripts/web-github-fixture-http.test.mjs",
       "runtime": "Node 24.20.0",
-      "result": "4 passed, 0 failed",
+      "result": "5 passed, 0 failed",
       "note": "The sandbox blocked Node's nested test processes on the first attempt; the required-permission rerun passed."
     }
   ],
@@ -35,6 +37,7 @@
   "ciResultAtCheckpoint": "not run on this unpushed branch",
   "limits": [
     "The fake PR API is a test double, not complete GitHub protocol coverage.",
+    "The public git() helper is deliberately not a general Git runner; adapter mutation tests must use fixture-owned paths through the adapter under test.",
     "No production Git adapter, UI, source/revision acceptance, external remote, or real credential was exercised.",
     "The parent #214 and its other focused children remain open."
   ]
