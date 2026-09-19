@@ -269,7 +269,9 @@ class WebApiControllerTest {
             assertEquals("application/octet-stream", download.headers().firstValue("Content-Type").orElseThrow())
             assertTrue(download.headers().firstValue("Content-Disposition").orElseThrow().startsWith("attachment;"))
             assertEquals("nosniff", download.headers().firstValue("X-Content-Type-Options").orElseThrow())
-            assertEquals("sandbox; default-src 'none'", download.headers().firstValue("Content-Security-Policy").orElseThrow())
+            assertEquals(WEB_INERT_CONTENT_SECURITY_POLICY, download.headers().firstValue("Content-Security-Policy").orElseThrow())
+            assertEquals("DENY", download.headers().firstValue("X-Frame-Options").orElseThrow())
+            assertEquals("no-referrer", download.headers().firstValue("Referrer-Policy").orElseThrow())
             val head = request(server, href, "HEAD", headers = downloadHeaders)
             assertEquals(200, head.statusCode()); assertEquals("", head.body())
             assertEquals(raw.toByteArray().size.toString(), head.headers().firstValue("Content-Length").orElseThrow())
@@ -586,6 +588,10 @@ class WebApiControllerTest {
         assertTrue(response.headers().firstValue("Content-Type").orElseThrow().startsWith("application/json"))
         assertEquals("no-store", response.headers().firstValue("Cache-Control").orElseThrow())
         assertEquals("no-referrer", response.headers().firstValue("Referrer-Policy").orElseThrow())
+        assertEquals("nosniff", response.headers().firstValue("X-Content-Type-Options").orElseThrow())
+        assertEquals("DENY", response.headers().firstValue("X-Frame-Options").orElseThrow())
+        assertEquals(WEB_INERT_CONTENT_SECURITY_POLICY,
+            response.headers().firstValue("Content-Security-Policy").orElseThrow())
         val body = Json.parseToJsonElement(response.body()).jsonObject
         assertEquals("1", body.getValue("apiVersion").toString())
         assertEquals(kind, body.getValue("kind").jsonPrimitive.content)

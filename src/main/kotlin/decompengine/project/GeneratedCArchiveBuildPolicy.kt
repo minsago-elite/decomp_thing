@@ -17,7 +17,10 @@ import kotlinx.serialization.json.longOrNull
 
 /** Existing generated-C/Make source and artifact verification for archival builds. */
 internal object GeneratedCArchiveBuildPolicy : ArchiveBuildPolicy {
-    private val transport = ArchiveTransportLayout(setOf("build"), setOf("reports/build_contract.json"))
+    private val transport = ArchiveTransportLayout(
+        setOf("build", ".ninja_log", ".ninja_deps"),
+        setOf("reports/build_contract.json"),
+    )
     override fun transportLayout(profile: ReconstructionProfile): ArchiveTransportLayout = transport
     override val rebuildInstructions = "Build with the exact parallel warnings-as-errors command in `BUILDING.md`. The recovered program model, module plan, confidence, unresolved entities, build logs, and per-module provenance are under `reports/`."
     override fun requiredPaths(profile: ReconstructionProfile): Set<String> = setOf(

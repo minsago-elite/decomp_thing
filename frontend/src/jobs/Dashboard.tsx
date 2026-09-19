@@ -17,17 +17,25 @@ export function Dashboard({ basePath }: { basePath: string }) {
   const [draft, setDraft] = useState(selection.filters);
   const [cursors, setCursors] = useState<(string | null)[]>([null]);
   const [pageIndex, setPageIndex] = useState(0);
+  const [displayedPageIndex, setDisplayedPageIndex] = useState<number | null>(null);
   const [refresh, setRefresh] = useState(0);
   const [data, setData] = useState<Jobs | null>(null);
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading');
   const [error, setError] = useState('');
   const [validationError, setValidationError] = useState<JobFilterError | null>(null);
   const form = useRef<HTMLFormElement>(null);
+  const results = useRef<HTMLHeadingElement>(null);
+  const moveFocus = useRef(false);
+  const errorNotice = useRef<HTMLParagraphElement>(null);
   useEffect(() => {
     if (validationError) form.current?.querySelector<HTMLElement>(`[name="${validationError.field}"]`)?.focus();
   }, [validationError]);
-  const results = useRef<HTMLHeadingElement>(null);
-  const moveFocus = useRef(false);
+  useEffect(() => {
+    if (error && moveFocus.current) {
+      moveFocus.current = false;
+      errorNotice.current?.focus();
+    }
+  }, [error]);
   const { client } = usePrivateTransport(basePath);
   // Only one extra bounded page is retained; continuation pages stay server-backed.
   const firstPage = useRef<{ selection: typeof selection; refresh: number; client: typeof client; data: Jobs } | null>(null);
@@ -35,7 +43,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
   useEffect(() => {
     const restore = () => {
       const restored = currentFilters(); setSelection(restored); setDraft(restored.filters);
-      setCursors([null]); setPageIndex(0); setData(null); setValidationError(null);
+      setCursors([null]); setPageIndex(0); setData(null); setDisplayedPageIndex(null); setValidationError(null);
     };
     window.addEventListener('popstate', restore);
     return () => { window.removeEventListener('popstate', restore); };
@@ -45,7 +53,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
     const retained = firstPage.current;
     if (retained && (retained.selection !== selection || retained.refresh !== refresh || retained.client !== client)) firstPage.current = null;
     if (!cursor && firstPage.current) {
-      setData(firstPage.current.data); setPhase('ready'); setError('');
+      setData(firstPage.current.data); setDisplayedPageIndex(0); setPhase('ready'); setError('');
       if (moveFocus.current) { moveFocus.current = false; results.current?.focus(); }
       return;
     }
@@ -57,14 +65,14 @@ export function Dashboard({ basePath }: { basePath: string }) {
     void client.get('jobs', `/jobs?${params}`, { signal: controller.signal }).then(response => {
       if (controller.signal.aborted) return;
       if (!cursor) firstPage.current = { selection, refresh, client, data: response.data };
-      setData(response.data); setPhase('ready');
+      setData(response.data); setDisplayedPageIndex(pageIndex); setPhase('ready');
       if (moveFocus.current) { moveFocus.current = false; results.current?.focus(); }
     }).catch((failure: unknown) => {
       if (controller.signal.aborted) return;
       setPhase('error');
       if (failure instanceof ApiClientError && (failure.status === 401 || failure.status === 403)) {
         firstPage.current = null;
-        setData(null); setError(withApiFailureReference('Access to this job library is unavailable. Check your local session.', failure));
+        setData(null); setDisplayedPageIndex(null); setError(withApiFailureReference('Access to this job library is unavailable. Check your local session.', failure));
       } else if (failure instanceof ApiClientError && ['JOB_RECORD_UNAVAILABLE', 'LISTING_UNAVAILABLE', 'CORRUPT_WORKFLOW_STATE', 'CORRUPT_LEGACY_JOB', 'INVALID_STORAGE_ENTRY'].includes(failure.serverCode ?? '')) {
         setError(withApiFailureReference('Stored jobs could not be listed completely. The server has not returned a partial library; inspect job storage before retrying.', failure));
       } else if (failure instanceof ApiClientError && failure.serverCode === 'LISTING_BUSY') {
@@ -76,7 +84,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
       } else setError(withApiFailureReference('Jobs could not be loaded. The server may be unavailable or a stored job may need attention.', failure));
     });
     return () => { controller.abort(); };
-  }, [selection, cursor, refresh, client]);
+  }, [selection, cursor, pageIndex, refresh, client]);
 
   function apply(filters: JobFilters) {
     const search = filterSearch(filters);
@@ -84,13 +92,13 @@ export function Dashboard({ basePath }: { basePath: string }) {
       const checked = jobFilters(search);
       history.replaceState(null, '', `${location.pathname}${search ? `?${search}` : ''}`);
       setSelection({ filters: checked, valid: true }); setDraft(checked);
-      setPageIndex(0); setCursors([null]); setData(null); setError(''); setValidationError(null); moveFocus.current = true;
+      setPageIndex(0); setCursors([null]); setData(null); setDisplayedPageIndex(null); setError(''); setValidationError(null); moveFocus.current = true;
     } catch (failure) {
       if (failure instanceof JobFilterError) setValidationError(failure);
       else setError('Use valid filter values.');
     }
   }
-  function reload() { setCursors([null]); setPageIndex(0); setRefresh(value => value + 1); }
+  function reload() { moveFocus.current = true; setCursors([null]); setPageIndex(0); setRefresh(value => value + 1); }
   function field(key: keyof JobFilters, value: string) { setDraft(previous => ({ ...previous, [key]: value })); }
   function fieldA11y(key: keyof JobFilters) {
     return { name: key, 'aria-invalid': validationError?.field === key || undefined,
@@ -124,7 +132,7 @@ export function Dashboard({ basePath }: { basePath: string }) {
     </form>
     {validationError && <p id="job-filter-error" role="alert" class="notice notice-error">{validationError.message}</p>}
     {!selection.valid && <p role="alert">The saved filters are invalid. Reset filters to load jobs.</p>}
-    {error && <p role="alert" class="notice notice-error">{error}{retainedNotice}</p>}
+    {error && <p ref={errorNotice} role="alert" tabIndex={-1} class="notice notice-error">{error}{retainedNotice}</p>}
     <div class="job-actions"><button type="button" disabled={phase === 'loading' || !selection.valid} onClick={reload}>Refresh jobs</button>
       <p>{selection.filters.sort === 'oldest' ? 'Oldest' : 'Newest'} jobs first. Completion does not establish validated reconstruction.</p></div>
     <h3 ref={results} tabIndex={-1}>Job results</h3>
@@ -140,7 +148,8 @@ export function Dashboard({ basePath }: { basePath: string }) {
     </ul>}
     <nav class="job-actions" aria-label="Job pages">
       <button type="button" disabled={phase !== 'ready' || pageIndex === 0} onClick={() => { moveFocus.current = true; setPageIndex(Math.max(0, pageIndex - 1)); }}>Previous page</button>
-      <span>Page {pageIndex + 1}</span>
+      <span aria-live="polite">{data && displayedPageIndex !== null ? `Page ${displayedPageIndex + 1}`
+        : phase === 'loading' && selection.valid ? `Loading page ${pageIndex + 1}` : 'No page available'}</span>
       <button type="button" disabled={phase !== 'ready' || !data?.page.nextCursor} onClick={() => {
         if (!data?.page.nextCursor) return;
         moveFocus.current = true; setCursors(previous => [...previous.slice(0, pageIndex + 1), data.page.nextCursor]); setPageIndex(pageIndex + 1);

@@ -101,7 +101,6 @@ internal class WebApiController(
                     webApiHeaders(exchange, UUID.randomUUID().toString())
                     exchange.responseHeaders.set("Content-Type", "application/octet-stream")
                     exchange.responseHeaders.set("Content-Disposition", "attachment; filename=\"exploration.json\"")
-                    exchange.responseHeaders.set("Content-Security-Policy", "sandbox; default-src 'none'")
                     exchange.responseHeaders.set("Content-Length", bytes.size.toString())
                     try {
                         if (exchange.requestMethod == "HEAD" || bytes.isEmpty()) exchange.sendResponseHeaders(200, -1)

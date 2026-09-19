@@ -69,7 +69,7 @@ interface WebAccessClock {
     fun nanoTime(): Long
 }
 
-private object SystemWebAccessClock : WebAccessClock {
+internal object SystemWebAccessClock : WebAccessClock {
     override fun instant(): Instant = Instant.now()
     override fun nanoTime(): Long = System.nanoTime()
 }
@@ -288,8 +288,7 @@ class LocalWebAccess(
         exchange.responseHeaders.set("Content-Type", "application/json; charset=utf-8")
         exchange.responseHeaders.set("Content-Length", body.size.toString())
         exchange.responseHeaders.set("Cache-Control", "no-store")
-        exchange.responseHeaders.set("Referrer-Policy", "no-referrer")
-        exchange.responseHeaders.set("X-Content-Type-Options", "nosniff")
+        exchange.applyWebSecurityHeaders()
         exchange.responseHeaders.set("X-Request-ID", requestId)
         deniedHeaders(exchange, failure)
         recordWebRequestFailure(requestId, failure.status, failure.code, requestDiagnosticOutput)
