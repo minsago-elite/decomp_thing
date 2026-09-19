@@ -39,7 +39,8 @@ class WebProgressPinControllerTest {
             val snapshot = (owner.inspect(job.id) as WorkflowJobInspection.Available).snapshot
             run = owner.create(job.id, snapshot.version, NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WorkflowExecutionLimits(60000u, 15000u, 1048576u, 16u))).attempt
             path = "/workbench/api/v1/jobs/${job.id}/runs/${run.runId}/progress-pin"
-            val api = WebApiController(access, EmbeddedWebAssets.load(basePath = "/workbench/"), service, resources)
+            val api = WebApiController(access, EmbeddedWebAssets.load(basePath = "/workbench/"), service,
+                WebJobMutationBoundary(access, service), resources)
             server.executor = workers; server.createContext("/") { check(api.route(it)) }; server.start()
             val token = access.issueBootstrap().token
             val session = send("POST", "{\"token\":\"$token\"}", mapOf("Origin" to origin, "Content-Type" to "application/json"), "/workbench/api/v1/session")

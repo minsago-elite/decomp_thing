@@ -419,7 +419,6 @@ private fun runDoctor(args: List<String>) {
         doctorUsageError(failure.message ?: "invalid doctor configuration")
     }
     val report = Doctor().inspect(invocation.options, invocation.profile)
-
     report.checks.forEach { check ->
         val stream = if (check.passed) System.out else System.err
         stream.println("[${if (check.passed) "ok" else "failed"}] ${check.name}: ${check.detail}")
@@ -437,7 +436,6 @@ private fun doctorUsageError(message: String): Nothing {
     System.err.println(message)
     System.err.println("usage: llm_bin_patch doctor --tools-only [--output <directory>] [--profile <id>] [--auth-methods]")
     System.err.println("   or: llm_bin_patch doctor [--output <directory>] [--profile <id>] [--harness acp|legacy-openai] [--workflow all|patch|reconstruct|repair|web] [--auth-methods]")
-
     kotlin.system.exitProcess(2)
 }
 
@@ -511,7 +509,6 @@ private fun printHelp() {
         Usage:
           llm_bin_patch doctor --tools-only [--output <directory>] [--profile <id>] [--auth-methods]
           llm_bin_patch doctor [--output <directory>] [--profile <id>] [--harness acp|legacy-openai] [--workflow all|patch|reconstruct|repair|web] [--auth-methods]
-
           llm_bin_patch patch <input-elf> --output <directory> [--yes] [--harness acp|legacy-openai]
           llm_bin_patch runner [--control-dir <directory>] [--root <directory>]...
           llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness acp|legacy-openai]

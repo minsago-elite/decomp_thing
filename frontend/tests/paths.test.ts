@@ -80,6 +80,8 @@ describe('identity-bound event, snapshot and download links', () => {
     const expected = apiResourcePath('/nested', artifact);
     for (const href of [
       `https://example.invalid${expected}`, `//example.invalid${expected}`, expected.slice(1),
+      `javascript:alert(1)`, `data:text/html,<script>alert(1)</script>`, `blob:https://example.invalid/id`,
+      `\\example.invalid${expected}`, `%2f%2fexample.invalid${expected}`,
       expected.replace('/nested/', '/other/'), expected.replace('/nested/', '/nested-other/'),
       expected.replace('Job_Case', 'Job_Other'), expected.replace('Artifact_1', 'Artifact_2'),
       expected.replace('Artifact_1', '%41rtifact_1'), expected.replace('Artifact_1', 'artifact_1'),

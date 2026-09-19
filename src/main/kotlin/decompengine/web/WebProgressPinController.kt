@@ -1,17 +1,20 @@
 package decompengine.web
 
 import com.sun.net.httpserver.HttpExchange
-import decompengine.jobs.WorkflowPinActor
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import kotlinx.serialization.json.*
 
 /** One selected progress-journal policy. Attribution comes exclusively from authorization. */
-internal class WebProgressPinController(private val access: LocalWebAccess, private val jobs: WebJobService) {
+internal class WebProgressPinController(
+    private val access: LocalWebAccess,
+    private val jobs: WebJobService,
+    private val jobMutations: WebJobMutationBoundary,
+) {
     fun handle(exchange: HttpExchange, jobId: String, runId: String) {
         val read = exchange.requestMethod == "GET"
-        val session = checkNotNull(access.authorize(exchange,
-            if (read) WebEndpointPolicy.privateRead() else WebEndpointPolicy.jsonMutation("PUT")))
+        val mutation = if (read) null else jobMutations.authorizeProgressPin(exchange)
+        if (read) access.authorize(exchange, WebEndpointPolicy.privateRead())
         requireNoWebApiQuery(exchange); requireJsonAccept(exchange)
         if (!jobId.matches(Regex("[0-9a-f]{32}")) || !runId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) {
             throw WebAccessDenied(404, "NOT_FOUND", "The requested attempt is unavailable.")
@@ -39,8 +42,9 @@ internal class WebProgressPinController(private val access: LocalWebAccess, priv
             }
             val desired = readPin(exchange)
             val result = try {
-                jobs.requestProgressRetentionPinned(jobId, runId, match.removeSurrounding("\""), desired,
-                    WorkflowPinActor.browserSession(session.sessionId), key)
+                checkNotNull(mutation).request(
+                    jobId, runId, match.removeSurrounding("\""), desired, key,
+                )
             } catch (failure: WebJobServiceException) {
                 when (failure.code) {
                     "VERSION_CONFLICT" -> throw WebAccessDenied(412, failure.code, "The run version changed. Read its current pin policy.")

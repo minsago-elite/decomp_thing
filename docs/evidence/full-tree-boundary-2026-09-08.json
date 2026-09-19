@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "kind": "a14-full-tree-boundary-evidence-v1",
+  "recordedAtUtc": "2026-09-08",
+  "sourceCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "sourceArtifact": {
+    "path": "oracle/llvm/22.1.6/full-tree-planning-inventory.json",
+    "sha256": "2bf9181f031e94304d63e184e5d2fb684623f981b655afb966a06db7c43be15a",
+    "reportSha256": "fcfe9bfd553ab9caee6a8f5a84a3a9345cd4243dcc6f46d752f68573bbdc6c70",
+    "scopeSha256": "48d15d0db12c67944473feae016123195cf9e1da37c5849d9131ba31248c4b57",
+    "counts": {
+      "sourceModules": 2150,
+      "handwrittenSourceModules": 2149,
+      "generatedSourceModules": 1,
+      "sourceOnlyUnits": 2325,
+      "sourceModuleShards": 57
+    }
+  },
+  "contract": {
+    "moduleOwner": "authenticated compilation-unit module ID",
+    "sourceOnlyOwnership": "excluded-non-owning",
+    "headerAndGraphStatus": "planning-only-non-authoritative",
+    "moduleGraphStatus": "withheld-until-authenticated-compiler-resolution-and-header-ownership",
+    "edgePopulationKnown": false,
+    "cleanCompilationProven": false,
+    "releaseEligible": false
+  },
+  "productionGap": [
+    "authenticated compiler, search-path, macro, sysroot, generated-overlay, and generator provenance",
+    "contained Ninja live-edge replay and complete all-TU compiler/header capture",
+    "complete header ownership and dependency-safe canonical graph",
+    "clean full-tree compilation and independently authorized publication/release"
+  ],
+  "authorityBoundary": {
+    "construction": "Kotlin/JVM authenticated controls only",
+    "acp": "read-only candidate producer/operator with no oracle, reference, validation, or release authority",
+    "ghidra": "bundled Java API boundary remains unchanged; no GHIDRA_HOME or external analyzeHeadless authority"
+  }
+}

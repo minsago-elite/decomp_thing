@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "issue": 685,
+  "recordedAtUtc": "2026-09-08",
+  "checkedTreeCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "status": "unavailable",
+  "authority": "checked-tree-evidence-only",
+  "verification": {
+    "samplePartitionSha256": null,
+    "observedErrorRate": null,
+    "declaredTolerance": null,
+    "absoluteError": null,
+    "withinTolerance": null,
+    "reason": "No checked empirical calibration artifact or production score exists from which a confidence-band error can be measured."
+  },
+  "existingFacts": {
+    "heuristicScoreInterpretation": {
+      "path": "oracle/heuristic-score-interpretation.schema.json",
+      "sha256": "7052f78a3e144c9a78f42157db65de8fb056ff663b27c431cb76b4eb13e08bc9",
+      "calibrationStatus": "uncalibrated"
+    },
+    "productionStructuralReplayRegistry": {
+      "path": "src/main/kotlin/decompengine/oracle/structural/StructuralReplayAdapterRegistry.kt",
+      "sha256": "192a03e5007e7aea39876927027cdb6802473687d52f8f6c954b09b5cf10a063",
+      "status": "empty-production-registry"
+    },
+    "gccBehaviorReference": {
+      "corpusPath": "oracle/gcc/16.2.0/behavior-corpus.json",
+      "corpusSha256": "bcc1a14ca8c54f94106c943f0bc5698cb9af3151b7bf20a49ae3c8828baaad0e",
+      "evidencePath": "oracle/gcc/16.2.0/behavior-corpus-evidence.json",
+      "evidenceSha256": "9dcf787aea232615a1ff8721144b86bc1f5e9a2a7068fa9e9280db0bc4ad6803",
+      "caseCount": 14,
+      "role": "reference-oracle-only"
+    }
+  },
+  "unavailableProductionGates": [
+    "#684 versioned bands with minimum support, empirical error rates, distribution applicability, and out-of-distribution handling",
+    "#40 authenticated GCC production structural replay and score for the calibration population",
+    "#685 measured candidate error rates and declared tolerance checks for every reported band"
+  ],
+  "boundary": {
+    "ghidra": "bundled Java-API worker and isolated execution remain unchanged",
+    "oracle": "checked reference artifacts remain evidence; caller-supplied models do not gain authority",
+    "provenance": "all retained inputs are identified by repository paths, tree commit, and SHA-256",
+    "unresolvedStates": [
+      "calibration",
+      "production-recovery-accuracy",
+      "production-qualification"
+    ]
+  }
+}

@@ -271,15 +271,7 @@ class JobStore internal constructor(
         }
     }
 
-    internal fun sourceArchiveInventory(jobId: String, layout: ArchiveTransportLayout): Map<String, LinuxFileIdentity> {
-        return sourceArchiveInventory(jobId, "reports", layout.excludedOutputRoots)
-    }
-
-    internal fun sourceArchiveInventory(
-        jobId: String,
-        reportPrefix: String = "reports",
-        excludedOutputRoots: Set<String> = emptySet(),
-    ): Map<String, LinuxFileIdentity> {
+    internal fun sourceArchiveInventory(jobId: String, layout: ArchiveTransportLayout, reportPrefix: String = "reports"): Map<String, LinuxFileIdentity> {
         jobDirectory(jobId)
         require(reportPrefix == "reports" || reportPrefix.matches(Regex("reports/runs/[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "archive report prefix is invalid" }
         val inventory = sortedMapOf<String, LinuxFileIdentity>()
@@ -297,7 +289,7 @@ class JobStore internal constructor(
                 }
                 selected.use { entry ->
                     require(!entry.identity.isSymbolicLink) { "archive source inventory contains a linked entry" }
-                    if (relative in excludedOutputRoots) {
+                    if (relative in layout.excludedOutputRoots) {
                         require(entry.identity.isDirectory) { "archive build root is not a directory" }
                     } else if (entry.identity.isDirectory) {
                         LinuxFilesystemSyscalls.openDirectoryAt(directory.fd, name).use { child ->

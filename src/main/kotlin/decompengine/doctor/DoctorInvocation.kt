@@ -10,6 +10,7 @@ internal data class DoctorInvocation(val options: DoctorOptions, val profile: Re
 /** Parses selections without inspecting the environment, probing tools, or creating output. */
 internal fun parseDoctorInvocation(args: List<String>, defaultOutput: Path): DoctorInvocation {
     var toolsOnly = false
+    var showAuthMethods = false
     var harnessOverride: String? = null
     var workflowOverride: AcpPreflightWorkflow? = null
     var output = defaultOutput
@@ -23,6 +24,10 @@ internal fun parseDoctorInvocation(args: List<String>, defaultOutput: Path): Doc
         when (args[index]) {
             "--tools-only" -> {
                 toolsOnly = true
+                index++
+            }
+            "--auth-methods" -> {
+                showAuthMethods = true
                 index++
             }
             "--harness" -> {
@@ -52,6 +57,7 @@ internal fun parseDoctorInvocation(args: List<String>, defaultOutput: Path): Doc
     }
     require(!toolsOnly || harnessOverride == null) { "--tools-only cannot be combined with --harness" }
     require(!toolsOnly || workflowOverride == null) { "--tools-only cannot be combined with --workflow" }
+    require(!toolsOnly || !showAuthMethods) { "--tools-only cannot be combined with --auth-methods" }
     return DoctorInvocation(
         DoctorOptions(
             outputDir = output,

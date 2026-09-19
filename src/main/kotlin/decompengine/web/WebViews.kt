@@ -294,8 +294,8 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
                 <dl class="metadata-grid">
                   <div class="datum"><dt>Original filename</dt><dd>${job.filename.escapeHtml()}</dd></div>
                   <div class="datum"><dt>Size</dt><dd>${formatBytes(job.sizeBytes)}</dd></div>
-                  <div class="datum"><dt>Created</dt><dd>${formatTimestamp(job.createdAt)}</dd></div>
-                  <div class="datum"><dt>Updated</dt><dd>${formatTimestamp(job.updatedAt)}</dd></div>
+                  <div class="datum"><dt>Created</dt><dd>${formatTimestamp(job.createdAt).escapeHtml()}</dd></div>
+                  <div class="datum"><dt>Updated</dt><dd>${formatTimestamp(job.updatedAt).escapeHtml()}</dd></div>
                   $metadata
                 </dl>
               </section>
@@ -442,7 +442,7 @@ private fun renderJobList(jobs: List<Job>): String {
         """
         <a class="job-row" href="/jobs/${job.id}">
           <span class="file-glyph">ELF</span>
-          <span class="job-copy"><strong>${job.filename.escapeHtml()}</strong><small>${formatBytes(job.sizeBytes)} · ${formatTimestamp(job.createdAt)}</small></span>
+          <span class="job-copy"><strong>${job.filename.escapeHtml()}</strong><small>${formatBytes(job.sizeBytes)} · ${formatTimestamp(job.createdAt).escapeHtml()}</small></span>
           ${statusPill(job.status)}
           <span class="arrow">→</span>
         </a>
@@ -467,12 +467,16 @@ private fun renderExploration(job: Job, reports: WebReportContext, root: JsonObj
         val candidate = element.jsonObject
         val id = candidate.text("id")
         val source = candidate.text("source")
+        val sourceClass = when (source.lowercase()) {
+            "angr", "mutation", "static_hint", "seed" -> source.lowercase()
+            else -> "unknown"
+        }
         val args = candidate["args"]?.jsonArray?.joinToString(" ") { it.jsonPrimitive.content }.orEmpty()
         val stdinHex = candidate.text("stdinHex")
         val observation = observations[id]?.jsonObject
         val exitCode = observation?.get("exitCode")?.jsonPrimitive?.intOrNull?.toString() ?: "—"
         val output = observation?.text("stdoutHex")?.hexPreview().orEmpty().ifBlank { "∅" }
-        "<tr><td><code>${id.escapeHtml()}</code></td><td><span class=\"source-tag ${source.lowercase()}\">${source.escapeHtml()}</span></td><td>${args.escapeHtml().ifBlank { "—" }}</td><td><code>${stdinHex.chunked(2).take(12).joinToString(" ").escapeHtml().ifBlank { "—" }}</code></td><td>$exitCode</td><td><code>${output.escapeHtml()}</code></td></tr>"
+        "<tr><td><code>${id.escapeHtml()}</code></td><td><span class=\"source-tag $sourceClass\">${source.escapeHtml()}</span></td><td>${args.escapeHtml().ifBlank { "—" }}</td><td><code>${stdinHex.chunked(2).take(12).joinToString(" ").escapeHtml().ifBlank { "—" }}</code></td><td>$exitCode</td><td><code>${output.escapeHtml()}</code></td></tr>"
     }
     return """
       <section class="panel evidence-panel">
@@ -505,7 +509,7 @@ fun renderRepairHistory(job: Job, reportContext: WebReportContext? = null, paylo
         val before = renderEvidence("Before", iteration["before"] as? JsonObject)
         val after = renderEvidence("After", iteration["after"] as? JsonObject)
         val outcome = if (succeeded) "passed" else "needs another iteration"
-        "<article class=\"history-item\"><div class=\"history-index\" aria-label=\"Iteration $index\">$index</div><div><div class=\"history-title\"><strong>${failureKind.escapeHtml()} — $outcome</strong>${statusPill(if (succeeded) "complete" else "analyzing")}</div><p>${summary.escapeHtml()}</p>$before$after<p class=\"regressions\"><b>Retained:</b> $regressions</p></div></article>"
+        "<article class=\"history-item\"><div class=\"history-index\" aria-label=\"Iteration ${index.escapeHtml()}\">${index.escapeHtml()}</div><div><div class=\"history-title\"><strong>${failureKind.escapeHtml()} — $outcome</strong>${statusPill(if (succeeded) "complete" else "analyzing")}</div><p>${summary.escapeHtml()}</p>$before$after<p class=\"regressions\"><b>Retained:</b> $regressions</p></div></article>"
     }
     return """
       <section class="panel history-panel">
@@ -569,7 +573,7 @@ private fun renderReconstructionProgress(progress: JsonObject?): String {
     val module = progress.text("module")
     return """
       <section class="panel reconstruction-progress">
-        <div><p class="kicker">Source reconstruction · ${phase.escapeHtml()}</p><h2>$completed / $total modules</h2></div>
+        <div><p class="kicker">Source reconstruction · ${phase.escapeHtml()}</p><h2>${completed.escapeHtml()} / ${total.escapeHtml()} modules</h2></div>
         ${if (module.isBlank()) "" else "<code>${module.escapeHtml()}</code>"}
       </section>
     """.trimIndent()
@@ -580,7 +584,7 @@ private fun reportsFor(job: Job, supplied: WebReportContext?): WebReportContext 
 
 private fun metric(label: String, value: String, detail: String, score: Double? = null): String {
     val gauge = score?.let { "<span class=\"gauge\"><i style=\"width:${(it.coerceIn(0.0, 1.0) * 100).toInt()}%\"></i></span>" }.orEmpty()
-    return "<div class=\"metric\"><p>$label</p><strong>$value</strong><small>$detail</small>$gauge</div>"
+    return "<div class=\"metric\"><p>${label.escapeHtml()}</p><strong>${value.escapeHtml()}</strong><small>${detail.escapeHtml()}</small>$gauge</div>"
 }
 
 private fun statusPill(status: String): String =
@@ -635,7 +639,14 @@ private fun formatBytes(bytes: Long): String = when {
     bytes >= 1024 -> "%.1f KiB".format(java.util.Locale.ROOT, bytes / 1024.0)
     else -> "$bytes B"
 }
-private fun jsString(value: String): String = "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+private fun jsString(value: String): String = "'" + value
+    .replace("\\", "\\\\")
+    .replace("'", "\\'")
+    .replace("<", "\\u003c")
+    .replace(">", "\\u003e")
+    .replace("&", "\\u0026")
+    .replace("\u2028", "\\u2028")
+    .replace("\u2029", "\\u2029") + "'"
 
 val APP_CSS = """
 :root {
