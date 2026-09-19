@@ -180,7 +180,8 @@ object ArchivalProjectAuditor {
                         "module checkpoint input identity differs from the audited model or profile"
                     }
                     require(checkpoint.boolean("accepted")) { "module checkpoint does not record acceptance" }
-                    if (moduleClaimsAgentExecution(checkpoint.string("generator"), checkpoint.string("reconstructorIdentity"))) {
+                    if (moduleClaimsAgentExecution(file.generator, checkpoint.string("reconstructorIdentity")) ||
+                        moduleClaimsAgentExecution(checkpoint.string("generator"), checkpoint.string("reconstructorIdentity"))) {
                         val promptCharacters = (checkpoint["promptCharacters"] as? JsonPrimitive)
                             ?.takeUnless { it.isString }?.longOrNull
                         val promptBudgetCharacters = (checkpoint["promptBudgetCharacters"] as? JsonPrimitive)
@@ -294,8 +295,8 @@ object ArchivalProjectAuditor {
                 }
                 val record = BehaviorEvidence.decode(snapshot.bytes)
                 val current = currentProjectRecord
+                BehaviorEvidence.requireProjectCurrent(record, BehaviorProjectContext(projectDir, profile))
                 if (current == null) {
-                    BehaviorEvidence.requireProjectCurrent(record, BehaviorProjectContext(projectDir, profile))
                     currentProjectRecord = record
                 } else {
                     require(record.getValue("projectRevision") == current.getValue("projectRevision")) {
@@ -304,10 +305,10 @@ object ArchivalProjectAuditor {
                 }
                 val identifier = record.string("id")
                 require(reportIds.add(identifier)) { "behavior report ID is duplicated" }
-                require(record.getValue("schemaVersion").jsonPrimitive.intOrNull == 4) {
+                require(record.getValue("schemaVersion").jsonPrimitive.intOrNull in setOf(4, 5)) {
                     "behavior record lacks independent local completion evidence"
                 }
-                val portable = record.getValue("schemaVersion").jsonPrimitive.intOrNull in setOf(3, 4)
+                val portable = record.getValue("schemaVersion").jsonPrimitive.intOrNull in setOf(3, 4, 5)
                 val corpus = record.string("corpusSha256")
                 if (requiredCorpora.isNotEmpty()) {
                     require(portable && corpus in requiredCorpora) { "behavior report does not match a required portable corpus" }

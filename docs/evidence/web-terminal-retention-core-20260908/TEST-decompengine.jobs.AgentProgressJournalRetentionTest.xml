@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.jobs.AgentProgressJournalRetentionTest" tests="5" skipped="0" failures="0" errors="0" timestamp="2026-09-08T04:53:15.062Z" hostname="whatsername" time="0.047">
+  <properties/>
+  <testcase name="expiry uses durable terminal time with an exact default boundary()" classname="decompengine.jobs.AgentProgressJournalRetentionTest" time="0.006"/>
+  <testcase name="expiry preserves exact large queue loss and cumulative history watermarks()" classname="decompengine.jobs.AgentProgressJournalRetentionTest" time="0.002"/>
+  <testcase name="expiry rejects corrupt accounting and malformed expiry markers()" classname="decompengine.jobs.AgentProgressJournalRetentionTest" time="0.003"/>
+  <testcase name="expired record cursors report a gap and fresh watermark permits empty replay()" classname="decompengine.jobs.AgentProgressJournalRetentionTest" time="0.029"/>
+  <testcase name="expiry removes the single startup record without changing source bytes or run metadata()" classname="decompengine.jobs.AgentProgressJournalRetentionTest" time="0.002"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

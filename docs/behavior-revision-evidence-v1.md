@@ -1,7 +1,7 @@
 # Local behavior records and archival revision attribution
 
-`BehaviorComparator` writes schema-4 records with provider
-`local-revision-bound-behavior-v4`. The decoder also accepts historical schema-1
+`BehaviorComparator` writes schema-5 records with provider
+`local-revision-bound-behavior-v5`. The decoder also accepts historical schema-1
 records, which do not commit file inputs, and schema-2 records, whose corpus digest
 includes host file locators. Schema-3 records retain portable corpus identities but
 lack independent completion evidence. Historical schemas remain readable, but audit
@@ -32,7 +32,7 @@ The decoder recomputes content digests and read-only mount argv without reopenin
 locators. Retained file bytes remain auditable after the host input files are removed.
 Declarations and mount requests do not prove that a program read every declared file.
 
-The schema-3/4 corpus digest commits the ordered case IDs, argv, stdin and declared
+The schema-3/4/5 corpus digest commits the ordered case IDs, argv, stdin and declared
 file names, lengths, digests and retained bytes. It excludes only each file's host
 `sourcePath`, so restoring the same corpus at another host path preserves its
 identity. Observations and the full report still commit the exact host locators
@@ -41,7 +41,7 @@ digest, even when the programs produce identical outputs. Environment and
 executable identities remain separately bound by the full report commitment.
 
 Callers may supply `expectedCorpusSha256` to `compare` or `evaluate` to require a
-previously selected schema-3 corpus identity. The comparator copies cases and file
+previously selected schema-3-or-later corpus identity. The comparator copies cases and file
 declarations, captures declared file contents, and checks the complete corpus digest
 before executing either original or rebuilt program. A missing, reordered or changed
 case, argv, stdin, logical file name or file content fails admission and leaves an
@@ -52,7 +52,7 @@ independently apply their expected-corpus policy.
 
 `ArchivalProjectAuditor.audit(..., requiredCorpusSha256 = setOf(expectedDigest))`
 applies that policy independently to current revision-bound reports. Every selected
-digest must have a schema-4 report; unrelated corpora and historical schemas cannot
+digest must have a schema-4 or schema-5 report; unrelated corpora and historical schemas cannot
 satisfy the selection. Missing corpora appear as `missing-corpus:<digest>` problems,
 and unrelated reports remain visible as problems rather than disappearing. The
 audit records sorted `requiredCorpusSha256` and `observedPortableCorpusSha256`
@@ -94,11 +94,22 @@ complete supplied case sequence separately from its observations. The report
 commitment covers those values, executable identities, project revision and
 execution policy. The policy records environment, working directory, requested
 network isolation, a positive whole-millisecond timeout, stream limits and the
-comparison output limit. The decoder checks closed field sets, JSON types,
+comparison output limit. Schema 5 additionally records the selected immutable
+profile ID/digest and behavior budgets, the independent host safety ceilings, and
+the effective corpus limits. The decoder checks closed field sets, JSON types,
 duplicate keys, canonical lowercase byte encodings, unique case IDs, every
 comparison flag, source-revision encoding and all commitments. It also reconstructs
 the expected sandbox argv and checks output sizes against the recorded limits.
 A rehashed contradictory report still fails validation.
+
+The selected profile budget admits at most 1,024 cases, 8 MiB of stdin, 1 MiB of
+argument bytes, 8 MiB of retained input-file bytes across 1,024 declarations, an
+execution timeout of 5 seconds, 8 MiB per output stream, 16 MiB per execution and
+16 MiB across the comparison by default. A caller may select lower immutable
+profile values. Behavior validation rejects a selected profile that exceeds the
+independent host safety budget before creating the report directory or launching
+either binary. A supplied local test runner may tighten these values but cannot
+raise them; the report retains both the selected profile and host budgets.
 
 Native timeout arguments preserve the selected milliseconds (`1900` becomes
 `1.900s`), alongside the JVM watchdog. Historical integer-second command recipes
@@ -122,8 +133,9 @@ retains its conservative 0–123 status restriction; archival audit marks all ol
 schemas unresolved because they lack the completion channel. These observations do
 not establish production containment or immutable executable/runtime identity.
 
-The record limits are 1,024 cases, 8 MiB of stdin, 1 MiB of argument bytes and
-16 MiB of comparison output. Captured input files are limited to 64 MiB each,
+The default record limits are 1,024 cases, 8 MiB of stdin, 1 MiB of argument bytes and
+16 MiB of comparison output. Profile-selected input-file limits are recorded in
+schema 5; the evidence transport still caps captured files at 64 MiB each,
 512 MiB in total and 10,000 tracked paths. Source enumeration has a 10,000-entry
 limit and depth 32 beneath each source root. JSON has a 64 MiB input/rendering
 limit, depth 32, one million nodes and a 16 MiB per-string limit.

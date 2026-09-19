@@ -58,7 +58,10 @@ sealed interface AuthenticatedFullTreePlanningRegistry {
     /** Resolves an authenticated A13 owner unit exactly; there is no nullable or catch-all fallback. */
     fun requireOwnerModule(ownerUnitId: String): FullTreePlanningSourceModule
 
-    /** Resolves the exact authenticated source-module population for one shard. */
+    /**
+     * Resolves the exact authenticated source-module population for one shard. This is planning
+     * ownership only; the returned module count is not an emitted-function denominator.
+     */
     fun requireOwnerModulesForShard(shardId: String): List<FullTreePlanningSourceModule>
 }
 

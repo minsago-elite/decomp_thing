@@ -8,7 +8,12 @@ class EvidenceModuleReconstructor(private val includeRecoveredC: Boolean = false
         val functions = request.module.functionIds.map { id -> request.model.functions.single { it.id == id } }
         val globals = request.module.globalIds.map { id -> request.model.globals.single { it.id == id } }
         val source = buildString {
-            append("#include <stddef.h>\n#include \"modules/${request.module.id}.h\"\n#include \"${request.module.id}_internal.h\"\n")
+            val moduleHeader = request.module.headerPath.removePrefix("include/")
+            val privateHeader = request.profile.layout.declaration("module-private-interface")
+                .materialize(mapOf("module" to request.module.id))
+                .removePrefix("include/")
+            append("#include <stddef.h>\n#include \"").append(moduleHeader).append("\"\n#include \"")
+                .append(privateHeader).append("\"\n")
             request.dependencyHeaders.keys.sorted().forEach { header -> append("#include \"").append(header.removePrefix("include/")).append("\"\n") }
             append('\n')
             globals.forEach { global ->
