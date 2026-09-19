@@ -56,7 +56,7 @@ class WebJobServiceTest {
                 override fun read(): Int = error("Quota refusal must precede request consumption")
             }
             assertEquals("UPLOAD_STORAGE", assertFailsWith<WebJobServiceException> {
-                service.uploadMultipart(unread, "multipart/form-data; boundary=test")
+                service.uploadMultipartReceipt(unread, "multipart/form-data; boundary=test")
             }.code)
             assertEquals(job.id, service.get(job.id).id)
             assertEquals(listOf(job.id), service.list().map { it.id })

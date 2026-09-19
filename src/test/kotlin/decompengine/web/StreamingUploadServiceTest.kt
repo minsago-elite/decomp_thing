@@ -35,13 +35,13 @@ class StreamingUploadServiceTest {
         val pool = Executors.newFixedThreadPool(2)
         try {
             service.initializeExistingStorage()
-            val tasks = (1..2).map { pool.submit<decompengine.jobs.Job> { service.uploadMultipart(blocked(entered, release), type) } }
+            val tasks = (1..2).map { pool.submit<decompengine.jobs.Job> { service.uploadMultipartReceipt(blocked(entered, release), type).job } }
             assertTrue(entered.await(5, TimeUnit.SECONDS))
             assertEquals(existing.id, service.get(existing.id).id)
             assertEquals(listOf(existing.id), store.jobIds())
             assertEquals(WebWorkflowAdmission.Unavailable, service.start(existing.id, WebWorkflow.EXPLORE))
             assertEquals("UPLOAD_CAPACITY", assertFailsWith<WebJobServiceException> { service.upload("blocked.elf", elfFixture()) }.code)
-            assertEquals("UPLOAD_CAPACITY", assertFailsWith<WebJobServiceException> { service.uploadMultipart(body().inputStream(), type) }.code)
+            assertEquals("UPLOAD_CAPACITY", assertFailsWith<WebJobServiceException> { service.uploadMultipartReceipt(body().inputStream(), type) }.code)
             release.countDown()
             val jobs = tasks.map { it.get(5, TimeUnit.SECONDS) }
             assertEquals(2, jobs.map { it.id }.toSet().size)
@@ -63,7 +63,7 @@ class StreamingUploadServiceTest {
             assertIs<WebWorkflowAdmission.Started>(service.start(existing.id, WebWorkflow.EXPLORE))
             assertTrue(entered.await(5, TimeUnit.SECONDS))
             val unread = object : java.io.InputStream() { override fun read(): Int = error("Must not consume denied upload") }
-            assertEquals("UPLOAD_CAPACITY", assertFailsWith<WebJobServiceException> { service.uploadMultipart(unread, type) }.code)
+            assertEquals("UPLOAD_CAPACITY", assertFailsWith<WebJobServiceException> { service.uploadMultipartReceipt(unread, type) }.code)
             assertEquals(existing.id, service.get(existing.id).id)
         } finally { release.countDown(); service.close(); root.toFile().deleteRecursively() }
     }
@@ -75,7 +75,7 @@ class StreamingUploadServiceTest {
         val pool = Executors.newSingleThreadExecutor()
         try {
             service.initializeExistingStorage()
-            val task = pool.submit<decompengine.jobs.Job> { service.uploadMultipart(blocked(entered, release), type) }
+            val task = pool.submit<decompengine.jobs.Job> { service.uploadMultipartReceipt(blocked(entered, release), type).job }
             assertTrue(entered.await(5, TimeUnit.SECONDS))
             assertEquals("SHUTDOWN_INCOMPLETE", assertFailsWith<WebJobServiceException> { service.close() }.code)
             assertEquals("OWNERSHIP_CONFLICT", assertFailsWith<WorkflowStoreException> { WorkflowAttemptStore.open(root) }.code)
