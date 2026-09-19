@@ -296,6 +296,36 @@ class FullTreePlanningInventoryControlTest {
     }
 
     @Test
+    fun `llvm analysis dispatch binds exact planning owners without an emitted denominator`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+
+        val modules = registry.requireOwnerModulesForShard("llvm-lib-analysis")
+        assertEquals(118, modules.size)
+        assertEquals(118, modules.map { it.sourcePath }.toSet().size)
+        assertEquals(118, modules.map { it.unitId }.toSet().size)
+        assertTrue(modules.all { it.sourceKind == "handwritten" })
+        assertTrue(modules.all { it.sourcePath.startsWith("source/llvm/lib/Analysis/") })
+        modules.forEach { module ->
+            assertEquals(module.unitId, module.moduleId)
+            assertEquals(
+                FullTreeInventoryControl.compilationUnitId(module.sourcePath),
+                module.unitId,
+            )
+            assertEquals(module, registry.requireOwnerModule(module.unitId))
+        }
+        assertEquals(7, registry.sourceOnlyUnits.count { it.shardId == "llvm-lib-analysis" })
+    }
+
+    @Test
     fun `shuffled stale forged and expanded planning documents fail closed`() =
         inControlTemporaryDirectory { directory ->
             val fixture = createFullTreeControlFixture(directory.resolve("fixture"))

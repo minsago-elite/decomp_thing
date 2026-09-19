@@ -202,7 +202,7 @@ class JobStore(root: Path) {
                 }
                 selected.use { entry ->
                     require(!entry.identity.isSymbolicLink) { "archive source inventory contains a linked entry" }
-                    if (relative in layout.excludedOutputRoots) {
+                    if (layout.excludes(relative)) {
                         require(entry.identity.isDirectory || entry.identity.isRegularFile) {
                             "archive source inventory contains a nonregular excluded entry"
                         }
