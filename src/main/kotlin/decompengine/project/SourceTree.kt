@@ -897,15 +897,27 @@ object SourceTreeGenerator {
         val makefilePath = profile.layout.declaration("build-definition").materialize()
         val makefileFile = projectDir.resolve(makefilePath)
         makefileFile.parent.createDirectories()
-        // A project directory rerun with the other built-in profile must not retain
-        // the previous profile's build definition; the packager archives every
-        // regular file outside build/, so delete inactive registered build
-        // definitions before writing the selected one.
+        // Only remove an inactive built-in definition when the previous manifest
+        // proves that the generator owned it. An arbitrary file in a reused
+        // project directory (for example, a user's Makefile) is not ours to delete.
+        val previouslyGeneratedBuildDefinitions = runCatching {
+            val manifest = projectDir.resolve("source_tree_manifest.json")
+            if (!manifest.exists()) emptySet() else {
+                Json.parseToJsonElement(manifest.readText()).jsonObject
+                    .getValue("files").jsonArray
+                    .mapNotNull { file ->
+                        val item = file.jsonObject
+                        val roles = item.getValue("roles").jsonArray.map { it.jsonPrimitive.content }
+                        item.getValue("path").jsonPrimitive.content.takeIf {
+                            ProjectFileRole.BUILD_DEFINITION.wireName in roles
+                        }
+                    }.toSet()
+            }
+        }.getOrDefault(emptySet())
         for (candidate in ReconstructionProfiles.builtIn) {
             val stalePath = candidate.layout.declaration("build-definition").materialize()
-            if (stalePath != makefilePath && !runCatching {
-                    profile.layout.declarationForPath(stalePath)
-                }.isSuccess) {
+            if (stalePath != makefilePath && stalePath in previouslyGeneratedBuildDefinitions &&
+                !runCatching { profile.layout.declarationForPath(stalePath) }.isSuccess) {
                 projectDir.resolve(stalePath).deleteIfExists()
             }
         }
