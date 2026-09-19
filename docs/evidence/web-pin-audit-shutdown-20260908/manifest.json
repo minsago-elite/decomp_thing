@@ -1,0 +1,57 @@
+{
+  "status": "passed",
+  "sourceCommit": "93ae6af53b2d23613192c23fcdcb4b3e9848239d",
+  "auditSourceCommit": "2997ff6c",
+  "command": "./gradlew -PfrontendNodeHome=/home/june/decomp_thing/build/tools/decomp-node-24.20.0/node-v24.20.0-linux-x64 test --tests 'decompengine.web.*' --tests 'decompengine.jobs.AgentProgressJournal*Test' --tests 'decompengine.jobs.WorkflowAttemptStoreTest' --tests 'decompengine.jobs.WorkflowPinAuditTest'",
+  "verification": {
+    "tests": 285,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "retainedXml": [
+    {
+      "file": "TEST-decompengine.jobs.WorkflowPinAuditTest.xml",
+      "tests": 4,
+      "sha256": "cdc9d295d1fbeb3b18b54681634a0d243fe604a6966ce0c26da7ed884bc9a165"
+    },
+    {
+      "file": "TEST-decompengine.web.WebProgressRetentionWorkerTest.xml",
+      "tests": 4,
+      "sha256": "b78a0379aac9ca8e01a19e33e7abfedd8e6c54c35322b2158ad2caf37d49dc7e"
+    },
+    {
+      "file": "TEST-decompengine.web.DurableWebWorkflowTest.xml",
+      "tests": 18,
+      "sha256": "d258d2f92b5354e7dc48f5e23cfe859261c18426f05e0a4d1fb44ac3d48670bc"
+    }
+  ],
+  "initialRun": {
+    "status": "terminated after confirmed JVM deadlock",
+    "sourceCommit": "2997ff6c",
+    "diagnosis": "Service monitor -> executor main lock -> service monitor during owner notification from terminated()",
+    "evidence": "initial-deadlock.txt",
+    "sha256": "3736477e0417aa50100b30eb459ba44408be1f1d5579e3a3a978f32398e6953e"
+  },
+  "negativeControl": {
+    "status": "expected failure",
+    "workerSourceCommit": "2997ff6c",
+    "regressionTest": "blocked owner notification does not hold the executor termination lock",
+    "failure": "java.util.concurrent.TimeoutException",
+    "tests": 1,
+    "failures": 1,
+    "file": "negative-control.xml",
+    "sha256": "47915ba493d5b2ff9899cd647bdd0f9704b0d56e0d568cb962097cdab9d983ec"
+  },
+  "fixtureExecution": "Owned inert records and callbacks; no binary analysis/provider/native workflow execution.",
+  "notRepeated": [
+    "frontend tests",
+    "package build",
+    "packaged browser qualification"
+  ],
+  "limitations": [
+    "The passing full-suite result includes both the audit change and the shutdown fix; the audit parent alone deadlocked in existing worker shutdown.",
+    "Applied receipts only; rejected/no-op request auditing, HTTP controls, broader sensitive-operation coverage and UI remain unfinished.",
+    "Periodic maintenance remains opt-in."
+  ]
+}

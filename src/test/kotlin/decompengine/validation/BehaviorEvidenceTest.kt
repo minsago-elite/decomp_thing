@@ -376,7 +376,7 @@ class BehaviorEvidenceTest {
             fileInputs = mapOf("file" to mapOf("nested/input.bin" to input)),
         )
         val record = BehaviorEvidence.decode(report.reportPath.readBytes())
-        assertEquals(4, record.integer("schemaVersion"))
+        assertEquals(5, record.integer("schemaVersion"))
         val case = record.getValue("cases").jsonArray.single().jsonObject
         val retained = case.getValue("fileInputs").jsonArray.single().jsonObject
         assertEquals("00017fff", retained.string("contentHex"))
@@ -628,11 +628,17 @@ class BehaviorEvidenceTest {
                 JsonObject(it.jsonObject - "sourcePath")
             })))
         })
+        val policy = record.getValue("executionPolicy").jsonObject.let { current ->
+            if (version >= 5) current else JsonObject(current - setOf(
+                "profileId", "profileSha256", "profileBudgets", "hostSafetyBudgets", "maximumCases",
+                "maximumStdinBytes", "maximumArgumentBytes", "maximumInputFileBytes", "maximumInputFiles",
+            ))
+        }
         val changed = JsonObject(record + mapOf(
             "schemaVersion" to JsonPrimitive(version),
             "provider" to JsonPrimitive("local-revision-bound-behavior-v$version"),
             "cases" to cases,
-            "executionPolicy" to JsonObject(record.getValue("executionPolicy").jsonObject - setOf("completionLauncher", "maximumCompletionBytes")),
+            "executionPolicy" to JsonObject(policy - if (version < 4) setOf("completionLauncher", "maximumCompletionBytes") else emptySet()),
             "corpusSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(corpus))),
             "observationsSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(cases))),
         ))
