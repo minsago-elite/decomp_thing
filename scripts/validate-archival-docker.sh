@@ -77,7 +77,10 @@ import sys
 root = pathlib.Path(sys.argv[1])
 for name in ("symbols-a", "stripped-a"):
     model = json.loads((root / name / "analysis/reports/program_model.json").read_text())
-    assert model["schemaVersion"] == 1
+    assert model["schemaVersion"] == 2
+    for kind in ("functions", "globals", "types"):
+        assert all(item["recoveryAssessment"] == "unassessed" for item in model[kind])
+        assert all(item["extractionStatus"] in ("recovered", "partial", "failed", "synthetic") for item in model[kind])
     assert len(model["functions"]) >= 50
     assert all(item["id"].startswith("fn_") and item["address"].startswith("0x") for item in model["functions"])
     assert sum(len(item["referencedGlobals"]) for item in model["functions"]) > 0

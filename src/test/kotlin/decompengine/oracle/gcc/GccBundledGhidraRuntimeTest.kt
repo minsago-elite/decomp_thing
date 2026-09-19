@@ -68,7 +68,79 @@ class GccBundledGhidraRuntimeTest {
             GccCompilerEngineContainmentContract.assessDefinition(request(historical)).bindingSha256,
             GccCompilerEngineContainmentContract.assessDefinition(request(current)).bindingSha256,
         )
-        assertFailsWith<IllegalArgumentException> { GccBundledGhidraRuntime(ROOT, classPath(), invocationVersion = 3) }
+        assertFailsWith<IllegalArgumentException> { GccBundledGhidraRuntime(ROOT, classPath(), invocationVersion = 5) }
+    }
+
+    @Test
+    fun `version three binds a fresh control temp path without changing project and export paths`() {
+        val current = GccBundledGhidraRuntime(ROOT, classPath())
+        val previous = runtime()
+        assertEquals(3, current.invocationVersion)
+        val name = assertNotNull(current.freshControlDirectoryName(lease().path))
+        assertTrue(name.matches(Regex("control-[a-f0-9]{64}")))
+        assertNotEquals(name, current.freshControlDirectoryName(Path.of("/scratch/another-run")))
+        val command = current.command(artifacts(current), state(), lease())
+        val oldCommand = previous.command(artifacts(previous), state(), lease())
+        assertEquals(oldCommand.toMutableList().also {
+            it[1] = "-Duser.home=/scratch/run/$name/tmp"
+            it[2] = "-Djava.io.tmpdir=/scratch/run/$name/tmp"
+        }, command)
+        val parsed = GccBundledGhidraRuntime.parse(current.toJson())
+        assertEquals(command, parsed.command(artifacts(parsed), state(), lease()))
+        assertEquals(name, parsed.freshControlDirectoryName(lease().path))
+        assertEquals(null, previous.freshControlDirectoryName(lease().path))
+        assertNotEquals(
+            GccCompilerEngineContainmentContract.assessDefinition(request(previous)).bindingSha256,
+            GccCompilerEngineContainmentContract.assessDefinition(request(current)).bindingSha256,
+        )
+        assertFailsWith<IllegalArgumentException> { request(current, command = oldCommand) }
+    }
+
+    @Test
+    fun `explicit resume definition reanalyzes in a new project and binds the stopped manifest`() {
+        val runtime = GccBundledGhidraRuntime(ROOT, classPath(), invocationVersion = 4)
+        val state = GccCompilerEngineAnalysisStateIdentity(
+            GccCompilerEngineAnalysisStateMode.RESUME_MANIFEST, Path.of("/scratch/run/state"), SHA_A, 1, 1,
+        )
+        val name = runtime.resumeControlDirectoryName(state, lease())
+        val fresh = GccBundledGhidraRuntime(ROOT, classPath())
+        assertNotEquals(fresh.freshControlDirectoryName(lease().path), name)
+        val command = runtime.command(artifacts(runtime), state, lease())
+        assertEquals("-Duser.home=/scratch/run/$name/tmp", command[1])
+        assertEquals("-Djava.io.tmpdir=/scratch/run/$name/tmp", command[2])
+        val analyzeIndex = command.indexOf("analyze")
+        assertTrue(analyzeIndex > 0)
+        assertEquals("/scratch/run/$name/state", command[analyzeIndex + 1])
+        assertEquals("/trusted/engine-binary", command[analyzeIndex + 3])
+        assertEquals("/scratch/run/reports/program_model.json", command.last())
+        assertFalse(command.contains(state.path.toString()))
+        val request = GccCompilerEngineContainmentRequest(
+            "cc1", GccCompilerEngineContainmentRunKind.RESUMED, artifacts(runtime), state, command,
+            ENVIRONMENT, lease(), GccCompilerEngineContainmentBudgets(1_800_000, 16L * 1024 * 1024 * 1024, 256), runtime,
+        )
+        val assessed = GccCompilerEngineContainmentContract.assessDefinition(request)
+        assertFalse(assessed.startAuthorized)
+        assertFalse(assessed.releaseEligible)
+        val parsed = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(assessed.canonicalBytes)
+        assertEquals(command, parsed.command)
+        assertEquals(state, parsed.analysisState)
+        val reparsedRuntime = GccBundledGhidraRuntime.parse(runtime.toJson())
+        assertEquals(command, reparsedRuntime.command(artifacts(runtime), state, lease()))
+        val changed = state.copy(manifestSha256 = SHA_B)
+        assertNotEquals(name, runtime.resumeControlDirectoryName(changed, lease()))
+        assertNotEquals(command, runtime.command(artifacts(runtime), changed, lease()))
+        assertFailsWith<IllegalArgumentException> {
+            GccCompilerEngineContainmentRequest(
+                "cc1", GccCompilerEngineContainmentRunKind.RESUMED, artifacts(runtime), changed, command,
+                ENVIRONMENT, lease(), GccCompilerEngineContainmentBudgets(1_800_000, 16L * 1024 * 1024 * 1024, 256), runtime,
+            )
+        }
+        assertFailsWith<IllegalArgumentException> { runtime.command(artifacts(runtime), state(), lease()) }
+        assertFailsWith<IllegalArgumentException> { runtime.freshControlDirectoryName(lease().path) }
+        assertFailsWith<IllegalArgumentException> { fresh.command(artifacts(fresh), state, lease()) }
+        assertFailsWith<IllegalArgumentException> {
+            runtime.command(artifacts(runtime), state.copy(path = Path.of("/scratch/run/other-state")), lease())
+        }
     }
 
     @Test
@@ -293,7 +365,7 @@ class GccBundledGhidraRuntimeTest {
         assertEquals(runtime.toJson(), assertNotNull(parsed.bundledRuntime).toJson())
         val changedRuntime = GccBundledGhidraRuntime(ROOT, classPath().mapIndexed { index, entry ->
             if (index == 1) entry.copy(sha256 = SHA_B) else entry
-        })
+        }, invocationVersion = runtime.invocationVersion)
         val changed = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(
             GccCompilerEngineContainmentContract.assessDefinition(request(changedRuntime)).canonicalBytes,
         )
@@ -389,7 +461,7 @@ class GccBundledGhidraRuntimeTest {
         }
     }
 
-    private fun runtime(root: Path = ROOT): GccBundledGhidraRuntime = GccBundledGhidraRuntime(root, classPath(root))
+    private fun runtime(root: Path = ROOT): GccBundledGhidraRuntime = GccBundledGhidraRuntime(root, classPath(root), invocationVersion = 2)
 
     private fun classPath(root: Path = ROOT, libraryCount: Int = 2): List<GccBundledGhidraClassPathEntry> =
         listOf(GccBundledGhidraClassPathEntry(root.resolve("decomp-ghidra-bridge.jar"), 32, SHA_A)) +

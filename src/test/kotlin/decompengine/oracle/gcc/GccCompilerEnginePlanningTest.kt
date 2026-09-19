@@ -27,6 +27,22 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class GccCompilerEnginePlanningTest {
     @Test
+    fun `current exporter contract rejects a historical model before plan publication`() {
+        val temporary = createTempDirectory("gcc-engine-model-version-").toAbsolutePath().normalize()
+        val bytes = "authored model version fixture".toByteArray()
+        val input = temporary.resolve("input").also { it.writeBytes(bytes) }
+        val output = temporary.resolve("output")
+        val service = GccCompilerEnginePlanningService.diagnostic(ProgramModelAnalyzer { _, _ ->
+            model(OracleArtifacts.sha256(bytes)).copy(schemaVersion = 1)
+        })
+        val failure = assertFailsWith<GccCompilerEnginePlanningException> {
+            service.plan(suite(bytes), "cc1", input, output)
+        }
+        assertTrue(failure.message.orEmpty().contains("requires program model schema 2"))
+        assertFalse(output.resolve("planning/compiler_engine_plan_assessment.json").exists())
+    }
+
+    @Test
     fun `planning authenticates input publishes exact ownership and resumes deterministically`() {
         val temporary = createTempDirectory("gcc-engine-plan-").toAbsolutePath().normalize()
         val input = temporary.resolve("cc1.stripped")
@@ -238,7 +254,7 @@ class GccCompilerEnginePlanningTest {
             sourceRevision = "78d4ac73dd391005b895a6148cd9831e28e1208b",
             analysis = GccCompilerEngineAnalysisToolchain(
                 exporterId = "decompengine-ghidra-program-model",
-                exporterVersion = 9,
+                exporterVersion = 10,
                 exporterSha256 = SHA_E,
                 exporterMode = "planning",
                 ghidraVersion = "12.1.3",
@@ -280,6 +296,7 @@ class GccCompilerEnginePlanningTest {
     )
 
     private fun model(inputSha256: String) = RecoveredProgramModel(
+        schemaVersion = 2,
         inputSha256 = inputSha256,
         functions = listOf(
             RecoveredFunction(

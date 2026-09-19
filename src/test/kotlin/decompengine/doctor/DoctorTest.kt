@@ -1,10 +1,7 @@
 package decompengine.doctor
 
 import java.net.URI
-import java.nio.file.Path
-import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
-import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -14,14 +11,9 @@ class DoctorTest {
     @Test
     fun `reports all tools output and authenticated connectivity independently`() {
         val temp = createTempDirectory("doctor-ok-")
-        val ghidra = temp.resolve("ghidra")
-        ghidra.resolve("support").createDirectories()
-        ghidra.resolve("support/analyzeHeadless").writeText("#!/bin/sh\n")
-        ghidra.resolve("support/analyzeHeadless").toFile().setExecutable(true)
         val commands = mutableListOf<List<String>>()
         val doctor = Doctor(
             environment = mapOf(
-                "GHIDRA_HOME" to ghidra.toString(),
                 "BASE_URL" to "https://models.example.test/v1",
                 "API_KEY" to "must-not-appear",
                 "MODEL" to "test-model",
@@ -42,7 +34,7 @@ class DoctorTest {
         )
 
         assertTrue(report.passed, report.checks.toString())
-        assertTrue(report.checks.any { it.name == "GCC sanitizers" && it.passed })
+        assertTrue(report.checks.any { it.name == "C sanitizers" && it.passed })
         assertTrue(report.checks.any { it.name == "output directory" && it.passed })
         assertTrue(report.checks.any { it.name == "LLM connectivity" && it.passed })
         assertTrue(commands.any { "-fsanitize=address,undefined" in it })
@@ -66,7 +58,7 @@ class DoctorTest {
         val doctor = Doctor(
             environment = environment,
             commandProbe = CommandProbe { command, _ ->
-                if (command.first() == "gcc" && command.any { it.startsWith("-fsanitize") }) {
+                if (command.first() == "cc" && command.any { it.startsWith("-fsanitize") }) {
                     CommandProbeResult(1, "cannot find libasan")
                 } else {
                     CommandProbeResult(127, "not found")
@@ -79,7 +71,7 @@ class DoctorTest {
 
         assertFalse(report.passed)
         assertTrue(report.checks.any { it.name == "Java" && !it.passed && it.detail.contains("Install") })
-        assertTrue(report.checks.any { it.name == "GCC sanitizers" && !it.passed && it.detail.contains("libasan") })
+        assertTrue(report.checks.any { it.name == "C sanitizers" && !it.passed && it.detail.contains("libasan") })
         assertFalse(report.checks.any { it.name == "ACP harness" || it.name == "ACP preflight" })
         assertFalse(report.checks.any { it.name.startsWith("LLM") })
     }
@@ -127,12 +119,8 @@ class DoctorTest {
     @Test
     fun `invalid configuration still records a connectivity result`() {
         val temp = createTempDirectory("doctor-config-")
-        val ghidra = temp.resolve("ghidra/support").createDirectories().resolve("analyzeHeadless")
-        ghidra.writeText("x")
-        ghidra.toFile().setExecutable(true)
         val doctor = Doctor(
             environment = mapOf(
-                "GHIDRA_HOME" to ghidra.parent.parent.toString(),
                 "ACP_HARNESS" to "legacy-openai",
                 "BASE_URL" to "not a URL",
             ),

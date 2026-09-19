@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Model-bound unassessed recovery population v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "state", "modelSchemaVersion", "modelSha256", "unassessedEntityIds", "assessedEntityIds"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "state": {"const": "unassessed"},
+    "modelSchemaVersion": {"enum": [1, 2]},
+    "modelSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "unassessedEntityIds": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+    "assessedEntityIds": {"type": "array", "maxItems": 0}
+  }
+}

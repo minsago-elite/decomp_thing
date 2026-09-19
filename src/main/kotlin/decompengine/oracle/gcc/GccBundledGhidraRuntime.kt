@@ -4,6 +4,7 @@ import decompengine.analysis.BundledGhidra
 import decompengine.analysis.GhidraInvocation
 import decompengine.analysis.GhidraPostScript
 import decompengine.analysis.GhidraWorkerCommand
+import decompengine.oracle.core.OracleArtifacts
 import java.nio.file.Path
 import java.util.Collections
 import kotlinx.serialization.json.JsonArray
@@ -22,13 +23,13 @@ internal data class GccBundledGhidraClassPathEntry(val path: Path, val bytes: Lo
 internal class GccBundledGhidraRuntime(
     val root: Path,
     classPath: List<GccBundledGhidraClassPathEntry>,
-    val invocationVersion: Int = 2,
+    val invocationVersion: Int = 3,
 ) {
     val classPath: List<GccBundledGhidraClassPathEntry>
     val release: Path
 
     init {
-        require(invocationVersion in 1..2) { "bundled Ghidra invocation version is unsupported" }
+        require(invocationVersion in 1..4) { "bundled Ghidra invocation version is unsupported" }
         requireRuntimePath(root)
         val copied = ArrayList<GccBundledGhidraClassPathEntry>()
         for (entry in classPath) {
@@ -69,21 +70,50 @@ internal class GccBundledGhidraRuntime(
         }
     }
 
+    /** Fresh leg only: choose before command hashing to avoid a self-referential JVM temp path. */
+    fun freshControlDirectoryName(outputRoot: Path): String? {
+        require(invocationVersion <= 3) { "resume runtime cannot select a fresh-leg control directory" }
+        requireRuntimePath(outputRoot)
+        if (invocationVersion < 3) return null
+        val digest = OracleArtifacts.sha256("gcc-bundled-fresh-control-v1\n$outputRoot".toByteArray(Charsets.UTF_8))
+        return "control-$digest"
+    }
+
+    /** Definition construction only; the retained owner must authenticate the manifest before START. */
+    fun resumeControlDirectoryName(
+        state: GccCompilerEngineAnalysisStateIdentity,
+        lease: GccCompilerEngineOutputLeaseIdentity,
+    ): String {
+        require(invocationVersion == 4 && state.mode == GccCompilerEngineAnalysisStateMode.RESUME_MANIFEST) {
+            "resume control selection requires the explicit reanalysis invocation and stopped manifest"
+        }
+        require(state.path == lease.path.resolve("state")) { "resume manifest must describe the original analysis-state directory" }
+        val digest = OracleArtifacts.sha256(
+            "gcc-bundled-resume-control-v1\n${lease.path}\n${state.manifestSha256}".toByteArray(Charsets.UTF_8),
+        )
+        return "control-$digest"
+    }
+
     fun command(
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
         state: GccCompilerEngineAnalysisStateIdentity,
         lease: GccCompilerEngineOutputLeaseIdentity,
     ): List<String> {
-        require(state.mode == GccCompilerEngineAnalysisStateMode.FRESH_EMPTY) {
-            "bundled Ghidra runtime has no authenticated saved-state resume invocation"
+        val resumed = invocationVersion == 4
+        require(state.mode == if (resumed) GccCompilerEngineAnalysisStateMode.RESUME_MANIFEST
+            else GccCompilerEngineAnalysisStateMode.FRESH_EMPTY) {
+            "bundled Ghidra state mode differs from its versioned invocation"
         }
         requireArtifacts(artifacts)
         require(!root.startsWith(lease.path) && !lease.path.startsWith(root)) { "bundled Ghidra runtime overlaps writable output" }
         val byRole = artifacts.associateBy { it.role }
         val exporter = byRole.getValue(GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE)
         val archive = byRole.getValue(GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE)
+        val controlName = if (resumed) resumeControlDirectoryName(state, lease) else freshControlDirectoryName(lease.path)
+        val controlRoot = controlName?.let(lease.path::resolve) ?: lease.path
+        val project = if (resumed) controlRoot.resolve("state") else state.path
         val invocation = GhidraInvocation(
-            state.path, "archival_reconstruction",
+            project, "archival_reconstruction",
             byRole.getValue(GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY).path,
             exporter.path.parent,
             listOf(GhidraPostScript("ExportProgramModel.java", listOf(
@@ -94,9 +124,10 @@ internal class GccBundledGhidraRuntime(
             byRole.getValue(GccCompilerEngineContainmentArtifactRole.JAVA_EXECUTABLE).path,
             release, classPath.map { it.path },
         )
-        val isolatedPrefix = if (invocationVersion == 2) {
+        val temporaryDirectory = controlRoot.resolve("tmp")
+        val isolatedPrefix = if (invocationVersion >= 2) {
             listOf(
-                prefix.first(), "-Duser.home=${lease.path.resolve("tmp")}", "-Djava.io.tmpdir=${lease.path.resolve("tmp")}",
+                prefix.first(), "-Duser.home=${temporaryDirectory}", "-Djava.io.tmpdir=${temporaryDirectory}",
                 "-XX:ActiveProcessorCount=1", "-XX:+DisableAttachMechanism",
             ) + prefix.drop(1)
         } else {
@@ -128,6 +159,8 @@ internal class GccBundledGhidraRuntime(
             val version = when (document.strictString("provider")) {
                 "${PROVIDER_PREFIX}1" -> 1
                 "${PROVIDER_PREFIX}2" -> 2
+                "${PROVIDER_PREFIX}3" -> 3
+                "${PROVIDER_PREFIX}4" -> 4
                 else -> throw IllegalArgumentException("bundled Ghidra runtime provider is invalid")
             }
             val entries = document["classPath"] as? JsonArray

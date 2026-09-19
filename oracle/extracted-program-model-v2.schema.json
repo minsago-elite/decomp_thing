@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Extracted program model v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "inputSha256",
+    "functions",
+    "globals",
+    "types"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 2
+    },
+    "inputSha256": {
+      "type": "string"
+    },
+    "functions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "address",
+          "prototype",
+          "extractionStatus",
+          "recoveryAssessment",
+          "calls",
+          "referencedGlobals",
+          "strings",
+          "decompiledC"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "address": {
+            "type": "string",
+            "pattern": "^0x(?:0|[1-9a-f][0-9a-f]*)$"
+          },
+          "prototype": {
+            "type": "string"
+          },
+          "extractionStatus": {
+            "enum": [
+              "recovered",
+              "partial",
+              "failed",
+              "synthetic"
+            ]
+          },
+          "recoveryAssessment": {
+            "const": "unassessed"
+          },
+          "calls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "uniqueItems": true
+          },
+          "referencedGlobals": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "uniqueItems": true
+          },
+          "strings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "uniqueItems": true
+          },
+          "decompiledC": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "globals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "address",
+          "type",
+          "initializer",
+          "extractionStatus",
+          "recoveryAssessment"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "address": {
+            "type": "string",
+            "pattern": "^0x(?:0|[1-9a-f][0-9a-f]*)$"
+          },
+          "type": {
+            "type": "string"
+          },
+          "initializer": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "extractionStatus": {
+            "enum": [
+              "recovered",
+              "partial",
+              "failed",
+              "synthetic"
+            ]
+          },
+          "recoveryAssessment": {
+            "const": "unassessed"
+          }
+        }
+      }
+    },
+    "types": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "declaration",
+          "sourceAddress",
+          "extractionStatus",
+          "recoveryAssessment"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "declaration": {
+            "type": "string"
+          },
+          "sourceAddress": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^0x(?:0|[1-9a-f][0-9a-f]*)$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "extractionStatus": {
+            "enum": [
+              "recovered",
+              "partial",
+              "failed",
+              "synthetic"
+            ]
+          },
+          "recoveryAssessment": {
+            "const": "unassessed"
+          }
+        }
+      }
+    }
+  }
+}

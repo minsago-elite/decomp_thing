@@ -43,35 +43,42 @@ import kotlin.io.path.pathString
  * Adapter for generated C/Make projects. All C syntax, suffix, directory, build-evidence, and entry
  * symbol conventions live here rather than in the reusable repair/revision implementation.
  */
-object GeneratedCRepairIndexProfile : RepairIndexProfile {
-    override fun profileId(): String = "generated-c-make-v1"
+object GeneratedCRepairIndexProfile : RepairIndexProfile by DescriptorGeneratedCRepairIndexProfile(
+    GeneratedCMakeReconstructionProfile.descriptor,
+) {
+    /** Index policy only; production runtime admission and qualification remain separate. */
+    fun forProfile(profile: ReconstructionProfile): RepairIndexProfile = DescriptorGeneratedCRepairIndexProfile(profile)
+}
+
+private class DescriptorGeneratedCRepairIndexProfile(private val profile: ReconstructionProfile) : RepairIndexProfile {
+    private val sourcePolicy = GeneratedCRepairSourcePolicy(profile)
+    private val buildDefinition = sourcePolicy.buildDefinition
+    private val sharedInterface = profile.layout.declaration("shared-interface").materialize()
+    private val planRelative = profile.layout.declaration("module-plan-evidence").materialize()
+    private val modelRelative = profile.layout.declaration("program-model-evidence").materialize()
+
+    override fun profileId(): String = profile.id
+    private val configurationIdentity = sha256(
+        ("generated-c-repair-index-v3\n" + profile.sha256 + "\n").toByteArray(Charsets.UTF_8),
+    )
+    override fun configurationSha256(): String = configurationIdentity
 
     override fun authorizesRecoveryLayout(
         sourcePaths: List<String>,
         editablePaths: List<String>,
         budget: RepairResourceBudget,
-    ): Boolean {
-        if (sourcePaths.isEmpty() || sourcePaths.size > budget.maximumSourceFiles) return false
-        if (sourcePaths != sourcePaths.distinct().sorted() || editablePaths != editablePaths.distinct().sorted()) return false
-        if (sourcePaths.any { path ->
-                path != MAKEFILE && !path.startsWith("src/") && !path.startsWith("include/") ||
-                    path.split('/').any { it.endsWith(".repair") }
-            }) return false
-        return editablePaths == sourcePaths.filter { it == MAKEFILE || it.endsWith(".c") || it.endsWith(".h") }
-    }
+    ): Boolean = sourcePolicy.authorizesRecoveryLayout(sourcePaths, editablePaths, budget)
 
     override fun resolve(projectRoot: Path, budget: RepairResourceBudget): RepairIndexLayout {
         val sourcePaths = discoverSourcePaths(projectRoot, budget)
         val editable = sourcePaths.filterTo(TreeSet()) {
-            it == MAKEFILE || it.endsWith(".c") || it.endsWith(".h")
+            sourcePolicy.isEditable(it)
         }
         require(editable.isNotEmpty()) { "generated C project has no editable source inputs" }
-        val evidence = readIndexEvidence(projectRoot, sourcePaths.toSet(), editable, budget)
+        val evidence = readIndexEvidence(projectRoot, sourcePaths.toSet(), budget)
         val modules = evidence.modules.map { module ->
-            val sourceParent = Path.of(module.sourcePath).parent?.pathString?.replace('\\', '/').orEmpty()
-            val internal = listOf(
-                listOf(sourceParent, "${module.id}_internal.h").filter { it.isNotEmpty() }.joinToString("/"),
-            ).filter { it in sourcePaths }.sorted()
+            val internal = listOf(profile.layout.declaration("module-private-interface")
+                .materialize(mapOf("module" to module.id))).filter { it in sourcePaths }
             RepairModuleEvidence(
                 id = module.id,
                 ownedPaths = (listOf(module.sourcePath, module.headerPath) + internal)
@@ -111,7 +118,7 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
             "generated C module ownership does not exactly match program-model entities"
         }
         val explicitlyOwnedPaths = modules.flatMapTo(hashSetOf()) { it.ownedPaths }
-        val shared = listOf(MAKEFILE, TYPES_HEADER).filter { it in sourcePaths }.sorted()
+        val shared = listOf(buildDefinition, sharedInterface).filter { it in sourcePaths }.sorted()
         val sharedSet = shared.toHashSet()
         val fallbackModules = TreeMap<String, String>()
         sourcePaths.filter { it !in explicitlyOwnedPaths && it !in sharedSet }.forEach { path ->
@@ -132,7 +139,7 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
                 .distinct()
                 .sorted(),
             behaviorRootEntityIds = evidence.functions.filter {
-                it.name in setOf("_start", "decomp_engine_main", "entry", "main")
+                it.name in profile.adapterConfiguration.getValue("entry-symbol-candidates")
             }.map { it.id }.sorted(),
         )
     }
@@ -226,11 +233,8 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
     private fun readIndexEvidence(
         root: Path,
         sourcePaths: Set<String>,
-        editablePaths: Set<String>,
         budget: RepairResourceBudget,
     ): GeneratedCIndexEvidence {
-        val planRelative = "reports/module_plan.json"
-        val modelRelative = "reports/program_model.json"
         val planBytes = readOptionalEvidence(root, planRelative, budget.maximumIndexEvidenceBytes)
         val remaining = budget.maximumIndexEvidenceBytes - (planBytes?.size?.toLong() ?: 0L)
         val modelBytes = readOptionalEvidence(root, modelRelative, remaining)
@@ -260,8 +264,21 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
 
         val modelRoot = Json.parseToJsonElement(decodeGeneratedCText(requireNotNull(modelBytes), modelRelative)).jsonObject
         modelRoot.requireExactKeys(MODEL_ROOT_KEYS, modelRelative)
-        require(modelRoot.requiredInt("schemaVersion", modelRelative) == INDEX_EVIDENCE_SCHEMA_VERSION) {
+        val modelSchemaVersion = modelRoot.requiredInt("schemaVersion", modelRelative)
+        require(modelSchemaVersion in 1..2) {
             "unsupported generated C program-model schemaVersion"
+        }
+        fun modelKeys(legacyKeys: Set<String>): Set<String> = if (modelSchemaVersion == 1) legacyKeys
+            else legacyKeys - "status" + setOf("extractionStatus", "recoveryAssessment")
+        fun JsonObject.requireExtractionStatus() {
+            val field = if (modelSchemaVersion == 1) "status" else "extractionStatus"
+            require(requiredBoundedString(field, modelRelative, evidenceIdentifierLimit(budget)) in
+                setOf("recovered", "partial", "failed", "synthetic")) { "unsupported model extraction status" }
+            if (modelSchemaVersion == 2) {
+                require(requiredBoundedString("recoveryAssessment", modelRelative, evidenceIdentifierLimit(budget)) == "unassessed") {
+                    "extracted model cannot supply a scored recovery assessment"
+                }
+            }
         }
         modelRoot.requiredBoundedString(
             "inputSha256",
@@ -331,12 +348,12 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
         }
         functionElements.forEach { element ->
             val function = element.jsonObject
-            function.requireExactKeys(MODEL_FUNCTION_KEYS, "$modelRelative function")
+            function.requireExactKeys(modelKeys(MODEL_FUNCTION_KEYS), "$modelRelative function")
             function.requiredBoundedString("id", modelRelative, identifierLimit)
             function.requiredBoundedString("name", modelRelative, identifierLimit)
             function.requiredBoundedString("address", modelRelative, identifierLimit)
             function.requiredBoundedString("prototype", modelRelative, textLimit)
-            function.requiredBoundedString("status", modelRelative, identifierLimit)
+            function.requireExtractionStatus()
             val calls = function.requiredArray("calls", modelRelative)
             val referencedGlobals = function.requiredArray("referencedGlobals", modelRelative)
             val strings = function.requiredArray("strings", modelRelative)
@@ -352,21 +369,21 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
         }
         globalElements.forEach { element ->
             val global = element.jsonObject
-            global.requireExactKeys(MODEL_GLOBAL_KEYS, "$modelRelative global")
+            global.requireExactKeys(modelKeys(MODEL_GLOBAL_KEYS), "$modelRelative global")
             global.requiredBoundedString("id", modelRelative, identifierLimit)
             global.requiredBoundedString("name", modelRelative, identifierLimit)
             global.requiredBoundedString("address", modelRelative, identifierLimit)
             global.requiredBoundedString("type", modelRelative, textLimit)
             global.requireNullableBoundedString("initializer", modelRelative, textLimit, allowBlank = true)
-            global.requiredBoundedString("status", modelRelative, identifierLimit)
+            global.requireExtractionStatus()
         }
         typeElements.forEach { element ->
             val type = element.jsonObject
-            type.requireExactKeys(MODEL_TYPE_KEYS, "$modelRelative type")
+            type.requireExactKeys(modelKeys(MODEL_TYPE_KEYS), "$modelRelative type")
             type.requiredBoundedString("id", modelRelative, identifierLimit)
             type.requiredBoundedString("declaration", modelRelative, textLimit)
             type.requireNullableBoundedString("sourceAddress", modelRelative, identifierLimit)
-            type.requiredBoundedString("status", modelRelative, identifierLimit)
+            type.requireExtractionStatus()
         }
 
         val modules = moduleElements.map { element ->
@@ -396,11 +413,15 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
         }.also { parsed ->
             requireUniqueValues(parsed.map { it.id }, "generated C module IDs")
             parsed.forEach { module ->
-                require(module.sourcePath in sourcePaths && module.sourcePath in editablePaths) {
-                    "generated C module source is not an editable discovered input: ${module.sourcePath}"
+                require(module.sourcePath in sourcePaths &&
+                    module.sourcePath == profile.layout.declaration("module-implementation")
+                        .materialize(mapOf("module" to module.id))) {
+                    "generated C module source is not its declared discovered input: ${module.sourcePath}"
                 }
-                require(module.headerPath in sourcePaths) {
-                    "generated C module header is not a discovered input: ${module.headerPath}"
+                require(module.headerPath in sourcePaths &&
+                    module.headerPath == profile.layout.declaration("module-interface")
+                        .materialize(mapOf("module" to module.id))) {
+                    "generated C module header is not its declared discovered input: ${module.headerPath}"
                 }
             }
         }
@@ -629,7 +650,7 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
                         }
                         entry.identity.isRegularFile -> {
                             if (!excludedAncestor && !relative.endsWith(".repair")) {
-                                if (paths.size >= budget.maximumSourceFiles) {
+                                if (relative !in paths && paths.size >= budget.maximumSourceFiles) {
                                     throw RepairBudgetExceededException(
                                         "generated C project has more than ${budget.maximumSourceFiles} source files",
                                     )
@@ -643,16 +664,38 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
             }
         }
 
+        val buildComponents = buildDefinition.split('/')
+        require(buildComponents.size <= budget.maximumDiscoveryDepth) {
+            "generated C build definition exceeds discovery depth ${budget.maximumDiscoveryDepth}"
+        }
+        fun discoverBuildDefinition(directory: LinuxDescriptor, component: Int, rootMount: Long) {
+            val name = buildComponents[component]
+            val relative = buildComponents.take(component + 1).joinToString("/")
+            val entry = LinuxFilesystemSyscalls.openPathAtOrNull(directory.fd, name) ?: return
+            entry.use {
+                countEntry(relative)
+                require(!entry.identity.isSymbolicLink && entry.identity.mountId == rootMount) {
+                    "generated C build definition rejects links or mounted entries: $relative"
+                }
+                if (component == buildComponents.lastIndex) {
+                    require(entry.identity.isRegularFile) { "generated C build definition is not a regular file" }
+                    paths += buildDefinition
+                } else {
+                    require(entry.identity.isDirectory) { "generated C build definition parent is not a directory: $relative" }
+                    countDirectory(relative, component + 1)
+                    LinuxFilesystemSyscalls.openDirectoryAt(directory.fd, name).use { child ->
+                        require(child.identity.key == entry.identity.key && child.identity.mountId == rootMount) {
+                            "generated C build definition parent changed identity: $relative"
+                        }
+                        discoverBuildDefinition(child, component + 1, rootMount)
+                    }
+                }
+            }
+        }
+
         openRepairRootDirectory(root).use { rootDescriptor ->
             val rootMount = rootDescriptor.identity.mountId
-            LinuxFilesystemSyscalls.openPathAtOrNull(rootDescriptor.fd, MAKEFILE)?.use { makefile ->
-                countEntry(MAKEFILE)
-                require(makefile.identity.isRegularFile && !makefile.identity.isSymbolicLink &&
-                    makefile.identity.mountId == rootMount) {
-                    "generated C Makefile is not a regular contained file"
-                }
-                paths += MAKEFILE
-            }
+            discoverBuildDefinition(rootDescriptor, 0, rootMount)
             listOf("include", "src").forEach { directoryName ->
                 val authorized = LinuxFilesystemSyscalls.openPathAtOrNull(rootDescriptor.fd, directoryName)
                     ?: return@forEach
@@ -733,14 +776,11 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile {
         return value
     }
 
-    private const val INDEX_EVIDENCE_SCHEMA_VERSION = 1
-    private const val LEGACY_PLAN_SCHEMA_VERSION = 1
-    private const val PLAN_SCHEMA_VERSION = 2
-    private const val BUILD_CONTRACT_SCHEMA_VERSION = 2
-    private const val MAXIMUM_EVIDENCE_IDENTIFIER_CHARACTERS = 4_096
-    private const val MAXIMUM_EVIDENCE_TEXT_CHARACTERS = 16 * 1024 * 1024
-    private const val MAKEFILE = "Makefile"
-    private const val TYPES_HEADER = "include/decomp_types.h"
+    private val LEGACY_PLAN_SCHEMA_VERSION = 1
+    private val PLAN_SCHEMA_VERSION = 2
+    private val BUILD_CONTRACT_SCHEMA_VERSION = 2
+    private val MAXIMUM_EVIDENCE_IDENTIFIER_CHARACTERS = 4_096
+    private val MAXIMUM_EVIDENCE_TEXT_CHARACTERS = 16 * 1024 * 1024
     private val SHARED_BUILD_OWNERS = setOf("link", "project")
     private val PLAN_ROOT_KEYS = setOf("schemaVersion", "modules", "dependencyCycles")
     private val LEGACY_PLAN_MODULE_KEYS = setOf(

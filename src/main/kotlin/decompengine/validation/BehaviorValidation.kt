@@ -35,12 +35,13 @@ data class ProcessInput(
     }
 }
 
-data class ProcessOutput(
+data class ProcessOutput @JvmOverloads constructor(
     val exitCode: Int,
     val stdout: ByteArray,
     val stderr: ByteArray,
     val sandboxCommand: List<String>,
     val networkIsolated: Boolean = true,
+    val completionEvidence: JsonObject? = null,
 ) {
     override fun equals(other: Any?): Boolean =
         other is ProcessOutput &&
@@ -48,7 +49,7 @@ data class ProcessOutput(
             stdout.contentEquals(other.stdout) &&
             stderr.contentEquals(other.stderr) &&
             sandboxCommand == other.sandboxCommand &&
-            networkIsolated == other.networkIsolated
+            networkIsolated == other.networkIsolated && completionEvidence == other.completionEvidence
 
     override fun hashCode(): Int {
         var result = exitCode
@@ -56,6 +57,7 @@ data class ProcessOutput(
         result = 31 * result + stderr.contentHashCode()
         result = 31 * result + sandboxCommand.hashCode()
         result = 31 * result + networkIsolated.hashCode()
+        result = 31 * result + (completionEvidence?.hashCode() ?: 0)
         return result
     }
 }
@@ -89,6 +91,16 @@ class SandboxUnavailableException(message: String) : RuntimeException(message)
 class BehaviorOutputLimitException(message: String) : RuntimeException(message)
 
 class BehaviorExecutionTimeoutException(message: String) : RuntimeException(message)
+
+class BehaviorExecutionOutcomeException(message: String) : RuntimeException(message)
+
+internal fun rejectReservedWrapperExit(exitCode: Int) {
+    if (exitCode !in 0..123) {
+        throw BehaviorExecutionOutcomeException(
+            "local wrapper exit $exitCode lacks unambiguous application completion evidence",
+        )
+    }
+}
 
 data class SandboxOutputLimits(
     val maximumStdoutBytes: Long = 8L * 1024 * 1024,
@@ -159,6 +171,7 @@ class SandboxRunner(
     private val networkIsolation: Boolean = BwrapCapability.networkIsolationSupported(bwrapPath, timeoutPath),
     private val outputLimits: SandboxOutputLimits = SandboxOutputLimits(),
 ) {
+    private val launcherPath = Path.of("/bin/sh").toRealPath()
     fun networkIsolationSupported(): Boolean = networkIsolation
 
     internal fun evidencePolicy(capture: BehaviorEvidenceCapture): JsonObject {
@@ -181,16 +194,29 @@ class SandboxRunner(
                 ("path" to JsonPrimitive(bwrapPath.toAbsolutePath().normalize().toString()))),
             "timeout" to JsonObject(capture.executable(timeoutPath) +
                 ("path" to JsonPrimitive(timeoutPath.toAbsolutePath().normalize().toString()))),
+            "completionLauncher" to JsonObject(capture.executable(launcherPath) +
+                ("path" to JsonPrimitive(launcherPath.toString()))),
+            "maximumCompletionBytes" to JsonPrimitive(MAXIMUM_BUBBLEWRAP_COMPLETION_BYTES),
         ))
     }
 
-    fun run(executable: Path, input: ProcessInput): ProcessOutput {
+    fun run(executable: Path, input: ProcessInput): ProcessOutput = runWithFiles(executable, input, emptyMap())
+
+    internal fun runWithFiles(executable: Path, input: ProcessInput, files: Map<String, Path>): ProcessOutput {
+        val deadline = runCatching { Math.addExact(System.nanoTime(), timeout.toNanos()) }.getOrDefault(Long.MAX_VALUE)
+        return withCompletionChannel { channel ->
+            runWithCompletion(executable, input, files, channel, deadline)
+        }
+    }
+
+    private fun runWithCompletion(executable: Path, input: ProcessInput, files: Map<String, Path>, channel: Path, deadline: Long): ProcessOutput {
         if (!bwrapPath.exists()) {
             throw SandboxUnavailableException("bubblewrap not found at ${bwrapPath.pathString}; sandboxed execution is mandatory")
         }
-        val command = behaviorSandboxCommand(executable, input.args, timeout.toMillis(), bwrapPath, timeoutPath, networkIsolation)
+        val command = behaviorSandboxCommand(executable, input.args, timeout.toMillis(), bwrapPath, timeoutPath, networkIsolation, files)
 
-        val builder = ProcessBuilder(command).redirectErrorStream(false)
+        val launchCommand = completionLaunchCommand(command, launcherPath, channel)
+        val builder = ProcessBuilder(launchCommand).redirectErrorStream(false)
         builder.environment().clear()
         builder.environment()["PATH"] = "/usr/bin"
         val process = builder.start()
@@ -207,9 +233,8 @@ class SandboxRunner(
         val stdinFuture = executor.submit<Unit> { process.outputStream.use { it.write(input.stdin) } }
         var primaryFailure: Throwable? = null
         try {
-            val deadline = runCatching { Math.addExact(System.nanoTime(), timeout.toNanos()) }
-                .getOrDefault(Long.MAX_VALUE)
             while (process.isAlive || !stdoutFuture.isDone || !stderrFuture.isDone || !stdinFuture.isDone) {
+                require(java.nio.file.Files.size(channel) <= MAXIMUM_BUBBLEWRAP_COMPLETION_BYTES) { "completion channel exceeds its bound" }
                 completedFailure(stdoutFuture)?.let { throw it }
                 completedFailure(stderrFuture)?.let { throw it }
                 completedFailure(stdinFuture)?.let { throw it }
@@ -224,12 +249,24 @@ class SandboxRunner(
             val stdout = awaitIo(stdoutFuture)
             val stderr = awaitIo(stderrFuture)
             awaitIo(stdinFuture)
+            val completionBytes = java.nio.file.Files.newInputStream(channel).use { it.readNBytes(MAXIMUM_BUBBLEWRAP_COMPLETION_BYTES + 1) }
+            try {
+                parseBubblewrapCompletion(completionBytes, exitCode)
+            } catch (failure: IllegalArgumentException) {
+                throw BehaviorExecutionOutcomeException(failure.message ?: "completion evidence is unavailable")
+            }
+            if (System.nanoTime() >= deadline) throw BehaviorExecutionTimeoutException("completion capture exceeded the behavior deadline")
             return ProcessOutput(
                 exitCode = exitCode,
                 stdout = stdout,
                 stderr = stderr,
                 sandboxCommand = command,
                 networkIsolated = networkIsolation,
+                completionEvidence = JsonObject(mapOf(
+                    "channelPath" to JsonPrimitive(channel.toString()),
+                    "statusHex" to JsonPrimitive(java.util.HexFormat.of().formatHex(completionBytes)),
+                    "launchCommand" to kotlinx.serialization.json.JsonArray(launchCommand.map(::JsonPrimitive)),
+                )),
             )
         } catch (failure: Throwable) {
             if (failure is InterruptedException) Thread.currentThread().interrupt()
@@ -306,15 +343,35 @@ class SandboxRunner(
         throw failure.cause ?: failure
     }
 
-    private fun terminateProcessTree(process: Process) {
+}
+
+/** Cancellation must not skip the bounded cleanup wait; preserve it for the caller. */
+internal fun terminateProcessTree(process: Process) {
+    var interrupted = Thread.interrupted()
+    fun awaitTermination(timeoutMillis: Long): Boolean {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+        while (process.isAlive) {
+            val remaining = deadline - System.nanoTime()
+            if (remaining <= 0) return false
+            try {
+                return process.waitFor(remaining, TimeUnit.NANOSECONDS)
+            } catch (_: InterruptedException) {
+                interrupted = true
+            }
+        }
+        return true
+    }
+    try {
         val descendants = process.toHandle().descendants().toList().asReversed()
         descendants.forEach { it.destroy() }
         process.destroy()
-        if (!process.waitFor(250, TimeUnit.MILLISECONDS)) {
+        if (!awaitTermination(250)) {
             descendants.forEach { if (it.isAlive) it.destroyForcibly() }
             process.destroyForcibly()
-            require(process.waitFor(2, TimeUnit.SECONDS)) { "sandboxed behavior process did not terminate" }
+            require(awaitTermination(2000)) { "sandboxed behavior process did not terminate" }
         }
+    } finally {
+        if (interrupted) Thread.currentThread().interrupt()
     }
 }
 
@@ -329,8 +386,10 @@ class BehaviorComparator(
         cases: List<ProcessInput>,
         reportsDir: Path,
         project: BehaviorProjectContext? = null,
+        fileInputs: Map<String, Map<String, Path>> = emptyMap(),
+        expectedCorpusSha256: String? = null,
     ): BehaviorComparisonReport {
-        val report = evaluate(id, originalBinary, rebuiltBinary, cases, reportsDir, project)
+        val report = evaluate(id, originalBinary, rebuiltBinary, cases, reportsDir, project, fileInputs, expectedCorpusSha256)
         if (!report.matches) {
             throw BehaviorMismatchException("behavior comparison failed for $id; see ${report.reportPath.pathString}")
         }
@@ -344,7 +403,12 @@ class BehaviorComparator(
         cases: List<ProcessInput>,
         reportsDir: Path,
         project: BehaviorProjectContext? = null,
+        fileInputs: Map<String, Map<String, Path>> = emptyMap(),
+        expectedCorpusSha256: String? = null,
     ): BehaviorComparisonReport {
+        require(expectedCorpusSha256 == null || expectedCorpusSha256.matches(Regex("[0-9a-f]{64}"))) {
+            "expected behavior corpus digest must be a lowercase SHA-256"
+        }
         require(id.matches(Regex("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"))) { "behavior report ID must be a safe filename component" }
         require(cases.size in 1..1024) { "between one and 1024 behavior cases are required" }
         require(cases.map { it.id }.distinct().size == cases.size) { "behavior case IDs must be unique" }
@@ -354,8 +418,16 @@ class BehaviorComparator(
             cases.sumOf { input -> input.args.sumOf { it.toByteArray().size.toLong() } } <= 1024L * 1024
         ) { "behavior corpus exceeds its byte bound" }
         val inputs = cases.map { ProcessInput(it.id, it.args.toList(), it.stdin.clone()) }
+        require(fileInputs.keys.all { id -> inputs.any { it.id == id } }) { "file inputs reference an unknown behavior case" }
+        val boundFiles = fileInputs.mapValues { it.value.toMap() }
         reportsDir.createDirectories()
         val capture = BehaviorEvidenceCapture()
+        val fileRecords = captureBehaviorFileInputs(boundFiles, capture)
+        if (expectedCorpusSha256 != null) {
+            require(BehaviorEvidence.inputCorpusSha256(inputs, fileRecords) == expectedCorpusSha256) {
+                "behavior corpus differs from the required corpus digest"
+            }
+        }
         val originalIdentity = capture.executable(originalBinary)
         val rebuiltIdentity = capture.executable(rebuiltBinary)
         val comparisonLimit = minOf(maximumAggregateOutputBytes, 16L * 1024 * 1024)
@@ -366,7 +438,7 @@ class BehaviorComparator(
         var aggregateOutputBytes = 0L
         fun runBounded(binary: Path, input: ProcessInput): ProcessOutput {
             capture.requireCurrent()
-            val output = sandbox.run(binary, input)
+            val output = sandbox.runWithFiles(binary, input, boundFiles[input.id].orEmpty())
             capture.requireCurrent()
             aggregateOutputBytes = Math.addExact(
                 aggregateOutputBytes,
@@ -400,7 +472,7 @@ class BehaviorComparator(
         }
         capture.requireCurrent()
         val encoded = BehaviorEvidence.encode(Json.parseToJsonElement(report.toJson()).jsonObject,
-            originalIdentity, rebuiltIdentity, policy, projectRevision)
+            originalIdentity, rebuiltIdentity, policy, projectRevision, fileRecords)
         require(encoded.toByteArray().size <= BehaviorEvidence.MAXIMUM_REPORT_BYTES) { "behavior report exceeds its byte bound" }
         capture.requireCurrent()
         writeProjectEvidenceAtomically(report.reportPath, encoded)
@@ -438,6 +510,7 @@ private fun BehaviorCaseResult.toJson(): String = """
 
 private fun ProcessOutput.toJson(): String = """
 {
+  "completionEvidence": ${completionEvidence ?: "null"},
   "exitCode": $exitCode,
   "stdoutHex": "${stdout.toHex()}",
   "stderrHex": "${stderr.toHex()}",

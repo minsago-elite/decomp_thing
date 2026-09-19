@@ -26,12 +26,33 @@ internal data class PlannerComplexity(
 
 internal data class IndexedPlannerRun(val plan: ModulePlan, val complexity: PlannerComplexity)
 
-private class MutablePlannerComplexity {
+private class MutablePlannerComplexity(entityCount: Int, private val maximumWorkUnits: Long) {
+    private var chargedWorkUnits = entityCount.toLong()
+
+    init {
+        require(chargedWorkUnits <= maximumWorkUnits) {
+            "module planning requires $chargedWorkUnits entity work units; limit=$maximumWorkUnits"
+        }
+    }
+
+    private fun charge(previous: Long, next: Long): Long {
+        require(next >= previous && next - previous <= maximumWorkUnits - chargedWorkUnits) {
+            "module planning exceeded its work limit during traversal; charged=$chargedWorkUnits, limit=$maximumWorkUnits"
+        }
+        chargedWorkUnits += next - previous
+        return next
+    }
+
     var indexedEvidenceEntries = 0L
+        set(value) { field = charge(field, value) }
     var affinityPostingVisits = 0L
+        set(value) { field = charge(field, value) }
     var anonymousGraphVisits = 0L
+        set(value) { field = charge(field, value) }
     var moduleGraphVisits = 0L
+        set(value) { field = charge(field, value) }
     var groupingIndexVisits = 0L
+        set(value) { field = charge(field, value) }
 
     fun snapshot(functionCount: Int, globalCount: Int, typeCount: Int) = PlannerComplexity(
         functionCount = functionCount,
@@ -69,6 +90,32 @@ class DeterministicModulePlanner(
         require(maximumWorkUnits > 0)
     }
 
+    /** Preserve stricter caller limits while binding generation to its admitted profile. */
+    internal fun withProfileBounds(profile: ReconstructionProfile): DeterministicModulePlanner {
+        for (id in listOf("module-implementation", "module-interface")) {
+            require(layout.declaration(id) == profile.layout.declaration(id)) {
+                "module planner $id declaration differs from the reconstruction profile"
+            }
+        }
+        return DeterministicModulePlanner(
+            maximumFunctionsPerModule = minOf(maximumFunctionsPerModule, profile.budgets.maximumFunctionsPerModule),
+            layout = profile.layout,
+            maximumEntities = minOf(maximumEntities, profile.budgets.plannerMaximumEntities),
+            maximumDependencyEdges = minOf(maximumDependencyEdges, profile.budgets.plannerMaximumDependencyEdges),
+            maximumWorkUnits = minOf(maximumWorkUnits, profile.budgets.plannerMaximumWorkUnits),
+        )
+    }
+
+    companion object {
+        internal fun forProfile(profile: ReconstructionProfile): DeterministicModulePlanner = DeterministicModulePlanner(
+            maximumFunctionsPerModule = profile.budgets.maximumFunctionsPerModule,
+            layout = profile.layout,
+            maximumEntities = profile.budgets.plannerMaximumEntities,
+            maximumDependencyEdges = profile.budgets.plannerMaximumDependencyEdges,
+            maximumWorkUnits = profile.budgets.plannerMaximumWorkUnits,
+        )
+    }
+
     fun plan(model: RecoveredProgramModel, overrides: Map<String, String> = emptyMap()): ModulePlan =
         planWithComplexity(model, overrides).plan
 
@@ -80,13 +127,13 @@ class DeterministicModulePlanner(
         require(entityCount <= maximumEntities) {
             "module planning requires $entityCount entities; limit=$maximumEntities"
         }
+        val complexity = MutablePlannerComplexity(entityCount, maximumWorkUnits)
         val dependencyEdges = model.functions.fold(0L) { total, function ->
             Math.addExact(total, Math.addExact(function.calls.size.toLong(), function.referencedGlobals.size.toLong()))
         }
         require(dependencyEdges <= maximumDependencyEdges) {
             "module planning requires $dependencyEdges dependency edges; limit=$maximumDependencyEdges"
         }
-        val complexity = MutablePlannerComplexity()
         val functions = model.functions.sortedWith(compareBy<RecoveredFunction> { it.address }.thenBy { it.id })
         val functionById = functions.associateBy { it.id }
         val globalIds = model.globals.mapTo(hashSetOf()) { it.id }

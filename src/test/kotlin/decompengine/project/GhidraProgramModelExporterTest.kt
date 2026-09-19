@@ -172,8 +172,10 @@ class GhidraProgramModelExporterTest {
         val analyzer = GhidraHeadlessProgramModelAnalyzer()
 
         val first = analyzer.analyze(binary, work)
+        assertEquals(2, first.schemaVersion)
         val modelPath = work.resolve("reports/program_model.json")
         val firstModel = modelPath.readBytes()
+        assertEquals(first, decompengine.oracle.structural.CanonicalProgramModelStreaming.readCanonical(firstModel).model)
         val records = modelPath.resolveSibling("program_model.json.export/functions").listDirectoryEntries("*.json").sorted()
         assertTrue(records.isNotEmpty())
         val firstRecords = records.associateWith { it.readBytes() }
@@ -217,8 +219,10 @@ class GhidraProgramModelExporterTest {
         )
 
         val first = analyzer.analyze(binary, work)
+        assertEquals(2, first.schemaVersion)
         val modelPath = work.resolve("reports/program_model.json")
         val firstModel = modelPath.readBytes()
+        assertEquals(first, decompengine.oracle.structural.CanonicalProgramModelStreaming.readCanonical(firstModel).model)
         val batches = modelPath.resolveSibling("program_model.json.export/planning-batches")
         val checkpoints = batches.listDirectoryEntries("*.checkpoint")
         assertTrue(checkpoints.isNotEmpty())
@@ -230,6 +234,14 @@ class GhidraProgramModelExporterTest {
         val progress = modelPath.resolveSibling("program_model.json.progress.json").readText()
         assertTrue(progress.contains("\"phase\":\"complete\""))
         assertTrue(progress.contains("\"reused\":${first.functions.size}"), progress)
+        val statePath = modelPath.resolveSibling("program_model.json.export/state.json")
+        val priorState = statePath.readText()
+        assertTrue("\"exporterVersion\":10" in priorState)
+        val historicalState = priorState.replace("\"exporterVersion\":10", "\"exporterVersion\":9")
+        statePath.writeText(historicalState)
+        assertFailsWith<IllegalArgumentException> { analyzer.analyze(binary, work) }
+        assertEquals(historicalState, statePath.readText())
+        assertTrue(firstModel.contentEquals(modelPath.readBytes()))
     }
 
     private fun fakeGhidraHome(temp: Path, complete: Boolean): (GhidraInvocation) -> List<String> {

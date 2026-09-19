@@ -795,7 +795,7 @@ def load_program_model(
     artifact: Artifact,
     model_image_base: int,
 ) -> RecoveredModel:
-    """Load the current schema-v1 program model and normalize its addresses."""
+    """Project schema-1/2 model functions into diagnostic boundary/name inputs."""
 
     if twin not in _TWIN_NAMES:
         raise ScoringError(f"unknown twin: {twin}")
@@ -811,8 +811,10 @@ def load_program_model(
         f"{twin} program model",
         {"schemaVersion", "inputSha256", "functions", "globals", "types"},
     )
-    if isinstance(root["schemaVersion"], bool) or root["schemaVersion"] != 1:
-        raise ScoringError(f"{twin} program model.schemaVersion must be the integer 1")
+    model_version = root["schemaVersion"]
+    if type(model_version) is not int or model_version not in (1, 2):
+        raise ScoringError(f"{twin} program model.schemaVersion must be the integer 1 or 2")
+    status_field = "status" if model_version == 1 else "extractionStatus"
     input_sha256 = _sha256(
         root["inputSha256"],
         f"{twin} program model.inputSha256",
@@ -853,13 +855,15 @@ def load_program_model(
                 "name",
                 "address",
                 "prototype",
-                "status",
+                status_field,
                 "calls",
                 "referencedGlobals",
                 "strings",
                 "decompiledC",
-            },
+            } | ({"recoveryAssessment"} if model_version == 2 else set()),
         )
+        if model_version == 2 and item["recoveryAssessment"] != "unassessed":
+            raise ScoringError(f"{item_path} cannot supply a scored recovery assessment")
         identifier = _string(
             item["id"],
             f"{item_path}.id",
@@ -891,7 +895,7 @@ def load_program_model(
             allow_empty=True,
             maximum=1_048_576,
         )
-        status = _string(item["status"], f"{item_path}.status", maximum=32)
+        status = _string(item[status_field], f"{item_path}.{status_field}", maximum=32)
         if status not in _RECOVERY_STATUSES:
             raise ScoringError(f"{item_path}.status has an invalid value")
         _string_array(item["calls"], f"{item_path}.calls")
