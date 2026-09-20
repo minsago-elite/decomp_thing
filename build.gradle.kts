@@ -1606,8 +1606,6 @@ val verifyReconstructionNeutrality = tasks.register<Exec>("verifyReconstructionN
 tasks.named("check") {
     dependsOn(testFrontendAssetManifest)
     dependsOn(verifyPackagedWeb)
-    // Keep the lexical neutrality gate in the normal verification graph so new
-    // generic identity leaks cannot bypass the declared ownership policy.
     dependsOn(verifyReconstructionNeutrality)
     dependsOn(verifyAcpGateHelperDistribution)
     dependsOn(verifyLlvmBehaviorHelperDistribution)
