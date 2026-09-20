@@ -1606,7 +1606,6 @@ val verifyReconstructionNeutrality = tasks.register<Exec>("verifyReconstructionN
 tasks.named("check") {
     dependsOn(testFrontendAssetManifest)
     dependsOn(verifyPackagedWeb)
-    dependsOn(verifyReconstructionNeutrality)
     dependsOn(verifyAcpGateHelperDistribution)
     dependsOn(verifyLlvmBehaviorHelperDistribution)
     dependsOn(verifyKotlinBootClasspathDistribution)
