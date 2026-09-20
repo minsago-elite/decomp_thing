@@ -151,6 +151,10 @@ object BwrapCapability {
                 val major = match.groupValues[1].toIntOrNull() ?: return@computeIfAbsent false
                 val minor = match.groupValues[2].toIntOrNull() ?: return@computeIfAbsent false
                 major > 0 || major == 0 && minor >= 11
+            } catch (interrupted: InterruptedException) {
+                Thread.currentThread().interrupt()
+                process.destroyForcibly()
+                throw interrupted
             } catch (_: Exception) {
                 process.destroyForcibly()
                 false

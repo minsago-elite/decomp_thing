@@ -661,6 +661,10 @@ class BehaviorEvidenceTest {
         val runner = root.resolve("authored-runner-shim").also { path ->
             path.writeText("""
                 #!/bin/sh
+                if [ "${'$'}1" = "--version" ]; then
+                    printf 'bubblewrap 0.11.2\n'
+                    exit 0
+                fi
                 printf '{ "child-pid": %s, "mnt-namespace": 1, "pid-namespace": 2 }\n' "${'$'}${'$'}" >&3
                 program=
                 while [ "${'$'}#" -gt 0 ]; do

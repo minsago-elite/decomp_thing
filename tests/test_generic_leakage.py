@@ -79,11 +79,10 @@ class GenericLeakageTest(unittest.TestCase):
 
         findings = scan_repository(self.root).findings
 
-        # Exact adapter ownership waives every rule, including benchmark
-        # identity: only the non-adapter generic surface still reports.
         self.assertEqual(
             [(item.path, item.rule) for item in findings],
-            [("src/Workflow.kt", "generic-layout"),
+            [("src/RegisteredAdapter.kt", "benchmark-hash"),
+             ("src/Workflow.kt", "generic-layout"),
              ("src/Workflow.kt", "generic-compiler-flag")],
         )
 
@@ -128,17 +127,18 @@ class GenericLeakageTest(unittest.TestCase):
         }
         self.write_json("oracle/gcc/revisions/v9/nested/profile.json", document)
         self.write_json("oracle/gccish/profile.json", document)
-        # Benchmark-identity rules apply only on declared generic surfaces, so
-        # only the generic-surface copy outside benchmark ownership reports.
+        # Benchmark-identity rules apply outside benchmark ownership, including
+        # the undeclared oracle/gccish location and the generic-surface copy.
         self.write_json("src/profile.json", document)
 
         findings = scan_repository(self.root).findings
 
         self.assertEqual({item.path for item in findings},
-                         {"src/profile.json"})
-        self.assertEqual({item.rule for item in findings},
-                         {"benchmark-version", "benchmark-target", "benchmark-hash"})
-        self.assertEqual(len(findings), 3)
+                         {"oracle/gccish/profile.json", "src/profile.json"})
+        for path in ("oracle/gccish/profile.json", "src/profile.json"):
+            self.assertEqual({item.rule for item in findings if item.path == path},
+                             {"benchmark-version", "benchmark-target", "benchmark-hash"})
+        self.assertEqual(len(findings), 6)
 
     def test_markdown_is_excluded_and_multiline_allowance_preserves_line_numbers(self) -> None:
         self.write("src/README.md", json.dumps(FIXTURE) + '\n"Makefile"\n')

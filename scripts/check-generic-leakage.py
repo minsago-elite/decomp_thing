@@ -183,14 +183,14 @@ def scan_repository(root: Path, policy_path: str = "oracle/gcc/reconstruction-ne
         if path.suffix.lower() not in TEXT_SUFFIXES and path.name != "Dockerfile" and path.suffix != ".Dockerfile":
             continue
         generic_surface = within(relative, policy["genericRoots"])
+        benchmark_owned = within(relative, policy["benchmarkRoots"])
         generic = generic_surface and relative not in adapters
-        # Benchmark-identity rules apply across the declared generic surface,
-        # including adapter files; only generic rules honor adapter ownership.
-        # Benchmark-owned locations declare their own ownership and must not
-        # trip the neutrality gate.
+        # Benchmark-identity rules apply to every supported file outside
+        # benchmark-owned locations, while generic rules stay on the declared
+        # generic surface and honor exact adapter ownership.
         selected = {name: pattern for name, pattern in rules.items()
-                    if generic_surface and
-                    (name.startswith("benchmark-") or generic and name.startswith("generic-"))}
+                    if (name.startswith("benchmark-") and not benchmark_owned) or
+                    (generic and name.startswith("generic-"))}
         if not selected:
             continue
         # Git's cached inventory retains ordinary unstaged deletions. Policy-owned
