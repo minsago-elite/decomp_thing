@@ -33,6 +33,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.util.Collections
@@ -919,7 +920,7 @@ object SourceTreeGenerator {
         staleBuildDefinitions
             .filter { it != makefilePath && it !in currentGeneratedPaths }
             .forEach { stale ->
-                projectDir.resolve(stale).takeIf { Files.isRegularFile(it) }?.deleteIfExists()
+                deleteStaleBuildDefinition(projectDir, stale)
             }
         val makefileFile = projectDir.resolve(makefilePath)
         makefileFile.parent.createDirectories()
@@ -1550,7 +1551,8 @@ object SourceTreeManifestReader {
     fun read(projectDir: Path, expectedProfile: ReconstructionProfile): SourceTreeManifest {
         val path = projectDir.resolve("source_tree_manifest.json")
         require(path.exists()) { "project is missing source_tree_manifest.json" }
-        return parse(path.readText(), expectedProfile)
+        val snapshot = readStableRegularFile(projectDir, "source_tree_manifest.json", MAXIMUM_SOURCE_TREE_MANIFEST_BYTES)
+        return parse(snapshot.bytes.decodeToString(throwOnInvalidSequence = true), expectedProfile)
     }
 
     fun parse(text: String, expectedProfile: ReconstructionProfile): SourceTreeManifest {
@@ -1801,3 +1803,22 @@ internal class UniqueJsonObjectKeyValidator(private val source: String) {
 
 private const val MAXIMUM_MANIFEST_JSON_DEPTH = 64
 private const val MAXIMUM_SOURCE_TREE_MANIFEST_BYTES = 16L * 1024 * 1024
+
+private fun deleteStaleBuildDefinition(projectDir: Path, relative: String) {
+    val normalized = requireNormalizedProjectPath(relative, "stale build-definition path")
+    val target = projectDir.resolve(normalized)
+    require(target.normalize().startsWith(projectDir.toAbsolutePath().normalize())) {
+        "stale build-definition path escapes project root: $relative"
+    }
+    var parent = projectDir.toAbsolutePath().normalize()
+    normalized.substringBeforeLast('/', "").split('/').filter { it.isNotEmpty() }.forEach { segment ->
+        parent = parent.resolve(segment)
+        require(Files.isDirectory(parent, LinkOption.NOFOLLOW_LINKS)) {
+            "stale build-definition path has an unsafe parent: $relative"
+        }
+    }
+    require(Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) {
+        "stale build-definition path is not a regular non-symbolic-link file: $relative"
+    }
+    Files.deleteIfExists(target)
+}
