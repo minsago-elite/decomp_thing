@@ -39,12 +39,14 @@ class UploadServerSpaTest {
                 assertTrue(response.body().contains("/assets/ui/assets/index-"))
                 assertTrue(response.body().contains("decomp-ui-build"))
                 assertEquals("no-store", response.headers().firstValue("Cache-Control").orElseThrow())
+                assertSecurity(response, WEB_APPLICATION_CONTENT_SECURITY_POLICY)
             }
             for (path in listOf("/api/v1/missing", "/api/jobs/fixture", "/jobs/fixture", "/missing.js")) {
                 val response = request(server, path)
                 assertEquals(if (path.startsWith("/api/")) 401 else 404, response.statusCode(), path)
                 assertTrue(response.headers().firstValue("Content-Type").orElseThrow().startsWith("application/json"))
                 assertFalse(response.body().contains("<!doctype html>"))
+                assertSecurity(response, WEB_INERT_CONTENT_SECURITY_POLICY)
             }
             assertEquals(405, request(server, "/jobs", "POST").statusCode())
             assertEquals(405, request(server, "/runtime", "POST").statusCode())
@@ -68,9 +70,11 @@ class UploadServerSpaTest {
             val response = request(server, "/workbench/runtime")
             assertEquals(200, response.statusCode())
             assertTrue(response.body().contains("/workbench/assets/ui/assets/index-"))
+            assertSecurity(response, WEB_APPLICATION_CONTENT_SECURITY_POLICY)
             val redirect = request(server, "/workbench?selection=fixture")
             assertEquals(308, redirect.statusCode())
             assertEquals("/workbench/?selection=fixture", redirect.headers().firstValue("Location").orElseThrow())
+            assertSecurity(redirect, WEB_INERT_CONTENT_SECURITY_POLICY)
             assertEquals("/workbench/runtime", request(server, "/workbench/runtime/").headers().firstValue("Location").orElseThrow())
             val jobPath = "/workbench/jobs/" + "a".repeat(32)
             assertEquals(200, request(server, jobPath).statusCode())
@@ -83,6 +87,7 @@ class UploadServerSpaTest {
             assertEquals(200, head.statusCode())
             assertTrue(head.body().isEmpty())
             assertTrue(head.headers().firstValue("Content-Length").orElseThrow().toLong() > 0)
+            assertSecurity(head, WEB_APPLICATION_CONTENT_SECURITY_POLICY)
         } finally {
             server.stop()
             data.toFile().deleteRecursively()
@@ -119,4 +124,12 @@ class UploadServerSpaTest {
                 .method(method, HttpRequest.BodyPublishers.noBody()).build(),
             HttpResponse.BodyHandlers.ofString(),
         )
+
+    private fun assertSecurity(response: HttpResponse<String>, contentSecurityPolicy: String) {
+        assertEquals("nosniff", response.headers().firstValue("X-Content-Type-Options").orElseThrow())
+        assertEquals("no-referrer", response.headers().firstValue("Referrer-Policy").orElseThrow())
+        assertEquals("DENY", response.headers().firstValue("X-Frame-Options").orElseThrow())
+        assertEquals(contentSecurityPolicy,
+            response.headers().firstValue("Content-Security-Policy").orElseThrow())
+    }
 }

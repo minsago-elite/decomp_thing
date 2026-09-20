@@ -778,7 +778,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
 
     private val LEGACY_PLAN_SCHEMA_VERSION = 1
     private val PLAN_SCHEMA_VERSION = 2
-    private val BUILD_CONTRACT_SCHEMA_VERSION = 2
+    private val BUILD_CONTRACT_SCHEMA_VERSION = 3
     private val MAXIMUM_EVIDENCE_IDENTIFIER_CHARACTERS = 4_096
     private val MAXIMUM_EVIDENCE_TEXT_CHARACTERS = 16 * 1024 * 1024
     private val MAKEFILE = "Makefile"

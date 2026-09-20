@@ -37,6 +37,11 @@ jobs:
           python3 -m pip install --requirement requirements/oracle-generation.txt
       - name: Validate versioned web contract fixtures
         run: python3 contracts/web/v1/verify.py | tee "$RUNNER_TEMP/frontend-ci/contracts.txt"
+      - name: Reject generated API contract drift
+        run: |
+          node scripts/generate-web-api.mjs --check
+          node --test scripts/generate-web-api.test.mjs \
+            | tee "$RUNNER_TEMP/frontend-ci/api-drift-tests.txt"
       - name: Verify generated large web fixtures
         run: node --test scripts/web-scale-fixtures.test.mjs | tee "$RUNNER_TEMP/frontend-ci/scale-fixtures-tests.txt"
       - name: Type-check frontend source and tests

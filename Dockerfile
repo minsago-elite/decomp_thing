@@ -12,6 +12,7 @@ RUN apt-get update \
         ca-certificates \
         clang \
         curl \
+        ninja-build \
         python3 \
         python3-pip \
         unzip \
