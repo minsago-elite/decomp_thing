@@ -72,205 +72,6 @@ class FullTreePlanningInventoryControlTest {
     }
 
     @Test
-    fun `clang codegen dispatch binds exact planning owners without an emitted denominator`() {
-        val profile = Path.of("oracle/llvm/22.1.6")
-        val registry = FullTreePlanningInventoryControl.loadAndValidate(
-            path = profile.resolve("full-tree-planning-inventory.json"),
-            scopePath = profile.resolve("full-tree-scope.json"),
-            sourceLockPath = profile.resolve("source-lock.json"),
-            artifactManifestPath = profile.resolve("oracle-manifest.json"),
-            buildRecordPath = profile.resolve("build-record.json"),
-            inventoryPath = profile.resolve("full-tree-inventory.json"),
-            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
-        )
-
-        val modules = registry.requireOwnerModulesForShard("clang-lib-codegen")
-        assertEquals(100, modules.size)
-        assertEquals(100, modules.map { it.sourcePath }.toSet().size)
-        assertEquals(
-            listOf(
-                "source/clang/lib/CodeGen/ABIInfo.cpp",
-                "source/clang/lib/CodeGen/ABIInfoImpl.cpp",
-                "source/clang/lib/CodeGen/BackendUtil.cpp",
-                "source/clang/lib/CodeGen/CGAtomic.cpp",
-                "source/clang/lib/CodeGen/CGBlocks.cpp",
-                "source/clang/lib/CodeGen/CGBuiltin.cpp",
-                "source/clang/lib/CodeGen/CGCUDANV.cpp",
-                "source/clang/lib/CodeGen/CGCUDARuntime.cpp",
-                "source/clang/lib/CodeGen/CGCXX.cpp",
-                "source/clang/lib/CodeGen/CGCXXABI.cpp",
-                "source/clang/lib/CodeGen/CGCall.cpp",
-                "source/clang/lib/CodeGen/CGClass.cpp",
-                "source/clang/lib/CodeGen/CGCleanup.cpp",
-                "source/clang/lib/CodeGen/CGCoroutine.cpp",
-                "source/clang/lib/CodeGen/CGDebugInfo.cpp",
-                "source/clang/lib/CodeGen/CGDecl.cpp",
-                "source/clang/lib/CodeGen/CGDeclCXX.cpp",
-                "source/clang/lib/CodeGen/CGException.cpp",
-                "source/clang/lib/CodeGen/CGExpr.cpp",
-                "source/clang/lib/CodeGen/CGExprAgg.cpp",
-                "source/clang/lib/CodeGen/CGExprCXX.cpp",
-                "source/clang/lib/CodeGen/CGExprComplex.cpp",
-                "source/clang/lib/CodeGen/CGExprConstant.cpp",
-                "source/clang/lib/CodeGen/CGExprScalar.cpp",
-                "source/clang/lib/CodeGen/CGGPUBuiltin.cpp",
-                "source/clang/lib/CodeGen/CGHLSLBuiltins.cpp",
-                "source/clang/lib/CodeGen/CGHLSLRuntime.cpp",
-                "source/clang/lib/CodeGen/CGLoopInfo.cpp",
-                "source/clang/lib/CodeGen/CGNonTrivialStruct.cpp",
-                "source/clang/lib/CodeGen/CGObjC.cpp",
-                "source/clang/lib/CodeGen/CGObjCGNU.cpp",
-                "source/clang/lib/CodeGen/CGObjCMac.cpp",
-                "source/clang/lib/CodeGen/CGObjCRuntime.cpp",
-                "source/clang/lib/CodeGen/CGOpenCLRuntime.cpp",
-                "source/clang/lib/CodeGen/CGOpenMPRuntime.cpp",
-                "source/clang/lib/CodeGen/CGOpenMPRuntimeGPU.cpp",
-                "source/clang/lib/CodeGen/CGPointerAuth.cpp",
-                "source/clang/lib/CodeGen/CGRecordLayoutBuilder.cpp",
-                "source/clang/lib/CodeGen/CGStmt.cpp",
-                "source/clang/lib/CodeGen/CGStmtOpenMP.cpp",
-                "source/clang/lib/CodeGen/CGVTT.cpp",
-                "source/clang/lib/CodeGen/CGVTables.cpp",
-                "source/clang/lib/CodeGen/CodeGenAction.cpp",
-                "source/clang/lib/CodeGen/CodeGenFunction.cpp",
-                "source/clang/lib/CodeGen/CodeGenModule.cpp",
-                "source/clang/lib/CodeGen/CodeGenPGO.cpp",
-                "source/clang/lib/CodeGen/CodeGenSYCL.cpp",
-                "source/clang/lib/CodeGen/CodeGenTBAA.cpp",
-                "source/clang/lib/CodeGen/CodeGenTypes.cpp",
-                "source/clang/lib/CodeGen/ConstantInitBuilder.cpp",
-                "source/clang/lib/CodeGen/CoverageMappingGen.cpp",
-                "source/clang/lib/CodeGen/HLSLBufferLayoutBuilder.cpp",
-                "source/clang/lib/CodeGen/ItaniumCXXABI.cpp",
-                "source/clang/lib/CodeGen/LinkInModulesPass.cpp",
-                "source/clang/lib/CodeGen/MacroPPCallbacks.cpp",
-                "source/clang/lib/CodeGen/MicrosoftCXXABI.cpp",
-                "source/clang/lib/CodeGen/ModuleBuilder.cpp",
-                "source/clang/lib/CodeGen/ObjectFilePCHContainerWriter.cpp",
-                "source/clang/lib/CodeGen/PatternInit.cpp",
-                "source/clang/lib/CodeGen/SanitizerMetadata.cpp",
-                "source/clang/lib/CodeGen/SwiftCallingConv.cpp",
-                "source/clang/lib/CodeGen/TargetBuiltins/AMDGPU.cpp",
-                "source/clang/lib/CodeGen/TargetBuiltins/ARM.cpp",
-                "source/clang/lib/CodeGen/TargetBuiltins/DirectX.cpp",
-                "source/clang/lib/CodeGen/TargetBuiltins/Hexagon.cpp",
-                "source/clang/lib/CodeGen/TargetBuiltins/NVPTX.cpp",
-                "source/clang/lib/CodeGen/TargetBuiltins/PPC.cpp",
-                "source/clang/lib/CodeGen/TargetBuiltins/RISCV.cpp",
-                "source/clang/lib/CodeGen/TargetBuiltins/SPIR.cpp",
-                "source/clang/lib/CodeGen/TargetBuiltins/SystemZ.cpp",
-                "source/clang/lib/CodeGen/TargetBuiltins/WebAssembly.cpp",
-                "source/clang/lib/CodeGen/TargetBuiltins/X86.cpp",
-                "source/clang/lib/CodeGen/TargetInfo.cpp",
-                "source/clang/lib/CodeGen/Targets/AArch64.cpp",
-                "source/clang/lib/CodeGen/Targets/AMDGPU.cpp",
-                "source/clang/lib/CodeGen/Targets/ARC.cpp",
-                "source/clang/lib/CodeGen/Targets/ARM.cpp",
-                "source/clang/lib/CodeGen/Targets/AVR.cpp",
-                "source/clang/lib/CodeGen/Targets/BPF.cpp",
-                "source/clang/lib/CodeGen/Targets/CSKY.cpp",
-                "source/clang/lib/CodeGen/Targets/DirectX.cpp",
-                "source/clang/lib/CodeGen/Targets/Hexagon.cpp",
-                "source/clang/lib/CodeGen/Targets/Lanai.cpp",
-                "source/clang/lib/CodeGen/Targets/LoongArch.cpp",
-                "source/clang/lib/CodeGen/Targets/M68k.cpp",
-                "source/clang/lib/CodeGen/Targets/MSP430.cpp",
-                "source/clang/lib/CodeGen/Targets/Mips.cpp",
-                "source/clang/lib/CodeGen/Targets/NVPTX.cpp",
-                "source/clang/lib/CodeGen/Targets/PPC.cpp",
-                "source/clang/lib/CodeGen/Targets/RISCV.cpp",
-                "source/clang/lib/CodeGen/Targets/SPIR.cpp",
-                "source/clang/lib/CodeGen/Targets/Sparc.cpp",
-                "source/clang/lib/CodeGen/Targets/SystemZ.cpp",
-                "source/clang/lib/CodeGen/Targets/TCE.cpp",
-                "source/clang/lib/CodeGen/Targets/VE.cpp",
-                "source/clang/lib/CodeGen/Targets/WebAssembly.cpp",
-                "source/clang/lib/CodeGen/Targets/X86.cpp",
-                "source/clang/lib/CodeGen/Targets/XCore.cpp",
-                "source/clang/lib/CodeGen/TrapReasonBuilder.cpp",
-                "source/clang/lib/CodeGen/VarBypassDetector.cpp",
-            ),
-            modules.map { it.sourcePath },
-        )
-        assertTrue(
-            modules.all {
-                it.moduleId == it.unitId &&
-                    it.shardId == "clang-lib-codegen" &&
-                    it.sourceKind == "handwritten" &&
-                    it.sourcePath.startsWith("source/clang/lib/CodeGen/")
-            },
-        )
-        assertEquals(
-            listOf("source/clang/lib/CodeGen/CodeGenABITypes.cpp"),
-            registry.sourceOnlyUnits.filter { it.shardId == "clang-lib-codegen" }.map { it.sourcePath },
-        )
-        assertFailsWith<FullTreeControlException> {
-            registry.requireOwnerModulesForShard("clang-lib-codegen-missing")
-        }
-    }
-
-    @Test
-    fun `clang astmatchers dispatch binds linked owners and retains source-only evidence`() {
-        val profile = Path.of("oracle/llvm/22.1.6")
-        val registry = FullTreePlanningInventoryControl.loadAndValidate(
-            path = profile.resolve("full-tree-planning-inventory.json"),
-            scopePath = profile.resolve("full-tree-scope.json"),
-            sourceLockPath = profile.resolve("source-lock.json"),
-            artifactManifestPath = profile.resolve("oracle-manifest.json"),
-            buildRecordPath = profile.resolve("build-record.json"),
-            inventoryPath = profile.resolve("full-tree-inventory.json"),
-            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
-        )
-
-        val modules = registry.requireOwnerModulesForShard("clang-lib-astmatchers")
-        assertEquals(3, modules.size)
-        assertEquals(3, modules.map { it.sourcePath }.toSet().size)
-        assertEquals(3, modules.map { it.unitId }.toSet().size)
-        assertEquals(
-            listOf(
-                "source/clang/lib/ASTMatchers/ASTMatchFinder.cpp",
-                "source/clang/lib/ASTMatchers/ASTMatchersInternal.cpp",
-                "source/clang/lib/ASTMatchers/LowLevelHelpers.cpp",
-            ),
-            modules.map { it.sourcePath },
-        )
-        assertEquals(
-            listOf(
-                "cu-c92b96b2a7deeb38aa0070c4ec3228e7",
-                "cu-7ea999cb15665cc462cbcd7cc46b6f4a",
-                "cu-eb1ca5e071877d61b8ce976f1c8e9427",
-            ),
-            modules.map { it.unitId },
-        )
-        assertTrue(
-            modules.all {
-                it.moduleId == it.unitId &&
-                    it.shardId == "clang-lib-astmatchers" &&
-                    it.sourceKind == "handwritten" &&
-                    it.sourcePath.startsWith("source/clang/lib/ASTMatchers/")
-            },
-        )
-
-        val sourceOnly = registry.sourceOnlyUnits.filter { it.shardId == "clang-lib-astmatchers" }
-        assertEquals(5, sourceOnly.size)
-        assertEquals(
-            listOf(
-                "source/clang/lib/ASTMatchers/Dynamic/Diagnostics.cpp",
-                "source/clang/lib/ASTMatchers/Dynamic/Marshallers.cpp",
-                "source/clang/lib/ASTMatchers/Dynamic/Parser.cpp",
-                "source/clang/lib/ASTMatchers/Dynamic/Registry.cpp",
-                "source/clang/lib/ASTMatchers/Dynamic/VariantValue.cpp",
-            ),
-            sourceOnly.map { it.sourcePath },
-        )
-        assertTrue(sourceOnly.all { it.reasonCode == "not-selected-by-authenticated-build-graph" })
-        assertFailsWith<FullTreeControlException> {
-            registry.requireOwnerModulesForShard("clang-lib-astmatchers-missing")
-        }
-    }
-
-
-    @Test
     fun `clang edit and astmatchers dispatch bind planning owners`() {
         val profile = Path.of("oracle/llvm/22.1.6")
         val registry = FullTreePlanningInventoryControl.loadAndValidate(
@@ -335,7 +136,6 @@ class FullTreePlanningInventoryControlTest {
             registry.requireOwnerModulesForShard("clang-lib-astmatchers-missing")
         }
     }
-
 
 
     @Test
@@ -410,9 +210,11 @@ class FullTreePlanningInventoryControlTest {
                 }
             }
         }
+    }
+
 
     @Test
-    fun `clang frontendtool dispatch binds exact planning owner without an emitted denominator`() {
+    fun `clang extractapi dispatch binds all six exact planning owners without an emitted denominator`() {
         val profile = Path.of("oracle/llvm/22.1.6")
         val registry = FullTreePlanningInventoryControl.loadAndValidate(
             path = profile.resolve("full-tree-planning-inventory.json"),
@@ -424,88 +226,41 @@ class FullTreePlanningInventoryControlTest {
             sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
         )
 
-        val modules = registry.requireOwnerModulesForShard("clang-lib-frontendtool")
-        assertEquals(1, modules.size)
+        val modules = registry.requireOwnerModulesForShard("clang-lib-extractapi")
+        assertEquals(6, modules.size)
         assertEquals(
-            listOf("source/clang/lib/FrontendTool/ExecuteCompilerInvocation.cpp"),
+            listOf(
+                "source/clang/lib/ExtractAPI/API.cpp",
+                "source/clang/lib/ExtractAPI/APIIgnoresList.cpp",
+                "source/clang/lib/ExtractAPI/DeclarationFragments.cpp",
+                "source/clang/lib/ExtractAPI/ExtractAPIConsumer.cpp",
+                "source/clang/lib/ExtractAPI/Serialization/SymbolGraphSerializer.cpp",
+                "source/clang/lib/ExtractAPI/TypedefUnderlyingTypeResolver.cpp",
+            ),
             modules.map { it.sourcePath },
         )
-        assertEquals(listOf("cu-b4837ea4cc24818596b117946fc94bc8"), modules.map { it.unitId })
-        assertTrue(modules.all { it.moduleId == it.unitId && it.shardId == "clang-lib-frontendtool" })
-        assertTrue(registry.sourceOnlyUnits.none { it.shardId == "clang-lib-frontendtool" })
-        assertFailsWith<FullTreeControlException> {
-            registry.requireOwnerModulesForShard("clang-lib-frontendtool-missing")
-        }
-    }
-
-    @Test
-    fun `clang installapi dispatch binds exact planning owners without an emitted denominator`() {
-    fun `clang format dispatch binds all 22 planning owners without an emitted denominator`() {
-        val profile = Path.of("oracle/llvm/22.1.6")
-        val registry = FullTreePlanningInventoryControl.loadAndValidate(
-            path = profile.resolve("full-tree-planning-inventory.json"),
-            scopePath = profile.resolve("full-tree-scope.json"),
-            sourceLockPath = profile.resolve("source-lock.json"),
-            artifactManifestPath = profile.resolve("oracle-manifest.json"),
-            buildRecordPath = profile.resolve("build-record.json"),
-            inventoryPath = profile.resolve("full-tree-inventory.json"),
-            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
-        )
-
-        val modules = registry.requireOwnerModulesForShard("clang-lib-format")
-        assertEquals(22, modules.size)
-        assertEquals(22, modules.map { it.sourcePath }.toSet().size)
-        assertEquals(22, modules.map { it.unitId }.toSet().size)
-        assertTrue(
-            modules.all {
-                it.moduleId == it.unitId &&
-                    it.shardId == "clang-lib-format" &&
-                    it.sourceKind == "handwritten" &&
-                    it.sourcePath.startsWith("source/clang/lib/Format/")
-            },
-        )
         assertEquals(
-            listOf("source/clang/lib/Format/MatchFilePath.cpp"),
-            registry.sourceOnlyUnits
-                .filter { it.shardId == "clang-lib-format" }
-                .map { it.sourcePath },
+            listOf(
+                "cu-d6c656c2b4dfd48b9f35c634322f6b7e",
+                "cu-0718b8055fb7b3600126d47a0a28b25c",
+                "cu-2625295803cf9e661bf0a36e7fc1a072",
+                "cu-9a1582e1eb470744d47ecc408fa9a7af",
+                "cu-0cca1fa31aa940b6294ad5ff2b2d05d8",
+                "cu-432f7b7c1a227aefe5cb9bc6a489bae8",
+            ),
+            modules.map { it.unitId },
         )
+        assertTrue(modules.all { it.sourceKind == "handwritten" })
+        assertTrue(modules.all { it.moduleId == it.unitId && it.shardId == "clang-lib-extractapi" })
+        modules.forEach { module ->
+            assertEquals(module, registry.requireOwnerModule(module.unitId))
+        }
+        assertEquals(0, registry.sourceOnlyUnits.count { it.shardId == "clang-lib-extractapi" })
         assertFailsWith<FullTreeControlException> {
-            registry.requireOwnerModulesForShard("clang-lib-format-missing")
+            registry.requireOwnerModulesForShard("clang-lib-extractapi-missing")
         }
     }
-    fun `checked clang sema shard binds all 86 source modules to exact owners`() =
-        inControlTemporaryDirectory { directory ->
-            val profile = Path.of("oracle/llvm/22.1.6")
-            val result = FullTreePlanningInventoryControl.generateAndPublish(
-                scopePath = profile.resolve("full-tree-scope.json"),
-                sourceLockPath = profile.resolve("source-lock.json"),
-                artifactManifestPath = profile.resolve("oracle-manifest.json"),
-                buildRecordPath = profile.resolve("build-record.json"),
-                inventoryPath = profile.resolve("full-tree-inventory.json"),
-                sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
-                output = directory.resolve("full-tree-planning-inventory.json"),
-            )
 
-            val sema = result.registry.requireOwnerModulesForShard("clang-lib-sema")
-            assertEquals(86, sema.size)
-            assertEquals(86, sema.map { it.sourcePath }.toSet().size)
-            assertEquals(86, sema.map { it.unitId }.toSet().size)
-            assertTrue(sema.all { it.sourceKind == "handwritten" })
-            assertTrue(sema.all { it.sourcePath.startsWith("source/clang/lib/Sema/") })
-            sema.forEach { module ->
-                assertEquals(module.unitId, module.moduleId)
-                assertEquals(
-                    FullTreeInventoryControl.compilationUnitId(module.sourcePath),
-                    module.unitId,
-                )
-                assertEquals(module, result.registry.requireOwnerModule(module.unitId))
-            }
-            assertEquals(
-                0,
-                result.registry.sourceOnlyUnits.count { it.shardId == "clang-lib-sema" },
-            )
-        }
 
     @Test
     fun `llvm analysis dispatch binds exact planning owners without an emitted denominator`() {
@@ -663,6 +418,70 @@ class FullTreePlanningInventoryControlTest {
         }
     }
 
+    @Test
+    fun `clang installapi dispatch binds exact planning owners without an emitted denominator`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+
+        val modules = registry.requireOwnerModulesForShard("clang-lib-installapi")
+        assertEquals(1, modules.size)
+        assertEquals(
+            listOf("source/clang/lib/InstallAPI/HeaderFile.cpp"),
+            modules.map { it.sourcePath },
+        )
+        assertEquals(listOf("cu-d65fa95a55a39225eb8705c9be72d115"), modules.map { it.unitId })
+        assertTrue(modules.all { it.moduleId == it.unitId && it.shardId == "clang-lib-installapi" })
+        assertEquals(7, registry.sourceOnlyUnits.count { it.shardId == "clang-lib-installapi" })
+        assertEquals(emptyList(), registry.requireOwnerModulesForShard("clang-lib-cir"))
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("clang-lib-installapi-missing")
+        }
+        assertFailsWith<FullTreeControlException> {
+            registry.requireOwnerModulesForShard("a-".repeat(5_000) + "a")
+        }
+    }
+
+    @Test
+    fun `checked clang sema shard binds all 86 source modules to exact owners`() =
+        inControlTemporaryDirectory { directory ->
+            val profile = Path.of("oracle/llvm/22.1.6")
+            val result = FullTreePlanningInventoryControl.generateAndPublish(
+                scopePath = profile.resolve("full-tree-scope.json"),
+                sourceLockPath = profile.resolve("source-lock.json"),
+                artifactManifestPath = profile.resolve("oracle-manifest.json"),
+                buildRecordPath = profile.resolve("build-record.json"),
+                inventoryPath = profile.resolve("full-tree-inventory.json"),
+                sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+                output = directory.resolve("full-tree-planning-inventory.json"),
+            )
+
+            val sema = result.registry.requireOwnerModulesForShard("clang-lib-sema")
+            assertEquals(86, sema.size)
+            assertEquals(86, sema.map { it.sourcePath }.toSet().size)
+            assertEquals(86, sema.map { it.unitId }.toSet().size)
+            assertTrue(sema.all { it.sourceKind == "handwritten" })
+            assertTrue(sema.all { it.sourcePath.startsWith("source/clang/lib/Sema/") })
+            sema.forEach { module ->
+                assertEquals(module.unitId, module.moduleId)
+                assertEquals(
+                    FullTreeInventoryControl.compilationUnitId(module.sourcePath),
+                    module.unitId,
+                )
+                assertEquals(module, result.registry.requireOwnerModule(module.unitId))
+            }
+            assertEquals(
+                0,
+                result.registry.sourceOnlyUnits.count { it.shardId == "clang-lib-sema" },
+            )
+        }
 
     @Test
     fun `shuffled stale forged and expanded planning documents fail closed`() =
