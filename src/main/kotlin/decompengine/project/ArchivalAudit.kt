@@ -295,13 +295,16 @@ object ArchivalProjectAuditor {
                         "module checkpoint input identity differs from the audited model or profile"
                     }
                     require(checkpoint.boolean("accepted")) { "module checkpoint does not record acceptance" }
-                    if (moduleClaimsAgentExecution(checkpoint.string("generator"), checkpoint.string("reconstructorIdentity"))) {
-                        val promptCharacters = (checkpoint["promptCharacters"] as? JsonPrimitive)
-                            ?.takeUnless { it.isString }?.longOrNull
-                        val promptBudgetCharacters = (checkpoint["promptBudgetCharacters"] as? JsonPrimitive)
-                            ?.takeUnless { it.isString }?.longOrNull
+                    val claimsAgentExecution = moduleClaimsAgentExecution(
+                        checkpoint.string("generator"), checkpoint.string("reconstructorIdentity"),
+                    )
+                    val promptCharacters = (checkpoint["promptCharacters"] as? JsonPrimitive)
+                        ?.takeUnless { it.isString }?.longOrNull
+                    val promptBudgetCharacters = (checkpoint["promptBudgetCharacters"] as? JsonPrimitive)
+                        ?.takeUnless { it.isString }?.longOrNull
+                    if (claimsAgentExecution || checkpoint.containsKey("promptCharacters") || checkpoint.containsKey("promptBudgetCharacters")) {
                         require(modulePromptBudgetIsValid(promptCharacters, promptBudgetCharacters, profile)) {
-                            "accepted agent checkpoint prompt budget is missing, invalid, or exceeds the reconstruction profile"
+                            "accepted checkpoint prompt budget is missing, invalid, or exceeds the reconstruction profile"
                         }
                     }
                     require(checkpoint.getValue("issues").jsonArray.isEmpty()) {
