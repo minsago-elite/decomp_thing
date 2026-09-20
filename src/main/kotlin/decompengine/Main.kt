@@ -18,6 +18,7 @@ import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.project.GhidraProgramModelExportLimits
 import decompengine.project.GhidraProgramModelRecoveryMode
 import decompengine.project.ModuleReconstructor
+import decompengine.project.ReconstructionProfiles
 import decompengine.agent.AgentHarness
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowPhase
@@ -56,70 +57,26 @@ fun main(args: Array<String>) {
 }
 
 private fun runGccEnginePlan(args: List<String>) {
-    var engineId: String? = null
-    var binary: Path? = null
-    var profilePath: Path? = null
-    var ghidraArchive: Path? = null
-    var output: Path? = null
-    var index = 0
-    while (index < args.size) {
-        when (args[index]) {
-            "--profile" -> {
-                if (index + 1 >= args.size) gccEnginePlanUsageError("--profile requires a file")
-                profilePath = Path.of(args[index + 1]); index += 2
-            }
-            "--ghidra-archive" -> {
-                if (index + 1 >= args.size) gccEnginePlanUsageError("--ghidra-archive requires a file")
-                ghidraArchive = Path.of(args[index + 1]); index += 2
-            }
-            "--output" -> {
-                if (index + 1 >= args.size) gccEnginePlanUsageError("--output requires a directory")
-                output = Path.of(args[index + 1]); index += 2
-            }
-            else -> {
-                if (args[index].startsWith("-")) gccEnginePlanUsageError("unexpected argument: ${args[index]}")
-                if (engineId == null) engineId = args[index]
-                else if (binary == null) binary = Path.of(args[index])
-                else gccEnginePlanUsageError("unexpected argument: ${args[index]}")
-                index++
-            }
-        }
+    val options = try {
+        decompengine.oracle.gcc.GccBundledCliOptions.parse(args)
+    } catch (failure: IllegalArgumentException) {
+        gccEnginePlanUsageError(failure.message ?: "invalid gcc-engine-plan arguments")
     }
-    if (engineId == null || binary == null || profilePath == null ||
-        ghidraArchive == null || output == null
-    ) {
-        gccEnginePlanUsageError("gcc-engine-plan requires an engine, binary, profile, Ghidra provenance archive, and output")
-    }
-    val suite = GccCompilerEngineProfiles.load(profilePath)
-    val authenticatedGhidra = suite.analysis.authenticateGhidraInstallation(ghidraArchive, BundledGhidra.locate().release)
-    val reconstructionProfile = suite.reconstructionProfile()
-    val analyzer = GhidraHeadlessProgramModelAnalyzer(
-        GhidraProgramModelExportLimits.from(reconstructionProfile),
-        authenticatedGhidra.archiveSha256,
-        GhidraProgramModelRecoveryMode.fromWireName(suite.analysis.exporterMode),
-    )
-    val result = GccCompilerEnginePlanningService.diagnostic(analyzer).plan(suite, engineId, binary, output)
-    println("engine: ${result.engineId}")
-    println("program model: ${result.programModelPath}")
-    println("program model sha256: ${result.programModelSha256}")
-    println("module plan: ${result.modulePlanPath}")
-    println("module plan sha256: ${result.modulePlanSha256}")
-    println("non-authoritative assessment: ${result.assessmentPath}")
-    println("assessment sha256: ${result.assessmentSha256}")
-    println("wall clock milliseconds: ${result.wallClockMillis}")
-    println("maximum resident bytes observed: ${result.maximumResidentBytesObserved}")
+    decompengine.oracle.gcc.GccBundledCliCommand.run(options, args)
 }
 
 private fun gccEnginePlanUsageError(message: String): Nothing {
     System.err.println(message)
     System.err.println(
         "usage: llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> " +
-            "--ghidra-archive <file> --output <directory>",
+            "--ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount> " +
+            "[--resume-after-checkpoint <multiple-of-512>]",
     )
     kotlin.system.exitProcess(2)
 }
 
 private fun runReconstruct(args: List<String>) {
+    var profile = ReconstructionProfiles.default
     var binary: Path? = null
     var output: Path? = null
     var evidenceOnly = false
@@ -131,6 +88,12 @@ private fun runReconstruct(args: List<String>) {
             "--output" -> {
                 if (index + 1 >= args.size) reconstructUsageError("--output requires a directory")
                 output = Path.of(args[index + 1]); index += 2
+            }
+            "--profile" -> {
+                if (index + 1 >= args.size) reconstructUsageError("--profile requires a registered profile ID")
+                profile = try { ReconstructionProfiles.named(args[index + 1]) }
+                catch (failure: IllegalArgumentException) { reconstructUsageError(failure.message ?: "unsupported reconstruction profile") }
+                index += 2
             }
             "--evidence-only" -> { evidenceOnly = true; index++ }
             "--max-context-chars" -> {
@@ -168,7 +131,7 @@ private fun runReconstruct(args: List<String>) {
         )
         val result = try {
             ArchivalReconstructionService(
-                GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor, progress = progress,
+                GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor, profile = profile, progress = progress,
             ).reconstruct(binary, output)
         } catch (failure: Exception) {
             progress.phase(AgentWorkflowPhase.FAILED)
@@ -214,7 +177,7 @@ internal fun selectReconstructionStrategy(
 
 private fun reconstructUsageError(message: String): Nothing {
     System.err.println(message)
-    System.err.println("usage: llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]")
+    System.err.println("usage: llm_bin_patch reconstruct <binary> --output <directory> [--profile generated-c-make-v1|generated-c-ninja-v1] [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]")
     kotlin.system.exitProcess(2)
 }
 
@@ -593,7 +556,7 @@ private fun printHelp() {
           llm_bin_patch runner [--control-dir <directory>] [--root <directory>]...
           llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness acp|legacy-openai]
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
-          llm_bin_patch reconstruct <binary> --output <directory> [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]
+          llm_bin_patch reconstruct <binary> --output <directory> [--profile generated-c-make-v1|generated-c-ninja-v1] [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]
           llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <directory>
           llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173]
 

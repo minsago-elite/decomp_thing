@@ -88,6 +88,14 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
     ) : this({ invocation, checkpoint -> BundledGhidra.locate().analysisCommand(invocation, checkpoint) },
         limits, analysisToolSha256, recoveryMode)
 
+    internal constructor(
+        ghidra: BundledGhidra,
+        limits: GhidraProgramModelExportLimits = GhidraProgramModelExportLimits(),
+        analysisToolSha256: String = BundledGhidra.ARCHIVE_SHA256,
+        recoveryMode: GhidraProgramModelRecoveryMode = GhidraProgramModelRecoveryMode.FULL,
+    ) : this({ invocation, checkpoint -> ghidra.analysisCommand(invocation, checkpoint) },
+        limits, analysisToolSha256, recoveryMode)
+
     init {
         require(analysisToolSha256.matches(Regex("[0-9a-f]{64}"))) {
             "Ghidra analysis-tool identity must be a lowercase SHA-256 digest"
@@ -391,6 +399,10 @@ class ArchivalReconstructionService(
         hostSafetyLimits.requireAllows(profile.budgets)
     }
 
+    private val boundedAnalyzer: ProgramModelAnalyzer =
+        (analyzer as? ExportBudgetedProgramModelAnalyzer)?.withExportBudgets(profile.budgets)
+            ?: throw IllegalArgumentException("archival reconstruction requires an export-budgeted analyzer")
+
     private val adapter = ReconstructionAdapters.resolve(profile)
 
     fun reconstruct(binaryPath: Path, outputDir: Path): ArchivalReconstructionResult {
@@ -400,7 +412,7 @@ class ArchivalReconstructionService(
             outputDir, profile.budgets.reconstructionMaximumContextCharacters,
         )
         progress.phase(AgentWorkflowPhase.ANALYZING)
-        val model = analyzer.analyze(binaryPath, outputDir.resolve("analysis"))
+        val model = boundedAnalyzer.analyze(binaryPath, outputDir.resolve("analysis"))
         val project = outputDir.resolve("source-tree")
         val progressPath = outputDir.resolve("reconstruction_progress.json")
         progressPath.writeText("{\"phase\":\"planning\",\"completed\":0,\"total\":0}\n")

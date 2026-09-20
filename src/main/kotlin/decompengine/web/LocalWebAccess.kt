@@ -268,6 +268,8 @@ class LocalWebAccess(
     /** All denial bodies are fixed safe text, including navigation, SSE and download failures. */
     fun sendDenied(exchange: HttpExchange, failure: WebAccessDenied) {
         val requestId = UUID.randomUUID().toString()
+        val retryable = failure.status == 429 || failure.code in TRANSIENT_CAPACITY_CODES
+        val retryAfterSeconds = if (retryable) 30 else null
         val body = buildJsonObject {
             put("apiVersion", 1)
             put("kind", "error")
@@ -275,9 +277,9 @@ class LocalWebAccess(
             put("error", buildJsonObject {
                 put("code", failure.code)
                 put("message", failure.message)
-                put("retryable", failure.status == 429)
+                put("retryable", retryable)
                 put("details", JsonArray(emptyList()))
-                put("retryAfterMs", if (failure.status == 429) JsonPrimitiveRetry else JsonNull)
+                put("retryAfterMs", retryAfterSeconds?.let { JsonPrimitive((it * 1000).toString()) } ?: JsonNull)
             })
         }.toString().toByteArray()
         exchange.responseHeaders.set("Content-Type", "application/json; charset=utf-8")
@@ -288,7 +290,7 @@ class LocalWebAccess(
         exchange.responseHeaders.set("X-Request-ID", requestId)
         if (failure.allowedMethods.isNotEmpty()) exchange.responseHeaders.set("Allow", failure.allowedMethods.sorted().joinToString(", "))
         if (failure.clearCookie) exchange.responseHeaders.add("Set-Cookie", expiredSessionCookie())
-        if (failure.status == 429) exchange.responseHeaders.set("Retry-After", "30")
+        if (retryable) exchange.responseHeaders.set("Retry-After", "30")
         try {
             if (exchange.requestMethod == "HEAD") exchange.sendResponseHeaders(failure.status, -1)
             else {
@@ -414,7 +416,7 @@ class LocalWebAccess(
         )
         private val JSON_TYPE = Regex("application/json(?:[ \\t]*;[ \\t]*charset=(?:utf-8|\"utf-8\"))?", RegexOption.IGNORE_CASE)
         private val MULTIPART_TYPE = Regex("multipart/form-data[ \\t]*;[ \\t]*boundary=(?:[A-Za-z0-9'()+_,./:=?-]{1,70}|\"[A-Za-z0-9'()+_,./:=? -]{0,69}[A-Za-z0-9'()+_,./:=?-]\")", RegexOption.IGNORE_CASE)
-        private val JsonPrimitiveRetry = kotlinx.serialization.json.JsonPrimitive("30000")
+        private val TRANSIENT_CAPACITY_CODES = setOf("LISTING_BUSY", "UPLOAD_CAPACITY", "UPLOAD_PROGRESS_CAPACITY")
         private fun validToken(value: String): Boolean = TOKEN.matches(value) && runCatching {
             val decoded = Base64.getUrlDecoder().decode(value)
             decoded.size == TOKEN_BYTES && Base64.getUrlEncoder().withoutPadding().encodeToString(decoded) == value
