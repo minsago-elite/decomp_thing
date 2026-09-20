@@ -89,8 +89,10 @@ internal class StagedJobUpload(
                 syncDirectory(stage)
                 if (Thread.currentThread().isInterrupted) throw java.io.InterruptedIOException("Upload interrupted before publication")
                 fault(UploadPublishPoint.BEFORE_RENAME)
-                Files.move(stage, destination, ATOMIC_MOVE)
+                // Mark the publication outcome uncertain before invoking the provider: a
+                // provider may complete the rename and then throw while reporting it.
                 renamed = true
+                Files.move(stage, destination, ATOMIC_MOVE)
                 fault(UploadPublishPoint.AFTER_RENAME)
                 syncDirectory(root)
                 PublishedJobUpload(job, inputSha)
@@ -128,6 +130,10 @@ internal class StagedJobUpload(
             store.get(id) // A missing/corrupt live job is unavailable; do not silently recreate it.
             val job = store.decodeJobRecord(id, receipt.getValue("job").jsonObject)
             require(job.status == "uploaded" && job.updatedAt == job.createdAt && job.statusMessage == null)
+            val retainedInput = readStableRegularFile(root, "$id/input.elf", 32L * 1024 * 1024)
+            val recordedInputSha = receipt.getValue("inputSha256").jsonPrimitive.content
+            require(retainedInput.bytes.size.toLong() == job.sizeBytes.toLong())
+            require(retainedInput.sha256 == recordedInputSha)
             val recordedIntent = hash(buildJsonObject {
                 put("version", 1); put("filename", job.filename)
                 put("inputSha256", receipt.getValue("inputSha256").jsonPrimitive.content); put("sizeBytes", job.sizeBytes.toString())

@@ -88,6 +88,14 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
     ) : this({ invocation, checkpoint -> BundledGhidra.locate().analysisCommand(invocation, checkpoint) },
         limits, analysisToolSha256, recoveryMode)
 
+    internal constructor(
+        ghidra: BundledGhidra,
+        limits: GhidraProgramModelExportLimits = GhidraProgramModelExportLimits(),
+        analysisToolSha256: String = BundledGhidra.ARCHIVE_SHA256,
+        recoveryMode: GhidraProgramModelRecoveryMode = GhidraProgramModelRecoveryMode.FULL,
+    ) : this({ invocation, checkpoint -> ghidra.analysisCommand(invocation, checkpoint) },
+        limits, analysisToolSha256, recoveryMode)
+
     init {
         require(analysisToolSha256.matches(Regex("[0-9a-f]{64}"))) {
             "Ghidra analysis-tool identity must be a lowercase SHA-256 digest"
