@@ -1802,7 +1802,7 @@ internal class UniqueJsonObjectKeyValidator(private val source: String) {
 }
 
 private const val MAXIMUM_MANIFEST_JSON_DEPTH = 64
-private const val MAXIMUM_SOURCE_TREE_MANIFEST_BYTES = 16L * 1024 * 1024
+private const val MAXIMUM_SOURCE_TREE_MANIFEST_BYTES = 128L * 1024 * 1024
 
 private fun deleteStaleBuildDefinition(projectDir: Path, relative: String) {
     val normalized = requireNormalizedProjectPath(relative, "stale build-definition path")
