@@ -16,14 +16,13 @@
     "oracle/gcc",
     "src/main/kotlin/decompengine/oracle/gcc",
     "src/test/kotlin/decompengine/oracle/gcc",
-    ".github",
+    ".github/workflows/gcc-oracle-model.yml",
+    "oracle/llvm/22.1.6",
     "scripts",
-    "tests",
-    "oracle/llvm",
-    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorReferenceInputPlanV2.kt",
-    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorReferenceInputPlanV2Generator.kt",
-    "src/test/kotlin/decompengine/oracle/behavior/LlvmBehaviorReferenceInputPlanV2Test.kt",
-    "src/test/kotlin/decompengine/analysis/BundledGhidraTest.kt"
+    "src/main/kotlin/decompengine/oracle/behavior",
+    "src/test/kotlin/decompengine/analysis",
+    "src/test/kotlin/decompengine/oracle/behavior",
+    "tests/oracle"
   ],
   "adapterFiles": [
     {

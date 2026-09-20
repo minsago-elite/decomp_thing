@@ -195,10 +195,7 @@ def scan_repository(root: Path, policy_path: str = "oracle/gcc/reconstruction-ne
             file_mode = candidate.lstat().st_mode
         except FileNotFoundError:
             continue
-        # Symlinked shared schemas are inventory entries, not independently owned
-        # source files; regular_path still rejects them for policy declarations.
-        if stat.S_ISLNK(file_mode):
-            continue
+        require(not stat.S_ISLNK(file_mode), f"scan path is indirect or has an unsupported file type: {relative}")
         content, size = read_text(root, relative)
         result.scanned_files += 1
         result.scanned_bytes += size

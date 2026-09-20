@@ -201,7 +201,7 @@ class UploadServer(
     private val store = JobStore(dataDir)
     private val jobs = WebJobService(store, analyzer, reconstructor, executor, shutdownTimeoutMs = 5000, failureDiagnostic = { diagnostic(it, "Background operation failed") })
     private val sourceEvidence = WebSourceEvidence(store, sourceProfiles, jobs::readArtifact)
-    private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
+    private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence)
     private val access = spaAssets?.let {
         LocalWebAccess(LocalWebAccessConfiguration(webOrigin(host, server.address.port), basePath,
             setOfNotNull(devFrontendOrigin)))

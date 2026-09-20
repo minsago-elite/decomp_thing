@@ -9,7 +9,6 @@ import decompengine.oracle.core.OracleJson
 import decompengine.project.ArchivalBundleLimits
 import decompengine.project.ArchivalBundleVerifier
 import decompengine.project.ReconstructionAdapters
-import decompengine.project.checkedTransportLayout
 import decompengine.project.requireNormalizedProjectPath
 import decompengine.repair.StableRegularFile
 import decompengine.repair.readStableRegularFile
@@ -29,15 +28,16 @@ internal data class WebArchiveSnapshot(
 internal class WebArchiveEvidence(private val store: JobStore, private val sources: WebSourceEvidence) {
     private data class ReadIdentity(val sha256: String, val identity: LinuxFileIdentity)
 
-    fun read(jobId: String, expectedSha256: String? = null): WebArchiveSnapshot {
+    fun read(jobId: String, expectedSha256: String? = null, reportPrefix: String = "reports"): WebArchiveSnapshot {
+        val archivePath = "$reportPrefix/source-tree.zip"
+        canonicalReportSegments(archivePath)
         require(expectedSha256 == null || expectedSha256.matches(Regex("[a-f0-9]{64}"))) { "archive digest is not canonical" }
-        val archive = store.readArtifact(jobId, ARCHIVE_PATH, MAXIMUM_BYTES)
+        val archive = store.readArtifact(jobId, archivePath, MAXIMUM_BYTES)
         require(expectedSha256 == null || archive.sha256 == expectedSha256) { "archive differs from the displayed verified digest" }
         val input = identity(store.readInput(jobId))
-        val source = sources.read(jobId).revision()
+        val source = sources.read(jobId, reportPrefix).revision()
         val adapter = ReconstructionAdapters.resolve(source.profile)
         val buildPolicy = adapter.behaviorBuild
-        val transport = adapter.archiveBuild.checkedTransportLayout(source.profile)
         val layout = buildPolicy.layout(source.profile)
         requireNormalizedProjectPath(layout.contractPath, "archive build contract path")
         requireNormalizedProjectPath(layout.artifactPath, "archive build artifact path")
@@ -65,31 +65,31 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
             }
             val current = relatives.associateWith { relative ->
                 val expected = readStableRegularFile(extractedRoot, relative, MAXIMUM_FILE_BYTES)
-                val observed = store.readArtifact(jobId, "reports/source-tree/$relative", MAXIMUM_FILE_BYTES)
+                val observed = store.readArtifact(jobId, "$reportPrefix/source-tree/$relative", MAXIMUM_FILE_BYTES)
                 require(expected.sha256 == observed.sha256 && expected.bytes.size == observed.bytes.size &&
                     observed.identity == inventory.getValue(relative)
                 ) { "archive payload differs from the current source tree: $relative" }
                 identity(observed)
             }
-            val contractSnapshot = store.readArtifact(jobId, "reports/source-tree/${layout.contractPath}", MAXIMUM_FILE_BYTES)
+            val contractSnapshot = store.readArtifact(jobId, "$reportPrefix/source-tree/${layout.contractPath}", MAXIMUM_FILE_BYTES)
             requireSame(current.getValue(layout.contractPath), contractSnapshot)
             val contract = buildPolicy.parseContract(OracleJson.parse(contractSnapshot.bytes).jsonObject, source.profile)
             val artifact = contract.artifact
             require(artifact.getValue("path").jsonPrimitive.content == layout.artifactPath) { "archive build artifact path is invalid" }
-            val executable = store.readArtifact(jobId, "reports/source-tree/${layout.artifactPath}", MAXIMUM_BYTES).let { snapshot ->
+            val executable = store.readArtifact(jobId, "$reportPrefix/source-tree/${layout.artifactPath}", MAXIMUM_BYTES).let { snapshot ->
                 require(artifact.getValue("sha256").jsonPrimitive.content == snapshot.sha256 &&
                     artifact.getValue("bytes").jsonPrimitive.longOrNull == snapshot.bytes.size.toLong()
                 ) { "archive build contract differs from the current rebuilt executable" }
                 identity(snapshot)
             }
             current.forEach { (relative, snapshot) ->
-                requireSame(snapshot, store.readArtifact(jobId, "reports/source-tree/$relative", MAXIMUM_FILE_BYTES))
+                requireSame(snapshot, store.readArtifact(jobId, "$reportPrefix/source-tree/$relative", MAXIMUM_FILE_BYTES))
             }
-            require(inventory == store.sourceArchiveInventory(jobId, transport)) { "archive source inventory changed during verification" }
-            require(source.manifestDocument == sources.read(jobId).manifestDocument) { "archive source revision changed during verification" }
-            requireSame(executable, store.readArtifact(jobId, "reports/source-tree/${layout.artifactPath}", MAXIMUM_BYTES))
+            require(inventory == store.sourceArchiveInventory(jobId, reportPrefix)) { "archive source inventory changed during verification" }
+            require(source.manifestDocument == sources.read(jobId, reportPrefix).manifestDocument) { "archive source revision changed during verification" }
+            requireSame(executable, store.readArtifact(jobId, "$reportPrefix/source-tree/${layout.artifactPath}", MAXIMUM_BYTES))
             requireSame(input, store.readInput(jobId))
-            requireSame(identity(archive), store.readArtifact(jobId, ARCHIVE_PATH, MAXIMUM_BYTES))
+            requireSame(identity(archive), store.readArtifact(jobId, archivePath, MAXIMUM_BYTES))
             return WebArchiveSnapshot(archive.bytes, archive.sha256, source.view.copy(archiveSha256 = archive.sha256), source.manifestDocument)
         } finally {
             LinuxFilesystemSyscalls.openRoot(temporary).use { directory ->
@@ -106,7 +106,6 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
     }
 
     companion object {
-        const val ARCHIVE_PATH = "reports/source-tree.zip"
         private const val MAXIMUM_BYTES = 64L * 1024 * 1024
         private const val MAXIMUM_FILE_BYTES = 4L * 1024 * 1024
         private const val MAXIMUM_CLEANUP_BYTES = MAXIMUM_BYTES + 2048L * 4096 * 4 + 4096
