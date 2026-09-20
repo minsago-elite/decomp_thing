@@ -234,10 +234,11 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             val completed = process.waitFor(deadline.remainingNanosOrZero(), TimeUnit.NANOSECONDS)
             if (!completed) terminateProcessTree(process, limits.terminationGrace)
             stopMemoryMonitor.set(true)
-            // A memory-limit breach may still be inside bounded tree termination. Give the
-            // monitor enough time for its configured grace and forcible-exit wait.
-            val monitorCleanupNanos = limits.terminationGrace.toNanos() + TimeUnit.SECONDS.toNanos(5)
-            memoryMonitor.get(monitorCleanupNanos, TimeUnit.NANOSECONDS)
+            // A memory-limit breach may still be inside bounded tree termination. The
+            // termination helper uses one global grace and forcible-exit deadline for the
+            // whole process tree, so joining here waits for that bounded cleanup to finish
+            // instead of imposing a shorter, separately estimated timeout.
+            memoryMonitor.join()
             // Timeout diagnostics retain their separate five-second drain allowance.
             val drainDeadline = if (completed) deadline else AnalysisDeadline.start(
                 TimeUnit.SECONDS.toNanos(5), "Ghidra diagnostic drain",
