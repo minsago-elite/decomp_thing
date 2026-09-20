@@ -70,6 +70,14 @@ class ProfiledReconstructionPipelineTest {
                 val plan = Json.parseToJsonElement(report.projectDir.resolve(planPath).readText()).jsonObject
                 assertEquals(2, plan.getValue("modules").jsonArray.size)
                 val contract = Json.parseToJsonElement(report.projectDir.resolve("reports/build_contract.json").readText()).jsonObject
+                assertEquals(profile.id, contract.getValue("profileId").jsonPrimitive.content)
+                assertEquals(profile.sha256, contract.getValue("profileSha256").jsonPrimitive.content)
+                assertEquals(profile.budgets.buildWallClockMillis,
+                    contract.getValue("profileBudgets").jsonObject.getValue("buildWallClockMillis").jsonPrimitive.long)
+                assertEquals(budgets.buildWallClockMillis,
+                    contract.getValue("configuration").jsonObject.getValue("wallClockTimeoutMillis").jsonPrimitive.long)
+                assertEquals(budgets.buildWallClockMillis,
+                    contract.getValue("hostSafetyLimits").jsonObject.getValue("buildWallClockMillis").jsonPrimitive.long)
                 assertEquals(budgets.buildWallClockMillis, contract.getValue("wallClockTimeoutMillis").jsonPrimitive.long)
                 assertEquals(budgets.buildMaximumOutputBytes, contract.getValue("maximumOutputBytes").jsonPrimitive.long)
                 assertTrue(report.projectDir.resolve("reports/unresolved.json").exists())

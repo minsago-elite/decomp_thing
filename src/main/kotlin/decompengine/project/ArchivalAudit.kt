@@ -184,7 +184,10 @@ object ArchivalProjectAuditor {
             profile, hostSafetyLimits, effectiveLimits, "audited",
         )
         val expectedPublication = ArchivePublicationEvidence.forProfile(
-            profile, hostSafetyLimits, effectiveLimits, publicationEvidence.outcome,
+            profile,
+            hostSafetyLimits,
+            effectiveLimits,
+            if (publication == null) "audited" else "prepared",
         )
         require(publicationEvidence.profileId == expectedPublication.profileId &&
             publicationEvidence.profileSha256 == expectedPublication.profileSha256 &&
@@ -195,10 +198,10 @@ object ArchivalProjectAuditor {
         }
         val compilationPolicy = ReconstructionCompilationPolicies.resolve(profile)
         val requiredCorpora = snapshotRequiredBehaviorCorpora(requiredCorpusSha256)
-        val maximumFileBytes = minOf(profile.budgets.archiveMaximumFileBytes, Int.MAX_VALUE.toLong() - 1L)
+        val maximumFileBytes = minOf(effectiveLimits.maximumFileBytes, Int.MAX_VALUE.toLong() - 1L)
         val manifestSnapshot = readStableRegularFile(projectDir, "source_tree_manifest.json", maximumFileBytes)
         val manifest = SourceTreeManifestReader.parse(manifestSnapshot.bytes.decodeToString(throwOnInvalidSequence = true), profile)
-        require(manifest.files.size <= profile.budgets.archiveMaximumEntries) { "audit manifest exceeds the file-count bound" }
+        require(manifest.files.size <= effectiveLimits.maximumEntries) { "audit manifest exceeds the file-count bound" }
         val modelPath = profile.layout.declaration("program-model-evidence").materialize()
         val planPath = profile.layout.declaration("module-plan-evidence").materialize()
         val files = manifest.files.associateBy { it.path }
@@ -209,7 +212,7 @@ object ArchivalProjectAuditor {
         for (file in manifest.files) {
             val snapshot = readStableRegularFile(projectDir, file.path, maximumFileBytes)
             totalBytes = Math.addExact(totalBytes, snapshot.bytes.size.toLong())
-            require(totalBytes <= profile.budgets.archiveMaximumTotalBytes) { "audit input exceeds the aggregate byte bound" }
+            require(totalBytes <= effectiveLimits.maximumTotalBytes) { "audit input exceeds the aggregate byte bound" }
             require(snapshot.sha256 == file.sha256) { "audit manifest hash differs from current file: ${file.path}" }
             hashes[file.path] = snapshot.sha256
             if (file.path == modelPath) modelText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
@@ -373,8 +376,8 @@ object ArchivalProjectAuditor {
             if (!Files.exists(reports, LinkOption.NOFOLLOW_LINKS)) return emptyList()
             require(!Files.isSymbolicLink(reports)) { "behavior reports directory is a symbolic link" }
             return Files.walk(reports, 32).use { stream ->
-                val entries = stream.limit(profile.budgets.archiveMaximumEntries.toLong() + 1L).toList()
-                require(entries.size <= profile.budgets.archiveMaximumEntries) { "behavior report inventory exceeds its bound" }
+                val entries = stream.limit(effectiveLimits.maximumEntries.toLong() + 1L).toList()
+                require(entries.size <= effectiveLimits.maximumEntries) { "behavior report inventory exceeds its bound" }
                 for (entry in entries) {
                     require(!Files.isSymbolicLink(entry) || entry.fileName.toString().endsWith(".behavior.json")) {
                         "behavior report inventory contains a link: $entry"

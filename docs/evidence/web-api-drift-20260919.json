@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "issue": 475,
+  "parentIssue": 159,
+  "sourceCommit": "e95065c276c811b2882383f45e0424913c1475da",
+  "contractSchemaSha256": "fc00bdccd0e4c492bc02db2bfe94240d20e52dae1560214d04ba2db08eee12b9",
+  "generatedTypeScriptSha256": "0321ad24ab234a2859e5be79489ee1c040e0c7745d139839cf994483f62008e3",
+  "generatedRuntimeSchemaSha256": "8ae7913730ad0a20028a69e1e256745e3b92bdd5315acb544af7720a0818eeab",
+  "ciGate": {
+    "workflow": ".github/workflows/ci.yml",
+    "job": "frontend",
+    "command": "node scripts/generate-web-api.mjs --check && node --test scripts/generate-web-api.test.mjs",
+    "sourceAndGeneratedFilesMustRemainUnchanged": true,
+    "hostedResultAtCheckpoint": "not run on this unpushed branch"
+  },
+  "isolatedMutationCases": [
+    "Unchanged schema and generated outputs pass the check.",
+    "Editing generated.ts fails the check without rewriting it.",
+    "Editing generated-schema.ts fails the check without rewriting it.",
+    "Adding a supported schema definition without regenerating output fails the check.",
+    "Adding an unsupported schema keyword fails closed before generation."
+  ],
+  "localVerification": [
+    {
+      "command": "/home/june/.bun/bin/bun test scripts/generate-web-api.test.mjs",
+      "runtime": "Bun 1.3.1",
+      "result": "1 passed, 0 failed"
+    },
+    {
+      "command": "/tmp/decomp-node-24/bin/node --test scripts/generate-web-api.test.mjs",
+      "runtime": "Node 24.20.0",
+      "result": "1 passed, 0 failed"
+    },
+    {
+      "command": "python3 contracts/web/v1/verify.py",
+      "result": "49 valid fixtures accepted; 41 invalid fixtures rejected"
+    },
+    {
+      "command": "bun scripts/generate-web-api.mjs --check and node scripts/generate-web-api.mjs --check",
+      "result": "both verified current generated contracts"
+    }
+  ],
+  "mergedBehaviorVerified": false,
+  "productionQualified": false,
+  "limitations": [
+    "This verifies generated contract drift detection, not diagnostic correlation owned by #476.",
+    "Representative schema and fixture coverage do not establish that every planned HTTP endpoint exists.",
+    "Frontend bundle, browser and JVM suites were not rerun because this checkpoint changes only the drift test, CI gate and documentation."
+  ]
+}

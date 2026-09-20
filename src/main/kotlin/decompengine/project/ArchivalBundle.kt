@@ -206,7 +206,7 @@ object ArchivalPackager {
             paths.forEach { path ->
                 if (path == projectDir) return@forEach
                 val relative = archiveRelativePath(projectDir, path)
-                if (transport.excludes(relative)) return@forEach
+                if (transport.excludes(relative) || relative == "ARCHIVE_MANIFEST.sha256") return@forEach
                 if (path.toAbsolutePath().normalize() == archiveAbsolute || relative == HASH_MANIFEST) {
                     return@forEach
                 }
@@ -245,7 +245,9 @@ object ArchivalBundleVerifier {
         profile: ReconstructionProfile,
         maximumPathDepth: Int,
         hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
-    ): List<Path> = archiveBytes.inputStream().use { input ->
+    ): List<Path> {
+        hostSafetyLimits.requireAllows(profile.budgets)
+        return archiveBytes.inputStream().use { input ->
         extractAndVerifyInternal(
             input,
             targetDir,
@@ -255,6 +257,7 @@ object ArchivalBundleVerifier {
             strictControlJson = true,
             hostSafetyLimits = hostSafetyLimits,
         ).paths
+        }
     }
 
     @JvmOverloads

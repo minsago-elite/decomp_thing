@@ -399,8 +399,12 @@ class ArchivalReconstructionService(
         val observedBehavior = ReconstructionExplorationInput.read(
             outputDir, profile.budgets.reconstructionMaximumContextCharacters,
         )
+        val selectedAnalyzer = (analyzer as? ExportBudgetedProgramModelAnalyzer)
+            ?.withExportBudgets(profile.budgets)
+            ?: analyzer
+        adapter.diagnostics.prepare(profile)
         progress.phase(AgentWorkflowPhase.ANALYZING)
-        val model = analyzer.analyze(binaryPath, outputDir.resolve("analysis"))
+        val model = selectedAnalyzer.analyze(binaryPath, outputDir.resolve("analysis"))
         val project = outputDir.resolve("source-tree")
         val progressPath = outputDir.resolve("reconstruction_progress.json")
         progressPath.writeText("{\"phase\":\"planning\",\"completed\":0,\"total\":0}\n")
@@ -419,7 +423,7 @@ class ArchivalReconstructionService(
             progressPath.writeText("{\"phase\":\"modules\",\"completed\":$completed,\"total\":$total,\"module\":\"$module\"}\n")
         }
         progress.phase(AgentWorkflowPhase.BUILD_VALIDATING)
-        val build = adapter.build(project, profile)
+        val build = adapter.build(project, profile, hostSafetyLimits)
         val bundle = ArchivalPackager.create(
             project,
             outputDir.resolve("source-tree.zip"),

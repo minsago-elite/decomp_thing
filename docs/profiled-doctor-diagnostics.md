@@ -64,9 +64,7 @@ unchanged.
 ./gradlew --no-daemon test \
   --tests 'decompengine.doctor.DoctorTest' \
   --tests 'decompengine.doctor.DoctorInvocationTest' \
-  --tests 'decompengine.doctor.ProfiledDoctorTest' \
-  --tests 'decompengine.doctor.BoundedCommandProbeTest' \
-  --tests 'decompengine.doctor.DoctorProbeBudgetTest'
+  --tests 'decompengine.doctor.ProfiledDoctorTest'
 python3 -B -m unittest discover -s tests -p test_generic_leakage.py -v
 python3 -B scripts/check-generic-leakage.py --json
 ```
@@ -82,18 +80,15 @@ declaration/descriptor pairs across Doctor, its option/report/probe types and th
 profile registry are retained. Additions are the profile-aware overload, its
 default-argument bridge and the registry's explicit default getter.
 
-Every owned Doctor command probe now uses a monotonic wall-clock and output
-allowance. Toolchain version and sanitizer probes share the selected profile's
-build phase limits, while bundled Ghidra preparation and its worker use the
-export phase ceiling; each group remains below the default host ceiling.
-Timeouts and output exhaustion are reported explicitly, and cancellation
-terminates observed child processes, closes owned streams and reports incomplete
-cleanup. Legacy injected `CommandProbe` callbacks are checked before and after
-their call and their returned UTF-8 output is charged, but the callback itself
-owns its execution and allocation.
+The four Doctor neutrality findings are removed. The repository gate passes on
+a clean checkout: the policy declares the remaining benchmark-owned namespaces
+and pins the remaining pre-existing generic literals as exact counted
+allowances. Its generic roots include the entire Doctor package; only the
+explicitly owned generated-C diagnostic implementation is registered as an
+adapter file.
 
-The focused tests use benign authored commands and an authored empty C `main`;
-they do not qualify a production compiler, analyzed program, ACP agent or
-network probe. Process-handle discovery cannot prove containment of a child
-that escapes before observation, so production qualification and broader
-consumer migration remain open under [#84](https://github.com/minsago-elite/decomp_thing/issues/84).
+Host budget admission does not establish diagnostic process resource bounds.
+`SystemCommandProbe` still reads complete command output and waits without a
+timeout. Bounding that executor, the MVP/repair and consumer migrations and
+production qualification remain open under
+[#84](https://github.com/minsago-elite/decomp_thing/issues/84).

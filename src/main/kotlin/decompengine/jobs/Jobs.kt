@@ -271,7 +271,11 @@ class JobStore internal constructor(
         }
     }
 
-    internal fun sourceArchiveInventory(jobId: String, layout: ArchiveTransportLayout, reportPrefix: String = "reports"): Map<String, LinuxFileIdentity> {
+    internal fun sourceArchiveInventory(
+        jobId: String,
+        layout: ArchiveTransportLayout,
+        reportPrefix: String = "reports",
+    ): Map<String, LinuxFileIdentity> {
         jobDirectory(jobId)
         require(reportPrefix == "reports" || reportPrefix.matches(Regex("reports/runs/[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "archive report prefix is invalid" }
         val inventory = sortedMapOf<String, LinuxFileIdentity>()
@@ -290,7 +294,7 @@ class JobStore internal constructor(
                 selected.use { entry ->
                     require(!entry.identity.isSymbolicLink) { "archive source inventory contains a linked entry" }
                     if (relative in layout.excludedOutputRoots) {
-                        require(entry.identity.isDirectory) { "archive build root is not a directory" }
+                        // Omitted transport roots may be files (for example Ninja state files) or directories.
                     } else if (entry.identity.isDirectory) {
                         LinuxFilesystemSyscalls.openDirectoryAt(directory.fd, name).use { child ->
                             require(child.identity == entry.identity) { "archive source directory changed" }
@@ -325,6 +329,12 @@ class JobStore internal constructor(
         }
         return inventory
     }
+
+    internal fun sourceArchiveInventory(jobId: String, reportPrefix: String = "reports"): Map<String, LinuxFileIdentity> =
+        sourceArchiveInventory(jobId, ArchiveTransportLayout(setOf("build"), emptySet()), reportPrefix)
+
+    internal fun sourceArchiveInventory(jobId: String, layout: ArchiveTransportLayout): Map<String, LinuxFileIdentity> =
+        sourceArchiveInventory(jobId, layout, "reports")
 
     @Synchronized
     fun recoverInterruptedJobs() = recoverInterruptedJobs { false }

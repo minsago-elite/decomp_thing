@@ -13,10 +13,14 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
-import kotlin.math.roundToInt
 
 fun renderDashboard(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = emptyList(),
-    recovery: JobRecoveryInventory = JobRecoveryInventory(0, 0, 0, 0, 0, inventoryComplete = true)): String = page(
+    recovery: JobRecoveryInventory = JobRecoveryInventory(0, 0, 0, 0, 0, inventoryComplete = true)): String =
+    renderDashboardDocument(jobs, diagnostics, recovery).body
+
+internal fun renderDashboardDocument(jobs: List<Job>, diagnostics: List<WebJobDiagnostic> = emptyList(),
+    recovery: JobRecoveryInventory = JobRecoveryInventory(0, 0, 0, 0, 0, inventoryComplete = true)):
+    WebApplicationDocument = pageDocument(
     title = "Binary workbench",
     body = """
       <header class="hero shell">
@@ -207,7 +211,17 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
     sourceTree: SourceTreeView? = null, sourceTreeUnavailable: Boolean = false,
     progressSnapshot: JsonObject? = null, explorationReport: JsonObject? = null,
     repairHistory: JsonObject? = null, reconstructionProgress: JsonObject? = null,
-    artifacts: List<WebArtifactSummary>? = null): String {
+    artifacts: List<WebArtifactSummary>? = null): String = renderJobDocument(
+    job, reportContext, diagnostics, sourceTree, sourceTreeUnavailable, progressSnapshot, explorationReport,
+    repairHistory, reconstructionProgress, artifacts,
+).body
+
+internal fun renderJobDocument(job: Job, reportContext: WebReportContext? = null,
+    diagnostics: List<decompengine.jobs.WorkflowStoreDiagnostic> = emptyList(),
+    sourceTree: SourceTreeView? = null, sourceTreeUnavailable: Boolean = false,
+    progressSnapshot: JsonObject? = null, explorationReport: JsonObject? = null,
+    repairHistory: JsonObject? = null, reconstructionProgress: JsonObject? = null,
+    artifacts: List<WebArtifactSummary>? = null): WebApplicationDocument {
     val reports = reportsFor(job, reportContext)
     val active = job.status in setOf("queued", "analyzing")
     val metadata = job.metadata.toJson().entries.joinToString("") { (key, value) ->
@@ -269,7 +283,7 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
         };
         setTimeout(poll, 900);
     """.trimIndent() else ""
-    return page(
+    return pageDocument(
         title = job.filename,
         body = """
           <main class="shell job-shell">
@@ -482,7 +496,7 @@ private fun renderExploration(job: Job, reports: WebReportContext, root: JsonObj
       <section class="panel evidence-panel">
         <div class="section-heading compact"><span class="step">03</span><div><p class="kicker">Evidence</p><h2>Exploration report</h2></div><a class="text-link" href="${artifactHref(job, "${reports.artifactPrefix}/exploration.json")}">Download JSON ↓</a></div>
         <div class="metric-grid">
-          ${metric("Exploration heuristic", score?.let { "%.3f".format(java.util.Locale.ROOT, it) } ?: "Unavailable", "Uncalibrated")}
+          ${metric("Exploration heuristic", score?.let { "%.3f".format(java.util.Locale.ROOT, it) } ?: "Unavailable", "Uncalibrated", score)}
           ${metric("Candidates", root.number("candidateCount"), "Generated inputs")}
           ${metric("Output paths", root.number("expandedOutputSignatures"), "Distinct signatures")}
           ${metric("New paths", root["newOutputSignatures"]?.jsonArray?.size?.toString() ?: "0", "Beyond baseline")}
@@ -546,9 +560,9 @@ private fun renderSourceTree(job: Job, source: SourceTreeView, reports: WebRepor
     val files = source.files
     val rows = files.joinToString("") { entry ->
         val relative = entry.path
-        val depth = relative.count { it == '/' }
+        val depth = relative.count { it == '/' }.coerceAtMost(12)
         val kind = entry.roles.first().wireName.uppercase().take(4)
-        "<li style=\"--depth:$depth\"><a href=\"/jobs/${job.id}/source/${encodePath(relative)}${reports.runId?.let { "?runId=$it" }.orEmpty()}\"><span>$kind</span><code>${relative.escapeHtml()}</code><i>→</i></a></li>"
+        "<li class=\"source-depth-$depth\"><a href=\"/jobs/${job.id}/source/${encodePath(relative)}${reports.runId?.let { "?runId=$it" }.orEmpty()}\"><span>$kind</span><code>${relative.escapeHtml()}</code><i>→</i></a></li>"
     }
     val confidence = runCatching {
         source.confidence?.get("projectScore")?.jsonPrimitive?.doubleOrNull?.takeIf { it.isFinite() && it in 0.0..1.0 }
@@ -583,7 +597,9 @@ private fun reportsFor(job: Job, supplied: WebReportContext?): WebReportContext 
     supplied ?: WebReportContext(job.binaryPath.parent.resolve("reports"))
 
 private fun metric(label: String, value: String, detail: String, score: Double? = null): String {
-    val gauge = score?.let { "<span class=\"gauge\"><i style=\"width:${(it.coerceIn(0.0, 1.0) * 100).toInt()}%\"></i></span>" }.orEmpty()
+    val gauge = score?.let {
+        "<meter class=\"gauge\" min=\"0\" max=\"1\" value=\"${it.coerceIn(0.0, 1.0)}\" aria-label=\"${label.escapeHtml()} score\"></meter>"
+    }.orEmpty()
     return "<div class=\"metric\"><p>${label.escapeHtml()}</p><strong>${value.escapeHtml()}</strong><small>${detail.escapeHtml()}</small>$gauge</div>"
 }
 
@@ -599,7 +615,11 @@ private fun encodePath(relative: String): String = relative.split('/').joinToStr
     URLEncoder.encode(it, StandardCharsets.UTF_8).replace("+", "%20")
 }
 
-private fun page(title: String, body: String, script: String = ""): String = """<!doctype html>
+private fun page(title: String, body: String, script: String = ""): String =
+    pageDocument(title, body, script).body
+
+private fun pageDocument(title: String, body: String, script: String = ""): WebApplicationDocument =
+    WebApplicationDocument("""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -616,7 +636,10 @@ $body
   ${if (script.isBlank()) "" else "<script>$script</script>"}
 </body>
 </html>
-"""
+""", buildList {
+        add(LEGACY_SESSION_SCRIPT)
+        if (script.isNotBlank()) add(script)
+    })
 
 private fun JsonObject.text(name: String): String = get(name)?.jsonPrimitive?.contentOrNull.orEmpty()
 private fun JsonObject.number(name: String): String = get(name)?.jsonPrimitive?.contentOrNull ?: "0"
@@ -734,11 +757,11 @@ h1 em { color: var(--acid); font-style: normal; }
 .workflow-list { list-style: none; padding: 0; margin: 0; }.workflow-list li { display: flex; gap: 14px; padding: 13px 0; border-bottom: 1px solid var(--line); }.workflow-list li:last-child { border: 0; }.workflow-list li > span { color: var(--acid); font: 700 11px ui-monospace, monospace; }.workflow-list strong { font-size: 14px; }.workflow-list p { margin: 4px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
 .evidence-panel, .history-panel, .artifacts-panel { margin-top: 18px; }.pending-evidence { color: var(--muted); }
 .text-link { margin-left: auto; color: var(--acid); font-size: 12px; text-decoration: none; }
-.metric-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 24px; }.metric { min-height: 126px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: rgba(8,11,9,.35); }.metric p, .metric small { color: var(--muted); font-size: 11px; }.metric strong { display: block; margin: 12px 0 4px; font-size: 30px; letter-spacing: -.05em; }.gauge { display: block; height: 3px; margin-top: 13px; background: #2c342f; }.gauge i { display: block; height: 100%; background: var(--acid); }
+.metric-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 24px; }.metric { min-height: 126px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: rgba(8,11,9,.35); }.metric p, .metric small { color: var(--muted); font-size: 11px; }.metric strong { display: block; margin: 12px 0 4px; font-size: 30px; letter-spacing: -.05em; }.gauge { display: block; width: 100%; height: 6px; margin-top: 13px; accent-color: var(--acid); }
 .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }table { width: 100%; border-collapse: collapse; font-size: 12px; }th { color: var(--muted); background: #101411; font: 700 9px ui-monospace, monospace; letter-spacing: .07em; text-transform: uppercase; text-align: left; }th, td { padding: 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }tbody tr:last-child td { border: 0; }code { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: #c9d0ca; }.source-tag.angr { color: var(--cyan); }.source-tag.mutation { color: var(--warning); }.source-tag.static_hint { color: #ba9cff; }.source-tag.seed { color: var(--acid); }.table-note { color: var(--muted); font-size: 11px; margin: 12px 0 0; }
 .history-list { display: grid; gap: 10px; }.history-item { display: grid; grid-template-columns: 40px 1fr; gap: 15px; padding: 17px; border: 1px solid var(--line); border-radius: 8px; }.history-index { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: #252d28; color: var(--acid); font: 700 11px ui-monospace, monospace; }.history-title { display: flex; align-items: center; justify-content: space-between; }.history-item p { color: var(--muted); font-size: 12px; }.evidence-line { display: grid; gap: 5px; padding: 9px 11px; border-left: 2px solid var(--cyan); background: rgba(114,215,208,.04); }.evidence-line b { color: var(--ink); }.regressions { margin-bottom: 0; }
 .artifact-list { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }.artifact-row { display: flex; align-items: center; gap: 12px; padding: 13px; border: 1px solid var(--line); border-radius: 8px; text-decoration: none; transition: .15s; }.artifact-row:hover { border-color: #526157; background: #202722; }.artifact-row > span:last-child { margin-left: auto; color: var(--acid); }.artifact-icon { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 5px; background: #252d28; color: var(--cyan); font: 700 9px ui-monospace, monospace; }.artifact-row strong, .artifact-row small { display: block; }.artifact-row small { margin-top: 4px; color: var(--muted); font-size: 10px; }
-.source-tree-panel { margin-top: 18px; }.tree-note { color: var(--muted); font-size: 13px; }.source-tree { list-style: none; padding: 0; margin: 18px 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }.source-tree li + li { border-top: 1px solid var(--line); }.source-tree a { display: grid; grid-template-columns: 42px 1fr 20px; gap: 11px; align-items: center; min-height: 43px; padding: 7px 12px 7px calc(12px + var(--depth) * 18px); text-decoration: none; background: rgba(8,11,9,.25); }.source-tree a:hover { background: #202722; }.source-tree span { color: var(--cyan); font: 700 9px ui-monospace, monospace; }.source-tree i { color: var(--acid); font-style: normal; }.archive-download { width: max-content; }.source-shell { padding-block: 44px 80px; }.source-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; padding: 42px 0 24px; }.source-heading h1 { margin: 8px 0 0; font: 700 clamp(1.8rem,4vw,3.5rem)/1.05 ui-monospace, monospace; letter-spacing: -.05em; }.source-view { overflow: auto; min-height: 420px; padding: 24px; border: 1px solid var(--line); border-radius: 10px; background: #080b09; line-height: 1.55; tab-size: 4; }.source-view code { font-size: 12px; color: #dbe2dc; }
+.source-tree-panel { margin-top: 18px; }.tree-note { color: var(--muted); font-size: 13px; }.source-tree { list-style: none; padding: 0; margin: 18px 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }.source-tree li + li { border-top: 1px solid var(--line); }.source-tree a { display: grid; grid-template-columns: 42px 1fr 20px; gap: 11px; align-items: center; min-height: 43px; padding: 7px 12px; text-decoration: none; background: rgba(8,11,9,.25); }.source-depth-1 a { padding-left: 30px; }.source-depth-2 a { padding-left: 48px; }.source-depth-3 a { padding-left: 66px; }.source-depth-4 a { padding-left: 84px; }.source-depth-5 a { padding-left: 102px; }.source-depth-6 a { padding-left: 120px; }.source-depth-7 a { padding-left: 138px; }.source-depth-8 a { padding-left: 156px; }.source-depth-9 a { padding-left: 174px; }.source-depth-10 a { padding-left: 192px; }.source-depth-11 a { padding-left: 210px; }.source-depth-12 a { padding-left: 228px; }.source-tree a:hover { background: #202722; }.source-tree span { color: var(--cyan); font: 700 9px ui-monospace, monospace; }.source-tree i { color: var(--acid); font-style: normal; }.archive-download { width: max-content; }.source-shell { padding-block: 44px 80px; }.source-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; padding: 42px 0 24px; }.source-heading h1 { margin: 8px 0 0; font: 700 clamp(1.8rem,4vw,3.5rem)/1.05 ui-monospace, monospace; letter-spacing: -.05em; }.source-view { overflow: auto; min-height: 420px; padding: 24px; border: 1px solid var(--line); border-radius: 10px; background: #080b09; line-height: 1.55; tab-size: 4; }.source-view code { font-size: 12px; color: #dbe2dc; }
 .reconstruction-progress { margin-top: 18px; padding: 20px 28px; display: flex; align-items: center; justify-content: space-between; }.reconstruction-progress h2 { margin: 5px 0 0; }.source-provenance { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; margin-bottom: 16px; }.source-provenance span { padding: 12px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); font: 11px ui-monospace,monospace; }.source-provenance b { display: block; margin-bottom: 6px; color: var(--cyan); text-transform: uppercase; font-size: 9px; }
 .spinner { width: 12px; height: 12px; border: 2px solid rgba(0,0,0,.25); border-top-color: #111; border-radius: 50%; animation: spin .8s linear infinite; }@keyframes spin { to { transform: rotate(360deg); } }
 .error-shell { display: grid; place-items: start; align-content: center; min-height: calc(100vh - 150px); max-width: 760px; }.error-shell h1 { font-size: 58px; margin: 5px 0 20px; }.error-shell > p:not(.error-code) { color: var(--muted); font-size: 17px; }.error-code { color: var(--danger); font: 700 12px ui-monospace, monospace; }.error-shell .button { margin-top: 20px; }

@@ -89,18 +89,57 @@ forwarding headers (#155). The dev fixture server has no production credentials.
 
 ## Text, files and secrets
 
-The SPA inserts content as text nodes. Source highlighting works on escaped
-tokens; no `innerHTML`, executable Markdown, SVG/HTML preview, data-URL document
-embedding or automatic external-image loading. Untrusted external links require
-explicit user navigation and use `noopener noreferrer`; reject non-HTTP(S)
-schemes. Content cannot name JavaScript modules, CSS resources or worker URLs.
+The SPA inserts content as text nodes. The current legacy source view escapes
+generated source into plain `<pre><code>` text; there is no syntax-highlighter
+dependency or SPA source route yet. No `innerHTML`, executable Markdown,
+SVG/HTML preview, data-URL document embedding or automatic external-image
+loading is granted. Untrusted external links require explicit user navigation
+and use `noopener noreferrer`; reject non-HTTP(S) schemes. Content cannot name
+JavaScript modules, CSS resources or worker URLs.
 
 Production CSP restricts default/script/style/connect/worker to the application
-origin, denies objects, framing and base URI, and limits forms to self. Do not
-require inline scripts/styles or `eval`; nonces are only a separately reviewed
-exception. Assets, API responses, errors and downloads use `nosniff` and
-`Referrer-Policy: no-referrer`. Served source/report/log bytes are plain text or
-attachments, including files whose names suggest active content (#176/#189).
+origin, denies objects, framing and base URI, and limits forms to self. The SPA
+requires no inline scripts/styles or `eval`. During the separately inventoried
+legacy migration, the response policy authorizes only the exact trusted adapter
+script bytes with per-response SHA-256 source expressions. The renderer supplies
+that script inventory before HTML assembly; the server never discovers or hashes
+scripts from the final document, so an escaping regression cannot add an
+authorized script. The policy never enables
+`unsafe-inline`, `unsafe-eval`, a nonce, an inline style, or an event-handler
+exception. Removing those legacy adapters remains part of retiring legacy HTML.
+
+The remaining resource directives are deliberately narrow and local. `style-src
+'self'` is required for Vite's extracted stylesheet and the legacy
+`/assets/app.css`; neither document uses inline style. `img-src data:` is limited
+to the packaged shell's data-URL SVG favicon and the legacy stylesheet's data-URL
+SVG texture, while ordinary images remain same-origin. `worker-src 'self'` and
+`font-src 'self'` are the upper bounds for statically bundled worker and font
+outputs covered by the packaged asset inventory; blob workers, downloaded code,
+and remote fonts remain denied. The current production bundle emits no worker or
+downloadable font, but keeping those directives aligned with the packaging
+contract permits only future reviewed, manifest-owned same-origin outputs.
+
+SPA and legacy application documents, including rendered HTML error pages,
+receive that application policy; legacy pages authorize only their inventoried
+adapter scripts. Static assets, JSON and other non-HTML errors, redirects,
+event streams, source/report bytes and downloads receive the inert navigation
+policy. Both classes consistently use `nosniff`,
+`Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and CSP
+`frame-ancestors 'none'`; generated downloadable material additionally remains
+sandboxed. Served source/report/log bytes are plain text or attachments,
+including files whose names suggest active content (#176/#189).
+
+The packaged-browser gate records `SecurityPolicyViolationEvent`, matching
+Chrome security-log entries, CSP-blocked network requests and CSP audit issues
+for every attached application page. It first proves all four listeners with
+isolated inline-script and blocked-external-image violations, then excludes
+that positive control from the application total. Every production document
+request, including redirects, must correlate to a response with a CSP
+header without `unsafe-inline` or `unsafe-eval`; the retained report identifies
+the exact routes and policies inspected. Bootstrap values are redacted before
+any violation detail is persisted. The current bundle creates no browser worker,
+so worker execution remains a packaging-policy bound rather than a claimed
+runtime qualification.
 
 Job metadata stores logical IDs and server-relative owned paths. Reopening old
 metadata never trusts its stored absolute `binary_path` for authorization. File
