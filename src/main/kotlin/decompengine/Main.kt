@@ -4,24 +4,30 @@ import decompengine.exploration.AutomaticExplorer
 import decompengine.exploration.CandidateInput
 import decompengine.exploration.CandidateSource
 import decompengine.doctor.Doctor
-import decompengine.doctor.parseDoctorInvocation
+import decompengine.doctor.DoctorOptions
 import decompengine.mvp.MvpPatchException
 import decompengine.mvp.MvpPatchOptions
 import decompengine.mvp.MvpPatchWorkflow
 import decompengine.mvp.BinaryRunnerService
 import decompengine.acp.AcpHarnessFactory
-import decompengine.project.GeneratedCMakeReconstructionProfile
-import decompengine.project.ReconstructionProfiles
+import decompengine.acp.AcpPreflightWorkflow
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.EvidenceModuleReconstructor
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
+import decompengine.project.GhidraProgramModelExportLimits
+import decompengine.project.GhidraProgramModelRecoveryMode
 import decompengine.project.ModuleReconstructor
+import decompengine.project.ReconstructionProfiles
 import decompengine.agent.AgentHarness
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowPhase
 import decompengine.jobs.BestEffortProgressJournal
 import decompengine.jobs.ProgressRedactor
+import decompengine.oracle.gcc.GccCompilerEnginePlanningService
+import decompengine.oracle.gcc.GccCompilerEngineProfiles
+import decompengine.oracle.gcc.authenticateGhidraInstallation
+import decompengine.analysis.BundledGhidra
 import decompengine.repair.RepairRuntimeConfiguration
 import decompengine.repair.SecureRepairRuntime
 import decompengine.validation.ProcessInput
@@ -54,20 +60,23 @@ private fun runGccEnginePlan(args: List<String>) {
     val options = try {
         decompengine.oracle.gcc.GccBundledCliOptions.parse(args)
     } catch (failure: IllegalArgumentException) {
-        System.err.println(failure.message)
-        System.err.println("usage: llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> " +
-            "--profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount> " +
-            "[--resume-after-checkpoint <multiple-of-512>]")
-        kotlin.system.exitProcess(2)
+        gccEnginePlanUsageError(failure.message ?: "invalid gcc-engine-plan arguments")
     }
-    val result = decompengine.oracle.gcc.GccBundledCliCommand.run(options, args)
-    println("engine: ${options.engineId}")
-    println("operation result: $result")
-    println("Model and plan paths and their digests are recorded in the result; scratch is retained.")
+    decompengine.oracle.gcc.GccBundledCliCommand.run(options, args)
+}
+
+private fun gccEnginePlanUsageError(message: String): Nothing {
+    System.err.println(message)
+    System.err.println(
+        "usage: llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> " +
+            "--ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount> " +
+            "[--resume-after-checkpoint <multiple-of-512>]",
+    )
+    kotlin.system.exitProcess(2)
 }
 
 private fun runReconstruct(args: List<String>) {
-    var profile = GeneratedCMakeReconstructionProfile.descriptor
+    var profile = ReconstructionProfiles.default
     var binary: Path? = null
     var output: Path? = null
     var evidenceOnly = false
@@ -82,11 +91,8 @@ private fun runReconstruct(args: List<String>) {
             }
             "--profile" -> {
                 if (index + 1 >= args.size) reconstructUsageError("--profile requires a registered profile ID")
-                profile = try {
-                    ReconstructionProfiles.named(args[index + 1])
-                } catch (failure: IllegalArgumentException) {
-                    reconstructUsageError(failure.message ?: "unsupported reconstruction profile")
-                }
+                profile = try { ReconstructionProfiles.named(args[index + 1]) }
+                catch (failure: IllegalArgumentException) { reconstructUsageError(failure.message ?: "unsupported reconstruction profile") }
                 index += 2
             }
             "--evidence-only" -> { evidenceOnly = true; index++ }
@@ -134,7 +140,6 @@ private fun runReconstruct(args: List<String>) {
         println("source tree: ${result.projectDir}")
         println("archive: ${result.bundle.archivePath}")
         println("archive sha256: ${result.bundle.archiveSha256}")
-        println("recovery accuracy: unassessed; see the source tree's confidence and unresolved reports")
     }
 }
 
@@ -215,7 +220,7 @@ private fun runExplore(args: List<String>) {
     val report = AutomaticExplorer().explore(binary, seeds, reports)
     println(
         "exploration generated ${report.candidates.size} input(s), discovered " +
-            "${report.coverage.newSignatures.size} new output signature(s), uncalibrated exploration heuristic=${"%.4f".format(Locale.ROOT, report.confidence.score)}",
+            "${report.coverage.newSignatures.size} new output signature(s), confidence=${"%.4f".format(Locale.ROOT, report.confidence.score)}",
     )
     println("report: ${report.reportPath}")
 }
@@ -412,13 +417,50 @@ private fun runnerUsageError(message: String): Nothing {
 }
 
 private fun runDoctor(args: List<String>) {
-    val defaultOutput = Path.of(System.getenv("OUTPUT_DIR") ?: if (Files.isDirectory(Path.of("/output"))) "/output" else "output")
-    val invocation = try {
-        parseDoctorInvocation(args, defaultOutput)
-    } catch (failure: IllegalArgumentException) {
-        doctorUsageError(failure.message ?: "invalid doctor configuration")
+    var toolsOnly = false
+    var harnessOverride: String? = null
+    var workflowOverride: AcpPreflightWorkflow? = null
+    var output = Path.of(System.getenv("OUTPUT_DIR") ?: if (Files.isDirectory(Path.of("/output"))) "/output" else "output")
+    var index = 0
+    while (index < args.size) {
+        when (args[index]) {
+            "--tools-only" -> { toolsOnly = true; index++ }
+            "--harness" -> {
+                if (index + 1 >= args.size) doctorUsageError("--harness requires acp or legacy-openai")
+                harnessOverride = args[index + 1]; index += 2
+            }
+            "--workflow" -> {
+                if (index + 1 >= args.size) {
+                    doctorUsageError("--workflow requires all, patch, reconstruct, repair, or web")
+                }
+                workflowOverride = try {
+                    AcpPreflightWorkflow.parse(args[index + 1])
+                } catch (failure: IllegalArgumentException) {
+                    doctorUsageError(failure.message ?: "invalid doctor workflow")
+                }
+                index += 2
+            }
+            "--output" -> {
+                if (index + 1 >= args.size) doctorUsageError("--output requires a directory")
+                output = Path.of(args[index + 1]); index += 2
+            }
+            else -> doctorUsageError("unexpected argument: ${args[index]}")
+        }
     }
-    val report = Doctor().inspect(invocation.options, invocation.profile)
+    if (toolsOnly && harnessOverride != null) {
+        doctorUsageError("--tools-only cannot be combined with --harness")
+    }
+    if (toolsOnly && workflowOverride != null) {
+        doctorUsageError("--tools-only cannot be combined with --workflow")
+    }
+    val report = Doctor().inspect(
+        DoctorOptions(
+            outputDir = output,
+            toolsOnly = toolsOnly,
+            harnessOverride = harnessOverride,
+            workflowOverride = workflowOverride,
+        ),
+    )
     report.checks.forEach { check ->
         val stream = if (check.passed) System.out else System.err
         stream.println("[${if (check.passed) "ok" else "failed"}] ${check.name}: ${check.detail}")
@@ -434,50 +476,42 @@ private fun runDoctor(args: List<String>) {
 
 private fun doctorUsageError(message: String): Nothing {
     System.err.println(message)
-    System.err.println("usage: llm_bin_patch doctor --tools-only [--output <directory>] [--profile <id>]")
-    System.err.println("   or: llm_bin_patch doctor [--output <directory>] [--profile <id>] [--harness acp|legacy-openai] [--workflow all|patch|reconstruct|repair|web]")
+    System.err.println("usage: llm_bin_patch doctor --tools-only [--output <directory>]")
+    System.err.println("   or: llm_bin_patch doctor [--output <directory>] [--harness acp|legacy-openai] [--workflow all|patch|reconstruct|repair|web]")
     kotlin.system.exitProcess(2)
 }
 
 private fun runWeb(args: List<String>) {
     var host = "127.0.0.1"
     var port = 8000
+    var listenBacklog = 64
     var dataDir = Path.of(".decomp_engine/jobs")
     var uiMode = WebUiMode.LEGACY
     var basePath = "/"
-            "--base-path" -> { basePath = args[index + 1]; index += 2 }
-            "--dev-frontend-origin" -> { devFrontendOrigin = args[index + 1]; index += 2 }
-            "--listen-backlog" -> { index += 2 }
-            else -> error("unknown web argument: ${args[index]}")
-        }
-    }
-    val server = UploadServer(host, port, dataDir, uiMode = uiMode, basePath = basePath, devFrontendOrigin = devFrontendOrigin, listenBacklog = listenBacklog)
+    var devFrontendOrigin: String? = null
     var index = 0
-
     while (index < args.size) {
         require(index + 1 < args.size) { "${args[index]} requires a value; see llm_bin_patch --help" }
         when (args[index]) {
-            "--host" -> { host = args[index + 1]; index += 2 }
-            "--port" -> { port = args[index + 1].toInt(); index += 2 }
-            "--data-dir" -> { dataDir = Path.of(args[index + 1]); index += 2 }
-            "--ui" -> {
-                uiMode = when (args[index + 1]) {
-                    "legacy" -> WebUiMode.LEGACY
-                    "spa" -> WebUiMode.SPA
-                    else -> error("--ui must be legacy or spa")
-                }
+            "--host" -> {
+                host = args[index + 1]
                 index += 2
             }
-<<<<<<< HEAD
-            "--base-path" -> { basePath = args[index + 1]; index += 2 }
-            "--listen-backlog" -> error("--listen-backlog is not supported with the web UI")
-            else -> error("unknown web argument: ${args[index]}")
-        }
-    }
-    val server = UploadServer(host, port, dataDir, uiMode = uiMode, basePath = basePath)
-=======
+            "--port" -> {
+                port = args[index + 1].toInt()
+                index += 2
+            }
+            "--listen-backlog" -> {
+                listenBacklog = args.getOrNull(index + 1)?.toIntOrNull()
+                    ?: error("--listen-backlog requires an integer between 1 and 4096")
+                index += 2
+            }
+            "--data-dir" -> {
+                dataDir = Path.of(args[index + 1])
+                index += 2
+            }
             "--ui" -> {
-                uiMode = when (args.getOrNull(index + 1)) {
+                uiMode = when (args[index + 1]) {
                     "legacy" -> WebUiMode.LEGACY
                     "spa" -> WebUiMode.SPA
                     else -> error("--ui must be legacy or spa")
@@ -495,25 +529,35 @@ private fun runWeb(args: List<String>) {
             else -> error("unknown web argument: ${args[index]}")
         }
     }
-    val server = UploadServer(host, port, dataDir, uiMode = uiMode, basePath = basePath, devFrontendOrigin = devFrontendOrigin, listenBacklog = listenBacklog)
->>>>>>> d8386338 (fix(web): restore packaged SPA launch wiring)
+    require(port in 0..65535) { "--port must be between 0 and 65535 (0 selects an available port)" }
+    val server = try {
+        UploadServer(host, port, dataDir, uiMode = uiMode, basePath = basePath, devFrontendOrigin = devFrontendOrigin, listenBacklog = listenBacklog)
+    } catch (_: java.net.BindException) {
+        System.err.println("Cannot bind web server to $host:$port. Check --host or choose an unused --port.")
+        kotlin.system.exitProcess(2)
+    }
     decompengine.web.startWebServerWithShutdownHook(server)
     val urlHost = if (':' in host && !host.startsWith('[')) "[$host]" else host
     println("Serving decomp_engine ${uiMode.name.lowercase()} UI on http://$urlHost:${server.serverPort}$basePath")
+    if (uiMode == WebUiMode.SPA) {
+        val bootstrap = server.issueBrowserBootstrap()
+        // This is an explicit local operator handoff, not a request/access log.
+        println("Open local browser session (expires ${bootstrap.expiresAt}): ${server.browserOrigin}${basePath}#bootstrap=${bootstrap.token}")
+    }
 }
 
 private fun printHelp() {
     println(
         """
         Usage:
-          llm_bin_patch doctor --tools-only [--output <directory>] [--profile <id>]
-          llm_bin_patch doctor [--output <directory>] [--profile <id>] [--harness acp|legacy-openai] [--workflow all|patch|reconstruct|repair|web]
+          llm_bin_patch doctor --tools-only [--output <directory>]
+          llm_bin_patch doctor [--output <directory>] [--harness acp|legacy-openai] [--workflow all|patch|reconstruct|repair|web]
           llm_bin_patch patch <input-elf> --output <directory> [--yes] [--harness acp|legacy-openai]
           llm_bin_patch runner [--control-dir <directory>] [--root <directory>]...
           llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness acp|legacy-openai]
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
           llm_bin_patch reconstruct <binary> --output <directory> [--profile generated-c-make-v1|generated-c-ninja-v1] [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]
-          llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
+          llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <directory>
           llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173]
 
         Agent harness selection for doctor, patch, reconstruction, and repair:
@@ -521,12 +565,8 @@ private fun printHelp() {
           --harness legacy-openai  use the deprecated direct OpenAI-compatible adapter
           Doctor performs an initialize-only ACP v1 preflight for all workflows by default.
           Doctor's --tools-only mode is agent-free and cannot be combined with agent selectors.
-          Doctor's --profile selects generated-c-make-v1 (default) or generated-c-ninja-v1.
           Reconstruction's --evidence-only mode is agent-free and cannot be combined with --harness.
-          gcc-engine-plan requires contained execution and retains scratch plus linked evidence; results remain incomplete and release-ineligible.
-          --resume-after-checkpoint <multiple-of-512> interrupts and resumes within this process; it is not cold recovery.
-          Scratch defaults: 8 GiB available / 64 GiB maximum filesystem, 32768 available / 1000000 maximum inodes.
-          Override with --scratch-min-bytes, --scratch-max-bytes, --scratch-min-inodes, --scratch-max-inodes.
+          gcc-engine-plan emits only a schema-v2 non-authoritative Kotlin/JVM diagnostic; it is not oracle or release evidence.
           ACP remains read-only and never receives oracle write, validation, scoring, or certification authority.
         """.trimIndent(),
     )

@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 1,
+  "issue": 934,
+  "recordedAtUtc": "2026-09-08T12:29:40Z",
+  "scope": "Focused source evidence for issue #934 criteria 1, 2, and 7. This record describes the checked Kotlin draft validator and its test fixture; it is not production qualification or fresh reference evidence.",
+  "sourceBaseCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "codeAndFixtures": {
+    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorNativeSandboxPolicyV2.kt": "bb80158cc248b5a92965bf9f0972b5f1e6a918e92c13edb54b872d809ea4e121",
+    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorNativeHelperArtifact.kt": "e5432dde11fefd5dd51dd15c7a5c06a9c420ace7377f4297151c395b6b1ef1c2",
+    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorNativeSandboxPolicyV2OperationJournal.kt": "d1da16b357f420def806ad2833166e73265d10c7fdd697d766a2934dc623a5ee",
+    "src/main/c/decomp_llvm_behavior_helper.c": "8465bd7761e3ecc2eefc42f194505e24d6adf3ed68a676a8370ee294f30cd713",
+    "oracle/llvm-behavior-native-sandbox-policy-v2.schema.json": "bdce127600546944a3545682c22983383a348aa5a453fa823292fd176bb6f079",
+    "src/test/kotlin/decompengine/oracle/behavior/LlvmBehaviorNativeSandboxPolicyV2Fixture.kt": "9f4b69bf18036ac0eda6b5a6cd1079ad5be6c1ff609f40fb6254c7af673a47b8",
+    "src/test/kotlin/decompengine/oracle/behavior/LlvmBehaviorNativeSandboxPolicyV2Test.kt": "ef9e27f8c8165ad1cfce67eaefb9d0d0f3bbb9fdda1e8d034e2c28e8d736dfa1"
+  },
+  "observed": {
+    "policyContract": {
+      "schemaVersion": 2,
+      "kind": "llvm-behavior-native-sandbox-helper-policy-draft",
+      "authority": "non-authoritative-native-sandbox-helper-policy-v2-draft-validation",
+      "backend": "oci-container-v2",
+      "helperProtocol": "decomp-llvm-behavior-helper-v2",
+      "helperContainerPath": "/decomp-llvm-behavior-helper",
+      "schemaSha256": "bdce127600546944a3545682c22983383a348aa5a453fa823292fd176bb6f079",
+      "staticPolicyIncludes": [
+        "pre-exec, stage, and collect argv templates",
+        "environment allowlists",
+        "mount profiles and users",
+        "cgroup and rlimit policy",
+        "workspace and capture bounds",
+        "ACP authority-denial boundary"
+      ]
+    },
+    "kotlinBoundary": {
+      "entryPoint": "LlvmBehaviorNativeSandboxPolicyV2Verifier.verify",
+      "rawInputs": [
+        "policy",
+        "helper",
+        "helper checksum",
+        "helper C source",
+        "helper build record"
+      ],
+      "authenticatedFacts": [
+        "bounded descriptor-backed reads",
+        "helper byte length and SHA-256",
+        "checksum SHA-256",
+        "source SHA-256",
+        "build-record SHA-256",
+        "terminal reauthentication"
+      ],
+      "pythonRequired": false,
+      "authorityReturned": "non-authoritative-native-sandbox-helper-policy-v2-draft-validation"
+    },
+    "helperProvenance": {
+      "source": "src/main/c/decomp_llvm_behavior_helper.c",
+      "buildRecordName": "decomp-llvm-behavior-helper-build-v2.json",
+      "helperName": "decomp-llvm-behavior-helper",
+      "checksumName": "decomp-llvm-behavior-helper.sha256",
+      "provenanceIsPinnedToRawInputs": true
+    },
+    "fixture": {
+      "class": "LlvmBehaviorNativeSandboxPolicyV2Fixture",
+      "policyConstruction": "test fixture copies the configured helper/checksum, writes a build record, and derives static policy values from the bundled schema",
+      "productionArtifact": false
+    },
+    "acpBoundary": {
+      "role": "first-class-candidate-producer-operator",
+      "contribution": "authenticated-session-change-build-artifact-provenance",
+      "provenanceAccess": "read-only-oracle-input",
+      "oracleAndReferenceAuthoringAuthority": false,
+      "policyValidationScoringAndReleaseAuthority": false
+    }
+  },
+  "criteria": {
+    "1": {
+      "status": "partial",
+      "verified": "The bundled schema and Kotlin validator bind the v2 static sandbox shape and helper/source/build-record digests.",
+      "unverified": "A closed production policy artifact is not generated here; the checked kind and authority still explicitly identify a draft validation boundary."
+    },
+    "2": {
+      "status": "partial",
+      "verified": "The production validation entry point is Kotlin/JVM, accepts only raw authenticated paths, and has no Python dependency.",
+      "unverified": "Production Kotlin generation of canonical policy/reference artifacts and fresh runtime/reference inputs is not demonstrated by this source-only record; policy creation appears only in the test fixture."
+    },
+    "7": {
+      "status": "partial",
+      "verified": "The static policy and operation journal deny ACP oracle, reference-authoring, policy-authoring, validation, observation-authoring, START, containment, terminal-absence, scoring, certification, and release authority.",
+      "unverified": "No authenticated live ACP session/change/build/artifact receipt is supplied or exercised here, so read-only candidate provenance contribution is not production-qualified."
+    }
+  },
+  "unverifiedCriteria": [
+    "Issue #935 mixed or substituted native-v2 runtime/admission rejection",
+    "Issue #936 retained live containment and terminal absence before authority",
+    "Issue #937 three byte-identical fresh native-v2 reference repetitions",
+    "Production policy/reference generation and runtime image binding",
+    "Production ACP candidate provenance integration and qualification"
+  ],
+  "validation": {
+    "tests": "skipped by request; no broad or focused test suite was run",
+    "performed": [
+      "sha256sum captured for the exact source, schema, and fixture files above",
+      "JSON structure and repository diff checks performed before commit"
+    ]
+  }
+}

@@ -1,5 +1,7 @@
 package decompengine.project
 
+import java.nio.file.Path
+
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowPhase
 
@@ -38,7 +40,7 @@ class GeneratedCNinjaIntegrationTest {
     fun `Ninja profile generates validates archives extracts and rebuilds accepted modules without Make`() {
         val temp = createTempDirectory("ninja-reconstruction-")
         val profile = GeneratedCNinjaReconstructionProfile.descriptor
-        val analyzer = ProgramModelAnalyzer { _, _ -> model() }
+        val analyzer = budgetCapable { _, _ -> model() }
         val phases = mutableListOf<AgentWorkflowPhase>()
         val progress = object : AgentWorkflowProgress by AgentWorkflowProgress.NONE {
             override fun phase(phase: AgentWorkflowPhase, taskId: String?, acceptedRevisionSha256: String?) {
@@ -124,3 +126,10 @@ class GeneratedCNinjaIntegrationTest {
         assertFalse(Files.exists(project.resolve("build/reconstructed")))
     }
 }
+
+
+private fun budgetCapable(operation: (Path, Path) -> RecoveredProgramModel): ExportBudgetedProgramModelAnalyzer =
+    object : ExportBudgetedProgramModelAnalyzer {
+        override fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel = operation(binaryPath, workDir)
+        override fun withExportBudgets(budgets: ReconstructionBudgets): ProgramModelAnalyzer = this
+    }

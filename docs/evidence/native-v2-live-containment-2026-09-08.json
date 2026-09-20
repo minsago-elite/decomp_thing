@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "issue": 936,
+  "recordedAtUtc": "2026-09-08",
+  "scope": "Current-source and fixture evidence for the native-v2 authority boundary; this record does not claim merged behavior or production qualification.",
+  "sourceCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "evidenceMode": "current-source-and-fixture-inspection",
+  "sourceFiles": {
+    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorNativeSandboxPolicyV2.kt": "bb80158cc248b5a92965bf9f0972b5f1e6a918e92c13edb54b872d809ea4e121",
+    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorNativeSandboxPolicyV2OperationJournal.kt": "d1da16b357f420def806ad2833166e73265d10c7fdd697d766a2934dc623a5ee",
+    "oracle/llvm-behavior-native-sandbox-policy-v2.schema.json": "bdce127600546944a3545682c22983383a348aa5a453fa823292fd176bb6f079",
+    "src/test/kotlin/decompengine/oracle/behavior/LlvmBehaviorNativeSandboxPolicyV2Fixture.kt": "9f4b69bf18036ac0eda6b5a6cd1079ad5be6c1ff609f40fb6254c7af673a47b8",
+    "src/test/kotlin/decompengine/oracle/behavior/LlvmBehaviorNativeSandboxPolicyV2Test.kt": "ef9e27f8c8165ad1cfce67eaefb9d0d0f3bbb9fdda1e8d034e2c28e8d736dfa1",
+    "src/test/kotlin/decompengine/oracle/behavior/LlvmBehaviorNativeSandboxPolicyV2OperationJournalTest.kt": "2b7185afad0c44d58744a01d0ca2add4ea9f154c7eb0031db273c02ccdcaf07a",
+    "docs/llvm-behavior-native-sandbox-policy-v2.md": "11967cfce59625b46a391291168d9ad416b2db0a0f89e13cc06d8411c4f80c7d",
+    "docs/llvm-behavior-native-sandbox-policy-v2-operation-journal.md": "e607dc80c8d998a7a4ed2aa1447b5613a8bb168ce05a06607f12624ff35fb1a9"
+  },
+  "currentCodeEvidence": {
+    "policyBoundary": "The v2 verifier accepts five raw paths and returns non-authoritative-native-sandbox-helper-policy-v2-draft-validation. Its result fixes referencePinned, candidateStarted, startAuthorized, scoringAuthority, and releaseEligible to false.",
+    "schemaBoundary": "The bundled policy schema fixes the ACP start, containment, terminal-absence, scoring, certification, and release authority fields to false and fixes claims.referencePinned, claims.candidateStarted, claims.startAuthorized, claims.scoringAuthority, and claims.releaseEligible to false.",
+    "journalBoundary": "The operation journal accepts six raw paths, has only policy-draft-bound and closed-without-start phases, persists all live and authority claims as false, and exposes closeWithoutStart as its only state-changing owner action. It has no preparation or START phase.",
+    "fileTerminalCheck": "The verifier reauthenticates the five build-local files before returning. That terminal file check is not a proof of live container or cgroup absence."
+  },
+  "fixtureEvidence": {
+    "construction": "LlvmBehaviorNativeSandboxPolicyV2Fixture copies the configured helper and checksum, copies src/main/c/decomp_llvm_behavior_helper.c, writes a canonical build record and policy, and creates private temporary input and journal-root directories.",
+    "policyCases": [
+      "valid v2 raw files yield only a non-authoritative contract validation",
+      "bundled draft pins independently reviewed platform roles IO and nonauthority",
+      "stale policy rejects helper checksum source and build-record substitution",
+      "Python reintroduction and known v1 sentinels are rejected",
+      "canonical bounds symlinks aliases and non-exact paths fail closed",
+      "public and reflective production surfaces accept only five raw Paths"
+    ],
+    "journalCases": [
+      "bound journal copies exact sealed validation and first class ACP requirements without authority",
+      "ordinary close permits deterministic cold reopen and explicit terminal close is idempotent",
+      "public JVM surface is six raw Paths and cannot represent positive execution phases",
+      "binding and transition corruption, replacement, drift, duplicate ownership, and unknown residue fail closed"
+    ],
+    "runtimeLimit": "These fixtures do not create or retain a live OCI container, process cgroup, cgroup descriptor, init pidfd, or terminal absence receipt."
+  },
+  "unverifiedCriteria": [
+    "Issue #936 acceptance criterion remains unverified: no separately reviewed live owner is present here that retains the exact per-container containment identity through execution and cleanup and proves terminal container/cgroup absence before authority.",
+    "No positive PREPARED or START transition, live runtime identity check, per-container containment proof, terminal absence proof, scoring decision, certification, or release decision was executed.",
+    "The focused Gradle command was interrupted during :ghidra-bridge:fetchGhidra before the selected tests ran; no test result is claimed.",
+    "This is draft implementation evidence only. Merged behavior and production qualification remain false."
+  ],
+  "validation": {
+    "testsRun": false,
+    "productionQualification": false,
+    "mergedBehavior": false,
+    "reason": "Tests skipped at user direction after the interrupted dependency setup."
+  }
+}
