@@ -58,7 +58,10 @@ sealed interface AuthenticatedFullTreePlanningRegistry {
     /** Resolves an authenticated A13 owner unit exactly; there is no nullable or catch-all fallback. */
     fun requireOwnerModule(ownerUnitId: String): FullTreePlanningSourceModule
 
-    /** Resolves the exact authenticated source-module population for one shard. */
+    /**
+     * Resolves the exact authenticated source-module population for one shard. This is planning
+     * ownership only; the returned module count is not an emitted-function denominator.
+     */
     fun requireOwnerModulesForShard(shardId: String): List<FullTreePlanningSourceModule>
 }
 
@@ -487,11 +490,8 @@ object FullTreePlanningInventoryControl {
                 }
             },
         )
-
-        private val sourceOnlyShardIds: Set<String> = Collections.unmodifiableSet(
-            LinkedHashSet<String>().apply {
-                state.sourceOnly.forEach { add(it.shardId) }
-            },
+        private val knownShardIds: Set<String> = Collections.unmodifiableSet(
+            (sourceModules.asSequence().map { it.shardId } + sourceOnlyUnits.asSequence().map { it.shardId }).toSet(),
         )
 
         override fun requireOwnerModule(ownerUnitId: String): FullTreePlanningSourceModule {
@@ -506,11 +506,12 @@ object FullTreePlanningInventoryControl {
             if (!isValidShardId(shardId)) {
                 throw FullTreeControlException("planning shard ID is invalid")
             }
-            modulesByShardId[shardId]?.let { return it }
-            if (shardId in sourceOnlyShardIds) {
-                return emptyList()
-            }
-            throw FullTreeControlException("planning shard ID is outside the authenticated inventory")
+            return modulesByShardId[shardId]
+                ?: if (shardId in knownShardIds) {
+                    emptyList()
+                } else {
+                    throw FullTreeControlException("planning shard ID is outside the authenticated inventory")
+                }
         }
 
         companion object {
