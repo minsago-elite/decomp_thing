@@ -307,11 +307,10 @@ internal object GeneratedCProjectBuilder {
                         Thread.sleep(5)
                     }
                     if (outputFuture.isDone) {
-                        return try {
-                            outputFuture.get()
-                        } catch (completed: ExecutionException) {
-                            throw completed.cause ?: completed
-                        }
+                        throw BuildException(
+                            "generated project build left background output open after the build process exited; " +
+                                "owned descendants were terminated",
+                        )
                     }
                     throw BuildException(
                         "generated project build left background output open after the build process exited; " +

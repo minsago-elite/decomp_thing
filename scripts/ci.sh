@@ -4,4 +4,4 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "==> JVM/Kotlin checks"
-./gradlew --no-daemon check
+./gradlew --no-daemon check verifyReconstructionNeutrality
