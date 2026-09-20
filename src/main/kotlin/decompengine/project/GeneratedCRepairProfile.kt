@@ -138,8 +138,9 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
                 .values
                 .distinct()
                 .sorted(),
-            behaviorRootEntityIds = evidence.functions.filter {
-                it.name in profile.adapterConfiguration.getValue("entry-symbol-candidates")
+            behaviorRootEntityIds = evidence.functions.filter { function ->
+                safeCName(function.name) in profile.adapterConfiguration.getValue("entry-symbol-candidates") ||
+                    function.name in profile.adapterConfiguration.getValue("entry-symbol-candidates")
             }.map { it.id }.sorted(),
         )
     }
@@ -625,6 +626,9 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
         ) {
             names(directory, relativeDirectory).forEach { name ->
                 val relative = normalizedProfilePath("$relativeDirectory/$name")
+                require(relative.split('/').none { it.endsWith(".repair") }) {
+                    "generated C discovery rejects repair workspace paths: $relative"
+                }
                 val entry = requireNotNull(LinuxFilesystemSyscalls.openPathAtOrNull(directory.fd, name)) {
                     "generated C discovery entry disappeared: $relative"
                 }

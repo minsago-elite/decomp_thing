@@ -13,7 +13,7 @@ internal class ContainedCommandOperationDeadline(
     private var rejected = false
 
     init {
-        require(maximumWallMillis in 1_000L..86_400_000L && maximumWallMillis % 1_000L == 0L)
+        require(maximumWallMillis in 2_000L..86_400_000L && maximumWallMillis % 1_000L == 0L)
         maximumNanos = maximumWallMillis * 1_000_000L
     }
 

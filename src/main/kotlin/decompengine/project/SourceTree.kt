@@ -895,6 +895,14 @@ object SourceTreeGenerator {
         }.map { it.path }.sorted()
         val makefile = rendering.buildDefinition(sourcePaths, profile)
         val makefilePath = profile.layout.declaration("build-definition").materialize()
+        val previousBuildDefinitions = runCatching {
+            SourceTreeManifestReader.read(projectDir, profile).files
+                .filter { ProjectFileRole.BUILD_DEFINITION in it.roles }
+                .map(GeneratedFileEvidence::path)
+        }.getOrDefault(emptyList())
+        previousBuildDefinitions
+            .filter { it != makefilePath }
+            .forEach { projectDir.resolve(it).deleteIfExists() }
         val makefileFile = projectDir.resolve(makefilePath)
         makefileFile.parent.createDirectories()
         makefileFile.writeText(makefile)
@@ -1268,7 +1276,8 @@ object SourceTreeGenerator {
             else -> "${failure::class.simpleName ?: "Exception"} during module reconstruction"
         }
         return fallback.copy(
-            generator = "unresolved:$reconstructorIdentity",
+            generator = if (failure is ModuleContextBudgetExceededException) "unresolved:profile-budget"
+                else "unresolved:$reconstructorIdentity",
             promptSha256 = agentOutcome?.promptSha256
                 ?: (failure as? ModuleContextBudgetExceededException)?.promptSha256
                 ?: fallback.promptSha256,

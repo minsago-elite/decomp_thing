@@ -14,10 +14,27 @@
   ],
   "benchmarkRoots": [
     "oracle/gcc",
+    "oracle/llvm",
+    "docs/evidence/gcc-cli-inputs-intent-2026-09-08.json",
+    ".github/workflows/gcc-oracle-model.yml",
+    "tests/oracle",
+    "scripts/fetch-gcc-oracle-source.py",
+    "scripts/generate-gcc-behavior-corpus.py",
+    "scripts/generate-gcc-compiler-engine-build-records.py",
+    "scripts/run-gcc-behavior-corpus.py",
+    "scripts/verify-gcc-oracle-source.py",
+    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorReferenceInputPlanV2.kt",
+    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorReferenceInputPlanV2Generator.kt",
+    "src/test/kotlin/decompengine/analysis/BundledGhidraTest.kt",
+    "src/test/kotlin/decompengine/oracle/behavior/LlvmBehaviorReferenceInputPlanV2Test.kt",
     "src/main/kotlin/decompengine/oracle/gcc",
     "src/test/kotlin/decompengine/oracle/gcc"
   ],
   "adapterFiles": [
+    {
+      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
+      "reason": "Application-owned C patch workflow; its compiler flags and GCC invocation are the deliberate reconstruction validation contract."
+    },
     {
       "path": "src/main/kotlin/decompengine/project/GeneratedCArchiveBuildPolicy.kt",
       "reason": "Generated-C source inventory and build-contract policy used by archive packaging and verification."
@@ -238,13 +255,6 @@
     {
       "path": "src/main/kotlin/decompengine/project/ReconstructionAdapter.kt",
       "rule": "generic-adapter-reference",
-      "fragment": "GeneratedCMakeReconstructionProfile.PROFILE_ID -> GeneratedCReconstructionAdapter",
-      "count": 1,
-      "reason": "Closed application-owned dispatch from the built-in Make profile identifier to its adapter implementation."
-    },
-    {
-      "path": "src/main/kotlin/decompengine/project/ReconstructionAdapter.kt",
-      "rule": "generic-adapter-reference",
       "fragment": "GeneratedCNinjaReconstructionProfile.PROFILE_ID -> GeneratedCNinjaReconstructionAdapter",
       "count": 1,
       "reason": "Closed application-owned dispatch from the built-in Ninja profile identifier to its adapter implementation."
@@ -255,6 +265,20 @@
       "fragment": "gcc_runtime / 'cc1'",
       "count": 1,
       "reason": "Inventories the installed compiler runtime for generated-C provisioning; this expression does not select a benchmark artifact. Version and digest checks remain active."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/RepairAcpEvidenceArchiveVerifier.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "GeneratedCRepairRuntimeConfiguration",
+      "count": 3,
+      "reason": "Generated-C repair runtime configuration is the explicitly selected application-owned deployment adapter."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/RepairAcpEvidenceArchiveVerifier.kt",
+      "rule": "generic-layout",
+      "fragment": "\"Makefile\"",
+      "count": 1,
+      "reason": "Makefile is the declared generated-C repair archive layout contract."
     }
   ],
   "benchmarkCatalog": "oracle/gcc/reconstruction-neutrality-identities.json"

@@ -120,3 +120,47 @@ release the writer after a display failure and preserves the calling thread's in
   --tests decompengine.web.UploadServerTest \
   --tests decompengine.web.SourceTreeJobReconstructorTest
 ```
+
+Web shutdown marks admission as stopping before draining HTTP requests. Owned workers
+receive one shutdown interruption; the service preserves its job-root lease until
+workers actually exit. Final legacy status writes clear and restore the interrupt flag
+around atomic metadata publication. Restart projects interrupted legacy work through
+the durable service while preserving its historical job.json bytes. CLI shutdown uses
+the bounded shutdown hook and reports incomplete cleanup explicitly.
+
+Persisted display snapshots must account for every allocated sequence through retained events or
+queue/history omission counts. Reads and writer restart reject inconsistent counts or truncation
+markers with bounded diagnostics; counter validation avoids arithmetic overflow. Rejected history
+is retained unchanged and writer ownership is released. These consistency checks do not authenticate
+history or prove that events pending at a process crash were durable.
+
+The browser labels its latest-30-row window separately from journal retention loss. Refresh and
+polling report unavailable progress history instead of implying an empty complete stream; polling
+continues after an HTTP failure. These display warnings do not alter job status or acceptance.
+
+Optional browser qualification uses the production renderer with an inert active-job fixture. It
+mocks event/status responses in Chromium without starting workflow execution. Supply Playwright
+and its browser installation separately (the recorded run used Playwright 1.63.0):
+
+```sh
+java -cp 'build/libs/*:build/oracle/gcc/kotlin-boot-runtime/*' \
+  scripts/fixtures/ProgressPageFixture.java build/progress-browser-fixture
+DECOMP_PLAYWRIGHT_MODULE=/absolute/path/to/node_modules/playwright \
+  node scripts/verify-progress-browser.cjs \
+  build/progress-browser-fixture/page.html build/progress-browser-evidence/new-run
+```
+
+Build the application JAR and staged runtime first using the relevant normal build/test task.
+The evidence directory must be new. A successful run records the rendered HTML digest, browser
+version, scenarios and request count, plus a screenshot and Playwright trace. This checks actual
+DOM updates, row limits, separate loss/window warnings, HTTP/network failures, subsequent recovery,
+and peer-text escaping. It does not qualify a real-agent job, server restart, or browser matrix.
+
+New snapshots persist `omittedSequenceRanges` as ordered, nonoverlapping half-open ranges with
+`startInclusive` and `endExclusive` decimal strings. They identify the exact complement of retained
+event sequences below `nextSequence`, including trailing omissions. There are at most one more
+range than retained events (1,025 at the largest configured history), and ranges share the existing
+snapshot byte cap. Reads reject inconsistent ranges when supplied. Older schema-1 snapshots without
+this field remain readable and acquire ranges on the next writer publication. Queue/history
+counters retain aggregate causes; individual ranges do not distinguish those causes. These ranges
+cannot account for events lost before an interrupted process published its snapshot.
