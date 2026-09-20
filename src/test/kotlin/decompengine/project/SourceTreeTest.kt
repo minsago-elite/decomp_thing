@@ -1066,6 +1066,36 @@ class SourceTreeTest {
     }
 
     @Test
+    fun `commented-out function signatures do not satisfy definition validation`() {
+        val project = createTempDirectory("source-tree-commented-function-")
+        val oneModule = model().copy(functions = model().functions.take(1), globals = emptyList())
+        val reconstructor = ModuleReconstructor {
+            val source = "/* int parse_input(void) { return 17; } */\\n"
+            ReconstructedModule(source, "scripted", sha256(source.toByteArray()))
+        }
+
+        val manifest = SourceTreeGenerator.generate(oneModule, project, reconstructor = reconstructor)
+
+        assertEquals(listOf("fn_0000000000401000"), manifest.unresolvedImplementationIds)
+        assertTrue(project.resolve("reports/modules/parse.json").readText().contains("missing-function-definition"))
+    }
+
+    @Test
+    fun `tag-only declarations do not satisfy global definition validation`() {
+        val project = createTempDirectory("source-tree-tag-declaration-")
+        val onlyGlobal = model().copy(functions = emptyList())
+        val reconstructor = ModuleReconstructor {
+            val source = "/* global_404000 */\\nstruct page_count { int value; };\\n"
+            ReconstructedModule(source, "scripted", sha256(source.toByteArray()))
+        }
+
+        val manifest = SourceTreeGenerator.generate(onlyGlobal, project, reconstructor = reconstructor)
+
+        assertEquals(listOf("global_404000"), manifest.unresolvedImplementationIds)
+        assertTrue(project.resolve("reports/modules/core.json").readText().contains("missing-global-definition"))
+    }
+
+    @Test
     fun `partial agent modules remain unresolved before compiler validation`() {
         val project = createTempDirectory("source-tree-partial-agent-")
         val functions = listOf(
