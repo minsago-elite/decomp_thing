@@ -29,10 +29,10 @@ RUN apt-get update \
     && printf '%s  %s\\n' "${BUBBLEWRAP_SHA256}" /tmp/bubblewrap.tar.xz | sha256sum --check --strict \
     && mkdir -p /tmp/bubblewrap-src \
     && tar -xJf /tmp/bubblewrap.tar.xz --strip-components=1 -C /tmp/bubblewrap-src \
-    && meson setup /tmp/bubblewrap-build /tmp/bubblewrap-src --prefix=/usr/local --buildtype=release \
+    && meson setup /tmp/bubblewrap-build /tmp/bubblewrap-src --prefix=/usr --buildtype=release \
     && meson compile -C /tmp/bubblewrap-build \
     && meson install -C /tmp/bubblewrap-build \
-    && /usr/local/bin/bwrap --version \
+    && /usr/bin/bwrap --version \
     && rm -rf /tmp/bubblewrap.tar.xz /tmp/bubblewrap-src /tmp/bubblewrap-build \
     && python3 -m pip install --no-cache-dir "angr==${ANGR_VERSION}" \
     && rm -rf /var/lib/apt/lists/*

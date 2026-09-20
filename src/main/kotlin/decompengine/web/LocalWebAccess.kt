@@ -279,7 +279,7 @@ class LocalWebAccess(
                 put("message", failure.message)
                 put("retryable", retryable)
                 put("details", JsonArray(emptyList()))
-                put("retryAfterMs", retryAfterSeconds?.let { JsonPrimitive(it * 1000) } ?: JsonNull)
+                put("retryAfterMs", retryAfterSeconds?.let { JsonPrimitive((it * 1000).toString()) } ?: JsonNull)
             })
         }.toString().toByteArray()
         exchange.responseHeaders.set("Content-Type", "application/json; charset=utf-8")
@@ -290,7 +290,7 @@ class LocalWebAccess(
         exchange.responseHeaders.set("X-Request-ID", requestId)
         if (failure.allowedMethods.isNotEmpty()) exchange.responseHeaders.set("Allow", failure.allowedMethods.sorted().joinToString(", "))
         if (failure.clearCookie) exchange.responseHeaders.add("Set-Cookie", expiredSessionCookie())
-        if (failure.status == 429) exchange.responseHeaders.set("Retry-After", "30")
+        if (retryable) exchange.responseHeaders.set("Retry-After", "30")
         try {
             if (exchange.requestMethod == "HEAD") exchange.sendResponseHeaders(failure.status, -1)
             else {
