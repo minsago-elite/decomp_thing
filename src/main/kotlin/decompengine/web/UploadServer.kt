@@ -210,13 +210,18 @@ class UploadServer(
         null
     }
     private val analysisExecutor: Executor = executor ?: ownedExecutor!!
+    private val requestExecutor = ThreadPoolExecutor(16, 16, 0L, TimeUnit.MILLISECONDS, ArrayBlockingQueue(64),
+        { runnable -> Thread(runnable, "decomp-web-http").apply { isDaemon = true } },
+        ThreadPoolExecutor.AbortPolicy())
     private val runningJobs = ConcurrentHashMap.newKeySet<String>()
+    private val pendingTasks = ConcurrentHashMap.newKeySet<ScheduledJob>()
     private val lifecycleLock = Any()
     private var stopping = false
     val serverPort: Int get() = server.address.port
 
     init {
         store.recoverInterruptedJobs()
+        server.executor = requestExecutor
         server.createContext("/") { exchange -> route(exchange) }
     }
 
@@ -226,7 +231,8 @@ class UploadServer(
         require(delaySeconds >= 0) { "shutdown delay must be nonnegative" }
         synchronized(lifecycleLock) { stopping = true }
         server.stop(delaySeconds)
-        val discarded = ownedExecutor?.shutdownNow().orEmpty()
+        requestExecutor.shutdownNow()
+        val discarded = (ownedExecutor?.shutdownNow().orEmpty() + pendingTasks.toList())
         var failure: Exception? = null
         discarded.forEach { task ->
             try {
@@ -374,23 +380,23 @@ class UploadServer(
         }
         try {
             store.updateStatus(job.id, "queued", queuedMessage)
-            analysisExecutor.execute(ScheduledJob(job.id) {
+            val task = ScheduledJob(job.id) {
                 try {
                     val active = store.updateStatus(job.id, "analyzing", activeMessage)
                     operation(active)
                     synchronized(lifecycleLock) {
-                        if (stopping) {
-                            store.updateStatus(job.id, "failed", "Server stopped before the operation reported completion")
-                        } else {
-                            store.updateStatus(job.id, "complete", completeMessage)
-                        }
+                        if (stopping) store.updateStatus(job.id, "failed", "Server stopped before the operation reported completion")
+                        else store.updateStatus(job.id, "complete", completeMessage)
                     }
                 } catch (failure: Exception) {
                     store.updateStatus(job.id, "failed", diagnostic(failure, "Background operation failed"))
                 } finally {
                     runningJobs.remove(job.id)
+                    pendingTasks.removeIf { it === this }
                 }
-            })
+            }
+            pendingTasks.add(task)
+            analysisExecutor.execute(task)
         } catch (failure: RejectedExecutionException) {
             runningJobs.remove(job.id)
             store.updateStatus(job.id, "failed", "Background job capacity is full or the server is stopping; retry later")

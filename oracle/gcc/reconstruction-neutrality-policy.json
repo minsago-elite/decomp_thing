@@ -296,11 +296,18 @@
       "reason": "Intentional generated-C adapter policy literal required by the existing reconstruction contract."
     },
     {
-      "path": "src/main/kotlin/decompengine/web/WebArchiveEvidence.kt",
-      "rule": "generic-layout",
-      "fragment": "\"build/reconstructed\"",
+      "path": "src/main/kotlin/decompengine/Main.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "import decompengine.project.GeneratedCMakeReconstructionProfile",
       "count": 1,
-      "reason": "Legacy archive verification retains the established reconstructed artifact path while validating archived build evidence."
+      "reason": "CLI compatibility default remains application-owned."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/Main.kt",
+      "rule": "generic-adapter-reference",
+      "fragment": "var profile = GeneratedCMakeReconstructionProfile.descriptor",
+      "count": 1,
+      "reason": "CLI compatibility default remains application-owned."
     }
   ],
   "benchmarkCatalog": "oracle/gcc/reconstruction-neutrality-identities.json"
