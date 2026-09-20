@@ -620,10 +620,6 @@ private val SOURCE_ONLY_ORDER = Comparator<JsonObject> { left, right ->
     FULL_TREE_CODE_POINT_ORDER.compare(left.controlString("sourcePath"), right.controlString("sourcePath"))
 }
 private val COMPILATION_UNIT_ID = Regex("cu-[0-9a-f]{32}")
-// A generated shard is composed of a prefix, two path components (each bounded by the
-// authenticated scope), and the separators between them.
-private const val MAXIMUM_SHARD_ID_CHARACTERS = 2 * 255 + 11
-
 private const val PLANNING_SCHEMA = "full-tree-planning-inventory"
 private const val PLANNING_MAXIMUM_SOURCE_MODULES = 1_000_000
 private const val PLANNING_MAXIMUM_CANDIDATE_SOURCE_UNITS = 200_000
@@ -631,7 +627,7 @@ private const val PLANNING_MAXIMUM_OUTPUT_RECORDS = 203_000
 private const val PLANNING_MAXIMUM_WORK_UNITS = 500_000L
 private const val PLANNING_MAXIMUM_SERIALIZED_BYTES = 32 * 1024 * 1024
 private fun isValidShardId(shardId: String): Boolean {
-    if (shardId.isEmpty() || shardId.length > MAXIMUM_SHARD_ID_CHARACTERS || shardId.first() == '-' || shardId.last() == '-') {
+    if (shardId.isEmpty() || shardId.first() == '-' || shardId.last() == '-') {
         return false
     }
     var previousWasSeparator = false
