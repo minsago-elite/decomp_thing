@@ -1586,6 +1586,13 @@ val verifyKotlinBootClasspathDistribution = tasks.register("verifyKotlinBootClas
     }
 }
 
+val verifyReconstructionNeutrality = tasks.register<Exec>("verifyReconstructionNeutrality") {
+    group = "verification"
+    description = "Checks declared generic surfaces and benchmark ownership without running project code"
+    commandLine("python3", "-B", "scripts/check-generic-leakage.py")
+    workingDir(rootDir)
+}
+
 tasks.named("check") {
     dependsOn(testFrontendAssetManifest)
     dependsOn(verifyPackagedWeb)
