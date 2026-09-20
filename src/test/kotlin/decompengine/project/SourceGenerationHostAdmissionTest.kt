@@ -1,5 +1,7 @@
 package decompengine.project
 
+import java.nio.file.Path
+
 import decompengine.agent.AgentWorkflowProgress
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -82,7 +84,7 @@ class SourceGenerationHostAdmissionTest {
             val digest = profile.sha256
             var analysisCalls = 0
             var reconstructionCalls = 0
-            val analyzer = ProgramModelAnalyzer { supplied, _ ->
+            val analyzer = budgetCapable { supplied, _ ->
                 analysisCalls++
                 assertEquals(binary, supplied)
                 model(sha256(supplied.readBytes()))
@@ -140,3 +142,10 @@ class SourceGenerationHostAdmissionTest {
         functions = listOf(RecoveredFunction("fn_host", "decomp_engine_main", 0x1000UL, "int decomp_engine_main(void)")),
     )
 }
+
+
+private fun budgetCapable(operation: (Path, Path) -> RecoveredProgramModel): ExportBudgetedProgramModelAnalyzer =
+    object : ExportBudgetedProgramModelAnalyzer {
+        override fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel = operation(binaryPath, workDir)
+        override fun withExportBudgets(budgets: ReconstructionBudgets): ProgramModelAnalyzer = this
+    }

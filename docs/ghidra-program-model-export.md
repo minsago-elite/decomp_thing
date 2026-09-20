@@ -70,7 +70,8 @@ full decompiled C bodies; those bodies belong to the later reconstruction phase:
 llm_bin_patch gcc-engine-plan cc1 /path/to/gcc-cc1.stripped \
   --profile oracle/gcc/16.2.0/compiler-engines.json \
   --ghidra-archive /path/to/ghidra_12.1.3_PUBLIC_20260817.zip \
-  --output /path/to/cc1-plan
+  --output /path/to/cc1-plan \
+  --scratch /path/to/provisioned-scratch
 ```
 
 The command authenticates the profile and all of its source/build/toolchain and ELF-manifest bindings, authenticates
