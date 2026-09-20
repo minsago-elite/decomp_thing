@@ -39,6 +39,31 @@ class LegacyWebSessionTest {
             headers.forEach { (key, value) -> builder.header(key, value) }
             return client.send(builder.build(), HttpResponse.BodyHandlers.ofString()).also(::assertNoWebCors)
         }
+        fun assertCommonSecurity(response: HttpResponse<String>) {
+            assertEquals("nosniff", response.headers().firstValue("X-Content-Type-Options").orElseThrow())
+            assertEquals("no-referrer", response.headers().firstValue("Referrer-Policy").orElseThrow())
+            assertEquals("DENY", response.headers().firstValue("X-Frame-Options").orElseThrow())
+            val policy = response.headers().firstValue("Content-Security-Policy").orElseThrow()
+            assertFalse(policy.contains("unsafe-inline"))
+            assertFalse(policy.contains("unsafe-eval"))
+        }
+        fun assertApplicationSecurity(response: HttpResponse<String>, trustedScripts: Iterable<String>? = null) {
+            assertCommonSecurity(response)
+            val policy = response.headers().firstValue("Content-Security-Policy").orElseThrow()
+            if (trustedScripts != null) {
+                assertEquals(webApplicationContentSecurityPolicy(trustedScripts), policy)
+            } else {
+                val sessionSource = webApplicationContentSecurityPolicy(listOf(LEGACY_SESSION_SCRIPT))
+                    .substringAfter("script-src 'self' ").substringBefore(';')
+                assertTrue(policy.contains(sessionSource))
+            }
+            assertFalse(response.body().contains("style="))
+        }
+        fun assertInertSecurity(response: HttpResponse<String>) {
+            assertCommonSecurity(response)
+            assertEquals(WEB_INERT_CONTENT_SECURITY_POLICY,
+                response.headers().firstValue("Content-Security-Policy").orElseThrow())
+        }
         try {
             val paths = listOf("/", "/jobs/${job.id}", "/api/jobs/${job.id}", "/api/jobs/${job.id}/events",
                 "/jobs/${job.id}/source/missing.c", "/jobs/${job.id}/artifacts/reports/missing.txt", "/missing")
@@ -47,14 +72,27 @@ class LegacyWebSessionTest {
                 assertEquals(401, denied.statusCode(), path)
                 assertFalse(denied.body().contains("private-fixture"))
                 assertEquals("no-store", denied.headers().firstValue("Cache-Control").orElseThrow())
+                if (denied.headers().firstValue("Content-Type").orElse("").startsWith("text/html")) {
+                    assertApplicationSecurity(denied, listOf(LEGACY_LOGIN_SCRIPT))
+                } else assertInertSecurity(denied)
             }
-            assertEquals(200, request("/login").statusCode())
-            assertEquals(200, request("/assets/app.css").statusCode())
+            val login = request("/login")
+            assertEquals(200, login.statusCode())
+            assertApplicationSecurity(login, listOf(LEGACY_LOGIN_SCRIPT))
+            val style = request("/assets/app.css")
+            assertEquals(200, style.statusCode())
+            assertInertSecurity(style)
             val session = legacySessionHeaders(server)
             val cookie = session.filterKeys { it == "Cookie" }
-            assertEquals(200, request("/jobs/${job.id}", headers = cookie).statusCode())
-            assertEquals(200, request("/api/jobs/${job.id}", headers = cookie).statusCode())
-            assertEquals(200, request("/api/v1/session/csrf", headers = cookie).statusCode())
+            val jobPage = request("/jobs/${job.id}", headers = cookie)
+            assertEquals(200, jobPage.statusCode())
+            assertApplicationSecurity(jobPage)
+            val legacyApi = request("/api/jobs/${job.id}", headers = cookie)
+            assertEquals(200, legacyApi.statusCode())
+            assertInertSecurity(legacyApi)
+            val csrf = request("/api/v1/session/csrf", headers = cookie)
+            assertEquals(200, csrf.statusCode())
+            assertInertSecurity(csrf)
             for (path in listOf("/jobs", "/jobs/${job.id}/explore", "/jobs/${job.id}/reconstruct")) {
                 val contentType = if (path == "/jobs") "multipart/form-data; boundary=fixture" else "application/json"
                 val base = mapOf("Origin" to origin, "Content-Type" to contentType)
@@ -67,6 +105,7 @@ class LegacyWebSessionTest {
             assertEquals(0, executions)
             val logout = request("/api/v1/session", "DELETE", session + mapOf("Origin" to origin, "Content-Type" to "application/json"))
             assertEquals(204, logout.statusCode())
+            assertInertSecurity(logout)
             assertTrue(logout.headers().firstValue("Set-Cookie").orElseThrow().contains("Max-Age=0"))
             for (path in paths + "/api/v1/session/csrf") assertEquals(401, request(path, headers = cookie).statusCode(), path)
             assertContentEquals(before, Files.readAllBytes(record))

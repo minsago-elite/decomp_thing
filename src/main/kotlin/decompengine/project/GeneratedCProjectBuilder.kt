@@ -82,8 +82,16 @@ internal object GeneratedCProjectBuilder {
         configuration: ProjectBuildConfiguration = ProjectBuildConfiguration(),
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
         invocation: GeneratedCBuildInvocation = GeneratedCBuildInvocation.make(configuration),
+        hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
     ): BuildReport {
         if (Thread.interrupted()) throw InterruptedException("generated project build cancelled")
+        hostSafetyLimits.requireAllows(profile.budgets)
+        require(configuration.wallClockTimeoutMillis <= profile.budgets.buildWallClockMillis) {
+            "build wall-clock configuration exceeds the selected profile budget"
+        }
+        require(configuration.maximumOutputBytes <= profile.budgets.buildMaximumOutputBytes) {
+            "build output configuration exceeds the selected profile budget"
+        }
         require(configuration.buildDefinition == profile.layout.declaration("build-definition").materialize()) {
             "build definition differs from the selected profile"
         }
@@ -93,6 +101,10 @@ internal object GeneratedCProjectBuilder {
             "generated project path cannot be encoded safely in GCC reproducible-prefix mappings: $projectRoot"
         }
         validateBuildProjectTree(projectRoot)
+        val manifest = projectRoot.resolve("source_tree_manifest.json")
+        if (Files.isRegularFile(manifest, LinkOption.NOFOLLOW_LINKS)) {
+            SourceTreeManifestReader.read(projectRoot, profile)
+        }
         if (!projectRoot.resolve(configuration.buildDefinition).exists()) {
             throw BuildException("generated project is missing ${configuration.buildDefinition}")
         }
@@ -129,6 +141,8 @@ internal object GeneratedCProjectBuilder {
             reportsDir.resolve("build_contract.json"),
             renderBuildContract(
                 configuration,
+                profile,
+                hostSafetyLimits,
                 invocation,
                 command,
                 owners,
@@ -380,6 +394,8 @@ internal object GeneratedCProjectBuilder {
 
     private fun renderBuildContract(
         configuration: ProjectBuildConfiguration,
+        profile: ReconstructionProfile,
+        hostSafetyLimits: ReconstructionHostSafetyLimits,
         invocation: GeneratedCBuildInvocation,
         command: List<String>,
         owners: List<BuildOwner>,
@@ -389,7 +405,22 @@ internal object GeneratedCProjectBuilder {
         sourceStableDuringBuild: Boolean,
         artifact: BuildArtifactIdentity?,
     ): String = buildString {
-        append("{\n  \"schemaVersion\": 2,")
+        append("{\n  \"schemaVersion\": ").append(GENERATED_C_BUILD_CONTRACT_SCHEMA_VERSION).append(',')
+        append("\n  \"profileId\": \"").append(profile.id.escapeJson()).append("\",")
+        append("\n  \"profileSha256\": \"").append(profile.sha256).append("\",")
+        append("\n  \"profileBudgets\": ").append(profile.budgets.canonicalJson()).append(',')
+        append("\n  \"hostSafetyLimits\": {")
+        append("\"buildWallClockMillis\":").append(hostSafetyLimits.maximum.buildWallClockMillis).append(',')
+        append("\"buildMaximumOutputBytes\":").append(hostSafetyLimits.maximum.buildMaximumOutputBytes).append("},")
+        append("\n  \"configuration\": {")
+        append("\"makeExecutable\":\"").append(configuration.makeExecutable.escapeJson()).append("\",")
+        append("\"compilerExecutable\":\"").append(configuration.compilerExecutable.escapeJson()).append("\",")
+        append("\"parallelism\":").append(configuration.parallelism).append(',')
+        append("\"cFlags\":[").append(configuration.cFlags.joinToString(",") { "\"${it.escapeJson()}\"" }).append("],")
+        append("\"wallClockTimeoutMillis\":").append(configuration.wallClockTimeoutMillis).append(',')
+        append("\"maximumOutputBytes\":").append(configuration.maximumOutputBytes).append(',')
+        append("\"terminationGraceMillis\":").append(configuration.terminationGraceMillis).append(',')
+        append("\"buildDefinition\":\"").append(configuration.buildDefinition.escapeJson()).append("\"},")
         append("\n  \"command\": [")
         append(command.joinToString(",") { "\"${it.escapeJson()}\"" })
         append("],\n  \"parallelism\": ").append(configuration.parallelism).append(',')

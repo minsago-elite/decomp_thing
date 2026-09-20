@@ -6,7 +6,10 @@ adapter and binds worker export budgets before analysis creates output. A caller
 can supply an explicit `hostSafetyLimits` policy and an optional `reconstructor`.
 An unsupported profile or analyzer fails before analysis starts. The same profile,
 host policy and reconstructor reach source generation; the selected adapter then
-builds the project with that profile's build configuration and budgets.
+passes both policies to the shared build boundary. The boundary rejects a build
+configuration wider than the selected profile, independently rechecks the host
+ceiling, and records the profile digest, declared budgets, host build ceilings,
+and effective configuration in `reports/build_contract.json`.
 
 For example, the bundled analyzer can select Ninja through the existing wrapper:
 
@@ -54,7 +57,7 @@ The new profile overload requires explicit budget support from an injected analy
   --tests 'decompengine.analysis.GhidraJvmExportBudgetTest'
 ```
 
-The 14 selected tests use authored ELF headers/models and local Make/Ninja
+The focused lifecycle and pipeline tests use authored ELF headers/models and local Make/Ninja
 fixture builds. Pipeline tests verify an explicit host ceiling reaches generation,
 one-function module planning, selected manifest identity and recorded build
 budgets. They also verify host, registration, capability and report-layout rejection

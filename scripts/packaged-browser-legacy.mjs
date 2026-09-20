@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { join, dirname } from 'node:path';
+
+const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 
 export async function seedLegacy(root) {
   await fs.mkdir(root, { mode: 0o700 });
@@ -25,7 +28,24 @@ export async function seedLegacy(root) {
   await fs.writeFile(journalPath, journal);
   const artifactPath = join(reports, 'fixture.txt');
   await fs.writeFile(artifactPath, 'ordinary artifact');
-  return { id, directory, reports, input, job, jobPath, journalPath, journal, artifactPath };
+  const sourceRelative = 'src/modules/fixture.c';
+  const source = 'int fixture(void) { return 7; }\n/* </code><script>globalThis.__sourceEscaped = true</script> */\n';
+  const sourceTree = join(reports, 'source-tree');
+  const sourcePath = join(sourceTree, sourceRelative);
+  await fs.mkdir(dirname(sourcePath), { recursive: true, mode: 0o700 });
+  await fs.writeFile(sourcePath, source);
+  // Deliberately pinned to GeneratedCMakeReconstructionProfile. A profile change
+  // must update this packaged fixture instead of silently weakening validation.
+  const manifest = { schemaVersion: 3, profileId: 'generated-c-make-v1',
+    profileSha256: 'a448a139a09f28ad9f2e08bfcebcb9d85765a0a557ebb11db6d7634bc145f28f',
+    inputSha256: sha256(input), files: [{ path: sourceRelative, sha256: sha256(source),
+      generator: 'packaged-browser-fixture', promptSha256: null, acceptedImplementation: true,
+      contentKind: 'utf8-text', roles: ['archive-payload', 'build-input', 'editable', 'module-implementation', 'viewable'],
+      entityIds: ['fn_fixture'] }], unresolvedEntityIds: [], unresolvedImplementationIds: [] };
+  const manifestPath = join(sourceTree, 'source_tree_manifest.json');
+  await fs.writeFile(manifestPath, JSON.stringify(manifest));
+  return { id, directory, reports, input, job, jobPath, journalPath, journal, artifactPath,
+    sourceRelative, source, sourcePath, manifestPath };
 }
 
 export async function qualifyLegacy({ fixture, origin, bootstrapUrl, tab, cdp, evaluate, ready, makeTarget }) {
@@ -53,6 +73,19 @@ export async function qualifyLegacy({ fixture, origin, bootstrapUrl, tab, cdp, e
   assert.ok(await evaluate(tab, `document.body.innerText.includes('Stored diagnostic details are withheld')`));
   assert.ok(await evaluate(tab, `document.body.innerText.includes('fixture.txt')`));
   assert.ok(!await evaluate(tab, `document.body.innerText.includes('PRIVATE_LEGACY_')`));
+  const sourceRoute = `/jobs/${fixture.id}/source/${fixture.sourceRelative}`;
+  await ready(tab, `[...document.querySelectorAll('a')].some(link => new URL(link.href).pathname === '${sourceRoute}')`, 'legacy source-tree link');
+  await cdp.call('Page.navigate', { url: origin + sourceRoute }, tab.sessionId);
+  await ready(tab, `location.pathname === '${sourceRoute}' && !!document.querySelector('.source-view code')`, 'legacy source page');
+  assert.equal(await evaluate(tab, `document.querySelector('.source-view code').textContent`), fixture.source);
+  assert.ok(await evaluate(tab, `document.querySelector('.source-view code').textContent.includes('<script>')`));
+  assert.ok(await evaluate(tab, `typeof globalThis.__sourceEscaped === 'undefined'`));
+  await cdp.call('Page.reload', {}, tab.sessionId);
+  await ready(tab, `document.querySelector('.source-view code')?.textContent.includes('int fixture')`, 'legacy source reload');
+  assert.equal(await evaluate(tab, `document.querySelector('.source-view code').textContent`), fixture.source);
+  assert.ok(await evaluate(tab, `typeof globalThis.__sourceEscaped === 'undefined'`));
+  await cdp.call('Page.navigate', { url: `${origin}/jobs/${fixture.id}` }, tab.sessionId);
+  await ready(tab, `document.querySelector('#agent-event-list')?.innerText.includes('18446744073709551615')`, 'legacy job after source');
   const endpoint = `/api/jobs/${fixture.id}/events`;
   await ready(tab, `performance.getEntriesByType('resource').some(e => new URL(e.name).pathname === '${endpoint}')`, 'legacy automatic poll');
   const response = await evaluate(tab, `fetch('${endpoint}').then(r => r.json())`);
@@ -115,10 +148,12 @@ export async function qualifyLegacy({ fixture, origin, bootstrapUrl, tab, cdp, e
   assert.equal(await fs.readFile(fixture.jobPath, 'utf8'), activeJob);
   assert.equal(await fs.readFile(fixture.journalPath, 'utf8'), fixture.journal);
   assert.equal(await fs.readFile(fixture.artifactPath, 'utf8'), 'ordinary artifact');
+  assert.equal(await fs.readFile(fixture.sourcePath, 'utf8'), fixture.source);
   assert.deepEqual(await fs.readFile(join(fixture.directory, 'input.elf')), fixture.input);
   return { initialHtml: true, pollingExecuted: true, privateDiagnosticsWithheld: true, privateEventFieldsWithheld: true,
     exactUsage: true, omissionCount: 2, missingJournalPreservesRows: true, validEmptyClearsRows: true,
-    restoredJournalRecovers: true, reload: true, artifactMetadata: true, pageExceptions: 0, mutationRequests: 3,
+    restoredJournalRecovers: true, reload: true, sourceRenderedUnderCsp: true, sourceReload: true,
+    sourceActiveContentInert: true, artifactMetadata: true, pageExceptions: 0, mutationRequests: 3,
     unauthenticatedReadsDenied: true, fragmentClearedBeforeExchange: true, authenticatedDownload: true,
     authenticatedFormUpload: true, uploadedJobRemainsUnexecuted: true, browserStorageEmpty: true,
     logoutRevokesReadsAndDownloads: true, idlePeerClearedByNotification: true,

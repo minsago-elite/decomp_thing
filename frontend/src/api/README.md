@@ -7,8 +7,11 @@ HTTP controllers, durable jobs, event subscriptions, uploads, source reads or Gi
 
 From `frontend/`, run `npm run api:generate` after an intentional shared schema change;
 `npm run api:check` compares deterministic output without writing. Typecheck/build and the contract
-test enforce drift checks. The generator accepts only its reviewed draft-07 subset and fails on
-new keywords or unsupported forms. It emits TypeScript aliases and the runtime schema from the
+test enforce drift checks. The frontend CI job explicitly runs the generator check and
+`scripts/generate-web-api.test.mjs` in an isolated temporary copy: unchanged outputs pass,
+schema or either generated TypeScript file changing fails without rewriting the file, and
+an unsupported schema keyword fails closed. The generator accepts only its reviewed
+draft-07 subset and fails on new keywords or unsupported forms. It emits TypeScript aliases and the runtime schema from the
 same bytes, with their source hash. Runtime validation enforces string bounds, conditional
 constraints and evidence relationships that structural TypeScript types cannot express.
 No runtime validator package or environment lookup is added.

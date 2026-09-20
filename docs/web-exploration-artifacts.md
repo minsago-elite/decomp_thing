@@ -20,7 +20,7 @@ private session policy and rejects query parameters. Both methods resolve and
 verify the digest; HEAD returns the same Content-Length without a body. Range and
 conditional headers are explicitly unsupported and return 400 UNSUPPORTED_HEADER.
 Content is served as an application/octet-stream attachment named exploration.json,
-with no-store, no-referrer, nosniff and `sandbox; default-src 'none'` CSP headers.
+with no-store, no-referrer, nosniff, frame denial and the shared sandboxed inert CSP headers.
 The descriptor's application/json is the producer file's media type, not permission
 to render it as trusted application content.
 

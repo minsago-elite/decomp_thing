@@ -138,9 +138,8 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
                 .values
                 .distinct()
                 .sorted(),
-            behaviorRootEntityIds = evidence.functions.filter { function ->
-                val candidates = profile.adapterConfiguration.getValue("entry-symbol-candidates")
-                function.name in candidates || safeCName(function.name) in candidates
+            behaviorRootEntityIds = evidence.functions.filter {
+                it.name in profile.adapterConfiguration.getValue("entry-symbol-candidates")
             }.map { it.id }.sorted(),
         )
     }
@@ -779,7 +778,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
 
     private val LEGACY_PLAN_SCHEMA_VERSION = 1
     private val PLAN_SCHEMA_VERSION = 2
-    private val BUILD_CONTRACT_SCHEMA_VERSION = 2
+    private val BUILD_CONTRACT_SCHEMA_VERSION = 3
     private val MAXIMUM_EVIDENCE_IDENTIFIER_CHARACTERS = 4_096
     private val MAXIMUM_EVIDENCE_TEXT_CHARACTERS = 16 * 1024 * 1024
     private val MAKEFILE = "Makefile"
