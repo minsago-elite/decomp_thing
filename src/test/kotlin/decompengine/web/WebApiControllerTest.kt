@@ -524,16 +524,23 @@ class WebApiControllerTest {
     @Test
     fun `v1 errors connect response IDs to redacted server diagnostics`() {
         val diagnostics = CopyOnWriteArrayList<String>()
+        fun awaitDiagnostic(expected: Int) {
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2)
+            while (diagnostics.size < expected && System.nanoTime() < deadline) Thread.yield()
+            assertEquals(expected, diagnostics.size)
+        }
         withServer(requestDiagnosticOutput = { diagnostics += it }) { server, _, jobId ->
             val canary = "private_root_and_token_canary"
             val path = "/workbench/api/v1/jobs/$jobId?untrusted=$canary"
             val unauthenticated = request(server, path)
             assertError(unauthenticated, 401, "SESSION_REQUIRED")
+            awaitDiagnostic(1)
             val deniedId = unauthenticated.headers().firstValue("X-Request-ID").orElseThrow()
             assertEquals("web-http-failure request_id=$deniedId status=401 code=SESSION_REQUIRED", diagnostics.single())
             val cookie = establish(server)
             val rejectedQuery = request(server, path, headers = mapOf("Cookie" to cookie))
             assertError(rejectedQuery, 400, "VALIDATION_FAILED")
+            awaitDiagnostic(2)
             val rejectedId = rejectedQuery.headers().firstValue("X-Request-ID").orElseThrow()
             assertEquals("web-http-failure request_id=$rejectedId status=400 code=VALIDATION_FAILED", diagnostics.last())
             assertEquals(2, diagnostics.size)
@@ -560,6 +567,8 @@ class WebApiControllerTest {
             val id = body.getValue("requestId").jsonPrimitive.content
             assertEquals(id, response.headers().firstValue("X-Request-ID").orElseThrow())
             assertEquals("SESSION_REQUIRED", body.getValue("error").jsonObject.getValue("code").jsonPrimitive.content)
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2)
+            while (diagnostics.isEmpty() && System.nanoTime() < deadline) Thread.yield()
             assertEquals("web-http-failure request_id=$id status=401 code=SESSION_REQUIRED", diagnostics.single())
             assertFalse(diagnostics.single().contains(canary))
             assertFalse(response.body().contains(canary))
