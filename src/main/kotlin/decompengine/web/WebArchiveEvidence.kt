@@ -42,7 +42,7 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
         requireNormalizedProjectPath(layout.contractPath, "archive build contract path")
         requireNormalizedProjectPath(layout.artifactPath, "archive build artifact path")
         require(layout.contractPath != layout.artifactPath) { "archive build evidence paths are duplicated" }
-        val inventory = store.sourceArchiveInventory(jobId, transport)
+        val inventory = store.sourceArchiveInventory(jobId, reportPrefix)
         val temporary = Files.createTempDirectory("decomp-web-archive-")
         try {
             val extractedRoot = temporary.resolve("payload")
