@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact
 import { beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import type { Bootstrap, Run, Report } from '../src/api/generated';
+import { ApiClientError } from '../src/api/errors';
 import { App } from '../src/app/App';
 import { createBrowserSession } from '../src/session/session';
 
@@ -38,6 +39,19 @@ it('pins attempt identity and shows completed candidate separately from acceptan
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     expect(await screen.findByText('Connect a local session to view this attempt.')).toBeTruthy();
     expect(screen.queryByText('9007199254740993')).toBeNull();
+  } finally { auth.dispose(); }
+});
+
+it('shows a canonical reference on an attempt read failure without exposing its server code', async () => {
+  const auth = await session();
+  const requestId = '123e4567-e89b-42d3-a456-426614174000';
+  transport.get.mockRejectedValue(new ApiClientError('http_error', { status: 503, serverCode: 'PRIVATE_DIAGNOSTIC', requestId }));
+  history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs/${sample.runId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain(`Reference ID: ${requestId}.`);
+    expect(alert.textContent).not.toContain('PRIVATE_DIAGNOSTIC');
   } finally { auth.dispose(); }
 });
 

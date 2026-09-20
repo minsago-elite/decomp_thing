@@ -17,12 +17,11 @@ export function activityGroup(event: WebEvent): ActivityGroup {
   }
 }
 
-export function matchesActivity(event: WebEvent, group: 'all' | ActivityGroup, task: string): boolean {
+export function matchesActivity(event: WebEvent, group: 'all' | ActivityGroup, taskDigest: string): boolean {
   if (group !== 'all' && group !== activityGroup(event)) return false;
-  if (!task) return true;
+  if (!taskDigest) return true;
   if (event.type !== 'workflow.observation') return false;
-  const fields = event.payload.fields;
-  return (fields.taskId?.includes(task) ?? false) || (fields.taskIdSha256?.includes(task) ?? false);
+  return event.payload.fields.taskIdSha256?.includes(taskDigest) ?? false;
 }
 
 export function ActivityRow({ event, basePath }: { event: WebEvent; basePath: string }) {
@@ -32,8 +31,8 @@ export function ActivityRow({ event, basePath }: { event: WebEvent; basePath: st
     {event.type === 'workflow.observation' ? <>
       <p>Observed {event.payload.observationKind}{event.payload.fields.phase ? `: ${event.payload.fields.phase}` : ''}</p>
       {event.payload.fields.status && <p>Observed status: {event.payload.fields.status}</p>}
-      <p>Writer: {event.payload.writerId}. Task: {event.payload.fields.taskId ?? 'Not recorded'}. Revision: {event.payload.fields.revisionId ?? 'Not recorded'}.</p>
-      {event.payload.observationKind === 'plan' && <p>Plan entries reported: {event.payload.fields.entryCount ?? 'Not recorded'}. Retained entry metadata: {event.payload.fields.entries?.length ?? 'Not recorded'}. {event.payload.fields.entriesTruncated && 'Producer truncated plan entries.'}</p>}
+      <p>Writer: {event.payload.writerId}.</p>
+      {event.payload.observationKind === 'plan' && <p>Plan entries reported: {event.payload.fields.entryCount ?? 'Not recorded'}. Entry details are omitted from public activity. {event.payload.fields.entriesTruncated && 'Producer reported truncated plan entries.'}</p>}
       <p>Fields omitted: {event.payload.omittedFieldCount}. {event.payload.fields.sourceSequenceGap && 'Source sequence gap reported.'} {event.payload.fields.textOmitted && 'Producer omitted text.'} {event.payload.fields.messageTrackingExhausted && 'Producer message tracking limit reached.'}</p>
       <ObservedUsage observation={event.payload} occurredAt={event.occurredAt} sequence={event.sequence} />
       <details>

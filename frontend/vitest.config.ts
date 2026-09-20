@@ -3,6 +3,7 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   plugins: [preact({ reactAliasesEnabled: false })],
+  server: { host: '127.0.0.1' },
   test: {
     environment: 'jsdom',
     setupFiles: ['./tests/setup.ts'],

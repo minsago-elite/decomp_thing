@@ -359,17 +359,19 @@ public projection: `id`, `filename`, `status`, `created_at`, `updated_at`, `size
 are removed for privacy: stored diagnostic text can contain host paths, environment values or
 raw exceptions, including records predating redaction. No placeholder diagnostic is invented.
 ELF metadata keeps its existing field names and numeric types, including signed/numeric
-`entry_point`; this legacy shape is not a v1 DTO. Execution POSTs still redirect.
+`entry_point`; its five categorical strings must exactly match `ElfMetadataReader` output,
+otherwise the historical job is unavailable with a fixed diagnostic. This legacy shape is not
+a v1 DTO. Execution POSTs still redirect.
 The persistence serializer and stored `job.json` format are unchanged.
 The HTTP regression in `UploadServerTest` checks both responses, an old private diagnostic,
 exact public keys, retained field values and byte-for-byte preservation of stored records.
 Legacy job HTML also withholds persisted `status_message` prose and displays a fixed
 explanation when details exist. The job status itself remains visible. Generic request/storage
 exceptions and unsupported-upload exceptions no longer supply raw text to HTML error pages;
-those paths use fixed public messages. Typed service/access error messages remain available.
+those paths use fixed public messages. Service/storage codes are allowlisted and select fixed
+messages; unknown code text collapses to `JOB_STORAGE_UNAVAILABLE` rather than being copied.
 This leaves stored diagnostic bytes and background redaction behavior unchanged. It is a
-privacy change for generic diagnostics, not a certification of report summaries or every
-retained metadata label as public.
+privacy change for DTO diagnostics, not a certification of report/source/artifact content.
 
 Legacy `/api/*` failures always return JSON, including unknown routes. POST `/jobs`
 returns JSON failures when the existing Accept switch selects `application/json`; HTML form

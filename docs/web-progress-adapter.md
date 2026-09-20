@@ -421,26 +421,27 @@ qualification or conflicting workflow-command scenarios.
 
 ## Public transport projection
 
-The v1 producer now withholds `text`, plan `entries` and `path` from every observation,
-regardless of message role or event kind. The journal does not certify provider-supported
-public visibility; hiding prose only in the activity component left it in browser responses.
-Known fields still undergo the existing type and size validation before projection. Each
-withheld source field increments `omittedFieldCount`, alongside unknown source fields, and
-withheld `text` sets `textOmitted: true`. Entire plan entries count as one omitted source field;
-entry counts and truncation metadata remain available. These counts do not imply retained
-event loss, and cursors still bind the original journal records, including withheld content.
+The v1 producer withholds raw task/workflow/revision labels, `text`, plan `entries` and `path`
+from every observation, regardless of message role or event kind. The journal does not certify
+provider-supported public visibility; hiding prose only in the activity component left it in
+browser responses. Each private source field increments `omittedFieldCount`, alongside unknown
+source fields, and withheld `text` sets `textOmitted: true`. Private fields are omitted without
+interpreting their retained value shape. Entry counts, truncation metadata and explicit SHA-256
+commitments remain available. These counts do not imply retained event loss, and cursors still
+bind the original journal records, including withheld content.
 
-Supported correlation, usage, event sequence and observation authority are unchanged. The
-schema retains optional prose fields for compatibility with its design fixtures; schema validity
-alone does not certify public visibility or oblige this producer to emit a field. New public and
-plan metadata fixtures capture the implemented producer output. Legacy JSON/HTML uses its own
-metadata projection and omission count spelling, documented in the API compatibility section.
+Supported opaque correlation, usage, event sequence and observation authority are unchanged.
+Recognized categorical values remain typed. Unknown optional categories are omitted and counted;
+unknown workflow/kind values use the fixed `unknown` state so forward-compatible retained records
+remain readable. The schema no longer admits raw labels, prose, paths or plan entries. Public and
+plan metadata fixtures capture the implemented producer output. Legacy JSON/HTML shares the same
+field classifier and uses its own envelope and omission-count spelling.
 
-Mapper tests cover all message roles, exact usage values and unknown-field accounting. The
+Mapper tests cover typed message roles, forward values, exact usage values and unknown-field accounting. The
 HTTP progress test checks authenticated response omission and unchanged journal bytes. The
-byte-page test uses large retained metadata to keep exercising response splitting after prose
-removal. Full classification of retained labels and explicit provider public-message support
-remain outstanding; this change does not claim that all possible journal data is public.
+byte-page test uses maximal public metadata to exercise the response ceiling after private-field
+removal. Intentionally retained opaque identifiers versus private labels are documented in
+`web-public-dto-privacy.md`; explicit provider public-message support remains outside this boundary.
 
 ### Packaged privacy qualification
 

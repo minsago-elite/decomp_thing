@@ -26,10 +26,10 @@ describe('bounded incremental SSE decoder', () => {
     expect(result).toEqual([decodeContract(JSON.stringify(observation))]);
   });
   it('handles UTF-8 split inside a multibyte value without replacing characters', () => {
-    const value = structuredClone(observation);
+    const value = structuredClone(fixture('event-message-lossless'));
     value.occurredAt = '2026-09-06T00:00:00Z';
     const payload = value.payload as Record<string, unknown>;
-    (payload.fields as Record<string, unknown>).taskId = 'fixture-한글';
+    payload.textDelta = 'fixture-한글';
     const decoder = createSseDecoder('/'); const result = [];
     for (const byte of encoder.encode(wire(value))) result.push(...decoder.push(new Uint8Array([byte])));
     expect(result).toEqual([decodeContract(JSON.stringify(value))]);

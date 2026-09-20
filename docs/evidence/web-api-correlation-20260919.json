@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "issue": 476,
+  "parentIssue": 159,
+  "basePullRequest": 1372,
+  "sourceCommits": ["b1a6c563", "36d669f6", "1181a5a8"],
+  "mergedBehaviorVerified": false,
+  "productionQualified": false,
+  "behavior": {
+    "server": "Versioned and legacy JSON failures, including direct operator and uncertain-upload rejections, emit a fixed-format diagnostic containing only the response UUID, bounded status, and allowlisted public code; unknown codes become UNCLASSIFIED. No request path, header, rejected value, exception, or private persisted detail is recorded on this line.",
+    "browser": "Only canonical lowercase UUIDs from ApiClientError with HTTP 4xx/5xx status are appended to fixed, locally authored error messages in job, run, history, activity, upload, evidence, policy, and session views. Malformed successful responses and post-header stream failures cannot claim a server failure reference.",
+    "assetErrors": "JSON asset failures also emit the fixed-format diagnostic; HTML legacy errors are outside this JSON API correlation path."
+  },
+  "verification": [
+    {
+      "command": "./gradlew test --tests decompengine.web.WebRequestDiagnosticsTest --tests decompengine.web.WebApiControllerTest --tests decompengine.web.LocalWebAccessTest --tests decompengine.web.EmbeddedWebAssetsTest --tests decompengine.web.UploadServerTest -x stageFrontend --no-daemon",
+      "result": "94 passed, 0 failed in both the initial and a post-staging run before the direct-legacy follow-up; real loopback HTTP response/header IDs matched captured server diagnostics for v1 and legacy JSON failures"
+    },
+    {
+      "command": "./gradlew test --tests decompengine.web.WebRequestDiagnosticsTest --tests decompengine.web.WebApiControllerTest --tests decompengine.web.WebAuthenticationInspectionTest --tests decompengine.web.UploadUncertaintyHttpTest -x stageFrontend --no-daemon",
+      "result": "29 passed, 0 failed after the direct-legacy follow-up; operator 400/409 and uncertain-upload 409 body/header/log IDs matched, without private action or exception details"
+    },
+    {
+      "command": "./gradlew test --tests decompengine.web.WebRequestDiagnosticsTest --tests decompengine.web.WebApiControllerTest --tests decompengine.web.LocalWebAccessTest --tests decompengine.web.EmbeddedWebAssetsTest --tests decompengine.web.UploadServerTest --tests decompengine.web.WebAuthenticationInspectionTest --tests decompengine.web.UploadUncertaintyHttpTest -x stageFrontend --no-daemon",
+      "result": "106 passed, 1 failed after the final Bun-built bundle was staged; failure was the existing UploadServerTest shutdown-timeout retry race, not a correlation assertion"
+    },
+    {
+      "command": "Bun focused Vitest, TypeScript noEmit, ESLint, generated API check, Vite build, asset bundle report",
+      "result": "49 focused tests passed before the status-gate follow-up; 30 affected tests passed after it; all listed static/build checks passed"
+    },
+    {
+      "command": "/tmp/decomp-node-24/bin/node node_modules/vitest/vitest.mjs run --maxWorkers=1",
+      "result": "362 passed, 0 failed across 26 files"
+    }
+  ],
+  "runnerLimitations": [
+    "A full Bun serial Vitest attempt stalled and was interrupted after its start banner, so it is not counted as a pass.",
+    "An earlier parallel Bun run had synthetic development-server cleanup and upload fake-timer failures; both affected tests passed when isolated or under the pinned Node serial suite.",
+    "An intermediate 94-test JVM run passed 93 and failed the existing UploadServerTest shutdown-timeout case at its second stop; two isolated repeats failed, while later isolated and complete 94-test runs passed. The same isolated case passed twice on the unchanged #1372 base. The final 107-test post-fix run again failed only this case (106 passed). The test releases a worker and retries stop without awaiting worker quiescence; stop can report active ownership while that worker is still finishing. This is recorded as an intermittent pre-existing race, not a green full regression."
+  ],
+  "scopeLimits": [
+    "The diagnostic connection is local server stderr output, not a production log ingestion or observability integration.",
+    "Asset JSON errors are statically wired to the diagnostic output, but their response/header/log join was not independently integration-tested.",
+    "The response contract and public DTO filtering depend on the open #1372 base PR; this stacked branch is not merged behavior.",
+    "No packaged-browser run, external network, native analysis, or production telemetry system was exercised."
+  ]
+}

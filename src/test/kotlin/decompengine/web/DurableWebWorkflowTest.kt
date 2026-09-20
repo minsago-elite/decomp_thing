@@ -432,12 +432,18 @@ class DurableWebWorkflowTest {
         }), Executor(queued::add)).use { service ->
             service.initializeExistingStorage()
             val admission = assertIs<DurableWebWorkflowAdmission.Started>(service.startDurable(job.id, version(service, job.id), DurableWebWorkflowRequest(WorkflowKind.RECONSTRUCT)))
+            val beforePinJobVersion = version(service, job.id)
             val before = service.getAttempt(job.id, admission.runId)
             val actor = decompengine.jobs.WorkflowPinActor.browserSession("b".repeat(64))
             val pinned = service.setProgressRetentionPinned(job.id, admission.runId, before.version, true, actor)
             val audited = assertIs<WorkflowJobInspection.Available>(service.inspectDurableJob(job.id)).snapshot.pinAudit.entries.single()
             assertEquals(actor, audited.actor); assertEquals(pinned.version, audited.appliedVersion)
             assertTrue(pinned.progressRetentionPinned)
+            val afterPinJobVersion = version(service, job.id)
+            assertNotEquals(beforePinJobVersion, afterPinJobVersion)
+            assertEquals("VERSION_CONFLICT", assertFailsWith<WorkflowStoreException> {
+                service.startDurable(job.id, beforePinJobVersion, DurableWebWorkflowRequest(WorkflowKind.RECONSTRUCT))
+            }.code)
             assertEquals("VERSION_CONFLICT", assertFailsWith<WebJobServiceException> {
                 service.setProgressRetentionPinned(job.id, admission.runId, before.version, false)
             }.code)
@@ -590,7 +596,8 @@ class DurableWebWorkflowTest {
         override val limits = LIMITS
         override fun execute(context: DurableWebWorkflowContext) = action(context)
     }
-    private fun version(service: WebJobService, jobId: String) = (service.inspectDurableJob(jobId) as WorkflowJobInspection.Available).snapshot.version
+    private fun version(service: WebJobService, jobId: String) =
+        webJob(service.presentation(jobId)).getValue("version").jsonPrimitive.content
     private fun withRoot(action: (Path) -> Unit) {
         val root = createTempDirectory("durable-web-")
         try { action(root) } finally { root.toFile().deleteRecursively() }

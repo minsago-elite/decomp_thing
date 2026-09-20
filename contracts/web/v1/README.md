@@ -50,8 +50,10 @@ explicit omission accounting, separate from event-retention gaps. See
 [`docs/web-progress-adapter.md`](../../../docs/web-progress-adapter.md).
 
 The `event-observation-public-metadata` and `event-observation-plan-metadata` fixtures
-capture the current producer's omission of uncertified prose and paths. Older prose-bearing
-fixtures remain schema compatibility examples, not a public-visibility certification.
+capture the public producer output after raw labels, prose, paths and plan entries are omitted.
+The retained-record input examples that contain those fields are declared invalid as public
+contract documents and remain only as projection-test inputs. Typed state and explicit SHA-256
+commitments are public; a digest never promotes the committed label or prose.
 
 A progress snapshot with zero retained events can still acknowledge a nonzero logical
 watermark after omissions. Its oldestCursor is null, while throughCursor/throughSequence

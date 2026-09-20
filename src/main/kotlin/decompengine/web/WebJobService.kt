@@ -11,6 +11,7 @@ import decompengine.jobs.WorkflowRunState
 import decompengine.jobs.WorkflowStoreException
 import decompengine.jobs.WorkflowTerminalReason
 import decompengine.jobs.WorkflowTransition
+import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
@@ -193,7 +194,9 @@ class WebJobService(
         if (result is WorkflowJobInspection.Unavailable && result.diagnostic.code == "JOB_NOT_FOUND") {
             throw WebJobServiceException("JOB_NOT_FOUND", "The requested job is unavailable.")
         }
-        return result
+        return if (result is WorkflowJobInspection.Unavailable) {
+            WorkflowJobInspection.Unavailable(result.jobId, publicWorkflowDiagnostic(result.diagnostic.code))
+        } else result
     }
 
     private fun requireInitializedRead() {
@@ -210,9 +213,13 @@ class WebJobService(
         return try {
             val inspected = attempts?.inspect(jobId)
             if (inspected is WorkflowJobInspection.Unavailable) return WebJobInspection.Unavailable(
-                WebJobDiagnostic(jobId, inspected.diagnostic.code, inspected.diagnostic.message))
+                publicWebDiagnostic(jobId, inspected.diagnostic.code))
             val snapshot = (inspected as? WorkflowJobInspection.Available)?.snapshot
             val raw = store.get(jobId)
+            requirePublicElfCategories(raw.metadata)
+            if (snapshot != null && snapshot.attempts.isNotEmpty()) {
+                require(snapshot.version.matches(Regex("version_[a-f0-9]{32}"))) { "Invalid stored workflow version" }
+            }
             val latest = snapshot?.latestRun
             val legacyInterrupted = latest == null && snapshot?.legacy?.recoveredInterrupted == true &&
                 raw.status in setOf("queued", "analyzing") && active[jobId] !is LegacyTask
@@ -227,12 +234,12 @@ class WebJobService(
             val reports = latest?.let { context(jobId, it.runId) }
                 ?: WebReportContext(store.storageRoot.resolve(jobId).resolve("reports"))
             WebJobInspection.Available(WebJobPresentation(job, snapshot, reports,
-                (inspected as? WorkflowJobInspection.Available)?.diagnostics.orEmpty(), legacyInterrupted))
+                (inspected as? WorkflowJobInspection.Available)?.diagnostics.orEmpty()
+                    .map { publicWorkflowDiagnostic(it.code) }, legacyInterrupted))
         } catch (failure: WorkflowStoreException) {
-            WebJobInspection.Unavailable(WebJobDiagnostic(jobId, failure.code, failure.message ?: "Job storage is unavailable."))
+            WebJobInspection.Unavailable(publicWebDiagnostic(jobId, failure.code))
         } catch (_: Exception) {
-            WebJobInspection.Unavailable(WebJobDiagnostic(jobId, "JOB_RECORD_UNAVAILABLE",
-                "The job record is unavailable or invalid. Preserve its storage and restore a verified backup before retrying."))
+            WebJobInspection.Unavailable(publicWebDiagnostic(jobId, "JOB_RECORD_UNAVAILABLE"))
         }
     }
 
@@ -480,13 +487,14 @@ class WebJobService(
         val owner = writableStore()
         val view = inspectStoredJob(owner, jobId) as? WorkflowJobInspection.Available
             ?: throw WebJobServiceException("JOB_RECORD_UNAVAILABLE", "The job record is unavailable; inspect its storage diagnostic.")
-        if (view.snapshot.version != expectedJobVersion) throw WorkflowStoreException("VERSION_CONFLICT", "The workflow version changed; refresh before starting another attempt.")
+        val publicVersion = webJob(presentation(jobId)).getValue("version").jsonPrimitive.content
+        if (publicVersion != expectedJobVersion) throw WorkflowStoreException("VERSION_CONFLICT", "The workflow version changed; refresh before starting another attempt.")
         if (active.containsKey(jobId) || view.snapshot.attempts.any { !it.state.terminal }) return DurableWebWorkflowAdmission.AlreadyRunning
         if (request.inputRevisionId != null && request.inputRevisionId != view.snapshot.acceptedRevision?.revisionId) {
             throw WebJobServiceException("INPUT_REVISION_UNAVAILABLE", "The requested input revision has no trusted publication reference for this job.")
         }
         val job = store.get(jobId)
-        val queued = owner.create(jobId, expectedJobVersion,
+        val queued = owner.create(jobId, view.snapshot.version,
             NewWorkflowAttempt(request.workflow, registration.limits, request.inputRevisionId, previousRunId = request.previousRunId))
         val task = DurableTask(job, queued.attempt, registration.adapter)
         active[jobId] = task

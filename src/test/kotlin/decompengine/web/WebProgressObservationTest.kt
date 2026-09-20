@@ -25,7 +25,7 @@ class WebProgressObservationTest {
         assertEquals(Json.parseToJsonElement(Files.readString(Path.of("contracts/web/v1/fixtures/event-observation-public-metadata.json"))), project(record()))
     }
 
-    @Test fun `plan prose is withheld while bounded task labels retain upstream truncation markers`() {
+    @Test fun `plan prose and raw task labels are withheld despite upstream truncation markers`() {
         val expected = Json.parseToJsonElement(Files.readString(Path.of("contracts/web/v1/fixtures/event-observation-truncated-preview.json"))).jsonObject
         val source = JsonObject(record(expected) + ("futureField" to JsonPrimitive("omitted")))
         assertEquals(Json.parseToJsonElement(Files.readString(Path.of("contracts/web/v1/fixtures/event-observation-plan-metadata.json"))), project(source))
@@ -34,14 +34,14 @@ class WebProgressObservationTest {
     @Test fun `unknown fields are counted but not copied into observations`() {
         val event = project(JsonObject(record() + ("future_private_field" to JsonPrimitive("must not escape"))))
         val payload = event.getValue("payload").jsonObject
-        assertEquals("2", payload.getValue("omittedFieldCount").jsonPrimitive.content)
+        assertEquals("3", payload.getValue("omittedFieldCount").jsonPrimitive.content)
         assertFalse(event.toString().contains("must not escape"))
         assertFalse(event.toString().contains("future_private_field"))
         assertEquals("observations", payload.getValue("authority").jsonPrimitive.content)
     }
 
-    @Test fun `all message roles withhold prose and path without losing correlation`() {
-        for (role in listOf("thought", "system", "assistant", "unknown")) {
+    @Test fun `known message roles retain typed state while prose and paths are withheld`() {
+        for (role in listOf("thought", "system", "assistant", "user")) {
             val output = project(JsonObject(record() + mapOf(
                 "role" to JsonPrimitive(role), "text" to JsonPrimitive("PRIVATE_PROSE"),
                 "path" to JsonPrimitive("/PRIVATE_HOST_ROOT/input"), "textOmitted" to JsonPrimitive(false),
@@ -50,7 +50,7 @@ class WebProgressObservationTest {
             val fields = payload.getValue("fields").jsonObject
             assertFalse(output.toString().contains("PRIVATE_"))
             assertEquals("true", fields.getValue("textOmitted").jsonPrimitive.content)
-            assertEquals("2", payload.getValue("omittedFieldCount").jsonPrimitive.content)
+            assertEquals("3", payload.getValue("omittedFieldCount").jsonPrimitive.content)
             assertEquals(role, fields.getValue("role").jsonPrimitive.content)
             assertEquals("18446744073709551615", fields.getValue("inputTokens").jsonPrimitive.content)
         }
@@ -60,10 +60,60 @@ class WebProgressObservationTest {
         for ((key, value) in listOf(
             "inputTokens" to JsonPrimitive(-1), "inputTokens" to JsonPrimitive("18446744073709551616"),
             "inputTokens" to JsonPrimitive("1e3"), "completed" to JsonPrimitive("true"),
-            "text" to JsonPrimitive("x".repeat(8193)), "requestSha256" to JsonPrimitive("invalid"),
+            "requestSha256" to JsonPrimitive("invalid"),
             "runId" to JsonPrimitive("invalid/path"), "agentSequence" to JsonPrimitive("01"),
-            "entries" to JsonArray(List(9) { JsonObject(emptyMap()) }),
+            "wallClock" to JsonPrimitive("-PT1S"), "role" to JsonObject(emptyMap()),
         )) assertFails(key) { project(JsonObject(record() + (key to value))) }
+    }
+
+    @Test fun `legacy and v1 projection suppress private labels prose paths plans and forward values`() {
+        val private = JsonObject(record() + mapOf(
+            "workflow" to JsonPrimitive("future_ENV_SECRET_workflow"),
+            "kind" to JsonPrimitive("future_raw_exception_kind"),
+            "taskId" to buildJsonObject { put("nested", "RAW_TASK_ENV_SECRET") },
+            "workflowRunId" to JsonPrimitive("RAW_RUN_/PRIVATE_HOST_ROOT"),
+            "revisionId" to JsonPrimitive("RAW_REV_IllegalStateException"),
+            "path" to JsonPrimitive("/PRIVATE_HOST_ROOT/input.elf"),
+            "text" to JsonPrimitive("ENV_SECRET=private IllegalStateException(/PRIVATE_HOST_ROOT)"),
+            "role" to JsonPrimitive("future_PRIVATE_ROLE"),
+            "entries" to JsonArray(listOf(buildJsonObject {
+                put("idSha256", "f".repeat(64)); put("status", "future_plan_state"); put("text", "PRIVATE_PLAN_TEXT")
+            })),
+        ))
+        val versioned = project(private)
+        val legacy = legacyProgressPresentation(buildJsonObject {
+            put("schemaVersion", 1); put("displayOnly", true); put("nextSequence", "9007199254740994")
+            put("queueDropped", 0); put("historyDropped", 0); put("truncated", false)
+            put("events", JsonArray(listOf(private)))
+        })
+
+        for (wire in listOf(versioned.toString(), legacy.toString())) {
+            for (privateValue in listOf("ENV_SECRET", "PRIVATE_HOST_ROOT", "IllegalStateException", "RAW_TASK", "RAW_RUN", "RAW_REV", "PRIVATE_PLAN_TEXT", "future_PRIVATE_ROLE")) {
+                assertFalse(wire.contains(privateValue), privateValue)
+            }
+        }
+        val payload = versioned.getValue("payload").jsonObject
+        assertEquals("unknown", payload.getValue("workflow").jsonPrimitive.content)
+        assertEquals("unknown", payload.getValue("observationKind").jsonPrimitive.content)
+        assertEquals("7", payload.getValue("omittedFieldCount").jsonPrimitive.content)
+        assertEquals("unknown", legacy.getValue("events").jsonArray.single().jsonObject.getValue("workflow").jsonPrimitive.content)
+        assertEquals("unknown", legacy.getValue("events").jsonArray.single().jsonObject.getValue("kind").jsonPrimitive.content)
+    }
+
+    @Test fun `metadata sparse legacy records remain readable without invented identity or time`() {
+        val legacy = legacyProgressPresentation(buildJsonObject {
+            put("schemaVersion", 1); put("displayOnly", true); put("nextSequence", 1)
+            put("queueDropped", 0); put("historyDropped", 0); put("truncated", false)
+            put("events", buildJsonArray { add(buildJsonObject {
+                put("sequence", 0); put("kind", "future_message_kind")
+                put("role", "future_PRIVATE_ROLE"); put("text", "ENV_SECRET=/PRIVATE_HOST_ROOT")
+            }) })
+        })
+        val event = legacy.getValue("events").jsonArray.single().jsonObject
+        assertEquals("unknown", event.getValue("kind").jsonPrimitive.content)
+        assertFalse(event.containsKey("runId")); assertFalse(event.containsKey("workflow")); assertFalse(event.containsKey("time"))
+        assertEquals("2", event.getValue("presentationOmittedFields").jsonPrimitive.content)
+        assertFalse(legacy.toString().contains("PRIVATE")); assertFalse(legacy.toString().contains("ENV_SECRET"))
     }
 
     @Test fun `actual persisted writer records retain distinct attempt and writer identity`() {
@@ -74,18 +124,16 @@ class WebProgressObservationTest {
             }
             val journal = AgentProgressJournal.decode(Files.readAllBytes(root.resolve(AgentProgressJournal.FILE_NAME)))
             assertTrue(journal.getValue("events").jsonArray.size >= 2)
-            var sawTruncatedTask = false
+            var sawWithheldTask = false
             for (raw in journal.getValue("events").jsonArray) {
                 val event = webProgressObservation("job_fixture", "attempt_fixture", "cursor_fixture", raw.jsonObject)
                 assertEquals("attempt_fixture", event.getValue("runId").jsonPrimitive.content)
                 val payload = event.getValue("payload").jsonObject
                 assertNotEquals("attempt_fixture", payload.getValue("writerId").jsonPrimitive.content)
-                assertEquals("0", payload.getValue("omittedFieldCount").jsonPrimitive.content)
-                payload.getValue("fields").jsonObject["taskId"]?.jsonPrimitive?.content?.let { task ->
-                    assertEquals(533, task.length); assertTrue(task.endsWith("… [preview truncated]")); sawTruncatedTask = true
-                }
+                assertFalse(payload.getValue("fields").jsonObject.containsKey("taskId"))
+                if (payload.getValue("omittedFieldCount").jsonPrimitive.content == "1") sawWithheldTask = true
             }
-            assertTrue(sawTruncatedTask)
+            assertTrue(sawWithheldTask)
         } finally { Files.walk(root).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) } }
     }
 }

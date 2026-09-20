@@ -1,7 +1,7 @@
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso/router';
-import { ApiClientError } from '../api/client';
+import { ApiClientError, withApiFailureReference } from '../api/client';
 import { jobPath } from '../app/paths';
 import type { BrowserSession } from '../session/session';
 import type { UploadProgress } from '../api/generated';
@@ -114,7 +114,7 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
       location.route(jobPath(basePath, result.data.jobId));
     } catch (error) {
       if (!live.current) return;
-      setPhase('retry'); setMessage(failureMessage(error));
+      setPhase('retry'); setMessage(withApiFailureReference(failureMessage(error), error));
     } finally { clearTimeout(pollTimer); controller.abort(); if (active.current === controller) active.current = null; }
   }
   function discard() {

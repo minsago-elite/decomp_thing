@@ -222,6 +222,7 @@ internal fun renderJobDocument(job: Job, reportContext: WebReportContext? = null
     progressSnapshot: JsonObject? = null, explorationReport: JsonObject? = null,
     repairHistory: JsonObject? = null, reconstructionProgress: JsonObject? = null,
     artifacts: List<WebArtifactSummary>? = null): WebApplicationDocument {
+    requirePublicElfCategories(job.metadata)
     val reports = reportsFor(job, reportContext)
     val active = job.status in setOf("queued", "analyzing")
     val metadata = job.metadata.toJson().entries.joinToString("") { (key, value) ->
@@ -251,8 +252,11 @@ internal fun renderJobDocument(job: Job, reportContext: WebReportContext? = null
               list.replaceChildren();
               for (const event of snapshot.events.slice(-30)) {
                 const item = document.createElement('li');
-                item.textContent = [event.sequence, event.workflowRunId || '', event.taskId || '',
-                  event.revisionId || '', event.phase || event.kind, event.role || '',
+                item.textContent = [event.sequence,
+                  event.workflowRunIdSha256 ? 'workflow commitment ' + event.workflowRunIdSha256 : '',
+                  event.taskIdSha256 ? 'task commitment ' + event.taskIdSha256 : '',
+                  event.revisionIdSha256 ? 'revision commitment ' + event.revisionIdSha256 : '',
+                  event.phase || event.kind, event.role || '',
                   event.status || event.stopReason || event.failureKind || event.decision || '',
                   event.acceptedRevisionSha256 ? 'accepted source ' + event.acceptedRevisionSha256 : '',
                   event.presentationOmittedFields ? 'Some event fields withheld' : '',
@@ -340,7 +344,10 @@ private fun renderAgentProgress(snapshot: JsonObject?): String {
     val events = retained.takeLast(30)
     val rows = events.joinToString("") { item ->
         val event = item.jsonObject
-        val summary = listOf(event.text("sequence"), event.text("workflowRunId"), event.text("taskId"), event.text("revisionId"),
+        val summary = listOf(event.text("sequence"),
+            event.text("workflowRunIdSha256").let { if (it.isBlank()) "" else "workflow commitment $it" },
+            event.text("taskIdSha256").let { if (it.isBlank()) "" else "task commitment $it" },
+            event.text("revisionIdSha256").let { if (it.isBlank()) "" else "revision commitment $it" },
             event.text("phase").ifBlank { event.text("kind") }, event.text("role"),
             event.text("status").ifBlank { event.text("stopReason") }.ifBlank { event.text("failureKind") }
                 .ifBlank { event.text("decision") },
@@ -453,6 +460,7 @@ private fun renderJobList(jobs: List<Job>): String {
         </div>
     """.trimIndent()
     return "<div class=\"job-list\">" + jobs.joinToString("") { job ->
+        requirePublicElfCategories(job.metadata)
         """
         <a class="job-row" href="/jobs/${job.id}">
           <span class="file-glyph">ELF</span>

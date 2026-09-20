@@ -113,6 +113,14 @@ it('retains stale rows after failed refresh and clears private rows on denied ac
   await waitFor(() => expect(screen.queryByText('program-1.elf')).toBeNull());
 });
 
+it('shows a safe API correlation reference without exposing opaque response metadata', async () => {
+  const requestId = '123e4567-e89b-42d3-a456-426614174000';
+  transport.get.mockRejectedValueOnce(new ApiClientError('http_error', { status: 503, requestId, serverCode: 'LISTING_BUSY' }));
+  render(<Dashboard basePath="" />);
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toContain(`Reference ID: ${requestId}.`);
+  expect(alert.textContent).not.toContain('LISTING_BUSY');
+
 it.each([
   {
     name: 'empty library followed by transport failure', query: '', empty: 'No uploaded jobs yet.',
