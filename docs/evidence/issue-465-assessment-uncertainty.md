@@ -36,3 +36,31 @@ authenticated production profiles is also outside this slice.
 
 No full test suite or production gate was run for this note; the focused test
 names above are retained source evidence, not a new execution claim.
+
+## 2026-09-25 authored replay checkpoint
+
+`GccCompilerEngineResumeEvidenceValidationTest.resumed schema two export keeps
+unknown global type unassessed` places an `undefined8` global in the first
+committed planning batch. It requires the recovered extraction label and
+unassessed recovery label to survive typed and streaming reads, an interrupted
+prefix, descriptor-bound resumed capture, and a fresh control. Resumed and fresh
+model bytes must match; capture must leave the interrupted state and checkpoint
+bytes unchanged. This is a synthetic exporter-10 planning transition, not a live
+Ghidra run. Planning fragments cannot contain recovered function records or
+decompiled bodies, so that replay fixture makes no such claim.
+
+`CanonicalProgramModelStreamingTest.schema two keeps completed extraction and
+unknown types unassessed with reader parity` separately retains a decompiled
+function from the frozen historical fixture and checks that its schema-2
+extraction label remains unresolved for recovery assessment. The reader parity,
+historical-report, and contradictory-finding tests cover their respective
+contracts independently. A joined, authenticated finding and production
+exporter-10 run remain dependencies of #462, #40, and #136.
+
+Verification on this checkpoint: the two changed focused cases passed, then
+the four relevant regression classes passed with 65 tests, zero failures,
+errors, or skips (`GccCompilerEngineResumeEvidenceValidationTest` 38,
+`CanonicalProgramModelStreamingTest` 8, `StructuralRecoveryV1ParityTest` 3,
+`ArchivalAuditProvenanceTest` 16). Both Gradle invocations used the pinned
+frontend Node home. This is local regression evidence, not a full CI or
+production qualification run.
