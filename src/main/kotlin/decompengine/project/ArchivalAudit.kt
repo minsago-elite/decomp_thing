@@ -17,6 +17,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.util.Locale
 
 data class ArchivePublicationLimits(
     val maximumEntries: Int,
@@ -254,6 +255,7 @@ object ArchivalProjectAuditor {
         val acceptedOwners = linkedMapOf<String, List<String>>()
         val acceptedSourcePaths = linkedMapOf<String, String>()
         val acceptedInputFingerprints = linkedMapOf<String, String>()
+        val plannedModuleEntityIds = linkedMapOf<String, List<String>>()
         for (element in planJson.getValue("modules").jsonArray) {
             val module = element.jsonObject
             require(module.keys == setOf("id", "sourcePath", "headerPath", "functionIds", "globalIds", "typeIds", "boundaryEvidence")) {
@@ -288,6 +290,7 @@ object ArchivalProjectAuditor {
             val header = requireNotNull(files[text("headerPath")]) { "audit module header is absent from its manifest" }
             require(ProjectFileRole.PUBLIC_INTERFACE in header.roles) { "audit module header has no declared interface role" }
             require(moduleRevisions.put(identifier, hashes.getValue(source)) == null) { "audit module IDs are duplicated" }
+            plannedModuleEntityIds[identifier] = owned + types
             if (file.acceptedImplementation == true) {
                 acceptedOwners[identifier] = owned
                 acceptedSourcePaths[identifier] = source
@@ -390,10 +393,31 @@ object ArchivalProjectAuditor {
                     interpretation.getValue("empiricalSampleCount") == JsonNull) {
                     "confidence evidence presents an unmeasured score as behavioral confidence"
                 }
+                fun score(status: RecoveryStatus) = when (status) {
+                    RecoveryStatus.RECOVERED -> 1.0
+                    RecoveryStatus.PARTIAL -> 0.6
+                    RecoveryStatus.SYNTHETIC -> 0.25
+                    RecoveryStatus.FAILED -> 0.0
+                }
+                val entityScores = (model.functions.map { it.id to score(it.status) } +
+                    model.globals.map { it.id to score(it.status) } +
+                    model.types.map { it.id to score(it.status) }).toMap()
+                fun expectedScore(ids: List<String>): String = "%.4f".format(Locale.ROOT,
+                    if (ids.isEmpty()) 0.0 else ids.map(entityScores::getValue).average())
+                fun requireScore(value: kotlinx.serialization.json.JsonElement, expected: String) {
+                    val actual = value.jsonPrimitive
+                    require(!actual.isString && actual.content == expected) {
+                        "confidence structural score differs from the audited recovery model"
+                    }
+                }
+                requireScore(report.getValue("projectScore"), expectedScore(entityScores.keys.toList()))
                 val entries = report.getValue("modules").jsonArray.map { it.jsonObject }
                 val byId = entries.associateBy { it.string("id") }
                 require(entries.size == byId.size && byId.keys == moduleRevisions.keys) {
                     "confidence module inventory differs from the audited plan"
+                }
+                byId.forEach { (id, module) ->
+                    requireScore(module.getValue("score"), expectedScore(plannedModuleEntityIds.getValue(id)))
                 }
                 byId
             } catch (failure: Exception) {

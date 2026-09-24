@@ -525,6 +525,13 @@ class SourceTreeTest {
         assertEquals(ids, mislabeled.moduleCompilationEvidenceProblems.keys)
         assertEquals(ids, mislabeled.moduleConfidenceEvidenceProblems.keys)
         assertTrue(mislabeled.moduleCompilationEvidence.isEmpty())
+
+        val falseScores = modules.toMutableList()
+        falseScores[0] = JsonObject(modules[0] + ("score" to JsonPrimitive(0.1234)))
+        publish(JsonObject(original + ("modules" to JsonArray(falseScores))))
+        val misleading = ArchivalProjectAuditor.audit(project)
+        assertEquals(ids, misleading.moduleConfidenceEvidenceProblems.keys)
+        assertTrue(misleading.moduleCompilationEvidence.isEmpty())
     }
 
     @Test
