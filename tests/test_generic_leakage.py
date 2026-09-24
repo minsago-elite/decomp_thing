@@ -138,6 +138,18 @@ class GenericLeakageTest(unittest.TestCase):
                              {"benchmark-version", "benchmark-target", "benchmark-hash"})
         self.assertEqual(len(findings), 6)
 
+    def test_declared_json_evidence_docs_are_exempt_without_exempting_neighboring_paths(self) -> None:
+        document = {"version": FIXTURE["version"], "sha256": FIXTURE["identity"]["sha256"]}
+        self.write_json("docs/evidence/retained.json", document)
+        self.write_json("docs/evidential/active.json", document)
+        self.policy["benchmarkRoots"].append("docs/evidence")
+        self.save_policy()
+
+        findings = scan_repository(self.root).findings
+
+        self.assertEqual({item.path for item in findings}, {"docs/evidential/active.json"})
+        self.assertEqual({item.rule for item in findings}, {"benchmark-version", "benchmark-hash"})
+
     def test_markdown_is_excluded_and_multiline_allowance_preserves_line_numbers(self) -> None:
         self.write("src/README.md", json.dumps(FIXTURE) + '\n"Makefile"\n')
         fragment = 'val tool =\n    "make"'

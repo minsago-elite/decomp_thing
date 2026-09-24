@@ -1007,13 +1007,15 @@ object SourceTreeGenerator {
     }
 
     private fun requireWorkflowOwnedPathsAreReserved(profile: ReconstructionProfile) {
+        val buildArtifact = ReconstructionAdapters.resolve(profile).behaviorBuild.layout(profile).artifactPath
+        requireNormalizedProjectPath(buildArtifact, "profile build artifact")
         val workflowOwned = listOf(
             "BUILDING.md",
             "source_tree_manifest.json",
             "reports/build.log",
             "reports/build_contract.json",
             "reports/archival_audit.json",
-            "build/reconstructed",
+            buildArtifact,
         )
         profile.layout.declarations.forEach { declaration ->
             workflowOwned.forEach { path ->

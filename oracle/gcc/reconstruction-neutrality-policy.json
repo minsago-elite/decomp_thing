@@ -13,6 +13,7 @@
     "src/main/kotlin/decompengine/web"
   ],
   "benchmarkRoots": [
+    "docs/evidence",
     "oracle",
     "src/main/kotlin/decompengine/oracle",
     "src/test/kotlin/decompengine/oracle",
@@ -32,6 +33,10 @@
     {
       "path": "src/main/kotlin/decompengine/project/GeneratedCBehaviorBuildPolicy.kt",
       "reason": "Generated-C build-contract parsing and source layout for local behavior evidence capture."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCBuildBudgetEvidence.kt",
+      "reason": "Generated-C Make/Ninja build-contract configuration and budget verification."
     },
     {
       "path": "src/main/kotlin/decompengine/project/GeneratedCBuildInvocation.kt",

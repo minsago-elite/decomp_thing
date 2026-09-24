@@ -1603,9 +1603,7 @@ val verifyReconstructionNeutrality = tasks.register<Exec>("verifyReconstructionN
 }
 
 tasks.named("check") {
-    // verifyReconstructionNeutrality stays out of `check` while the draft gate
-    // still reports outstanding #84 migrations; run it via scripts/ci.sh (advisory)
-    // or `./gradlew --no-daemon verifyReconstructionNeutrality` directly.
+    dependsOn(verifyReconstructionNeutrality)
     dependsOn(testFrontendAssetManifest)
     dependsOn(verifyPackagedWeb)
     dependsOn(verifyAcpGateHelperDistribution)

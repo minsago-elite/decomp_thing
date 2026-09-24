@@ -201,7 +201,6 @@ object ArchivalProjectAuditor {
             publicationEvidence.effectiveLimits == expectedPublication.effectiveLimits) {
             "archive publication evidence does not match the selected profile or effective budgets"
         }
-        val compilationPolicy = ReconstructionCompilationPolicies.resolve(profile)
         val requiredCorpora = snapshotRequiredBehaviorCorpora(requiredCorpusSha256)
         val maximumFileBytes = minOf(effectiveLimits.maximumFileBytes, Int.MAX_VALUE.toLong() - 1L)
         val manifestSnapshot = readStableRegularFile(projectDir, "source_tree_manifest.json", maximumFileBytes)
@@ -347,7 +346,9 @@ object ArchivalProjectAuditor {
                         require(it.jsonPrimitive.isString) { "compiler argument must be a string" }
                         it.jsonPrimitive.content
                     }
-                    require(command == compilationPolicy.command(profile, source)) { "compiler command differs from the reconstruction profile" }
+                    require(command == ReconstructionCompilationPolicies.resolve(profile).command(profile, source)) {
+                        "compiler command differs from the reconstruction profile"
+                    }
                     require(compilation.keys == setOf("sourceSha256", "command", "outcome", "returnCode", "diagnosticsSha256", "diagnosticsBytes")) {
                         "compiler evidence has unsupported fields"
                     }
