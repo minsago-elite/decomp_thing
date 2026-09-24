@@ -18,7 +18,12 @@ import kotlin.test.assertTrue
 import kotlin.test.assertFailsWith
 
 class ProfiledGeneratedCRepairIndexTest {
-    private fun profile(base: ReconstructionProfile, buildRoot: String = "config/build") = ReconstructionProfile(
+    private fun profile(
+        base: ReconstructionProfile,
+        buildRoot: String = "config/build",
+        sourceRoot: String = "src",
+        interfaceRoot: String = "include",
+    ) = ReconstructionProfile(
         base.schemaVersion, base.id,
         ProjectLayoutProfile(base.layout.schemaVersion, base.layout.declarations.map {
             val path = when (it.id) {
@@ -26,11 +31,53 @@ class ProfiledGeneratedCRepairIndexTest {
                 "module-plan-evidence" -> "reports/planning/modules.json"
                 "program-model-evidence" -> "reports/inputs/model.json"
                 else -> it.pathTemplate
+                    .replace(Regex("^src/"), "$sourceRoot/")
+                    .replace(Regex("^include/"), "$interfaceRoot/")
             }
             ProjectFileDeclaration(it.id, path,
                 if (it.id in setOf("shared-interface", "module-interface")) it.roles - ProjectFileRole.EDITABLE else it.roles, it.contentKind)
         }), base.budgets, base.adapterConfiguration,
     )
+
+    @Test
+    fun `relocated declared roots retain dependency context and recover under the same descriptor`() {
+        val descriptor = profile(GeneratedCMakeReconstructionProfile.descriptor,
+            sourceRoot = "workspace/code", interfaceRoot = "workspace/headers")
+        val policy = GeneratedCRepairIndexProfile.forProfile(descriptor)
+        val project = createTempDirectory("relocated-repair-roots-")
+        SourceTreeGenerator.generate(RecoveredProgramModel(inputSha256 = "b".repeat(64), functions = listOf(
+            RecoveredFunction("fn_alpha", "alpha_run", 0x1000UL, "int alpha_run(void)"),
+        )), project, profile = descriptor)
+        project.resolve("workspace/code/auxiliary.c").writeText("/* read-only auxiliary */\n")
+        val index = ModuleRepairIndex.load(project, policy)
+        assertTrue("workspace/code/modules/alpha.c" in index.sourcePaths)
+        assertTrue("workspace/headers/modules/alpha.h" in index.sourcePaths)
+        assertTrue("workspace/code/auxiliary.c" in index.sourcePaths)
+        assertFalse("workspace/code/auxiliary.c" in index.editablePaths)
+        assertFalse("include/decomp_types.h" in index.sourcePaths)
+        val selection = index.select("compile", "workspace/code/modules/alpha.c:1: error: authored diagnostic")
+        assertTrue("workspace/headers/modules/alpha.h" in selection.readablePaths)
+        assertFalse("workspace/headers/modules/alpha.h" in selection.writablePaths)
+        val target = project.resolve("workspace/code/modules/alpha.c")
+        val accepted = target.readBytes()
+        val candidate = accepted + "\n/* pending authored revision */\n".toByteArray()
+        ModuleRevisionGraph.open(project, policy).use { graph ->
+            val attempt = graph.beginAttempt(listOf("workspace/code/modules/alpha.c"))
+            graph.installCandidate(attempt, mapOf("workspace/code/modules/alpha.c" to candidate))
+        }
+        val graphPath = project.resolve("reports/repair-revisions/graph.json")
+        val graphBefore = graphPath.readBytes()
+        val changed = GeneratedCRepairIndexProfile.forProfile(
+            profile(GeneratedCMakeReconstructionProfile.descriptor,
+                sourceRoot = "workspace/code", interfaceRoot = "headers"))
+        assertFailsWith<IllegalArgumentException> { ModuleRevisionGraph.open(project, changed) }
+        assertContentEquals(candidate, target.readBytes())
+        assertContentEquals(graphBefore, graphPath.readBytes())
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile.forProfile(descriptor)).use { recovered ->
+            assertContentEquals(accepted, target.readBytes())
+            assertEquals(null, recovered.snapshot.pendingAttemptId)
+        }
+    }
 
     @Test
     fun `Make and Ninja index declared evidence and recover the same graph`() {

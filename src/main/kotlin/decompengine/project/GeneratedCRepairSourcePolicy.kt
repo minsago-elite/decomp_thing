@@ -5,16 +5,26 @@ import decompengine.repair.RepairResourceBudget
 /** Content-independent source authorization shared by indexing, recovery and validation staging. */
 internal class GeneratedCRepairSourcePolicy(private val profile: ReconstructionProfile) {
     val buildDefinition = profile.layout.declaration("build-definition").materialize()
+    private val sourceDeclarations = profile.layout.declarations.filter {
+        ProjectFileRole.BUILD_INPUT in it.roles && ProjectFileRole.BUILD_DEFINITION !in it.roles
+    }
+    val sourceRoots = declaredRoots(sourceDeclarations)
+    val rootFiles = sourceDeclarations.mapNotNull { declaration ->
+        declaration.pathTemplate.takeIf { '/' !in it }
+    }.sorted()
+    val interfaceRoots = declaredRoots(sourceDeclarations.filter {
+        ProjectFileRole.PUBLIC_INTERFACE in it.roles || ProjectFileRole.PRIVATE_INTERFACE in it.roles
+    })
 
     init {
         ReconstructionAdapters.resolve(profile)
-        require(profile.layout.declarations.filter { ProjectFileRole.BUILD_INPUT in it.roles }.all {
-            it.pathTemplate == buildDefinition || it.pathTemplate.startsWith("src/") || it.pathTemplate.startsWith("include/")
-        }) { "generated-C repair build inputs must use the supported source roots" }
+        require(sourceRoots.isNotEmpty() || rootFiles.isNotEmpty()) {
+            "generated-C repair profile has no declared source inputs"
+        }
     }
 
     fun admitsSourcePath(path: String): Boolean =
-        (path == buildDefinition || path.startsWith("src/") || path.startsWith("include/")) &&
+        (path == buildDefinition || path in rootFiles || sourceRoots.any { path.startsWith("$it/") }) &&
             path.split('/').none { it.endsWith(".repair") }
 
     fun isEditable(path: String): Boolean {
@@ -30,6 +40,24 @@ internal class GeneratedCRepairSourcePolicy(private val profile: ReconstructionP
         if (paths != paths.distinct().sorted() || editable != editable.distinct().sorted()) return false
         if (paths.any { !admitsSourcePath(it) }) return false
         return editable == paths.filter(::isEditable)
+    }
+
+    private fun declaredRoots(declarations: List<ProjectFileDeclaration>): List<String> {
+        val roots = declarations.mapNotNull { declaration ->
+            val parent = declaration.pathTemplate.substringBeforeLast('/', "")
+            if (parent.isEmpty()) {
+                require('{' !in declaration.pathTemplate) {
+                    "generated-C repair cannot discover a root-level template input"
+                }
+                null
+            } else {
+                require('{' !in parent && '}' !in parent) {
+                    "generated-C repair source root must be a static declared directory: $parent"
+                }
+                parent
+            }
+        }.distinct().sortedWith(compareBy<String> { it.length }.thenBy { it })
+        return roots.filter { root -> roots.none { other -> other != root && root.startsWith("$other/") } }.sorted()
     }
 }
 
