@@ -235,7 +235,7 @@
       "rule": "generic-adapter-reference",
       "fragment": "repairProfile: RepairIndexProfile = GeneratedCRepairIndexProfile",
       "count": 1,
-      "reason": "Existing repair verifier default profile parameter only; concrete runtime-tool and Makefile role policy is not exempt."
+      "reason": "Existing repair verifier default profile parameter only; concrete runtime-tool and build-file role policy is not exempt."
     },
     {
       "path": "src/main/kotlin/decompengine/project/ReconstructionProfiles.kt",
@@ -320,13 +320,6 @@
       "fragment": "GeneratedCValidationBudgetPolicy.DEFAULT.admit(graph.budget)",
       "count": 1,
       "reason": "The generated-C repair release verifier rechecks its adapter-owned validation budget policy; #824 owns migration of remaining archive policy behind the adapter boundary."
-    },
-    {
-      "path": "src/main/kotlin/decompengine/project/RepairAcpEvidenceArchiveVerifier.kt",
-      "rule": "generic-layout",
-      "fragment": "\"Makefile\"",
-      "count": 1,
-      "reason": "Repair evidence verification classifies the archived generated-C repair validation snapshot's build-file source role."
     },
     {
       "path": "src/test/kotlin/decompengine/analysis/BundledGhidraTest.kt",
