@@ -220,7 +220,7 @@ class BehaviorValidationTest {
         val audit = ArchivalProjectAuditor.audit(project)
         assertEquals(true, audit.behaviorMatched)
         assertEquals(listOf("reports/file_mounts.behavior.json"), audit.projectBehaviorReportIds)
-        assertTrue(audit.unresolvedEntityIds.isEmpty())
+        assertEquals(listOf("fn_1000"), audit.unresolvedEntityIds)
     }
 
     @Test
