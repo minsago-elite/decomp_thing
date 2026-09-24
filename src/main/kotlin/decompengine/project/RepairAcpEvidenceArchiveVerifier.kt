@@ -159,7 +159,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
         )
         val verifiedReceipts = verifyReceipts(graph, projectDir, payloadSha256, payloadSizes)
         verifyHistory(graph, projectDir, payloadSha256, payloadSizes)
-        verifyValidationReceipts(graph, projectDir, payloadSha256, payloadSizes)
+        verifyValidationReceipts(graph, projectDir, payloadSha256, payloadSizes, reconstructionProfile)
 
         val nodesById = graph.nodes.associateBy(ReleaseRepairNode::id)
         val qualifiedContributions = linkedSetOf<String>()
@@ -542,7 +542,9 @@ internal object RepairAcpEvidenceArchiveVerifier {
         projectDir: Path,
         payloadSha256: Map<String, String>,
         payloadSizes: Map<String, Long>,
+        reconstructionProfile: ReconstructionProfile,
     ) {
+        val buildDefinition = reconstructionProfile.layout.declaration("build-definition").materialize()
         val runs = graph.runs.associateBy(ReleaseRepairRun::id)
         val required = graph.nodes.mapNotNull { node -> node.validationProof?.let {
             Triple(it, runs.getValue(requireNotNull(node.repairMetadata?.runId)), node.status == "accepted")
@@ -633,7 +635,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 val path = file.requiredString("path", "validation source")
                 requireNormalizedPath(path, "validation source")
                 require(file.requiredString("role", "validation source") ==
-                    (if (path == "Makefile") "build-file" else "source") &&
+                    (if (path == buildDefinition) "build-file" else "source") &&
                     file.requiredInt("mode", "validation source") == 292) {
                     "repair validation source role or immutable mode is invalid"
                 }

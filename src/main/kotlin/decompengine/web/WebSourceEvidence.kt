@@ -9,6 +9,7 @@ import decompengine.project.ProjectFileRole
 import decompengine.project.ReconstructionProfile
 import decompengine.project.SourceTreeManifest
 import decompengine.project.SourceTreeManifestReader
+import decompengine.project.moduleIdForPath
 import decompengine.repair.StableRegularFile
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
@@ -93,13 +94,18 @@ internal class WebSourceSnapshot(
         ProjectFileRole.VIEWABLE in it.roles && it.contentKind == ProjectContentKind.UTF8_TEXT
     }
 
-    val confidence: JsonObject? = viewable.singleOrNull { it.path == "reports/confidence.json" }?.let {
+    val confidence: JsonObject? = profile.layout.declarations.singleOrNull { it.id == "confidence-evidence" }
+        ?.materialize()?.let { path -> viewable.singleOrNull { it.path == path } }?.let {
         runCatching { OracleJson.parse(files.getValue(it.path).bytes, WebSourceEvidence.JSON_LIMITS) as? JsonObject }.getOrNull()
     }
 
     fun view(): SourceTreeView = SourceTreeView(viewable, confidence)
 
     fun revision(): WebSourceRevision = WebSourceRevision(profile, manifestDocument, view())
+
+    fun moduleId(relative: String): String? = profile.layout.declarationForPath(relative).let { declaration ->
+        if (ProjectFileRole.MODULE_IMPLEMENTATION in declaration.roles) declaration.moduleIdForPath(relative) else null
+    }
 
     fun text(relative: String): String {
         require(viewable.any { it.path == relative }) { "source file is not declared as viewable UTF-8 text" }

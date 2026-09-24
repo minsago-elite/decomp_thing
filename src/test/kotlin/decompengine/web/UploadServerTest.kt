@@ -1345,6 +1345,48 @@ class UploadServerTest {
     }
 
     @Test
+    fun `source view reads confidence from the admitted profile declaration`() {
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val profile = ReconstructionProfile(
+            schemaVersion = base.schemaVersion,
+            id = "web-confidence-relocated-v1",
+            layout = ProjectLayoutProfile(base.layout.schemaVersion, base.layout.declarations.map { declaration ->
+                val path = when (declaration.id) {
+                    "confidence-evidence" -> "reports/assessment/confidence.json"
+                    "module-implementation" -> "src/modules/{module}.c.impl"
+                    else -> null
+                }
+                if (path == null) declaration else ProjectFileDeclaration(
+                    declaration.id, path, declaration.roles, declaration.contentKind,
+                )
+            }),
+            budgets = base.budgets,
+            adapterConfiguration = base.adapterConfiguration,
+        )
+        val reconstructor = JobReconstructor { _, reportsDir ->
+            val tree = reportsDir.resolve("source-tree")
+            tree.resolve("src/modules").createDirectories()
+            tree.resolve("reports/assessment").createDirectories()
+            tree.resolve("src/modules/core.c.impl").writeText("int core(void) { return 0; }\n")
+            tree.resolve("Makefile").writeText("all:\n\t@true\n")
+            tree.resolve("reports/assessment/confidence.json").writeText(
+                "{\"projectScore\":0.75,\"modules\":[{\"id\":\"core\",\"score\":0.8}]}",
+            )
+            writeManifest(tree, listOf("src/modules/core.c.impl", "Makefile", "reports/assessment/confidence.json"), profile)
+        }
+        withServer(reconstructor = reconstructor, profiles = listOf(profile)) { server, _ ->
+            val jobId = uploadedJobId(server)
+            assertEquals(303, request(server, "POST", "/jobs/$jobId/reconstruct", followRedirects = false).status)
+            val page = request(server, "GET", "/jobs/$jobId")
+            val source = request(server, "GET", "/jobs/$jobId/source/src/modules/core.c.impl")
+            assertEquals(200, page.status)
+            assertTrue(page.body.decodeToString().contains("0.750 heuristic"))
+            assertEquals(200, source.status)
+            assertTrue(source.body.decodeToString().contains("0.800 · uncalibrated"))
+        }
+    }
+
+    @Test
     fun `artifact and source routes reject final file and parent directory indirection`() {
         withServer { server, dataDir ->
             val jobId = uploadedJobId(server)
