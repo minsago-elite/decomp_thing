@@ -86,12 +86,13 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor() : G
         val deadline = GeneratedCValidationDeadline(request.deadlineNanos, request.cancellation)
         deadline.check()
         GeneratedCValidationProfile.requireIdentity(request.profileId, request.profileSha256, request.budget)
+        val behaviorBudgetEvidence = GeneratedCValidationBudgetPolicy.DEFAULT.admit(request.budget)
         require(request.label.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}"))) { "validation receipt label is invalid" }
         require(request.reportsDir.isAbsolute && request.reportsDir == request.reportsDir.normalize())
         val config = configuration
         val inputs = request.inputs
         if (request.originalBinary != null) require(inputs.isNotEmpty()) { "behavior validation requires the full nonempty retained corpus" }
-        val receipt = GeneratedCValidationReceipt(request, config)
+        val receipt = GeneratedCValidationReceipt(request, config, behaviorBudgetEvidence)
         val aggregateOutput = AtomicLong()
         var original: CapturedGeneratedExecutable? = null
         var rebuilt: CapturedGeneratedExecutable? = null
@@ -418,7 +419,8 @@ private fun containsCleanupFailure(failure: Throwable): Boolean {
 }
 
 private class GeneratedCValidationReceipt(private val request: RepairCandidateValidationRequest,
-    private val configuration: GeneratedCRepairRuntimeConfiguration) {
+    private val configuration: GeneratedCRepairRuntimeConfiguration,
+    private val behaviorBudgetEvidence: JsonObject) {
     private val scopes = ArrayList<JsonObject>()
     private var source: JsonObject = JsonObject(emptyMap())
     private var outputLink: JsonObject = JsonObject(emptyMap())
@@ -446,12 +448,13 @@ private class GeneratedCValidationReceipt(private val request: RepairCandidateVa
     fun finish(outcome: String, original: CapturedGeneratedExecutable?, rebuilt: CapturedGeneratedExecutable?,
         cases: List<BehaviorCaseResult>, cleanupVerified: Boolean = true): ByteArray {
         val document = JsonObject(mapOf(
-            "schemaVersion" to JsonPrimitive(1), "provider" to JsonPrimitive("generated-c-linux-bubblewrap-cgroup-v1"),
+            "schemaVersion" to JsonPrimitive(2), "provider" to JsonPrimitive("generated-c-linux-bubblewrap-cgroup-v1"),
             "profileId" to JsonPrimitive(request.profileId), "profileSha256" to JsonPrimitive(request.profileSha256),
             "indexSha256" to JsonPrimitive(request.indexSha256), "sourceRevisionSha256" to JsonPrimitive(request.sourceRevisionSha256),
             "regressionCorpusSha256" to JsonPrimitive(request.regressionCorpusSha256),
             "runtimeSha256" to JsonPrimitive(configuration.configurationSha256),
             "runtimeConfiguration" to configuration.configurationRecord,
+            "behaviorBudgetEvidence" to behaviorBudgetEvidence,
             "sourceSnapshot" to source, "buildOutputLink" to outputLink,
             "originalExecutable" to executable(original), "rebuiltExecutable" to executable(rebuilt),
             "inputs" to JsonArray(request.inputs.map { input -> JsonObject(mapOf("id" to JsonPrimitive(input.id),

@@ -4,6 +4,7 @@ import decompengine.agent.AgentCancellation
 import decompengine.agent.AgentCancellationSource
 import decompengine.repair.RepairCandidateValidationRequest
 import decompengine.repair.RepairResourceBudget
+import decompengine.repair.RepairBudgetExceededException
 import decompengine.repair.RepairValidationAssurance
 import decompengine.repair.repairCandidateSourceSha256
 import decompengine.repair.repairRegressionCorpusSha256
@@ -20,6 +21,26 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class GeneratedCRepairValidationProviderTest {
+    @Test
+    fun `behavior validation admits profile limits only beneath independent host ceilings`() {
+        val selected = RepairResourceBudget(maximumBehaviorExecutionMillis = 2_000,
+            maximumBehaviorStdoutBytes = 1_024, maximumBehaviorStderrBytes = 1_024,
+            maximumBehaviorOutputBytes = 2_048)
+        val policy = GeneratedCValidationBudgetPolicy(GeneratedCValidationHostSafetyLimits(
+            maximumStdoutBytes = 2_048, maximumStderrBytes = 2_048,
+            maximumOutputBytes = 4_096, maximumExecutionMillis = 3_000))
+        val evidence = policy.admit(selected)
+        assertEquals(evidence.getValue("profileLimits"), evidence.getValue("effectiveLimits"))
+        assertFalse(evidence.getValue("profileLimits") == evidence.getValue("hostSafetyLimits"))
+        assertFailsWith<RepairBudgetExceededException> {
+            policy.admit(selected.copy(maximumBehaviorExecutionMillis = 3_001))
+        }
+        assertFailsWith<RepairBudgetExceededException> {
+            policy.admit(selected.copy(maximumBehaviorStdoutBytes = 4_097,
+                maximumBehaviorOutputBytes = 4_097))
+        }
+    }
+
     @Test
     fun `validation identity policy admits only the registered descriptor fingerprint`() {
         val budget = RepairResourceBudget()

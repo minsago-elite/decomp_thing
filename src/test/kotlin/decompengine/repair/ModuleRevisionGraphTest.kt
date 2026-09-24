@@ -2470,6 +2470,11 @@ class ModuleRevisionGraphTest {
             Mutation("snapshot", "source manifest", { receipt -> receipt.changed("sourceSnapshot",
                 receipt.getValue("sourceSnapshot").jsonObject.changed("manifestSha256", JsonPrimitive("0".repeat(64)))) }),
             Mutation("runtime", "runtime configuration", { it.changed("runtimeConfiguration", JsonObject(emptyMap())) }),
+            Mutation("behavior-budgets", "behavior budgets differ", { receipt ->
+                val evidence = receipt.getValue("behaviorBudgetEvidence").jsonObject
+                val limits = evidence.getValue("effectiveLimits").jsonObject
+                receipt.changed("behaviorBudgetEvidence", evidence.changed("effectiveLimits",
+                    limits.changed("maximumExecutionMillis", JsonPrimitive(1)))) }),
             Mutation("corpus", "retained corpus", { it.changed("inputs", JsonArray(emptyList())) }),
             Mutation("omitted-scope", "scope inventory", { it.changed("scopes", JsonArray((it.getValue("scopes") as JsonArray).dropLast(1))) }),
             Mutation("case-count", "scope inventory", { it.changed("caseCount", JsonPrimitive(0)) }),
@@ -3603,11 +3608,12 @@ class ModuleRevisionGraphTest {
                 "sandboxFields" to fields.map { listOf(it.key, it.value) }, "writableQuota" to outputQuota,
                 "cleanupVerified" to true)
         }
-        val receipt = obj("schemaVersion" to 1, "provider" to "generated-c-linux-bubblewrap-cgroup-v1",
+        val receipt = obj("schemaVersion" to 2, "provider" to "generated-c-linux-bubblewrap-cgroup-v1",
             "profileId" to GeneratedCRepairIndexProfile.profileId(), "profileSha256" to snapshot.profileSha256,
             "indexSha256" to snapshot.indexSha256, "sourceRevisionSha256" to sourceDigest,
             "regressionCorpusSha256" to repairRegressionCorpusSha256(inputs), "runtimeSha256" to runtimeDigest,
             "runtimeConfiguration" to runtime,
+            "behaviorBudgetEvidence" to decompengine.project.GeneratedCValidationBudgetPolicy.DEFAULT.admit(RepairResourceBudget()),
             "sourceSnapshot" to obj("manifestSha256" to sha256(canonical(files)), "files" to files,
                 "quota" to quota(101, "/fixture/source")),
             "buildOutputLink" to obj("path" to "build", "role" to "application-owned-output-link",
