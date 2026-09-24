@@ -553,22 +553,27 @@ class AcpAgentHarnessTest {
             assertEquals(expectedWirePromptSha256(firstRequest), firstEvidence.wirePromptSha256)
             assertEquals(expectedWirePromptSha256(secondRequest), secondEvidence.wirePromptSha256)
             assertFalse(firstEvidence.wirePromptSha256 == secondEvidence.wirePromptSha256)
+            assertEquals(AgentStopReason.COMPLETED, assertIs<AgentExecutionOutcome.Returned>(first.outcome).result.stopReason)
+            assertEquals(AgentStopReason.COMPLETED, assertIs<AgentExecutionOutcome.Returned>(second.outcome).result.stopReason)
             assertEquals(
                 firstEvidence.wirePromptSha256,
-                assertNotNull(firstEvidence.completeExecutionEvidence).wirePromptSha256,
+                assertNotNull(firstEvidence.completeExecutionEvidence, "first: ${firstEvidence.summaryForTest()}").wirePromptSha256,
             )
             assertEquals(
                 secondEvidence.wirePromptSha256,
-                assertNotNull(secondEvidence.completeExecutionEvidence).wirePromptSha256,
+                assertNotNull(secondEvidence.completeExecutionEvidence, "second: ${secondEvidence.summaryForTest()}").wirePromptSha256,
             )
-            assertEquals(AgentStopReason.COMPLETED, assertIs<AgentExecutionOutcome.Returned>(first.outcome).result.stopReason)
-            assertEquals(AgentStopReason.COMPLETED, assertIs<AgentExecutionOutcome.Returned>(second.outcome).result.stopReason)
             assertEquals("new source\n", firstFixture.source.readText())
             assertEquals("new source\n", secondFixture.source.readText())
         } finally {
             executor.shutdownNow()
         }
     }
+
+    private fun AcpInvocationEvidenceSnapshot.summaryForTest(): String =
+        "phase=$phaseReached cleanup=$cleanupDisposition audits=$completeness " +
+            "negotiated=${negotiatedAgent != null} diagnostics=${diagnostics != null} " +
+            "sandbox=${sandboxEvidence != null}"
 
     @Test
     fun `fake agent permission request uses offered default denial and metadata-only evidence`() {
