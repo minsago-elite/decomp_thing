@@ -73,9 +73,9 @@ data class RecoveredProgramModel(
             append(",\n  \"inputSha256\": \"").append(inputSha256.json(checkpoint)).append("\",")
             append("\n  \"functions\": [")
             if (functions.isNotEmpty()) append('\n')
-            val sortedFunctions = checkedModelStage("sorting program model functions", checkpoint) {
-                functions.sortedWith(compareBy<RecoveredFunction> { it.address }.thenBy { it.id })
-            }
+            val sortedFunctions = functions.sortedWithCheckpoints(
+                compareBy<RecoveredFunction> { it.address }.thenBy { it.id }, "program model functions", checkpoint,
+            )
             append(checkedModelStage("joining program model functions", checkpoint) {
                 sortedFunctions.joinToString(",\n") { function ->
                     checkedModelStage("rendering program model function", checkpoint) {
@@ -96,9 +96,9 @@ data class RecoveredProgramModel(
             })
             append("\n  ],\n  \"globals\": [")
             if (globals.isNotEmpty()) append('\n')
-            val sortedGlobals = checkedModelStage("sorting program model globals", checkpoint) {
-                globals.sortedWith(compareBy<RecoveredGlobal> { it.address }.thenBy { it.id })
-            }
+            val sortedGlobals = globals.sortedWithCheckpoints(
+                compareBy<RecoveredGlobal> { it.address }.thenBy { it.id }, "program model globals", checkpoint,
+            )
             append(checkedModelStage("joining program model globals", checkpoint) {
                 sortedGlobals.joinToString(",\n") { global ->
                     checkedModelStage("rendering program model global", checkpoint) {
@@ -116,7 +116,7 @@ data class RecoveredProgramModel(
             })
             append("\n  ],\n  \"types\": [")
             if (types.isNotEmpty()) append('\n')
-            val sortedTypes = checkedModelStage("sorting program model types", checkpoint) { types.sortedBy { it.id } }
+            val sortedTypes = types.sortedWithCheckpoints(compareBy { it.id }, "program model types", checkpoint)
             append(checkedModelStage("joining program model types", checkpoint) {
                 sortedTypes.joinToString(",\n") { type ->
                     checkedModelStage("rendering program model type", checkpoint) {
@@ -147,8 +147,9 @@ object ProgramModelJson {
         }
         val model = read(root, checkpoint)
         val canonicalText = model.toJson(checkpoint)
-        val canonical = checkedModelStage("encoding canonical program model", checkpoint) { canonicalText.toByteArray(Charsets.UTF_8) }
-        require(checkedModelStage("comparing canonical program model", checkpoint) { MessageDigest.isEqual(bytes, canonical) }) {
+        require(checkedModelStage("comparing canonical program model", checkpoint) {
+            canonicalText.matchesCanonicalUtf8(bytes, checkpoint)
+        }) {
             "program model must use exact canonical fields, entity order, sets, and bytes"
         }
         checkpoint("before returning canonical program model")
@@ -307,12 +308,45 @@ private fun String.json(checkpoint: (String) -> Unit): String = checkedModelStag
 }
 
 private fun Set<String>.json(checkpoint: (String) -> Unit): String {
-    val strings = checkedModelStage("sorting program model set", checkpoint) { sorted() }
+    val strings = toList().sortedWithCheckpoints(naturalOrder(), "program model set", checkpoint)
     return checkedModelStage("joining program model set", checkpoint) {
         strings.joinToString(", ") {
             checkedModelStage("rendering program model set entry", checkpoint) { "\"${it.json(checkpoint)}\"" }
         }
     }
+}
+
+private fun <T> List<T>.sortedWithCheckpoints(
+    comparator: Comparator<in T>,
+    label: String,
+    checkpoint: (String) -> Unit,
+): List<T> = checkedModelStage("sorting $label", checkpoint) {
+    var comparisons = 0L
+    sortedWith(Comparator { first, second ->
+        comparisons++
+        if (comparisons % 1024L == 0L) checkpoint("sorting $label after $comparisons comparisons")
+        comparator.compare(first, second)
+    })
+}
+
+private fun String.matchesCanonicalUtf8(expected: ByteArray, checkpoint: (String) -> Unit): Boolean {
+    var characterOffset = 0
+    var byteOffset = 0
+    while (characterOffset < length) {
+        checkpoint("before comparing canonical program model chunk")
+        var end = minOf(characterOffset + 4096, length)
+        if (end < length && this[end - 1].isHighSurrogate() && this[end].isLowSurrogate()) end++
+        val chunk = substring(characterOffset, end).toByteArray(Charsets.UTF_8)
+        checkpoint("after encoding canonical program model chunk")
+        if (chunk.size > expected.size - byteOffset) return false
+        for (index in chunk.indices) {
+            if (chunk[index] != expected[byteOffset + index]) return false
+        }
+        byteOffset += chunk.size
+        characterOffset = end
+        checkpoint("after comparing canonical program model chunk")
+    }
+    return byteOffset == expected.size
 }
 
 private inline fun <T> checkedModelStage(stage: String, checkpoint: (String) -> Unit, operation: () -> T): T {

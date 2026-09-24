@@ -223,6 +223,56 @@ class ProgramModelCheckpointTest {
         assertTrue(input.available() > 0, "parsing consumed later model bytes after the deadline")
     }
 
+    @Test
+    fun `canonical byte comparison checks long UTF-8 text and keeps surrogate pairs together`() {
+        fun model(text: String) = RecoveredProgramModel(
+            schemaVersion = 2,
+            inputSha256 = "fixture",
+            functions = listOf(RecoveredFunction("fn", "fixture", 0x10UL, "void fixture(void)", decompiledC = text)),
+        )
+        val markerOffset = model("MARK").toJson().indexOf("MARK")
+        val padding = (4095 - markerOffset % 4096 + 4096) % 4096
+        val expected = model("x".repeat(padding) + "😀" + "y".repeat(12_000))
+        val canonical = expected.toJson().toByteArray(Charsets.UTF_8)
+        var comparedChunks = 0
+
+        assertEquals(expected, ProgramModelJson.readCanonical(canonical) { stage ->
+            if (stage == "after comparing canonical program model chunk") comparedChunks++
+        })
+        assertTrue(comparedChunks >= 3)
+        assertFailsWith<IllegalArgumentException> {
+            ProgramModelJson.readCanonical(canonical.copyOf().also { it[it.lastIndex] = ' '.code.toByte() })
+        }
+    }
+
+    @Test
+    fun `canonical comparison and large sorts propagate cancellation during work`() {
+        val large = RecoveredProgramModel(
+            schemaVersion = 2,
+            inputSha256 = "fixture",
+            functions = listOf(RecoveredFunction("fn", "fixture", 0x10UL, "void fixture(void)",
+                decompiledC = "x".repeat(20_000), strings = (2048 downTo 0).map { "s_$it" }.toSet())),
+            types = (2048 downTo 0).map { RecoveredType("type_${it.toString().padStart(4, '0')}", "int t;") },
+        )
+        val canonical = large.toJson().toByteArray()
+        for (stage in listOf(
+            "sorting program model set after 1024 comparisons",
+            "sorting program model types after 1024 comparisons",
+            "after comparing canonical program model chunk",
+        )) {
+            val cancellation = InterruptedException("cancel $stage")
+            val stopAfter = if (stage.startsWith("after comparing")) 2 else 1
+            var comparisons = 0
+            val failure = assertFailsWith<InterruptedException> {
+                ProgramModelJson.readCanonical(canonical) { current ->
+                    if (current == stage && ++comparisons == stopAfter) throw cancellation
+                }
+            }
+            assertSame(cancellation, failure)
+            assertEquals(stopAfter, comparisons)
+        }
+    }
+
     private fun fixture(schemaVersion: Int) = RecoveredProgramModel(
         schemaVersion = schemaVersion,
         inputSha256 = "authored fixture identity",
