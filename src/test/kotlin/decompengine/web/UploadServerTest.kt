@@ -1236,6 +1236,34 @@ class UploadServerTest {
     }
 
     @Test
+    fun `repair history presentation rejects a linked report and does not expose its target`() {
+        withServer { server, dataDir ->
+            val upload = upload(server, "history.elf", elfFixture(), acceptJson = true)
+            val jobId = Json.parseToJsonElement(upload.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            val reports = dataDir.resolve(jobId).resolve("reports").createDirectories()
+            val outside = dataDir.resolve("foreign-repair-history.json")
+            outside.writeText("""{"iterations":[{"index":1,"failureKind":"foreign","summary":"foreign repair marker","succeeded":true}]}""")
+            val history = reports.resolve("repair_history.json")
+            Files.createSymbolicLink(history, outside)
+
+            val page = request(server, "GET", "/jobs/$jobId")
+            val download = request(server, "GET", "/jobs/$jobId/artifacts/reports/repair_history.json")
+
+            assertEquals(200, page.status)
+            assertTrue(page.body.decodeToString().contains("Repair history is unavailable"))
+            assertTrue(!page.body.decodeToString().contains("foreign repair marker"))
+            assertTrue(download.status != 200)
+            assertTrue(!download.body.decodeToString().contains("foreign repair marker"))
+
+            Files.delete(history)
+            history.writeText("""{"iterations":[{"index":2,"failureKind":"local","summary":"accepted display marker","succeeded":false}]}""")
+            val restored = request(server, "GET", "/jobs/$jobId")
+            assertEquals(200, restored.status)
+            assertTrue(restored.body.decodeToString().contains("accepted display marker"))
+        }
+    }
+
+    @Test
     fun `upload rejects non-ELF content`() {
         withServer { server, _ ->
             val response = upload(server, "not-elf.bin", "not an elf".toByteArray(), acceptJson = false)

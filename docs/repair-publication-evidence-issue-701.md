@@ -16,12 +16,18 @@ state as release authority, and admits preserved legacy bytes only by their
 exact archive commitment. These are the publication and evidence contracts
 available in the current source.
 
-One entry point remains path-based: `WebViews.renderRepairHistory` reads
-`job.binaryPath.parent/reports/repair_history.json` directly to render the
-display page. `UploadServerTest` exercises that compatibility projection by
-writing the file and checking the rendered iteration, but the page is not a
-release verifier or an authority for repair acceptance. Canonical graph and
-archive verification therefore remain the authoritative evidence paths.
+The historical direct repair-history read is gone. `UploadServer.handleJob`
+selects the report namespace and passes the compatibility projection through
+`WebJobService.readArtifact`, `JobStore.readArtifact`, and the bounded,
+descriptor-bound `readStableRegularFile` operation. `WebViews.renderRepairHistory`
+only renders the supplied JSON; it never opens the job path. The web report
+listing uses path-based metadata for display, but artifact downloads repeat the
+bounded descriptor-bound read. `UploadServerTest` now checks both ordinary
+history presentation and rejection of a symlinked history that points at a
+foreign file: the foreign bytes appear neither on the page nor as a download.
+The compatibility projection is still not a release verifier or repair
+acceptance authority; canonical graph and archive verification retain those
+roles.
 
 This record does not claim production qualification. The strict contained
 generated-C validation provider remains unavailable behind its production
