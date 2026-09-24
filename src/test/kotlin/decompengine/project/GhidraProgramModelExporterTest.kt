@@ -121,7 +121,7 @@ class GhidraProgramModelExporterTest {
 
         val failure = assertFailsWith<GhidraAnalysisException> { analyzer.analyze(binary, work) }
 
-        assertTrue(failure.message.orEmpty().contains("rerun with the same output directory"))
+        assertTrue(failure.message.orEmpty().contains("rerun with the same output directory"), failure.message)
         assertTrue(work.resolve("reports/ghidra_stdout.log").readText().contains("fake export started"))
     }
 

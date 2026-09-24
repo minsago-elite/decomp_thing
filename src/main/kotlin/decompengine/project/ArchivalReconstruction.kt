@@ -257,8 +257,11 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                 "Ghidra program recovery exceeded ${limits.maximumDiagnosticBytesPerStream} diagnostic bytes per stream; " +
                     "rerun with the same output directory to resume durable function checkpoints",
             )
+            if (!completed) throw GhidraAnalysisException(
+                "Ghidra export exceeded its wall-clock allowance; " +
+                    "rerun with the same output directory to resume durable function checkpoints",
+            )
             deadline.checkpoint("after export diagnostics")
-            if (!completed) throw java.util.concurrent.TimeoutException()
             return process.exitValue()
         } catch (failure: Throwable) {
             val reported = if (failure is java.util.concurrent.TimeoutException) {
