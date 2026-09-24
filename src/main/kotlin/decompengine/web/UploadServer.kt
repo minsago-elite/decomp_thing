@@ -803,6 +803,7 @@ class UploadServer(
             source.manifestDocument,
             source.confidence,
             currentBuild?.manifestDocument == source.manifestDocument,
+            source.moduleId(normalized),
         ))
     }
 

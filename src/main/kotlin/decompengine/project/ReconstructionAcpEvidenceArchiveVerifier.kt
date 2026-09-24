@@ -123,7 +123,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         manifest.files
             .filter { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }
             .forEach { source ->
-                val moduleId = extractModuleId(sourceDeclaration, source.path)
+                val moduleId = sourceDeclaration.moduleIdForPath(source.path)
                 val repairedSource = repairLineage.repairedSource(source.path)
                 val checkpointPath = checkpointDeclaration.materialize(mapOf("module" to moduleId))
                 val checkpointManifest = requireNotNull(manifestByPath[checkpointPath]) {
@@ -1382,35 +1382,6 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
 
     private fun strictObject(bytes: ByteArray, limits: StrictJsonLimits, label: String): JsonObject =
         OracleJson.parse(bytes, limits).requiredObject(label)
-
-    private fun extractModuleId(declaration: ProjectFileDeclaration, path: String): String {
-        val marker = "{module}"
-        require(declaration.pathTemplate.countOccurrences(marker) == 1) {
-            "module implementation declaration must contain exactly one module placeholder"
-        }
-        val prefix = declaration.pathTemplate.substringBefore(marker)
-        val suffix = declaration.pathTemplate.substringAfter(marker)
-        require(path.startsWith(prefix) && path.endsWith(suffix) && path.length > prefix.length + suffix.length) {
-            "module implementation path does not match the reconstruction profile: $path"
-        }
-        val end = path.length - suffix.length
-        val moduleId = path.substring(prefix.length, end)
-        require(declaration.materialize(mapOf("module" to moduleId)) == path) {
-            "module implementation path does not bind one safe module identity: $path"
-        }
-        return moduleId
-    }
-
-    private fun String.countOccurrences(fragment: String): Int {
-        var count = 0
-        var index = 0
-        while (true) {
-            index = indexOf(fragment, index)
-            if (index < 0) return count
-            count++
-            index += fragment.length
-        }
-    }
 
     private fun Enum<*>.wireName(): String = name.lowercase().replace('_', '-')
 

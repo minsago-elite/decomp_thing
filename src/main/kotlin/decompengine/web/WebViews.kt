@@ -387,6 +387,19 @@ fun renderSourceFile(
     manifest: JsonObject? = null,
     confidence: JsonObject? = null,
     currentBuildVerified: Boolean = false,
+): String = renderSourceFile(
+    job, relativePath, source, reportContext, manifest, confidence, currentBuildVerified, null,
+)
+
+internal fun renderSourceFile(
+    job: Job,
+    relativePath: String,
+    source: String,
+    reportContext: WebReportContext?,
+    manifest: JsonObject?,
+    confidence: JsonObject?,
+    currentBuildVerified: Boolean,
+    declaredModuleId: String?,
 ): String {
     val reports = reportsFor(job, reportContext)
     val fileEvidence = manifest?.get("files")?.jsonArray?.mapNotNull { it as? JsonObject }
@@ -398,7 +411,7 @@ fun renderSourceFile(
         else -> "not classified as an implementation"
     }
     val entities = fileEvidence?.get("entityIds")?.jsonArray?.joinToString(", ") { it.jsonPrimitive.content }.orEmpty()
-    val moduleId = relativePath.substringAfterLast('/').substringBeforeLast('.')
+    val moduleId = declaredModuleId ?: relativePath.substringAfterLast('/').substringBeforeLast('.')
     val moduleConfidence = runCatching {
         confidence?.get("modules")?.jsonArray
             ?.mapNotNull { it as? JsonObject }?.firstOrNull { it.text("id") == moduleId }
