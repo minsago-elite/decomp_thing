@@ -1317,7 +1317,12 @@ distributions {
 }
 
 tasks.test {
-    useJUnitPlatform()
+    when (val shard = providers.gradleProperty("ciTestShard").orNull) {
+        null -> useJUnitPlatform()
+        "core" -> useJUnitPlatform { excludeTags("ci-live") }
+        "live" -> useJUnitPlatform { includeTags("ci-live") }
+        else -> error("unsupported ciTestShard: $shard")
+    }
     if (providers.environmentVariable("DECOMP_REQUIRE_GCC_ENGINE_CLI").orNull == "true") {
         // The test JVM retains large captured records; this is not aggregate RSS qualification.
         maxHeapSize = "8g"
