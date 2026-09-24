@@ -435,7 +435,19 @@ class GccBundledContainedExecutionTest {
                 "bytes" to JsonPrimitive(entry.bytes), "sha256" to JsonPrimitive(entry.sha256),
             )) }),
         ))))
-        val exporter = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java")).use { it.readNBytes(4 * 1024 * 1024 + 1) }
+        val productionExporter = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java"))
+            .use { it.readNBytes(4 * 1024 * 1024 + 1) }
+        assertTrue(productionExporter.size in 1..4 * 1024 * 1024)
+        val exporter = if (!interrupted) productionExporter else {
+            // The authored ELF exports its remaining batches quickly. Give the host time to
+            // durably authorize and deliver an actual interruption after the first checkpoint.
+            // The fixture variant is retained as an exact, hashed exporter input.
+            val source = productionExporter.decodeToString()
+            val checkpoint = "println(\"program-model planning export \" + completed + \"/\" + total + \" batch=\" + baseName);"
+            assertTrue(source.indexOf(checkpoint) >= 0 && source.indexOf(checkpoint) == source.lastIndexOf(checkpoint))
+            source.replace(checkpoint, "$checkpoint\n                if (completed == 512) Thread.sleep(30_000L);")
+                .toByteArray(Charsets.UTF_8)
+        }
         assertTrue(exporter.size in 1..4 * 1024 * 1024)
         val tools = mapOf(
             GccCompilerEngineContainmentArtifactRole.JAVA_EXECUTABLE to Path.of(System.getProperty("java.home"), "bin", "java"),
