@@ -26,6 +26,13 @@ internal data class PlannerComplexity(
 
 internal data class IndexedPlannerRun(val plan: ModulePlan, val complexity: PlannerComplexity)
 
+internal data class PlannerBudgetLimits(
+    val maximumFunctionsPerModule: Int,
+    val maximumEntities: Int,
+    val maximumDependencyEdges: Long,
+    val maximumWorkUnits: Long,
+)
+
 private class MutablePlannerComplexity(entityCount: Int, private val maximumWorkUnits: Long) {
     private var chargedWorkUnits = entityCount.toLong()
 
@@ -89,6 +96,10 @@ class DeterministicModulePlanner(
         require(maximumDependencyEdges > 0)
         require(maximumWorkUnits > 0)
     }
+
+    internal val budgetLimits: PlannerBudgetLimits
+        get() = PlannerBudgetLimits(maximumFunctionsPerModule, maximumEntities,
+            maximumDependencyEdges, maximumWorkUnits)
 
     /** Preserve stricter caller limits while binding generation to its admitted profile. */
     internal fun withProfileBounds(profile: ReconstructionProfile): DeterministicModulePlanner {
