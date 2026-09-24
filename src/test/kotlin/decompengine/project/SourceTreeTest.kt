@@ -272,11 +272,16 @@ class SourceTreeTest {
         val overrides = functions.associate { it.id to it.id }
         val project = createTempDirectory("source-transitive-resume-")
         val calls = mutableListOf<String>()
+        var rejectLeafRepair = false
         var interruptRoot = false
         val reconstructor = object : ModuleReconstructor {
             override fun cacheIdentity() = "transitive-resume-test"
             override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule {
                 calls += request.module.id
+                if (rejectLeafRepair && request.module.id == "leaf") {
+                    val invalid = "int leaf(void) { return ; }\n"
+                    return ReconstructedModule(invalid, "scripted", sha256(invalid.toByteArray()))
+                }
                 if (interruptRoot && request.module.id == "root") {
                     throw ModuleReconstructionInterruptedException("root", AgentStopReason.CANCELLED, "test checkpoint interruption")
                 }
@@ -301,7 +306,19 @@ class SourceTreeTest {
         assertTrue(initialAudit.moduleCompilationEvidenceProblems.isEmpty())
         val unrelatedCheckpoint = project.resolve("reports/modules/unrelated.json").readText()
         val changed = model.copy(functions = functions.map { if (it.id == "leaf") it.copy(prototype = "long leaf(void)") else it })
+        val previousLeafSource = project.resolve("src/modules/leaf.c").readText()
+        val previousLeafCheckpoint = project.resolve("reports/modules/leaf.json").readText()
         calls.clear()
+        rejectLeafRepair = true
+        assertFailsWith<ModuleReconstructionRevisionRejectedException> {
+            SourceTreeGenerator.generate(changed, project, reconstructor = reconstructor, overrides = overrides)
+        }
+        assertEquals(listOf("leaf"), calls)
+        assertEquals(previousLeafSource, project.resolve("src/modules/leaf.c").readText())
+        assertEquals(previousLeafCheckpoint, project.resolve("reports/modules/leaf.json").readText())
+        assertTrue(project.resolve("reports/modules/leaf.attempt.json").exists())
+        calls.clear()
+        rejectLeafRepair = false
         interruptRoot = true
         assertFailsWith<ModuleReconstructionInterruptedException> {
             SourceTreeGenerator.generate(changed, project, reconstructor = reconstructor, overrides = overrides)
@@ -313,6 +330,7 @@ class SourceTreeTest {
         val manifest = SourceTreeGenerator.generate(changed, project, reconstructor = reconstructor, overrides = overrides)
         assertEquals(listOf("root"), calls)
         assertTrue(manifest.unresolvedImplementationIds.isEmpty())
+        assertFalse(project.resolve("reports/modules/leaf.attempt.json").exists())
         completed.forEach { (id, bytes) -> assertEquals(bytes, project.resolve("reports/modules/$id.json").readText()) }
         assertEquals(unrelatedCheckpoint, project.resolve("reports/modules/unrelated.json").readText())
         val confidence = Json.parseToJsonElement(project.resolve("reports/confidence.json").readText()).jsonObject
@@ -338,6 +356,7 @@ class SourceTreeTest {
             val audit = ArchivalProjectAuditor.audit(directory)
             assertTrue(audit.provenanceComplete)
             assertTrue(audit.moduleCompilationEvidenceProblems.isEmpty())
+            assertTrue(audit.moduleConfidenceEvidenceProblems.isEmpty())
             assertEquals(expectedRevisions, audit.moduleRevisionSha256)
             assertTrue(audit.unresolvedEntityIds.isEmpty())
             assertNull(audit.behaviorMatched)
