@@ -32,10 +32,26 @@ jobs:
           cache-dependency-path: requirements/oracle-generation.txt
       - name: Install non-authoritative Python compatibility dependencies
         run: python3 -m pip install -r requirements/oracle-generation.txt
+      - name: Restore locked LLVM source artifacts
+        id: llvm-source-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ runner.temp }}/llvm-source/llvm-project-22.1.6.src.tar.xz
+            ${{ runner.temp }}/llvm-source/llvm-project-22.1.6.src.tar.xz.sig
+          key: llvm-source-v1-${{ hashFiles('oracle/llvm/22.1.6/source-lock.json') }}
       - name: Verify authenticated LLVM source
         run: |
           ./gradlew --no-daemon fetchLlvmSourceArchive \
             --args="--lock oracle/llvm/22.1.6/source-lock.json --output $RUNNER_TEMP/llvm-source"
+      - name: Save authenticated LLVM source artifacts
+        if: steps.llvm-source-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ runner.temp }}/llvm-source/llvm-project-22.1.6.src.tar.xz
+            ${{ runner.temp }}/llvm-source/llvm-project-22.1.6.src.tar.xz.sig
+          key: ${{ steps.llvm-source-cache.outputs.cache-primary-key }}
       - name: Fetch hash-locked Clang release artifacts
         run: |
           ./gradlew --no-daemon fetchLlvmReleaseArtifacts \
