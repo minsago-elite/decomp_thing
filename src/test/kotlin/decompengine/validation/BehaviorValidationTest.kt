@@ -290,13 +290,15 @@ class BehaviorValidationTest {
         val source = "int main(void) { return 0; }\n"
         val original = compileC(tempDir, "early-original", source)
         val rebuilt = compileC(tempDir, "early-rebuilt", source)
-        val report = BehaviorComparator().compare("early_stdin", original, rebuilt,
-            listOf(ProcessInput("unread", stdin = ByteArray(256 * 1024) { 'x'.code.toByte() })),
-            tempDir.resolve("reports"))
+        repeat(8) { attempt ->
+            val report = BehaviorComparator().compare("early_stdin", original, rebuilt,
+                listOf(ProcessInput("unread", stdin = ByteArray(256 * 1024) { 'x'.code.toByte() })),
+                tempDir.resolve("reports-$attempt"))
 
-        assertTrue(report.matches)
-        assertTrue(report.cases.single().original.completionEvidence != null)
-        assertTrue(report.cases.single().rebuilt.completionEvidence != null)
+            assertTrue(report.matches)
+            assertTrue(report.cases.single().original.completionEvidence != null)
+            assertTrue(report.cases.single().rebuilt.completionEvidence != null)
+        }
     }
 
     @Test

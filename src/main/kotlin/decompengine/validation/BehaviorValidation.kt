@@ -278,10 +278,12 @@ class SandboxRunner(
             try {
                 process.outputStream.use { it.write(input.stdin) }
             } catch (failure: IOException) {
-                // A completed program may close stdin without consuming it. The writer can then
-                // see EPIPE even though the independently authenticated execution succeeded.
-                // Every other I/O error still fails, and completion is checked below.
-                if (failure.message != "Broken pipe") throw failure
+                // A program may exit without consuming stdin. Writing its pipe can report EPIPE;
+                // retrieving the stream after exit can instead return a closed JDK stream.
+                // Completion and output are authenticated below before either is accepted.
+                if (failure.message != "Broken pipe" &&
+                    !(failure.message == "Stream closed" && !process.isAlive)
+                ) throw failure
             }
         }
         var primaryFailure: Throwable? = null
