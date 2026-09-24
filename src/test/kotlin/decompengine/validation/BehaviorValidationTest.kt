@@ -285,6 +285,21 @@ class BehaviorValidationTest {
     }
 
     @Test
+    fun `early exit that closes unread stdin still requires authenticated completion`() {
+        val tempDir = createTempDirectory("validation-early-stdin-")
+        val source = "int main(void) { return 0; }\n"
+        val original = compileC(tempDir, "early-original", source)
+        val rebuilt = compileC(tempDir, "early-rebuilt", source)
+        val report = BehaviorComparator().compare("early_stdin", original, rebuilt,
+            listOf(ProcessInput("unread", stdin = ByteArray(256 * 1024) { 'x'.code.toByte() })),
+            tempDir.resolve("reports"))
+
+        assertTrue(report.matches)
+        assertTrue(report.cases.single().original.completionEvidence != null)
+        assertTrue(report.cases.single().rebuilt.completionEvidence != null)
+    }
+
+    @Test
     fun `exit code stdout and stderr are compared byte-for-byte`() {
         val tempDir = createTempDirectory("validation-mismatch-")
         val original = compileC(tempDir, "original", "int main(void) { return 0; }\n")
