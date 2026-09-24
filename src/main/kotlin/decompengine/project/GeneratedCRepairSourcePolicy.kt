@@ -1,6 +1,7 @@
 package decompengine.project
 
 import decompengine.repair.RepairResourceBudget
+import decompengine.repair.RepairIndexProfile
 
 /** Content-independent source authorization shared by indexing, recovery and validation staging. */
 internal class GeneratedCRepairSourcePolicy(private val profile: ReconstructionProfile) {
@@ -61,13 +62,14 @@ internal class GeneratedCRepairSourcePolicy(private val profile: ReconstructionP
     }
 }
 
-/** The production validator still registers exactly the built-in Make descriptor. */
-internal object GeneratedCValidationProfile {
-    val sources = GeneratedCRepairSourcePolicy(GeneratedCMakeReconstructionProfile.descriptor)
+/** One immutable index/staging policy; constructing this alone grants no execution authority. */
+internal class GeneratedCValidationRegistration(val profile: ReconstructionProfile) {
+    val indexProfile: RepairIndexProfile = GeneratedCRepairIndexProfile.forProfile(profile)
+    val sources = GeneratedCRepairSourcePolicy(profile)
 
     fun requireIdentity(profileId: String, profileSha256: String, budget: RepairResourceBudget) {
-        require(profileId == GeneratedCRepairIndexProfile.profileId() &&
-            profileSha256 == GeneratedCRepairIndexProfile.configurationSha256(budget)) {
+        require(profileId == indexProfile.profileId() &&
+            profileSha256 == indexProfile.configurationSha256(budget)) {
             "validation request differs from the registered generated-C repair profile"
         }
     }
@@ -78,4 +80,16 @@ internal object GeneratedCValidationProfile {
             "candidate source layout is not authorized by the generated-C profile"
         }
     }
+}
+
+/** Production still registers only the exact built-in Make descriptor and unavailable validator. */
+internal object GeneratedCValidationProfile {
+    val registeredMake = GeneratedCValidationRegistration(GeneratedCMakeReconstructionProfile.descriptor)
+    val sources: GeneratedCRepairSourcePolicy get() = registeredMake.sources
+
+    fun requireIdentity(profileId: String, profileSha256: String, budget: RepairResourceBudget) =
+        registeredMake.requireIdentity(profileId, profileSha256, budget)
+
+    fun requireSourceLayout(paths: List<String>, budget: RepairResourceBudget) =
+        registeredMake.requireSourceLayout(paths, budget)
 }

@@ -18,9 +18,52 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class GeneratedCRepairValidationProviderTest {
+    @Test
+    fun `selected repair registration binds validation identity and source roles without alternate execution`() {
+        val budget = RepairResourceBudget()
+        val make = GeneratedCValidationProfile.registeredMake
+        val provider = GeneratedCRepairRuntimeProvider()
+        assertSame(make.indexProfile, provider.indexProfile())
+        make.requireIdentity(provider.profileId(), provider.indexProfile().configurationSha256(budget), budget)
+        make.requireSourceLayout(listOf("Makefile", "include/decomp_types.h", "src/main.c"), budget)
+
+        val ninja = GeneratedCValidationRegistration(GeneratedCNinjaReconstructionProfile.descriptor)
+        ninja.requireIdentity(ninja.indexProfile.profileId(), ninja.indexProfile.configurationSha256(budget), budget)
+        ninja.requireSourceLayout(listOf("build.ninja", "include/decomp_types.h", "src/main.c"), budget)
+        assertFailsWith<IllegalArgumentException> {
+            ninja.requireSourceLayout(listOf("Makefile", "include/decomp_types.h", "src/main.c"), budget)
+        }
+        assertFailsWith<IllegalArgumentException> { LinuxGeneratedCRepairValidationBoundary.create(ninja) }
+
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val relocated = ReconstructionProfile(base.schemaVersion, base.id,
+            ProjectLayoutProfile(base.layout.schemaVersion, base.layout.declarations.map { declaration ->
+                val path = when (declaration.id) {
+                    "build-definition" -> "config/build/Makefile"
+                    else -> declaration.pathTemplate
+                        .replace(Regex("^src/"), "workspace/code/")
+                        .replace(Regex("^include/"), "workspace/headers/")
+                }
+                ProjectFileDeclaration(declaration.id, path, declaration.roles, declaration.contentKind)
+            }), base.budgets, base.adapterConfiguration)
+        val relocatedRegistration = GeneratedCValidationRegistration(relocated)
+        val relocatedPaths = listOf("config/build/Makefile", "workspace/code/main.c",
+            "workspace/headers/decomp_types.h").sorted()
+        relocatedRegistration.requireSourceLayout(relocatedPaths, budget)
+        assertTrue(relocatedRegistration.sources.isEditable("workspace/code/main.c"))
+        assertFalse(relocatedRegistration.sources.isEditable("workspace/code/undeclared.c"))
+        assertFailsWith<IllegalArgumentException> {
+            relocatedRegistration.requireSourceLayout(listOf("Makefile", "src/main.c"), budget)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            LinuxGeneratedCRepairValidationBoundary.create(relocatedRegistration)
+        }
+    }
+
     @Test
     fun `behavior validation admits profile limits only beneath independent host ceilings`() {
         val selected = RepairResourceBudget(maximumBehaviorExecutionMillis = 2_000,

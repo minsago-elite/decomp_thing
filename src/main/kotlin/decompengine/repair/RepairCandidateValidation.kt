@@ -28,6 +28,7 @@ class RepairCandidateValidationRequest(
 ) {
     private val sourceContent = checkedCandidateSources(candidateSources, budget)
     private val inputContent = checkedCandidateInputs(inputs, budget)
+    val candidateSourcePaths: List<String> get() = Collections.unmodifiableList(sourceContent.keys.toList())
     val candidateSources: Map<String, ByteArray> get() = Collections.unmodifiableMap(
         sourceContent.mapValuesTo(TreeMap()) { (_, bytes) -> bytes.copyOf() },
     )
