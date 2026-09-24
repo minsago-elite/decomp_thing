@@ -30,6 +30,9 @@ class GeneratedCRepairValidationProviderTest {
         assertSame(make.indexProfile, provider.indexProfile())
         make.requireIdentity(provider.profileId(), provider.indexProfile().configurationSha256(budget), budget)
         make.requireSourceLayout(listOf("Makefile", "include/decomp_types.h", "src/main.c"), budget)
+        val buildCommand = make.buildCommand(Path.of("/tools/make"), Path.of("/tools/cc"), Path.of("/tools/sh"))
+        assertEquals("/tools/make", buildCommand.first())
+        assertEquals("Makefile", buildCommand[buildCommand.indexOf("-f") + 1])
 
         val ninja = GeneratedCValidationRegistration(GeneratedCNinjaReconstructionProfile.descriptor)
         ninja.requireIdentity(ninja.indexProfile.profileId(), ninja.indexProfile.configurationSha256(budget), budget)
@@ -38,6 +41,11 @@ class GeneratedCRepairValidationProviderTest {
             ninja.requireSourceLayout(listOf("Makefile", "include/decomp_types.h", "src/main.c"), budget)
         }
         assertFailsWith<IllegalArgumentException> { LinuxGeneratedCRepairValidationBoundary.create(ninja) }
+        val ninjaCommand = ninja.buildCommand(Path.of("/tools/ninja"), Path.of("/tools/cc"), Path.of("/tools/sh"))
+        assertEquals(listOf("/tools/ninja", "-f", "build.ninja", "build/reconstructed"), ninjaCommand)
+        assertFailsWith<IllegalArgumentException> {
+            ninja.buildCommand(Path.of("/tools/make"), Path.of("/tools/cc"), Path.of("/tools/sh"))
+        }
 
         val base = GeneratedCMakeReconstructionProfile.descriptor
         val relocated = ReconstructionProfile(base.schemaVersion, base.id,
@@ -62,6 +70,9 @@ class GeneratedCRepairValidationProviderTest {
         assertFailsWith<IllegalArgumentException> {
             LinuxGeneratedCRepairValidationBoundary.create(relocatedRegistration)
         }
+        val relocatedCommand = relocatedRegistration.buildCommand(Path.of("/tools/make"),
+            Path.of("/tools/cc"), Path.of("/tools/sh"))
+        assertEquals("config/build/Makefile", relocatedCommand[relocatedCommand.indexOf("-f") + 1])
     }
 
     @Test

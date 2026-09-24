@@ -2,6 +2,7 @@ package decompengine.project
 
 import decompengine.repair.RepairResourceBudget
 import decompengine.repair.RepairIndexProfile
+import java.nio.file.Path
 
 /** Content-independent source authorization shared by indexing, recovery and validation staging. */
 internal class GeneratedCRepairSourcePolicy(private val profile: ReconstructionProfile) {
@@ -78,6 +79,24 @@ internal class GeneratedCValidationRegistration(val profile: ReconstructionProfi
         require(sources.buildDefinition in paths &&
             sources.authorizesRecoveryLayout(paths, paths.filter(sources::isEditable), budget)) {
             "candidate source layout is not authorized by the generated-C profile"
+        }
+    }
+
+    fun buildCommand(buildTool: Path, compiler: Path, shell: Path): List<String> {
+        require(buildTool.fileName.toString() == profile.adapterConfiguration.getValue("build-executable").single()) {
+            "validation build tool differs from the selected repair profile"
+        }
+        require(compiler.fileName.toString() == profile.adapterConfiguration.getValue("compiler-driver").single()) {
+            "validation compiler differs from the selected repair profile"
+        }
+        require(shell.fileName.toString() == "sh") { "validation shell differs from the generated-C repair policy" }
+        return when (profile.adapterConfiguration.getValue("build-system").single()) {
+            "gnu-make" -> listOf(buildTool.toString(), "--no-builtin-rules", "--no-builtin-variables",
+                "--no-print-directory", "-f", sources.buildDefinition,
+                "CC=$compiler -B${GeneratedCRepairRuntimeConfiguration.TOOL_DIRECTORY}/", "SHELL=$shell",
+                "TARGET=build/reconstructed", "all")
+            "ninja" -> listOf(buildTool.toString(), "-f", sources.buildDefinition, "build/reconstructed")
+            else -> throw IllegalArgumentException("unsupported selected repair build system")
         }
     }
 }

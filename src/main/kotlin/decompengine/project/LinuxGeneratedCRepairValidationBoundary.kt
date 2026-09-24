@@ -107,12 +107,10 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor(
                 original = request.originalBinary?.let(snapshot::captureOriginal)
                 val output = snapshot.beginBuild()
                 receipt.buildOutputLink(output)
-                val compiler = config.tools.getValue("compiler").destination.toString()
-                val shell = config.tools.getValue("shell").destination.toString()
-                val command = listOf(config.tools.getValue("make").destination.toString(),
-                    "--no-builtin-rules", "--no-builtin-variables", "--no-print-directory", "-f", registration.sources.buildDefinition,
-                    "CC=$compiler -B${GeneratedCRepairRuntimeConfiguration.TOOL_DIRECTORY}/", "SHELL=$shell",
-                    "TARGET=build/reconstructed", "all")
+                val compiler = config.tools.getValue("compiler").destination
+                val shell = config.tools.getValue("shell").destination
+                val command = registration.buildCommand(config.tools.getValue("make").destination,
+                    compiler, shell)
                 val build = runContained(config, deadline, request.budget, aggregateOutput, command,
                     buildEnvironment(output.path), snapshot.source.path, config.tools.values.toList() + config.buildRuntime,
                     listOf(AcpSandboxRootGrant(snapshot.source, AcpSandboxRootMode.READ_ONLY),

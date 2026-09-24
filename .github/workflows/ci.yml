@@ -215,6 +215,12 @@ jobs:
           DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH: "true"
           DECOMP_REQUIRE_BUNDLED_GHIDRA_EXECUTION: "true"
         run: scripts/ci.sh
+      - name: Retain complete JVM suite reports before focused quota fixture
+        run: |
+          mv build/test-results/test build/test-results/full-suite
+          mv build/reports/tests/test build/reports/tests/full-suite
+      - name: Verify quota-backed repair snapshot layouts
+        run: bash scripts/test-repair-validation-snapshot.sh
       - name: Release root-owned application-bundled Ghidra
         if: always()
         run: bash scripts/ci-release-bundled-ghidra-runtime.sh
@@ -235,6 +241,8 @@ jobs:
         with:
           name: kotlin-test-reports
           path: |
+            build/reports/tests/full-suite
+            build/test-results/full-suite
             build/reports/tests/test
             build/test-results/test
       - name: Release finite ACP quota fixture
