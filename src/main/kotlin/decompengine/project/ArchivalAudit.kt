@@ -411,13 +411,33 @@ object ArchivalProjectAuditor {
                     }
                 }
                 requireScore(report.getValue("projectScore"), expectedScore(entityScores.keys.toList()))
+                val recoveryUnresolved = (model.functions.map { it.id to it.status } +
+                    model.globals.map { it.id to it.status } +
+                    model.types.map { it.id to it.status })
+                    .filter { (_, status) -> model.isRecoveryUnresolved(status) }.map { it.first }.toSet()
+                val implementationUnresolved = manifest.unresolvedImplementationIds.toSet()
+                fun requireIds(record: JsonObject, field: String, expected: Collection<String>) {
+                    val actual = record.getValue(field).jsonArray.map { value ->
+                        require(value.jsonPrimitive.isString) { "confidence $field contains a non-string entity ID" }
+                        value.jsonPrimitive.content
+                    }
+                    require(actual == expected.distinct().sorted()) {
+                        "confidence $field differs from the audited unresolved entities"
+                    }
+                }
+                requireIds(report, "unresolvedRecoveryEntityIds", recoveryUnresolved)
+                requireIds(report, "unresolvedImplementationIds", implementationUnresolved)
+                requireIds(report, "unresolvedEntityIds", recoveryUnresolved + implementationUnresolved)
                 val entries = report.getValue("modules").jsonArray.map { it.jsonObject }
                 val byId = entries.associateBy { it.string("id") }
                 require(entries.size == byId.size && byId.keys == moduleRevisions.keys) {
                     "confidence module inventory differs from the audited plan"
                 }
                 byId.forEach { (id, module) ->
-                    requireScore(module.getValue("score"), expectedScore(plannedModuleEntityIds.getValue(id)))
+                    val owned = plannedModuleEntityIds.getValue(id)
+                    requireScore(module.getValue("score"), expectedScore(owned))
+                    requireIds(module, "unresolvedRecoveryEntityIds", owned.filter { it in recoveryUnresolved })
+                    requireIds(module, "unresolvedImplementationIds", owned.filter { it in implementationUnresolved })
                 }
                 byId
             } catch (failure: Exception) {

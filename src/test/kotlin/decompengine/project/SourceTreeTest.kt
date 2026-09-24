@@ -532,6 +532,13 @@ class SourceTreeTest {
         val misleading = ArchivalProjectAuditor.audit(project)
         assertEquals(ids, misleading.moduleConfidenceEvidenceProblems.keys)
         assertTrue(misleading.moduleCompilationEvidence.isEmpty())
+
+        assertTrue(original.getValue("unresolvedRecoveryEntityIds").jsonArray.isEmpty())
+        publish(JsonObject(original + ("unresolvedRecoveryEntityIds" to
+            JsonArray(listOf(JsonPrimitive("fn_0000000000401000"))))))
+        val forgedRecovery = ArchivalProjectAuditor.audit(project)
+        assertEquals(ids, forgedRecovery.moduleConfidenceEvidenceProblems.keys)
+        assertTrue(forgedRecovery.moduleCompilationEvidence.isEmpty())
     }
 
     @Test

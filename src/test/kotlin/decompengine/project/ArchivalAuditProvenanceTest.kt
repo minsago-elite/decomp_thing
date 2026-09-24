@@ -263,7 +263,9 @@ class ArchivalAuditProvenanceTest {
         rewriteManifest(project) {
             it.withField("unresolvedImplementationIds", JsonArray(listOf(JsonPrimitive("fn_10"))))
         }
-        assertEquals(listOf("fn_10"), ArchivalProjectAuditor.audit(project).unresolvedEntityIds)
+        val audit = ArchivalProjectAuditor.audit(project)
+        assertEquals(listOf("fn_10", "fn_100"), audit.unresolvedEntityIds)
+        assertEquals(audit.moduleRevisionSha256.keys, audit.moduleConfidenceEvidenceProblems.keys)
     }
 
     @Test
