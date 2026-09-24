@@ -94,9 +94,8 @@ internal class WebSourceSnapshot(
         ProjectFileRole.VIEWABLE in it.roles && it.contentKind == ProjectContentKind.UTF8_TEXT
     }
 
-    val confidence: JsonObject? = viewable.singleOrNull {
-        it.path == profile.layout.declaration("confidence-evidence").materialize()
-    }?.let {
+    val confidence: JsonObject? = profile.layout.declarations.singleOrNull { it.id == "confidence-evidence" }
+        ?.materialize()?.let { path -> viewable.singleOrNull { it.path == path } }?.let {
         runCatching { OracleJson.parse(files.getValue(it.path).bytes, WebSourceEvidence.JSON_LIMITS) as? JsonObject }.getOrNull()
     }
 
