@@ -10,6 +10,7 @@ internal interface ReconstructionAdapter {
     val compilation: ModuleCompilationPolicy
     val archiveBuild: ArchiveBuildPolicy
     val behaviorBuild: BehaviorBuildPolicy
+    val mvpPatchCompiler: MvpPatchCompilerPolicy
     fun build(
         projectDir: Path,
         profile: ReconstructionProfile,

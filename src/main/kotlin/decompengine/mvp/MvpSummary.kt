@@ -23,6 +23,8 @@ internal data class VerificationEvidence(
 internal class MvpRunEvidence(
     private val environment: Map<String, String>,
     val harnessProvenance: String,
+    val profileId: String,
+    val profileSha256: String,
 ) {
     val phases = linkedMapOf<String, PhaseEvidence>()
     val verification = mutableListOf<VerificationEvidence>()
@@ -127,6 +129,7 @@ internal fun writeMvpSummary(
         - Approval decision: ${evidence.redact(evidence.approvalDecision)}
         - Execution isolation: ${evidence.redact(evidence.isolation)}
         - Agent harness: `${evidence.redact(evidence.harnessProvenance)}`
+        - Reconstruction profile: `${evidence.profileId}` (`${evidence.profileSha256}`)
         - Verified final binary: `${if (binary.exists() && result == "PASS") binary.relativeOrAbsolute(output) else "not published"}`
 
         ## Executed Phases

@@ -11,6 +11,7 @@ internal object GeneratedCReconstructionAdapter : ReconstructionAdapter {
     override val compilation: ModuleCompilationPolicy = GeneratedCModuleValidation
     override val archiveBuild: ArchiveBuildPolicy = GeneratedCArchiveBuildPolicy
     override val behaviorBuild: BehaviorBuildPolicy = GeneratedCBehaviorBuildPolicy
+    override val mvpPatchCompiler: MvpPatchCompilerPolicy = GeneratedCMvpPatchCompilerPolicy
     override fun rendering(model: RecoveredProgramModel, plan: ModulePlan): ProjectRendering =
         GeneratedCProjectRendering(model, plan)
     override fun build(
