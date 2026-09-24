@@ -12,10 +12,8 @@ python3 -B -m unittest discover -s tests -p test_generic_leakage.py -v
 ```
 
 The scanner requires Python 3.9+ and Git. The standalone Gradle task runs the
-scanner without compiling or executing application code. While the draft gate
-still reports outstanding migrations, `scripts/ci.sh` runs it advisory (after
-the test task, without failing CI) and it stays out of Gradle `check`; wire it
-back into `check` and `ci.sh` only once the repository scan passes. Exit status
+scanner without compiling or executing application code. `scripts/ci.sh` runs
+the gate before the JVM suite, and Gradle `check` requires it. Exit status
 is 0 for no findings, 1 for findings, and
 2 for invalid policy or unreadable inputs. JSON output contains either the scan
 counts and sorted findings or an `error` field. Findings include path, line,
@@ -58,7 +56,8 @@ The inventory includes tracked files and nonignored untracked files. Ordinary
 unstaged deletions are omitted; declared policy paths must still exist. Ignore
 patterns do not exempt tracked files. The scanner supports the source, script,
 configuration and text suffixes listed in `TEXT_SUFFIXES`, plus Dockerfiles.
-Markdown documentation is exempt under #84. Unsupported binary formats are not
+Markdown documentation and declared retained JSON evidence under `docs/evidence`
+are exempt under #84. Unsupported binary formats are not
 decoded. This is a working-tree lexical check, not a semantic proof or an atomic
 repository snapshot; comments can match and indirect policy can escape a rule.
 
@@ -70,11 +69,13 @@ ordinary directory ancestors.
 
 ## Current migration state
 
-The initial repository run fails on remaining policy and ownership migrations.
-Examples include MVP compiler assumptions, repair runtime policy,
-benchmark scripts/tests/workflows, and retained historical
-benchmark identities in LLVM reference evidence. Retained evidence must not be
-rewritten merely to satisfy the scanner.
+The repository scan passes with zero findings after declaring retained JSON
+evidence as documentation, recording the generated-C build verifier as adapter
+owned, routing compiler and build-artifact policy through registered adapters,
+and moving two substantive GCC scripts under `oracle/gcc` behind compatibility
+entry points. Retained historical evidence was not rewritten to satisfy the
+scanner. A passing lexical gate does not complete the semantic consumer and
+production-authority work still tracked by #84, #824, and #829.
 
 `ReconstructionPipeline` now resolves its build adapter from the selected profile.
 Its profile overload admits host budgets and binds analyzer export limits before
@@ -88,11 +89,11 @@ resource bounds and other report consumers remain unfinished.
 
 Doctor's compiler/build probes and authored sanitizer sample now come from its
 selected registered adapter, through both the CLI and JVM API. The generic root
-covers the full Doctor package. This removes four findings, leaving 80
-(67 benchmark and 13 generic); the diagnostic executor still needs output/time
-bounds. See [profile-selected Doctor diagnostics](profiled-doctor-diagnostics.md).
+covers the full Doctor package. The historical draft checkpoint removed four
+findings and left 80 (67 benchmark and 13 generic). Doctor process and output
+bounds are now tracked as completed in #1057. See
+[profile-selected Doctor diagnostics](profiled-doctor-diagnostics.md).
 
 Passing the authored scanner tests verifies its detection and exemption
-behavior. It does not make the repository scan pass or complete #84. Current
-scope and progress remain on the issue; the draft gate layer is not ready for
-integration while these findings remain.
+behavior. The repository-wide zero-finding scan supplies the separate lexical
+gate result; neither result alone proves every consumer is program neutral.
