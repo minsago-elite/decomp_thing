@@ -51,7 +51,9 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
 /** The registered generated-C runtime. Every candidate-controlled process uses the audited boundary. */
-internal class LinuxGeneratedCRepairValidationBoundary private constructor() : GeneratedCRepairValidationBoundary {
+internal class LinuxGeneratedCRepairValidationBoundary private constructor(
+    private val registration: GeneratedCValidationRegistration,
+) : GeneratedCRepairValidationBoundary {
     override val assurance = RepairValidationAssurance.STRICT_CONTAINED
     private val configuration by lazy { GeneratedCRepairRuntimeConfiguration.loadFromEnvironment() }
 
@@ -85,7 +87,7 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor() : G
         requireProductionQualification()
         val deadline = GeneratedCValidationDeadline(request.deadlineNanos, request.cancellation)
         deadline.check()
-        GeneratedCValidationProfile.requireIdentity(request.profileId, request.profileSha256, request.budget)
+        registration.requireIdentity(request.profileId, request.profileSha256, request.budget)
         val behaviorBudgetEvidence = GeneratedCValidationBudgetPolicy.DEFAULT.admit(request.budget)
         require(request.label.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}"))) { "validation receipt label is invalid" }
         require(request.reportsDir.isAbsolute && request.reportsDir == request.reportsDir.normalize())
@@ -105,12 +107,10 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor() : G
                 original = request.originalBinary?.let(snapshot::captureOriginal)
                 val output = snapshot.beginBuild()
                 receipt.buildOutputLink(output)
-                val compiler = config.tools.getValue("compiler").destination.toString()
-                val shell = config.tools.getValue("shell").destination.toString()
-                val command = listOf(config.tools.getValue("make").destination.toString(),
-                    "--no-builtin-rules", "--no-builtin-variables", "--no-print-directory", "-f", "Makefile",
-                    "CC=$compiler -B${GeneratedCRepairRuntimeConfiguration.TOOL_DIRECTORY}/", "SHELL=$shell",
-                    "TARGET=build/reconstructed", "all")
+                val compiler = config.tools.getValue("compiler").destination
+                val shell = config.tools.getValue("shell").destination
+                val command = registration.buildCommand(config.tools.getValue("make").destination,
+                    compiler, shell)
                 val build = runContained(config, deadline, request.budget, aggregateOutput, command,
                     buildEnvironment(output.path), snapshot.source.path, config.tools.values.toList() + config.buildRuntime,
                     listOf(AcpSandboxRootGrant(snapshot.source, AcpSandboxRootMode.READ_ONLY),
@@ -213,7 +213,7 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor() : G
         var cleanupUnverified = false
         try {
             deadline.check()
-            snapshot = GeneratedCValidationSnapshot.create(config, budget, deadline::check)
+            snapshot = GeneratedCValidationSnapshot.create(config, registration, budget, deadline::check)
             return action(snapshot)
         } catch (failure: Throwable) {
             primary = failure
@@ -243,7 +243,12 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor() : G
         inputs: List<ProcessInput>, reportsDir: Path, budget: RepairResourceBudget): BehaviorComparisonReport = immutableRequestRequired()
 
     companion object {
-        fun create(): GeneratedCRepairValidationBoundary = LinuxGeneratedCRepairValidationBoundary()
+        fun create(registration: GeneratedCValidationRegistration): GeneratedCRepairValidationBoundary {
+            require(registration.profile === GeneratedCMakeReconstructionProfile.descriptor) {
+                "production validation is registered only for the built-in generated-C/Make descriptor"
+            }
+            return LinuxGeneratedCRepairValidationBoundary(registration)
+        }
         private val PROGRAM_DESTINATION = Path.of("/decomp-generated-c-program")
         private fun requireProductionQualification(): Nothing = throw SandboxUnavailableException(
             "generated-C validation remains unavailable pending qualification of its complete " +

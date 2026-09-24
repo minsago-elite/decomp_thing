@@ -28,7 +28,10 @@ import kotlinx.serialization.json.JsonPrimitive
 
 /** Owns both finite mounts for one validation; directory flock leases also serialize other JVMs. */
 internal class GeneratedCValidationSnapshot private constructor(
-    private val configuration: GeneratedCRepairRuntimeConfiguration,
+    private val configuration: GeneratedCRepairRuntimeConfiguration?,
+    private val sourceTmpfs: Path,
+    private val outputTmpfs: Path,
+    private val registration: GeneratedCValidationRegistration,
     val budget: RepairResourceBudget,
     private val check: () -> Unit,
     private val leases: List<LinuxDescriptor>,
@@ -45,9 +48,10 @@ internal class GeneratedCValidationSnapshot private constructor(
     val sourceFiles: List<JsonObject> get() = Collections.unmodifiableList(sourceManifest)
 
     fun populate(request: RepairCandidateValidationRequest) {
-        GeneratedCValidationProfile.requireIdentity(request.profileId, request.profileSha256, request.budget)
-        val sourcePolicy = GeneratedCValidationProfile.sources
-        val paths = ArrayList<String>()
+        registration.requireIdentity(request.profileId, request.profileSha256, request.budget)
+        val sourcePolicy = registration.sources
+        val paths = request.candidateSourcePaths
+        registration.requireSourceLayout(paths, budget)
         val revision = MessageDigest.getInstance("SHA-256")
         request.forEachCandidateSource { relative, bytes ->
             check()
@@ -63,7 +67,6 @@ internal class GeneratedCValidationSnapshot private constructor(
             if (sourceMetadataBytes > minOf(budget.maximumIndexEvidenceBytes, 64L * 1024 * 1024)) {
                 throw RepairBudgetExceededException("validation source manifest exceeds its metadata bound")
             }
-            paths += relative
             revision.update("${relative.length}:$relative:${bytes.size}:${sha256(bytes)}\n".toByteArray(Charsets.UTF_8))
             writeSource(relative, bytes, executable = false)
             sourceManifest += JsonObject(mapOf(
@@ -71,7 +74,6 @@ internal class GeneratedCValidationSnapshot private constructor(
                 "mode" to JsonPrimitive(0x124), "bytes" to JsonPrimitive(bytes.size), "sha256" to JsonPrimitive(sha256(bytes)),
             ))
         }
-        GeneratedCValidationProfile.requireSourceLayout(paths, budget)
         require(revision.digest().joinToString("") { "%02x".format(it) } == request.sourceRevisionSha256) {
             "candidate revision changed during snapshot population"
         }
@@ -97,7 +99,7 @@ internal class GeneratedCValidationSnapshot private constructor(
         check()
         kotlin.check(output == null) { "previous contained output has not been cleaned" }
         val root = AcpWorkflowStagingRoot.createQuotaBacked(
-            "generated-c-output", configuration.outputTmpfs,
+            "generated-c-output", outputTmpfs,
             AcpStagingQuotaLimits(budget.maximumStagingBytes, budget.maximumStagingDirectories.toLong()),
             ".generated-c-output-",
         )
@@ -120,8 +122,9 @@ internal class GeneratedCValidationSnapshot private constructor(
 
     private fun capture(path: Path, role: String): CapturedGeneratedExecutable {
         check()
+        val runtime = requireNotNull(configuration) { "executable capture requires the registered runtime" }
         require(path.isAbsolute && path == path.normalize()) { "validation executable path must be absolute and normalized" }
-        val limit = minOf(budget.maximumSourceFileBytes, configuration.sandbox.agentResourceLimits.maximumFileBytes)
+        val limit = minOf(budget.maximumSourceFileBytes, runtime.sandbox.agentResourceLimits.maximumFileBytes)
         val file = readStableRegularFile(requireNotNull(path.parent), path.fileName.toString(), limit,
             afterAuthorization = check, afterRead = check, cancellationCheck = check)
         require(file.bytes.size >= 4 && file.bytes[0] == 0x7f.toByte() && file.bytes[1] == 'E'.code.toByte() &&
@@ -130,7 +133,7 @@ internal class GeneratedCValidationSnapshot private constructor(
         }
         val target = writeSource(".validation/$role.elf", file.bytes, executable = true)
         return CapturedGeneratedExecutable(target, file.sha256, file.bytes.size.toLong(), role,
-            calculateAcpRuntimeManifestSha256(target, configuration.sandbox.runtimeClosureLimits, check))
+            calculateAcpRuntimeManifestSha256(target, runtime.sandbox.runtimeClosureLimits, check))
     }
 
     private fun writeSource(relative: String, bytes: ByteArray, executable: Boolean): Path {
@@ -188,10 +191,36 @@ internal class GeneratedCValidationSnapshot private constructor(
     companion object {
         private val retainedLeases = ArrayList<LinuxDescriptor>()
 
-        fun create(configuration: GeneratedCRepairRuntimeConfiguration, budget: RepairResourceBudget, check: () -> Unit): GeneratedCValidationSnapshot {
+        fun create(
+            configuration: GeneratedCRepairRuntimeConfiguration,
+            registration: GeneratedCValidationRegistration,
+            budget: RepairResourceBudget,
+            check: () -> Unit,
+        ): GeneratedCValidationSnapshot = createOnMounts(configuration, configuration.sourceTmpfs,
+            configuration.outputTmpfs, registration, budget, check)
+
+        /** Source-only fixture seam; never creates a production validation capability. */
+        internal fun createForSourceFixture(
+            sourceTmpfs: Path,
+            outputTmpfs: Path,
+            registration: GeneratedCValidationRegistration,
+            budget: RepairResourceBudget,
+            check: () -> Unit = {},
+        ): GeneratedCValidationSnapshot = createOnMounts(null, sourceTmpfs, outputTmpfs, registration, budget, check)
+
+        private fun createOnMounts(
+            configuration: GeneratedCRepairRuntimeConfiguration?,
+            sourceTmpfs: Path,
+            outputTmpfs: Path,
+            registration: GeneratedCValidationRegistration,
+            budget: RepairResourceBudget,
+            check: () -> Unit,
+        ): GeneratedCValidationSnapshot {
+            require(sourceTmpfs != outputTmpfs && !sourceTmpfs.startsWith(outputTmpfs) &&
+                !outputTmpfs.startsWith(sourceTmpfs)) { "validation source and output mounts must be independent" }
             val leases = ArrayList<LinuxDescriptor>()
             try {
-                listOf(configuration.sourceTmpfs, configuration.outputTmpfs).sorted().forEach { mount ->
+                listOf(sourceTmpfs, outputTmpfs).sorted().forEach { mount ->
                     check()
                     val lease = LinuxFilesystemSyscalls.openRoot(mount)
                     leases += lease
@@ -205,11 +234,12 @@ internal class GeneratedCValidationSnapshot private constructor(
                 }
                 check()
                 val source = AcpWorkflowStagingRoot.createQuotaBacked(
-                    "generated-c-source", configuration.sourceTmpfs,
+                    "generated-c-source", sourceTmpfs,
                     AcpStagingQuotaLimits(budget.maximumSourceBytes, budget.maximumDiscoveryEntries.toLong()),
                     ".generated-c-source-",
                 )
-                return GeneratedCValidationSnapshot(configuration, budget, check, leases, source)
+                return GeneratedCValidationSnapshot(configuration, sourceTmpfs, outputTmpfs,
+                    registration, budget, check, leases, source)
             } catch (failure: Throwable) {
                 if (failure is AcpCleanupProofFailure) synchronized(retainedLeases) { retainedLeases.addAll(leases) }
                 else leases.asReversed().forEach { it.close() }

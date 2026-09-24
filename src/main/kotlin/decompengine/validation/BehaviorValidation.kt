@@ -6,6 +6,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.io.InputStream
 import java.nio.file.Path
 import java.time.Duration
@@ -273,7 +274,16 @@ class SandboxRunner(
         val stderrFuture = executor.submit<ByteArray> {
             readBounded(process.errorStream, "stderr", outputLimits.maximumStderrBytes, aggregate)
         }
-        val stdinFuture = executor.submit<Unit> { process.outputStream.use { it.write(input.stdin) } }
+        val stdinFuture = executor.submit<Unit> {
+            try {
+                process.outputStream.use { it.write(input.stdin) }
+            } catch (failure: IOException) {
+                // A completed program may close stdin without consuming it. The writer can then
+                // see EPIPE even though the independently authenticated execution succeeded.
+                // Every other I/O error still fails, and completion is checked below.
+                if (failure.message != "Broken pipe") throw failure
+            }
+        }
         var primaryFailure: Throwable? = null
         try {
             while (process.isAlive || !stdoutFuture.isDone || !stderrFuture.isDone || !stdinFuture.isDone) {
