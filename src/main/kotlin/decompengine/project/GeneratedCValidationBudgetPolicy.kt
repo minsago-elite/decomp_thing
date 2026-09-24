@@ -7,9 +7,9 @@ import kotlinx.serialization.json.JsonPrimitive
 
 /** Host-owned ceilings for contained generated-C validation processes. */
 internal data class GeneratedCValidationHostSafetyLimits(
-    val maximumStdoutBytes: Long = 32L * 1024 * 1024,
-    val maximumStderrBytes: Long = 32L * 1024 * 1024,
-    val maximumOutputBytes: Long = 64L * 1024 * 1024,
+    val maximumStdoutBytes: Long = 8L * 1024 * 1024,
+    val maximumStderrBytes: Long = 8L * 1024 * 1024,
+    val maximumOutputBytes: Long = 16L * 1024 * 1024,
     val maximumExecutionMillis: Long = 30_000,
 ) {
     init {

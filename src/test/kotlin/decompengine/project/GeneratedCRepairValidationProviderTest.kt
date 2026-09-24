@@ -39,6 +39,10 @@ class GeneratedCRepairValidationProviderTest {
             policy.admit(selected.copy(maximumBehaviorStdoutBytes = 4_097,
                 maximumBehaviorOutputBytes = 4_097))
         }
+        assertFailsWith<RepairBudgetExceededException> {
+            GeneratedCValidationBudgetPolicy.DEFAULT.admit(RepairResourceBudget(
+                maximumBehaviorOutputBytes = 16L * 1024 * 1024 + 1))
+        }
     }
 
     @Test
