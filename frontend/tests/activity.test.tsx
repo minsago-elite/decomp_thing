@@ -50,7 +50,8 @@ it('renders retained labels as text without creating active markup or links', as
   const marker = '<img src=x onerror="location.href=\'https://example.invalid\'">';
   const item = page.data.items[0]!;
   item.payload.writerId = marker;
-  item.payload.fields = { phase: marker, status: marker, taskId: marker, revisionId: marker };
+  // Deliberately bypass the wire schema to exercise rendering of hostile retained data.
+  item.payload.fields = { phase: marker, status: marker, taskIdSha256: marker, revisionIdSha256: marker } as unknown as ProgressObservation['fields'];
   transport.get.mockResolvedValueOnce(snapshot).mockResolvedValueOnce(page);
 
   mount(); fireEvent.click(screen.getByRole('button', { name: 'Follow activity' }));

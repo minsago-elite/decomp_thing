@@ -120,6 +120,7 @@ it('shows a safe API correlation reference without exposing opaque response meta
   const alert = await screen.findByRole('alert');
   expect(alert.textContent).toContain(`Reference ID: ${requestId}.`);
   expect(alert.textContent).not.toContain('LISTING_BUSY');
+});
 
 it.each([
   {
