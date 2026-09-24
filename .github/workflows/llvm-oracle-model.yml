@@ -54,7 +54,9 @@ jobs:
           key: ${{ steps.llvm-source-cache.outputs.cache-primary-key }}
       - name: Fetch hash-locked Clang release artifacts
         run: |
-          ./gradlew --no-daemon fetchLlvmReleaseArtifacts \
+          bash scripts/test-ci-fetch-llvm-release-artifacts.sh
+          bash scripts/ci-fetch-llvm-release-artifacts.sh \
+            ./gradlew --no-daemon fetchLlvmReleaseArtifacts \
             --args="$RUNNER_TEMP/llvm-oracle-release"
           echo "LLVM_ORACLE_ARTIFACT_ROOT=$RUNNER_TEMP/llvm-oracle-release" \
             >> "$GITHUB_ENV"
