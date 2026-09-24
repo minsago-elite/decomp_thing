@@ -156,8 +156,13 @@ jobs:
             build/reports/tests/test
             build/test-results/test
 
-  kotlin:
+  kotlin-suite:
+    name: kotlin-${{ matrix.shard }}
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [core, live]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -214,12 +219,14 @@ jobs:
         env:
           DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH: "true"
           DECOMP_REQUIRE_BUNDLED_GHIDRA_EXECUTION: "true"
+          DECOMP_CI_TEST_SHARD: ${{ matrix.shard }}
         run: scripts/ci.sh
-      - name: Retain complete JVM suite reports before focused quota fixture
+      - name: Retain Kotlin partition reports
         run: |
           mv build/test-results/test build/test-results/full-suite
           mv build/reports/tests/test build/reports/tests/full-suite
       - name: Verify quota-backed repair snapshot layouts
+        if: matrix.shard == 'core'
         run: bash scripts/test-repair-validation-snapshot.sh
       - name: Release root-owned application-bundled Ghidra
         if: always()
@@ -239,7 +246,8 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: kotlin-test-reports
+          name: kotlin-${{ matrix.shard }}-test-reports
+          if-no-files-found: error
           path: |
             build/reports/tests/full-suite
             build/test-results/full-suite
@@ -251,18 +259,28 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: bundled-ghidra-contained-fixture-evidence
+          name: kotlin-${{ matrix.shard }}-bundled-ghidra-contained-fixture-evidence
           path: build/contained-ghidra-evidence
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: acp-goose-compatibility-evidence
+          name: kotlin-${{ matrix.shard }}-acp-goose-compatibility-evidence
           path: build/acp-compatibility/results
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: acp-codex-authentication-evidence
+          name: kotlin-${{ matrix.shard }}-acp-codex-authentication-evidence
           path: build/acp-codex-compatibility/results
+
+  kotlin:
+    runs-on: ubuntu-24.04
+    needs: kotlin-suite
+    if: ${{ !cancelled() }}
+    steps:
+      - name: Require both Kotlin test partitions
+        env:
+          SHARD_RESULT: ${{ needs.kotlin-suite.result }}
+        run: test "$SHARD_RESULT" = success
 
   bundled-ghidra:
     runs-on: ubuntu-24.04

@@ -34,8 +34,10 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import org.junit.jupiter.api.Assumptions.assumeTrue
+import org.junit.jupiter.api.Tag
 import org.opentest4j.TestAbortedException
 
+@Tag("ci-live")
 class GccBundledContainedExecutionTest {
     @Test
     fun `authored ELF completes bundled direct API export in retained scope without benchmark or release authority`() {
