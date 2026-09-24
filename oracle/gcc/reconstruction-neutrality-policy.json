@@ -59,6 +59,10 @@
       "reason": "Built-in immutable generated-C/Make layout, compiler configuration, and requested budgets."
     },
     {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCMvpPatchCompilerPolicy.kt",
+      "reason": "Generated-C standalone MVP patch compiler and sanitizer command selected by the admitted reconstruction adapter."
+    },
+    {
       "path": "src/main/kotlin/decompengine/project/GeneratedCModulePrompt.kt",
       "reason": "Generated-C reconstruction prompt language and compiler instructions."
     },
@@ -276,36 +280,22 @@
       "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
       "rule": "generic-compiler-flag",
       "fragment": "-Werror",
-      "count": 3,
-      "reason": "Pre-existing MVP memory-safety patch verification compiles its patched C with warnings as errors and names that policy in retained evidence and prompt text; no reconstruction adapter dispatch is involved."
+      "count": 2,
+      "reason": "MVP retained evidence and patch prompt describe the adapter-owned warnings-as-errors check; the executable compiler policy is now selected through the registered profile."
     },
     {
       "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
       "rule": "generic-compiler-flag",
       "fragment": "-Wall",
-      "count": 2,
-      "reason": "Pre-existing MVP patch verification compile flag set and patch-prompt instruction; the MVP evidence flow predates the neutrality policy."
+      "count": 1,
+      "reason": "MVP patch prompt describes a compiler warning flag; the executable command is adapter-owned."
     },
     {
       "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
       "rule": "generic-compiler-flag",
       "fragment": "-Wextra",
-      "count": 2,
-      "reason": "Pre-existing MVP patch verification compile flag set and patch-prompt instruction; the MVP evidence flow predates the neutrality policy."
-    },
-    {
-      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
-      "rule": "generic-compiler-flag",
-      "fragment": "-std=c11",
       "count": 1,
-      "reason": "Pre-existing MVP patch verification C dialect selection for its own compile evidence flow."
-    },
-    {
-      "path": "src/main/kotlin/decompengine/mvp/MvpPatchWorkflow.kt",
-      "rule": "generic-tool",
-      "fragment": "\"gcc\"",
-      "count": 1,
-      "reason": "Pre-existing MVP patch verification invokes the host C compiler directly for its own evidence flow; it is not a reconstruction adapter implementation."
+      "reason": "MVP patch prompt describes a compiler warning flag; the executable command is adapter-owned."
     },
     {
       "path": "src/main/kotlin/decompengine/project/RepairAcpEvidenceArchiveVerifier.kt",

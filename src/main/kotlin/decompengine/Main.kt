@@ -312,6 +312,8 @@ private fun runPatch(args: List<String>) {
     var output: Path? = null
     var assumeYes = false
     var harnessOverride: String? = null
+    var profile = ReconstructionProfiles.default
+    var profileSelected = false
     var index = 0
     while (index < args.size) {
         when (args[index]) {
@@ -323,6 +325,16 @@ private fun runPatch(args: List<String>) {
             "--harness" -> {
                 if (index + 1 >= args.size) patchUsageError("--harness requires acp or legacy-openai")
                 harnessOverride = args[index + 1]; index += 2
+            }
+            "--profile" -> {
+                if (profileSelected || index + 1 >= args.size) patchUsageError("--profile requires one registered profile ID")
+                profile = try {
+                    ReconstructionProfiles.named(args[index + 1])
+                } catch (failure: IllegalArgumentException) {
+                    patchUsageError(failure.message ?: "unsupported reconstruction profile")
+                }
+                profileSelected = true
+                index += 2
             }
             else -> {
                 if (args[index].startsWith("-") || input != null) patchUsageError("unexpected argument: ${args[index]}")
@@ -342,7 +354,7 @@ private fun runPatch(args: List<String>) {
             harness = strategy.harness,
             environment = System.getenv(),
             harnessProvenance = strategy.harnessProvenance,
-        ).run(MvpPatchOptions(input, output, assumeYes))
+        ).run(MvpPatchOptions(input, output, assumeYes), profile)
     } catch (failure: IllegalArgumentException) {
         System.err.println("configuration error: ${failure.message}"); kotlin.system.exitProcess(2)
     } catch (failure: MvpPatchException) {
@@ -352,7 +364,7 @@ private fun runPatch(args: List<String>) {
 
 private fun patchUsageError(message: String): Nothing {
     System.err.println(message)
-    System.err.println("usage: llm_bin_patch patch <input-elf> --output <directory> [--yes] [--harness acp|legacy-openai]")
+    System.err.println("usage: llm_bin_patch patch <input-elf> --output <directory> [--yes] [--profile generated-c-make-v1|generated-c-ninja-v1] [--harness acp|legacy-openai]")
     kotlin.system.exitProcess(2)
 }
 
@@ -509,7 +521,7 @@ private fun printHelp() {
         Usage:
           llm_bin_patch doctor --tools-only [--output <directory>] [--profile <id>] [--auth-methods]
           llm_bin_patch doctor [--output <directory>] [--profile <id>] [--harness acp|legacy-openai] [--workflow all|patch|reconstruct|repair|web] [--auth-methods]
-          llm_bin_patch patch <input-elf> --output <directory> [--yes] [--harness acp|legacy-openai]
+          llm_bin_patch patch <input-elf> --output <directory> [--yes] [--profile generated-c-make-v1|generated-c-ninja-v1] [--harness acp|legacy-openai]
           llm_bin_patch runner [--control-dir <directory>] [--root <directory>]...
           llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness acp|legacy-openai]
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
