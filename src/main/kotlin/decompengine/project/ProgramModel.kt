@@ -138,16 +138,14 @@ data class RecoveredProgramModel(
 object ProgramModelJson {
     fun readCanonical(bytes: ByteArray): RecoveredProgramModel = readCanonical(bytes) {}
 
-    /** Charset conversion and JSON parsing remain monolithic, with checks on either side. */
+    /** Parse the admitted bytes through bounded reads so a deadline can interrupt a long token. */
     internal fun readCanonical(bytes: ByteArray, checkpoint: (String) -> Unit): RecoveredProgramModel {
         checkpoint("before reading canonical program model")
         require(bytes.isNotEmpty()) { "program model must not be empty" }
-        val text = checkedModelStage("decoding program model UTF-8", checkpoint) { bytes.toString(Charsets.UTF_8) }
-        val encoded = checkedModelStage("encoding program model UTF-8", checkpoint) { text.toByteArray(Charsets.UTF_8) }
-        require(checkedModelStage("comparing program model UTF-8", checkpoint) { bytes.contentEquals(encoded) }) {
-            "program model must be canonical UTF-8"
+        val root = checkedModelStage("parsing program model JSON", checkpoint) {
+            parseCheckpointedProgramModelJson(bytes.inputStream(), checkpoint)
         }
-        val model = read(text, checkpoint)
+        val model = read(root, checkpoint)
         val canonicalText = model.toJson(checkpoint)
         val canonical = checkedModelStage("encoding canonical program model", checkpoint) { canonicalText.toByteArray(Charsets.UTF_8) }
         require(checkedModelStage("comparing canonical program model", checkpoint) { MessageDigest.isEqual(bytes, canonical) }) {
@@ -162,6 +160,10 @@ object ProgramModelJson {
     /** Library parsing and constructor validation remain nonpreemptible between checkpoints. */
     internal fun read(text: String, checkpoint: (String) -> Unit): RecoveredProgramModel {
         val root = checkedModelStage("parsing program model JSON", checkpoint) { Json.parseToJsonElement(text).jsonObject }
+        return read(root, checkpoint)
+    }
+
+    private fun read(root: JsonObject, checkpoint: (String) -> Unit): RecoveredProgramModel {
         val schemaVersion = root.int("schemaVersion", 1)
         require(schemaVersion in 1..2) { "unsupported program model schemaVersion: $schemaVersion" }
         val inputSha256 = root.string("inputSha256")
