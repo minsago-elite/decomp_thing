@@ -263,7 +263,9 @@ class ArchivalAuditProvenanceTest {
         rewriteManifest(project) {
             it.withField("unresolvedImplementationIds", JsonArray(listOf(JsonPrimitive("fn_10"))))
         }
-        assertEquals(listOf("fn_10"), ArchivalProjectAuditor.audit(project).unresolvedEntityIds)
+        val audit = ArchivalProjectAuditor.audit(project)
+        assertEquals(listOf("fn_10", "fn_100"), audit.unresolvedEntityIds)
+        assertEquals(audit.moduleRevisionSha256.keys, audit.moduleConfidenceEvidenceProblems.keys)
     }
 
     @Test
@@ -428,10 +430,26 @@ class ArchivalAuditProvenanceTest {
 
     private fun writeBoundFile(project: Path, relative: String, text: String) {
         project.resolve(relative).writeText(text)
+        val revisedHashes = linkedMapOf(relative to sha256(text.toByteArray()))
+        if (relative.startsWith("reports/modules/") && relative.endsWith(".json")) {
+            val id = relative.removePrefix("reports/modules/").removeSuffix(".json")
+            val confidencePath = project.resolve("reports/confidence.json")
+            val confidence = Json.parseToJsonElement(confidencePath.readText()).jsonObject
+            val modules = confidence.getValue("modules").jsonArray.map { element ->
+                val module = element.jsonObject
+                if (module.getValue("id").jsonPrimitive.content != id) module else {
+                    val revision = module.getValue("revisionEvidence").jsonObject
+                    module.withField("revisionEvidence", revision.withField("checkpointSha256", JsonPrimitive(revisedHashes.getValue(relative))))
+                }
+            }
+            val updated = confidence.withField("modules", JsonArray(modules)).toString()
+            confidencePath.writeText(updated)
+            revisedHashes["reports/confidence.json"] = sha256(updated.toByteArray())
+        }
         rewriteManifest(project) { root -> root.withField("files", JsonArray(root.getValue("files").jsonArray.map { element ->
             val file = element.jsonObject
-            if (file.getValue("path").jsonPrimitive.content == relative) file.withField("sha256", JsonPrimitive(sha256(text.toByteArray())))
-            else file
+            val hash = revisedHashes[file.getValue("path").jsonPrimitive.content]
+            if (hash == null) file else file.withField("sha256", JsonPrimitive(hash))
         })) }
     }
 

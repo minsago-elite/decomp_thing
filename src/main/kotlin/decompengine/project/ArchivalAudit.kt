@@ -6,6 +6,7 @@ import decompengine.validation.BehaviorProjectContext
 import decompengine.validation.boolean
 import decompengine.validation.string
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.intOrNull
@@ -16,6 +17,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.util.Locale
 
 data class ArchivePublicationLimits(
     val maximumEntries: Int,
@@ -109,6 +111,7 @@ data class ArchivalAudit(
     val behaviorEvidenceProblems: Map<String, String> = emptyMap(),
     val projectBehaviorReportIds: List<String> = emptyList(),
     val moduleCompilationEvidenceProblems: Map<String, String> = emptyMap(),
+    val moduleConfidenceEvidenceProblems: Map<String, String> = emptyMap(),
     val requiredCorpusSha256: List<String> = emptyList(),
     val observedPortableCorpusSha256: List<String> = emptyList(),
     val recoveryAssessment: JsonObject? = null,
@@ -148,6 +151,7 @@ data class ArchivalAudit(
           "moduleSourceRevisions": [${moduleRevisionSha256.toSortedMap().entries.joinToString(",") { (id, hash) -> "{\"moduleId\":${JsonPrimitive(id)},\"sourceRevisionSha256\":${JsonPrimitive(hash)}}" }}],
           "moduleBehaviorEvidence": [],
           "moduleCompilationEvidenceProblems": {${moduleCompilationEvidenceProblems.toSortedMap().entries.joinToString(",") { (id, problem) -> "${JsonPrimitive(id)}:${JsonPrimitive(problem)}" }}},
+          "moduleConfidenceEvidenceProblems": {${moduleConfidenceEvidenceProblems.toSortedMap().entries.joinToString(",") { (id, problem) -> "${JsonPrimitive(id)}:${JsonPrimitive(problem)}" }}},
           "moduleCompilationEvidence": ${JsonObject(moduleCompilationEvidence.toSortedMap())},
           "moduleExecutionCoverage": "not-observed",
           "projectBehaviorReportIds": [${projectBehaviorReportIds.sorted().joinToString(",") { JsonPrimitive(it).toString() }}],
@@ -177,6 +181,7 @@ object ArchivalProjectAuditor {
         hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
         publication: ArchivePublicationEvidence? = null,
         limits: ArchivalBundleLimits = ArchivalBundleLimits(),
+        publish: Boolean = true,
     ): ArchivalAudit {
         hostSafetyLimits.requireAllows(profile.budgets)
         val effectiveLimits = limits.constrainedTo(profile)
@@ -204,11 +209,13 @@ object ArchivalProjectAuditor {
         require(manifest.files.size <= effectiveLimits.maximumEntries) { "audit manifest exceeds the file-count bound" }
         val modelPath = profile.layout.declaration("program-model-evidence").materialize()
         val planPath = profile.layout.declaration("module-plan-evidence").materialize()
+        val confidencePath = profile.layout.declaration("confidence-evidence").materialize()
         val files = manifest.files.associateBy { it.path }
         val hashes = linkedMapOf<String, String>()
         var totalBytes = manifestSnapshot.bytes.size.toLong()
         var modelText: String? = null
         var planText: String? = null
+        var confidenceText: String? = null
         for (file in manifest.files) {
             val snapshot = readStableRegularFile(projectDir, file.path, maximumFileBytes)
             totalBytes = Math.addExact(totalBytes, snapshot.bytes.size.toLong())
@@ -217,6 +224,7 @@ object ArchivalProjectAuditor {
             hashes[file.path] = snapshot.sha256
             if (file.path == modelPath) modelText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
             if (file.path == planPath) planText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
+            if (file.path == confidencePath) confidenceText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
         }
         require(modelText != null && planText != null) { "audit requires manifest-bound program model and module plan" }
         UniqueJsonObjectKeyValidator(modelText).validate()
@@ -241,8 +249,13 @@ object ArchivalProjectAuditor {
         val moduleRevisions = linkedMapOf<String, String>()
         val implementationOwners = mutableSetOf<String>()
         val compilationProblems = linkedMapOf<String, String>()
+        val confidenceProblems = linkedMapOf<String, String>()
         val compilationEvidence = linkedMapOf<String, JsonObject>()
         val compilationUnresolved = mutableSetOf<String>()
+        val acceptedOwners = linkedMapOf<String, List<String>>()
+        val acceptedSourcePaths = linkedMapOf<String, String>()
+        val acceptedInputFingerprints = linkedMapOf<String, String>()
+        val plannedModuleEntityIds = linkedMapOf<String, List<String>>()
         for (element in planJson.getValue("modules").jsonArray) {
             val module = element.jsonObject
             require(module.keys == setOf("id", "sourcePath", "headerPath", "functionIds", "globalIds", "typeIds", "boundaryEvidence")) {
@@ -277,7 +290,10 @@ object ArchivalProjectAuditor {
             val header = requireNotNull(files[text("headerPath")]) { "audit module header is absent from its manifest" }
             require(ProjectFileRole.PUBLIC_INTERFACE in header.roles) { "audit module header has no declared interface role" }
             require(moduleRevisions.put(identifier, hashes.getValue(source)) == null) { "audit module IDs are duplicated" }
+            plannedModuleEntityIds[identifier] = owned + types
             if (file.acceptedImplementation == true) {
+                acceptedOwners[identifier] = owned
+                acceptedSourcePaths[identifier] = source
                 try {
                     val checkpointPath = profile.layout.declaration("module-evidence").materialize(mapOf("module" to identifier))
                     val expectedHash = requireNotNull(hashes[checkpointPath]) { "module compiler checkpoint is absent from the manifest" }
@@ -321,6 +337,7 @@ object ArchivalProjectAuditor {
                         "module checkpoint entity ownership differs from the module plan"
                     }
                     require(checkpoint.string("sourceSha256") == hashes.getValue(source)) { "module checkpoint does not bind the current source" }
+                    acceptedInputFingerprints[identifier] = checkpoint.string("fingerprint")
                     val compilation = checkpoint.getValue("compilation").jsonObject
                     require(compilation.string("sourceSha256") == hashes.getValue(source)) { "compiler evidence does not bind the current source" }
                     require(compilation.string("outcome") == "passed" && compilation.getValue("returnCode") == JsonPrimitive(0)) {
@@ -355,6 +372,124 @@ object ArchivalProjectAuditor {
                     if (failure is InterruptedException) throw failure
                     compilationProblems[identifier] = failure.message.orEmpty().take(512).ifEmpty { failure.javaClass.simpleName }
                     compilationUnresolved += owned
+                }
+            }
+        }
+        if (acceptedOwners.isNotEmpty()) {
+            val confidence = try {
+                val text = requireNotNull(confidenceText) { "accepted modules require manifest-bound confidence evidence" }
+                UniqueJsonObjectKeyValidator(text).validate()
+                val report = Json.parseToJsonElement(text).jsonObject
+                require(report.getValue("schemaVersion") == JsonPrimitive(2)) { "confidence evidence has an unsupported schema" }
+                require(report.string("basis") == "recovery evidence only; behavioral equivalence is not implied" &&
+                    report.string("scoreMeaning") ==
+                    "structural recovery heuristic; not implementation acceptance or measured behavioral confidence") {
+                    "confidence evidence mislabels structural recovery as measured behavior"
+                }
+                val interpretation = report.getValue("scoreInterpretation").jsonObject
+                require(interpretation.string("kind") == "structural-recovery" &&
+                    interpretation.string("calibrationStatus") == "uncalibrated" &&
+                    interpretation.getValue("calibratedProbability") == JsonNull &&
+                    interpretation.getValue("empiricalSampleCount") == JsonNull) {
+                    "confidence evidence presents an unmeasured score as behavioral confidence"
+                }
+                fun score(status: RecoveryStatus) = when (status) {
+                    RecoveryStatus.RECOVERED -> 1.0
+                    RecoveryStatus.PARTIAL -> 0.6
+                    RecoveryStatus.SYNTHETIC -> 0.25
+                    RecoveryStatus.FAILED -> 0.0
+                }
+                val entityScores = (model.functions.map { it.id to score(it.status) } +
+                    model.globals.map { it.id to score(it.status) } +
+                    model.types.map { it.id to score(it.status) }).toMap()
+                fun expectedScore(ids: List<String>): String = "%.4f".format(Locale.ROOT,
+                    if (ids.isEmpty()) 0.0 else ids.map(entityScores::getValue).average())
+                fun requireScore(value: kotlinx.serialization.json.JsonElement, expected: String) {
+                    val actual = value.jsonPrimitive
+                    require(!actual.isString && actual.content == expected) {
+                        "confidence structural score differs from the audited recovery model"
+                    }
+                }
+                requireScore(report.getValue("projectScore"), expectedScore(entityScores.keys.toList()))
+                val recoveryUnresolved = (model.functions.map { it.id to it.status } +
+                    model.globals.map { it.id to it.status } +
+                    model.types.map { it.id to it.status })
+                    .filter { (_, status) -> model.isRecoveryUnresolved(status) }.map { it.first }.toSet()
+                val implementationUnresolved = manifest.unresolvedImplementationIds.toSet()
+                fun requireIds(record: JsonObject, field: String, expected: Collection<String>) {
+                    val actual = record.getValue(field).jsonArray.map { value ->
+                        require(value.jsonPrimitive.isString) { "confidence $field contains a non-string entity ID" }
+                        value.jsonPrimitive.content
+                    }
+                    require(actual == expected.distinct().sorted()) {
+                        "confidence $field differs from the audited unresolved entities"
+                    }
+                }
+                requireIds(report, "unresolvedRecoveryEntityIds", recoveryUnresolved)
+                requireIds(report, "unresolvedImplementationIds", implementationUnresolved)
+                requireIds(report, "unresolvedEntityIds", recoveryUnresolved + implementationUnresolved)
+                val entries = report.getValue("modules").jsonArray.map { it.jsonObject }
+                val byId = entries.associateBy { it.string("id") }
+                require(entries.size == byId.size && byId.keys == moduleRevisions.keys) {
+                    "confidence module inventory differs from the audited plan"
+                }
+                byId.forEach { (id, module) ->
+                    val owned = plannedModuleEntityIds.getValue(id)
+                    requireScore(module.getValue("score"), expectedScore(owned))
+                    requireIds(module, "unresolvedRecoveryEntityIds", owned.filter { it in recoveryUnresolved })
+                    requireIds(module, "unresolvedImplementationIds", owned.filter { it in implementationUnresolved })
+                }
+                byId
+            } catch (failure: Exception) {
+                if (failure is InterruptedException) throw failure
+                val reason = failure.message.orEmpty().take(512).ifEmpty { failure.javaClass.simpleName }
+                acceptedOwners.forEach { (id, owners) ->
+                    if (id !in compilationEvidence) return@forEach
+                    confidenceProblems[id] = reason
+                    compilationProblems.putIfAbsent(id, reason)
+                    compilationEvidence.remove(id)
+                    compilationUnresolved += owners
+                }
+                emptyMap()
+            }
+            for ((id, owners) in acceptedOwners) {
+                if (id !in compilationEvidence) continue
+                try {
+                    val revision = requireNotNull(confidence[id]) { "accepted module confidence evidence is missing" }
+                        .getValue("revisionEvidence").jsonObject
+                    val source = acceptedSourcePaths.getValue(id)
+                    val checkpoint = profile.layout.declaration("module-evidence").materialize(mapOf("module" to id))
+                    require(revision.keys == setOf("sourcePath", "sourceSha256", "inputFingerprint",
+                        "inputFingerprintProvider", "inputBinarySha256", "modelSchemaVersion", "checkpointPath",
+                        "checkpointSha256", "acceptedImplementation", "compilation", "behavior")) {
+                        "accepted module confidence revision fields are incomplete or unsupported"
+                    }
+                    require(revision.string("sourcePath") == source &&
+                        revision.string("sourceSha256") == moduleRevisions.getValue(id) &&
+                        revision.string("inputFingerprint") == acceptedInputFingerprints.getValue(id) &&
+                        revision.string("inputFingerprintProvider") == "module-reconstruction-input-v2" &&
+                        revision.string("inputBinarySha256") == model.inputSha256 &&
+                        revision.getValue("modelSchemaVersion") == JsonPrimitive(model.schemaVersion) &&
+                        revision.string("checkpointPath") == checkpoint &&
+                        revision.string("checkpointSha256") == hashes.getValue(checkpoint) &&
+                        revision.getValue("acceptedImplementation") == JsonPrimitive(true) &&
+                        revision.getValue("compilation") == compilationEvidence.getValue(id).getValue("compilation")) {
+                        "accepted module confidence evidence is missing or cross-paired with another revision"
+                    }
+                    val behavior = revision.getValue("behavior").jsonObject
+                    require(behavior.keys == setOf("status", "reason", "coverage", "outputAgreement", "unobservedBehavior") &&
+                        behavior.string("status") == "unknown" && behavior.getValue("coverage") == JsonNull &&
+                        behavior.getValue("outputAgreement") == JsonNull &&
+                        behavior.string("unobservedBehavior") == "unknown") {
+                        "accepted module confidence evidence overstates unobserved behavior"
+                    }
+                } catch (failure: Exception) {
+                    if (failure is InterruptedException) throw failure
+                    val reason = failure.message.orEmpty().take(512).ifEmpty { failure.javaClass.simpleName }
+                    confidenceProblems[id] = reason
+                    compilationProblems.putIfAbsent(id, reason)
+                    compilationEvidence.remove(id)
+                    compilationUnresolved += owners
                 }
             }
         }
@@ -466,6 +601,7 @@ object ArchivalProjectAuditor {
             behaviorEvidenceProblems = problems,
             projectBehaviorReportIds = verifiedBehavior.keys.sorted(),
             moduleCompilationEvidenceProblems = compilationProblems,
+            moduleConfidenceEvidenceProblems = confidenceProblems,
             moduleCompilationEvidence = compilationEvidence,
             requiredCorpusSha256 = requiredCorpora.sorted(),
             observedPortableCorpusSha256 = observedCorpora.toList(),
@@ -487,7 +623,7 @@ object ArchivalProjectAuditor {
             require(snapshot.sha256 == expectedHash) { "behavior report changed before audit publication" }
         }
         currentProjectRecord?.let { BehaviorEvidence.requireProjectCurrent(it, BehaviorProjectContext(projectDir, profile)) }
-        writeProjectEvidenceAtomically(projectDir.resolve("reports/archival_audit.json"), audit.toJson())
+        if (publish) writeProjectEvidenceAtomically(projectDir.resolve("reports/archival_audit.json"), audit.toJson())
         return audit
     }
 }

@@ -564,7 +564,8 @@ object SourceTreeGenerator {
         val selectedReconstructor = reconstructor ?: adapter.defaultReconstructor()
         val compilationPolicy = adapter.compilation
         val selectedPlanner = planner?.withProfileBounds(profile) ?: DeterministicModulePlanner.forProfile(profile)
-        val plan = selectedPlanner.plan(model, overrides)
+        val planning = selectedPlanner.planWithComplexity(model, overrides)
+        val plan = planning.plan
         val rendering = adapter.rendering(model, plan)
         requireProjectedArchiveEntryBudget(profile, plan.modules.size, rendering.entrypoint() != null)
         val typesHeader = rendering.sharedInterface()
@@ -979,6 +980,8 @@ object SourceTreeGenerator {
             moduleRevisionEvidence,
             profile,
             hostSafetyLimits,
+            selectedPlanner.budgetLimits,
+            planning.complexity,
             generationBudgetObservations,
         )
         projectDir.resolve(confidencePath).also { it.parent.createDirectories() }.writeText(confidence)
@@ -1510,6 +1513,8 @@ object SourceTreeGenerator {
         moduleRevisionEvidence: Map<String, String>,
         profile: ReconstructionProfile,
         hostSafetyLimits: ReconstructionHostSafetyLimits,
+        plannerLimits: PlannerBudgetLimits,
+        plannerComplexity: PlannerComplexity,
         generationBudgetObservations: List<ModuleGenerationBudgetObservation>,
     ): String {
         fun score(status: RecoveryStatus) = when (status) {
@@ -1555,6 +1560,30 @@ object SourceTreeGenerator {
             append("\n  ],\n  \"unresolvedRecoveryEntityIds\": ").append(idsJson(unresolvedRecovery))
             append(",\n  \"unresolvedImplementationIds\": ").append(idsJson(unresolvedImplementations))
             append(",\n  \"unresolvedEntityIds\": ").append(idsJson(unresolvedRecovery + unresolvedImplementations))
+            append(",\n  \"semanticPlanningBudgetEvidence\": {")
+            append("\n    \"schemaVersion\":1,")
+            append("\n    \"selectedProfile\":{")
+            append("\"id\":\"").append(profile.id.jsonEscape()).append("\",")
+            append("\"sha256\":\"").append(profile.sha256).append("\",")
+            append("\"descriptor\":").append(profile.canonicalJson()).append("},")
+            append("\n    \"hostSafetyLimits\":").append(hostSafetyLimits.maximum.canonicalJson()).append(',')
+            append("\n    \"effectivePlannerLimits\":{")
+            append("\"maximumFunctionsPerModule\":").append(plannerLimits.maximumFunctionsPerModule).append(',')
+            append("\"maximumEntities\":").append(plannerLimits.maximumEntities).append(',')
+            append("\"maximumDependencyEdges\":").append(plannerLimits.maximumDependencyEdges).append(',')
+            append("\"maximumWorkUnits\":").append(plannerLimits.maximumWorkUnits).append("},")
+            append("\n    \"outcome\":{")
+            append("\"status\":\"planned\",")
+            append("\"plannedModules\":").append(plan.modules.size).append(',')
+            append("\"functionCount\":").append(plannerComplexity.functionCount).append(',')
+            append("\"globalCount\":").append(plannerComplexity.globalCount).append(',')
+            append("\"typeCount\":").append(plannerComplexity.typeCount).append(',')
+            append("\"dependencyEdges\":").append(model.functions.sumOf {
+                it.calls.size.toLong() + it.referencedGlobals.size.toLong()
+            }).append(',')
+            append("\"sparseWorkUnits\":").append(plannerComplexity.sparseWorkUnits).append("},")
+            append("\n    \"limitations\":[\"local planning evidence; no production execution authority\"]")
+            append("\n  }")
             append(",\n  \"sourceGenerationBudgetEvidence\": {")
             append("\n    \"schemaVersion\": 1,")
             append("\n    \"selectedProfile\": {")
