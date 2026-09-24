@@ -108,7 +108,8 @@ public final class AcpCompatibilityAuthenticationProbe {
                     null,
                     null
                 ),
-                AgentCancellation.Companion.getNONE()
+                AgentCancellation.Companion.getNONE(),
+                null
             );
             var harness = (AcpAgentHarness) selection.createHarness();
             receipt = harness.executeReceipt(request, event -> {
