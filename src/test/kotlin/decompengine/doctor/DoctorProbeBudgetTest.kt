@@ -151,7 +151,7 @@ class DoctorProbeBudgetTest {
     }
 
     @Test
-    fun `bundled Ghidra callback cancellation preserves identity before capability and output work`() = inControlTemporaryDirectory { root ->
+    fun `bundled Ghidra callback cancellation preserves identity after capability work and before output`() = inControlTemporaryDirectory { root ->
         withAuthoredBundle(root) {
             val output = root.resolve("output")
             val cancellation = InterruptedException("caller cancelled bundled probe")
@@ -170,7 +170,7 @@ class DoctorProbeBudgetTest {
 
             assertSame(cancellation, failure)
             assertTrue(isGhidraProbe(calls.last()))
-            assertEquals(0, capabilityCalls)
+            assertEquals(2, capabilityCalls)
             assertFalse(output.exists())
         }
     }

@@ -262,7 +262,7 @@ class UploadServerTest {
             assertEquals(200, response.status)
             assertEquals(body, response.body.decodeToString())
             assertEquals(expectedContentType, response.contentType)
-            assertEquals("sandbox; default-src 'none'; base-uri 'none'; form-action 'none'", response.contentSecurityPolicy)
+            assertEquals("sandbox; default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'", response.contentSecurityPolicy)
             assertEquals("nosniff", response.contentTypeOptions)
             assertEquals("no-referrer", response.referrerPolicy)
             assertTrue(response.contentDisposition.orEmpty().startsWith("attachment;"))
@@ -784,6 +784,21 @@ class UploadServerTest {
                 try { release.await() } catch (_: InterruptedException) { }
             }
         })
+        fun stopAfterRelease() {
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+            while (true) {
+                try {
+                    server.stop()
+                    return
+                } catch (failure: Exception) {
+                    val retryable = failure is IllegalStateException &&
+                        failure.message == "HTTP requests remain active after server stop" ||
+                        failure is WebJobServiceException && failure.code == "SHUTDOWN_INCOMPLETE"
+                    if (!retryable || System.nanoTime() >= deadline) throw failure
+                    Thread.sleep(20)
+                }
+            }
+        }
         server.start()
         try {
             val uploaded = upload(server, "waiting.elf", elfFixture(), acceptJson = true)
@@ -798,7 +813,7 @@ class UploadServerTest {
             assertEquals("analyzing", store.get(id).status)
 
             release.countDown()
-            server.stop()
+            stopAfterRelease()
             assertEquals("failed", store.get(id).status)
             assertEquals("Server stopped before the operation reported completion", store.get(id).statusMessage)
             val restarted = UploadServer("127.0.0.1", 0, dataDir)
@@ -810,7 +825,7 @@ class UploadServerTest {
             }
         } finally {
             release.countDown()
-            server.stop()
+            stopAfterRelease()
         }
     }
 

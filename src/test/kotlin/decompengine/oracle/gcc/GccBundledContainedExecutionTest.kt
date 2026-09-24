@@ -435,8 +435,10 @@ class GccBundledContainedExecutionTest {
                 "bytes" to JsonPrimitive(entry.bytes), "sha256" to JsonPrimitive(entry.sha256),
             )) }),
         ))))
-        val exporter = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java")).use { it.readNBytes(4 * 1024 * 1024 + 1) }
-        assertTrue(exporter.size in 1..4 * 1024 * 1024)
+        val productionExporter = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java"))
+            .use { it.readNBytes(4 * 1024 * 1024 + 1) }
+        assertTrue(productionExporter.size in 1..4 * 1024 * 1024)
+        val exporter = productionExporter
         val tools = mapOf(
             GccCompilerEngineContainmentArtifactRole.JAVA_EXECUTABLE to Path.of(System.getProperty("java.home"), "bin", "java"),
             GccCompilerEngineContainmentArtifactRole.BUBBLEWRAP_EXECUTABLE to Path.of("/usr/bin/bwrap"),

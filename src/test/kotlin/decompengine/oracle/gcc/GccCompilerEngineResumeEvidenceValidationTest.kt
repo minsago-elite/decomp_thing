@@ -773,7 +773,7 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         )
         assertFailsWith<GccCompilerEngineResumeEvidenceException> { assessInterrupted(countDrift) }
         val statusDrift = transition.interrupted.batches.single().functions.decodeToString()
-            .replaceFirst("\"status\": \"partial\"", "\"status\": \"failed\"")
+            .replaceFirst("\"extractionStatus\": \"partial\"", "\"extractionStatus\": \"failed\"")
             .toByteArray()
         assertFailsWith<GccCompilerEngineResumeEvidenceException> {
             assessInterrupted(

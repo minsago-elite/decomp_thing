@@ -1096,7 +1096,7 @@ class GccCompilerEngineLiveContainmentControllerTest {
             runKind = runKind,
             artifacts = artifacts,
             analysisState = stateIdentity,
-            command = bundledRuntime?.command(artifacts, stateIdentity, outputIdentity) ?: listOf(
+            command = bundledRuntime?.command(artifacts, stateIdentity, outputIdentity, runKind) ?: listOf(
                 byRole.getValue(
                     GccCompilerEngineContainmentArtifactRole.GHIDRA_ANALYZE_HEADLESS,
                 ).path.toString(),

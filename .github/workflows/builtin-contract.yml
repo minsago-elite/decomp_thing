@@ -2,8 +2,14 @@ name: Built-in core contract
 
 on:
   push:
+    branches: [master]
+    tags: ['**']
   pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   builtin-contract:
@@ -18,6 +24,10 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: gradle
+      - name: Install pinned build-only frontend toolchain
+        run: |
+          bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
+          echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
       - name: Install shared sandbox prerequisites
         run: |
           sudo apt-get update

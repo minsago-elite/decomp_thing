@@ -4453,7 +4453,7 @@ private class TrustedObservationBoundary(
                 mount.source.resolve(mount.destination.relativize(input)) == input
             }
         }
-        requireSyntheticMountPlan(mounts, mountedInputs, writableRoot)
+        requireSyntheticMountPlan(mounts, mountedInputs, writableRoot, runDirectory)
         mounts.forEachIndexed { index, mount ->
             require(!pathsOverlap(mount.source, writableRoot)) { "contained command runtime source overlaps writable output" }
             require(mounts.drop(index + 1).none { pathsOverlap(mount.destination, it.destination) }) {
@@ -4500,6 +4500,7 @@ private class TrustedObservationBoundary(
         mounts: List<FullTreeFunctionObservationRuntimeMount>,
         readOnlyInputs: List<Path>,
         runDirectory: Path,
+        classPathRunDirectory: Path = runDirectory,
     ) {
         val reserved = listOf(Path.of("/proc"), Path.of("/dev"), configuration.systemdUserRuntimeDirectory)
         if (reserved.any { pathsOverlap(runDirectory, it) }) {
@@ -4517,7 +4518,7 @@ private class TrustedObservationBoundary(
                 reserved.any { pathsOverlap(mount.destination, it) }
             ) isolationFail("isolated runtime mount overlaps another synthetic-root authority")
         }
-        val classPathRoot = runDirectory.resolve(RUNTIME_DIRECTORY)
+        val classPathRoot = classPathRunDirectory.resolve(RUNTIME_DIRECTORY)
         materializedClassPath.paths.forEach { entry ->
             if (entry.parent != classPathRoot || !Files.isRegularFile(entry, LinkOption.NOFOLLOW_LINKS)) {
                 isolationFail("isolated class-path snapshot escaped its private runtime directory")

@@ -845,7 +845,7 @@ class GccBundledOperationJournalTest {
             byRole.getValue(GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY).path.toString(),
             byRole.getValue(GccCompilerEngineContainmentArtifactRole.EXPORTER_CLASSFILE).path.toString(),
             state.path.toString(), lease.path.toString(),
-        ) else runtime.command(artifacts, state, lease)
+        ) else runtime.command(artifacts, state, lease, runKind)
         return GccCompilerEngineContainmentContract.assessDefinition(GccCompilerEngineContainmentRequest(
             engineId = "cc1",
             runKind = runKind,

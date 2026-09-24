@@ -14,7 +14,6 @@ internal fun parseDoctorInvocation(args: List<String>, defaultOutput: Path): Doc
     var harnessOverride: String? = null
     var workflowOverride: AcpPreflightWorkflow? = null
     var output = defaultOutput
-    var showAuthMethods = false
     var profile = ReconstructionProfiles.default
     var index = 0
     fun nextValue(message: String): String = args.getOrNull(index + 1)

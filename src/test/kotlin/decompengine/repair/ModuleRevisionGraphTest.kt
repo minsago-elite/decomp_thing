@@ -429,7 +429,7 @@ class ModuleRevisionGraphTest {
         val project = generatedProject()
         val index = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
         project.resolve("reports/build_contract.json").writeText(
-            "{\"schemaVersion\":2,\"sourceStableDuringBuild\":true," +
+            "{\"schemaVersion\":3,\"sourceStableDuringBuild\":true," +
                 "\"sourceRevisionSha256\":\"${index.sourceRevisionSha256}\"," +
                 "\"failedOwners\":[\"charlie\"],\"modules\":[{\"id\":\"charlie\"}]}",
         )
@@ -466,7 +466,7 @@ class ModuleRevisionGraphTest {
             val budget = RepairResourceBudget(maximumContextModules = 1)
             val index = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile, budget)
             project.resolve("reports/build_contract.json").writeText(
-                "{\"schemaVersion\":2,\"sourceStableDuringBuild\":true," +
+                "{\"schemaVersion\":3,\"sourceStableDuringBuild\":true," +
                     "\"sourceRevisionSha256\":\"${index.sourceRevisionSha256}\"," +
                     "\"failedOwners\":[\"alpha\",\"beta\"]," +
                     "\"modules\":[{\"id\":\"alpha\"},{\"id\":\"beta\"}]}",
@@ -994,7 +994,7 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
-    fun `generated C fallback roots do not collide with explicitly owned entry sources`() {
+    fun `generated C rejects a module plan that claims the entry source`() {
         val project = genericProject(
             "repair-generated-entry-owner-",
             mapOf(
@@ -1016,12 +1016,10 @@ class ModuleRevisionGraphTest {
             ),
         )
 
-        val index = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
-        val selection = index.select("behavior", "")
-
-        assertEquals(listOf("owned_entry"), selection.seedModules)
-        assertFalse("entrypoint" in index.moduleIds)
-        assertEquals(listOf("include/main.h", "src/main.c"), selection.writablePaths)
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
+        }
+        assertTrue(failure.message.orEmpty().contains("declared discovered input"))
     }
 
     @Test

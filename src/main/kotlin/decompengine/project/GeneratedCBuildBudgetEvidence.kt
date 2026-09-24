@@ -53,10 +53,10 @@ internal fun JsonObject.requireGeneratedCBuildBudgetEvidence(profile: Reconstruc
     val configuredWallClock = configuration.number("wallClockTimeoutMillis")
     val configuredOutput = configuration.number("maximumOutputBytes")
     require(configuration.number("terminationGraceMillis") in 0..30_000)
-    require(flags.none { it == "-w" || it.startsWith("-Wno-error") && it.isNotBlank() }) {
+    require(flags.none { it.jsonPrimitive.content == "-w" || it.jsonPrimitive.content.startsWith("-Wno-error") }) {
         "build contract compiler flags cannot disable warnings-as-errors"
     }
-    require(flags.any { it == "-Werror" }) {
+    require(flags.any { it.jsonPrimitive.content == "-Werror" }) {
         "build contract compiler flags must enable warnings-as-errors"
     }
     require(configuredWallClock == number("wallClockTimeoutMillis") &&
@@ -103,4 +103,3 @@ private fun JsonObject.string(name: String): String = getValue(name).jsonPrimiti
 private fun JsonObject.number(name: String): Long = getValue(name).jsonPrimitive.also {
     require(!it.isString) { "$name must be an integer" }
 }.longOrNull ?: throw IllegalArgumentException("$name must be an integer")
-
