@@ -38,10 +38,11 @@ class BehaviorEvidenceTest {
         val shim = fixture.original.parent.resolve("authored-runner-shim")
         val ready = fixture.original.parent.resolve("capture-ready")
         val originalShim = shim.readText()
+        val probe = originalShim.lines().first { "echo --json-status-fd" in it }
         val header = originalShim.lines().first { "child-pid" in it }
         // A test-owned execution owner announces readiness before waiting. No
         // application output or namespace assertion qualifies this negative run.
-        shim.writeText("#!/bin/sh\n" + header + "\n" +
+        shim.writeText("#!/bin/sh\n" + probe + "\n" + header + "\n" +
             "printf '%s\\n' \"${'$'}${'$'}\" > \"$ready\"\n" +
             "exec /bin/sleep 5\n")
         for (interrupt in listOf(true, false)) {
@@ -661,6 +662,7 @@ class BehaviorEvidenceTest {
         val runner = root.resolve("authored-runner-shim").also { path ->
             path.writeText("""
                 #!/bin/sh
+                if [ "${'$'}1" = "--help" ]; then echo --json-status-fd; exit 0; fi
                 printf '{ "child-pid": %s, "mnt-namespace": 1, "pid-namespace": 2 }\n' "${'$'}${'$'}" >&3
                 program=
                 while [ "${'$'}#" -gt 0 ]; do
