@@ -232,7 +232,8 @@ class UploadServer(
     private val sourceEvidence = WebSourceEvidence(store, sourceProfiles, jobs::readArtifact)
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
     private val access = LocalWebAccess(LocalWebAccessConfiguration(webOrigin(host, server.address.port), basePath,
-        setOfNotNull(devFrontendOrigin)), webAccessClock ?: SystemWebAccessClock)
+        setOfNotNull(devFrontendOrigin)), webAccessClock ?: SystemWebAccessClock,
+        requestDiagnosticOutput = requestDiagnosticOutput)
     private val jobMutations = WebJobMutationBoundary(access, jobs)
     private val legacySessions = WebSessionController(access)
     internal val streamResources = WebStreamResources()

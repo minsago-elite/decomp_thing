@@ -262,7 +262,7 @@ class UploadServerTest {
             assertEquals(200, response.status)
             assertEquals(body, response.body.decodeToString())
             assertEquals(expectedContentType, response.contentType)
-            assertEquals("sandbox; default-src 'none'; base-uri 'none'; form-action 'none'", response.contentSecurityPolicy)
+            assertEquals("sandbox; default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'", response.contentSecurityPolicy)
             assertEquals("nosniff", response.contentTypeOptions)
             assertEquals("no-referrer", response.referrerPolicy)
             assertTrue(response.contentDisposition.orEmpty().startsWith("attachment;"))
