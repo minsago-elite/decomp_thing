@@ -5,9 +5,9 @@ import java.util.TreeSet
 /**
  * Counts index entries and sparse-graph visits performed by one planner run.
  *
- * This is internal benchmark instrumentation rather than part of the archive schema. It lets the
- * scale regression tests distinguish work proportional to recovered evidence from an accidental
- * return to scanning every pair of functions.
+ * These measurements support scale regression tests and local planning budget evidence. They
+ * distinguish work proportional to recovered evidence from an accidental return to scanning
+ * every pair of functions; they do not certify production execution.
  */
 internal data class PlannerComplexity(
     val functionCount: Int,
