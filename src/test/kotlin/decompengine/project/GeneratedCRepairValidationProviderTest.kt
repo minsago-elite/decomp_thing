@@ -4,6 +4,7 @@ import decompengine.agent.AgentCancellation
 import decompengine.agent.AgentCancellationSource
 import decompengine.repair.RepairCandidateValidationRequest
 import decompengine.repair.RepairResourceBudget
+import decompengine.repair.RepairBudgetExceededException
 import decompengine.repair.RepairValidationAssurance
 import decompengine.repair.repairCandidateSourceSha256
 import decompengine.repair.repairRegressionCorpusSha256
@@ -21,10 +22,41 @@ import kotlin.test.assertTrue
 
 class GeneratedCRepairValidationProviderTest {
     @Test
+    fun `behavior validation admits profile limits only beneath independent host ceilings`() {
+        val selected = RepairResourceBudget(maximumBehaviorExecutionMillis = 2_000,
+            maximumBehaviorStdoutBytes = 1_024, maximumBehaviorStderrBytes = 1_024,
+            maximumBehaviorOutputBytes = 2_048)
+        val policy = GeneratedCValidationBudgetPolicy(GeneratedCValidationHostSafetyLimits(
+            maximumStdoutBytes = 2_048, maximumStderrBytes = 2_048,
+            maximumOutputBytes = 4_096, maximumExecutionMillis = 3_000))
+        val evidence = policy.admit(selected)
+        assertEquals(evidence.getValue("profileLimits"), evidence.getValue("effectiveLimits"))
+        assertFalse(evidence.getValue("profileLimits") == evidence.getValue("hostSafetyLimits"))
+        assertFailsWith<RepairBudgetExceededException> {
+            policy.admit(selected.copy(maximumBehaviorExecutionMillis = 3_001))
+        }
+        assertFailsWith<RepairBudgetExceededException> {
+            policy.admit(selected.copy(maximumBehaviorStdoutBytes = 4_097,
+                maximumBehaviorOutputBytes = 4_097))
+        }
+        assertFailsWith<RepairBudgetExceededException> {
+            GeneratedCValidationBudgetPolicy.DEFAULT.admit(RepairResourceBudget(
+                maximumBehaviorOutputBytes = 16L * 1024 * 1024 + 1))
+        }
+    }
+
+    @Test
     fun `validation identity policy admits only the registered descriptor fingerprint`() {
         val budget = RepairResourceBudget()
         val current = GeneratedCRepairIndexProfile
         GeneratedCValidationProfile.requireIdentity(current.profileId(), current.configurationSha256(), budget)
+        val tighterBehavior = budget.copy(maximumBehaviorExecutionMillis = budget.maximumBehaviorExecutionMillis - 1)
+        assertFalse(current.configurationSha256(tighterBehavior) == current.configurationSha256(budget))
+        assertFailsWith<IllegalArgumentException> {
+            GeneratedCValidationProfile.requireIdentity(current.profileId(), current.configurationSha256(), tighterBehavior)
+        }
+        GeneratedCValidationProfile.requireIdentity(current.profileId(),
+            current.configurationSha256(tighterBehavior), tighterBehavior)
         val base = GeneratedCMakeReconstructionProfile.descriptor
         val changed = ReconstructionProfile(base.schemaVersion, base.id, base.layout,
             base.budgets.copy(buildWallClockMillis = base.budgets.buildWallClockMillis - 1), base.adapterConfiguration)

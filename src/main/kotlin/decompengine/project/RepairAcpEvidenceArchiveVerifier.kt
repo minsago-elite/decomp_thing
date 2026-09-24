@@ -557,7 +557,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 payloadSha256, payloadSizes)
             val receipt = strictObject(bytes, HISTORY_JSON_LIMITS, "repair validation receipt")
             receipt.requireExactKeys(VALIDATION_RECEIPT_FIELDS, "repair validation receipt")
-            require(receipt.requiredInt("schemaVersion", "validation") == 1 &&
+            require(receipt.requiredInt("schemaVersion", "validation") == 2 &&
                 receipt.requiredString("provider", "validation") == "generated-c-linux-bubblewrap-cgroup-v1" &&
                 receipt.requiredString("profileId", "validation") == graph.profileId &&
                 receipt.requiredBoolean("cleanupVerified", "validation") &&
@@ -570,6 +570,10 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 require(receipt.requiredSha256(field, "validation") == expected) {
                     "repair validation receipt is cross-paired: $field"
                 }
+            }
+            require(receipt.getValue("behaviorBudgetEvidence") ==
+                GeneratedCValidationBudgetPolicy.DEFAULT.admit(graph.budget)) {
+                "repair validation behavior budgets differ from the graph and host safety policy"
             }
             val runtime = receipt.getValue("runtimeConfiguration").requiredObject("validation runtime")
             require(sha256(OracleJson.canonicalBytes(runtime, HISTORY_JSON_LIMITS)) == proof.runtimeSha256) {
@@ -1598,7 +1602,8 @@ private val VALIDATION_PROOF_FIELDS = setOf(
 private val REPAIR_LEGACY_PATH = Regex("reports/repair-revisions/legacy-(?:graph|history)-([0-9a-f]{64})\\.json")
 private val VALIDATION_RECEIPT_FIELDS = setOf(
     "schemaVersion", "provider", "profileId", "profileSha256", "indexSha256", "sourceRevisionSha256",
-    "regressionCorpusSha256", "runtimeSha256", "runtimeConfiguration", "sourceSnapshot", "buildOutputLink",
+    "regressionCorpusSha256", "runtimeSha256", "runtimeConfiguration", "behaviorBudgetEvidence",
+    "sourceSnapshot", "buildOutputLink",
     "originalExecutable", "rebuiltExecutable", "inputs", "scopes", "outcome", "caseCount", "matches",
     "cleanupVerified", "assurance",
 )
