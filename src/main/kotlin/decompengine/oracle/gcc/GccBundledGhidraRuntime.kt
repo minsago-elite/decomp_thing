@@ -98,6 +98,7 @@ internal class GccBundledGhidraRuntime(
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
         state: GccCompilerEngineAnalysisStateIdentity,
         lease: GccCompilerEngineOutputLeaseIdentity,
+        runKind: GccCompilerEngineContainmentRunKind = GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
     ): List<String> {
         val resumed = invocationVersion == 4
         require(state.mode == if (resumed) GccCompilerEngineAnalysisStateMode.RESUME_MANIFEST
@@ -112,13 +113,16 @@ internal class GccBundledGhidraRuntime(
         val controlName = if (resumed) resumeControlDirectoryName(state, lease) else freshControlDirectoryName(lease.path)
         val controlRoot = controlName?.let(lease.path::resolve) ?: lease.path
         val project = if (resumed) controlRoot.resolve("state") else state.path
+        val exporterArguments = listOf(
+            exporter.sha256, archive.sha256, "planning", lease.path.resolve("reports/program_model.json").toString(),
+        ) + if (runKind == GccCompilerEngineContainmentRunKind.INTERRUPTED && invocationVersion >= 3) {
+            listOf("hold-first-planning-checkpoint-v1")
+        } else emptyList()
         val invocation = GhidraInvocation(
             project, "archival_reconstruction",
             byRole.getValue(GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY).path,
             exporter.path.parent,
-            listOf(GhidraPostScript("ExportProgramModel.java", listOf(
-                exporter.sha256, archive.sha256, "planning", lease.path.resolve("reports/program_model.json").toString(),
-            ))),
+            listOf(GhidraPostScript("ExportProgramModel.java", exporterArguments)),
         )
         val prefix = GhidraWorkerCommand.prefix(
             byRole.getValue(GccCompilerEngineContainmentArtifactRole.JAVA_EXECUTABLE).path,

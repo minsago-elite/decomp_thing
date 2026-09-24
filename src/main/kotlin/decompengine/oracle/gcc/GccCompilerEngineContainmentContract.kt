@@ -216,7 +216,7 @@ internal class GccCompilerEngineContainmentRequest(
         }
         require(this.command.isNotEmpty())
         if (bundledRuntime != null) {
-            require(this.command == bundledRuntime.command(this.artifacts, analysisState, outputLease)) {
+            require(this.command == bundledRuntime.command(this.artifacts, analysisState, outputLease, runKind)) {
                 "command differs from the exact bundled direct-API worker invocation"
             }
         } else {

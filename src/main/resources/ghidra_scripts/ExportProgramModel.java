@@ -1746,10 +1746,14 @@ public class ExportProgramModel extends GhidraScript {
     @Override
     protected void run() throws Exception {
         String[] arguments = getScriptArgs();
-        if (arguments.length != 4) {
+        if (arguments.length != 4 && arguments.length != 5) {
             throw new IllegalArgumentException(
-                "expected exporter SHA-256, analysis-tool SHA-256, recovery mode, and output path"
+                "expected exporter SHA-256, analysis-tool SHA-256, recovery mode, output path, and optional checkpoint hold"
             );
+        }
+        boolean holdFirstPlanningCheckpoint = arguments.length == 5;
+        if (holdFirstPlanningCheckpoint && !"hold-first-planning-checkpoint-v1".equals(arguments[4])) {
+            throw new IllegalArgumentException("unsupported planning checkpoint hold");
         }
         if (!arguments[0].matches("[0-9a-f]{64}")) throw new IllegalArgumentException("invalid exporter SHA-256");
         if (!arguments[1].matches("[0-9a-f]{64}")) throw new IllegalArgumentException("invalid analysis-tool SHA-256");
@@ -2180,6 +2184,12 @@ public class ExportProgramModel extends GhidraScript {
                 failed += validation.functions.failed;
                 writeProgress(progressPath, "planning", completed, total, recovered, partial, failed, reused, null);
                 println("program-model planning export " + completed + "/" + total + " batch=" + baseName);
+                // The contained owner must durably authorize and deliver the requested stop
+                // while this child is still live. Only an explicitly bound interrupted run
+                // opens this bounded first-checkpoint delivery window.
+                if (holdFirstPlanningCheckpoint && completed == PLANNING_BATCH_FUNCTIONS && completed < total) {
+                    Thread.sleep(60_000L);
+                }
             }
         }
 
