@@ -143,7 +143,11 @@ internal object GccBundledExportCapture {
                 return@liveExport null
             }
             val observation = GccCompilerEngineResumeByteValidator.assessExportProgress(state, progress, limits)
-            capture.verify()
+            try {
+                capture.verify()
+            } catch (_: LinuxNamedRegularFileReplacedException) {
+                return@liveExport null
+            }
             requireNamedDirectory(run, "reports", reports)
             requireNamedDirectory(reports, "program_model.json.export", export)
             observation
@@ -396,6 +400,9 @@ private class BoundExportFile(
 
     fun verify() {
         requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, name)) { "GCC export file disappeared: $name" }.use { selected ->
+            if (selected.identity.key != identity.key || selected.identity.mountId != identity.mountId) {
+                throw LinuxNamedRegularFileReplacedException()
+            }
             require(selected.identity == identity &&
                 Files.readAttributes(LinuxFilesystemSyscalls.stableDescriptorPath(selected.fd), "unix:size,lastModifiedTime,ctime") == metadata
             ) { "GCC export file changed during capture: $name" }
