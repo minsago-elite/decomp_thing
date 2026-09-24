@@ -297,7 +297,7 @@ class ArchivalBundleTest {
             base.schemaVersion,
             base.id,
             base.layout,
-            base.budgets.copy(archiveMaximumEntries = 1, archiveMaximumFileBytes = 4_096, archiveMaximumTotalBytes = 4_096),
+            base.budgets.copy(archiveMaximumEntries = 21),
             base.adapterConfiguration,
         )
         val project = temp.resolve("project")

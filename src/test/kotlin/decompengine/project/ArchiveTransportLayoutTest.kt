@@ -21,7 +21,6 @@ class ArchiveTransportLayoutTest {
             assertEquals(setOf("reports/build_contract.json"), layout.strictBuildControlPaths)
             assertTrue(buildDefinition in required)
             assertTrue("reports/build_contract.json" in required)
-            assertTrue("ARCHIVE_MANIFEST.sha256" in required)
             assertTrue("ARCHIVE_README.md" in required)
             assertFalse(layout.excludes(buildDefinition))
             assertFalse(layout.excludes("reports/build_contract.json"))

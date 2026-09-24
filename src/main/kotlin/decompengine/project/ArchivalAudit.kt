@@ -302,10 +302,10 @@ object ArchivalProjectAuditor {
                         ?.takeUnless { it.isString }?.longOrNull
                     val promptBudgetCharacters = (checkpoint["promptBudgetCharacters"] as? JsonPrimitive)
                         ?.takeUnless { it.isString }?.longOrNull
-                    if (claimsAgentExecution || checkpoint.containsKey("promptCharacters") || checkpoint.containsKey("promptBudgetCharacters")) {
-                        require(modulePromptBudgetIsValid(promptCharacters, promptBudgetCharacters, profile)) {
-                            "accepted checkpoint prompt budget is missing, invalid, or exceeds the reconstruction profile"
-                        }
+                    require(modulePromptAttributionIsValid(
+                        claimsAgentExecution, promptCharacters, promptBudgetCharacters, profile,
+                    )) {
+                        "accepted checkpoint prompt budget is missing, invalid, or exceeds the reconstruction profile"
                     }
                     require(checkpoint.getValue("issues").jsonArray.isEmpty()) {
                         "accepted module checkpoint retains unresolved reconstruction issues"

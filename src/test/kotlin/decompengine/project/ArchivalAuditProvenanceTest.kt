@@ -115,7 +115,8 @@ class ArchivalAuditProvenanceTest {
     fun `audit retains exact accepted compiler records through archive extraction`() {
         val project = fixture(accepted = true)
         val audit = ArchivalProjectAuditor.audit(project)
-        assertEquals(audit.moduleRevisionSha256.keys, audit.moduleCompilationEvidence.keys)
+        assertEquals(audit.moduleRevisionSha256.keys, audit.moduleCompilationEvidence.keys,
+            audit.moduleCompilationEvidenceProblems.toString())
         for ((id, evidence) in audit.moduleCompilationEvidence) {
             val source = project.resolve(evidence.getValue("sourcePath").jsonPrimitive.content)
             val checkpoint = project.resolve(evidence.getValue("checkpointPath").jsonPrimitive.content)
