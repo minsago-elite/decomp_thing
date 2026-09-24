@@ -25,6 +25,13 @@ class GeneratedCRepairValidationProviderTest {
         val budget = RepairResourceBudget()
         val current = GeneratedCRepairIndexProfile
         GeneratedCValidationProfile.requireIdentity(current.profileId(), current.configurationSha256(), budget)
+        val tighterBehavior = budget.copy(maximumBehaviorExecutionMillis = budget.maximumBehaviorExecutionMillis - 1)
+        assertFalse(current.configurationSha256(tighterBehavior) == current.configurationSha256(budget))
+        assertFailsWith<IllegalArgumentException> {
+            GeneratedCValidationProfile.requireIdentity(current.profileId(), current.configurationSha256(), tighterBehavior)
+        }
+        GeneratedCValidationProfile.requireIdentity(current.profileId(),
+            current.configurationSha256(tighterBehavior), tighterBehavior)
         val base = GeneratedCMakeReconstructionProfile.descriptor
         val changed = ReconstructionProfile(base.schemaVersion, base.id, base.layout,
             base.budgets.copy(buildWallClockMillis = base.budgets.buildWallClockMillis - 1), base.adapterConfiguration)

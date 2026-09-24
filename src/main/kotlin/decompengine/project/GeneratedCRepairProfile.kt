@@ -9,6 +9,7 @@ import decompengine.repair.RepairEntityEvidence
 import decompengine.repair.RepairFailureOwnership
 import decompengine.repair.RepairModuleEvidence
 import decompengine.repair.RepairResourceBudget
+import decompengine.repair.canonicalJson
 import decompengine.repair.CompileFailure
 import decompengine.repair.RepairValidationStrategy
 import decompengine.repair.RepairValidationAssurance
@@ -58,10 +59,11 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
     private val modelRelative = profile.layout.declaration("program-model-evidence").materialize()
 
     override fun profileId(): String = profile.id
-    private val configurationIdentity = sha256(
-        ("generated-c-repair-index-v3\n" + profile.sha256 + "\n").toByteArray(Charsets.UTF_8),
+    override fun configurationSha256(): String = configurationSha256(RepairResourceBudget())
+    override fun configurationSha256(budget: RepairResourceBudget): String = sha256(
+        ("generated-c-repair-index-v4\n" + profile.sha256 + "\n" + budget.canonicalJson() + "\n")
+            .toByteArray(Charsets.UTF_8),
     )
-    override fun configurationSha256(): String = configurationIdentity
 
     override fun authorizesRecoveryLayout(
         sourcePaths: List<String>,

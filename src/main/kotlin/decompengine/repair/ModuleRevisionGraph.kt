@@ -4750,6 +4750,9 @@ private fun renderGraph(state: RevisionGraphState): String = buildString {
         .append(state.pending?.toJson(state.schemaVersion) ?: "null").append("\n}\n")
 }
 
+/** Stable policy bytes used by external adapters when binding a profile to its repair limits. */
+internal fun RepairResourceBudget.canonicalJson(): String = toJson()
+
 private fun RepairResourceBudget.toJson(): String =
     "{\"maximumIndexedModules\":$maximumIndexedModules,\"maximumIndexedEntities\":$maximumIndexedEntities," +
         "\"maximumDependencyEdges\":$maximumDependencyEdges,\"maximumSourceFiles\":$maximumSourceFiles," +
