@@ -3,6 +3,7 @@ package decompengine.oracle.gcc
 import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
+import decompengine.acp.LinuxNamedRegularFileReplacedException
 import decompengine.acp.permissions
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
@@ -123,13 +124,24 @@ internal object GccBundledExportCapture {
         }
         if (!captureEntryExists(reports, "program_model.json.export") ||
             !captureEntryExists(reports, "program_model.json.progress.json")) return@use null
-        LinuxFilesystemSyscalls.openDirectoryAt(reports.fd, "program_model.json.export").use { export ->
+        LinuxFilesystemSyscalls.openDirectoryAt(reports.fd, "program_model.json.export").use liveExport@{ export ->
             requireCaptureDirectory(export, reports.identity)
-            if (!captureEntryExists(export, "state.json")) return@use null
+            if (!captureEntryExists(export, "state.json")) return@liveExport null
             val capture = GccBoundExportFiles(limits.transitionAggregateBytes)
-            val state = capture.read(export, "state.json", limits.exporterStateBytes)
+            // Both files are atomically republished while the worker runs. A regular-file
+            // replacement during the named-open check is a missed sample, not a completed
+            // checkpoint. Symlinks, special files and invalid bytes still fail closed.
+            val state = try {
+                capture.read(export, "state.json", limits.exporterStateBytes)
+            } catch (_: LinuxNamedRegularFileReplacedException) {
+                return@liveExport null
+            }
             requireInvocation(state, artifacts)
-            val progress = capture.read(reports, "program_model.json.progress.json", limits.progressBytes)
+            val progress = try {
+                capture.read(reports, "program_model.json.progress.json", limits.progressBytes)
+            } catch (_: LinuxNamedRegularFileReplacedException) {
+                return@liveExport null
+            }
             val observation = GccCompilerEngineResumeByteValidator.assessExportProgress(state, progress, limits)
             capture.verify()
             requireNamedDirectory(run, "reports", reports)
