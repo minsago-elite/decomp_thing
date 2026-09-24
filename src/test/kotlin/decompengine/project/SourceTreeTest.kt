@@ -14,6 +14,10 @@ import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
+import java.util.zip.CRC32
+import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
+import java.util.zip.ZipOutputStream
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
@@ -427,6 +431,100 @@ class SourceTreeTest {
         SourceTreeGenerator.generate(recovered, project, reconstructor = reconstructor)
         assertEquals(initialCalls, calls)
         assertEquals(confidence, project.resolve("reports/confidence.json").readText())
+    }
+
+    @Test
+    fun `audit and archive reject missing or cross-paired accepted module confidence evidence`() {
+        val project = createTempDirectory("source-confidence-cross-pair-")
+        SourceTreeGenerator.generate(
+            model().copy(inputSha256 = sha256("archived confidence fixture".toByteArray())),
+            project,
+            reconstructor = validReconstructor(),
+        )
+        assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+        assertTrue(ArchivalProjectAuditor.audit(project).moduleCompilationEvidenceProblems.isEmpty())
+        val validArchive = project.parent.resolve(project.fileName.toString() + "-valid.zip")
+        ArchivalPackager.create(project, validArchive)
+        val confidencePath = project.resolve("reports/confidence.json")
+        val original = Json.parseToJsonElement(confidencePath.readText()).jsonObject
+        val modules = original.getValue("modules").jsonArray.map { it.jsonObject }
+        assertTrue(modules.size >= 2)
+        val ids = modules.map { it.getValue("id").jsonPrimitive.content }.toSet()
+
+        fun publish(document: JsonObject) {
+            val bytes = document.toString().toByteArray()
+            confidencePath.writeText(bytes.decodeToString())
+            val manifestPath = project.resolve("source_tree_manifest.json")
+            val manifest = Json.parseToJsonElement(manifestPath.readText()).jsonObject
+            val files = manifest.getValue("files").jsonArray.map { element ->
+                val file = element.jsonObject
+                if (file.getValue("path").jsonPrimitive.content == "reports/confidence.json") {
+                    JsonObject(file + ("sha256" to JsonPrimitive(sha256(bytes))))
+                } else file
+            }
+            manifestPath.writeText(JsonObject(manifest + ("files" to JsonArray(files))).toString())
+        }
+
+        val swapped = modules.toMutableList()
+        swapped[0] = JsonObject(modules[0] + ("revisionEvidence" to modules[1].getValue("revisionEvidence")))
+        swapped[1] = JsonObject(modules[1] + ("revisionEvidence" to modules[0].getValue("revisionEvidence")))
+        publish(JsonObject(original + ("modules" to JsonArray(swapped))))
+        val crossPaired = ArchivalProjectAuditor.audit(project)
+        assertEquals(ids, crossPaired.moduleCompilationEvidenceProblems.keys)
+        assertEquals(ids, crossPaired.moduleConfidenceEvidenceProblems.keys)
+        assertTrue(crossPaired.moduleCompilationEvidence.isEmpty())
+        val archive = project.parent.resolve(project.fileName.toString() + ".zip")
+        val rejected = assertFailsWith<IllegalArgumentException> { ArchivalPackager.create(project, archive) }
+        assertTrue(rejected.message.orEmpty().contains("cross-paired accepted module evidence"))
+        assertFalse(archive.exists())
+
+        val payload = linkedMapOf<String, ByteArray>()
+        ZipInputStream(Files.newInputStream(validArchive)).use { zip ->
+            while (true) {
+                val entry = zip.nextEntry ?: break
+                payload[entry.name] = zip.readBytes()
+                zip.closeEntry()
+            }
+        }
+        payload["reports/confidence.json"] = confidencePath.readBytes()
+        payload["source_tree_manifest.json"] = project.resolve("source_tree_manifest.json").readBytes()
+        payload["ARCHIVE_MANIFEST.sha256"] = payload.filterKeys { it != "ARCHIVE_MANIFEST.sha256" }
+            .toSortedMap().entries.joinToString("", transform = { (path, bytes) -> "${sha256(bytes)}  $path\n" }).toByteArray()
+        val forgedArchive = project.parent.resolve(project.fileName.toString() + "-forged.zip")
+        ZipOutputStream(Files.newOutputStream(forgedArchive)).use { zip ->
+            for ((path, bytes) in payload) {
+                val crc = CRC32().apply { update(bytes) }
+                zip.putNextEntry(ZipEntry(path).apply {
+                    method = ZipEntry.STORED
+                    size = bytes.size.toLong()
+                    compressedSize = size
+                    this.crc = crc.value
+                })
+                zip.write(bytes)
+                zip.closeEntry()
+            }
+        }
+        val extracted = project.parent.resolve(project.fileName.toString() + "-forged-extracted")
+        val extractionFailure = assertFailsWith<IllegalArgumentException> {
+            ArchivalBundleVerifier.extractAndVerify(forgedArchive, extracted)
+        }
+        assertTrue(extractionFailure.message.orEmpty().contains("cross-paired accepted module evidence"))
+        assertFalse(extracted.exists())
+
+        val missing = modules.toMutableList()
+        missing[0] = JsonObject(modules[0] + ("revisionEvidence" to
+            JsonObject(modules[0].getValue("revisionEvidence").jsonObject - "compilation")))
+        publish(JsonObject(original + ("modules" to JsonArray(missing))))
+        val incomplete = ArchivalProjectAuditor.audit(project)
+        assertTrue(modules[0].getValue("id").jsonPrimitive.content in incomplete.moduleCompilationEvidenceProblems)
+        assertTrue(modules[0].getValue("id").jsonPrimitive.content in incomplete.moduleConfidenceEvidenceProblems)
+        assertEquals(ids.size - 1, incomplete.moduleCompilationEvidence.size)
+
+        publish(JsonObject(original + ("scoreMeaning" to JsonPrimitive("measured behavioral confidence"))))
+        val mislabeled = ArchivalProjectAuditor.audit(project)
+        assertEquals(ids, mislabeled.moduleCompilationEvidenceProblems.keys)
+        assertEquals(ids, mislabeled.moduleConfidenceEvidenceProblems.keys)
+        assertTrue(mislabeled.moduleCompilationEvidence.isEmpty())
     }
 
     @Test

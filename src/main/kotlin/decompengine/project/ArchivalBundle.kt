@@ -109,6 +109,9 @@ object ArchivalPackager {
             projectDir, profile, requiredCorpora, hostSafetyLimits, publication, effectiveLimits,
         )
         require(audit.provenanceComplete) { "archive project has incomplete model or source provenance" }
+        require(audit.moduleConfidenceEvidenceProblems.isEmpty()) {
+            "archive project has missing or cross-paired accepted module evidence"
+        }
         require(requiredCorpora.isEmpty() || audit.behaviorMatched == true) {
             "archive project does not satisfy the required behavior corpora"
         }
@@ -418,6 +421,12 @@ object ArchivalBundleVerifier {
                 ArchivePayload(relative, path, Files.size(path), hash, 0)
             }.associateBy { it.relativePath }
             val sourceLineage = validateSourceManifest(staging, payload, profile)
+            val audit = ArchivalProjectAuditor.audit(
+                staging, profile, hostSafetyLimits = hostSafetyLimits, limits = effectiveLimits, publish = false,
+            )
+            require(audit.moduleConfidenceEvidenceProblems.isEmpty()) {
+                "archive contains missing or cross-paired accepted module evidence"
+            }
             val candidateLineage = VerifiedCandidateArchiveLineage(
                 archiveManifestBytes = Files.size(manifestPath),
                 archiveManifestSha256 = digestFile(manifestPath),
