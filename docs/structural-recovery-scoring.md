@@ -309,6 +309,6 @@ denominator field remains explicit rather than treating absence as success.
 This is fixture evidence with `productionVerified: false` and
 `adapterReplayVerified: false`. The production gate is unavailable: #679 has no
 registered host-owned adapter (`StructuralReplayAdapterRegistry.production` is
-empty), and the repository has no checked GCC production global/type oracle,
+empty), and the repository has no checked benchmark production global/type oracle,
 recovered model, identity-map replay, or score. Consequently this slice does
 not establish the #682 production outcome or downstream #45/#46 qualification.
