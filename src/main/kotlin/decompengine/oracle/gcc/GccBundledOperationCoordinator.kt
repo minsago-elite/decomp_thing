@@ -54,6 +54,19 @@ internal class GccBundledExecutedOperation(
     val exportAssessmentReceiptBytes: ByteArray get() = exportAssessment.copyOf()
 }
 
+internal class GccBundledFullExportOperation(
+    executionReceiptBytes: ByteArray,
+    exportAssessmentReceiptBytes: ByteArray,
+    val snapshot: GccBundledFullExportSnapshot,
+) {
+    val complete: Boolean = false
+    val releaseEligible: Boolean = false
+    private val execution = executionReceiptBytes.copyOf()
+    private val exportAssessment = exportAssessmentReceiptBytes.copyOf()
+    val executionReceiptBytes: ByteArray get() = execution.copyOf()
+    val exportAssessmentReceiptBytes: ByteArray get() = exportAssessment.copyOf()
+}
+
 internal class GccBundledInterruptedOperation(
     executionReceiptBytes: ByteArray,
     prefixAssessmentReceiptBytes: ByteArray,
@@ -133,16 +146,35 @@ internal class GccBundledPreparedOperation internal constructor(
     }
 
     @Synchronized
-    fun execute(): GccBundledExecutedOperation = executeRun(GccCompilerEngineContainmentRunKind.FRESH_CONTROL, null) { borrowed, execution ->
-        val receipt = journal.recordExecution(execution.canonicalBytes)
-        val captured = borrowed.withPinnedDescriptor { descriptor ->
-            GccBundledExportCapture.capture(descriptor, directories.getValue("reports"), intent.artifacts)
+    fun execute(): GccBundledExecutedOperation {
+        check(intent.bundledRuntime.recoveryMode == "planning") { "planning execution cannot consume a full-recovery runtime" }
+        return executeRun(GccCompilerEngineContainmentRunKind.FRESH_CONTROL, null) { borrowed, execution ->
+            val receipt = journal.recordExecution(execution.canonicalBytes)
+            val captured = borrowed.withPinnedDescriptor { descriptor ->
+                GccBundledExportCapture.capture(descriptor, directories.getValue("reports"), intent.artifacts)
+            }
+            inputs.verify("after GCC export capture")
+            lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+            val exportReceipt = journal.recordExportAssessment(bindWallTime(captured.canonicalBytes))
+            GccBundledExecutedOperation(receipt, exportReceipt, captured)
+        }.also { completedExport = it }
+    }
+
+    /** Executes the versioned full-recovery exporter and snapshots its output after worker absence. */
+    @Synchronized
+    fun executeFullExport(): GccBundledFullExportOperation {
+        check(intent.bundledRuntime.recoveryMode == "full") { "full export execution requires the full-recovery runtime" }
+        return executeRun(GccCompilerEngineContainmentRunKind.FRESH_CONTROL, null) { borrowed, execution ->
+            val receipt = journal.recordExecution(execution.canonicalBytes)
+            val captured = borrowed.withPinnedDescriptor { descriptor ->
+                GccBundledFullExportCapture.capture(descriptor, directories.getValue("reports"), intent.artifacts)
+            }
+            inputs.verify("after GCC full export snapshot")
+            lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+            val exportReceipt = journal.recordExportAssessment(bindWallTime(captured.assessmentBytes))
+            GccBundledFullExportOperation(receipt, exportReceipt, captured)
         }
-        inputs.verify("after GCC export capture")
-        lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
-        val exportReceipt = journal.recordExportAssessment(bindWallTime(captured.canonicalBytes))
-        GccBundledExecutedOperation(receipt, exportReceipt, captured)
-    }.also { completedExport = it }
+    }
 
     @Synchronized
     fun executeUntilCheckpoint(minimumCompletedFunctions: Long): GccBundledInterruptedOperation {
@@ -460,7 +492,9 @@ internal class GccBundledPreparedOperation internal constructor(
     ): T {
         requireCurrent()
         require(intent.runKind == kind) { "GCC bundled execution kind differs from the prepared intent" }
-        require(intent.bundledRuntime.invocationVersion in 2..3) { "GCC contained execution requires explicitly bound JVM home and temporary paths" }
+        require(intent.bundledRuntime.invocationVersion in 2..3 || intent.bundledRuntime.invocationVersion == 5) {
+            "GCC contained execution requires an explicitly bound fresh JVM runtime"
+        }
         executionAttempted = true
         operationDeadline = ContainedCommandOperationDeadline(intent.budgets.wallClockMillis)
         try {

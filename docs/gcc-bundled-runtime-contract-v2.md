@@ -34,6 +34,14 @@ uses the exact engine path, analysis-state directory and source exporter, with
 the exporter/source digest, release digest, planning mode and fixed output path.
 The classpath is a single argv element, not a shell expression.
 
+Runtime provider v5 is the explicitly versioned fresh full-recovery command. It
+selects the exporter's `full` mode and rejects checkpoint-interruption requests;
+providers v1–v3 preserve their planning-mode commands and v4 remains the
+resume-only planning command. The prepared-operation owner has a separate
+`executeFullExport` transition that snapshots the model and full sidecar tree
+after the contained worker and cgroup are absent. That snapshot is byte evidence
+only and does not grant structural score or release authority.
+
 Real bundled library paths exceed schema 1's 16 KiB argv-component ceiling.
 Schema 2 therefore permits a 64 KiB component while retaining the 64 KiB total
 command-character bound and existing bounded strict-JSON limits. Schema 1 keeps
@@ -81,10 +89,12 @@ digest is captured before attachment, not recomputed from mutable inputs during
 cleanup. Runtime verification failure therefore cannot prevent the retained
 owner's terminal cleanup solely because those runtime bytes changed.
 
-The exposed live owner still has no START, command execution, export, saved-state
-resume, output-lease release or release-eligibility transition. BOOT attachment
-and terminal absence do not prove that either compiler engine was analyzed.
-Issue #235 remains open for actual contained analysis through export and cleanup.
+The exposed live owner has contained START and fresh execution transitions,
+including the distinct v5 full-export path, plus the separately versioned
+planning resume flow. It still has no output-lease release or release-eligibility
+transition. Contained execution and a model snapshot do not establish structural
+score authority. Issue #235 remains open for the compiler-engine evidence and
+cleanup outcomes it owns.
 The older archive-to-installation verifier remains useful diagnostic evidence
 but closes its file handles; its returned paths are not retained execution
 authority. The full cc1/lto1 forced-interruption/resume equivalence proof remains
