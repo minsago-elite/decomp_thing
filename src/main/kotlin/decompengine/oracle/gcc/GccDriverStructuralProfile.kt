@@ -32,9 +32,12 @@ internal data class GccDriverStructuralTargetAbiV1(
     val id: String,
     val architecture: String,
     val abi: String,
+    val machine: Int,
+    val osAbi: Int,
     val elfClass: String,
     val dataEncoding: String,
     val pointerBits: Int,
+    val elfType: String,
 )
 
 internal data class GccDriverStructuralBinaryV1(
@@ -173,7 +176,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
             requireTwinEquivalence(manifest.document.objectField("equivalence", "GCC artifact manifest"), pair)
 
             val target = requireTarget(pair.stripped.elf.header.elfClass, pair.stripped.elf.header.dataEncoding,
-                pair.stripped.elf.header.machine.toInt(), pair.stripped.elf.header.typeName)
+                pair.stripped.elf.header.machine.toInt(), pair.stripped.elf.header.osAbi, pair.stripped.elf.header.typeName)
             val imageBase = pair.stripped.elf.programHeaders
                 .filter { it.typeName == "PT_LOAD" && it.memorySize > 0UL }
                 .minOfOrNull { it.virtualAddress }
@@ -259,18 +262,24 @@ internal class GccDriverStructuralInputsV1 private constructor(
             elfClass: String,
             dataEncoding: String,
             machine: Int,
+            osAbi: Int,
             elfType: String,
         ): GccDriverStructuralTargetAbiV1 {
-            require(elfClass == "ELF64" && dataEncoding == "little-endian" && machine == 62 && elfType == "ET_EXEC") {
+            require(elfClass == "ELF64" && dataEncoding == "little-endian" && machine == 62 && osAbi == 3 &&
+                elfType == "ET_EXEC"
+            ) {
                 "GCC driver ELF differs from its fixed x86-64 SysV target profile"
             }
             return GccDriverStructuralTargetAbiV1(
                 id = "x86_64-sysv-amd64-v1",
                 architecture = "x86_64",
                 abi = "sysv-amd64",
+                machine = machine,
+                osAbi = osAbi,
                 elfClass = elfClass,
                 dataEncoding = dataEncoding,
                 pointerBits = 64,
+                elfType = elfType,
             )
         }
 
