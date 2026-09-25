@@ -4,6 +4,7 @@ import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.permissions
 import decompengine.oracle.fulltree.ContainedCommandOperationDeadline
+import decompengine.oracle.core.DescriptorBoundAtomicStateFile
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import kotlinx.serialization.json.JsonObject
@@ -115,6 +116,7 @@ internal class GccBundledPreparedOperation internal constructor(
     private var retainedTrigger: GccBundledCheckpointTrigger? = null
     private var pendingCleanup: KotlinSystemdCgroupCommandCleanup? = null
     private var completedExport: GccBundledExecutedOperation? = null
+    private var completedFullExport: GccBundledFullExportOperation? = null
     private val completedControls = linkedMapOf<String, LinuxFileIdentity>()
     private var plannerAttempted = false
     private var completedPlan: GccBundledPlannedOperation? = null
@@ -176,7 +178,7 @@ internal class GccBundledPreparedOperation internal constructor(
             lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
             val exportReceipt = journal.recordExportAssessment(bindWallTime(captured.assessmentBytes))
             GccBundledFullExportOperation(intent.canonicalBytes, receipt, exportReceipt, captured)
-        }
+        }.also { completedFullExport = it }
     }
 
     @Synchronized
@@ -466,6 +468,66 @@ internal class GccBundledPreparedOperation internal constructor(
             }
             inputs.verify("after CLI result publication")
             journal.verify("after CLI result publication")
+            lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+            deadline.requireCurrent()
+            return cli.options.output.resolve("result.json")
+        } catch (failure: Throwable) {
+            poisoned = true
+            throw failure
+        }
+    }
+
+    /** Publishes the descriptor-captured full model and its authenticated profile binding, never a score. */
+    @Synchronized
+    fun publishFullExportCliResult(binding: GccDriverStructuralFullExportBindingV2): Path {
+        check(!closed && !poisoned && !cliPublicationAttempted)
+        check(intent.bundledRuntime.recoveryMode == "full") {
+            "structural binding publication requires a full-recovery operation"
+        }
+        val cli = checkNotNull(intent.cliInvocation) { "operation has no bound CLI output" }
+        val exported = checkNotNull(completedFullExport) { "operation has no captured full export" }
+        cliPublicationAttempted = true
+        try {
+            val deadline = checkNotNull(operationDeadline)
+            deadline.requireCurrent()
+            inputs.verify("before full-export binding publication")
+            journal.verify("before full-export binding publication")
+            lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+            val original = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(definition)
+            val snapshot = exported.snapshot
+            val bindingBytes = binding.canonicalBytes
+            require(OracleArtifacts.sha256(bindingBytes) == binding.sha256) {
+                "structural full-export binding bytes differ from their digest"
+            }
+            val bindingName = "structural-full-export-binding.json"
+            val resultBytes = OracleJson.canonicalBytes(JsonObject(mapOf(
+                "provider" to JsonPrimitive("gcc-bundled-cli-full-export-result-v1"), "schemaVersion" to JsonPrimitive(1),
+                "complete" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
+                "scored" to JsonPrimitive(false), "operationId" to JsonPrimitive(intent.operationId),
+                "requestSha256" to JsonPrimitive(intent.requestSha256), "journal" to JsonPrimitive(journal.path.toString()),
+                "programModel" to JsonPrimitive(original.outputLease.path.resolve("reports/program_model.json").toString()),
+                "programModelSha256" to JsonPrimitive(snapshot.programModelSha256),
+                "programModelBytes" to JsonPrimitive(snapshot.programModelBytes),
+                "functionCount" to JsonPrimitive(snapshot.functionCount),
+                "exportAssessmentReceiptSha256" to JsonPrimitive(OracleArtifacts.sha256(exported.exportAssessmentReceiptBytes)),
+                "executionReceiptSha256" to JsonPrimitive(OracleArtifacts.sha256(exported.executionReceiptBytes)),
+                "structuralBinding" to JsonPrimitive(cli.options.output.resolve(bindingName).toString()),
+                "structuralBindingSha256" to JsonPrimitive(binding.sha256),
+                "operationWallTime" to deadline.snapshot(),
+                "scratchDisposition" to JsonPrimitive("retained; structural scoring and release eligibility unqualified"),
+            )))
+            LinuxFilesystemSyscalls.openRoot(cli.options.output).use { output ->
+                cli.requireCurrent()
+                DescriptorBoundAtomicStateFile.publishNoReplace(output, bindingName, bindingBytes, 256 * 1024)
+                inputs.verify("after full-export binding publication")
+                journal.verify("after full-export binding publication")
+                lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+                deadline.requireCurrent()
+                DescriptorBoundAtomicStateFile.publishNoReplace(output, "result.json", resultBytes, 256 * 1024)
+                cli.requireCurrent()
+            }
+            inputs.verify("after full-export result publication")
+            journal.verify("after full-export result publication")
             lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
             deadline.requireCurrent()
             return cli.options.output.resolve("result.json")

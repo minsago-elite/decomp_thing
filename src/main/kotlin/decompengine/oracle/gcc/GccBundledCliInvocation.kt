@@ -12,10 +12,10 @@ import kotlinx.serialization.json.JsonPrimitive
 internal data class GccBundledCliOptions(
     val engineId: String, val binary: Path, val profile: Path, val archive: Path,
     val output: Path, val scratch: Path, val diskPolicy: FullTreeDiskScratchPolicy,
-    val resumeAfterCheckpoint: Long?,
+    val resumeAfterCheckpoint: Long?, val fullRecoveryExport: Boolean = false,
 ) {
     companion object {
-        fun parse(arguments: List<String>): GccBundledCliOptions {
+        fun parse(arguments: List<String>, fullRecoveryExport: Boolean = false): GccBundledCliOptions {
             require(arguments.size in 2..32 && arguments.sumOf { it.toByteArray().size.toLong() + 1 } <= 65536)
             val positionals = mutableListOf<String>()
             val values = linkedMapOf<String, String>()
@@ -34,6 +34,9 @@ internal data class GccBundledCliOptions(
                 } else positionals += argument
             }
             require(positionals.size == 2 && positionals[0] in setOf("cc1", "lto1")) { "expected cc1 or lto1 and its stripped binary" }
+            require(!fullRecoveryExport || positionals[0] == "cc1") {
+                "full-recovery structural export is currently supported only for cc1"
+            }
             fun path(value: String) = Path.of(value).toAbsolutePath().normalize()
             fun required(name: String) = path(requireNotNull(values[name]) { "$name is required" })
             fun number(name: String, default: Long? = null): Long? = values[name]?.let {
@@ -41,11 +44,13 @@ internal data class GccBundledCliOptions(
                 it.toLong()
             } ?: default
             val threshold = number("--resume-after-checkpoint")?.also { GccBundledCheckpointTrigger(it) }
+            require(!fullRecoveryExport || threshold == null) { "full-recovery export cannot resume from a planning checkpoint" }
             return GccBundledCliOptions(positionals[0], path(positionals[1]), required("--profile"), required("--ghidra-archive"),
                 required("--output"), required("--scratch"), FullTreeDiskScratchPolicy(
                     number("--scratch-min-bytes", 8L * 1024 * 1024 * 1024)!!,
                     number("--scratch-max-bytes", 64L * 1024 * 1024 * 1024)!!,
-                    number("--scratch-min-inodes", 32768)!!, number("--scratch-max-inodes", 1_000_000)!!), threshold).also {
+                    number("--scratch-min-inodes", 32768)!!, number("--scratch-max-inodes", 1_000_000)!!), threshold,
+                fullRecoveryExport).also {
                 require(it.diskPolicy.maximumFilesystemBytes <= 1024L * 1024 * 1024 * 1024 &&
                     it.diskPolicy.maximumFilesystemInodes <= 2_000_000)
                 require(!it.output.startsWith(it.scratch) && !it.scratch.startsWith(it.output)) { "output and scratch must be disjoint" }
@@ -64,7 +69,8 @@ internal class GccBundledCliInvocation(val options: GccBundledCliOptions, argume
     val path: Path = options.output.resolve("invocation.json")
     private val encoded = OracleJson.canonicalBytes(JsonObject(mapOf(
         "provider" to JsonPrimitive("gcc-bundled-cli-invocation-v1"), "schemaVersion" to JsonPrimitive(1),
-        "argv" to JsonArray((listOf("gcc-engine-plan") + arguments).map(::JsonPrimitive)),
+        "argv" to JsonArray((listOf(if (options.fullRecoveryExport) "gcc-engine-full-export" else "gcc-engine-plan") + arguments)
+            .map(::JsonPrimitive)),
         "engineId" to JsonPrimitive(options.engineId), "binary" to JsonPrimitive(options.binary.toString()),
         "profile" to JsonPrimitive(options.profile.toString()), "archive" to JsonPrimitive(options.archive.toString()),
         "output" to JsonPrimitive(options.output.toString()), "scratch" to JsonPrimitive(options.scratch.toString()),
@@ -80,7 +86,9 @@ internal class GccBundledCliInvocation(val options: GccBundledCliOptions, argume
 
     init {
         require(directories.keys == setOf(options.output, options.output.resolve("inputs"), options.output.resolve("journal")))
-        require(GccBundledCliOptions.parse(arguments) == options) { "CLI argv differs from its selected options" }
+        require(GccBundledCliOptions.parse(arguments, options.fullRecoveryExport) == options) {
+            "CLI argv differs from its selected options"
+        }
     }
 
     fun requireCurrent() {
