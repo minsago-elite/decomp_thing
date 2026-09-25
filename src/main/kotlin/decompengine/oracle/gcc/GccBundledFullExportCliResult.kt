@@ -2,8 +2,10 @@ package decompengine.oracle.gcc
 
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -11,6 +13,13 @@ import kotlinx.serialization.json.jsonPrimitive
 internal object GccBundledFullExportCliResultV2 {
     const val TREE_MANIFEST_NAME = "full-export-tree-manifest.json"
     const val MAXIMUM_TREE_MANIFEST_BYTES = 64 * 1024 * 1024
+    private val TREE_MANIFEST_JSON_LIMITS = StrictJsonLimits(
+        maximumInputBytes = MAXIMUM_TREE_MANIFEST_BYTES,
+        maximumCanonicalBytes = MAXIMUM_TREE_MANIFEST_BYTES,
+        maximumNodes = 1_000_000,
+        maximumStringBytes = 4 * 1024 * 1024,
+        maximumTotalStringBytes = 32 * 1024 * 1024,
+    )
 
     fun create(
         operationId: String,
@@ -59,6 +68,35 @@ internal object GccBundledFullExportCliResultV2 {
         require(treeManifestBytes.isNotEmpty() && treeManifestBytes.size <= MAXIMUM_TREE_MANIFEST_BYTES) {
             "full-export tree manifest exceeds its publication bound"
         }
+        val treeManifest = OracleJson.parseCanonical(treeManifestBytes, TREE_MANIFEST_JSON_LIMITS).jsonObject
+        require(treeManifest.keys == setOf("outputTreeSha256", "tree")) {
+            "full-export tree manifest does not match its closed schema"
+        }
+        val manifestTree = treeManifest.getValue("tree").jsonObject
+        require(manifestTree.keys == setOf(
+            "kind", "stateSha256", "progressSha256", "language", "compilerSpec",
+            "programModelSha256", "programModelBytes", "sidecars",
+        )) { "full-export output tree does not match its closed schema" }
+        val manifestTreeBytes = OracleJson.canonicalBytes(manifestTree, TREE_MANIFEST_JSON_LIMITS)
+        val stateSha256 = manifestTree.getValue("stateSha256").jsonPrimitive
+        val progressSha256 = manifestTree.getValue("progressSha256").jsonPrimitive
+        val language = manifestTree.getValue("language").jsonPrimitive
+        val compilerSpec = manifestTree.getValue("compilerSpec").jsonPrimitive
+        require(stateSha256.isString && stateSha256.content.matches(Regex("[a-f0-9]{64}")) &&
+            progressSha256.isString && progressSha256.content.matches(Regex("[a-f0-9]{64}")) &&
+            language.isString && language.content.isNotBlank() &&
+            compilerSpec.isString && compilerSpec.content.isNotBlank()
+        ) { "full-export output tree contains invalid state, progress, or loader identity" }
+        require(manifestTree.getValue("sidecars") is JsonObject) {
+            "full-export output tree sidecar inventory is not an object"
+        }
+        require(treeManifest.getValue("outputTreeSha256").jsonPrimitive.content == outputTreeSha256 &&
+            manifestTree.getValue("kind").jsonPrimitive.content == "gcc-bundled-full-export-output-tree-v2" &&
+            OracleArtifacts.sha256(manifestTreeBytes) == outputTreeSha256
+        ) { "retained full-export tree manifest does not bind the captured output tree" }
+        require(manifestTree.getValue("programModelSha256").jsonPrimitive.content == programModelSha256 &&
+            manifestTree.getValue("programModelBytes").jsonPrimitive.longOrNull == programModelBytes
+        ) { "retained full-export tree model differs from the profile-bound model" }
         return OracleJson.canonicalBytes(JsonObject(mapOf(
             "provider" to JsonPrimitive("gcc-bundled-cli-full-export-result-v2"),
             "schemaVersion" to JsonPrimitive(2),

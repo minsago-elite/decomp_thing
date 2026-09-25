@@ -14,11 +14,21 @@ import kotlinx.serialization.json.jsonPrimitive
 class GccBundledFullExportCliResultTest {
     @Test
     fun `full export CLI result binds retained tree manifest and remains unscored`() {
-        val treeBytes = OracleJson.canonicalBytes(JsonObject(mapOf("files" to JsonPrimitive(3))))
+        val tree = JsonObject(mapOf(
+            "kind" to JsonPrimitive("gcc-bundled-full-export-output-tree-v2"),
+            "stateSha256" to JsonPrimitive("1".repeat(64)),
+            "progressSha256" to JsonPrimitive("2".repeat(64)),
+            "language" to JsonPrimitive("x86:LE:64:default"),
+            "compilerSpec" to JsonPrimitive("gcc"),
+            "programModelSha256" to JsonPrimitive("c".repeat(64)),
+            "programModelBytes" to JsonPrimitive(123),
+            "sidecars" to JsonObject(emptyMap()),
+        ))
+        val treeBytes = OracleJson.canonicalBytes(tree)
         val treeSha = OracleArtifacts.sha256(treeBytes)
         val manifestBytes = OracleJson.canonicalBytes(JsonObject(mapOf(
             "outputTreeSha256" to JsonPrimitive(treeSha),
-            "tree" to OracleJson.parseCanonical(treeBytes),
+            "tree" to tree,
         )))
         val bindingBytes = OracleJson.canonicalBytes(JsonObject(mapOf(
             "provider" to JsonPrimitive("gcc-compiler-engine-structural-full-export-binding-v2"),
@@ -32,7 +42,11 @@ class GccBundledFullExportCliResultTest {
         )))
         val root = Path.of("/tmp/structural-result-fixture")
         val manifestPath = root.resolve(GccBundledFullExportCliResultV2.TREE_MANIFEST_NAME)
-        fun createResult(binding: ByteArray) = GccBundledFullExportCliResultV2.create(
+        fun createResult(
+            binding: ByteArray = bindingBytes,
+            manifest: ByteArray = manifestBytes,
+            outputTreeSha256: String = treeSha,
+        ) = GccBundledFullExportCliResultV2.create(
             operationId = "a".repeat(64),
             requestSha256 = "b".repeat(64),
             journalPath = root.resolve("journal"),
@@ -45,11 +59,11 @@ class GccBundledFullExportCliResultTest {
             structuralBindingPath = root.resolve("structural-full-export-binding.json"),
             structuralBindingBytes = binding,
             treeManifestPath = manifestPath,
-            treeManifestBytes = manifestBytes,
-            outputTreeSha256 = treeSha,
+            treeManifestBytes = manifest,
+            outputTreeSha256 = outputTreeSha256,
             operationWallTime = JsonObject(mapOf("startedMonotonicNanos" to JsonPrimitive(1))),
         )
-        val resultBytes = createResult(bindingBytes)
+        val resultBytes = createResult()
         val result = OracleJson.parseCanonical(resultBytes).jsonObject
         assertEquals("gcc-bundled-cli-full-export-result-v2", result.getValue("provider").jsonPrimitive.content)
         assertEquals("2", result.getValue("schemaVersion").jsonPrimitive.content)
@@ -73,5 +87,27 @@ class GccBundledFullExportCliResultTest {
             ))),
         ))
         assertFails { createResult(mismatchedModelBinding) }
+
+        assertFails { createResult(outputTreeSha256 = "f".repeat(64)) }
+
+        val alteredStateTree = JsonObject(tree + ("stateSha256" to JsonPrimitive("3".repeat(64))))
+        val manifestWithStaleTreeDigest = OracleJson.canonicalBytes(JsonObject(mapOf(
+            "outputTreeSha256" to JsonPrimitive(treeSha),
+            "tree" to alteredStateTree,
+        )))
+        assertFails { createResult(manifest = manifestWithStaleTreeDigest) }
+
+        val treeWithSubstitutedModel = JsonObject(tree + ("programModelSha256" to JsonPrimitive("f".repeat(64))))
+        val substitutedTreeSha = OracleArtifacts.sha256(OracleJson.canonicalBytes(treeWithSubstitutedModel))
+        val substitutedManifest = OracleJson.canonicalBytes(JsonObject(mapOf(
+            "outputTreeSha256" to JsonPrimitive(substitutedTreeSha),
+            "tree" to treeWithSubstitutedModel,
+        )))
+        val substitutedBinding = OracleJson.canonicalBytes(JsonObject(
+            OracleJson.parseCanonical(bindingBytes).jsonObject + ("outputTreeSha256" to JsonPrimitive(substitutedTreeSha)),
+        ))
+        assertFails { createResult(substitutedBinding, substitutedManifest, substitutedTreeSha) }
+
+        assertFails { createResult(manifest = manifestBytes + byteArrayOf('\n'.code.toByte())) }
     }
 }
