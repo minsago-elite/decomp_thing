@@ -35,10 +35,11 @@ internal class BehaviorEvidenceCapture {
 
     private val observed = linkedMapOf<Path, ObservedFile>()
     private var totalBytes = 0L
+    private var trackedFiles = 0
 
-    fun executable(path: Path): JsonObject {
+    fun executable(path: Path, includeInBounds: Boolean = true): JsonObject {
         require(Files.isExecutable(path)) { "behavior executable is unavailable: $path" }
-        return file(path).also { require(it.count("bytes") > 0L) { "behavior executable is empty: $path" } }
+        return file(path, includeInBounds).also { require(it.count("bytes") > 0L) { "behavior executable is empty: $path" } }
     }
 
     /** Copy the already identified executable bytes into a private, read-only execution snapshot. */
@@ -62,13 +63,15 @@ internal class BehaviorEvidenceCapture {
             java.nio.file.attribute.PosixFilePermission.OTHERS_READ,
             java.nio.file.attribute.PosixFilePermission.OTHERS_EXECUTE,
         ))
-        val retained = executable(destination)
+        // The copy duplicates an already counted input; it is observed for stability
+        // without consuming the evidence-input inventory a second time.
+        val retained = executable(destination, includeInBounds = false)
         require(retained == expected) { "retained behavior executable differs from its identified source: $source" }
         requireCurrent()
         return retained
     }
 
-    fun file(path: Path): JsonObject {
+    fun file(path: Path, includeInBounds: Boolean = true): JsonObject {
         val absolute = path.toAbsolutePath().normalize()
         val snapshot = readStableRegularFile(absolute.parent, absolute.fileName.toString(), MAXIMUM_FILE_BYTES)
         val document = JsonObject(mapOf(
@@ -78,9 +81,10 @@ internal class BehaviorEvidenceCapture {
         val current = ObservedFile(snapshot.identity, document)
         val previous = observed.putIfAbsent(absolute, current)
         require(previous == null || previous == current) { "behavior input changed while captured: $absolute" }
-        if (previous == null) {
+        if (previous == null && includeInBounds) {
             totalBytes = Math.addExact(totalBytes, snapshot.bytes.size.toLong())
-            require(totalBytes <= MAXIMUM_TOTAL_BYTES && observed.size <= MAXIMUM_FILES) {
+            trackedFiles++
+            require(totalBytes <= MAXIMUM_TOTAL_BYTES && trackedFiles <= MAXIMUM_FILES) {
                 "behavior evidence inputs exceed their aggregate bound"
             }
         }
