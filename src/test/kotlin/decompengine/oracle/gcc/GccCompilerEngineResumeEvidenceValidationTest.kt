@@ -3,6 +3,7 @@ package decompengine.oracle.gcc
 import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
+import decompengine.acp.LinuxNamedRegularFileReplacedException
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.structural.CanonicalProgramModelStreaming
@@ -12,6 +13,7 @@ import java.lang.reflect.Modifier
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.FileTime
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.util.TreeMap
@@ -102,6 +104,25 @@ class GccCompilerEngineResumeEvidenceValidationTest {
             Files.createSymbolicLink(progress, original)
             assertFails { GccBundledExportCapture.observeProgress(captured.root, captured.reportsIdentity, captured.artifacts) }
             assertContentEquals(fixture.progress, Files.readAllBytes(original))
+        }
+    }
+
+    @Test
+    fun `captured live progress classifies same-inode metadata changes as a missed sample`() {
+        val fixture = transitionFixture(twoBatchFixture()).interrupted
+        withDescriptorExportFixture(fixture, includeModel = false) { captured ->
+            LinuxFilesystemSyscalls.openDirectoryAt(captured.root.fd, "reports").use { reports ->
+                val files = GccBoundExportFiles(1024 * 1024)
+                files.read(reports, "program_model.json.progress.json", fixture.progress.size)
+
+                // Preserve the inode, owner, mode, and link count while changing captured metadata.
+                val progress = captured.directory.resolve("reports/program_model.json.progress.json")
+                Files.setLastModifiedTime(
+                    progress,
+                    FileTime.fromMillis(Files.getLastModifiedTime(progress).toMillis() + 2_000),
+                )
+                assertFailsWith<LinuxNamedRegularFileReplacedException> { files.verify() }
+            }
         }
     }
 
