@@ -57,6 +57,9 @@ class GhidraJvmAnalyzer private constructor(
     fun analyze(binaryPath: Path, outputDir: Path): GhidraAnalysis {
         val deadline = AnalysisDeadline.start(
             TimeUnit.MILLISECONDS.toNanos(metadataLimits.maximumWallClockMillis), "analysis and metadata",
+            timeoutAdvice = if (analyzer is GhidraHeadlessProgramModelAnalyzer) {
+                AnalysisDeadline.RECOVERY_TIMEOUT_ADVICE
+            } else null,
         )
         return deadline.enforceDuring("analysis and metadata") {
             fun checkpoint(stage: String) = deadline.checkpoint(stage)

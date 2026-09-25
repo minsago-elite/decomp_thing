@@ -122,7 +122,10 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         includeCallSites: Boolean,
         parentDeadline: AnalysisDeadline?,
     ): Pair<RecoveredProgramModel, RecoveredCallSiteReceipt?> {
-        val deadline = AnalysisDeadline.start(limits.wallClockTimeout.toNanos(), "Ghidra program recovery", parentDeadline)
+        val deadline = AnalysisDeadline.start(
+            limits.wallClockTimeout.toNanos(), "Ghidra program recovery", parentDeadline,
+            AnalysisDeadline.RECOVERY_TIMEOUT_ADVICE,
+        )
         return deadline.enforceDuring("Ghidra program recovery") {
             deadline.checkpoint("before export preparation")
             val reports = workDir.resolve("reports").createDirectories()
@@ -229,7 +232,11 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             }.also(tasks::add)
             val stdout = capture(process.inputStream)
             val stderr = capture(process.errorStream)
-            val completed = process.waitFor(deadline.remainingNanosOrZero(), TimeUnit.NANOSECONDS)
+            val completed = try {
+                process.waitFor(deadline.remainingNanosOrZero(), TimeUnit.NANOSECONDS)
+            } catch (interrupted: InterruptedException) {
+                if (deadline.remainingNanosOrZero() == 0L) false else throw interrupted
+            }
             if (!completed) processTree.terminate()
             fun <T> await(task: CompletableFuture<T>): T {
                 while (true) {

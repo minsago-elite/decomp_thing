@@ -10,6 +10,7 @@ internal class AnalysisDeadline private constructor(
     private val maximumNanos: Long,
     private val description: String,
     private val parent: AnalysisDeadline?,
+    private val timeoutAdvice: String?,
 ) {
     val maximumMillis: Long get() = TimeUnit.NANOSECONDS.toMillis(maximumNanos)
     val parentMaximumMillis: Long? get() = parent?.maximumMillis
@@ -55,12 +56,17 @@ internal class AnalysisDeadline private constructor(
         // InterruptedException clears the flag in most blocking APIs; also clear it for APIs that
         // return after observing the watchdog interrupt so it cannot affect the caller's next task.
         Thread.interrupted()
-        return try {
+        var observedExpiration: GhidraAnalysisException? = null
+        val baseMessage = try {
             checkpoint("during $stage")
-            GhidraAnalysisException("$description exceeded $maximumMillis milliseconds during $stage", cause)
+            "$description exceeded $maximumMillis milliseconds during $stage"
         } catch (expired: GhidraAnalysisException) {
-            if (cause != null && cause !== expired) expired.addSuppressed(cause)
-            expired
+            observedExpiration = expired
+            expired.message ?: "$description exceeded $maximumMillis milliseconds during $stage"
+        }
+        val message = if (timeoutAdvice == null) baseMessage else "$baseMessage; $timeoutAdvice"
+        return GhidraAnalysisException(message, cause).also { timeout ->
+            observedExpiration?.let(timeout::addSuppressed)
         }
     }
 
@@ -76,15 +82,22 @@ internal class AnalysisDeadline private constructor(
     }
 
     companion object {
+        const val RECOVERY_TIMEOUT_ADVICE = "rerun with the same output directory to resume durable function checkpoints"
+
         private val WATCHDOG = ScheduledThreadPoolExecutor(1) { task ->
             Thread(task, "analysis-deadline-watchdog").apply { isDaemon = true }
         }.apply {
             removeOnCancelPolicy = true
         }
 
-        fun start(maximumNanos: Long, description: String, parent: AnalysisDeadline? = null): AnalysisDeadline {
+        fun start(
+            maximumNanos: Long,
+            description: String,
+            parent: AnalysisDeadline? = null,
+            timeoutAdvice: String? = parent?.timeoutAdvice,
+        ): AnalysisDeadline {
             require(maximumNanos in 1..TimeUnit.HOURS.toNanos(24)) { "analysis deadline must be positive and at most 24 hours" }
-            return AnalysisDeadline(System.nanoTime(), maximumNanos, description, parent)
+            return AnalysisDeadline(System.nanoTime(), maximumNanos, description, parent, timeoutAdvice)
         }
     }
 }
