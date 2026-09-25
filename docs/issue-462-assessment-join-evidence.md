@@ -27,3 +27,31 @@ the existing fixture report and cannot attach authenticated production findings
 or change model assessment state. Dependencies #40 and #136 still own the
 authenticated exporter, loader, replay, and oracle authority required for that
 gate.
+
+## 2026-09-25 fixture join implementation
+
+`StructuralRecoveryAssessmentJoinV1` adds an explicit fixture-only projection
+from a canonical schema-2 program model and a validated fixture score report.
+Its binding retains the exact program-model and canonical score-report digests,
+input-binary digest, recovered-model ID/payload digest, boundary-report digest,
+and identity-map digest. The join matches only `(kind, recoveredId)` pairs; it
+does not use names. It retains each fact's dimension, slot, evidence, and outcome,
+keeps oracle-only rows visible, rejects stale byte pairs and absent recovered
+identities, and leaves entities without findings `unassessed`. Its result and
+the extracted model keep `recoveryAssessmentState: unassessed`.
+
+This path requires `scope: fixture` and the fixture identity-map marker
+`productionVerified: false`; it cannot construct
+`VerifiedStructuralInputsV1`, is not wired into archival publication, and does
+not change schema-2 model bytes. Production registration is still intentionally
+empty. A host-owned production creator, authenticated exporter/loader replay,
+and checked GCC production score remain with #40/#136; fixture success does not
+close that gate.
+
+Focused local verification at the implementation checkpoint: 20 tests across
+`StructuralRecoveryAssessmentJoinV1Test`, `StructuralRecoveryV1ParityTest`,
+`StructuralRecoveryV1MutationTest`, and `CanonicalProgramModelStreamingTest`;
+zero failures, errors, or skips. `verifyReconstructionNeutrality` passed with 0
+findings in 669 files, and `git diff --check` passed. These are fixture/code
+checks, not production replay qualification; hosted PR checks remain the
+required merge gate.
