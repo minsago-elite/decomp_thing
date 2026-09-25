@@ -55,15 +55,100 @@ internal object GccBundledFullExportCliResultV2 {
             "structural full-export binding exceeds its publication bound"
         }
         val binding = OracleJson.parseCanonical(structuralBindingBytes).jsonObject
-        require(binding.getValue("provider").jsonPrimitive.content == "gcc-compiler-engine-structural-full-export-binding-v2" &&
-            binding.getValue("schemaVersion").jsonPrimitive.content == "2" &&
-            binding.getValue("outputTreeSha256").jsonPrimitive.content == outputTreeSha256
-        ) { "structural binding does not match the captured full-export tree" }
+        require(binding.keys == BINDING_KEYS &&
+            binding.requiredString("provider", "structural binding") ==
+            "gcc-compiler-engine-structural-full-export-binding-v2" &&
+            binding.requiredLong("schemaVersion", "structural binding") == 2L
+        ) { "structural binding does not match its closed schema" }
+        val profileId = binding.requiredString("profileId", "structural binding")
+        require(profileId.matches(Regex("[a-z0-9][a-z0-9._-]{0,127}"))) {
+            "structural binding profile ID is invalid"
+        }
+        val profileVersion = binding.requiredString("profileVersion", "structural binding")
+        require(profileVersion.matches(Regex("[A-Za-z0-9._+-]{1,64}"))) {
+            "structural binding profile version is invalid"
+        }
+        require(binding.requiredString("sourceRevision", "structural binding").matches(Regex("[a-f0-9]{40}"))) {
+            "structural binding source revision is invalid"
+        }
+        val compilerEngineProfileSha256 = binding.requiredDigest("compilerEngineProfileSha256", "structural binding")
+        binding.requiredDigest("artifactManifestSha256", "structural binding")
+        require(binding.requiredDigest("outputTreeSha256", "structural binding") == outputTreeSha256) {
+            "structural binding does not match the captured full-export tree"
+        }
+
+        val targetDescriptor = binding.getValue("targetDescriptor") as? JsonObject
+            ?: throw IllegalArgumentException("structural binding target descriptor must be an object")
+        require(targetDescriptor.keys == TARGET_DESCRIPTOR_KEYS) {
+            "structural binding target descriptor does not match its closed schema"
+        }
+        require(binding.requiredDigest("targetDescriptorSha256", "structural binding") ==
+            OracleArtifacts.sha256(OracleJson.canonicalBytes(targetDescriptor))
+        ) { "structural binding target descriptor digest is invalid" }
+        val loaderLanguage = targetDescriptor.requiredString("ghidraLanguage", "target descriptor")
+        val loaderCompilerSpec = targetDescriptor.requiredString("ghidraCompilerSpec", "target descriptor")
+        require(targetDescriptor.requiredString("imageBase", "target descriptor").matches(Regex("0x[0-9a-f]+"))) {
+            "structural binding target image base is invalid"
+        }
+        targetDescriptor.requiredDigest("executableRangesSha256", "target descriptor")
+
+        val inputBinary = binding.getValue("inputBinary") as? JsonObject
+            ?: throw IllegalArgumentException("structural binding input binary must be an object")
+        require(inputBinary.keys == INPUT_BINARY_KEYS) {
+            "structural binding input binary does not match its closed schema"
+        }
+        inputBinary.requiredDigest("sha256", "structural binding input binary")
+        require(inputBinary.requiredLong("bytes", "structural binding input binary") > 0L) {
+            "structural binding input binary size is invalid"
+        }
+
+        val exporter = binding.getValue("exporter") as? JsonObject
+            ?: throw IllegalArgumentException("structural binding exporter must be an object")
+        require(exporter.keys == EXPORTER_KEYS && exporter.requiredString("recoveryMode", "structural binding exporter") == "full") {
+            "structural binding exporter does not match its closed full-recovery schema"
+        }
+        exporter.requiredDigest("sha256", "structural binding exporter")
+        require(exporter.requiredLong("bytes", "structural binding exporter") > 0L) {
+            "structural binding exporter size is invalid"
+        }
+
+        val ghidraArchive = binding.getValue("ghidraArchive") as? JsonObject
+            ?: throw IllegalArgumentException("structural binding Ghidra archive must be an object")
+        require(ghidraArchive.keys == BINARY_KEYS) {
+            "structural binding Ghidra archive does not match its closed schema"
+        }
+        ghidraArchive.requiredDigest("sha256", "structural binding Ghidra archive")
+        require(ghidraArchive.requiredLong("bytes", "structural binding Ghidra archive") > 0L) {
+            "structural binding Ghidra archive size is invalid"
+        }
+
         val boundModel = binding.getValue("programModel").jsonObject
-        require(boundModel.getValue("sha256").jsonPrimitive.content == programModelSha256 &&
-            boundModel.getValue("bytes").jsonPrimitive.content == programModelBytes.toString() &&
-            boundModel.getValue("functionCount").jsonPrimitive.content == functionCount.toString()
+        require(boundModel.keys == PROGRAM_MODEL_KEYS &&
+            boundModel.requiredDigest("sha256", "structural binding program model") == programModelSha256 &&
+            boundModel.requiredLong("bytes", "structural binding program model") == programModelBytes &&
+            boundModel.requiredLong("functionCount", "structural binding program model") == functionCount
         ) { "CLI model pointer differs from the profile-bound full-export model" }
+
+        val lineage = binding.getValue("receiptLineage") as? JsonObject
+            ?: throw IllegalArgumentException("structural binding receipt lineage must be an object")
+        require(lineage.keys == RECEIPT_LINEAGE_KEYS &&
+            lineage.requiredString("provider", "structural binding receipt lineage") ==
+            "gcc-bundled-full-export-receipt-lineage-v1" &&
+            lineage.requiredLong("schemaVersion", "structural binding receipt lineage") == 1L &&
+            lineage.requiredString("engineId", "structural binding receipt lineage") == "cc1" &&
+            lineage.requiredString("operationId", "structural binding receipt lineage") == operationId &&
+            lineage.requiredDigest("intentSha256", "structural binding receipt lineage") == requestSha256 &&
+            lineage.requiredDigest("compilerEngineProfileSha256", "structural binding receipt lineage") ==
+            compilerEngineProfileSha256 &&
+            lineage.requiredDigest("executionReceiptSha256", "structural binding receipt lineage") == executionReceiptSha256 &&
+            lineage.requiredDigest("exportAssessmentReceiptSha256", "structural binding receipt lineage") ==
+            exportAssessmentReceiptSha256
+        ) { "full-export result identity differs from its authenticated receipt lineage" }
+        lineage.requiredDigest("executionPayloadSha256", "structural binding receipt lineage")
+        lineage.requiredDigest("exportAssessmentSha256", "structural binding receipt lineage")
+        require(binding.requiredDigest("receiptLineageSha256", "structural binding") ==
+            OracleArtifacts.sha256(OracleJson.canonicalBytes(lineage))
+        ) { "structural binding receipt-lineage digest is invalid" }
 
         require(treeManifestBytes.isNotEmpty() && treeManifestBytes.size <= MAXIMUM_TREE_MANIFEST_BYTES) {
             "full-export tree manifest exceeds its publication bound"
@@ -90,6 +175,9 @@ internal object GccBundledFullExportCliResultV2 {
         require(manifestTree.getValue("sidecars") is JsonObject) {
             "full-export output tree sidecar inventory is not an object"
         }
+        require(manifestTree.getValue("language").jsonPrimitive.content == loaderLanguage &&
+            manifestTree.getValue("compilerSpec").jsonPrimitive.content == loaderCompilerSpec
+        ) { "retained full-export loader identity differs from the profile-bound target" }
         require(treeManifest.getValue("outputTreeSha256").jsonPrimitive.content == outputTreeSha256 &&
             manifestTree.getValue("kind").jsonPrimitive.content == "gcc-bundled-full-export-output-tree-v2" &&
             OracleArtifacts.sha256(manifestTreeBytes) == outputTreeSha256
@@ -121,4 +209,37 @@ internal object GccBundledFullExportCliResultV2 {
             "scratchDisposition" to JsonPrimitive("retained; structural replay and release eligibility unqualified"),
         )))
     }
+
+    private val BINDING_KEYS = setOf(
+        "provider", "schemaVersion", "profileId", "profileVersion", "sourceRevision",
+        "compilerEngineProfileSha256", "artifactManifestSha256", "targetDescriptor",
+        "targetDescriptorSha256", "inputBinary", "exporter", "ghidraArchive", "programModel",
+        "outputTreeSha256", "receiptLineage", "receiptLineageSha256",
+    )
+    private val TARGET_DESCRIPTOR_KEYS = setOf(
+        "id", "architecture", "abi", "machine", "osAbi", "elfClass", "dataEncoding", "pointerBits",
+        "elfType", "ghidraLanguage", "ghidraCompilerSpec", "imageBase", "executableRangesSha256",
+    )
+    private val INPUT_BINARY_KEYS = setOf("sha256", "bytes")
+    private val BINARY_KEYS = setOf("sha256", "bytes")
+    private val EXPORTER_KEYS = setOf("sha256", "bytes", "recoveryMode")
+    private val PROGRAM_MODEL_KEYS = setOf("sha256", "bytes", "functionCount")
+    private val RECEIPT_LINEAGE_KEYS = setOf(
+        "provider", "schemaVersion", "operationId", "intentSha256", "engineId",
+        "compilerEngineProfileSha256", "executionReceiptSha256", "executionPayloadSha256",
+        "exportAssessmentReceiptSha256", "exportAssessmentSha256",
+    )
 }
+
+private fun JsonObject.requiredString(name: String, label: String): String =
+    (this[name] as? JsonPrimitive)?.takeIf(JsonPrimitive::isString)?.content
+        ?: throw IllegalArgumentException("$label.$name must be a string")
+
+private fun JsonObject.requiredLong(name: String, label: String): Long =
+    (this[name] as? JsonPrimitive)?.takeIf { !it.isString }?.longOrNull
+        ?: throw IllegalArgumentException("$label.$name must be an integer")
+
+private fun JsonObject.requiredDigest(name: String, label: String): String =
+    requiredString(name, label).also { value ->
+        require(value.matches(Regex("[a-f0-9]{64}"))) { "$label.$name must be a SHA-256 digest" }
+    }
