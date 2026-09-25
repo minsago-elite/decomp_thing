@@ -35,13 +35,43 @@ internal class BehaviorEvidenceCapture {
 
     private val observed = linkedMapOf<Path, ObservedFile>()
     private var totalBytes = 0L
+    private var trackedFiles = 0
 
-    fun executable(path: Path): JsonObject {
+    fun executable(path: Path, includeInBounds: Boolean = true): JsonObject {
         require(Files.isExecutable(path)) { "behavior executable is unavailable: $path" }
-        return file(path).also { require(it.count("bytes") > 0L) { "behavior executable is empty: $path" } }
+        return file(path, includeInBounds).also { require(it.count("bytes") > 0L) { "behavior executable is empty: $path" } }
     }
 
-    fun file(path: Path): JsonObject {
+    /** Copy the already identified executable bytes into a private, read-only execution snapshot. */
+    fun retainExecutable(source: Path, destination: Path, expected: JsonObject): JsonObject {
+        require(file(source) == expected) { "behavior executable changed before it could be retained: $source" }
+        val absoluteSource = source.toAbsolutePath().normalize()
+        val capturedSource = requireNotNull(observed[absoluteSource])
+        val sourcePath = absoluteSource.parent
+        val snapshot = readStableRegularFile(sourcePath, absoluteSource.fileName.toString(), MAXIMUM_FILE_BYTES)
+        require(snapshot.identity == capturedSource.identity && snapshot.sha256 == expected.string("sha256") &&
+            snapshot.bytes.size.toLong() == expected.count("bytes")) {
+            "behavior executable changed while it was retained: $source"
+        }
+        Files.write(destination, snapshot.bytes, java.nio.file.StandardOpenOption.CREATE_NEW,
+            java.nio.file.StandardOpenOption.WRITE)
+        Files.setPosixFilePermissions(destination, setOf(
+            java.nio.file.attribute.PosixFilePermission.OWNER_READ,
+            java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE,
+            java.nio.file.attribute.PosixFilePermission.GROUP_READ,
+            java.nio.file.attribute.PosixFilePermission.GROUP_EXECUTE,
+            java.nio.file.attribute.PosixFilePermission.OTHERS_READ,
+            java.nio.file.attribute.PosixFilePermission.OTHERS_EXECUTE,
+        ))
+        // The copy duplicates an already counted input; it is observed for stability
+        // without consuming the evidence-input inventory a second time.
+        val retained = executable(destination, includeInBounds = false)
+        require(retained == expected) { "retained behavior executable differs from its identified source: $source" }
+        requireCurrent()
+        return retained
+    }
+
+    fun file(path: Path, includeInBounds: Boolean = true): JsonObject {
         val absolute = path.toAbsolutePath().normalize()
         val snapshot = readStableRegularFile(absolute.parent, absolute.fileName.toString(), MAXIMUM_FILE_BYTES)
         val document = JsonObject(mapOf(
@@ -51,9 +81,10 @@ internal class BehaviorEvidenceCapture {
         val current = ObservedFile(snapshot.identity, document)
         val previous = observed.putIfAbsent(absolute, current)
         require(previous == null || previous == current) { "behavior input changed while captured: $absolute" }
-        if (previous == null) {
+        if (previous == null && includeInBounds) {
             totalBytes = Math.addExact(totalBytes, snapshot.bytes.size.toLong())
-            require(totalBytes <= MAXIMUM_TOTAL_BYTES && observed.size <= MAXIMUM_FILES) {
+            trackedFiles++
+            require(totalBytes <= MAXIMUM_TOTAL_BYTES && trackedFiles <= MAXIMUM_FILES) {
                 "behavior evidence inputs exceed their aggregate bound"
             }
         }
@@ -182,6 +213,7 @@ internal object BehaviorEvidence {
         legacy: JsonObject,
         original: JsonObject,
         rebuilt: JsonObject,
+        executionSnapshots: JsonObject,
         policy: JsonObject,
         project: JsonObject?,
         fileInputs: Map<String, JsonArray> = emptyMap(),
@@ -192,10 +224,11 @@ internal object BehaviorEvidence {
         })
         val body = JsonObject(legacy + mapOf(
             "cases" to cases,
-            "schemaVersion" to JsonPrimitive(4),
-            "provider" to JsonPrimitive("local-revision-bound-behavior-v4"),
+            "schemaVersion" to JsonPrimitive(5),
+            "provider" to JsonPrimitive("local-revision-bound-behavior-v5"),
             "originalIdentity" to original,
             "rebuiltIdentity" to rebuilt,
+            "executionSnapshots" to executionSnapshots,
             "executionPolicy" to policy,
             "projectRevision" to (project ?: JsonNull),
             "corpusSha256" to JsonPrimitive(hash(corpus(cases, includeFileLocators = false))),
@@ -224,16 +257,19 @@ internal object BehaviorEvidence {
     }
 
     private fun validate(root: JsonObject) {
+        val schemaVersion = root.integer("schemaVersion")
         require(root.keys == setOf(
             "schemaVersion", "provider", "id", "sandbox", "networkIsolated", "originalBinary", "rebuiltBinary",
             "matches", "cases", "originalIdentity", "rebuiltIdentity", "executionPolicy", "projectRevision",
             "corpusSha256", "observationsSha256", "reportSha256",
-        )) { "behavior report has missing or unknown fields" }
-        val schemaVersion = root.integer("schemaVersion")
+        ) + if (schemaVersion == 5) setOf("executionSnapshots") else emptySet()) {
+            "behavior report has missing or unknown fields"
+        }
         require((schemaVersion == 1 && root.string("provider") == PROVIDER) ||
             (schemaVersion == 2 && root.string("provider") == "local-revision-bound-behavior-v2") ||
             (schemaVersion == 3 && root.string("provider") == "local-revision-bound-behavior-v3") ||
-            (schemaVersion == 4 && root.string("provider") == "local-revision-bound-behavior-v4")) { "unsupported behavior report" }
+            (schemaVersion == 4 && root.string("provider") == "local-revision-bound-behavior-v4") ||
+            (schemaVersion == 5 && root.string("provider") == "local-revision-bound-behavior-v5")) { "unsupported behavior report" }
         require(root.string("id").matches(Regex("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"))) { "invalid behavior report ID" }
         require(root.string("sandbox") == "bubblewrap") { "unsupported behavior sandbox request" }
         val originalPath = absolutePath(root.string("originalBinary"))
@@ -242,14 +278,32 @@ internal object BehaviorEvidence {
         identity(root.getValue("rebuiltIdentity").jsonObject)
         require(root.getValue("originalIdentity").jsonObject.count("bytes") > 0L &&
             root.getValue("rebuiltIdentity").jsonObject.count("bytes") > 0L)
+        val executionSnapshots = if (schemaVersion == 5) root.getValue("executionSnapshots").jsonObject.also { snapshots ->
+            require(snapshots.keys == setOf("original", "rebuilt")) { "behavior execution snapshots are not closed" }
+            for ((name, sourceIdentity) in listOf(
+                "original" to root.getValue("originalIdentity").jsonObject,
+                "rebuilt" to root.getValue("rebuiltIdentity").jsonObject,
+            )) {
+                val snapshot = snapshots.getValue(name).jsonObject
+                require(snapshot.keys == setOf("path", "bytes", "sha256")) { "behavior execution snapshot is not closed" }
+                absolutePath(snapshot.string("path"))
+                identity(JsonObject(snapshot - "path"))
+                require(JsonObject(snapshot - "path") == sourceIdentity) {
+                    "retained behavior executable differs from its source identity"
+                }
+            }
+        } else null
         val policy = root.getValue("executionPolicy").jsonObject
         require(policy.keys == setOf("assurance", "environment", "workingDirectory", "networkIsolationRequested",
             "timeoutMillis", "maximumStdoutBytes", "maximumStderrBytes", "maximumAggregateBytes",
             "maximumComparisonOutputBytes", "bubblewrap", "timeout") +
-            if (schemaVersion == 4) setOf("completionLauncher", "maximumCompletionBytes") else emptySet<String>()) {
+            if (schemaVersion >= 4) setOf("completionLauncher", "maximumCompletionBytes") else emptySet<String>()) {
             "behavior execution policy is not closed"
         }
-        require(policy.string("assurance") == "local-path-stability-checks-not-production-authority" &&
+        val expectedAssurance = if (schemaVersion == 5) {
+            "retained-executable-identity-runtime-closure-unqualified-not-production-authority"
+        } else "local-path-stability-checks-not-production-authority"
+        require(policy.string("assurance") == expectedAssurance &&
             policy.getValue("environment") == JsonObject(mapOf("PATH" to JsonPrimitive("/usr/bin"))) &&
             policy.string("workingDirectory") == "/tmp"
         ) { "behavior execution policy is unsupported" }
@@ -266,8 +320,8 @@ internal object BehaviorEvidence {
         }
         val bubblewrap = executable("bubblewrap")
         val timeout = executable("timeout")
-        val launcher = if (schemaVersion == 4) executable("completionLauncher") else null
-        if (schemaVersion == 4) require(policy.count("maximumCompletionBytes") == MAXIMUM_BUBBLEWRAP_COMPLETION_BYTES.toLong())
+        val launcher = if (schemaVersion >= 4) executable("completionLauncher") else null
+        if (schemaVersion >= 4) require(policy.count("maximumCompletionBytes") == MAXIMUM_BUBBLEWRAP_COMPLETION_BYTES.toLong())
         val network = policy.boolean("networkIsolationRequested")
         require(root.boolean("networkIsolated") == network) { "behavior network request is contradictory" }
         val cases = root.getValue("cases").jsonArray
@@ -312,7 +366,14 @@ internal object BehaviorEvidence {
             require(stdinBytes <= 8L * 1024 * 1024 && argumentBytes <= 1024L * 1024)
             val original = output(case.getValue("original").jsonObject, network, schemaVersion)
             val rebuilt = output(case.getValue("rebuilt").jsonObject, network, schemaVersion)
-            for ((observation, path) in listOf(original to originalPath, rebuilt to rebuiltPath)) {
+            val executionPaths = if (schemaVersion == 5) {
+                val snapshots = requireNotNull(executionSnapshots)
+                listOf(
+                    absolutePath(snapshots.getValue("original").jsonObject.string("path")),
+                    absolutePath(snapshots.getValue("rebuilt").jsonObject.string("path")),
+                )
+            } else listOf(originalPath, rebuiltPath)
+            for ((observation, path) in listOf(original to executionPaths[0], rebuilt to executionPaths[1])) {
                 val stdoutBytes = observation.string("stdoutHex").length.toLong() / 2
                 val stderrBytes = observation.string("stderrHex").length.toLong() / 2
                 require(stdoutBytes <= policy.count("maximumStdoutBytes") && stderrBytes <= policy.count("maximumStderrBytes") &&
@@ -330,7 +391,7 @@ internal object BehaviorEvidence {
                     (schemaVersion < 4 && recordedCommand == JsonArray(historicalCommand.map(::JsonPrimitive)))) {
                     "behavior sandbox command contradicts its inputs or execution policy"
                 }
-                if (schemaVersion == 4) {
+                if (schemaVersion >= 4) {
                     val completion = observation.getValue("completionEvidence").jsonObject
                     require(completion.keys == setOf("channelPath", "statusHex", "launchCommand"))
                     require(completion.string("channelPath").length <= 4096)
@@ -390,7 +451,7 @@ internal object BehaviorEvidence {
 
     private fun output(output: JsonObject, network: Boolean, schemaVersion: Int): JsonObject {
         require(output.keys == setOf("exitCode", "stdoutHex", "stderrHex", "networkIsolated", "sandboxCommand") +
-            if (schemaVersion == 4) setOf("completionEvidence") else emptySet<String>())
+            if (schemaVersion >= 4) setOf("completionEvidence") else emptySet<String>())
         if (schemaVersion < 4) rejectReservedWrapperExit(output.integer("exitCode"))
         requireHex(output.string("stdoutHex"))
         requireHex(output.string("stderrHex"))

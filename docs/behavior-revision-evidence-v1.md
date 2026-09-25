@@ -1,18 +1,25 @@
 # Local behavior records and archival revision attribution
 
-`BehaviorComparator` writes schema-4 records with provider
-`local-revision-bound-behavior-v4`. The decoder also accepts historical schema-1
-records, which do not commit file inputs, and schema-2 records, whose corpus digest
-includes host file locators. Schema-3 records retain portable corpus identities but
-lack independent completion evidence. Historical schemas remain readable, but audit
-reports their completion uncertainty and cannot qualify them as passing. An archival comparison supplies an explicit
+`BehaviorComparator` writes schema-5 records with provider
+`local-revision-bound-behavior-v5`. The decoder also accepts historical schema-1
+records, which do not commit file inputs, schema-2 records, whose corpus digest
+includes host file locators, schema-3 records, which retain portable corpus identities
+but lack independent completion evidence, and schema-4 records, which include that
+completion evidence but use the original executable paths. Historical schemas remain
+readable, but archival audit keeps records without independent completion unresolved.
+An archival comparison supplies an explicit
 `BehaviorProjectContext(projectDir, profile)`. Comparisons without a project
 context retain their observations, but cannot validate an archival revision.
 
 The producer captures the original and rebuilt executable sizes and SHA-256
-digests before execution. It also captures the selected bubblewrap, timeout and completion-launcher
-executables, including their locators. File identity and content are checked
-before and after each execution and again before atomic report publication.
+digests before execution. It makes private, read-only execution copies and runs those
+copies at `/program/executable`; the report binds each recorded launch command to
+the matching copied-byte digest and locator. Copying checks the stable source identity
+and hash, and the copies are rechecked before and after each execution. The private
+execution files are removed before atomic report publication. The producer also
+captures the selected bubblewrap, timeout and completion-launcher executables,
+including their locators. Other captured file identities and content are checked
+before and after each execution and again before report publication.
 Case arguments and stdin bytes are copied before execution. A detected input
 change aborts publication and preserves an existing report.
 
@@ -32,7 +39,7 @@ The decoder recomputes content digests and read-only mount argv without reopenin
 locators. Retained file bytes remain auditable after the host input files are removed.
 Declarations and mount requests do not prove that a program read every declared file.
 
-The schema-3/4 corpus digest commits the ordered case IDs, argv, stdin and declared
+The schema-3/4/5 corpus digest commits the ordered case IDs, argv, stdin and declared
 file names, lengths, digests and retained bytes. It excludes only each file's host
 `sourcePath`, so restoring the same corpus at another host path preserves its
 identity. Observations and the full report still commit the exact host locators
@@ -41,7 +48,7 @@ digest, even when the programs produce identical outputs. Environment and
 executable identities remain separately bound by the full report commitment.
 
 Callers may supply `expectedCorpusSha256` to `compare` or `evaluate` to require a
-previously selected schema-3 corpus identity. The comparator copies cases and file
+previously selected portable corpus identity. The comparator copies cases and file
 declarations, captures declared file contents, and checks the complete corpus digest
 before executing either original or rebuilt program. A missing, reordered or changed
 case, argv, stdin, logical file name or file content fails admission and leaves an
@@ -52,7 +59,7 @@ independently apply their expected-corpus policy.
 
 `ArchivalProjectAuditor.audit(..., requiredCorpusSha256 = setOf(expectedDigest))`
 applies that policy independently to current revision-bound reports. Every selected
-digest must have a schema-4 report; unrelated corpora and historical schemas cannot
+digest must have a schema-4 or schema-5 report; unrelated corpora and historical schemas cannot
 satisfy the selection. Missing corpora appear as `missing-corpus:<digest>` problems,
 and unrelated reports remain visible as problems rather than disappearing. The
 audit records sorted `requiredCorpusSha256` and `observedPortableCorpusSha256`
@@ -107,20 +114,26 @@ The live timing regression requires a 1.2-second authored program to finish with
 a 1.9-second policy with its expected output and exit status; equal timeout exits
 cannot satisfy that assertion.
 
-Schema 4 requires a separate Bubblewrap JSON status descriptor, closed in the
+Schema 4 introduced a separate Bubblewrap JSON status descriptor, closed in the
 application child. The runner owns a private temporary channel, starts the local
 deadline before launch, bounds capture to 4 KiB, and removes the channel on exit.
 The record retains the status bytes, channel locator, and exact launcher argv in
 addition to the logical sandbox request. Validation reconstructs both commands and
-requires a complete launch/terminal pair agreeing with the wrapper exit.
+requires a complete launch/terminal pair agreeing with the wrapper exit. Schema 5
+adds a per-comparison copy of each executable to that record, and verifies the copy
+identity throughout the execution sequence. The record states that runtime-library
+closure remains unqualified; the sandbox still exposes host `/usr`, `/lib` and
+`/lib64` trees and does not retain an immutable copy of their loaded libraries.
 
 Genuine application exits 0–127, including 124, can qualify locally. Missing,
 truncated or contradictory completion evidence and deadline/capture failures abort
 publication and preserve prior reports. Signal-style statuses 128 and above remain
 unqualified because Bubblewrap does not retain raw wait status. Historical decoding
 retains its conservative 0–123 status restriction; archival audit marks all older
-schemas unresolved because they lack the completion channel. These observations do
-not establish production containment or immutable executable/runtime identity.
+schemas unresolved because they lack the completion channel. Schema 4's completion
+record still refers to the original executable paths; schema 5 binds staged copies.
+Neither version establishes production containment or immutable runtime-library
+identity.
 
 The record limits are 1,024 cases, 8 MiB of stdin, 1 MiB of argument bytes and
 16 MiB of comparison output. Captured input files are limited to 64 MiB each,
@@ -204,8 +217,9 @@ The earlier behavior/audit/archive/reconstruction/profile checkpoint passed 42
 focused tests. Bubblewrap was unavailable at that checkpoint; its two live runner
 failures were not counted as successful containment verification.
 
-The current `BehaviorValidationTest` includes a live bubblewrap file-input case.
-An authored original and a generated, rebuilt project read binary and empty files,
+The current `BehaviorValidationTest` checks that execution commands bind the retained
+copies whose hashes match the captured inputs. An authored original and a generated,
+rebuilt project read binary and empty files,
 report failed attempts to open the mounted files for writing, and observe an
 undeclared file as absent in the next case. Assertions check expected exit codes
 and exact bytes independently of original/rebuilt equality. The project audit
@@ -235,9 +249,9 @@ the consumer audit recomputes coverage from behavior records, reports the missin
 corpus, and refuses repackaging under the unsupported selection. Archived audit
 claims do not supply the consumer's policy or replace current revision checks.
 
-These records describe local path-stability checks. They do not retain an
-execve-bound executable capability or an immutable runtime-library closure across
-execution, and do not prove exclusion of same-user replace-and-restore races.
+These records bind locally staged executable bytes to the generated launch commands.
+They do not provide an execve-bound kernel capability or an immutable runtime-library
+closure across execution, and do not prove exclusion of same-user replace-and-restore races.
 The C/Make build record is locally checked evidence, not an independent build
 attestation. Implicit file-input trees and externally fixed benchmark-corpus admission
 remain unimplemented. File mounts still use host paths, so retained contents and local

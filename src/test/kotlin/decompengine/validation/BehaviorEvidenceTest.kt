@@ -377,8 +377,19 @@ class BehaviorEvidenceTest {
             fileInputs = mapOf("file" to mapOf("nested/input.bin" to input)),
         )
         val record = BehaviorEvidence.decode(report.reportPath.readBytes())
-        assertEquals(4, record.integer("schemaVersion"))
+        assertEquals(5, record.integer("schemaVersion"))
         val case = record.getValue("cases").jsonArray.single().jsonObject
+        val executionSnapshots = record.getValue("executionSnapshots").jsonObject
+        val originalSnapshot = executionSnapshots.getValue("original").jsonObject
+        val rebuiltSnapshot = executionSnapshots.getValue("rebuilt").jsonObject
+        assertEquals(record.getValue("originalIdentity").jsonObject, JsonObject(originalSnapshot - "path"))
+        assertEquals(record.getValue("rebuiltIdentity").jsonObject, JsonObject(rebuiltSnapshot - "path"))
+        val originalCommand = case.getValue("original").jsonObject.getValue("sandboxCommand").jsonArray.map { it.jsonPrimitive.content }
+        val rebuiltCommand = case.getValue("rebuilt").jsonObject.getValue("sandboxCommand").jsonArray.map { it.jsonPrimitive.content }
+        assertTrue(originalCommand.windowed(3).any { it == listOf("--ro-bind", originalSnapshot.string("path"), "/program/executable") })
+        assertTrue(rebuiltCommand.windowed(3).any { it == listOf("--ro-bind", rebuiltSnapshot.string("path"), "/program/executable") })
+        assertFalse(Files.exists(Path.of(originalSnapshot.string("path"))))
+        assertFalse(Files.exists(Path.of(rebuiltSnapshot.string("path"))))
         val retained = case.getValue("fileInputs").jsonArray.single().jsonObject
         assertEquals("00017fff", retained.string("contentHex"))
         assertEquals(OracleArtifacts.sha256(bytes), retained.string("sha256"))
@@ -427,6 +438,13 @@ class BehaviorEvidenceTest {
         val fixture = fixture()
         val report = fixture.evaluate()
         val record = BehaviorEvidence.decode(report.reportPath.readBytes())
+        assertEquals(5, record.integer("schemaVersion"))
+        val snapshots = record.getValue("executionSnapshots").jsonObject
+        for ((side, identityName) in listOf("original" to "originalIdentity", "rebuilt" to "rebuiltIdentity")) {
+            val snapshot = snapshots.getValue(side).jsonObject
+            assertEquals(record.getValue(identityName).jsonObject, JsonObject(snapshot - "path"))
+            assertFalse(Files.exists(Path.of(snapshot.string("path"))))
+        }
         BehaviorEvidence.requireProjectCurrent(record, BehaviorProjectContext(fixture.project))
         val audit = ArchivalProjectAuditor.audit(fixture.project)
         assertEquals(true, audit.behaviorMatched)
@@ -615,10 +633,17 @@ class BehaviorEvidenceTest {
     }
 
     private fun historicalCompletionRecord(record: JsonObject, version: Int): JsonObject {
+        val executionSnapshots = record.getValue("executionSnapshots").jsonObject
         val cases = JsonArray(record.getValue("cases").jsonArray.map { element ->
             val case = element.jsonObject
             val stripped = JsonObject(case + listOf("original", "rebuilt").associateWith { side ->
-                JsonObject(case.getValue(side).jsonObject - "completionEvidence")
+                val output = case.getValue(side).jsonObject
+                val executionPath = executionSnapshots.getValue(side).jsonObject.string("path")
+                val sourcePath = record.string("${side}Binary")
+                val command = JsonArray(output.getValue("sandboxCommand").jsonArray.map { argument ->
+                    if (argument.jsonPrimitive.content == executionPath) JsonPrimitive(sourcePath) else argument
+                })
+                JsonObject(output - "completionEvidence" + ("sandboxCommand" to command))
             })
             if (version == 1) JsonObject(stripped - "fileInputs") else stripped
         })
@@ -629,11 +654,14 @@ class BehaviorEvidenceTest {
                 JsonObject(it.jsonObject - "sourcePath")
             })))
         })
-        val changed = JsonObject(record + mapOf(
+        val changed = JsonObject((record - "executionSnapshots") + mapOf(
             "schemaVersion" to JsonPrimitive(version),
             "provider" to JsonPrimitive("local-revision-bound-behavior-v$version"),
             "cases" to cases,
-            "executionPolicy" to JsonObject(record.getValue("executionPolicy").jsonObject - setOf("completionLauncher", "maximumCompletionBytes")),
+            "executionPolicy" to JsonObject(
+                (record.getValue("executionPolicy").jsonObject - setOf("completionLauncher", "maximumCompletionBytes")) +
+                    ("assurance" to JsonPrimitive("local-path-stability-checks-not-production-authority")),
+            ),
             "corpusSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(corpus))),
             "observationsSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(cases))),
         ))

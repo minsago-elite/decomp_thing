@@ -223,7 +223,7 @@ class SandboxRunner(
             throw SandboxUnavailableException("bubblewrap not found at ${bwrapPath.pathString}; sandboxed execution is mandatory")
         }
         return JsonObject(mapOf(
-            "assurance" to JsonPrimitive("local-path-stability-checks-not-production-authority"),
+            "assurance" to JsonPrimitive("retained-executable-identity-runtime-closure-unqualified-not-production-authority"),
             "environment" to JsonObject(mapOf("PATH" to JsonPrimitive("/usr/bin"))),
             "workingDirectory" to JsonPrimitive("/tmp"),
             "networkIsolationRequested" to JsonPrimitive(networkIsolation),
@@ -485,53 +485,90 @@ class BehaviorComparator(
         }
         val originalIdentity = capture.executable(originalBinary)
         val rebuiltIdentity = capture.executable(rebuiltBinary)
-        val comparisonLimit = minOf(maximumAggregateOutputBytes, 16L * 1024 * 1024)
-        require(comparisonLimit > 0L) { "behavior comparison output bound must be positive" }
-        val policy = JsonObject(sandbox.evidencePolicy(capture) +
-            ("maximumComparisonOutputBytes" to JsonPrimitive(comparisonLimit)))
-        val projectRevision = project?.let { capture.project(it, originalIdentity, rebuiltBinary) }
-        var aggregateOutputBytes = 0L
-        fun runBounded(binary: Path, input: ProcessInput): ProcessOutput {
-            capture.requireCurrent()
-            val output = sandbox.runWithFiles(binary, input, boundFiles[input.id].orEmpty())
-            capture.requireCurrent()
-            aggregateOutputBytes = Math.addExact(
-                aggregateOutputBytes,
-                Math.addExact(output.stdout.size.toLong(), output.stderr.size.toLong()),
-            )
-            if (aggregateOutputBytes > comparisonLimit) {
-                throw BehaviorOutputLimitException(
-                    "behavior comparison output exceeds $comparisonLimit aggregate bytes",
+        val executionDirectory = java.nio.file.Files.createTempDirectory("behavior-execution-")
+        val executionOriginal = executionDirectory.resolve("original")
+        val executionRebuilt = executionDirectory.resolve("rebuilt")
+        var primaryFailure: Throwable? = null
+        var executionDirectoryRemoved = false
+        fun removeExecutionDirectory() {
+            java.nio.file.Files.deleteIfExists(executionOriginal)
+            java.nio.file.Files.deleteIfExists(executionRebuilt)
+            java.nio.file.Files.deleteIfExists(executionDirectory)
+            executionDirectoryRemoved = true
+        }
+        try {
+            java.nio.file.Files.setPosixFilePermissions(executionDirectory, setOf(
+                java.nio.file.attribute.PosixFilePermission.OWNER_READ,
+                java.nio.file.attribute.PosixFilePermission.OWNER_WRITE,
+                java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE,
+            ))
+            val comparisonLimit = minOf(maximumAggregateOutputBytes, 16L * 1024 * 1024)
+            require(comparisonLimit > 0L) { "behavior comparison output bound must be positive" }
+            val policy = JsonObject(sandbox.evidencePolicy(capture) +
+                ("maximumComparisonOutputBytes" to JsonPrimitive(comparisonLimit)))
+            val projectRevision = project?.let { capture.project(it, originalIdentity, rebuiltBinary) }
+            val executionSnapshots = JsonObject(mapOf(
+                "original" to JsonObject(capture.retainExecutable(originalBinary, executionOriginal, originalIdentity) +
+                    ("path" to JsonPrimitive(executionOriginal.toAbsolutePath().normalize().toString()))),
+                "rebuilt" to JsonObject(capture.retainExecutable(rebuiltBinary, executionRebuilt, rebuiltIdentity) +
+                    ("path" to JsonPrimitive(executionRebuilt.toAbsolutePath().normalize().toString()))),
+            ))
+            var aggregateOutputBytes = 0L
+            fun runBounded(binary: Path, input: ProcessInput): ProcessOutput {
+                capture.requireCurrent()
+                val output = sandbox.runWithFiles(binary, input, boundFiles[input.id].orEmpty())
+                capture.requireCurrent()
+                aggregateOutputBytes = Math.addExact(
+                    aggregateOutputBytes,
+                    Math.addExact(output.stdout.size.toLong(), output.stderr.size.toLong()),
+                )
+                if (aggregateOutputBytes > comparisonLimit) {
+                    throw BehaviorOutputLimitException(
+                        "behavior comparison output exceeds $comparisonLimit aggregate bytes",
+                    )
+                }
+                return output
+            }
+            val results = inputs.map { input ->
+                BehaviorCaseResult(
+                    input = input,
+                    original = runBounded(executionOriginal, input),
+                    rebuilt = runBounded(executionRebuilt, input),
                 )
             }
-            return output
-        }
-        val results = inputs.map { input ->
-            BehaviorCaseResult(
-                input = input,
-                original = runBounded(originalBinary, input),
-                rebuilt = runBounded(rebuiltBinary, input),
+            val report = BehaviorComparisonReport(
+                id = id,
+                originalBinary = originalBinary.toAbsolutePath().normalize(),
+                rebuiltBinary = rebuiltBinary.toAbsolutePath().normalize(),
+                cases = results,
+                reportPath = reportsDir.resolve("$id.behavior.json"),
             )
-        }
-        val report = BehaviorComparisonReport(
-            id = id,
-            originalBinary = originalBinary.toAbsolutePath().normalize(),
-            rebuiltBinary = rebuiltBinary.toAbsolutePath().normalize(),
-            cases = results,
-            reportPath = reportsDir.resolve("$id.behavior.json"),
-        )
-        if (project != null) {
-            require(capture.project(project, originalIdentity, rebuiltBinary) == projectRevision) {
-                "behavior project changed during execution"
+            if (project != null) {
+                require(capture.project(project, originalIdentity, rebuiltBinary) == projectRevision) {
+                    "behavior project changed during execution"
+                }
+            }
+            capture.requireCurrent()
+            val encoded = BehaviorEvidence.encode(Json.parseToJsonElement(report.toJson()).jsonObject,
+                originalIdentity, rebuiltIdentity, executionSnapshots, policy, projectRevision, fileRecords)
+            require(encoded.toByteArray().size <= BehaviorEvidence.MAXIMUM_REPORT_BYTES) { "behavior report exceeds its byte bound" }
+            capture.requireCurrent()
+            removeExecutionDirectory()
+            writeProjectEvidenceAtomically(report.reportPath, encoded)
+            return report
+        } catch (failure: Throwable) {
+            primaryFailure = failure
+            throw failure
+        } finally {
+            if (!executionDirectoryRemoved) {
+                try {
+                    removeExecutionDirectory()
+                } catch (cleanupFailure: Throwable) {
+                    val primary = primaryFailure
+                    if (primary != null) primary.addSuppressed(cleanupFailure) else throw cleanupFailure
+                }
             }
         }
-        capture.requireCurrent()
-        val encoded = BehaviorEvidence.encode(Json.parseToJsonElement(report.toJson()).jsonObject,
-            originalIdentity, rebuiltIdentity, policy, projectRevision, fileRecords)
-        require(encoded.toByteArray().size <= BehaviorEvidence.MAXIMUM_REPORT_BYTES) { "behavior report exceeds its byte bound" }
-        capture.requireCurrent()
-        writeProjectEvidenceAtomically(report.reportPath, encoded)
-        return report
     }
 }
 
