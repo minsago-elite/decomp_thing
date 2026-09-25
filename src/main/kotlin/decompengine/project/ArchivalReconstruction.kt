@@ -230,9 +230,17 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             val completed = process.waitFor(deadline.remainingNanosOrZero(), TimeUnit.NANOSECONDS)
             if (!completed) processTree.terminate()
             fun <T> await(task: CompletableFuture<T>): T {
-                val remainingNanos = if (completed) deadline.remainingNanosOrZero()
-                    else processTree.remainingCleanupNanos()
-                return task.get(remainingNanos, TimeUnit.NANOSECONDS)
+                while (true) {
+                    val remainingNanos = processTree.remainingCleanupNanosOrNull()
+                        ?: deadline.remainingNanosOrZero()
+                    val pollNanos = minOf(remainingNanos, TimeUnit.MILLISECONDS.toNanos(100))
+                    try {
+                        return task.get(pollNanos, TimeUnit.NANOSECONDS)
+                    } catch (timeout: java.util.concurrent.TimeoutException) {
+                        if (task.isDone) return task.get()
+                        if (remainingNanos == 0L) throw timeout
+                    }
+                }
             }
             val stdoutBytes = await(stdout)
             val stderrBytes = await(stderr)
@@ -389,8 +397,8 @@ private class ExportProcessTree(
     }
 
     @Synchronized
-    fun remainingCleanupNanos(): Long {
-        val started = terminationStartedNanos ?: return 0L
+    fun remainingCleanupNanosOrNull(): Long? {
+        val started = terminationStartedNanos ?: return null
         return remainingNanos(started, gracefulTermination.toNanos() + FORCE_EXIT_WAIT_NANOS)
     }
 
