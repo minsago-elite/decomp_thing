@@ -130,8 +130,10 @@ truncated or contradictory completion evidence and deadline/capture failures abo
 publication and preserve prior reports. Signal-style statuses 128 and above remain
 unqualified because Bubblewrap does not retain raw wait status. Historical decoding
 retains its conservative 0–123 status restriction; archival audit marks all older
-schemas unresolved because they lack the completion channel. These observations do
-not establish production containment or immutable executable/runtime identity.
+schemas unresolved because they lack the completion channel. Schema 4's completion
+record still refers to the original executable paths; schema 5 binds staged copies.
+Neither version establishes production containment or immutable runtime-library
+identity.
 
 The record limits are 1,024 cases, 8 MiB of stdin, 1 MiB of argument bytes and
 16 MiB of comparison output. Captured input files are limited to 64 MiB each,
