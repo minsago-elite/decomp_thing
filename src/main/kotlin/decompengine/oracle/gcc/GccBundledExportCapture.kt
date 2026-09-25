@@ -399,13 +399,20 @@ private class BoundExportFile(
     ))
 
     fun verify() {
-        requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, name)) { "GCC export file disappeared: $name" }.use { selected ->
+        val selectedFile = LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, name)
+            ?: throw LinuxNamedRegularFileReplacedException()
+        selectedFile.use { selected ->
             if (selected.identity.key != identity.key || selected.identity.mountId != identity.mountId) {
                 throw LinuxNamedRegularFileReplacedException()
             }
-            require(selected.identity == identity &&
-                Files.readAttributes(LinuxFilesystemSyscalls.stableDescriptorPath(selected.fd), "unix:size,lastModifiedTime,ctime") == metadata
-            ) { "GCC export file changed during capture: $name" }
+            if (selected.identity != identity ||
+                Files.readAttributes(LinuxFilesystemSyscalls.stableDescriptorPath(selected.fd), "unix:size,lastModifiedTime,ctime") != metadata
+            ) {
+                // A later atomic publication can reuse a captured inode number after unlinking
+                // it. Treat any changed binding as a missed live sample; final stopped captures
+                // do not catch this signal and remain fail-closed.
+                throw LinuxNamedRegularFileReplacedException()
+            }
         }
     }
 }
