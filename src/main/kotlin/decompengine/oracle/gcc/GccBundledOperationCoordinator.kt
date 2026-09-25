@@ -500,23 +500,36 @@ internal class GccBundledPreparedOperation internal constructor(
                 "structural full-export binding bytes differ from their digest"
             }
             val bindingName = "structural-full-export-binding.json"
-            val resultBytes = OracleJson.canonicalBytes(JsonObject(mapOf(
-                "provider" to JsonPrimitive("gcc-bundled-cli-full-export-result-v1"), "schemaVersion" to JsonPrimitive(1),
-                "complete" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
-                "scored" to JsonPrimitive(false), "operationId" to JsonPrimitive(intent.operationId),
-                "requestSha256" to JsonPrimitive(intent.requestSha256), "journal" to JsonPrimitive(journal.path.toString()),
-                "programModel" to JsonPrimitive(original.outputLease.path.resolve("reports/program_model.json").toString()),
-                "programModelSha256" to JsonPrimitive(snapshot.programModelSha256),
-                "programModelBytes" to JsonPrimitive(snapshot.programModelBytes),
-                "functionCount" to JsonPrimitive(snapshot.functionCount),
-                "exportAssessmentReceiptSha256" to JsonPrimitive(OracleArtifacts.sha256(exported.exportAssessmentReceiptBytes)),
-                "executionReceiptSha256" to JsonPrimitive(OracleArtifacts.sha256(exported.executionReceiptBytes)),
-                "structuralBinding" to JsonPrimitive(cli.options.output.resolve(bindingName).toString()),
-                "structuralBindingSha256" to JsonPrimitive(binding.sha256),
-                "operationWallTime" to deadline.snapshot(),
-                "scratchDisposition" to JsonPrimitive("retained; structural scoring and release eligibility unqualified"),
-            )))
+            val manifestName = GccBundledFullExportCliResultV2.TREE_MANIFEST_NAME
+            val manifestBytes = snapshot.sidecarManifest
+            val modelPath = original.outputLease.path.resolve("reports/program_model.json")
+            val bindingPath = cli.options.output.resolve(bindingName)
+            val manifestPath = cli.options.output.resolve(manifestName)
+            val resultBytes = GccBundledFullExportCliResultV2.create(
+                operationId = intent.operationId,
+                requestSha256 = intent.requestSha256,
+                journalPath = journal.path,
+                programModelPath = modelPath,
+                programModelSha256 = snapshot.programModelSha256,
+                programModelBytes = snapshot.programModelBytes,
+                functionCount = snapshot.functionCount,
+                exportAssessmentReceiptSha256 = OracleArtifacts.sha256(exported.exportAssessmentReceiptBytes),
+                executionReceiptSha256 = OracleArtifacts.sha256(exported.executionReceiptBytes),
+                structuralBindingPath = bindingPath,
+                structuralBindingBytes = bindingBytes,
+                treeManifestPath = manifestPath,
+                treeManifestBytes = manifestBytes,
+                outputTreeSha256 = snapshot.outputTreeSha256,
+                operationWallTime = deadline.snapshot(),
+            )
             LinuxFilesystemSyscalls.openRoot(cli.options.output).use { output ->
+                cli.requireCurrent()
+                DescriptorBoundAtomicStateFile.publishManifestNoReplace(
+                    output,
+                    manifestName,
+                    manifestBytes,
+                    GccBundledFullExportCliResultV2.MAXIMUM_TREE_MANIFEST_BYTES,
+                )
                 cli.requireCurrent()
                 DescriptorBoundAtomicStateFile.publishNoReplace(output, bindingName, bindingBytes, 256 * 1024)
                 inputs.verify("after full-export binding publication")

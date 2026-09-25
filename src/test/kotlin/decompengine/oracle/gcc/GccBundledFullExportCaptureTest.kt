@@ -45,6 +45,12 @@ class GccBundledFullExportCaptureTest {
             OracleJson.parseCanonical(snapshot.sidecarManifest).jsonObject.getValue("tree").jsonObject
                 .getValue("kind").jsonPrimitive.content,
         )
+        val retainedManifest = OracleJson.parseCanonical(snapshot.sidecarManifest).jsonObject
+        assertEquals(snapshot.outputTreeSha256, retainedManifest.getValue("outputTreeSha256").jsonPrimitive.content)
+        assertEquals(
+            snapshot.outputTreeSha256,
+            OracleArtifacts.sha256(OracleJson.canonicalBytes(retainedManifest.getValue("tree"))),
+        )
         val assessment = OracleJson.parseCanonical(snapshot.assessmentBytes).jsonObject
         assertEquals(2, assessment.getValue("schemaVersion").jsonPrimitive.int)
         assertEquals(snapshot.inputBytes, assessment.getValue("inputBytes").jsonPrimitive.long)
