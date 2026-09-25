@@ -7,8 +7,11 @@ import decompengine.jobs.elfFixture
 import decompengine.oracle.fulltree.inControlTemporaryDirectory
 import java.nio.file.Path
 import java.time.Duration
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.io.path.exists
+import kotlin.io.path.readBytes
 import kotlin.io.path.readText
 import kotlin.io.path.writeBytes
 import kotlin.io.path.writeText
@@ -25,6 +28,68 @@ import kotlinx.serialization.json.long
 
 class GhidraSharedDeadlineTest {
     @Test
+    fun `in-flight command preparation is interrupted at its shared deadline and keeps prior model evidence`() = inControlTemporaryDirectory { root ->
+        val work = root.resolve("analysis")
+        val priorModel = "previous canonical model evidence\n".toByteArray(Charsets.UTF_8)
+        work.resolve("reports/program_model.json").also { it.parent.toFile().mkdirs(); it.writeBytes(priorModel) }
+        val input = root.resolve("authored.txt").also { it.writeText("authored local input\n") }
+        var commandReturned = false
+        val analyzer = GhidraHeadlessProgramModelAnalyzer(
+            commandFactory = {
+                Thread.sleep(TimeUnit.SECONDS.toMillis(10))
+                commandReturned = true
+                listOf("/usr/bin/true")
+            },
+            limits = limits(5_000),
+        )
+        val parent = deadline(250)
+        val started = System.nanoTime()
+
+        val failure = assertFailsWith<GhidraAnalysisException> {
+            analyzer.analyzeWithDeadline(input, work, parent)
+        }
+
+        assertTrue(failure.message.orEmpty().contains("fixture parent exceeded 250 milliseconds during Ghidra program recovery"))
+        assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(2), "deadline did not interrupt command preparation in flight")
+        assertFalse(commandReturned)
+        assertEquals(priorModel.toList(), work.resolve("reports/program_model.json").readBytes().toList())
+        assertFalse(Thread.currentThread().isInterrupted, "deadline watchdog interrupt leaked to the caller")
+    }
+
+    @Test
+    fun `caller interruption during command preparation is not reclassified as a deadline`() = inControlTemporaryDirectory { root ->
+        val input = root.resolve("authored.txt").also { it.writeText("authored local input\n") }
+        val enteredCommandFactory = CountDownLatch(1)
+        val failure = AtomicReference<Throwable?>()
+        val analyzer = GhidraHeadlessProgramModelAnalyzer(commandFactory = {
+            enteredCommandFactory.countDown()
+            CountDownLatch(1).await()
+            listOf("/usr/bin/true")
+        }, limits = limits(5_000))
+        val worker = Thread {
+            try {
+                analyzer.analyzeWithDeadline(input, root.resolve("analysis"), deadline(5_000))
+            } catch (caught: Throwable) {
+                failure.set(caught)
+            }
+        }
+        worker.start()
+        try {
+            assertTrue(enteredCommandFactory.await(2, TimeUnit.SECONDS), "command factory did not start")
+            worker.interrupt()
+            worker.join(TimeUnit.SECONDS.toMillis(2))
+        } finally {
+            if (worker.isAlive) {
+                worker.interrupt()
+                worker.join(TimeUnit.SECONDS.toMillis(2))
+            }
+        }
+
+        assertFalse(worker.isAlive, "caller interruption did not cancel command preparation")
+        assertTrue(failure.get() is InterruptedException, "caller interruption was reclassified as a deadline")
+    }
+
+    @Test
     fun `expired parent deadline rejects before workspace or command preparation`() = inControlTemporaryDirectory { root ->
         val work = root.resolve("analysis")
         var commandPrepared = false
@@ -39,32 +104,38 @@ class GhidraSharedDeadlineTest {
             analyzer.analyzeWithDeadline(root.resolve("unused-authored-input"), work, parent)
         }
 
-        assertTrue(failure.message.orEmpty().contains("fixture parent exceeded 10 milliseconds before export preparation"))
+        assertTrue(failure.message.orEmpty().contains("fixture parent exceeded 10 milliseconds before Ghidra program recovery"))
         assertFalse(commandPrepared)
         assertFalse(work.exists())
     }
 
     @Test
-    fun `command preparation cannot launch its returned command after the parent expires`() = inControlTemporaryDirectory { root ->
+    fun `command returned after swallowing timeout interrupt is not launched`() = inControlTemporaryDirectory { root ->
         val work = root.resolve("analysis")
         val marker = root.resolve("worker-launched")
         val input = root.resolve("authored.txt").also { it.writeText("authored local input\n") }
         var commandReturned = false
         val analyzer = GhidraHeadlessProgramModelAnalyzer(
             commandFactory = {
-                Thread.sleep(600)
+                try {
+                    Thread.sleep(TimeUnit.SECONDS.toMillis(10))
+                } catch (_: InterruptedException) {
+                    // Return a command after cancellation to verify the deadline gate rejects it.
+                }
                 commandReturned = true
                 listOf("/usr/bin/touch", marker.toString())
             },
             limits = limits(5_000),
         )
+        val started = System.nanoTime()
 
         val failure = assertFailsWith<GhidraAnalysisException> {
-            analyzer.analyzeWithDeadline(input, work, deadline(500))
+            analyzer.analyzeWithDeadline(input, work, deadline(250))
         }
 
-        assertTrue(commandReturned)
-        assertTrue(failure.message.orEmpty().contains("fixture parent exceeded 500 milliseconds after constructing export command"))
+        assertTrue(commandReturned, "fixture should return after swallowing the cancellation interrupt")
+        assertTrue(failure.message.orEmpty().contains("fixture parent exceeded 250 milliseconds during Ghidra program recovery"))
+        assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(2), "command preparation was not interrupted in flight")
         assertFalse(marker.exists())
         assertFalse(work.resolve("reports/ghidra_resource_usage.json").exists())
     }

@@ -89,8 +89,8 @@ class GhidraJvmMetadataInspectionTest {
 
         val failure = assertFailsWith<GhidraAnalysisException> { analyzer.analyze(input, output) }
 
-        assertTrue(exported)
-        assertTrue(failure.message.orEmpty().contains("analysis and metadata exceeded 250 milliseconds after export"))
+        assertFalse(exported, "shared deadline should interrupt the injected exporter in flight")
+        assertTrue(failure.message.orEmpty().contains("analysis and metadata exceeded 250 milliseconds during analysis and metadata"))
         assertFalse(output.resolve("reports/ghidra_analysis.json").exists())
     }
 
