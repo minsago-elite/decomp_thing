@@ -16,6 +16,7 @@ internal class GccDriverStructuralFullExportBindingV2 private constructor(bytes:
             profileId: String,
             version: String,
             sourceRevision: String,
+            compilerEngineProfileSha256: String,
             artifactManifestSha256: String,
             targetDescriptorBytes: ByteArray,
             inputSha256: String,
@@ -35,11 +36,12 @@ internal class GccDriverStructuralFullExportBindingV2 private constructor(bytes:
             val receiptLineage = OracleJson.parseCanonical(receiptLineageBytes) as? JsonObject
                 ?: throw GccDriverStructuralProfileException("GCC full-export receipt lineage is not a canonical object")
             val fields = JsonObject(linkedMapOf(
-                "provider" to JsonPrimitive("gcc-driver-structural-full-export-binding-v2"),
+                "provider" to JsonPrimitive("gcc-compiler-engine-structural-full-export-binding-v2"),
                 "schemaVersion" to JsonPrimitive(2),
                 "profileId" to JsonPrimitive(profileId),
                 "profileVersion" to JsonPrimitive(version),
                 "sourceRevision" to JsonPrimitive(sourceRevision),
+                "compilerEngineProfileSha256" to JsonPrimitive(compilerEngineProfileSha256),
                 "artifactManifestSha256" to JsonPrimitive(artifactManifestSha256),
                 "targetDescriptor" to target,
                 "targetDescriptorSha256" to JsonPrimitive(OracleArtifacts.sha256(targetDescriptorBytes)),

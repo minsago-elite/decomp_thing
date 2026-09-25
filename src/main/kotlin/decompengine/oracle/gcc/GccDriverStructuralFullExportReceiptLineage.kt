@@ -18,7 +18,10 @@ internal class GccDriverStructuralFullExportReceiptLineageV1 private constructor
     val sha256: String = OracleArtifacts.sha256(storedBytes)
 
     companion object {
-        fun validate(operation: GccBundledFullExportOperation): GccDriverStructuralFullExportReceiptLineageV1 {
+        fun validate(
+            operation: GccBundledFullExportOperation,
+            expectedCompilerEngineProfileSha256: String,
+        ): GccDriverStructuralFullExportReceiptLineageV1 {
             require(!operation.complete && !operation.releaseEligible) {
                 "GCC full-export operation unexpectedly grants completion or release eligibility"
             }
@@ -30,9 +33,13 @@ internal class GccDriverStructuralFullExportReceiptLineageV1 private constructor
             require(operationId.matches(Regex("[a-f0-9]{64}"))) { "GCC full-export operation ID is invalid" }
             val schemaVersion = intent.long("schemaVersion")
             val provider = intent.string("provider")
-            require((schemaVersion == 1L && provider == "gcc-bundled-operation-intent-v1") ||
-                (schemaVersion == 2L && provider == "gcc-bundled-operation-intent-v2")
-            ) { "GCC full-export intent schema is invalid" }
+            require(schemaVersion == 2L && provider == "gcc-bundled-operation-intent-v2" &&
+                intent.string("engineId") == "cc1"
+            ) { "GCC full-export intent is not the pinned cc1 compiler-engine operation" }
+            val plannerProfile = intent.getValue("plannerProfile").jsonObject
+            require(plannerProfile.string("profileSha256") == expectedCompilerEngineProfileSha256) {
+                "GCC full-export intent does not bind the authenticated compiler-engine profile"
+            }
             require(intent.string("runKind") == "fresh-control") {
                 "GCC full export was not authorized as a fresh uninterrupted operation"
             }
@@ -105,6 +112,8 @@ internal class GccDriverStructuralFullExportReceiptLineageV1 private constructor
                 "schemaVersion" to JsonPrimitive(1),
                 "operationId" to JsonPrimitive(operationId),
                 "intentSha256" to JsonPrimitive(intentSha256),
+                "engineId" to JsonPrimitive("cc1"),
+                "compilerEngineProfileSha256" to JsonPrimitive(expectedCompilerEngineProfileSha256),
                 "executionReceiptSha256" to JsonPrimitive(OracleArtifacts.sha256(executionBytes)),
                 "executionPayloadSha256" to JsonPrimitive(executionRecord.payloadSha256),
                 "exportAssessmentReceiptSha256" to JsonPrimitive(OracleArtifacts.sha256(exportBytes)),
