@@ -12,6 +12,7 @@ import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
 import kotlin.io.path.isExecutable
 import kotlin.io.path.pathString
+import kotlin.io.path.readBytes
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.Test
@@ -19,6 +20,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 
 class BehaviorValidationTest {
     @Test
@@ -107,7 +110,7 @@ class BehaviorValidationTest {
         """.trimIndent() + "\n"
         val original = compileC(tempDir, "outcome-original", source)
         val rebuilt = compileC(tempDir, "outcome-rebuilt", source)
-        val comparator = BehaviorComparator(SandboxRunner(timeout = java.time.Duration.ofMillis(300), networkIsolation = false))
+        val comparator = BehaviorComparator(SandboxRunner(networkIsolation = false))
         val report = comparator.compare("outcome", original, rebuilt, listOf(ProcessInput("normal")), tempDir.resolve("reports"))
         val prior = java.nio.file.Files.readAllBytes(report.reportPath)
         for (status in listOf(124, 125, 126, 127)) {
@@ -123,7 +126,8 @@ class BehaviorValidationTest {
             assertTrue(prior.contentEquals(java.nio.file.Files.readAllBytes(report.reportPath)))
         }
         val failure = kotlin.test.assertFails {
-            comparator.compare("outcome", original, rebuilt, listOf(ProcessInput("deadline", listOf("wait"))), tempDir.resolve("reports"))
+            BehaviorComparator(SandboxRunner(timeout = java.time.Duration.ofMillis(300), networkIsolation = false))
+                .compare("outcome", original, rebuilt, listOf(ProcessInput("deadline", listOf("wait"))), tempDir.resolve("reports"))
         }
         assertTrue(failure is BehaviorExecutionTimeoutException || failure is BehaviorExecutionOutcomeException)
         assertTrue(prior.contentEquals(java.nio.file.Files.readAllBytes(report.reportPath)))
@@ -352,6 +356,38 @@ class BehaviorValidationTest {
         assertTrue(json.contains("\"networkIsolated\""))
         assertEquals(sandbox.networkIsolationSupported(), report.networkIsolated)
         assertEquals(sandbox.networkIsolationSupported(), report.cases.single().original.networkIsolated)
+    }
+
+    @Test
+    fun `runtime dependencies are staged and host runtime roots are absent in the program sandbox`() {
+        val root = createTempDirectory("behavior-runtime-closure-")
+        val source = """
+            #include <stdio.h>
+            #include <stdlib.h>
+            #include <unistd.h>
+            int main(void) {
+                printf("%s:%d\n", getenv("LD_LIBRARY_PATH"), access("/usr/bin/true", X_OK));
+                return 0;
+            }
+        """.trimIndent() + "\n"
+        val original = compileC(root, "runtime-original", source)
+        val rebuilt = compileC(root, "runtime-rebuilt", source)
+        val report = BehaviorComparator().evaluate("runtime", original, rebuilt,
+            listOf(ProcessInput("probe")), root.resolve("reports"))
+
+        assertEquals("/runtime/lib:-1\n", report.cases.single().original.stdout.decodeToString())
+        val record = BehaviorEvidence.decode(report.reportPath.readBytes())
+        assertEquals(6, record.integer("schemaVersion"))
+        val closure = record.getValue("executionSnapshots").jsonObject.getValue("runtimeClosure").jsonObject
+        assertTrue(closure.getValue("libraries").jsonArray.any {
+            it.jsonObject.string("name") == "libc.so.6"
+        })
+        assertTrue(closure.getValue("interpreters").jsonArray.isNotEmpty())
+        assertFalse(closure.boolean("hostRuntimeRootsVisible"))
+        val command = report.cases.single().original.sandboxCommand
+        assertFalse(command.windowed(3).any { it == listOf("--ro-bind", "/usr", "/usr") })
+        assertTrue("--clearenv" in command)
+        assertTrue(command.windowed(3).any { it[0] == "--ro-bind" && it[2] == "/runtime/lib/libc.so.6" })
     }
 
     private fun compileC(tempDir: java.nio.file.Path, name: String, source: String): java.nio.file.Path {

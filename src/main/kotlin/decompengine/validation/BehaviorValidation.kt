@@ -10,6 +10,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.nio.file.Path
 import java.time.Duration
+import java.util.Comparator
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
@@ -223,8 +224,11 @@ class SandboxRunner(
             throw SandboxUnavailableException("bubblewrap not found at ${bwrapPath.pathString}; sandboxed execution is mandatory")
         }
         return JsonObject(mapOf(
-            "assurance" to JsonPrimitive("retained-executable-identity-runtime-closure-unqualified-not-production-authority"),
-            "environment" to JsonObject(mapOf("PATH" to JsonPrimitive("/usr/bin"))),
+            "assurance" to JsonPrimitive("staged-elf-needed-closure-not-production-authority"),
+            "environment" to JsonObject(mapOf(
+                "PATH" to JsonPrimitive("/nonexistent"),
+                "LD_LIBRARY_PATH" to JsonPrimitive("/runtime/lib"),
+            )),
             "workingDirectory" to JsonPrimitive("/tmp"),
             "networkIsolationRequested" to JsonPrimitive(networkIsolation),
             "timeoutMillis" to JsonPrimitive(timeout.toMillis()),
@@ -243,21 +247,34 @@ class SandboxRunner(
 
     fun run(executable: Path, input: ProcessInput): ProcessOutput = runWithFiles(executable, input, emptyMap())
 
-    internal fun runWithFiles(executable: Path, input: ProcessInput, files: Map<String, Path>): ProcessOutput {
+    internal fun runWithFiles(
+        executable: Path,
+        input: ProcessInput,
+        files: Map<String, Path>,
+        runtimeMounts: List<BehaviorSandboxRuntimeMount>? = null,
+    ): ProcessOutput {
         val deadline = runCatching { Math.addExact(System.nanoTime(), timeout.toNanos()) }.getOrDefault(Long.MAX_VALUE)
         return withCompletionChannel { channel ->
-            runWithCompletion(executable, input, files, channel, deadline)
+            runWithCompletion(executable, input, files, runtimeMounts, channel, deadline)
         }
     }
 
-    private fun runWithCompletion(executable: Path, input: ProcessInput, files: Map<String, Path>, channel: Path, deadline: Long): ProcessOutput {
+    private fun runWithCompletion(
+        executable: Path,
+        input: ProcessInput,
+        files: Map<String, Path>,
+        runtimeMounts: List<BehaviorSandboxRuntimeMount>?,
+        channel: Path,
+        deadline: Long,
+    ): ProcessOutput {
         if (!bwrapPath.exists()) {
             throw SandboxUnavailableException("bubblewrap not found at ${bwrapPath.pathString}; sandboxed execution is mandatory")
         }
         if (!BwrapCapability.jsonStatusSupported(bwrapPath)) {
             throw SandboxUnavailableException("bubblewrap at ${bwrapPath.pathString} lacks --json-status-fd; completion evidence is mandatory")
         }
-        val command = behaviorSandboxCommand(executable, input.args, timeout.toMillis(), bwrapPath, timeoutPath, networkIsolation, files)
+        val command = behaviorSandboxCommand(executable, input.args, timeout.toMillis(), bwrapPath, timeoutPath,
+            networkIsolation, files, runtimeMounts)
 
         val launchCommand = completionLaunchCommand(command, launcherPath, channel)
         val builder = ProcessBuilder(launchCommand).redirectErrorStream(false)
@@ -491,9 +508,11 @@ class BehaviorComparator(
         var primaryFailure: Throwable? = null
         var executionDirectoryRemoved = false
         fun removeExecutionDirectory() {
-            java.nio.file.Files.deleteIfExists(executionOriginal)
-            java.nio.file.Files.deleteIfExists(executionRebuilt)
-            java.nio.file.Files.deleteIfExists(executionDirectory)
+            if (java.nio.file.Files.exists(executionDirectory, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                java.nio.file.Files.walk(executionDirectory).use { paths ->
+                    paths.sorted(Comparator.reverseOrder()).forEach(java.nio.file.Files::deleteIfExists)
+                }
+            }
             executionDirectoryRemoved = true
         }
         try {
@@ -507,16 +526,21 @@ class BehaviorComparator(
             val policy = JsonObject(sandbox.evidencePolicy(capture) +
                 ("maximumComparisonOutputBytes" to JsonPrimitive(comparisonLimit)))
             val projectRevision = project?.let { capture.project(it, originalIdentity, rebuiltBinary) }
+            val runtimeClosure = BehaviorRuntimeClosureCapture.capture(capture, listOf(
+                originalBinary to originalIdentity,
+                rebuiltBinary to rebuiltIdentity,
+            ), executionDirectory.resolve("runtime"))
             val executionSnapshots = JsonObject(mapOf(
                 "original" to JsonObject(capture.retainExecutable(originalBinary, executionOriginal, originalIdentity) +
                     ("path" to JsonPrimitive(executionOriginal.toAbsolutePath().normalize().toString()))),
                 "rebuilt" to JsonObject(capture.retainExecutable(rebuiltBinary, executionRebuilt, rebuiltIdentity) +
                     ("path" to JsonPrimitive(executionRebuilt.toAbsolutePath().normalize().toString()))),
+                "runtimeClosure" to runtimeClosure.record,
             ))
             var aggregateOutputBytes = 0L
             fun runBounded(binary: Path, input: ProcessInput): ProcessOutput {
                 capture.requireCurrent()
-                val output = sandbox.runWithFiles(binary, input, boundFiles[input.id].orEmpty())
+                val output = sandbox.runWithFiles(binary, input, boundFiles[input.id].orEmpty(), runtimeClosure.mounts)
                 capture.requireCurrent()
                 aggregateOutputBytes = Math.addExact(
                     aggregateOutputBytes,

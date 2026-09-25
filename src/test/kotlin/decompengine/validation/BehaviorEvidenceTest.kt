@@ -377,7 +377,7 @@ class BehaviorEvidenceTest {
             fileInputs = mapOf("file" to mapOf("nested/input.bin" to input)),
         )
         val record = BehaviorEvidence.decode(report.reportPath.readBytes())
-        assertEquals(5, record.integer("schemaVersion"))
+        assertEquals(6, record.integer("schemaVersion"))
         val case = record.getValue("cases").jsonArray.single().jsonObject
         val executionSnapshots = record.getValue("executionSnapshots").jsonObject
         val originalSnapshot = executionSnapshots.getValue("original").jsonObject
@@ -438,8 +438,15 @@ class BehaviorEvidenceTest {
         val fixture = fixture()
         val report = fixture.evaluate()
         val record = BehaviorEvidence.decode(report.reportPath.readBytes())
-        assertEquals(5, record.integer("schemaVersion"))
+        assertEquals(6, record.integer("schemaVersion"))
         val snapshots = record.getValue("executionSnapshots").jsonObject
+        val runtimeClosure = snapshots.getValue("runtimeClosure").jsonObject
+        assertEquals(1, runtimeClosure.integer("schemaVersion"))
+        assertEquals("/runtime/lib", runtimeClosure.string("visibleSearchPath"))
+        assertFalse(runtimeClosure.boolean("hostRuntimeRootsVisible"))
+        assertTrue(runtimeClosure.getValue("libraries").jsonArray.any {
+            it.jsonObject.string("name") == "libc.so.6"
+        })
         for ((side, identityName) in listOf("original" to "originalIdentity", "rebuilt" to "rebuiltIdentity")) {
             val snapshot = snapshots.getValue(side).jsonObject
             assertEquals(record.getValue(identityName).jsonObject, JsonObject(snapshot - "path"))
@@ -453,6 +460,18 @@ class BehaviorEvidenceTest {
         assertTrue(audit.networkIsolation.isEmpty())
         assertTrue(audit.toJson().contains("\"moduleBehaviorEvidence\": []"))
         assertTrue(record.getValue("executionPolicy").jsonObject.string("assurance").contains("not-production-authority"))
+
+        val changedClosureBody = JsonObject(runtimeClosure - "closureSha256" +
+            ("hostRuntimeRootsVisible" to JsonPrimitive(true)))
+        val changedClosure = JsonObject(changedClosureBody + ("closureSha256" to JsonPrimitive(
+            OracleArtifacts.sha256(OracleJson.canonicalBytes(changedClosureBody)),
+        )))
+        val changedSnapshots = JsonObject(snapshots + ("runtimeClosure" to changedClosure))
+        val changedRecord = JsonObject(record + ("executionSnapshots" to changedSnapshots))
+        val rehashedRecord = JsonObject(changedRecord + ("reportSha256" to JsonPrimitive(
+            OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(changedRecord - "reportSha256"))),
+        )))
+        assertFails { BehaviorEvidence.decode(OracleJson.canonicalBytes(rehashedRecord)) }
     }
 
     @Test
@@ -634,16 +653,21 @@ class BehaviorEvidenceTest {
 
     private fun historicalCompletionRecord(record: JsonObject, version: Int): JsonObject {
         val executionSnapshots = record.getValue("executionSnapshots").jsonObject
+        val policy = record.getValue("executionPolicy").jsonObject
         val cases = JsonArray(record.getValue("cases").jsonArray.map { element ->
             val case = element.jsonObject
             val stripped = JsonObject(case + listOf("original", "rebuilt").associateWith { side ->
                 val output = case.getValue(side).jsonObject
-                val executionPath = executionSnapshots.getValue(side).jsonObject.string("path")
                 val sourcePath = record.string("${side}Binary")
-                val command = JsonArray(output.getValue("sandboxCommand").jsonArray.map { argument ->
-                    if (argument.jsonPrimitive.content == executionPath) JsonPrimitive(sourcePath) else argument
-                })
-                JsonObject(output - "completionEvidence" + ("sandboxCommand" to command))
+                val files = case.getValue("fileInputs").jsonArray.associate { file ->
+                    file.jsonObject.string("name") to Path.of(file.jsonObject.string("sourcePath"))
+                }
+                val commandArguments = case.getValue("args").jsonArray.map { it.jsonPrimitive.content }
+                val command = behaviorSandboxCommand(Path.of(sourcePath), commandArguments,
+                    policy.count("timeoutMillis"), Path.of(policy.getValue("bubblewrap").jsonObject.string("path")),
+                    Path.of(policy.getValue("timeout").jsonObject.string("path")), policy.boolean("networkIsolationRequested"), files)
+                    .toMutableList().apply { this[1] = "${maxOf(1L, policy.count("timeoutMillis") / 1000L)}s" }
+                JsonObject(output - "completionEvidence" + ("sandboxCommand" to JsonArray(command.map(::JsonPrimitive))))
             })
             if (version == 1) JsonObject(stripped - "fileInputs") else stripped
         })
@@ -659,8 +683,10 @@ class BehaviorEvidenceTest {
             "provider" to JsonPrimitive("local-revision-bound-behavior-v$version"),
             "cases" to cases,
             "executionPolicy" to JsonObject(
-                (record.getValue("executionPolicy").jsonObject - setOf("completionLauncher", "maximumCompletionBytes")) +
-                    ("assurance" to JsonPrimitive("local-path-stability-checks-not-production-authority")),
+                (policy - setOf("completionLauncher", "maximumCompletionBytes")) + mapOf(
+                    "assurance" to JsonPrimitive("local-path-stability-checks-not-production-authority"),
+                    "environment" to JsonObject(mapOf("PATH" to JsonPrimitive("/usr/bin"))),
+                ),
             ),
             "corpusSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(corpus))),
             "observationsSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(cases))),
