@@ -40,6 +40,11 @@ class GccBundledFullExportCaptureTest {
         assertTrue(snapshot.capturedBytes > snapshot.programModelBytes)
         assertContentEquals(Files.readAllBytes(root.resolve("reports/program_model.json")), snapshot.programModel)
         assertTrue(snapshot.sidecarManifest.decodeToString().contains("functions/fn_0000000000400010.json"))
+        assertEquals(
+            "gcc-bundled-full-export-output-tree-v2",
+            OracleJson.parseCanonical(snapshot.sidecarManifest).jsonObject.getValue("tree").jsonObject
+                .getValue("kind").jsonPrimitive.content,
+        )
         val assessment = OracleJson.parseCanonical(snapshot.assessmentBytes).jsonObject
         assertEquals(2, assessment.getValue("schemaVersion").jsonPrimitive.int)
         assertEquals(snapshot.inputBytes, assessment.getValue("inputBytes").jsonPrimitive.long)

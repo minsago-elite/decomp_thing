@@ -55,14 +55,17 @@ internal class GccBundledExecutedOperation(
 }
 
 internal class GccBundledFullExportOperation(
+    intentBytes: ByteArray,
     executionReceiptBytes: ByteArray,
     exportAssessmentReceiptBytes: ByteArray,
     val snapshot: GccBundledFullExportSnapshot,
 ) {
     val complete: Boolean = false
     val releaseEligible: Boolean = false
+    private val intent = intentBytes.copyOf()
     private val execution = executionReceiptBytes.copyOf()
     private val exportAssessment = exportAssessmentReceiptBytes.copyOf()
+    val intentBytes: ByteArray get() = intent.copyOf()
     val executionReceiptBytes: ByteArray get() = execution.copyOf()
     val exportAssessmentReceiptBytes: ByteArray get() = exportAssessment.copyOf()
 }
@@ -172,7 +175,7 @@ internal class GccBundledPreparedOperation internal constructor(
             inputs.verify("after GCC full export snapshot")
             lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
             val exportReceipt = journal.recordExportAssessment(bindWallTime(captured.assessmentBytes))
-            GccBundledFullExportOperation(receipt, exportReceipt, captured)
+            GccBundledFullExportOperation(intent.canonicalBytes, receipt, exportReceipt, captured)
         }
     }
 

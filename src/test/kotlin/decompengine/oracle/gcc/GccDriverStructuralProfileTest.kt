@@ -10,6 +10,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.int
@@ -77,11 +78,12 @@ class GccDriverStructuralProfileTest {
         val modelBytes = modelBytes(profile, 0x403000UL)
         val snapshot = fullSnapshot(profile, modelBytes)
 
-        val binding = profile.bindFullExport(snapshot)
+        val operation = fullOperation(profile, snapshot)
+        val binding = profile.bindFullExport(operation)
         val document = OracleJson.parseCanonical(binding.canonicalBytes).jsonObject
 
-        assertEquals("gcc-driver-structural-full-export-binding-v1", document.getValue("provider").jsonPrimitive.content)
-        assertEquals(1, document.getValue("schemaVersion").jsonPrimitive.int)
+        assertEquals("gcc-driver-structural-full-export-binding-v2", document.getValue("provider").jsonPrimitive.content)
+        assertEquals(2, document.getValue("schemaVersion").jsonPrimitive.int)
         assertEquals(profile.artifactManifestSha256, document.getValue("artifactManifestSha256").jsonPrimitive.content)
         val target = document.getValue("targetDescriptor").jsonObject
         assertEquals("x86_64-sysv-amd64-v1", target.getValue("id").jsonPrimitive.content)
@@ -89,6 +91,13 @@ class GccDriverStructuralProfileTest {
         assertEquals("gcc", target.getValue("ghidraCompilerSpec").jsonPrimitive.content)
         assertEquals("0x400000", target.getValue("imageBase").jsonPrimitive.content)
         assertEquals(snapshot.outputTreeSha256, document.getValue("outputTreeSha256").jsonPrimitive.content)
+        val lineage = document.getValue("receiptLineage").jsonObject
+        assertEquals("gcc-bundled-full-export-receipt-lineage-v1", lineage.getValue("provider").jsonPrimitive.content)
+        assertEquals("a".repeat(64), lineage.getValue("operationId").jsonPrimitive.content)
+        assertEquals(
+            OracleArtifacts.sha256(OracleJson.canonicalBytes(lineage)),
+            document.getValue("receiptLineageSha256").jsonPrimitive.content,
+        )
         assertEquals(64, binding.sha256.length)
     }
 
@@ -99,19 +108,34 @@ class GccDriverStructuralProfileTest {
         val canonical = modelBytes(profile, 0x403000UL)
 
         assertFailsWith<GccDriverStructuralProfileException> {
-            profile.bindFullExport(fullSnapshot(profile, "{\"inputSha256\":\"${profile.strippedBinary.sha256}\"}".toByteArray()))
+            profile.bindFullExport(fullOperation(profile,
+                fullSnapshot(profile, "{\"inputSha256\":\"${profile.strippedBinary.sha256}\"}".toByteArray())))
         }
         assertFailsWith<GccDriverStructuralProfileException> {
-            profile.bindFullExport(fullSnapshot(profile, modelBytes(profile, 0x400000UL)))
+            profile.bindFullExport(fullOperation(profile, fullSnapshot(profile, modelBytes(profile, 0x400000UL))))
         }
         assertFailsWith<GccDriverStructuralProfileException> {
-            profile.bindFullExport(fullSnapshot(profile, canonical, language = "x86:LE:64:default:attacker"))
+            profile.bindFullExport(fullOperation(profile,
+                fullSnapshot(profile, canonical, language = "x86:LE:64:default:attacker")))
         }
         assertFailsWith<GccDriverStructuralProfileException> {
-            profile.bindFullExport(fullSnapshot(profile, canonical, compilerSpec = "attacker"))
+            profile.bindFullExport(fullOperation(profile, fullSnapshot(profile, canonical, compilerSpec = "attacker")))
         }
         assertFailsWith<GccDriverStructuralProfileException> {
-            profile.bindFullExport(fullSnapshot(profile, canonical, inputSha256 = "f".repeat(64)))
+            profile.bindFullExport(fullOperation(profile, fullSnapshot(profile, canonical, inputSha256 = "f".repeat(64))))
+        }
+    }
+
+    @Test
+    fun `full export binding rejects a broken receipt chain and intent artifact substitutions`() {
+        val profile = GccDriverStructuralInputsV1.load(Path.of("oracle/gcc/16.2.0").toAbsolutePath().normalize())
+        val snapshot = fullSnapshot(profile, modelBytes(profile, 0x403000UL))
+
+        assertFailsWith<GccDriverStructuralProfileException> {
+            profile.bindFullExport(fullOperation(profile, snapshot, exportPreviousSha256 = "f".repeat(64)))
+        }
+        assertFailsWith<GccDriverStructuralProfileException> {
+            profile.bindFullExport(fullOperation(profile, snapshot, intentExporterSha256 = "e".repeat(64)))
         }
     }
 
@@ -165,5 +189,94 @@ class GccDriverStructuralProfileTest {
             programModel = modelBytes,
             sidecarManifest = OracleJson.canonicalBytes(JsonObject(emptyMap())),
         )
+    }
+
+    private fun fullOperation(
+        profile: GccDriverStructuralInputsV1,
+        snapshot: GccBundledFullExportSnapshot,
+        exportPreviousSha256: String? = null,
+        intentExporterSha256: String = snapshot.exporterSha256,
+    ): GccBundledFullExportOperation {
+        val operationId = "a".repeat(64)
+        val intent = JsonObject(mapOf(
+            "provider" to JsonPrimitive("gcc-bundled-operation-intent-v1"),
+            "schemaVersion" to JsonPrimitive(1),
+            "operationId" to JsonPrimitive(operationId),
+            "runKind" to JsonPrimitive("fresh-control"),
+            "bundledRuntime" to JsonObject(mapOf("provider" to JsonPrimitive("bundled-ghidra-java-api-runtime-v5"))),
+            "artifacts" to JsonArray(listOf(
+                artifact("engine-binary", profile.strippedBinary.bytes, profile.strippedBinary.sha256),
+                artifact("exporter-source", snapshot.exporterBytes, intentExporterSha256),
+                artifact("ghidra-archive", snapshot.analysisToolBytes, snapshot.analysisToolSha256),
+            )),
+        ))
+        val intentBytes = OracleJson.canonicalBytes(intent)
+        val intentSha256 = OracleArtifacts.sha256(intentBytes)
+        val executionUnsigned = JsonObject(mapOf(
+            "provider" to JsonPrimitive("kotlin-lease-contained-command-execution-v1"),
+            "schemaVersion" to JsonPrimitive(1),
+            "childExitCode" to JsonPrimitive(0),
+            "unitAbsent" to JsonPrimitive(true),
+            "cgroupAbsent" to JsonPrimitive(true),
+            "processesAbsent" to JsonPrimitive(true),
+            "releaseEligible" to JsonPrimitive(false),
+        ))
+        val execution = JsonObject(executionUnsigned + (
+            "executionSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(executionUnsigned)))
+        ))
+        val executionReceipt = linkedRecord(
+            provider = "gcc-bundled-command-executed-v1",
+            operationId = operationId,
+            intentSha256 = intentSha256,
+            previousSha256 = "b".repeat(64),
+            payloadName = "execution",
+            payload = execution,
+        )
+        val assessment = OracleJson.parseCanonical(snapshot.assessmentBytes).jsonObject
+        val assessmentUnsigned = JsonObject(assessment - "assessmentSha256" + (
+            "operationWallTime" to JsonObject(mapOf("elapsedMillis" to JsonPrimitive(50)))
+        ))
+        val assessmentWithDigest = JsonObject(assessmentUnsigned + (
+            "assessmentSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(assessmentUnsigned)))
+        ))
+        val exportReceipt = linkedRecord(
+            provider = "gcc-bundled-command-export-assessed-v1",
+            operationId = operationId,
+            intentSha256 = intentSha256,
+            previousSha256 = exportPreviousSha256 ?: OracleArtifacts.sha256(executionReceipt),
+            payloadName = "assessment",
+            payload = assessmentWithDigest,
+        )
+        return GccBundledFullExportOperation(intentBytes, executionReceipt, exportReceipt, snapshot)
+    }
+
+    private fun artifact(role: String, bytes: Long, sha256: String): JsonObject = JsonObject(mapOf(
+        "role" to JsonPrimitive(role),
+        "bytes" to JsonPrimitive(bytes),
+        "sha256" to JsonPrimitive(sha256),
+    ))
+
+    private fun linkedRecord(
+        provider: String,
+        operationId: String,
+        intentSha256: String,
+        previousSha256: String,
+        payloadName: String,
+        payload: JsonObject,
+    ): ByteArray {
+        val fields = JsonObject(mapOf(
+            "provider" to JsonPrimitive(provider),
+            "schemaVersion" to JsonPrimitive(1),
+            "operationId" to JsonPrimitive(operationId),
+            "intentSha256" to JsonPrimitive(intentSha256),
+            "previousSha256" to JsonPrimitive(previousSha256),
+            "complete" to JsonPrimitive(false),
+            "releaseEligible" to JsonPrimitive(false),
+            payloadName to payload,
+            "${payloadName}Sha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(payload))),
+        ))
+        return OracleJson.canonicalBytes(JsonObject(fields + (
+            "recordSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(fields)))
+        )))
     }
 }

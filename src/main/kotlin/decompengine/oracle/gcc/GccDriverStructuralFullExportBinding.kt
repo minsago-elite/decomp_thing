@@ -6,7 +6,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
 /** Profile-bound provenance for a full export; it is not a verified-input capability or score authority. */
-internal class GccDriverStructuralFullExportBindingV1 private constructor(bytes: ByteArray) {
+internal class GccDriverStructuralFullExportBindingV2 private constructor(bytes: ByteArray) {
     private val storedBytes = bytes.copyOf()
     val canonicalBytes: ByteArray get() = storedBytes.copyOf()
     val sha256: String = OracleArtifacts.sha256(storedBytes)
@@ -28,12 +28,15 @@ internal class GccDriverStructuralFullExportBindingV1 private constructor(bytes:
             programModelBytes: Long,
             outputTreeSha256: String,
             functionCount: Long,
-        ): GccDriverStructuralFullExportBindingV1 {
+            receiptLineageBytes: ByteArray,
+        ): GccDriverStructuralFullExportBindingV2 {
             val target = OracleJson.parseCanonical(targetDescriptorBytes) as? JsonObject
                 ?: throw GccDriverStructuralProfileException("GCC target descriptor is not a canonical object")
+            val receiptLineage = OracleJson.parseCanonical(receiptLineageBytes) as? JsonObject
+                ?: throw GccDriverStructuralProfileException("GCC full-export receipt lineage is not a canonical object")
             val fields = JsonObject(linkedMapOf(
-                "provider" to JsonPrimitive("gcc-driver-structural-full-export-binding-v1"),
-                "schemaVersion" to JsonPrimitive(1),
+                "provider" to JsonPrimitive("gcc-driver-structural-full-export-binding-v2"),
+                "schemaVersion" to JsonPrimitive(2),
                 "profileId" to JsonPrimitive(profileId),
                 "profileVersion" to JsonPrimitive(version),
                 "sourceRevision" to JsonPrimitive(sourceRevision),
@@ -59,6 +62,8 @@ internal class GccDriverStructuralFullExportBindingV1 private constructor(bytes:
                     "functionCount" to JsonPrimitive(functionCount),
                 )),
                 "outputTreeSha256" to JsonPrimitive(outputTreeSha256),
+                "receiptLineage" to receiptLineage,
+                "receiptLineageSha256" to JsonPrimitive(OracleArtifacts.sha256(receiptLineageBytes)),
             ))
             require(profileId.matches(Regex("[a-z0-9][a-z0-9._-]{0,127}"))) {
                 "GCC structural full-export profile ID is invalid"
@@ -77,7 +82,7 @@ internal class GccDriverStructuralFullExportBindingV1 private constructor(bytes:
                 programModelBytes > 0L && functionCount > 0L
             ) { "GCC structural full-export inventory is empty or invalid" }
             val bytes = OracleJson.canonicalBytes(fields)
-            return GccDriverStructuralFullExportBindingV1(bytes)
+            return GccDriverStructuralFullExportBindingV2(bytes)
         }
     }
 }

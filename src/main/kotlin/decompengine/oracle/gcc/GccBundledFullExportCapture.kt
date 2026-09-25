@@ -272,7 +272,7 @@ internal object GccBundledFullExportCapture {
 
         val sidecarManifest = OracleJson.canonicalBytes(JsonObject(entries))
         val outputTree = JsonObject(linkedMapOf(
-            "kind" to JsonPrimitive("gcc-bundled-full-export-output-tree-v1"),
+            "kind" to JsonPrimitive("gcc-bundled-full-export-output-tree-v2"),
             "stateSha256" to JsonPrimitive(OracleArtifacts.sha256(stateBytes)),
             "progressSha256" to JsonPrimitive(OracleArtifacts.sha256(progressBytes)),
             "language" to JsonPrimitive(target.language),

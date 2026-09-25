@@ -74,12 +74,15 @@ internal class GccDriverStructuralInputsV1 private constructor(
         Collections.unmodifiableList(ArrayList(executableRanges))
 
     /**
-     * Binds one descriptor-captured full export to the authenticated driver, target and runtime profile.
-     * This returns provenance evidence only; structural scoring still requires independent replay admission.
+     * Binds one descriptor-captured full export and its linked contained-operation receipts to the
+     * authenticated driver, target and runtime profile. This is provenance evidence only; it does
+     * not authorize structural scoring or independent replay admission.
      */
     fun bindFullExport(
-        snapshot: GccBundledFullExportSnapshot,
-    ): GccDriverStructuralFullExportBindingV1 = translateProfileFailure {
+        operation: GccBundledFullExportOperation,
+    ): GccDriverStructuralFullExportBindingV2 = translateProfileFailure {
+        val receiptLineage = GccDriverStructuralFullExportReceiptLineageV1.validate(operation)
+        val snapshot = operation.snapshot
         require(snapshot.inputSha256 == strippedBinary.sha256 && snapshot.inputBytes == strippedBinary.bytes) {
             "GCC full export input differs from the authenticated stripped driver"
         }
@@ -128,7 +131,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
                 "imageBase" to JsonPrimitive("0x${imageBase.toString(16)}"),
                 "executableRangesSha256" to JsonPrimitive(inputBinary.executableRangesSha256),
             )))
-            GccDriverStructuralFullExportBindingV1.create(
+            GccDriverStructuralFullExportBindingV2.create(
                 profileId = profileId,
                 version = version,
                 sourceRevision = sourceRevision,
@@ -144,6 +147,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
                 programModelBytes = snapshot.programModelBytes,
                 outputTreeSha256 = snapshot.outputTreeSha256,
                 functionCount = snapshot.functionCount,
+                receiptLineageBytes = receiptLineage.canonicalBytes,
             )
         }
     }
