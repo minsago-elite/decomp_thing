@@ -122,75 +122,80 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         includeCallSites: Boolean,
         parentDeadline: AnalysisDeadline?,
     ): Pair<RecoveredProgramModel, RecoveredCallSiteReceipt?> {
-        val deadline = AnalysisDeadline.start(limits.wallClockTimeout.toNanos(), "Ghidra program recovery", parentDeadline)
-        deadline.checkpoint("before export preparation")
-        val reports = workDir.resolve("reports").createDirectories()
-        val scripts = workDir.resolve("scripts").createDirectories()
-        deadline.checkpoint("before reading export scripts")
-        val scriptBytes = javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java")
-            ?.use { it.readBytes() } ?: error("bundled ExportProgramModel.java is missing")
-        deadline.checkpoint("after reading export script")
-        scripts.resolve("ExportProgramModel.java").writeBytes(scriptBytes)
-        deadline.checkpoint("after writing export script")
-        val exporterSha256 = sha256(scriptBytes)
-        val output = reports.resolve("program_model.json")
-        val callOutput = reports.resolve("program_model_calls.json")
-        val callScriptBytes = if (includeCallSites) {
-            require(!Files.exists(callOutput, LinkOption.NOFOLLOW_LINKS)) { "call-site output already exists" }
-            javaClass.getResourceAsStream("/ghidra_scripts/ExportRecoveredCallSites.java")
-                ?.use { it.readBytes() } ?: error("bundled ExportRecoveredCallSites.java is missing")
-        } else null
-        deadline.checkpoint("after preparing call-site script")
-        callScriptBytes?.let { scripts.resolve("ExportRecoveredCallSites.java").writeBytes(it) }
-        deadline.checkpoint("before creating export project")
-        val project = workDir.resolve("ghidra_project").createDirectories()
-        val postScripts = listOf(GhidraPostScript("ExportProgramModel.java", listOf(
-            exporterSha256, analysisToolSha256, recoveryMode.wireName, output.toAbsolutePath().normalize().pathString,
-        ))) + if (callScriptBytes == null) emptyList() else listOf(
-            GhidraPostScript("ExportRecoveredCallSites.java", listOf(
-                sha256(callScriptBytes), analysisToolSha256, output.toAbsolutePath().normalize().pathString,
-                callOutput.toAbsolutePath().normalize().pathString,
-            )),
+        val deadline = AnalysisDeadline.start(
+            limits.wallClockTimeout.toNanos(), "Ghidra program recovery", parentDeadline,
+            AnalysisDeadline.RECOVERY_TIMEOUT_ADVICE,
         )
-        deadline.checkpoint("before constructing export command")
-        val command = commandFactory(GhidraInvocation(project, "archival_reconstruction", binaryPath, scripts, postScripts), deadline::checkpoint)
-        deadline.checkpoint("after constructing export command")
-        val exitCode = executeExport(command, workDir, reports, deadline)
-        deadline.checkpoint("before export result validation")
-        require(exitCode == 0 && Files.isRegularFile(output, LinkOption.NOFOLLOW_LINKS)) {
-            "Ghidra program recovery failed with exit code $exitCode; see ${reports.resolve("ghidra_stderr.log")}"
-        }
-        val modelBytes = readStableProgramModel(output, deadline)
-        val model = ProgramModelJson.readCanonical(modelBytes, deadline::checkpoint)
-        deadline.checkpoint("after canonical model validation")
-        val calls = callScriptBytes?.let { script ->
-            val callLimits = RecoveredCallSiteLimits()
-            fun requireRemainingTime() {
-                deadline.checkpoint("during call-site export validation")
+        return deadline.enforceDuring("Ghidra program recovery") {
+            deadline.checkpoint("before export preparation")
+            val reports = workDir.resolve("reports").createDirectories()
+            val scripts = workDir.resolve("scripts").createDirectories()
+            deadline.checkpoint("before reading export scripts")
+            val scriptBytes = javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java")
+                ?.use { it.readBytes() } ?: error("bundled ExportProgramModel.java is missing")
+            deadline.checkpoint("after reading export script")
+            scripts.resolve("ExportProgramModel.java").writeBytes(scriptBytes)
+            deadline.checkpoint("after writing export script")
+            val exporterSha256 = sha256(scriptBytes)
+            val output = reports.resolve("program_model.json")
+            val callOutput = reports.resolve("program_model_calls.json")
+            val callScriptBytes = if (includeCallSites) {
+                require(!Files.exists(callOutput, LinkOption.NOFOLLOW_LINKS)) { "call-site output already exists" }
+                javaClass.getResourceAsStream("/ghidra_scripts/ExportRecoveredCallSites.java")
+                    ?.use { it.readBytes() } ?: error("bundled ExportRecoveredCallSites.java is missing")
+            } else null
+            deadline.checkpoint("after preparing call-site script")
+            callScriptBytes?.let { scripts.resolve("ExportRecoveredCallSites.java").writeBytes(it) }
+            deadline.checkpoint("before creating export project")
+            val project = workDir.resolve("ghidra_project").createDirectories()
+            val postScripts = listOf(GhidraPostScript("ExportProgramModel.java", listOf(
+                exporterSha256, analysisToolSha256, recoveryMode.wireName, output.toAbsolutePath().normalize().pathString,
+            ))) + if (callScriptBytes == null) emptyList() else listOf(
+                GhidraPostScript("ExportRecoveredCallSites.java", listOf(
+                    sha256(callScriptBytes), analysisToolSha256, output.toAbsolutePath().normalize().pathString,
+                    callOutput.toAbsolutePath().normalize().pathString,
+                )),
+            )
+            deadline.checkpoint("before constructing export command")
+            val command = commandFactory(GhidraInvocation(project, "archival_reconstruction", binaryPath, scripts, postScripts), deadline::checkpoint)
+            deadline.checkpoint("after constructing export command")
+            val exitCode = executeExport(command, workDir, reports, deadline)
+            deadline.checkpoint("before export result validation")
+            require(exitCode == 0 && Files.isRegularFile(output, LinkOption.NOFOLLOW_LINKS)) {
+                "Ghidra program recovery failed with exit code $exitCode; see ${reports.resolve("ghidra_stderr.log")}"
             }
-            requireRemainingTime()
-            require(Files.isRegularFile(callOutput, LinkOption.NOFOLLOW_LINKS)) { "call-site export did not produce a regular file" }
-            val digest = MessageDigest.getInstance("SHA-256")
-            var bytes = 0L
-            Files.newInputStream(callOutput, java.nio.file.StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { stream ->
-                val buffer = ByteArray(64 * 1024)
-                while (true) {
-                    requireRemainingTime()
-                    val count = stream.read(buffer)
-                    if (count < 0) break
-                    bytes = Math.addExact(bytes, count.toLong())
-                    require(bytes <= callLimits.maximumInputBytes) { "call-site export exceeds its input byte bound" }
-                    digest.update(buffer, 0, count)
+            val modelBytes = readStableProgramModel(output, deadline)
+            val model = ProgramModelJson.readCanonical(modelBytes, deadline::checkpoint)
+            deadline.checkpoint("after canonical model validation")
+            val calls = callScriptBytes?.let { script ->
+                val callLimits = RecoveredCallSiteLimits()
+                fun requireRemainingTime() {
+                    deadline.checkpoint("during call-site export validation")
                 }
+                requireRemainingTime()
+                require(Files.isRegularFile(callOutput, LinkOption.NOFOLLOW_LINKS)) { "call-site export did not produce a regular file" }
+                val digest = MessageDigest.getInstance("SHA-256")
+                var bytes = 0L
+                Files.newInputStream(callOutput, java.nio.file.StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { stream ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        requireRemainingTime()
+                        val count = stream.read(buffer)
+                        if (count < 0) break
+                        bytes = Math.addExact(bytes, count.toLong())
+                        require(bytes <= callLimits.maximumInputBytes) { "call-site export exceeds its input byte bound" }
+                        digest.update(buffer, 0, count)
+                    }
+                }
+                RecoveredCallSites.read(
+                    callOutput, digest.digest().joinToString("") { "%02x".format(it) },
+                    RecoveredCallSiteBindings(model.inputSha256, sha256(modelBytes), sha256(script), analysisToolSha256),
+                    callLimits,
+                ) { requireRemainingTime() }.also { requireRemainingTime() }
             }
-            RecoveredCallSites.read(
-                callOutput, digest.digest().joinToString("") { "%02x".format(it) },
-                RecoveredCallSiteBindings(model.inputSha256, sha256(modelBytes), sha256(script), analysisToolSha256),
-                callLimits,
-            ) { requireRemainingTime() }.also { requireRemainingTime() }
+            deadline.checkpoint("before returning exported model")
+            model to calls
         }
-        deadline.checkpoint("before returning exported model")
-        return model to calls
     }
 
     private fun executeExport(command: List<String>, workDir: Path, reports: Path, deadline: AnalysisDeadline): Int {
@@ -227,7 +232,11 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             }.also(tasks::add)
             val stdout = capture(process.inputStream)
             val stderr = capture(process.errorStream)
-            val completed = process.waitFor(deadline.remainingNanosOrZero(), TimeUnit.NANOSECONDS)
+            val completed = try {
+                process.waitFor(deadline.remainingNanosOrZero(), TimeUnit.NANOSECONDS)
+            } catch (interrupted: InterruptedException) {
+                if (deadline.remainingNanosOrZero() == 0L) false else throw interrupted
+            }
             if (!completed) processTree.terminate()
             fun <T> await(task: CompletableFuture<T>): T {
                 while (true) {
@@ -305,6 +314,21 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             cleanup { process.inputStream.close() }
             cleanup { process.errorStream.close() }
             cleanup { process.outputStream.close() }
+            val usagePath = reports.resolve("ghidra_resource_usage.json")
+            if (primaryFailure is InterruptedException && !Files.exists(usagePath, LinkOption.NOFOLLOW_LINKS)) {
+                cleanup {
+                    usagePath.writeText(
+                        "{\"maximumResidentBytesLimit\":${limits.maximumResidentBytes}," +
+                            "\"maximumResidentBytesObserved\":${peakResidentBytes.get()}," +
+                            "\"wallClockMillisLimit\":${limits.wallClockTimeout.toMillis()}," +
+                            "\"parentWallClockMillisLimit\":${deadline.parentMaximumMillis}," +
+                            "\"remainingWallClockNanosAtLaunch\":$remainingNanosAtLaunch," +
+                            "\"maximumDiagnosticBytesPerStream\":${limits.maximumDiagnosticBytesPerStream}," +
+                            "\"stdoutBytesRetained\":0,\"stderrBytesRetained\":0," +
+                            "\"diagnosticLimitExceeded\":${diagnosticsExceeded.get()}}\n",
+                    )
+                }
+            }
             cleanupFailure?.let { throw it }
         }
     }
