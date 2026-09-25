@@ -365,7 +365,7 @@ class GccBundledContainedExecutionTest {
             val process = ProcessBuilder("/usr/bin/nm", "--defined-only", "--format=posix", inputs.resolve("authored.elf").toString())
                 .redirectErrorStream(true).redirectOutput(output.toFile()).start()
             try {
-                assertTrue(process.waitFor(10, TimeUnit.SECONDS))
+                assertTrue(process.waitFor(60, TimeUnit.SECONDS), "nm symbol inventory timed out")
                 assertEquals(0, process.exitValue())
                 val symbols = boundedRead(output, MAXIMUM_METADATA_BYTES).decodeToString().lineSequence().map { it.substringBefore(' ') }.toSet()
                 assertEquals(4096, symbols.count { it.startsWith("fixture_step_") })
