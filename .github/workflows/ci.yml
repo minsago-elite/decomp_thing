@@ -29,6 +29,13 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements/oracle-generation.txt
+      - name: Cache locked frontend package downloads
+        uses: actions/cache@v6
+        with:
+          path: ~/.npm
+          key: frontend-npm-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
       - name: Record toolchain and install locked dependencies
         run: |
           mkdir -p "$RUNNER_TEMP/frontend-ci"
@@ -102,6 +109,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements/oracle-generation.txt
       - name: Install pinned build and browser tools
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
