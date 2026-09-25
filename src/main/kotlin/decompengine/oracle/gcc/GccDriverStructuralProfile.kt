@@ -7,6 +7,7 @@ import decompengine.oracle.core.OracleSchemas
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.oracle.provenance.BoundedElfTwinV1
 import decompengine.oracle.provenance.BoundedElfTwinV1Limits
+import decompengine.oracle.structural.CanonicalProgramModelStreaming
 import decompengine.oracle.structural.StructuralReplayInputBinaryV1
 import java.nio.file.Files
 import java.nio.file.LinkOption
@@ -38,6 +39,8 @@ internal data class GccDriverStructuralTargetAbiV1(
     val dataEncoding: String,
     val pointerBits: Int,
     val elfType: String,
+    val ghidraLanguage: String,
+    val ghidraCompilerSpec: String,
 )
 
 internal data class GccDriverStructuralBinaryV1(
@@ -69,6 +72,81 @@ internal class GccDriverStructuralInputsV1 private constructor(
 ) {
     val executableRanges: List<GccDriverStructuralExecutableRangeV1> =
         Collections.unmodifiableList(ArrayList(executableRanges))
+
+    /**
+     * Binds one descriptor-captured full export to the authenticated driver, target and runtime profile.
+     * This returns provenance evidence only; structural scoring still requires independent replay admission.
+     */
+    fun bindFullExport(
+        snapshot: GccBundledFullExportSnapshot,
+    ): GccDriverStructuralFullExportBindingV1 = translateProfileFailure {
+        require(snapshot.inputSha256 == strippedBinary.sha256 && snapshot.inputBytes == strippedBinary.bytes) {
+            "GCC full export input differs from the authenticated stripped driver"
+        }
+        require(snapshot.language == targetAbi.ghidraLanguage && snapshot.compilerSpec == targetAbi.ghidraCompilerSpec) {
+            "GCC full export loader identity differs from the authenticated target profile"
+        }
+        val model = CanonicalProgramModelStreaming.readCanonical(snapshot.programModel)
+        require(model.model.inputSha256 == strippedBinary.sha256 &&
+            model.model.functions.size.toLong() == snapshot.functionCount
+        ) { "GCC full program model differs from the authenticated input or export inventory" }
+        for (function in model.model.functions) {
+            require(function.address >= imageBase) { "GCC exported function precedes the authenticated image base" }
+            val rva = function.address - imageBase
+            require(executableRanges.any { rva >= it.startRva && rva < it.endExclusiveRva }) {
+                "GCC exported function lies outside authenticated executable ranges"
+            }
+            require(function.id == "fn_${function.address.toString(16).padStart(16, '0')}") {
+                "GCC exported function identity does not encode its loaded address"
+            }
+        }
+        GccRetainedCompilerEngineProfile.open(root.resolve("compiler-engines.json")).use { runtimeProfile ->
+            runtimeProfile.requireCurrent()
+            val analysis = runtimeProfile.suite.analysis
+            val exporterBytes = GccCompilerEngineProfiles::class.java
+                .getResourceAsStream("/ghidra_scripts/ExportProgramModel.java")?.use {
+                    it.readNBytes(4 * 1024 * 1024 + 1)
+                } ?: profileFail("bundled Ghidra exporter is unavailable")
+            require(snapshot.exporterSha256 == analysis.exporterSha256 &&
+                snapshot.exporterBytes == exporterBytes.size.toLong()
+            ) { "GCC full export implementation differs from the authenticated bundled exporter" }
+            require(snapshot.analysisToolSha256 == analysis.ghidraArchive.sha256 &&
+                snapshot.analysisToolBytes == analysis.ghidraArchive.bytes
+            ) { "GCC full export analysis runtime differs from the authenticated bundled Ghidra archive" }
+            val descriptor = OracleJson.canonicalBytes(JsonObject(linkedMapOf(
+                "id" to JsonPrimitive(targetAbi.id),
+                "architecture" to JsonPrimitive(targetAbi.architecture),
+                "abi" to JsonPrimitive(targetAbi.abi),
+                "machine" to JsonPrimitive(targetAbi.machine),
+                "osAbi" to JsonPrimitive(targetAbi.osAbi),
+                "elfClass" to JsonPrimitive(targetAbi.elfClass),
+                "dataEncoding" to JsonPrimitive(targetAbi.dataEncoding),
+                "pointerBits" to JsonPrimitive(targetAbi.pointerBits),
+                "elfType" to JsonPrimitive(targetAbi.elfType),
+                "ghidraLanguage" to JsonPrimitive(targetAbi.ghidraLanguage),
+                "ghidraCompilerSpec" to JsonPrimitive(targetAbi.ghidraCompilerSpec),
+                "imageBase" to JsonPrimitive("0x${imageBase.toString(16)}"),
+                "executableRangesSha256" to JsonPrimitive(inputBinary.executableRangesSha256),
+            )))
+            GccDriverStructuralFullExportBindingV1.create(
+                profileId = profileId,
+                version = version,
+                sourceRevision = sourceRevision,
+                artifactManifestSha256 = artifactManifestSha256,
+                targetDescriptorBytes = descriptor,
+                inputSha256 = snapshot.inputSha256,
+                inputBytes = snapshot.inputBytes,
+                exporterSha256 = snapshot.exporterSha256,
+                exporterBytes = snapshot.exporterBytes,
+                ghidraArchiveSha256 = snapshot.analysisToolSha256,
+                ghidraArchiveBytes = snapshot.analysisToolBytes,
+                programModelSha256 = snapshot.programModelSha256,
+                programModelBytes = snapshot.programModelBytes,
+                outputTreeSha256 = snapshot.outputTreeSha256,
+                functionCount = snapshot.functionCount,
+            )
+        }
+    }
 
     companion object {
         private const val PROFILE_ID = "gcc-driver-16.2.0"
@@ -280,6 +358,8 @@ internal class GccDriverStructuralInputsV1 private constructor(
                 dataEncoding = dataEncoding,
                 pointerBits = 64,
                 elfType = elfType,
+                ghidraLanguage = "x86:LE:64:default",
+                ghidraCompilerSpec = "gcc",
             )
         }
 
@@ -355,7 +435,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
             require(actual == expected) { "$label SHA-256 differs from the fixed GCC driver profile" }
         }
 
-        private fun translateProfileFailure(action: () -> GccDriverStructuralInputsV1): GccDriverStructuralInputsV1 = try {
+        private fun <T> translateProfileFailure(action: () -> T): T = try {
             action()
         } catch (failure: GccDriverStructuralProfileException) {
             throw failure

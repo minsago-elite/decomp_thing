@@ -3,6 +3,7 @@ package decompengine.oracle.gcc
 import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.core.OracleArtifacts
+import decompengine.oracle.core.OracleJson
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
@@ -12,6 +13,10 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFails
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 
 class GccBundledFullExportCaptureTest {
     @Test
@@ -22,11 +27,26 @@ class GccBundledFullExportCaptureTest {
         assertEquals(0L, snapshot.partial)
         assertEquals(0L, snapshot.failed)
         assertEquals(0L, snapshot.reused)
+        assertEquals(inputSha(), snapshot.inputSha256)
+        assertEquals(1L, snapshot.inputBytes)
+        assertEquals(exporterSha(), snapshot.exporterSha256)
+        assertEquals(1L, snapshot.exporterBytes)
+        assertEquals(analysisToolSha(), snapshot.analysisToolSha256)
+        assertEquals(1L, snapshot.analysisToolBytes)
+        assertEquals("x86:LE:64:default", snapshot.language)
+        assertEquals("gcc", snapshot.compilerSpec)
         assertEquals(4L, snapshot.outputFileCount)
         assertEquals(snapshot.programModel.size.toLong(), snapshot.programModelBytes)
         assertTrue(snapshot.capturedBytes > snapshot.programModelBytes)
         assertContentEquals(Files.readAllBytes(root.resolve("reports/program_model.json")), snapshot.programModel)
         assertTrue(snapshot.sidecarManifest.decodeToString().contains("functions/fn_0000000000400010.json"))
+        val assessment = OracleJson.parseCanonical(snapshot.assessmentBytes).jsonObject
+        assertEquals(2, assessment.getValue("schemaVersion").jsonPrimitive.int)
+        assertEquals(snapshot.inputBytes, assessment.getValue("inputBytes").jsonPrimitive.long)
+        assertEquals(snapshot.exporterBytes, assessment.getValue("exporterBytes").jsonPrimitive.long)
+        assertEquals(snapshot.analysisToolBytes, assessment.getValue("analysisToolBytes").jsonPrimitive.long)
+        assertEquals(snapshot.language, assessment.getValue("language").jsonPrimitive.content)
+        assertEquals(snapshot.compilerSpec, assessment.getValue("compilerSpec").jsonPrimitive.content)
 
         val changed = functionRecord("fn_0000000000400010", "changed")
         Files.writeString(root.resolve("reports/program_model.json.export/functions/fn_0000000000400010.json"), changed)

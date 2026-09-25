@@ -18,8 +18,13 @@ import kotlinx.serialization.json.longOrNull
 /** Immutable host snapshot of a completed full-recovery export. It is evidence input, not a score capability. */
 internal class GccBundledFullExportSnapshot internal constructor(
     val inputSha256: String,
+    val inputBytes: Long,
     val exporterSha256: String,
+    val exporterBytes: Long,
     val analysisToolSha256: String,
+    val analysisToolBytes: Long,
+    val language: String,
+    val compilerSpec: String,
     val stateSha256: String,
     val progressSha256: String,
     val programModelSha256: String,
@@ -38,7 +43,8 @@ internal class GccBundledFullExportSnapshot internal constructor(
     private val model = programModel.copyOf()
     private val sidecars = sidecarManifest.copyOf()
     private val assessment = fullAssessmentBytes(
-        inputSha256, exporterSha256, analysisToolSha256, stateSha256, progressSha256, programModelSha256,
+        inputSha256, inputBytes, exporterSha256, exporterBytes, analysisToolSha256, analysisToolBytes,
+        language, compilerSpec, stateSha256, progressSha256, programModelSha256,
         programModelBytes, functionCount, recovered, partial, failed, reused, outputTreeSha256, outputFileCount,
         capturedBytes,
     )
@@ -54,8 +60,13 @@ internal class GccBundledFullExportSnapshot internal constructor(
 
 private fun fullAssessmentBytes(
     inputSha256: String,
+    inputBytes: Long,
     exporterSha256: String,
+    exporterBytes: Long,
     analysisToolSha256: String,
+    analysisToolBytes: Long,
+    language: String,
+    compilerSpec: String,
     stateSha256: String,
     progressSha256: String,
     programModelSha256: String,
@@ -70,15 +81,20 @@ private fun fullAssessmentBytes(
     capturedBytes: Long,
 ): ByteArray {
     val fields = JsonObject(linkedMapOf(
-        "provider" to JsonPrimitive("gcc-bundled-descriptor-full-export-assessment-v1"),
-        "schemaVersion" to JsonPrimitive(1),
+        "provider" to JsonPrimitive("gcc-bundled-descriptor-full-export-assessment-v2"),
+        "schemaVersion" to JsonPrimitive(2),
         "byteAssessmentAuthority" to JsonPrimitive("non-authoritative-byte-assessment"),
         "complete" to JsonPrimitive(false),
         "releaseEligible" to JsonPrimitive(false),
         "recoveryMode" to JsonPrimitive("full"),
         "inputSha256" to JsonPrimitive(inputSha256),
+        "inputBytes" to JsonPrimitive(inputBytes),
         "exporterSha256" to JsonPrimitive(exporterSha256),
+        "exporterBytes" to JsonPrimitive(exporterBytes),
         "analysisToolSha256" to JsonPrimitive(analysisToolSha256),
+        "analysisToolBytes" to JsonPrimitive(analysisToolBytes),
+        "language" to JsonPrimitive(language),
+        "compilerSpec" to JsonPrimitive(compilerSpec),
         "stateSha256" to JsonPrimitive(stateSha256),
         "progressSha256" to JsonPrimitive(progressSha256),
         "programModelSha256" to JsonPrimitive(programModelSha256),
@@ -112,8 +128,11 @@ internal object GccBundledFullExportCapture {
         val byRole = artifacts.associateBy { it.role }
         require(byRole.size == artifacts.size) { "GCC full export capture contains duplicate invocation roles" }
         val expectedInput = byRole.getValue(GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY).sha256
+        val expectedInputBytes = byRole.getValue(GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY).bytes
         val expectedExporter = byRole.getValue(GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE).sha256
+        val expectedExporterBytes = byRole.getValue(GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE).bytes
         val expectedAnalysisTool = byRole.getValue(GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE).sha256
+        val expectedAnalysisToolBytes = byRole.getValue(GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE).bytes
         return LinuxFilesystemSyscalls.openDirectoryAt(run.fd, "reports").use { reports ->
             require(reports.identity.copy(linkCount = expectedReports.linkCount) == expectedReports) {
                 "GCC full export reports directory changed identity"
@@ -139,6 +158,7 @@ internal object GccBundledFullExportCapture {
                                     captureStableOutputs(
                                         run, reports, export, planning, functions, globals, types, failures,
                                         expectedReports, expectedInput, expectedExporter, expectedAnalysisTool,
+                                        expectedInputBytes, expectedExporterBytes, expectedAnalysisToolBytes,
                                         topNames, limits,
                                     )
                                 }
@@ -163,12 +183,15 @@ internal object GccBundledFullExportCapture {
         expectedInput: String,
         expectedExporter: String,
         expectedAnalysisTool: String,
+        expectedInputBytes: Long,
+        expectedExporterBytes: Long,
+        expectedAnalysisToolBytes: Long,
         expectedTop: Set<String>,
         limits: GccResumeByteValidationLimits,
     ): GccBundledFullExportSnapshot {
         val capture = GccBoundExportFiles(limits.transitionAggregateBytes)
         val stateBytes = capture.read(export, "state.json", limits.exporterStateBytes)
-        requireFullState(stateBytes, expectedInput, expectedExporter, expectedAnalysisTool)
+        val target = requireFullState(stateBytes, expectedInput, expectedExporter, expectedAnalysisTool)
         val progressBytes = capture.read(reports, "program_model.json.progress.json", limits.progressBytes)
         val progress = requireFullProgress(progressBytes)
         require(progress.reused == 0L) { "fresh full GCC export unexpectedly reused function records" }
@@ -252,6 +275,8 @@ internal object GccBundledFullExportCapture {
             "kind" to JsonPrimitive("gcc-bundled-full-export-output-tree-v1"),
             "stateSha256" to JsonPrimitive(OracleArtifacts.sha256(stateBytes)),
             "progressSha256" to JsonPrimitive(OracleArtifacts.sha256(progressBytes)),
+            "language" to JsonPrimitive(target.language),
+            "compilerSpec" to JsonPrimitive(target.compilerSpec),
             "programModelSha256" to JsonPrimitive(OracleArtifacts.sha256(model)),
             "programModelBytes" to JsonPrimitive(model.size),
             "sidecars" to OracleJson.parseCanonical(sidecarManifest),
@@ -260,8 +285,13 @@ internal object GccBundledFullExportCapture {
         val treeSha = OracleArtifacts.sha256(treeBytes)
         return GccBundledFullExportSnapshot(
             inputSha256 = expectedInput,
+            inputBytes = expectedInputBytes,
             exporterSha256 = expectedExporter,
+            exporterBytes = expectedExporterBytes,
             analysisToolSha256 = expectedAnalysisTool,
+            analysisToolBytes = expectedAnalysisToolBytes,
+            language = target.language,
+            compilerSpec = target.compilerSpec,
             stateSha256 = OracleArtifacts.sha256(stateBytes),
             progressSha256 = OracleArtifacts.sha256(progressBytes),
             programModelSha256 = OracleArtifacts.sha256(model),
@@ -305,7 +335,7 @@ internal object GccBundledFullExportCapture {
         expectedInput: String,
         expectedExporter: String,
         expectedAnalysisTool: String,
-    ) {
+    ): GccBundledFullExportTarget {
         require(bytes.isNotEmpty() && bytes.last() == '\n'.code.toByte() && bytes.none { it == '\r'.code.toByte() }) {
             "GCC full exporter state is not a complete LF-terminated record"
         }
@@ -323,6 +353,7 @@ internal object GccBundledFullExportCapture {
             string(root, "compilerSpec").matches(Regex("[A-Za-z0-9_.:+-]{1,256}"))) {
             "GCC full exporter target identity is invalid"
         }
+        return GccBundledFullExportTarget(string(root, "language"), string(root, "compilerSpec"))
     }
 
     private fun requireFullProgress(bytes: ByteArray): FullProgress {
@@ -446,3 +477,5 @@ internal object GccBundledFullExportCapture {
 
     private data class FullProgress(val total: Long, val recovered: Long, val partial: Long, val failed: Long, val reused: Long)
 }
+
+internal data class GccBundledFullExportTarget(val language: String, val compilerSpec: String)

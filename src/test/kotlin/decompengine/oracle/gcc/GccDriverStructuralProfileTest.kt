@@ -1,6 +1,9 @@
 package decompengine.oracle.gcc
 
 import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.OracleArtifacts
+import decompengine.project.RecoveredFunction
+import decompengine.project.RecoveredProgramModel
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
@@ -9,7 +12,9 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 class GccDriverStructuralProfileTest {
     @Test
@@ -63,5 +68,102 @@ class GccDriverStructuralProfileTest {
         } finally {
             Files.walk(parent).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::delete) }
         }
+    }
+
+    @Test
+    fun `captured full export binds binary exporter loader target image base and executable addresses`() {
+        val root = Path.of("oracle/gcc/16.2.0").toAbsolutePath().normalize()
+        val profile = GccDriverStructuralInputsV1.load(root)
+        val modelBytes = modelBytes(profile, 0x403000UL)
+        val snapshot = fullSnapshot(profile, modelBytes)
+
+        val binding = profile.bindFullExport(snapshot)
+        val document = OracleJson.parseCanonical(binding.canonicalBytes).jsonObject
+
+        assertEquals("gcc-driver-structural-full-export-binding-v1", document.getValue("provider").jsonPrimitive.content)
+        assertEquals(1, document.getValue("schemaVersion").jsonPrimitive.int)
+        assertEquals(profile.artifactManifestSha256, document.getValue("artifactManifestSha256").jsonPrimitive.content)
+        val target = document.getValue("targetDescriptor").jsonObject
+        assertEquals("x86_64-sysv-amd64-v1", target.getValue("id").jsonPrimitive.content)
+        assertEquals("x86:LE:64:default", target.getValue("ghidraLanguage").jsonPrimitive.content)
+        assertEquals("gcc", target.getValue("ghidraCompilerSpec").jsonPrimitive.content)
+        assertEquals("0x400000", target.getValue("imageBase").jsonPrimitive.content)
+        assertEquals(snapshot.outputTreeSha256, document.getValue("outputTreeSha256").jsonPrimitive.content)
+        assertEquals(64, binding.sha256.length)
+    }
+
+    @Test
+    fun `full export binding rejects binary-only JSON target and loader substitutions`() {
+        val root = Path.of("oracle/gcc/16.2.0").toAbsolutePath().normalize()
+        val profile = GccDriverStructuralInputsV1.load(root)
+        val canonical = modelBytes(profile, 0x403000UL)
+
+        assertFailsWith<GccDriverStructuralProfileException> {
+            profile.bindFullExport(fullSnapshot(profile, "{\"inputSha256\":\"${profile.strippedBinary.sha256}\"}".toByteArray()))
+        }
+        assertFailsWith<GccDriverStructuralProfileException> {
+            profile.bindFullExport(fullSnapshot(profile, modelBytes(profile, 0x400000UL)))
+        }
+        assertFailsWith<GccDriverStructuralProfileException> {
+            profile.bindFullExport(fullSnapshot(profile, canonical, language = "x86:LE:64:default:attacker"))
+        }
+        assertFailsWith<GccDriverStructuralProfileException> {
+            profile.bindFullExport(fullSnapshot(profile, canonical, compilerSpec = "attacker"))
+        }
+        assertFailsWith<GccDriverStructuralProfileException> {
+            profile.bindFullExport(fullSnapshot(profile, canonical, inputSha256 = "f".repeat(64)))
+        }
+    }
+
+    private fun modelBytes(profile: GccDriverStructuralInputsV1, address: ULong): ByteArray =
+        RecoveredProgramModel(
+            inputSha256 = profile.strippedBinary.sha256,
+            functions = listOf(
+                RecoveredFunction(
+                    id = "fn_${address.toString(16).padStart(16, '0')}",
+                    name = "driver_function",
+                    address = address,
+                    prototype = "void driver_function(void)",
+                ),
+            ),
+        ).toJson().toByteArray()
+
+    private fun fullSnapshot(
+        profile: GccDriverStructuralInputsV1,
+        modelBytes: ByteArray,
+        inputSha256: String = profile.strippedBinary.sha256,
+        language: String = profile.targetAbi.ghidraLanguage,
+        compilerSpec: String = profile.targetAbi.ghidraCompilerSpec,
+    ): GccBundledFullExportSnapshot {
+        val runtime = GccRetainedCompilerEngineProfile.open(profile.root.resolve("compiler-engines.json")).use {
+            it.suite.analysis
+        }
+        val exporterBytes = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java"))
+            .use { it.readBytes() }
+        val modelSha = OracleArtifacts.sha256(modelBytes)
+        return GccBundledFullExportSnapshot(
+            inputSha256 = inputSha256,
+            inputBytes = profile.strippedBinary.bytes,
+            exporterSha256 = runtime.exporterSha256,
+            exporterBytes = exporterBytes.size.toLong(),
+            analysisToolSha256 = runtime.ghidraArchive.sha256,
+            analysisToolBytes = runtime.ghidraArchive.bytes,
+            language = language,
+            compilerSpec = compilerSpec,
+            stateSha256 = OracleArtifacts.sha256("state".toByteArray()),
+            progressSha256 = OracleArtifacts.sha256("progress".toByteArray()),
+            programModelSha256 = modelSha,
+            programModelBytes = modelBytes.size.toLong(),
+            functionCount = 1,
+            recovered = 1,
+            partial = 0,
+            failed = 0,
+            reused = 0,
+            outputTreeSha256 = OracleArtifacts.sha256("tree".toByteArray()),
+            outputFileCount = 4,
+            capturedBytes = modelBytes.size.toLong() + 2,
+            programModel = modelBytes,
+            sidecarManifest = OracleJson.canonicalBytes(JsonObject(emptyMap())),
+        )
     }
 }
