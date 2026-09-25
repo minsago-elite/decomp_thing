@@ -1,12 +1,13 @@
 # Local behavior records and archival revision attribution
 
-`BehaviorComparator` writes schema-5 records with provider
-`local-revision-bound-behavior-v5`. The decoder also accepts historical schema-1
+`BehaviorComparator` writes schema-6 records with provider
+`local-revision-bound-behavior-v6`. The decoder also accepts historical schema-1
 records, which do not commit file inputs, schema-2 records, whose corpus digest
 includes host file locators, schema-3 records, which retain portable corpus identities
 but lack independent completion evidence, and schema-4 records, which include that
-completion evidence but use the original executable paths. Historical schemas remain
-readable, but archival audit keeps records without independent completion unresolved.
+completion evidence but use the original executable paths, and schema-5 records, which
+stage the executables but retain host runtime roots. Historical schemas remain readable,
+but archival audit keeps records without independent completion unresolved.
 An archival comparison supplies an explicit
 `BehaviorProjectContext(projectDir, profile)`. Comparisons without a project
 context retain their observations, but cannot validate an archival revision.
@@ -59,7 +60,7 @@ independently apply their expected-corpus policy.
 
 `ArchivalProjectAuditor.audit(..., requiredCorpusSha256 = setOf(expectedDigest))`
 applies that policy independently to current revision-bound reports. Every selected
-digest must have a schema-4 or schema-5 report; unrelated corpora and historical schemas cannot
+digest must have a schema-4, schema-5 or schema-6 report; unrelated corpora and historical schemas cannot
 satisfy the selection. Missing corpora appear as `missing-corpus:<digest>` problems,
 and unrelated reports remain visible as problems rather than disappearing. The
 audit records sorted `requiredCorpusSha256` and `observedPortableCorpusSha256`
@@ -120,10 +121,22 @@ deadline before launch, bounds capture to 4 KiB, and removes the channel on exit
 The record retains the status bytes, channel locator, and exact launcher argv in
 addition to the logical sandbox request. Validation reconstructs both commands and
 requires a complete launch/terminal pair agreeing with the wrapper exit. Schema 5
-adds a per-comparison copy of each executable to that record, and verifies the copy
-identity throughout the execution sequence. The record states that runtime-library
-closure remains unqualified; the sandbox still exposes host `/usr`, `/lib` and
-`/lib64` trees and does not retain an immutable copy of their loaded libraries.
+adds a per-comparison copy of each executable to that record. Schema 6 also parses
+bounded ELF program/dynamic tables, rejects RPATH/RUNPATH and deferred-load directives,
+resolves each direct dependency with the identified `ldconfig -p` inventory, walks
+dependencies recursively, and stages each selected shared object and ELF interpreter.
+The sandbox receives only those staged objects at their interpreter or `/runtime/lib`
+paths, uses `LD_LIBRARY_PATH=/runtime/lib`, clears inherited variables, and has no
+host `/usr`, `/lib` or `/lib64` runtime roots. A load request for a library outside the
+staged set cannot fall back to those host directories. The record commits resolver,
+cache, listing, source and staged-copy identities, and the exact Bubblewrap mounts.
+
+Staged files are checked before and after every execution and before publication.
+Their containing directory remains owned by the comparison process, so same-user
+replace-and-restore races are not excluded by a kernel-enforced identity. Explicit
+case file inputs still use read-only host-path mounts and have the same race limit.
+The resolver and host control tools are not executed inside this runtime root, and
+kernel-provided objects such as the vDSO are outside the file closure.
 
 Genuine application exits 0–127, including 124, can qualify locally. Missing,
 truncated or contradictory completion evidence and deadline/capture failures abort
@@ -131,9 +144,9 @@ publication and preserve prior reports. Signal-style statuses 128 and above rema
 unqualified because Bubblewrap does not retain raw wait status. Historical decoding
 retains its conservative 0–123 status restriction; archival audit marks all older
 schemas unresolved because they lack the completion channel. Schema 4's completion
-record still refers to the original executable paths; schema 5 binds staged copies.
-Neither version establishes production containment or immutable runtime-library
-identity.
+record still refers to the original executable paths; schema 5 binds staged executable
+copies; schema 6 binds the staged ELF closure as well. The local checks do not exclude
+same-user mutation races or establish production containment.
 
 The record limits are 1,024 cases, 8 MiB of stdin, 1 MiB of argument bytes and
 16 MiB of comparison output. Captured input files are limited to 64 MiB each,
@@ -249,14 +262,15 @@ the consumer audit recomputes coverage from behavior records, reports the missin
 corpus, and refuses repackaging under the unsupported selection. Archived audit
 claims do not supply the consumer's policy or replace current revision checks.
 
-These records bind locally staged executable bytes to the generated launch commands.
-They do not provide an execve-bound kernel capability or an immutable runtime-library
-closure across execution, and do not prove exclusion of same-user replace-and-restore races.
-The C/Make build record is locally checked evidence, not an independent build
-attestation. Implicit file-input trees and externally fixed benchmark-corpus admission
-remain unimplemented. File mounts still use host paths, so retained contents and local
-pre/post checks do not prove immutable mounted bytes throughout execution. Production execution, recovery and release
-authority remain governed by the oracle and repair boundaries.
+These records bind locally staged executable bytes and the bounded `DT_NEEDED` runtime
+namespace to generated launch commands. They do not provide an execve-bound kernel
+capability, exclude same-user replace-and-restore races, or separately observe which
+shared objects the loader mapped. The C/Make build record is locally checked evidence,
+not an independent build attestation. Implicit file-input trees and externally fixed
+benchmark-corpus admission remain unimplemented. File mounts still use host paths, so
+retained contents and local pre/post checks do not prove immutable mounted bytes
+throughout execution. Production execution, recovery and release authority remain
+governed by the oracle and repair boundaries.
 
 Consequently this checkpoint advances #36/#37 without completing their execution
 provenance dependency or the A5 milestone.

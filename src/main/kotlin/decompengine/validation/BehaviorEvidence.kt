@@ -42,6 +42,18 @@ internal class BehaviorEvidenceCapture {
         return file(path, includeInBounds).also { require(it.count("bytes") > 0L) { "behavior executable is empty: $path" } }
     }
 
+    fun bytes(path: Path, expected: JsonObject): ByteArray {
+        require(file(path) == expected) { "behavior runtime input changed before it could be read: $path" }
+        val absolute = path.toAbsolutePath().normalize()
+        val snapshot = readStableRegularFile(absolute.parent, absolute.fileName.toString(), MAXIMUM_FILE_BYTES)
+        val observedFile = observed[absolute]
+        require(observedFile != null && snapshot.identity == observedFile.identity &&
+            snapshot.sha256 == expected.string("sha256") && snapshot.bytes.size.toLong() == expected.count("bytes")) {
+            "behavior runtime input changed while it was read: $path"
+        }
+        return snapshot.bytes
+    }
+
     /** Copy the already identified executable bytes into a private, read-only execution snapshot. */
     fun retainExecutable(source: Path, destination: Path, expected: JsonObject): JsonObject {
         require(file(source) == expected) { "behavior executable changed before it could be retained: $source" }
@@ -67,6 +79,24 @@ internal class BehaviorEvidenceCapture {
         // without consuming the evidence-input inventory a second time.
         val retained = executable(destination, includeInBounds = false)
         require(retained == expected) { "retained behavior executable differs from its identified source: $source" }
+        requireCurrent()
+        return retained
+    }
+
+    fun retainRuntimeFile(source: Path, destination: Path, expected: JsonObject): JsonObject {
+        val snapshot = bytes(source, expected)
+        Files.write(destination, snapshot, java.nio.file.StandardOpenOption.CREATE_NEW,
+            java.nio.file.StandardOpenOption.WRITE)
+        Files.setPosixFilePermissions(destination, setOf(
+            java.nio.file.attribute.PosixFilePermission.OWNER_READ,
+            java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE,
+            java.nio.file.attribute.PosixFilePermission.GROUP_READ,
+            java.nio.file.attribute.PosixFilePermission.GROUP_EXECUTE,
+            java.nio.file.attribute.PosixFilePermission.OTHERS_READ,
+            java.nio.file.attribute.PosixFilePermission.OTHERS_EXECUTE,
+        ))
+        val retained = executable(destination, includeInBounds = false)
+        require(retained == expected) { "retained behavior runtime file differs from its source: $source" }
         requireCurrent()
         return retained
     }
@@ -198,6 +228,7 @@ internal class BehaviorEvidenceCapture {
 internal object BehaviorEvidence {
     const val MAXIMUM_REPORT_BYTES = 64L * 1024 * 1024
     private const val PROVIDER = "local-revision-bound-behavior-v1"
+    private data class RuntimeClosureValidation(val mounts: List<BehaviorSandboxRuntimeMount>)
 
     fun inputCorpusSha256(inputs: List<ProcessInput>, fileInputs: Map<String, JsonArray>): String {
         val cases = JsonArray(inputs.map { input -> JsonObject(mapOf(
@@ -224,8 +255,8 @@ internal object BehaviorEvidence {
         })
         val body = JsonObject(legacy + mapOf(
             "cases" to cases,
-            "schemaVersion" to JsonPrimitive(5),
-            "provider" to JsonPrimitive("local-revision-bound-behavior-v5"),
+            "schemaVersion" to JsonPrimitive(6),
+            "provider" to JsonPrimitive("local-revision-bound-behavior-v6"),
             "originalIdentity" to original,
             "rebuiltIdentity" to rebuilt,
             "executionSnapshots" to executionSnapshots,
@@ -256,20 +287,114 @@ internal object BehaviorEvidence {
         capture.requireCurrent()
     }
 
+    private fun validateRuntimeClosure(record: JsonObject): RuntimeClosureValidation {
+        require(record.keys == setOf(
+            "schemaVersion", "provider", "elfMachine", "elfClass", "elfOsAbi", "elfAbiFlags", "byteOrder", "resolver", "loaderCache",
+            "resolverListingBytes", "resolverListingSha256", "interpreters", "libraries", "visibleSearchPath",
+            "hostRuntimeRootsVisible", "closureSha256",
+        )) { "behavior runtime closure fields are not closed" }
+        require(record.integer("schemaVersion") == 1 && record.string("provider") == "bounded-elf-needed-runtime-v1") {
+            "unsupported behavior runtime closure"
+        }
+        require(record.integer("elfMachine") in 1..65535 && record.integer("elfClass") in 1..2 &&
+            record.integer("elfOsAbi") in 0..255 && record.count("elfAbiFlags") in 0L..0xffff_ffffL &&
+            record.string("byteOrder") in setOf("little", "big")) { "behavior runtime ELF identity is invalid" }
+        require(record.string("visibleSearchPath") == "/runtime/lib" && !record.boolean("hostRuntimeRootsVisible")) {
+            "behavior runtime namespace exposes an unsupported shared-library search path"
+        }
+        val resolverValue = record.getValue("resolver")
+        val cacheValue = record.getValue("loaderCache")
+        val listingBytesValue = record.getValue("resolverListingBytes")
+        val listingHashValue = record.getValue("resolverListingSha256")
+        if (resolverValue == JsonNull) {
+            require(cacheValue == JsonNull && listingBytesValue == JsonNull && listingHashValue == JsonNull) {
+                "behavior runtime resolver evidence is incomplete"
+            }
+        } else {
+            fun controlFile(value: JsonElement, name: String): Path {
+                val control = value.jsonObject
+                require(control.keys == setOf("path", "bytes", "sha256")) { "behavior $name identity is not closed" }
+                val path = absolutePath(control.string("path"))
+                require(control.count("bytes") > 0L)
+                requireHash(control.string("sha256"))
+                return path
+            }
+            controlFile(resolverValue, "runtime resolver")
+            controlFile(cacheValue, "loader cache")
+            require(listingBytesValue.jsonPrimitive.longOrNull in 1L..8L * 1024 * 1024) {
+                "behavior runtime resolver listing exceeds its bound"
+            }
+            requireHash(listingHashValue.jsonPrimitive.content)
+        }
+        val interpreterElements = record.getValue("interpreters").jsonArray
+        require(interpreterElements.size <= 2) { "behavior runtime has too many ELF interpreters" }
+        val interpreters = interpreterElements.map { element ->
+            val interpreter = element.jsonObject
+            require(interpreter.keys == setOf("guestPath", "sourcePath", "snapshotPath", "bytes", "sha256")) {
+                "behavior runtime interpreter fields are not closed"
+            }
+            val guestPath = absolutePath(interpreter.string("guestPath"))
+            require(guestPath != Path.of("/") && listOf("/tmp", "/program", "/runtime", "/inputs").none {
+                guestPath == Path.of(it) || guestPath.startsWith(Path.of(it))
+            }) { "behavior runtime interpreter conflicts with a private sandbox path" }
+            absolutePath(interpreter.string("sourcePath"))
+            val snapshot = absolutePath(interpreter.string("snapshotPath"))
+            require(interpreter.count("bytes") > 0L)
+            requireHash(interpreter.string("sha256"))
+            BehaviorSandboxRuntimeMount(snapshot, guestPath)
+        }
+        val libraryElements = record.getValue("libraries").jsonArray
+        require(libraryElements.size <= 512) { "behavior runtime has too many shared libraries" }
+        val libraryNames = mutableListOf<String>()
+        val libraries = libraryElements.map { element ->
+            val library = element.jsonObject
+            require(library.keys == setOf("name", "sourcePath", "snapshotPath", "bytes", "sha256")) {
+                "behavior runtime library fields are not closed"
+            }
+            val name = library.string("name")
+            require(name.matches(Regex("[A-Za-z0-9_.+~-]{1,255}"))) { "behavior runtime soname is invalid" }
+            libraryNames += name
+            absolutePath(library.string("sourcePath"))
+            val snapshot = absolutePath(library.string("snapshotPath"))
+            require(library.count("bytes") > 0L)
+            requireHash(library.string("sha256"))
+            BehaviorSandboxRuntimeMount(snapshot, Path.of("/runtime/lib").resolve(name))
+        }
+        require(libraryNames == libraryNames.distinct().sorted()) {
+            "behavior runtime library names are duplicated or unsorted"
+        }
+        require(interpreters.map { it.destination }.distinct().size == interpreters.size &&
+            (interpreters + libraries).map { it.destination }.distinct().size == interpreters.size + libraries.size) {
+            "behavior runtime mount destinations are duplicated"
+        }
+        if (libraries.isNotEmpty()) require(resolverValue != JsonNull) {
+            "behavior runtime dependencies have no resolver evidence"
+        }
+        require(record.string("closureSha256") == hash(JsonObject(record - "closureSha256"))) {
+            "behavior runtime closure commitment is invalid"
+        }
+        val mounts = (interpreters + libraries).sortedBy { it.destination.toString() }
+        require(mounts.map { it.source }.distinct().size == mounts.size) {
+            "behavior runtime snapshot paths are duplicated"
+        }
+        return RuntimeClosureValidation(mounts)
+    }
+
     private fun validate(root: JsonObject) {
         val schemaVersion = root.integer("schemaVersion")
         require(root.keys == setOf(
             "schemaVersion", "provider", "id", "sandbox", "networkIsolated", "originalBinary", "rebuiltBinary",
             "matches", "cases", "originalIdentity", "rebuiltIdentity", "executionPolicy", "projectRevision",
             "corpusSha256", "observationsSha256", "reportSha256",
-        ) + if (schemaVersion == 5) setOf("executionSnapshots") else emptySet()) {
+        ) + if (schemaVersion >= 5) setOf("executionSnapshots") else emptySet()) {
             "behavior report has missing or unknown fields"
         }
         require((schemaVersion == 1 && root.string("provider") == PROVIDER) ||
             (schemaVersion == 2 && root.string("provider") == "local-revision-bound-behavior-v2") ||
             (schemaVersion == 3 && root.string("provider") == "local-revision-bound-behavior-v3") ||
             (schemaVersion == 4 && root.string("provider") == "local-revision-bound-behavior-v4") ||
-            (schemaVersion == 5 && root.string("provider") == "local-revision-bound-behavior-v5")) { "unsupported behavior report" }
+            (schemaVersion == 5 && root.string("provider") == "local-revision-bound-behavior-v5") ||
+            (schemaVersion == 6 && root.string("provider") == "local-revision-bound-behavior-v6")) { "unsupported behavior report" }
         require(root.string("id").matches(Regex("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"))) { "invalid behavior report ID" }
         require(root.string("sandbox") == "bubblewrap") { "unsupported behavior sandbox request" }
         val originalPath = absolutePath(root.string("originalBinary"))
@@ -278,8 +403,10 @@ internal object BehaviorEvidence {
         identity(root.getValue("rebuiltIdentity").jsonObject)
         require(root.getValue("originalIdentity").jsonObject.count("bytes") > 0L &&
             root.getValue("rebuiltIdentity").jsonObject.count("bytes") > 0L)
-        val executionSnapshots = if (schemaVersion == 5) root.getValue("executionSnapshots").jsonObject.also { snapshots ->
-            require(snapshots.keys == setOf("original", "rebuilt")) { "behavior execution snapshots are not closed" }
+        val executionSnapshots = if (schemaVersion >= 5) root.getValue("executionSnapshots").jsonObject.also { snapshots ->
+            require(snapshots.keys == (setOf("original", "rebuilt") + if (schemaVersion >= 6) setOf("runtimeClosure") else emptySet())) {
+                "behavior execution snapshots are not closed"
+            }
             for ((name, sourceIdentity) in listOf(
                 "original" to root.getValue("originalIdentity").jsonObject,
                 "rebuilt" to root.getValue("rebuiltIdentity").jsonObject,
@@ -293,6 +420,17 @@ internal object BehaviorEvidence {
                 }
             }
         } else null
+        val runtimeClosure = if (schemaVersion >= 6) {
+            validateRuntimeClosure(requireNotNull(executionSnapshots).getValue("runtimeClosure").jsonObject)
+        } else null
+        if (runtimeClosure != null) {
+            val executableSnapshots = requireNotNull(executionSnapshots)
+                .filterKeys { it == "original" || it == "rebuilt" }
+                .values.map { absolutePath(it.jsonObject.string("path")) }
+            require(runtimeClosure.mounts.map { it.source }.none { it in executableSnapshots }) {
+                "behavior executable and runtime snapshot paths collide"
+            }
+        }
         val policy = root.getValue("executionPolicy").jsonObject
         require(policy.keys == setOf("assurance", "environment", "workingDirectory", "networkIsolationRequested",
             "timeoutMillis", "maximumStdoutBytes", "maximumStderrBytes", "maximumAggregateBytes",
@@ -300,11 +438,17 @@ internal object BehaviorEvidence {
             if (schemaVersion >= 4) setOf("completionLauncher", "maximumCompletionBytes") else emptySet<String>()) {
             "behavior execution policy is not closed"
         }
-        val expectedAssurance = if (schemaVersion == 5) {
-            "retained-executable-identity-runtime-closure-unqualified-not-production-authority"
-        } else "local-path-stability-checks-not-production-authority"
+        val expectedAssurance = when (schemaVersion) {
+            5 -> "retained-executable-identity-runtime-closure-unqualified-not-production-authority"
+            6 -> "staged-elf-needed-closure-not-production-authority"
+            else -> "local-path-stability-checks-not-production-authority"
+        }
+        val expectedEnvironment = if (schemaVersion >= 6) JsonObject(mapOf(
+            "PATH" to JsonPrimitive("/nonexistent"),
+            "LD_LIBRARY_PATH" to JsonPrimitive("/runtime/lib"),
+        )) else JsonObject(mapOf("PATH" to JsonPrimitive("/usr/bin")))
         require(policy.string("assurance") == expectedAssurance &&
-            policy.getValue("environment") == JsonObject(mapOf("PATH" to JsonPrimitive("/usr/bin"))) &&
+            policy.getValue("environment") == expectedEnvironment &&
             policy.string("workingDirectory") == "/tmp"
         ) { "behavior execution policy is unsupported" }
         listOf("timeoutMillis", "maximumStdoutBytes", "maximumStderrBytes", "maximumAggregateBytes", "maximumComparisonOutputBytes").forEach {
@@ -366,7 +510,7 @@ internal object BehaviorEvidence {
             require(stdinBytes <= 8L * 1024 * 1024 && argumentBytes <= 1024L * 1024)
             val original = output(case.getValue("original").jsonObject, network, schemaVersion)
             val rebuilt = output(case.getValue("rebuilt").jsonObject, network, schemaVersion)
-            val executionPaths = if (schemaVersion == 5) {
+            val executionPaths = if (schemaVersion >= 5) {
                 val snapshots = requireNotNull(executionSnapshots)
                 listOf(
                     absolutePath(snapshots.getValue("original").jsonObject.string("path")),
@@ -380,7 +524,8 @@ internal object BehaviorEvidence {
                     stdoutBytes + stderrBytes <= policy.count("maximumAggregateBytes")) { "behavior output exceeds its recorded policy" }
                 observedOutputBytes += stdoutBytes + stderrBytes
                 require(observedOutputBytes <= policy.count("maximumComparisonOutputBytes"))
-                val expectedCommand = behaviorSandboxCommand(path, arguments, policy.count("timeoutMillis"), bubblewrap, timeout, network, inputFiles.toMap())
+                val expectedCommand = behaviorSandboxCommand(path, arguments, policy.count("timeoutMillis"), bubblewrap, timeout,
+                    network, inputFiles.toMap(), runtimeClosure?.mounts)
                 // Historical records used integer-second native timeouts; the JVM watchdog
                 // still enforced the recorded millisecond limit. Preserve their exact recipe.
                 val historicalCommand = expectedCommand.toMutableList().apply {
@@ -502,6 +647,7 @@ internal fun behaviorSandboxCommand(
     timeout: Path,
     networkRequested: Boolean,
     files: Map<String, Path> = emptyMap(),
+    runtimeMounts: List<BehaviorSandboxRuntimeMount>? = null,
 ): List<String> = buildList {
     require(timeoutMillis > 0) { "behavior timeout must be positive" }
     requireBehaviorFileNames(files.keys)
@@ -511,10 +657,30 @@ internal fun behaviorSandboxCommand(
     addAll(listOf(timeout.toAbsolutePath().normalize().toString(), duration,
         bubblewrap.toAbsolutePath().normalize().toString()))
     if (networkRequested) add("--unshare-net")
-    addAll(listOf("--unshare-pid", "--new-session", "--die-with-parent",
-        "--ro-bind", "/usr", "/usr", "--ro-bind", "/lib", "/lib", "--ro-bind", "/lib64", "/lib64",
-        "--dir", "/tmp", "--dir", "/program", "--ro-bind", executable.toAbsolutePath().normalize().toString(),
-        "/program/executable"))
+    addAll(listOf("--unshare-pid", "--new-session", "--die-with-parent"))
+    if (runtimeMounts == null) {
+        addAll(listOf("--ro-bind", "/usr", "/usr", "--ro-bind", "/lib", "/lib", "--ro-bind", "/lib64", "/lib64"))
+    } else {
+        require(runtimeMounts.map { it.destination }.distinct().size == runtimeMounts.size) {
+            "behavior runtime mount destinations are duplicated"
+        }
+        require(runtimeMounts.all { it.source.isAbsolute && it.source.normalize() == it.source &&
+            it.destination.isAbsolute && it.destination.normalize() == it.destination }) {
+            "behavior runtime mount paths must be absolute and normalized"
+        }
+        val directories = (runtimeMounts.map { it.destination.parent } + Path.of("/runtime/lib"))
+            .flatMap { destination ->
+                generateSequence(destination) { parent -> parent.parent?.takeIf { it != parent && it != Path.of("/") } }.toList()
+            }
+            .toSet()
+            .sortedWith(compareBy<Path> { it.nameCount }.thenBy(Path::toString))
+        directories.forEach { directory -> addAll(listOf("--dir", directory.toString())) }
+        runtimeMounts.sortedBy { it.destination.toString() }.forEach { mount ->
+            addAll(listOf("--ro-bind", mount.source.toString(), mount.destination.toString()))
+        }
+    }
+    addAll(listOf("--dir", "/tmp", "--dir", "/program", "--ro-bind",
+        executable.toAbsolutePath().normalize().toString(), "/program/executable"))
     if (files.isNotEmpty()) {
         addAll(listOf("--dir", "/inputs"))
         val parents = files.keys.flatMap { name ->
@@ -525,6 +691,9 @@ internal fun behaviorSandboxCommand(
         files.toSortedMap().forEach { (name, path) ->
             addAll(listOf("--ro-bind", path.toAbsolutePath().normalize().toString(), "/inputs/$name"))
         }
+    }
+    if (runtimeMounts != null) {
+        addAll(listOf("--clearenv", "--setenv", "PATH", "/nonexistent", "--setenv", "LD_LIBRARY_PATH", "/runtime/lib"))
     }
     addAll(listOf("--chdir", "/tmp", "/program/executable"))
     addAll(arguments)
