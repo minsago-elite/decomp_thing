@@ -196,6 +196,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
     private fun executeExport(command: List<String>, workDir: Path, reports: Path, deadline: AnalysisDeadline): Int {
         val remainingNanosAtLaunch = deadline.remainingNanos("before worker launch")
         val process = ProcessBuilder(command).directory(workDir.toFile()).start()
+        val processTree = ExportProcessTree(process, limits.terminationGrace)
         val peakResidentBytes = AtomicLong(0)
         val memoryExceeded = AtomicBoolean(false)
         val diagnosticsExceeded = AtomicBoolean(false)
@@ -210,7 +211,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                     peakResidentBytes.accumulateAndGet(observed, ::maxOf)
                     if (observed > limits.maximumResidentBytes) {
                         memoryExceeded.set(true)
-                        terminateProcessTree(process, limits.terminationGrace)
+                        processTree.terminate()
                         break
                     }
                     Thread.sleep(25)
@@ -220,20 +221,27 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                 val bytes = stream.readNBytes(limits.maximumDiagnosticBytesPerStream + 1)
                 if (bytes.size > limits.maximumDiagnosticBytesPerStream) {
                     diagnosticsExceeded.set(true)
-                    terminateProcessTree(process, limits.terminationGrace)
+                    processTree.terminate()
                     bytes.copyOf(limits.maximumDiagnosticBytesPerStream)
                 } else bytes
             }.also(tasks::add)
             val stdout = capture(process.inputStream)
             val stderr = capture(process.errorStream)
             val completed = process.waitFor(deadline.remainingNanosOrZero(), TimeUnit.NANOSECONDS)
-            if (!completed) terminateProcessTree(process, limits.terminationGrace)
-            // Timeout diagnostics retain their separate five-second drain allowance.
-            val drainDeadline = if (completed) deadline else AnalysisDeadline.start(
-                TimeUnit.SECONDS.toNanos(5), "Ghidra diagnostic drain",
-            )
-            fun <T> await(task: CompletableFuture<T>): T =
-                task.get(drainDeadline.remainingNanosOrZero(), TimeUnit.NANOSECONDS)
+            if (!completed) processTree.terminate()
+            fun <T> await(task: CompletableFuture<T>): T {
+                while (true) {
+                    val remainingNanos = processTree.remainingCleanupNanosOrNull()
+                        ?: deadline.remainingNanosOrZero()
+                    val pollNanos = minOf(remainingNanos, TimeUnit.MILLISECONDS.toNanos(100))
+                    try {
+                        return task.get(pollNanos, TimeUnit.NANOSECONDS)
+                    } catch (timeout: java.util.concurrent.TimeoutException) {
+                        if (task.isDone) return task.get()
+                        if (remainingNanos == 0L) throw timeout
+                    }
+                }
+            }
             val stdoutBytes = await(stdout)
             val stderrBytes = await(stderr)
             await(memoryMonitor)
@@ -292,7 +300,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                     if (previous == null) cleanupFailure = failure else previous.addSuppressed(failure)
                 }
             }
-            cleanup { terminateProcessTree(process, limits.terminationGrace) }
+            cleanup { processTree.terminate() }
             tasks.forEach { task -> cleanup { task.cancel(true) } }
             cleanup { process.inputStream.close() }
             cleanup { process.errorStream.close() }
@@ -347,20 +355,6 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         }
     }
 
-    private fun terminateProcessTree(process: Process, grace: Duration) {
-        val handles = (process.toHandle().descendants().toList().asReversed() + process.toHandle()).distinct()
-        handles.forEach { if (it.isAlive) it.destroy() }
-        val deadline = System.nanoTime() + grace.toNanos()
-        handles.forEach { handle ->
-            val remaining = deadline - System.nanoTime()
-            if (handle.isAlive && remaining > 0) {
-                runCatching { handle.onExit().get(remaining, TimeUnit.NANOSECONDS) }
-            }
-        }
-        handles.forEach { if (it.isAlive) it.destroyForcibly() }
-        handles.forEach { handle -> if (handle.isAlive) runCatching { handle.onExit().get(5, TimeUnit.SECONDS) } }
-    }
-
     companion object {
         internal const val UNAUTHENTICATED_ANALYSIS_TOOL_SHA256 =
             "0000000000000000000000000000000000000000000000000000000000000000"
@@ -372,6 +366,52 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             hostSafetyLimits.requireAllows(profile.budgets)
             return GhidraHeadlessProgramModelAnalyzer(GhidraProgramModelExportLimits.from(profile))
         }
+    }
+}
+
+/** One invocation-wide cleanup window shared by every process-tree stop and diagnostic drain. */
+private class ExportProcessTree(
+    private val process: Process,
+    private val gracefulTermination: Duration,
+) {
+    private var terminationStartedNanos: Long? = null
+
+    @Synchronized
+    fun terminate() {
+        val started = terminationStartedNanos ?: System.nanoTime().also { terminationStartedNanos = it }
+        val handles = (process.toHandle().descendants().toList().asReversed() + process.toHandle()).distinct()
+        handles.forEach { if (it.isAlive) it.destroy() }
+        handles.forEach { handle ->
+            val remaining = remainingNanos(started, gracefulTermination.toNanos())
+            if (handle.isAlive && remaining > 0) {
+                runCatching { handle.onExit().get(remaining, TimeUnit.NANOSECONDS) }
+            }
+        }
+        handles.forEach { if (it.isAlive) it.destroyForcibly() }
+        handles.forEach { handle ->
+            val remaining = remainingCleanupNanos(started)
+            if (handle.isAlive && remaining > 0) {
+                runCatching { handle.onExit().get(remaining, TimeUnit.NANOSECONDS) }
+            }
+        }
+    }
+
+    @Synchronized
+    fun remainingCleanupNanosOrNull(): Long? {
+        val started = terminationStartedNanos ?: return null
+        return remainingNanos(started, gracefulTermination.toNanos() + FORCE_EXIT_WAIT_NANOS)
+    }
+
+    private fun remainingCleanupNanos(started: Long): Long =
+        remainingNanos(started, gracefulTermination.toNanos() + FORCE_EXIT_WAIT_NANOS)
+
+    private fun remainingNanos(started: Long, allowance: Long): Long {
+        val elapsed = System.nanoTime() - started
+        return if (elapsed < 0 || elapsed >= allowance) 0L else allowance - elapsed
+    }
+
+    private companion object {
+        val FORCE_EXIT_WAIT_NANOS: Long = TimeUnit.SECONDS.toNanos(5)
     }
 }
 
