@@ -254,7 +254,7 @@ class GccCompilerEnginePlanningTest {
             sourceRevision = "78d4ac73dd391005b895a6148cd9831e28e1208b",
             analysis = GccCompilerEngineAnalysisToolchain(
                 exporterId = "decompengine-ghidra-program-model",
-                exporterVersion = 10,
+                exporterVersion = 11,
                 exporterSha256 = SHA_E,
                 exporterMode = "planning",
                 ghidraVersion = "12.1.3",

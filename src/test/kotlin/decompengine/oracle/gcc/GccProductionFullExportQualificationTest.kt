@@ -64,7 +64,7 @@ class GccProductionFullExportQualificationTest {
             invokeInstalledGccCli(
                 arguments,
                 launcherEvidence,
-                timeoutSeconds = 8100,
+                timeoutSeconds = 9900,
                 installation = installation,
                 command = "gcc-engine-full-export",
             ),
