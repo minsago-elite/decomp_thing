@@ -2374,6 +2374,36 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `repair and behavior reports share one audit byte budget`() {
+        val fixture = releaseRepairFixture(undispatchedFallback = true)
+        val manifest = SourceTreeManifestReader.read(fixture.project, GeneratedCMakeReconstructionProfile.descriptor)
+        val manifestPaths = manifest.files.mapTo(hashSetOf()) { it.path }
+        val manifestBytes = Files.size(fixture.project.resolve("source_tree_manifest.json"))
+        val manifestInputBytes = manifestBytes + manifest.files.sumOf { Files.size(fixture.project.resolve(it.path)) }
+        val extraFiles = Files.walk(fixture.project.resolve("reports")).use { stream ->
+            stream.filter { Files.isRegularFile(it, LinkOption.NOFOLLOW_LINKS) }
+                .filter { path ->
+                    val relative = fixture.project.relativize(path).toString().replace('\\', '/')
+                    relative !in manifestPaths && (relative.startsWith("reports/repair-revisions/") ||
+                        relative == "reports/repair_history.json" || relative.endsWith(".validation.json"))
+                }.toList()
+        }
+        assertTrue(extraFiles.isNotEmpty())
+        val extraBytes = extraFiles.sumOf(Files::size)
+        val largestInput = maxOf(manifestBytes,
+            manifest.files.maxOf { Files.size(fixture.project.resolve(it.path)) }, extraFiles.maxOf(Files::size))
+        fixture.project.resolve("reports/extra.behavior.json").writeBytes("extra behavior".toByteArray())
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ArchivalProjectAuditor.audit(fixture.project, limits = ArchivalBundleLimits(
+                maximumFileBytes = largestInput,
+                maximumTotalBytes = manifestInputBytes + extraBytes,
+            ))
+        }
+        assertTrue(failure.message.orEmpty().contains("remaining aggregate bound"))
+    }
+
+    @Test
     fun `repair audit rejects a historical checkpoint changed to a dispatched rejection`() {
         val fixture = releaseRepairFixture(undispatchedFallback = true)
         val profile = GeneratedCMakeReconstructionProfile.descriptor
