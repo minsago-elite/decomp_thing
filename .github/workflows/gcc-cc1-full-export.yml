@@ -80,7 +80,8 @@ jobs:
             --file oracle/gcc/16.2.0/build-toolchain.Dockerfile \
             oracle/gcc/16.2.0
           observed="$(docker image inspect --format '{{.Id}}' decomp-gcc-oracle-toolchain:16.2.0)"
-          test "$observed" = sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248
+          echo 'recorded origin image: sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248'
+          echo "reproduced image: $observed"
           install -d -m 0700 "$RUNNER_TEMP/gcc-cc1-toolchain"
           (umask 077; docker image inspect "$observed" > "$RUNNER_TEMP/gcc-cc1-toolchain/inspect.json")
           python3 scripts/verify-gcc-toolchain-reproduction.py \
