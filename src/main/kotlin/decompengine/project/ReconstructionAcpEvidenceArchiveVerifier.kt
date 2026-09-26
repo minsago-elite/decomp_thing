@@ -161,6 +161,18 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                     return@forEach
                 }
 
+                if (repairedSource == null && source.acceptedImplementation == false &&
+                    !checkpoint.accepted && source.generator.startsWith("unresolved:agent:")
+                ) {
+                    require(checkpoint.hasNoExecutionEvidence()) {
+                        "unresolved agent fallback retains ACP execution evidence: $moduleId"
+                    }
+                    require(source.entityIds.all(manifest.unresolvedImplementationIds::contains)) {
+                        "unresolved agent fallback has an entity outside the unresolved population: $moduleId"
+                    }
+                    return@forEach
+                }
+
                 require(source.acceptedImplementation == true && checkpoint.accepted) {
                     "agent-generated module is not accepted at the archive release gate: $moduleId"
                 }

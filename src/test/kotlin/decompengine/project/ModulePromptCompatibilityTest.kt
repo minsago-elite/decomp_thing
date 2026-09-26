@@ -114,7 +114,7 @@ class ModulePromptCompatibilityTest {
     }
 
     @Test
-    fun `workflow records profile budget and identity for undispatched modules`() {
+    fun `workflow archives undispatched agent modules as unresolved for both profiles`() {
         for (base in ReconstructionProfiles.builtIn) {
             val profile = withBudget(base, 1)
             val project = createTempDirectory("profile-module-budget-")
@@ -138,6 +138,9 @@ class ModulePromptCompatibilityTest {
             assertTrue(moduleEvidence.getValue("promptCharacters").jsonPrimitive.content.toInt() > 1)
             assertEquals("1", moduleEvidence.getValue("promptBudgetCharacters").jsonPrimitive.content)
             assertEquals("unresolved", moduleEvidence.getValue("outcome").jsonPrimitive.content)
+            assertEquals(0, ReconstructionAdapters.resolve(profile).build(project, profile).returnCode)
+            val bundle = ArchivalPackager.create(project, project.parent.resolve("undispatched.zip"), profile = profile)
+            assertEquals(listOf("fn_alpha"), requireNotNull(bundle.audit).unresolvedEntityIds)
         }
     }
 
