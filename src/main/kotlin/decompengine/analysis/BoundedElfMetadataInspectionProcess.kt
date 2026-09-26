@@ -58,8 +58,8 @@ internal class BoundedElfMetadataInspectionProcess(
         val maximumNanos = TimeUnit.MILLISECONDS.toNanos(minOf(maximumWallMillis, limits.maximumWallClockMillis))
         checkpoint("before starting bounded ELF metadata worker")
         val command = commandFactory(path, limits)
-        require(command.isNotEmpty() && command.all { it.isNotEmpty() && it.none(::isControl) }) {
-            "bounded ELF metadata worker command is empty or ambiguous"
+        require(command.isNotEmpty() && command.all(String::isNotEmpty)) {
+            "bounded ELF metadata worker command is empty"
         }
         checkpoint("before launching bounded ELF metadata worker")
         val launch = try {
@@ -113,8 +113,13 @@ internal class BoundedElfMetadataInspectionProcess(
                     "bounded ELF metadata worker exited $exitCode" + if (text.isBlank()) "" else ": $text",
                 )
             }
-            val inspection = MetadataInspectionProtocol.decode(result, limits)
+            val decodeCheckpoint: (String) -> Unit = { stage ->
+                checkpoint(stage)
+                remainingNanos(started, maximumNanos, stage)
+            }
+            val inspection = MetadataInspectionProtocol.decode(result, limits, decodeCheckpoint)
             checkpoint("after bounded ELF metadata result validation")
+            remainingNanos(started, maximumNanos, "after worker result validation")
             return inspection
         } catch (failure: Throwable) {
             primaryFailure = failure
@@ -310,14 +315,19 @@ private object MetadataInspectionProtocol {
         }
     }
 
-    fun decode(bytes: ByteArray, limits: BoundedElfMetadataLimits): BoundedElfMetadataInspection {
+    fun decode(
+        bytes: ByteArray,
+        limits: BoundedElfMetadataLimits,
+        checkpoint: (String) -> Unit,
+    ): BoundedElfMetadataInspection {
         try {
+            checkpoint("before decoding bounded ELF metadata worker result")
             return DataInputStream(BufferedInputStream(ByteArrayInputStream(bytes))).use { input ->
                 require(input.readInt() == MAGIC && input.readInt() == VERSION) {
                     "bounded ELF metadata worker returned an unsupported protocol"
                 }
                 when (input.readUnsignedByte()) {
-                    SUCCESS -> readInspection(input, limits).also {
+                    SUCCESS -> readInspection(input, limits, checkpoint).also {
                         require(input.available() == 0) { "bounded ELF metadata worker returned trailing data" }
                     }
                     FAILURE -> {
@@ -377,7 +387,12 @@ private object MetadataInspectionProtocol {
         writeSymbols(output, inspection.symbolInventory.other)
     }
 
-    private fun readInspection(input: DataInputStream, limits: BoundedElfMetadataLimits): BoundedElfMetadataInspection {
+    private fun readInspection(
+        input: DataInputStream,
+        limits: BoundedElfMetadataLimits,
+        checkpoint: (String) -> Unit,
+    ): BoundedElfMetadataInspection {
+        checkpoint("before decoding bounded ELF metadata inventory")
         val inputBytes = input.readLong()
         val inputSha256 = input.readUTF()
         val metadata = ElfMetadata(
@@ -403,11 +418,16 @@ private object MetadataInspectionProtocol {
             metadataReadBytes = input.readLong(),
             workUnits = input.readLong(),
         )
-        val functions = readSymbols(input, limits.maximumRetainedSymbols)
-        val objects = readSymbols(input, limits.maximumRetainedSymbols - functions.size)
-        val other = readSymbols(input, limits.maximumRetainedSymbols - functions.size - objects.size)
+        val functions = readSymbols(input, limits.maximumRetainedSymbols, "function", checkpoint)
+        val objects = readSymbols(input, limits.maximumRetainedSymbols - functions.size, "object", checkpoint)
+        val other = readSymbols(
+            input,
+            limits.maximumRetainedSymbols - functions.size - objects.size,
+            "other",
+            checkpoint,
+        )
         val inventory = SymbolInventory(functions, objects, other)
-        validate(inputBytes, inputSha256, metadata, usage, inventory, limits)
+        validate(inputBytes, inputSha256, metadata, usage, inventory, limits, checkpoint)
         return BoundedElfMetadataInspection(metadata, inventory, inputBytes, inputSha256, usage)
     }
 
@@ -421,10 +441,16 @@ private object MetadataInspectionProtocol {
         }
     }
 
-    private fun readSymbols(input: DataInputStream, remainingLimit: Int): List<UnresolvedSymbol> {
+    private fun readSymbols(
+        input: DataInputStream,
+        remainingLimit: Int,
+        label: String,
+        checkpoint: (String) -> Unit,
+    ): List<UnresolvedSymbol> {
         val count = input.readInt()
         require(count in 0..remainingLimit) { "bounded ELF metadata symbol count exceeds its selected limit" }
         return Collections.unmodifiableList(List(count) {
+            if (it % CHECKPOINT_INTERVAL == 0) checkpoint("while decoding bounded ELF metadata $label symbols")
             val name = input.readUTF()
             val kind = SymbolKind.entries.getOrNull(input.readUnsignedByte())
                 ?: throw GhidraAnalysisException("bounded ELF metadata worker returned an unknown symbol kind")
@@ -441,6 +467,7 @@ private object MetadataInspectionProtocol {
         usage: BoundedElfMetadataUsage,
         inventory: SymbolInventory,
         limits: BoundedElfMetadataLimits,
+        checkpoint: (String) -> Unit,
     ) {
         require(inputBytes in 1..limits.maximumInputBytes && inputSha256.matches(Regex("[0-9a-f]{64}"))) {
             "bounded ELF metadata worker returned an invalid input identity"
@@ -449,19 +476,29 @@ private object MetadataInspectionProtocol {
             "bounded ELF metadata worker returned an invalid ELF class or endianness"
         }
         val symbols = inventory.functions.size + inventory.objects.size + inventory.other.size
-        require(inventory.functions.all { it.kind == SymbolKind.FUNCTION } &&
-            inventory.objects.all { it.kind == SymbolKind.OBJECT } &&
-            inventory.other.all { it.kind == SymbolKind.OTHER } &&
-            symbols.toLong() == usage.symbolsRetained) {
+        require(symbols.toLong() == usage.symbolsRetained) {
             "bounded ELF metadata worker returned an inconsistent symbol inventory"
         }
         var encodedNameBytes = 0L
-        inventory.all.forEach { symbol ->
-            val nameBytes = symbol.name.toByteArray(StandardCharsets.UTF_8).size.toLong()
-            require(nameBytes in 1..limits.maximumNameBytes.toLong()) {
-                "bounded ELF metadata worker returned a symbol name outside its selected limit"
+        var validatedSymbols = 0
+        listOf(
+            inventory.functions to SymbolKind.FUNCTION,
+            inventory.objects to SymbolKind.OBJECT,
+            inventory.other to SymbolKind.OTHER,
+        ).forEach { (category, expectedKind) ->
+            category.forEach { symbol ->
+                if (validatedSymbols++ % CHECKPOINT_INTERVAL == 0) {
+                    checkpoint("while validating bounded ELF metadata symbols")
+                }
+                require(symbol.kind == expectedKind) {
+                    "bounded ELF metadata worker returned an inconsistent symbol category"
+                }
+                val nameBytes = symbol.name.toByteArray(StandardCharsets.UTF_8).size.toLong()
+                require(nameBytes in 1..limits.maximumNameBytes.toLong()) {
+                    "bounded ELF metadata worker returned a symbol name outside its selected limit"
+                }
+                encodedNameBytes = Math.addExact(encodedNameBytes, nameBytes)
             }
-            encodedNameBytes = Math.addExact(encodedNameBytes, nameBytes)
         }
         require(encodedNameBytes <= limits.maximumRetainedNameBytes &&
             usage.sectionHeadersVisited in 0..(limits.maximumSectionHeaders.toLong() + 2L) &&
@@ -475,20 +512,24 @@ private object MetadataInspectionProtocol {
             "bounded ELF metadata worker exceeded or misreported a selected parser limit"
         }
     }
+
+    private const val CHECKPOINT_INTERVAL = 64
 }
 
 private fun metadataWorkerCommand(path: Path, limits: BoundedElfMetadataLimits): List<String> {
     val java = Path.of(System.getProperty("java.home"), "bin", if (File.separatorChar == '\\') "java.exe" else "java")
         .toAbsolutePath().normalize()
     require(Files.isExecutable(java)) { "application JDK has no executable metadata worker: $java" }
-    val inheritedClassPath = requireNotNull(System.getProperty("java.class.path")) {
-        "application JVM has no bounded metadata worker classpath"
-    }
-    val entries = inheritedClassPath.split(File.pathSeparator).map { entry ->
-        require(entry.isNotEmpty()) { "bounded ELF metadata worker classpath contains an empty entry" }
-        Path.of(entry).toAbsolutePath().normalize().toString()
+    val entries = listOf(
+        BoundedElfMetadataInspectionWorker::class.java,
+        decompengine.binary.BoundedElfMetadataReader::class.java,
+        decompengine.oracle.fulltree.StableControlFile::class.java,
+        com.sun.jna.Native::class.java,
+        Unit::class.java,
+    ).map { type ->
+        Path.of(type.protectionDomain.codeSource.location.toURI()).toAbsolutePath().normalize()
     }.distinct()
-    require(entries.isNotEmpty() && entries.none { File.pathSeparatorChar in it || it.any(::isControl) }) {
+    require(entries.isNotEmpty() && entries.none { File.pathSeparatorChar in it.toString() }) {
         "bounded ELF metadata worker classpath contains an ambiguous path"
     }
     return listOf(
@@ -509,5 +550,3 @@ private fun startMetadataWorker(command: List<String>, directory: Path): Process
     builder.environment().clear()
     return builder.start()
 }
-
-private fun isControl(character: Char): Boolean = character.code < 0x20 || character.code == 0x7f

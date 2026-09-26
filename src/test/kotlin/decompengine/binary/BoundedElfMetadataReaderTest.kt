@@ -1,6 +1,7 @@
 package decompengine.binary
 
 import decompengine.analysis.BoundedElfMetadataInspectionProcess
+import decompengine.analysis.GhidraAnalysisException
 import decompengine.jobs.elfFixture
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.fulltree.FullTreeElfTestBytes
@@ -148,7 +149,7 @@ class BoundedElfMetadataReaderTest {
     @Test
     fun `isolated metadata worker preserves the exact bounded symbol inventory`() = inControlTemporaryDirectory { root ->
         val bytes = dynamicFixture(variants.first())
-        val input = writeElf(root.resolve("isolated-dynamic.elf"), bytes)
+        val input = writeElf(root.resolve("isolated-dynamic\tinput\n.elf"), bytes)
         val direct = BoundedElfMetadataReader.read(input)
 
         val isolated = BoundedElfMetadataInspectionProcess().inspect(input, BoundedElfMetadataLimits()) {}
@@ -160,8 +161,27 @@ class BoundedElfMetadataReaderTest {
         }
     }
 
-    private fun dynamicFixture(variant: TestElfVariant): ByteArray {
-        val symbols = listOf(
+    @Test
+    fun `isolated metadata result decoding continues to observe analysis checkpoints`() = inControlTemporaryDirectory { root ->
+        val input = writeElf(root.resolve("checkpointed-inventory.elf"), dynamicFixture(variants.first(), functionCount = 128))
+        var decodingCheckpoints = 0
+
+        val failure = assertFailsWith<GhidraAnalysisException> {
+            BoundedElfMetadataInspectionProcess().inspect(input, BoundedElfMetadataLimits()) { stage ->
+                if (stage == "while decoding bounded ELF metadata function symbols" && ++decodingCheckpoints == 2) {
+                    throw GhidraAnalysisException("deadline fixture stopped result decoding")
+                }
+            }
+        }
+
+        assertEquals(2, decodingCheckpoints)
+        assertTrue(failure.message.orEmpty().contains("deadline fixture stopped result decoding"))
+    }
+
+    private fun dynamicFixture(variant: TestElfVariant, functionCount: Int? = null): ByteArray {
+        val symbols = functionCount?.let { count ->
+            List(count) { index -> TestElfSymbol("authored_fn_$index", null) }
+        } ?: listOf(
             TestElfSymbol("authored_fn", null),
             TestElfSymbol("weak_fn", null),
             TestElfSymbol("authored_object", null, type = 1),
@@ -174,8 +194,8 @@ class BoundedElfMetadataReaderTest {
         FullTreeElfTestBytes.put32(bytes, FullTreeElfTestBytes.sectionFieldOffset(bytes, 2, 4, 4), 11, variant.littleEndian)
         val table = FullTreeElfTestBytes.symbolTableOffset(bytes)
         val entryBytes = if (variant.is64Bit) 24 else 16
-        val bindings = listOf(1, 2, 0, 3, 1, 1)
-        val sizes = listOf(0UL, 8UL, 0x80000001UL, 3UL, 4UL, 0UL)
+        val bindings = if (functionCount == null) listOf(1, 2, 0, 3, 1, 1) else List(symbols.size) { 1 }
+        val sizes = if (functionCount == null) listOf(0UL, 8UL, 0x80000001UL, 3UL, 4UL, 0UL) else List(symbols.size) { 0UL }
         for (index in symbols.indices) {
             val entry = table + (index + 1) * entryBytes
             bytes[entry + if (variant.is64Bit) 4 else 12] = ((bindings[index] shl 4) or symbols[index].type).toByte()
