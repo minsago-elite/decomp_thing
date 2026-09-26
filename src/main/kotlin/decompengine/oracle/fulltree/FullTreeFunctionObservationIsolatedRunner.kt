@@ -1226,7 +1226,10 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 operationDeadline?.requireCurrent()
                 val outcome = KotlinContainedCommandProtocol.requireOutcome(outcomeBytes, secret, request, keeperPid)
                 val interruptionAuthorization = if (interruption == null) {
-                    outcome.requireSuccessful()
+                    val diagnostics = if (outcome.status == "EXITED" && outcome.exitCode == 0) {
+                        null
+                    } else containedCommandFailureDiagnostics(runTree)
+                    outcome.requireSuccessful(diagnostics)
                     null
                 } else interruption.requireInterruptedOutcome(outcome)
                 val elapsed = monotonicElapsed(started, System.nanoTime(), "contained command execution")
@@ -1284,6 +1287,60 @@ private fun readContainedCommandProtocol(runTree: ObservationRunTreeAccess, name
     runTree.withPinnedDescriptor { root ->
         DescriptorBoundAtomicStateFile.readOrNull(root, name, KotlinContainedCommandProtocol.MAXIMUM_PROTOCOL_BYTES)?.bytes
     }
+
+private fun containedCommandFailureDiagnostics(runTree: ObservationRunTreeAccess): String = buildString {
+    for ((label, name) in listOf(
+        "stdout" to KotlinContainedCommandProtocol.STDOUT_FILE,
+        "stderr" to KotlinContainedCommandProtocol.STDERR_FILE,
+    )) {
+        if (isNotEmpty()) append('\n')
+        append("contained command ").append(label).append(" tail: ")
+        val tail = runCatching {
+            runTree.withPinnedDescriptor { root ->
+                LinuxFilesystemSyscalls.openDirectoryAt(root.fd, "reports").use { reports ->
+                    val selected = LinuxFilesystemSyscalls.openRegularFileAtOrNull(reports.fd, name)
+                        ?: return@withPinnedDescriptor "not captured"
+                    selected.use { file ->
+                        val before = file.identity
+                        require(before.isRegularFile && !before.isSymbolicLink && before.linkCount == 1) {
+                            "contained command diagnostic is not a private regular file"
+                        }
+                        val size = Files.size(LinuxFilesystemSyscalls.stableDescriptorPath(file.fd))
+                        require(size in 0L..KotlinContainedCommandRequest.MAXIMUM_LOG_BYTES) {
+                            "contained command diagnostic exceeds its fixed limit"
+                        }
+                        val tailBytes = minOf(size, MAXIMUM_CONTAINED_COMMAND_DIAGNOSTIC_TAIL_BYTES.toLong()).toInt()
+                        val bytes = ByteArray(tailBytes)
+                        if (tailBytes > 0) {
+                            FileChannel.open(
+                                LinuxFilesystemSyscalls.stableDescriptorPath(file.fd), StandardOpenOption.READ,
+                            ).use { channel ->
+                                channel.position(size - tailBytes)
+                                val buffer = ByteBuffer.wrap(bytes)
+                                while (buffer.hasRemaining()) {
+                                    require(channel.read(buffer) >= 0) { "contained command diagnostic ended during tail capture" }
+                                }
+                            }
+                        }
+                        require(sameRegularFile(before, LinuxFilesystemSyscalls.identity(file.fd))) {
+                            "contained command diagnostic changed during capture"
+                        }
+                        val text = bytes.toString(Charsets.UTF_8)
+                            .map { character ->
+                                if (character == '\n' || character == '\r' || character == '\t' || !Character.isISOControl(character)) {
+                                    character
+                                } else '?'
+                            }.joinToString("")
+                        "last $tailBytes of $size bytes${if (tailBytes.toLong() == size) "" else " (truncated)"}:\n$text"
+                    }
+                }
+            }
+        }.getOrElse { failure -> "unavailable (${failure::class.simpleName ?: "read failure"})" }
+        append(tail)
+    }
+}
+
+private const val MAXIMUM_CONTAINED_COMMAND_DIAGNOSTIC_TAIL_BYTES = 4 * 1024
 
 /**
  * Shared production BOOT primitive extracted from the full-tree controller's proven boundary.
