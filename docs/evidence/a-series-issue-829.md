@@ -10,6 +10,7 @@
 - Every workspace context path must match a declared viewable UTF-8 interface with its expected public or private interface role. Module headers must match the profile's module-interface path, and dependencies must resolve to declared module interfaces.
 - The request path policy is verified to give read access only to the declared interface inputs and read/write/create access only to the planned implementation target.
 - The Make-profile test verifies the exact request rules. The alternate Ninja-profile test removes `viewable` from the private interface, verifies the harness is never called, and verifies the implementation remains unresolved.
+- The public archival service test exercises those rules through Make and Ninja builds. A fixture harness without invocation-bound ACP evidence is refused by the archive release gate after its build succeeds. With an alternate Ninja layout that hides the private interface, the harness is not called and archive publication is also refused.
 
 ## Verification
 
@@ -21,6 +22,14 @@ Command:
 
 Result: passed; all 46 `SourceTreeTest` tests completed successfully. `git diff --check` also passed.
 
+Command:
+
+```sh
+./gradlew -PfrontendNodeHome=/home/june/.cache/decomp-toolchains/node-v24.20.0 --offline test --tests decompengine.project.ArchivalReconstructionTest --console=plain
+```
+
+Result: passed; all 6 `ArchivalReconstructionTest` tests completed successfully, including the Make/Ninja role and archive-gate workflow.
+
 ## Remaining qualification
 
-This slice does not exercise the public #63 mutation workflow, #64 reconstruction workflow, or #65 repair workflow through actual Make and Ninja ACP runs. It also does not establish contained production qualification or retained public workflow evidence. Keep #829 open until the full acceptance criterion and the issue's evidence requirements are met.
+The new integration test uses a fixture harness; it does not exercise the public #63 mutation workflow, #64 reconstruction workflow, or #65 repair workflow through authenticated ACP runs. It proves the public service carries role-limited requests into Make/Ninja builds and rejects archive publication without invocation-bound ACP evidence. It does not establish contained production qualification or retained public workflow evidence. Keep #829 open until the full acceptance criterion and the issue's evidence requirements are met.
