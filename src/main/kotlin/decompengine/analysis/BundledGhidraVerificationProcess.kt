@@ -9,6 +9,9 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutionException
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 
 /**
@@ -33,12 +36,16 @@ internal class BundledGhidraVerificationProcess(
         checkpoint("before starting bundled Ghidra verifier")
         val started = System.nanoTime()
         val maximumNanos = TimeUnit.MILLISECONDS.toNanos(maximumWallMillis)
-        val launch = CompletableFuture.supplyAsync {
-            val command = commandFactory(normalizedRoot)
-            require(command.isNotEmpty() && command.all { it.isNotEmpty() && it.none(::isControl) }) {
-                "bundled Ghidra verifier command is empty or ambiguous"
-            }
-            processStarter(command, normalizedRoot)
+        val launch = try {
+            CompletableFuture.supplyAsync({
+                val command = commandFactory(normalizedRoot)
+                require(command.isNotEmpty() && command.all { it.isNotEmpty() && it.none(::isControl) }) {
+                    "bundled Ghidra verifier command is empty or ambiguous"
+                }
+                processStarter(command, normalizedRoot)
+            }, LAUNCH_EXECUTOR)
+        } catch (failure: RejectedExecutionException) {
+            throw GhidraAnalysisException("bundled Ghidra verifier launch capacity is exhausted", failure)
         }
         val process = try {
             var launched: Process? = null
@@ -215,6 +222,11 @@ internal class BundledGhidraVerificationProcess(
         const val FORCE_EXIT_WAIT_MILLIS = 5_000L
         const val CAPTURE_DRAIN_MILLIS = 5_000L
         val POLL_NANOS = TimeUnit.MILLISECONDS.toNanos(25)
+        private val LAUNCH_EXECUTOR = ThreadPoolExecutor(
+            0, 2, 60L, TimeUnit.SECONDS, SynchronousQueue(),
+            { task -> Thread(task, "bundled-ghidra-verifier-launch").apply { isDaemon = true } },
+            ThreadPoolExecutor.AbortPolicy(),
+        )
     }
 }
 

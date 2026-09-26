@@ -3,6 +3,7 @@ package decompengine.analysis
 import decompengine.project.sha256
 import java.nio.file.Files
 import java.nio.file.Path
+import java.io.IOException
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -78,6 +79,37 @@ class BundledGhidraVerificationProcessTest {
         val worker = launched.get(2, TimeUnit.SECONDS)
         worker.onExit().get(2, TimeUnit.SECONDS)
         assertFalse(worker.isAlive, "late verifier worker is still alive")
+    }
+
+    @Test
+    fun `blocked launches exhaust only the dedicated bounded launch pool`() {
+        val entered = CountDownLatch(2)
+        val release = CountDownLatch(1)
+        val verifier = BundledGhidraVerificationProcess(
+            commandFactory = { listOf("/bin/true") },
+            processStarter = { _, _ ->
+                entered.countDown()
+                release.await(5, TimeUnit.SECONDS)
+                throw IOException("fixture launch stopped")
+            },
+            maximumWallMillis = 250,
+        )
+        val callers = List(2) {
+            Thread { runCatching { verifier.verifyAndGetLibraries(Path.of("/")) {} } }.apply { start() }
+        }
+        try {
+            assertTrue(entered.await(2, TimeUnit.SECONDS), "both launch slots were not occupied")
+            val rejected = assertFailsWith<GhidraAnalysisException> {
+                verifier.verifyAndGetLibraries(Path.of("/")) {}
+            }
+            assertTrue(rejected.message.orEmpty().contains("launch capacity is exhausted"))
+        } finally {
+            release.countDown()
+            callers.forEach { caller ->
+                caller.join(2_000)
+                assertFalse(caller.isAlive, "fixture verification caller remained blocked")
+            }
+        }
     }
 
     @Test
