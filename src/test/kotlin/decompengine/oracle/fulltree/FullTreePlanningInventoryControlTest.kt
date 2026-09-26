@@ -19,6 +19,58 @@ import kotlinx.serialization.json.JsonPrimitive
 
 class FullTreePlanningInventoryControlTest {
     @Test
+    fun `authenticated shard lookup binds current A14 planning owners without an emitted denominator`() {
+        val profile = Path.of("oracle/llvm/22.1.6")
+        val registry = FullTreePlanningInventoryControl.loadAndValidate(
+            path = profile.resolve("full-tree-planning-inventory.json"),
+            scopePath = profile.resolve("full-tree-scope.json"),
+            sourceLockPath = profile.resolve("source-lock.json"),
+            artifactManifestPath = profile.resolve("oracle-manifest.json"),
+            buildRecordPath = profile.resolve("build-record.json"),
+            inventoryPath = profile.resolve("full-tree-inventory.json"),
+            sourceInventoryPath = profile.resolve("full-tree-source-inventory.json"),
+        )
+        val expected = mapOf(
+            "clang-lib-driver" to (75 to "source/clang/lib/Driver/"),
+            "clang-lib-index" to (1 to "source/clang/lib/Index/"),
+            "clang-lib-parse" to (18 to "source/clang/lib/Parse/"),
+            "llvm-lib-asmparser" to (4 to "source/llvm/lib/AsmParser/"),
+            "llvm-lib-profiledata" to (18 to "source/llvm/lib/ProfileData/"),
+        )
+        expected.forEach { (shardId, expectedOwner) ->
+            val modules = registry.requireOwnerModulesForShard(shardId)
+            assertEquals(expectedOwner.first, modules.size, shardId)
+            assertEquals(modules.size, modules.map { it.sourcePath }.toSet().size, shardId)
+            assertEquals(modules.size, modules.map { it.unitId }.toSet().size, shardId)
+            assertTrue(modules.all { module ->
+                module.moduleId == module.unitId && module.shardId == shardId &&
+                    module.sourceKind == "handwritten" && module.sourcePath.startsWith(expectedOwner.second) &&
+                    FullTreeInventoryControl.compilationUnitId(module.sourcePath) == module.unitId &&
+                    registry.requireOwnerModule(module.unitId) == module
+            }, shardId)
+        }
+        assertEquals(
+            listOf("source/clang/lib/Index/USRGeneration.cpp"),
+            registry.requireOwnerModulesForShard("clang-lib-index").map { it.sourcePath },
+        )
+        assertEquals(
+            listOf("source/clang/lib/Driver/OffloadBundler.cpp"),
+            registry.sourceOnlyUnits.filter { it.shardId == "clang-lib-driver" }.map { it.sourcePath },
+        )
+        assertEquals(8, registry.sourceOnlyUnits.count { it.shardId == "clang-lib-index" })
+        assertTrue(registry.sourceOnlyUnits.none { it.shardId in setOf("clang-lib-parse", "llvm-lib-asmparser") })
+        assertEquals(6, registry.sourceOnlyUnits.count { it.shardId == "llvm-lib-profiledata" })
+        assertTrue(registry.sourceOnlyUnits.any { it.shardId == "llvm-tools-llvm-profdata" })
+        assertTrue(registry.requireOwnerModulesForShard("llvm-tools-llvm-profdata").isEmpty())
+        listOf("", "-clang-lib-driver", "clang--lib-driver", "clang_lib_driver", "clang-lib-driver-", "missing-shard",
+            "a".repeat(129), "a".repeat(4_096)).forEach { invalid ->
+            assertFailsWith<FullTreeControlException>(invalid.take(40)) { registry.requireOwnerModulesForShard(invalid) }
+        }
+        val owners = registry.requireOwnerModulesForShard("llvm-lib-asmparser") as MutableList<FullTreePlanningSourceModule>
+        assertFailsWith<UnsupportedOperationException> { owners.clear() }
+    }
+
+    @Test
     fun `fixture planning inventory is closed exact and byte deterministic`() =
         inControlTemporaryDirectory { directory ->
             val fixture = createFullTreeControlFixture(directory.resolve("fixture"))
