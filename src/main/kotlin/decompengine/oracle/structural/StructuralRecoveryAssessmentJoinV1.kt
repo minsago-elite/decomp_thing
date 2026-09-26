@@ -2,6 +2,7 @@ package decompengine.oracle.structural
 
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.project.RecoveredProgramModel
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -87,12 +88,71 @@ internal data class FixtureStructuralFindingJoinV1(
     val authority: String = "fixture-only",
 )
 
+/** Conservative population view of a verified fixture join, for report-consumer tests. */
+internal data class FixtureStructuralAssessmentPopulationV1(
+    val programModelSha256: String,
+    val scoreReportSha256: String,
+    val modelEntityCount: Int,
+    val entitiesWithFindings: Int,
+    val missingFindingEntities: List<Pair<String, String>>,
+    val recoveredOutcomeCounts: Map<String, Int>,
+    val oracleOnlyEntityCount: Int,
+    val oracleOnlyOutcomeCounts: Map<String, Int>,
+    val recoveryAssessmentState: String = "unassessed",
+    val authority: String = "fixture-only",
+) {
+    fun toJson(): JsonObject = JsonObject(linkedMapOf(
+        "schemaVersion" to JsonPrimitive(1),
+        "authority" to JsonPrimitive(authority),
+        "recoveryAssessmentState" to JsonPrimitive(recoveryAssessmentState),
+        "programModelSha256" to JsonPrimitive(programModelSha256),
+        "scoreReportSha256" to JsonPrimitive(scoreReportSha256),
+        "modelEntityCount" to JsonPrimitive(modelEntityCount),
+        "entitiesWithFindings" to JsonPrimitive(entitiesWithFindings),
+        "missingFindingEntities" to JsonArray(missingFindingEntities.map { (kind, id) ->
+            JsonObject(mapOf("kind" to JsonPrimitive(kind), "id" to JsonPrimitive(id)))
+        }),
+        "recoveredOutcomeCounts" to JsonObject(recoveredOutcomeCounts.mapValues { JsonPrimitive(it.value) }),
+        "oracleOnlyEntityCount" to JsonPrimitive(oracleOnlyEntityCount),
+        "oracleOnlyOutcomeCounts" to JsonObject(oracleOnlyOutcomeCounts.mapValues { JsonPrimitive(it.value) }),
+    ))
+}
+
 /**
  * Fixture-only join contract. A production join still requires the unavailable host-created
  * [VerifiedStructuralInputsV1] capability from the production replay owner. This path can never
  * mark extracted entities assessed or publish production evidence.
  */
 internal object StructuralRecoveryAssessmentJoinV1 {
+    fun summarizeFixture(join: FixtureStructuralFindingJoinV1): FixtureStructuralAssessmentPopulationV1 {
+        require(join.authority == "fixture-only" && join.recoveryAssessmentState == "unassessed" &&
+            join.entities.all { it.recoveryAssessment == "unassessed" }) {
+            "fixture finding summary cannot promote extraction to assessed recovery"
+        }
+        fun counts(outcomes: Sequence<String>): Map<String, Int> {
+            val counted = StructuralRecoveryV1Contract.OUTCOMES.associateWith { 0 }.toMutableMap()
+            outcomes.forEach { outcome ->
+                require(outcome in counted) { "fixture finding summary has an unsupported outcome" }
+                counted[outcome] = Math.addExact(counted.getValue(outcome), 1)
+            }
+            return counted.toMap()
+        }
+        val missing = join.entities.filter { it.facts.isEmpty() }
+            .map { it.kind to it.entityId }
+        return FixtureStructuralAssessmentPopulationV1(
+            programModelSha256 = join.programModelSha256,
+            scoreReportSha256 = join.scoreReportSha256,
+            modelEntityCount = join.entities.size,
+            entitiesWithFindings = join.entities.size - missing.size,
+            missingFindingEntities = missing,
+            recoveredOutcomeCounts = counts(join.entities.asSequence().flatMap { it.outcomes.asSequence() }),
+            oracleOnlyEntityCount = join.oracleOnlyEntities.size,
+            oracleOnlyOutcomeCounts = counts(join.oracleOnlyEntities.asSequence().flatMap { entity ->
+                entity.facts.asSequence().map { it.getValue("outcome").jsonPrimitive.content }
+            }),
+        )
+    }
+
     fun joinFixture(
         programModelBytes: ByteArray,
         scoreReport: JsonObject,
