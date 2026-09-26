@@ -6,9 +6,19 @@ if (($# != 0)); then
   exit 64
 fi
 
-for name in DECOMP_GCC_CLI_INSTALLATION DECOMP_GCC_CLI_PROFILE DECOMP_GCC_CLI_ARCHIVE DECOMP_GCC_CLI_CC1_BINARY DECOMP_GCC_CLI_LTO1_BINARY \
-  DECOMP_GCC_CLI_CC1_FRESH_SCRATCH DECOMP_GCC_CLI_CC1_RESUME_SCRATCH \
-  DECOMP_GCC_CLI_LTO1_FRESH_SCRATCH DECOMP_GCC_CLI_LTO1_RESUME_SCRATCH DECOMP_GCC_CLI_EVIDENCE_ROOT; do
+selected_engine="${DECOMP_GCC_CLI_ENGINE-all}"
+case "$selected_engine" in
+  all) engines=(CC1 LTO1) ;;
+  cc1) engines=(CC1) ;;
+  lto1) engines=(LTO1) ;;
+  *) echo "invalid real-engine CLI qualification engine: $selected_engine" >&2; exit 64 ;;
+esac
+
+required=(DECOMP_GCC_CLI_INSTALLATION DECOMP_GCC_CLI_PROFILE DECOMP_GCC_CLI_ARCHIVE DECOMP_GCC_CLI_EVIDENCE_ROOT)
+for engine in "${engines[@]}"; do
+  required+=("DECOMP_GCC_CLI_${engine}_BINARY" "DECOMP_GCC_CLI_${engine}_FRESH_SCRATCH" "DECOMP_GCC_CLI_${engine}_RESUME_SCRATCH")
+done
+for name in "${required[@]}"; do
   if [[ -z "${!name:-}" ]]; then
     echo "required real-engine CLI qualification input is missing: $name" >&2
     exit 64
