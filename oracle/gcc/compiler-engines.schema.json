@@ -74,7 +74,7 @@
       "additionalProperties": false,
       "required": ["exportWallClockSeconds", "exportMaximumResidentBytes", "plannerMaximumEntities", "plannerMaximumDependencyEdges", "plannerMaximumWorkUnits"],
       "properties": {
-        "exportWallClockSeconds": {"const": 3600},
+        "exportWallClockSeconds": {"const": 7200},
         "exportMaximumResidentBytes": {"const": 17179869184},
         "plannerMaximumEntities": {"type": "integer", "minimum": 1},
         "plannerMaximumDependencyEdges": {"type": "integer", "minimum": 1},

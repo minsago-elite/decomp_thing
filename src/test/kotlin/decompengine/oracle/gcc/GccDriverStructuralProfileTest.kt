@@ -27,7 +27,7 @@ class GccDriverStructuralProfileTest {
         assertEquals("gcc-cc1-16.2.0", profile.profileId)
         assertEquals("16.2.0", profile.version)
         assertEquals("78d4ac73dd391005b895a6148cd9831e28e1208b", profile.sourceRevision)
-        assertEquals("1bfd82a556302bdfbd78948cbbb0e6fe549c755a48c1ad3e56247ca7b9bbc301", profile.compilerEngineProfileSha256)
+        assertEquals("c91d94057c455ae7ef27e183e7a4d6b02625149a6beebfc2838dde008e3c9f0c", profile.compilerEngineProfileSha256)
         assertEquals("dbef520c025d268f5126229ace8ad5b08a15722573d45b5e1ab934611905abb4", profile.artifactManifestSha256)
         assertEquals("ba9b2f314bfb3d92a172e67f8ce993a2e98b9bc14aabf00ff6d58e4631037621", profile.fullBinary.sha256)
         assertEquals("e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905", profile.strippedBinary.sha256)

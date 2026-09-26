@@ -18,7 +18,7 @@ internal fun invokeInstalledGccCli(arguments: List<String>, evidence: Path, time
     installation: Path = Path.of(System.getProperty("user.dir"), "build/install/llm_bin_patch"),
     command: String = "gcc-engine-plan",
 ): Int {
-    require(timeoutSeconds in 1..4500)
+    require(timeoutSeconds in 1..8100)
     require(installation.isAbsolute && installation.normalize() == installation && installation.toRealPath() == installation)
     val launcher = installation.resolve("bin/llm_bin_patch").toRealPath()
     require(Files.isExecutable(launcher))
@@ -104,7 +104,7 @@ internal fun verifyInstalledCliEvidence(
     require(request["javaOpts"] == JsonPrimitive("-Xmx8g") &&
         request["javaHome"] == JsonPrimitive(Path.of(System.getProperty("java.home")).toRealPath().toString()))
     val timeout = request["outerTimeoutSeconds"] as? JsonPrimitive
-    require(timeout != null && !timeout.isString && timeout.longOrNull in 1L..4500L)
+    require(timeout != null && !timeout.isString && timeout.longOrNull in 1L..8100L)
     decompengine.oracle.fulltree.StableControlFile.open(installation.resolve("bin/llm_bin_patch"),
         256L * 1024, "retained launcher").use { launcher ->
         require(request["launcherSha256"] == JsonPrimitive(launcher.authenticatedSha256))

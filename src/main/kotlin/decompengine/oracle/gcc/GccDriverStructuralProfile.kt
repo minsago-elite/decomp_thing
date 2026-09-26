@@ -177,7 +177,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
         private const val SOURCE_PROFILE_ID = "gcc-driver-16.2.0"
         private const val PROFILE_VERSION = "16.2.0"
         private const val SOURCE_REVISION = "78d4ac73dd391005b895a6148cd9831e28e1208b"
-        private const val COMPILER_ENGINE_PROFILE_SHA256 = "1bfd82a556302bdfbd78948cbbb0e6fe549c755a48c1ad3e56247ca7b9bbc301"
+        private const val COMPILER_ENGINE_PROFILE_SHA256 = "c91d94057c455ae7ef27e183e7a4d6b02625149a6beebfc2838dde008e3c9f0c"
         private const val CC1_MANIFEST_SHA256 = "dbef520c025d268f5126229ace8ad5b08a15722573d45b5e1ab934611905abb4"
         private const val CC1_BUILD_RECORD_SHA256 = "f6b2711d4f82562195acebe7250d7dc62eb9425af4f736736e0ea69b65103e8e"
         private const val SOURCE_LOCK_SHA256 = "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc"
