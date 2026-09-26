@@ -49,6 +49,10 @@ import decompengine.project.ArchivalBundleVerifier
 import decompengine.project.ArchivalBundleLimits
 import decompengine.project.ArchivalProjectAuditor
 import decompengine.project.ArchivalPackager
+import decompengine.project.GeneratedFileEvidence
+import decompengine.project.ProjectContentKind
+import decompengine.project.ProjectFileRole
+import decompengine.project.SourceTreeManifest
 import decompengine.project.captureBuildSourceRevision
 import decompengine.project.MakeProjectBuilder
 import decompengine.project.GeneratedCRepairIndexProfile
@@ -2335,8 +2339,12 @@ class ModuleRevisionGraphTest {
         val alphaRevision = confidence.getValue("modules").jsonArray.map { it.jsonObject }
             .single { it.getValue("id").jsonPrimitive.content == "alpha" }
             .getValue("revisionEvidence").jsonObject
-        assertEquals(sha256(fixture.after), alphaRevision.getValue("sourceSha256").jsonPrimitive.content)
-        assertEquals(JsonPrimitive(true), alphaRevision.getValue("acceptedImplementation"))
+        val alphaCheckpointPath = GeneratedCMakeReconstructionProfile.descriptor.layout
+            .declaration("module-evidence").materialize(mapOf("module" to "alpha"))
+        val alphaCheckpoint = Json.parseToJsonElement(fixture.project.resolve(alphaCheckpointPath).readText()).jsonObject
+        assertEquals(alphaCheckpoint.getValue("sourceSha256"), alphaRevision.getValue("sourceSha256"))
+        assertEquals(alphaCheckpoint.getValue("accepted"), alphaRevision.getValue("acceptedImplementation"))
+        assertEquals(JsonPrimitive(false), alphaRevision.getValue("acceptedImplementation"))
         assertFalse("fn_alpha" in ArchivalProjectAuditor.audit(fixture.project).unresolvedEntityIds)
         val unresolved = fixture.project.resolve("UNRESOLVED.md").readText()
         assertFalse("| `fn_alpha` |" in unresolved)
@@ -2435,6 +2443,52 @@ class ModuleRevisionGraphTest {
         }
 
         assertTrue(failure.message.orEmpty().contains("no remaining inventory entries"))
+    }
+
+    @Test
+    fun `repair audit charges only new payload files while scanning manifest-bound reports`() {
+        val fixture = releaseRepairFixture(undispatchedFallback = true)
+        val original = SourceTreeManifestReader.read(fixture.project, GeneratedCMakeReconstructionProfile.descriptor)
+        val manifestBoundReports = (0 until 10).map { index ->
+            val path = "reports/ordinary-$index.validation.json"
+            val bytes = "manifest-bound report $index\n".toByteArray()
+            fixture.project.resolve(path).writeBytes(bytes)
+            GeneratedFileEvidence(
+                path = path,
+                sha256 = sha256(bytes),
+                generator = "test-report-fixture",
+                roles = setOf(ProjectFileRole.EVIDENCE),
+                contentKind = ProjectContentKind.UTF8_TEXT,
+            )
+        }
+        val manifest = SourceTreeManifest(
+            profileId = original.profileId,
+            profileSha256 = original.profileSha256,
+            inputSha256 = original.inputSha256,
+            files = original.files + manifestBoundReports,
+            unresolvedEntityIds = original.unresolvedEntityIds,
+            unresolvedImplementationIds = original.unresolvedImplementationIds,
+        )
+        fixture.project.resolve("source_tree_manifest.json").writeText(manifest.toJson())
+        val manifestPaths = manifest.files.mapTo(hashSetOf()) { it.path }
+        val additionalInventoryFiles = Files.walk(fixture.project.resolve("reports")).use { stream ->
+            stream.filter { path ->
+                val relative = fixture.project.relativize(path).toString().replace('\\', '/')
+                relative.startsWith("reports/repair-revisions/") || relative == "reports/repair_history.json" ||
+                    relative.endsWith(".validation.json")
+            }.filter { Files.isRegularFile(it, LinkOption.NOFOLLOW_LINKS) }
+                .map { fixture.project.relativize(it).toString().replace('\\', '/') }
+                .filter { it !in manifestPaths }
+                .toList()
+        }
+        assertTrue(additionalInventoryFiles.isNotEmpty())
+
+        val audit = ArchivalProjectAuditor.audit(
+            fixture.project,
+            limits = ArchivalBundleLimits(maximumEntries = manifest.files.size + 1 + additionalInventoryFiles.size),
+        )
+
+        assertFalse("fn_alpha" in audit.unresolvedEntityIds)
     }
 
     @Test

@@ -20,6 +20,7 @@ import java.nio.file.Path
 import java.util.Locale
 
 private const val MAXIMUM_AUDIT_REPORT_DEPTH = 32
+private const val MAXIMUM_AUDIT_REPORT_SCAN_ENTRIES = 1_000_000
 private val REPAIR_ATOMIC_TEMPORARY_NAME = Regex("^\\..+\\.repair-atomic\\.tmp$")
 
 internal fun isRepairAtomicTemporary(path: Path): Boolean =
@@ -52,36 +53,54 @@ private data class VerifiedAuditRepairState(
     val inventoryEntryLimit: Int,
 )
 
-private fun auditRepairInventory(projectDir: Path, maximumInspectedEntries: Int): List<Path> {
-    require(maximumInspectedEntries > 0) { "repair audit has no remaining inventory entries" }
+private fun auditRepairInventory(
+    projectDir: Path,
+    maximumAdditionalEntries: Int,
+    manifestPaths: Set<String>,
+): List<Path> {
+    require(maximumAdditionalEntries > 0) { "repair audit has no remaining inventory entries" }
     val reportsRoot = projectDir.resolve("reports")
     val repairRoot = reportsRoot.resolve("repair-revisions")
     require(Files.isDirectory(repairRoot, LinkOption.NOFOLLOW_LINKS)) {
         "accepted repair source has no authenticated repair state"
     }
-    val candidates = Files.walk(reportsRoot, MAXIMUM_AUDIT_REPORT_DEPTH).use { stream ->
-        stream.limit(maximumInspectedEntries.toLong() + 1L).toList().also { paths ->
-            paths.forEach { path ->
-                require(!isRepairAtomicTemporary(path)) {
-                    "repair audit report inventory contains a retained atomic temporary: $path"
+    val history = projectDir.resolve("reports/repair_history.json")
+    val candidates = ArrayList<Path>()
+    var scannedEntries = 0
+    var additionalFiles = 0
+    Files.walk(reportsRoot, MAXIMUM_AUDIT_REPORT_DEPTH).use { stream ->
+        val paths = stream.iterator()
+        while (paths.hasNext()) {
+            val path = paths.next()
+            scannedEntries = Math.addExact(scannedEntries, 1)
+            require(scannedEntries <= MAXIMUM_AUDIT_REPORT_SCAN_ENTRIES) {
+                "repair audit report inventory exceeds its independent scan bound"
+            }
+            require(!isRepairAtomicTemporary(path)) {
+                "repair audit report inventory contains a retained atomic temporary: $path"
+            }
+            if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) &&
+                reportsRoot.relativize(path).nameCount >= MAXIMUM_AUDIT_REPORT_DEPTH
+            ) {
+                require(Files.newDirectoryStream(path).use { !it.iterator().hasNext() }) {
+                    "repair audit report inventory exceeds its depth bound"
                 }
-                if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) &&
-                    reportsRoot.relativize(path).nameCount >= MAXIMUM_AUDIT_REPORT_DEPTH
-                ) {
-                    require(Files.newDirectoryStream(path).use { !it.iterator().hasNext() }) {
-                        "repair audit report inventory exceeds its depth bound"
+            }
+            val selected = path.startsWith(repairRoot) || path == history ||
+                path.fileName.toString().endsWith(".validation.json")
+            if (selected) {
+                candidates += path
+                val relative = projectDir.relativize(path).toString().replace('\\', '/')
+                if (Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) && relative !in manifestPaths) {
+                    additionalFiles = Math.addExact(additionalFiles, 1)
+                    require(additionalFiles <= maximumAdditionalEntries) {
+                        "repair audit report inventory exceeds the remaining entry bound"
                     }
                 }
             }
         }
     }
-    require(candidates.size <= maximumInspectedEntries) {
-        "repair audit report inventory exceeds the remaining entry bound"
-    }
-    val history = projectDir.resolve("reports/repair_history.json")
-    return candidates.filter { path ->
-        path.startsWith(repairRoot) || path == history || path.fileName.toString().endsWith(".validation.json")
-    }.sorted()
+    return candidates.sorted()
 }
 
 private fun verifiedAuditRepairLineage(
@@ -100,7 +119,8 @@ private fun verifiedAuditRepairLineage(
     var retainedBytes = consumedBytes
     var retainedEntries = manifest.files.size + 1 // The source manifest is also an audited input.
     val inventoryEntryLimit = limits.maximumEntries - retainedEntries
-    val inventory = auditRepairInventory(projectDir, inventoryEntryLimit)
+    val manifestPaths = manifest.files.mapTo(hashSetOf()) { it.path }
+    val inventory = auditRepairInventory(projectDir, inventoryEntryLimit, manifestPaths)
     inventory.forEach { path ->
         require(!Files.isSymbolicLink(path)) { "repair audit state contains a symbolic link" }
         val relative = projectDir.relativize(path).toString().replace('\\', '/')
@@ -602,16 +622,16 @@ object ArchivalProjectAuditor {
                             "inputFingerprintProvider", "inputBinarySha256", "modelSchemaVersion", "checkpointPath",
                             "checkpointSha256", "acceptedImplementation", "compilation", "behavior") &&
                             revision.string("sourcePath") == acceptedSourcePaths.getValue(id) &&
-                            revision.string("sourceSha256") == moduleRevisions.getValue(id) &&
+                            revision.string("sourceSha256") == checkpoint.string("sourceSha256") &&
                             revision.string("inputFingerprint") == checkpoint.string("fingerprint") &&
                             revision.string("inputFingerprintProvider") == "module-reconstruction-input-v2" &&
                             revision.string("inputBinarySha256") == model.inputSha256 &&
                             revision.getValue("modelSchemaVersion") == JsonPrimitive(model.schemaVersion) &&
                             revision.string("checkpointPath") == checkpointPath &&
                             revision.string("checkpointSha256") == hashes.getValue(checkpointPath) &&
-                            revision.getValue("acceptedImplementation") == JsonPrimitive(true) &&
+                            revision.getValue("acceptedImplementation") == checkpoint.getValue("accepted") &&
                             revision.getValue("compilation") == checkpoint.getValue("compilation")) {
-                            "repaired module confidence evidence differs from its authenticated revision"
+                            "repaired module confidence evidence differs from its historical reconstruction checkpoint"
                         }
                         val behavior = revision.getValue("behavior").jsonObject
                         require(behavior.keys == setOf("status", "reason", "coverage", "outputAgreement", "unobservedBehavior") &&
@@ -819,7 +839,7 @@ object ArchivalProjectAuditor {
         }
         if (repairState.isInitialized()) {
             val verified = repairState.value
-            val currentInventory = auditRepairInventory(projectDir, verified.inventoryEntryLimit).map {
+            val currentInventory = auditRepairInventory(projectDir, verified.inventoryEntryLimit, hashes.keys).map {
                 projectDir.relativize(it).toString().replace('\\', '/')
             }
             require(currentInventory == verified.inventory) { "repair audit inventory changed before publication" }
