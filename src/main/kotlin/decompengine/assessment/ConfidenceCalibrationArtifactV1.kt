@@ -21,6 +21,7 @@ internal data class ConfidenceCalibrationScopeV1(
     val inputSha256: String,
     val targetAbiSha256: String,
     val oracleId: String,
+    val oracleSha256: String,
     val scoreDefinitionSha256: String,
     val scoreDimension: String,
     val distributionProfileSha256: String,
@@ -112,7 +113,7 @@ internal class ConfidenceCalibrationArtifactV1 private constructor(
             maximumDepth = 24,
             maximumNodes = 20_000,
             maximumStringBytes = 16 * 1024,
-            maximumTotalStringBytes = 128 * 1024,
+            maximumTotalStringBytes = 768 * 1024,
         )
         /**
          * Authenticate exact canonical bytes against an independently pinned digest, validate the
@@ -120,10 +121,12 @@ internal class ConfidenceCalibrationArtifactV1 private constructor(
          */
         fun authenticate(bytes: ByteArray, expectedArtifactSha256: String): ConfidenceCalibrationArtifactV1 {
             require(SHA256.matches(expectedArtifactSha256)) { "expected calibration digest must be lowercase SHA-256" }
-            val actualDigest = OracleArtifacts.sha256(bytes)
+            require(bytes.size <= MAXIMUM_ARTIFACT_BYTES) { "calibration artifact exceeds its byte limit" }
+            val snapshot = bytes.copyOf()
+            val actualDigest = OracleArtifacts.sha256(snapshot)
             require(actualDigest == expectedArtifactSha256) { "calibration artifact digest does not match the pinned digest" }
 
-            val document = OracleJson.parseCanonical(bytes, limits)
+            val document = OracleJson.parseCanonical(snapshot, limits)
             OracleSchemas.validate(SCHEMA_NAME, document)
             val root = document.jsonObject
             val parsedScope = parseScope(root.getValue("scope").jsonObject)
@@ -141,6 +144,11 @@ internal class ConfidenceCalibrationArtifactV1 private constructor(
             }
             val fitPartitionCount = fitPartition.int("sampleCount")
             val validationPartitionCount = validationPartition.int("sampleCount")
+            val fitSampleIds = fitPartition.sampleIds(fitPartitionCount)
+            val validationSampleIds = validationPartition.sampleIds(validationPartitionCount)
+            require(fitSampleIds.intersect(validationSampleIds).isEmpty()) {
+                "calibration fit and validation samples must be disjoint"
+            }
             val parsedBands = root.getValue("bands").jsonArray.map { parseBand(it.jsonObject) }
             validateBands(parsedBands, fitPartitionCount, validationPartitionCount)
 
@@ -161,6 +169,7 @@ internal class ConfidenceCalibrationArtifactV1 private constructor(
             inputSha256 = value.string("inputSha256"),
             targetAbiSha256 = value.string("targetAbiSha256"),
             oracleId = value.string("oracleId"),
+            oracleSha256 = value.string("oracleSha256"),
             scoreDefinitionSha256 = value.string("scoreDefinitionSha256"),
             scoreDimension = value.string("scoreDimension"),
             distributionProfileSha256 = value.string("distributionProfileSha256"),
@@ -240,6 +249,7 @@ internal class ConfidenceCalibrationArtifactV1 private constructor(
         }
 
         private const val SCHEMA_NAME = "confidence-calibration-artifact"
+        private const val MAXIMUM_ARTIFACT_BYTES = 1024 * 1024
         private const val RATE_SCALE = 12
         private val SHA256 = Regex("[0-9a-f]{64}")
     }
@@ -251,8 +261,22 @@ private fun JsonObject.string(name: String): String {
     require(primitive.isString) { "$name must be a string" }
     return primitive.content
 }
-private fun JsonObject.int(name: String): Int = value(name).jsonPrimitive.content.toIntOrNull()
-    ?: error("$name must be an integer")
+private fun JsonObject.int(name: String): Int {
+    val primitive = value(name).jsonPrimitive
+    require(!primitive.isString) { "$name must be an integer" }
+    return try {
+        requireNotNull(primitive.content.toBigDecimalOrNull()).toBigIntegerExact().intValueExact()
+    } catch (_: ArithmeticException) {
+        error("$name must be an integer within the supported range")
+    }
+}
+private fun JsonObject.sampleIds(expectedCount: Int): Set<String> {
+    val ids = getValue("sampleIds").jsonArray.map { it.jsonPrimitive.content }
+    require(ids.size == expectedCount && ids == ids.sorted() && ids.size == ids.toSet().size) {
+        "calibration sample identities must be sorted, unique and match the partition count"
+    }
+    return ids.toSet()
+}
 private fun JsonObject.decimal(name: String): BigDecimal = value(name).jsonPrimitive.content.toBigDecimalOrNull()
     ?: error("$name must be a number")
 private fun JsonObject.boolean(name: String): Boolean = value(name).jsonPrimitive.content.toBooleanStrictOrNull()

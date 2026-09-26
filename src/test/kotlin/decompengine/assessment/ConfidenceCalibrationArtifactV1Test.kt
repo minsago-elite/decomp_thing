@@ -5,6 +5,7 @@ import decompengine.oracle.core.OracleJson
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -35,6 +36,10 @@ class ConfidenceCalibrationArtifactV1Test {
         val verified = load(document())
         val mismatched = verified.interpret(0.6, scope().copy(targetAbiSha256 = hash('f')))
         assertUncalibrated(mismatched, "scope-mismatch")
+        assertUncalibrated(
+            verified.interpret(0.6, scope().copy(oracleSha256 = hash('f'))),
+            "scope-mismatch",
+        )
 
         val unverified = load(document(distributionStatus = "unverified"))
         assertUncalibrated(unverified.interpret(0.6, scope()), "distribution-unverified")
@@ -93,6 +98,22 @@ class ConfidenceCalibrationArtifactV1Test {
         assertFailsWith<IllegalArgumentException> {
             load(document(fitPartitionHash = hash('a'), validationPartitionHash = hash('a')))
         }
+        val overlapping = document()
+        val partitions = overlapping.getValue("partitions") as JsonObject
+        val fit = partitions.getValue("fit") as JsonObject
+        val validation = partitions.getValue("validation") as JsonObject
+        val fitId = (fit.getValue("sampleIds") as JsonArray).first().jsonPrimitive.content
+        val validationIds = (validation.getValue("sampleIds") as JsonArray)
+            .map { it.jsonPrimitive.content }.toMutableList()
+        validationIds[0] = fitId
+        val overlappingPartitions = JsonObject(partitions + (
+            "validation" to JsonObject(validation + (
+                "sampleIds" to JsonArray(validationIds.sorted().map(::JsonPrimitive))
+            ))
+        ))
+        assertFailsWith<IllegalArgumentException> {
+            load(JsonObject(overlapping + ("partitions" to overlappingPartitions)))
+        }
 
         val twoBands = twoBandDocument()
         val originalBands = twoBands.getValue("bands") as JsonArray
@@ -112,6 +133,17 @@ class ConfidenceCalibrationArtifactV1Test {
         assertEquals(0.8, assertNotNull(result.calibratedProbability), 1e-12)
         assertEquals(5, result.fitSampleCount)
         assertEquals(10, result.validationSampleCount)
+    }
+
+    @Test
+    fun schemaIntegerValuesWithDecimalNotationAreAcceptedExactly() {
+        val original = document()
+        val support = original.getValue("supportPolicy") as JsonObject
+        val decimalInteger = JsonObject(original + (
+            "supportPolicy" to JsonObject(support + ("minimumFitSamplesPerBand" to JsonPrimitive(5.0)))
+        ))
+
+        assertEquals("calibrated", load(decimalInteger).interpret(0.6, scope()).calibrationStatus)
     }
 
     private fun twoBandDocument(): JsonObject {
@@ -197,10 +229,12 @@ class ConfidenceCalibrationArtifactV1Test {
                 "fit" to JsonObject(mapOf(
                     "sha256" to JsonPrimitive(fitPartitionHash),
                     "sampleCount" to JsonPrimitive(fitCount),
+                    "sampleIds" to JsonArray((1..fitCount).map(::sampleId).map(::JsonPrimitive)),
                 )),
                 "validation" to JsonObject(mapOf(
                     "sha256" to JsonPrimitive(validationPartitionHash),
                     "sampleCount" to JsonPrimitive(validationCount),
+                    "sampleIds" to JsonArray((10_001..10_000 + validationCount).map(::sampleId).map(::JsonPrimitive)),
                 )),
             )),
             "bands" to JsonArray(listOf(band)),
@@ -213,6 +247,7 @@ class ConfidenceCalibrationArtifactV1Test {
         "inputSha256" to JsonPrimitive(hash('1')),
         "targetAbiSha256" to JsonPrimitive(hash('2')),
         "oracleId" to JsonPrimitive("oracle-v1"),
+        "oracleSha256" to JsonPrimitive(hash('6')),
         "scoreDefinitionSha256" to JsonPrimitive(hash('3')),
         "scoreDimension" to JsonPrimitive("function-boundary"),
         "distributionProfileSha256" to JsonPrimitive(hash('4')),
@@ -225,6 +260,7 @@ class ConfidenceCalibrationArtifactV1Test {
         inputSha256 = hash('1'),
         targetAbiSha256 = hash('2'),
         oracleId = "oracle-v1",
+        oracleSha256 = hash('6'),
         scoreDefinitionSha256 = hash('3'),
         scoreDimension = "function-boundary",
         distributionProfileSha256 = hash('4'),
@@ -232,4 +268,5 @@ class ConfidenceCalibrationArtifactV1Test {
     )
 
     private fun hash(character: Char) = character.toString().repeat(64)
+    private fun sampleId(number: Int) = number.toString(16).padStart(64, '0')
 }
