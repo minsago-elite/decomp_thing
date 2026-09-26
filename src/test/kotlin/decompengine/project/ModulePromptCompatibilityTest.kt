@@ -129,17 +129,19 @@ class ModulePromptCompatibilityTest {
     @Test
     fun `workflow archives undispatched agent modules as unresolved for both profiles`() {
         for (base in ReconstructionProfiles.builtIn) {
-            val profile = withBudget(base, 1)
+            val profile = base
             val qualificationRoot = createTempDirectory("profile-module-budget-")
             val project = Files.createDirectory(qualificationRoot.resolve("project"))
-            val reconstructor = BoundedLlmModuleReconstructor(AgentHarness { _, _ -> error("must not execute") })
+            val reconstructor = BoundedLlmModuleReconstructor(
+                AgentHarness { _, _ -> error("must not execute") }, maximumContextCharacters = 4_096,
+            )
             val manifest = SourceTreeGenerator.generate(model(), project, profile = profile, reconstructor = reconstructor)
             assertEquals(listOf("fn_alpha"), manifest.unresolvedImplementationIds)
             val module = DeterministicModulePlanner(layout = profile.layout).plan(model()).modules.single()
             val checkpoint = Json.parseToJsonElement(project.resolve(
                 profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id)),
             ).readText()).jsonObject
-            assertEquals(JsonPrimitive(1), checkpoint.getValue("promptBudgetCharacters"))
+            assertEquals(JsonPrimitive(4_096), checkpoint.getValue("promptBudgetCharacters"))
             assertEquals(JsonPrimitive(reconstructor.cacheIdentity(profile)), checkpoint.getValue("reconstructorIdentity"))
             assertEquals(JsonPrimitive(false), checkpoint.getValue("accepted"))
             assertEquals(JsonPrimitive("pre-dispatch-context-budget-fallback"),
