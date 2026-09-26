@@ -42,22 +42,21 @@ jobs:
         id: cc1-artifact-cache
         uses: actions/cache/restore@v6
         with:
-          path: ${{ runner.temp }}/gcc-cc1-cache/artifacts
+          path: ${{ runner.temp }}/gcc-cc1-engine/artifacts
           key: gcc-cc1-artifacts-v1-${{ hashFiles('oracle/gcc/16.2.0/source-lock.json', 'oracle/gcc/16.2.0/build-record.json', 'oracle/gcc/16.2.0/toolchain-reproduction.json', 'oracle/gcc/16.2.0/build-toolchain.Dockerfile', 'oracle/gcc/16.2.0/compiler-engines.json', 'oracle/gcc/16.2.0/cc1-build-record.json', 'oracle/gcc/16.2.0/cc1-oracle-manifest.json') }}
           restore-keys: |
             gcc-cc1-artifacts-v1-
       - name: Validate cached cc1 binaries before using them
         id: cached-cc1-verify
-        if: steps.cc1-artifact-cache.outputs.cache-hit == 'true'
+        if: steps.cc1-artifact-cache.outputs.cache-matched-key != ''
         run: |
           workspace="$RUNNER_TEMP/gcc-cc1-engine"
           set +e
-          mkdir -p "$workspace/artifacts" && cp -a "$RUNNER_TEMP/gcc-cc1-cache/artifacts/." "$workspace/artifacts/" && \
-            python3 scripts/rebuild-gcc-compiler-engines.py \
-              --workspace "$workspace" \
-              --profile oracle/gcc/16.2.0/compiler-engines.json \
-              --engine cc1 \
-              --verify-artifacts
+          python3 scripts/rebuild-gcc-compiler-engines.py \
+            --workspace "$workspace" \
+            --profile oracle/gcc/16.2.0/compiler-engines.json \
+            --engine cc1 \
+            --verify-artifacts
           status=$?
           set -e
           if test "$status" = 0; then
@@ -68,7 +67,7 @@ jobs:
             echo 'valid=false' >> "$GITHUB_OUTPUT"
           fi
       - name: Rebuild only cc1 from the authenticated GCC source
-        if: steps.cc1-artifact-cache.outputs.cache-hit != 'true' || steps.cached-cc1-verify.outputs.valid != 'true'
+        if: steps.cc1-artifact-cache.outputs.cache-matched-key == '' || steps.cached-cc1-verify.outputs.valid != 'true'
         run: |
           python3 scripts/fetch-gcc-oracle-source.py "$RUNNER_TEMP/gcc-oracle-source"
           echo '8b0af79ba3426f49ba599eb0c7eea433c62ac5bb6ab5e7797f7d09d978f43543  oracle/gcc/16.2.0/build-toolchain.Dockerfile' \
