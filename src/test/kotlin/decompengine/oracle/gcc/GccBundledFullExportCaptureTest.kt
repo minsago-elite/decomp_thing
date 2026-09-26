@@ -61,6 +61,8 @@ class GccBundledFullExportCaptureTest {
 
         val changed = functionRecord("fn_0000000000400010", "changed")
         Files.writeString(root.resolve("reports/program_model.json.export/functions/fn_0000000000400010.json"), changed)
+        assertFails { GccBundledFullExportCapture.capture(run, reports, artifacts()) }
+        Files.writeString(root.resolve("reports/program_model.json"), modelText(changed))
         val next = GccBundledFullExportCapture.capture(run, reports, artifacts())
         assertNotEquals(snapshot.outputTreeSha256, next.outputTreeSha256)
     }
@@ -83,6 +85,8 @@ class GccBundledFullExportCaptureTest {
         for (mutation in listOf<(Path) -> Unit>(
             { path -> Files.createSymbolicLink(path.resolve("reports/program_model.json.export/functions/linked.json"), path.resolve("outside")) },
             { path -> Files.writeString(path.resolve("reports/program_model.json.export/functions/unexpected.json"), "{}") },
+            { path -> Files.writeString(path.resolve("reports/.program_model.json.pending"), "stale") },
+            { path -> Files.writeString(path.resolve("reports/.program_model.json.progress.json.pending"), "stale") },
         )) fixture { root, run, reports ->
             Files.writeString(root.resolve("outside"), "{}")
             mutation(root)
@@ -104,9 +108,9 @@ class GccBundledFullExportCaptureTest {
             val functionId = "fn_0000000000400010"
             writeState(root)
             writeProgress(root)
-            val prefix = "{\n  \"schemaVersion\": 2,\n  \"inputSha256\": \"${inputSha()}\",\n  \"functions\": [\n"
-            Files.writeString(reports.resolve("program_model.json"), prefix + "    {\"id\":\"$functionId\"}\n  ]\n}\n")
-            Files.writeString(export.resolve("functions/$functionId.json"), functionRecord(functionId, "f"))
+            val record = functionRecord(functionId, "f")
+            Files.writeString(reports.resolve("program_model.json"), modelText(record))
+            Files.writeString(export.resolve("functions/$functionId.json"), record)
             LinuxFilesystemSyscalls.openRoot(root).use { run ->
                 LinuxFilesystemSyscalls.openDirectoryAt(run.fd, "reports").use { reportsDescriptor ->
                     action(root, run, reportsDescriptor.identity)
@@ -146,4 +150,8 @@ class GccBundledFullExportCaptureTest {
 
     private fun functionRecord(id: String, name: String) =
         """{"id":"$id","name":"$name","address":"0x400010","prototype":"int f(void)","extractionStatus":"recovered","recoveryAssessment":"unassessed","calls":[],"referencedGlobals":[],"strings":[],"decompiledC":"int f(void) { return 1; }"}"""
+
+    private fun modelText(record: String) =
+        "{\n  \"schemaVersion\": 2,\n  \"inputSha256\": \"${inputSha()}\",\n  \"functions\": [\n" +
+            "$record\n  ],\n  \"globals\": [\n  ],\n  \"types\": [\n  ]\n}\n"
 }

@@ -116,8 +116,9 @@ private fun fullAssessmentBytes(
 /** Captures full-mode sidecars after the caller has established worker absence and retained the run lease. */
 internal object GccBundledFullExportCapture {
     private const val MAXIMUM_FULL_FUNCTION_RECORD_BYTES = 64 * 1024 * 1024
-    private const val MAXIMUM_FULL_FUNCTIONS = 512L * 256L
+    internal const val MAXIMUM_FULL_FUNCTIONS = 512L * 256L
     private const val MAXIMUM_MODEL_BYTES = 512 * 1024 * 1024
+    private const val MAXIMUM_SIDECAR_FILES = 300_000
 
     fun capture(
         run: LinuxDescriptor,
@@ -137,6 +138,12 @@ internal object GccBundledFullExportCapture {
             require(reports.identity.copy(linkCount = expectedReports.linkCount) == expectedReports) {
                 "GCC full export reports directory changed identity"
             }
+            val expectedReportNames = setOf(
+                "program_model.json.export", "program_model.json", "program_model.json.progress.json",
+            )
+            require(LinuxFilesystemSyscalls.directoryEntryNames(reports, expectedReportNames.size + 1).toSet() ==
+                expectedReportNames
+            ) { "GCC full export reports contain missing, extra or uncommitted entries" }
             LinuxFilesystemSyscalls.openDirectoryAt(reports.fd, "program_model.json.export").use { export ->
                 requireFullDirectory(export, reports.identity)
                 val expectedTop = setOf("state.json", "planning-batches", "functions", "globals", "types", "failures")
@@ -197,6 +204,8 @@ internal object GccBundledFullExportCapture {
         require(progress.reused == 0L) { "fresh full GCC export unexpectedly reused function records" }
         val model = capture.read(reports, "program_model.json", minOf(limits.assembledModelBytes, MAXIMUM_MODEL_BYTES))
         requireFullModelHeader(model, expectedInput)
+        val modelVerifier = ExactByteVerifier(model, "GCC full program model", MAXIMUM_MODEL_BYTES)
+        modelVerifier.accept("{\n  \"schemaVersion\": 2,\n  \"inputSha256\": \"$expectedInput\",\n  \"functions\": [\n")
 
         val functionNames = captureDirectoryFiles(functions, MAXIMUM_FULL_FUNCTIONS, MAXIMUM_FULL_FUNCTION_RECORD_BYTES)
         require(functionNames.size.toLong() == progress.total &&
@@ -216,8 +225,12 @@ internal object GccBundledFullExportCapture {
         }
         val entries = linkedMapOf<String, JsonObject>()
         val functionStatuses = linkedMapOf<String, String>()
-        fun addFiles(prefix: String, directory: LinuxDescriptor, names: List<String>, maximum: Int) {
-            for (name in names) {
+        fun addFiles(prefix: String, directory: LinuxDescriptor, names: List<String>, maximum: Int,
+            includedInModel: Boolean = false) {
+            require(entries.size + names.size <= MAXIMUM_SIDECAR_FILES) {
+                "GCC full export sidecar inventory exceeds its manifest bound"
+            }
+            for ((index, name) in names.withIndex()) {
                 val bytes = capture.read(directory, name, maximum)
                 when (prefix) {
                     "functions" -> functionStatuses[name.removeSuffix(".json")] =
@@ -232,16 +245,21 @@ internal object GccBundledFullExportCapture {
                         bytes, name.removeSuffix(".json"), functionStatuses[name.removeSuffix(".json")],
                     )
                 }
+                if (includedInModel) modelVerifier.acceptRecord(bytes, index + 1 == names.size)
                 entries["$prefix/$name"] = fileCommitment(bytes)
             }
         }
-        addFiles("functions", functions, functionNames, MAXIMUM_FULL_FUNCTION_RECORD_BYTES)
+        addFiles("functions", functions, functionNames, MAXIMUM_FULL_FUNCTION_RECORD_BYTES, includedInModel = true)
+        modelVerifier.accept("  ],\n  \"globals\": [\n")
         require(functionStatuses.values.count { it == "recovered" }.toLong() == progress.recovered &&
             functionStatuses.values.count { it == "partial" }.toLong() == progress.partial &&
             functionStatuses.values.count { it == "failed" }.toLong() == progress.failed
         ) { "GCC full function outcomes differ from completed progress counts" }
-        addFiles("globals", globals, globalNames, 1024 * 1024)
-        addFiles("types", types, typeNames, 1024 * 1024)
+        addFiles("globals", globals, globalNames, 1024 * 1024, includedInModel = true)
+        modelVerifier.accept("  ],\n  \"types\": [\n")
+        addFiles("types", types, typeNames, 1024 * 1024, includedInModel = true)
+        modelVerifier.accept("  ]\n}\n")
+        modelVerifier.finish()
         addFiles("failures", failures, failureNames, 1024 * 1024)
         require(failureNames.map { it.removeSuffix(".json") }.toSet() ==
             functionStatuses.filterValues { it != "recovered" }.keys
@@ -266,11 +284,15 @@ internal object GccBundledFullExportCapture {
         requireNamedDirectory(export, "types", types, types.identity, reports.identity)
         requireNamedDirectory(export, "failures", failures, failures.identity, reports.identity)
         val modelName = "program_model.json"
-        require(captureEntryExists(reports, modelName) && captureEntryExists(reports, "$modelName.progress.json")) {
-            "GCC full export model or progress disappeared during capture"
+        val expectedReportNames = setOf("program_model.json.export", modelName, "$modelName.progress.json")
+        require(LinuxFilesystemSyscalls.directoryEntryNames(reports, expectedReportNames.size + 1).toSet() ==
+            expectedReportNames
+        ) {
+            "GCC full export reports contain missing, extra or uncommitted entries"
         }
 
-        val sidecarManifest = OracleJson.canonicalBytes(JsonObject(entries))
+        val manifestLimits = GccBundledFullExportCliResultV2.TREE_MANIFEST_JSON_LIMITS
+        val sidecarManifest = OracleJson.canonicalBytes(JsonObject(entries), manifestLimits)
         val outputTree = JsonObject(linkedMapOf(
             "kind" to JsonPrimitive("gcc-bundled-full-export-output-tree-v2"),
             "stateSha256" to JsonPrimitive(OracleArtifacts.sha256(stateBytes)),
@@ -279,9 +301,9 @@ internal object GccBundledFullExportCapture {
             "compilerSpec" to JsonPrimitive(target.compilerSpec),
             "programModelSha256" to JsonPrimitive(OracleArtifacts.sha256(model)),
             "programModelBytes" to JsonPrimitive(model.size),
-            "sidecars" to OracleJson.parseCanonical(sidecarManifest),
+            "sidecars" to OracleJson.parseCanonical(sidecarManifest, manifestLimits),
         ))
-        val treeBytes = OracleJson.canonicalBytes(outputTree)
+        val treeBytes = OracleJson.canonicalBytes(outputTree, manifestLimits)
         val treeSha = OracleArtifacts.sha256(treeBytes)
         return GccBundledFullExportSnapshot(
             inputSha256 = expectedInput,
@@ -308,7 +330,7 @@ internal object GccBundledFullExportCapture {
             sidecarManifest = OracleJson.canonicalBytes(JsonObject(linkedMapOf(
                 "outputTreeSha256" to JsonPrimitive(treeSha),
                 "tree" to outputTree,
-            ))),
+            )), manifestLimits),
         )
     }
 
@@ -459,9 +481,6 @@ internal object GccBundledFullExportCapture {
             "GCC full export sidecar inventory changed during capture"
         }
     }
-
-    private fun captureEntryExists(directory: LinuxDescriptor, name: String): Boolean =
-        LinuxFilesystemSyscalls.openPathAtOrNull(directory.fd, name)?.use { true } ?: false
 
     private fun string(root: JsonObject, name: String): String {
         val value = root[name] as? JsonPrimitive ?: throw IllegalArgumentException("GCC full exporter $name is invalid")

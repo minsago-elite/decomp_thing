@@ -41,6 +41,7 @@ internal object GccBundledCliCommand {
             options.diskPolicy, invocation, fullRecoveryExport = options.fullRecoveryExport)
         return GccBundledOperationCoordinator.prepareNew(intent, journal, options.scratch).use { owner ->
             if (options.fullRecoveryExport) {
+                GccDriverStructuralInputsV1.load(options.profile.parent)
                 val fullExport = owner.executeFullExport()
                 val structuralInputs = GccDriverStructuralInputsV1.load(options.profile.parent)
                 owner.publishFullExportCliResult(structuralInputs.captureFullExport(fullExport))

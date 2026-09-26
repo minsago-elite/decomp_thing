@@ -17,6 +17,7 @@ internal class GccDriverStructuralFullExportBindingV2 private constructor(bytes:
             version: String,
             sourceRevision: String,
             compilerEngineProfileSha256: String,
+            fullExportProfileSha256: String,
             artifactManifestSha256: String,
             targetDescriptorBytes: ByteArray,
             inputSha256: String,
@@ -42,6 +43,7 @@ internal class GccDriverStructuralFullExportBindingV2 private constructor(bytes:
                 "profileVersion" to JsonPrimitive(version),
                 "sourceRevision" to JsonPrimitive(sourceRevision),
                 "compilerEngineProfileSha256" to JsonPrimitive(compilerEngineProfileSha256),
+                "fullExportProfileSha256" to JsonPrimitive(fullExportProfileSha256),
                 "artifactManifestSha256" to JsonPrimitive(artifactManifestSha256),
                 "targetDescriptor" to target,
                 "targetDescriptorSha256" to JsonPrimitive(OracleArtifacts.sha256(targetDescriptorBytes)),
@@ -77,7 +79,7 @@ internal class GccDriverStructuralFullExportBindingV2 private constructor(bytes:
                 "GCC structural full-export source revision is invalid"
             }
             listOf(
-                artifactManifestSha256, inputSha256, exporterSha256, ghidraArchiveSha256,
+                artifactManifestSha256, fullExportProfileSha256, inputSha256, exporterSha256, ghidraArchiveSha256,
                 programModelSha256, outputTreeSha256,
             ).forEach { require(it.matches(Regex("[a-f0-9]{64}"))) { "GCC structural full-export digest is invalid" } }
             require(inputBytes > 0L && exporterBytes > 0L && ghidraArchiveBytes > 0L &&
