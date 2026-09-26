@@ -44,7 +44,7 @@ class ModulePromptCompatibilityTest {
     @Test
     fun `candidate assessment applies profile budgets to every agent identity form`() {
         for ((generator, identity) in listOf(
-            "agent:authored" to "custom", "authored" to "agent:authored", "unresolved:agent:authored" to "custom",
+            "agent:authored" to "custom", "authored" to "agent:authored", "unresolved:agent:authored" to "agent:authored",
         )) {
             val profile = withBudget(GeneratedCMakeReconstructionProfile.descriptor, 4096)
             val project = createTempDirectory("candidate-profile-budget-")
@@ -52,7 +52,9 @@ class ModulePromptCompatibilityTest {
                 override fun cacheIdentity(): String = identity
                 override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule =
                     EvidenceModuleReconstructor(true).reconstruct(request).copy(
-                        generator = generator, promptCharacters = 10, promptBudgetCharacters = 4097,
+                        generator = generator,
+                        promptCharacters = if (generator.startsWith("unresolved:agent:")) 5000 else 10,
+                        promptBudgetCharacters = 4097,
                     )
             }
             val manifest = SourceTreeGenerator.generate(model(), project, profile = profile, reconstructor = reconstructor)
@@ -66,6 +68,12 @@ class ModulePromptCompatibilityTest {
             assertTrue(checkpoint.getValue("issues").jsonArray.any {
                 it.jsonObject.getValue("code").jsonPrimitive.content == "prompt-budget-invalid"
             })
+            if (generator.startsWith("unresolved:agent:")) {
+                assertEquals(0, ReconstructionAdapters.resolve(profile).build(project, profile).returnCode)
+                assertFailsWith<Exception> {
+                    ArchivalPackager.create(project, project.parent.resolve("returned-candidate.zip"), profile = profile)
+                }
+            }
         }
     }
 
