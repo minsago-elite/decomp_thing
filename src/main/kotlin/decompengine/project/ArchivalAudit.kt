@@ -19,6 +19,11 @@ import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.util.Locale
 
+private const val MAXIMUM_AUDIT_REPORT_DEPTH = 32
+
+internal fun isRepairAtomicTemporary(path: Path): Boolean =
+    path.fileName?.toString()?.endsWith(".repair-atomic.tmp") == true
+
 private data class VerifiedAuditRepairState(
     val lineage: ArchivedRepairReleaseLineage,
     val totalBytes: Long,
@@ -34,8 +39,21 @@ private fun auditRepairInventory(projectDir: Path, limits: ArchivalBundleLimits)
     require(Files.isDirectory(repairRoot, LinkOption.NOFOLLOW_LINKS)) {
         "accepted repair source has no authenticated repair state"
     }
-    val candidates = Files.walk(reportsRoot).use { stream ->
-        stream.limit(limits.maximumEntries.toLong() + 1L).toList()
+    val candidates = Files.walk(reportsRoot, MAXIMUM_AUDIT_REPORT_DEPTH).use { stream ->
+        stream.limit(limits.maximumEntries.toLong() + 1L).toList().also { paths ->
+            paths.forEach { path ->
+                require(!isRepairAtomicTemporary(path)) {
+                    "repair audit report inventory contains a retained atomic temporary: $path"
+                }
+                if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) &&
+                    reportsRoot.relativize(path).nameCount >= MAXIMUM_AUDIT_REPORT_DEPTH
+                ) {
+                    require(Files.newDirectoryStream(path).use { !it.iterator().hasNext() }) {
+                        "repair audit report inventory exceeds its depth bound"
+                    }
+                }
+            }
+        }
     }
     require(candidates.size <= limits.maximumEntries) { "repair audit report inventory exceeds the entry bound" }
     val history = projectDir.resolve("reports/repair_history.json")
@@ -346,6 +364,9 @@ object ArchivalProjectAuditor {
                 totalEntries = it.totalEntries
             }
         }
+        if (manifest.files.any { it.generator == "repair-revision" }) {
+            repairState.value
+        }
         for (element in planJson.getValue("modules").jsonArray) {
             val module = element.jsonObject
             require(module.keys == setOf("id", "sourcePath", "headerPath", "functionIds", "globalIds", "typeIds", "boundaryEvidence")) {
@@ -651,14 +672,16 @@ object ArchivalProjectAuditor {
             val reports = projectDir.resolve("reports")
             if (!Files.exists(reports, LinkOption.NOFOLLOW_LINKS)) return emptyList()
             require(!Files.isSymbolicLink(reports)) { "behavior reports directory is a symbolic link" }
-            return Files.walk(reports, 32).use { stream ->
+            return Files.walk(reports, MAXIMUM_AUDIT_REPORT_DEPTH).use { stream ->
                 val entries = stream.limit(effectiveLimits.maximumEntries.toLong() + 1L).toList()
                 require(entries.size <= effectiveLimits.maximumEntries) { "behavior report inventory exceeds its bound" }
                 for (entry in entries) {
                     require(!Files.isSymbolicLink(entry) || entry.fileName.toString().endsWith(".behavior.json")) {
                         "behavior report inventory contains a link: $entry"
                     }
-                    if (Files.isDirectory(entry, LinkOption.NOFOLLOW_LINKS) && reports.relativize(entry).nameCount >= 32) {
+                    if (Files.isDirectory(entry, LinkOption.NOFOLLOW_LINKS) &&
+                        reports.relativize(entry).nameCount >= MAXIMUM_AUDIT_REPORT_DEPTH
+                    ) {
                         require(Files.newDirectoryStream(entry).use { !it.iterator().hasNext() }) {
                             "behavior report inventory exceeds its depth bound"
                         }

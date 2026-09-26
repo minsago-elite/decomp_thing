@@ -2356,6 +2356,26 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `direct archive packaging rejects retained repair report preimages`() {
+        val fixture = releaseRepairFixture(undispatchedFallback = true)
+        fixture.project.resolve("reports/.confidence.json.repair-atomic.tmp")
+            .writeText("stale confidence preimage")
+        fixture.project.resolve(".UNRESOLVED.md.repair-atomic.tmp")
+            .writeText("stale unresolved preimage")
+        val archive = fixture.project.parent.resolve("retained-repair-preimages.zip")
+
+        assertFailsWith<IllegalArgumentException> {
+            ArchivalProjectAuditor.audit(fixture.project)
+        }
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ArchivalPackager.create(fixture.project, archive)
+        }
+
+        assertTrue(failure.message.orEmpty().contains("retained repair atomic temporary"))
+        assertFalse(archive.exists())
+    }
+
+    @Test
     fun `repair audit charges nonmanifest evidence against its remaining byte budget`() {
         val fixture = releaseRepairFixture(undispatchedFallback = true)
         val manifest = SourceTreeManifestReader.read(fixture.project, GeneratedCMakeReconstructionProfile.descriptor)
@@ -2423,6 +2443,42 @@ class ModuleRevisionGraphTest {
         manifestPath.writeText(manifestAfter)
 
         assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(fixture.project) }
+    }
+
+    @Test
+    fun `repair audit authenticates header-only repair state`() {
+        val fixture = releaseRepairFixture(
+            undispatchedFallback = true,
+            relativePath = "include/modules/alpha.h",
+        )
+        val manifest = SourceTreeManifestReader.read(fixture.project, GeneratedCMakeReconstructionProfile.descriptor)
+        assertEquals("repair-revision", manifest.files.single { it.path == fixture.relativePath }.generator)
+        val graph = fixture.project.resolve("reports/repair-revisions/graph.json")
+        assertTrue(graph.exists())
+        val audit = ArchivalProjectAuditor.audit(fixture.project)
+        assertTrue("fn_alpha" in audit.unresolvedEntityIds)
+
+        Files.delete(graph)
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ArchivalProjectAuditor.audit(fixture.project)
+        }
+        assertTrue(failure.message.orEmpty().contains("missing repair_history.json or repair-revisions/graph.json"))
+    }
+
+    @Test
+    fun `repair audit rejects nonempty directories beyond its traversal depth`() {
+        val fixture = releaseRepairFixture(undispatchedFallback = true)
+        var nested = fixture.project.resolve("reports")
+        repeat(40) {
+            nested = nested.resolve("d")
+            Files.createDirectories(nested)
+        }
+        Files.writeString(nested.resolve("deep-evidence.json"), "out-of-bound evidence")
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ArchivalProjectAuditor.audit(fixture.project)
+        }
+        assertTrue(failure.message.orEmpty().contains("depth bound"))
     }
 
     @Test

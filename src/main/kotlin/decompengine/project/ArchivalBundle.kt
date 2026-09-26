@@ -619,6 +619,9 @@ private fun preflightProjectTree(projectDir: Path, limits: ArchivalBundleLimits,
             }
             val relative = archiveRelativePath(projectDir, path)
             validateRelativePath(relative)
+            require(!isRepairAtomicTemporary(path)) {
+                "archive project contains a retained repair atomic temporary: $relative"
+            }
             require(portablePaths.add(portablePathKey(relative))) {
                 "archive project contains a non-portable colliding path: $relative"
             }
