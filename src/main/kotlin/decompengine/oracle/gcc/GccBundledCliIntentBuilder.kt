@@ -20,6 +20,12 @@ internal object GccBundledCliIntentBuilder {
         require(!fullRecoveryExport || runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL) {
             "full-recovery export requires a fresh uninterrupted operation"
         }
+        require(!fullRecoveryExport || engineId == "cc1") {
+            "full-recovery structural export is currently supported only for cc1"
+        }
+        require(cliInvocation == null || cliInvocation.options.fullRecoveryExport == fullRecoveryExport) {
+            "CLI invocation command differs from requested recovery mode"
+        }
         val roots = listOf(controls, journalRoot, scratch)
         (roots + listOf(binary, profilePath, archive)).forEach { path ->
             requireGccBundledOperationPath(path)
