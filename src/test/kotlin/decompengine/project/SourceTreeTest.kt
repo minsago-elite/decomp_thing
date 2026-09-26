@@ -844,6 +844,9 @@ class SourceTreeTest {
             assertFalse(request.accessPolicy.allows(target, AgentOperation.READ_FILE))
             assertTrue(request.accessPolicy.allows(target, AgentOperation.WRITE_FILE))
             assertTrue(request.accessPolicy.allows(target, AgentOperation.CREATE_FILE))
+            val continuation = requireNotNull(request.sessionContinuation)
+            assertFalse(target in continuation.workspaceFiles)
+            assertTrue(continuation.workspaceFiles.keys.all { request.accessPolicy.allows(it, AgentOperation.READ_FILE) })
             val source = "#include \"modules/parse.h\"\n/* fn_0000000000401000 */\nint parse_input(void) { return 17; }\n"
             target.resolve(request.workspaceRoots).writeText(source)
             AgentExecutionResult(
@@ -856,7 +859,10 @@ class SourceTreeTest {
         val manifest = SourceTreeGenerator.generate(
             oneModuleModel(),
             project,
-            reconstructor = BoundedLlmModuleReconstructor(harness),
+            reconstructor = BoundedLlmModuleReconstructor(
+                harness,
+                harnessProvenanceDescriptor = "agent-harness-v1:acp:configuration-${"a".repeat(64)}",
+            ),
             profile = alternateProfile,
         )
 

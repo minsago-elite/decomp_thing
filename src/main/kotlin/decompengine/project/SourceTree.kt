@@ -137,12 +137,14 @@ class BoundedLlmModuleReconstructor(
         val fingerprint = request.sessionEvidenceFingerprint ?: return null
         if (harnessProvenanceSha256 == null) return null
         val root = request.workspaceRoot.toAbsolutePath().normalize()
+        val implementationViewable = ProjectFileRole.VIEWABLE in
+            request.profile.layout.declaration("module-implementation").roles
         val paths = (listOf(
             request.profile.layout.declaration("shared-interface").materialize(),
             request.module.headerPath,
             request.profile.layout.declaration("module-private-interface").materialize(mapOf("module" to request.module.id)),
-            request.module.sourcePath,
-        ) + request.dependencyHeaders.keys).distinct()
+        ) + (if (implementationViewable) listOf(request.module.sourcePath) else emptyList()) +
+            request.dependencyHeaders.keys).distinct()
         val files = try {
             AgentSessionJournal.captureWorkspaceFiles(
                 paths.map { AgentWorkspacePath("project", it) }, listOf(AgentWorkspaceRoot("project", root)),

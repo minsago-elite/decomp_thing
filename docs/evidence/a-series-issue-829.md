@@ -8,8 +8,8 @@
 
 - Reconstruction now checks that the planned editable implementation matches the profile declaration.
 - Every workspace context path must match a declared viewable UTF-8 interface with its expected public or private interface role. Module headers must match the profile's module-interface path, and dependencies must resolve to declared module interfaces.
-- The request path policy gives read access to declared interface inputs. The planned implementation gets write/create access from its editable role and read access only when the profile also declares it viewable.
-- The Make-profile test verifies the exact request rules. One alternate Ninja-profile test removes `viewable` from the private interface, verifies the harness is never called, and verifies the implementation remains unresolved. Another removes `viewable` from the implementation, verifies that the agent can write it without receiving read access, and verifies that generation proceeds.
+- The request path policy gives read access to declared interface inputs. The planned implementation gets write/create access from its editable role and read access only when the profile also declares it viewable. A durable session inventories the implementation only if that read access exists; accepted revision identity is recorded separately.
+- The Make-profile test verifies the exact request rules. One alternate Ninja-profile test removes `viewable` from the private interface, verifies the harness is never called, and verifies the implementation remains unresolved. Another removes `viewable` from the implementation, supplies a harness provenance descriptor to exercise the durable continuation, verifies that the agent can write it without receiving read access or inventorying it, and verifies that generation proceeds.
 - The public archival service test exercises those rules through Make and Ninja builds. A fixture harness without invocation-bound ACP evidence is refused by the archive release gate after its build succeeds. With an alternate Ninja layout that hides the private interface, the harness is not called and archive publication is also refused.
 - A scripted ACP v1 fixture now runs the archival service through `AcpAgentHarness`, its sandbox, and filesystem broker for both built-in profiles. It reads the three declared interfaces, confirms a confidence-report read and an unauthorized Makefile write are denied, writes only the declared module implementation, then builds, packages, extracts, verifies, and rebuilds the archive. This exercises the scripted fixture provider through the ACP transport; it is not evidence from a production ACP provider.
 
@@ -18,10 +18,13 @@
 Command:
 
 ```sh
-./gradlew -PfrontendNodeHome=/home/june/.cache/decomp-toolchains/node-v24.20.0 --offline test --tests decompengine.project.SourceTreeTest --console=plain
+TMPDIR=/home/june/decomp-thing-issue-829-role-policy/.tmp \
+JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/home/june/decomp-thing-issue-829-role-policy/.tmp \
+./gradlew -PfrontendNodeHome=/home/june/.cache/decomp-toolchains/node-v24.20.0 \
+  --offline test --tests decompengine.project.SourceTreeTest --console=plain
 ```
 
-Result: passed; all 47 `SourceTreeTest` tests completed successfully, including the nonviewable implementation case. `git diff --check` also passed.
+Result: passed; all 47 `SourceTreeTest` tests completed successfully, including the durable-session nonviewable implementation case. The default `/tmp` mount was full during an earlier local rerun, so the successful run used a dedicated temporary directory on the worktree filesystem. `git diff --check` also passed.
 
 Command:
 
