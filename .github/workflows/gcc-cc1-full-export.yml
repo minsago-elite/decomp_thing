@@ -107,6 +107,11 @@ jobs:
         with:
           path: ${{ runner.temp }}/gcc-cc1-engine/artifacts
           key: gcc-cc1-artifacts-v1-${{ hashFiles('oracle/gcc/16.2.0/source-lock.json', 'oracle/gcc/16.2.0/build-record.json', 'oracle/gcc/16.2.0/toolchain-reproduction.json', 'oracle/gcc/16.2.0/build-toolchain.Dockerfile', 'oracle/gcc/16.2.0/cc1-build-record.json', 'oracle/gcc/16.2.0/cc1-oracle-manifest.json') }}
+      - name: Reclaim build-only GCC toolchain storage
+        if: steps.cc1-artifact-cache.outputs.cache-matched-key == '' || steps.cached-cc1-verify.outputs.valid != 'true'
+        run: |
+          docker image rm decomp-gcc-oracle-toolchain:16.2.0
+          docker buildx prune --all --force
       - name: Install contained-execution host prerequisites
         run: |
           sudo apt-get update
@@ -139,12 +144,25 @@ jobs:
             | sha256sum --check --strict
           install -d -m 0700 "$RUNNER_TEMP/cc1-full-export-evidence"
           echo "DECOMP_GCC_CLI_ARCHIVE=$archive" >> "$GITHUB_ENV"
+      - name: Record capacity before the live cc1 export
+        run: |
+          df -h "$DECOMP_GCC_CLI_CC1_FRESH_SCRATCH" "$RUNNER_TEMP"
+          df -i "$DECOMP_GCC_CLI_CC1_FRESH_SCRATCH" "$RUNNER_TEMP"
       - name: Run the real contained cc1 full-export qualification
         env:
           DECOMP_GCC_CLI_PROFILE: ${{ github.workspace }}/oracle/gcc/16.2.0/compiler-engines.json
           DECOMP_GCC_CLI_CC1_BINARY: ${{ runner.temp }}/gcc-cc1-engine/artifacts/gcc-cc1.stripped
           DECOMP_GCC_CLI_EVIDENCE_ROOT: ${{ runner.temp }}/cc1-full-export-evidence
         run: scripts/ci-qualify-gcc-cc1-full-export.sh
+      - name: Record capacity after the live cc1 export
+        if: always()
+        run: |
+          if [[ -n "${DECOMP_GCC_CLI_CC1_FRESH_SCRATCH:-}" && -d "$DECOMP_GCC_CLI_CC1_FRESH_SCRATCH" ]]; then
+            df -h "$DECOMP_GCC_CLI_CC1_FRESH_SCRATCH" "$RUNNER_TEMP"
+            df -i "$DECOMP_GCC_CLI_CC1_FRESH_SCRATCH" "$RUNNER_TEMP"
+          else
+            echo 'cc1 scratch was not provisioned'
+          fi
       - name: Retain production cc1 model and receipt evidence
         if: always()
         uses: actions/upload-artifact@v7
