@@ -46,6 +46,7 @@ internal fun JsonObject.requireGeneratedCBuildBudgetEvidence(profile: Reconstruc
     require(flags.isNotEmpty() && flags.all { it.jsonPrimitive.isString }) {
         "build contract compiler flags are invalid"
     }
+    val flagValues = flags.map { it.jsonPrimitive.content }
     val configuredParallelism = configuration.number("parallelism")
     require(configuredParallelism in 1..256 && configuredParallelism == number("parallelism")) {
         "build contract parallelism is inconsistent"
@@ -53,10 +54,10 @@ internal fun JsonObject.requireGeneratedCBuildBudgetEvidence(profile: Reconstruc
     val configuredWallClock = configuration.number("wallClockTimeoutMillis")
     val configuredOutput = configuration.number("maximumOutputBytes")
     require(configuration.number("terminationGraceMillis") in 0..30_000)
-    require(flags.none { it == "-w" || it.startsWith("-Wno-error") && it.isNotBlank() }) {
+    require(flagValues.none { it == "-w" || it.startsWith("-Wno-error") }) {
         "build contract compiler flags cannot disable warnings-as-errors"
     }
-    require(flags.any { it == "-Werror" }) {
+    require(flagValues.any { it == "-Werror" }) {
         "build contract compiler flags must enable warnings-as-errors"
     }
     require(configuredWallClock == number("wallClockTimeoutMillis") &&
@@ -75,7 +76,7 @@ internal fun JsonObject.requireGeneratedCBuildBudgetEvidence(profile: Reconstruc
     val effective = ProjectBuildConfiguration(
         makeExecutable = makeExecutable,
         compilerExecutable = compilerExecutable,
-        cFlags = flags.map { it.jsonPrimitive.content },
+        cFlags = flagValues,
         parallelism = configuredParallelism.toInt(),
         wallClockTimeoutMillis = configuredWallClock,
         maximumOutputBytes = configuredOutput,
