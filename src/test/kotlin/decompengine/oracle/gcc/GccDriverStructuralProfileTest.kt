@@ -26,10 +26,14 @@ class GccDriverStructuralProfileTest {
         assertEquals("16.2.0", profile.version)
         assertEquals("78d4ac73dd391005b895a6148cd9831e28e1208b", profile.sourceRevision)
         assertEquals("55135c3631a45586f02f2a124b39923e561831730dc4c9aa7138fc541675056a", profile.compilerEngineProfileSha256)
+        assertEquals("106b2097f0da61d64c2c3c4bc09b6a56a25ad9f789250dae660429a04d02c952",
+            profile.fullExportProfileSha256)
         assertEquals("dbef520c025d268f5126229ace8ad5b08a15722573d45b5e1ab934611905abb4", profile.artifactManifestSha256)
         assertEquals("ba9b2f314bfb3d92a172e67f8ce993a2e98b9bc14aabf00ff6d58e4631037621", profile.fullBinary.sha256)
         assertEquals("e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905", profile.strippedBinary.sha256)
-        assertEquals("x86_64-sysv-amd64-v1", profile.targetAbi.id)
+        assertEquals("sysv-amd64-elf-v1", profile.targetAbi.id)
+        assertEquals("d251d5e6a0edc17655c355fb8fd757d557f064a6e67095ad53c8ca1e7569a343",
+            profile.targetAbi.descriptorSha256)
         assertEquals("sysv-amd64", profile.targetAbi.abi)
         assertEquals(62, profile.targetAbi.machine)
         assertEquals(3, profile.targetAbi.osAbi)
@@ -85,9 +89,13 @@ class GccDriverStructuralProfileTest {
         assertEquals(2, document.getValue("schemaVersion").jsonPrimitive.int)
         assertEquals(profile.compilerEngineProfileSha256,
             document.getValue("compilerEngineProfileSha256").jsonPrimitive.content)
+        assertEquals(profile.fullExportProfileSha256,
+            document.getValue("fullExportProfileSha256").jsonPrimitive.content)
         assertEquals(profile.artifactManifestSha256, document.getValue("artifactManifestSha256").jsonPrimitive.content)
         val target = document.getValue("targetDescriptor").jsonObject
-        assertEquals("x86_64-sysv-amd64-v1", target.getValue("id").jsonPrimitive.content)
+        assertEquals("sysv-amd64-elf-v1", target.getValue("id").jsonPrimitive.content)
+        assertEquals(profile.targetAbi.descriptorSha256,
+            target.getValue("checkedTargetAbiSha256").jsonPrimitive.content)
         assertEquals("x86:LE:64:default", target.getValue("ghidraLanguage").jsonPrimitive.content)
         assertEquals("gcc", target.getValue("ghidraCompilerSpec").jsonPrimitive.content)
         assertEquals("0x400000", target.getValue("imageBase").jsonPrimitive.content)
@@ -136,6 +144,22 @@ class GccDriverStructuralProfileTest {
         }
         assertFailsWith<GccDriverStructuralProfileException> {
             profile.bindFullExport(fullOperation(profile, snapshot, intentExporterSha256 = "e".repeat(64)))
+        }
+    }
+
+    @Test
+    fun `publication rejects a binding from another retained export`() {
+        val profile = profile()
+        val first = fullOperation(profile, fullSnapshot(profile,
+            modelBytes(profile, executableAddress(profile))))
+        val second = fullOperation(profile, fullSnapshot(profile,
+            modelBytes(profile, executableAddress(profile) + 1UL)))
+        val firstBinding = profile.bindFullExport(first)
+        val secondBinding = profile.bindFullExport(second)
+
+        requireGccFullExportBindingMatchesOperation(firstBinding, first, "a".repeat(64))
+        assertFailsWith<IllegalArgumentException> {
+            requireGccFullExportBindingMatchesOperation(secondBinding, first, "a".repeat(64))
         }
     }
 
@@ -252,7 +276,13 @@ class GccDriverStructuralProfileTest {
             payloadName = "assessment",
             payload = assessmentWithDigest,
         )
-        return GccBundledFullExportOperation(intentBytes, executionReceipt, exportReceipt, snapshot)
+        // Test-only fixture: production callers cannot obtain the coordinator's private permit.
+        val permitField = Class.forName("decompengine.oracle.gcc.GCC_BUNDLED_PREPARED_OPERATION_PERMIT")
+            .getDeclaredField("INSTANCE")
+        permitField.isAccessible = true
+        return GccBundledFullExportOperation(
+            intentBytes, executionReceipt, exportReceipt, snapshot, permitField.get(null),
+        )
     }
 
     private fun artifact(role: String, bytes: Long, sha256: String): JsonObject = JsonObject(mapOf(

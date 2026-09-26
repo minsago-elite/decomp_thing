@@ -6,12 +6,28 @@ import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFails
+import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 class GccBundledFullExportCliResultTest {
+    @Test
+    fun `tree manifest limits admit a sidecar inventory beyond generic JSON limits`() {
+        val record = JsonObject(mapOf(
+            "bytes" to JsonPrimitive(1),
+            "sha256" to JsonPrimitive("a".repeat(64)),
+        ))
+        val entries = (0 until 45_000).associate { index ->
+            "functions/fn_${index.toString(16).padStart(16, '0')}.json" to record
+        }
+        val limits = GccBundledFullExportCliResultV2.TREE_MANIFEST_JSON_LIMITS
+        val bytes = OracleJson.canonicalBytes(JsonObject(entries), limits)
+        assertTrue(bytes.size > 4 * 1024 * 1024)
+        assertEquals(entries.size, OracleJson.parseCanonical(bytes, limits).jsonObject.size)
+    }
+
     @Test
     fun `full export CLI result binds retained tree manifest and remains unscored`() {
         val tree = JsonObject(mapOf(
@@ -146,7 +162,8 @@ class GccBundledFullExportCliResultTest {
 
     private fun fullBindingBytes(outputTreeSha256: String): ByteArray {
         val target = JsonObject(mapOf(
-            "id" to JsonPrimitive("x86_64-sysv-amd64-v1"),
+            "id" to JsonPrimitive("sysv-amd64-elf-v1"),
+            "checkedTargetAbiSha256" to JsonPrimitive("a".repeat(64)),
             "architecture" to JsonPrimitive("x86_64"),
             "abi" to JsonPrimitive("sysv-amd64"),
             "machine" to JsonPrimitive(62),
@@ -179,6 +196,7 @@ class GccBundledFullExportCliResultTest {
             "profileVersion" to JsonPrimitive("16.2.0"),
             "sourceRevision" to JsonPrimitive("7".repeat(40)),
             "compilerEngineProfileSha256" to JsonPrimitive("4".repeat(64)),
+            "fullExportProfileSha256" to JsonPrimitive("3".repeat(64)),
             "artifactManifestSha256" to JsonPrimitive("8".repeat(64)),
             "targetDescriptor" to target,
             "targetDescriptorSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(target))),

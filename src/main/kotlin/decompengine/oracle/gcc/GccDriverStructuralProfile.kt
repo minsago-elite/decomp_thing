@@ -6,6 +6,7 @@ import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.OracleSchemas
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.oracle.structural.CanonicalProgramModelStreaming
+import decompengine.oracle.structural.CanonicalProgramModelStreamingLimits
 import decompengine.oracle.structural.StructuralReplayInputBinaryV1
 import java.nio.file.Files
 import java.nio.file.LinkOption
@@ -29,6 +30,7 @@ internal data class GccDriverStructuralExecutableRangeV1(val startRva: ULong, va
 
 internal data class GccDriverStructuralTargetAbiV1(
     val id: String,
+    val descriptorSha256: String,
     val architecture: String,
     val abi: String,
     val machine: Int,
@@ -58,6 +60,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
     val version: String,
     val sourceRevision: String,
     val compilerEngineProfileSha256: String,
+    val fullExportProfileSha256: String,
     val artifactManifestSha256: String,
     val sourceLockSha256: String,
     val buildRecordSha256: String,
@@ -90,7 +93,12 @@ internal class GccDriverStructuralInputsV1 private constructor(
         require(snapshot.language == targetAbi.ghidraLanguage && snapshot.compilerSpec == targetAbi.ghidraCompilerSpec) {
             "GCC full export loader identity differs from the authenticated target profile"
         }
-        val model = CanonicalProgramModelStreaming.readCanonical(snapshot.programModel)
+        val model = CanonicalProgramModelStreaming.readCanonical(
+            snapshot.programModel,
+            CanonicalProgramModelStreamingLimits(
+                maximumFunctions = GccBundledFullExportCapture.MAXIMUM_FULL_FUNCTIONS.toInt(),
+            ),
+        )
         require(model.model.inputSha256 == strippedBinary.sha256 &&
             model.model.functions.size.toLong() == snapshot.functionCount
         ) { "GCC full program model differs from the authenticated cc1 input or export inventory" }
@@ -106,6 +114,9 @@ internal class GccDriverStructuralInputsV1 private constructor(
         }
         GccRetainedCompilerEngineProfile.open(root.resolve("compiler-engines.json")).use { runtimeProfile ->
             runtimeProfile.requireCurrent()
+            require(loadFullExportAuthority(root, runtimeProfile.suite.analysis.exporterSha256,
+                runtimeProfile.suite.analysis.ghidraArchive.sha256) == fullExportProfileSha256
+            ) { "GCC full-export authority changed after structural profile admission" }
             val intent = OracleJson.parseCanonical(operation.intentBytes) as JsonObject
             require(intent["plannerProfile"] == OracleJson.parseCanonical(runtimeProfile.policyBytes())) {
                 "GCC full-export intent planner profile differs from the retained compiler-engine profile"
@@ -127,6 +138,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
             ) { "GCC full export analysis runtime differs from the authenticated bundled Ghidra archive" }
             val descriptor = OracleJson.canonicalBytes(JsonObject(linkedMapOf(
                 "id" to JsonPrimitive(targetAbi.id),
+                "checkedTargetAbiSha256" to JsonPrimitive(targetAbi.descriptorSha256),
                 "architecture" to JsonPrimitive(targetAbi.architecture),
                 "abi" to JsonPrimitive(targetAbi.abi),
                 "machine" to JsonPrimitive(targetAbi.machine),
@@ -146,6 +158,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
                 sourceRevision = sourceRevision,
                 artifactManifestSha256 = artifactManifestSha256,
                 compilerEngineProfileSha256 = compilerEngineProfileSha256,
+                fullExportProfileSha256 = fullExportProfileSha256,
                 targetDescriptorBytes = descriptor,
                 inputSha256 = snapshot.inputSha256,
                 inputBytes = snapshot.inputBytes,
@@ -173,6 +186,8 @@ internal class GccDriverStructuralInputsV1 private constructor(
         private const val SOURCE_LOCK_SHA256 = "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc"
         private const val BUILD_RECORD_SHA256 = "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
         private const val TOOLCHAIN_REPRODUCTION_SHA256 = "5c2c159d7287305159a220a1260f6ff6bffe9ec78bb1cbe2fb24f85b68a7d4de"
+        private const val TARGET_ABI_SHA256 = "d251d5e6a0edc17655c355fb8fd757d557f064a6e67095ad53c8ca1e7569a343"
+        private const val FULL_EXPORT_PROFILE_SHA256 = "106b2097f0da61d64c2c3c4bc09b6a56a25ad9f789250dae660429a04d02c952"
         private const val MAXIMUM_CONTROL_BYTES = 4 * 1024 * 1024
         private const val MAXIMUM_MANIFEST_BYTES = 64 * 1024 * 1024
         private val JSON_LIMITS = StrictJsonLimits(
@@ -234,7 +249,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
             requireDigest(dockerfileSha256, recipe.stringField("dockerfileSha256", "GCC toolchain recipe"),
                 "GCC toolchain Dockerfile")
 
-            val cc1 = GccRetainedCompilerEngineProfile.open(compilerEngineProfilePath).use { retained ->
+            val (cc1, analysis) = GccRetainedCompilerEngineProfile.open(compilerEngineProfilePath).use { retained ->
                 retained.requireCurrent()
                 val suite = retained.suite
                 require(suite.id == "gcc-compiler-engines-$PROFILE_VERSION" && suite.version == PROFILE_VERSION &&
@@ -243,14 +258,18 @@ internal class GccDriverStructuralInputsV1 private constructor(
                     suite.toolchainReproductionSha256 == toolchain.sha256 &&
                     suite.profileSha256 == compilerEngineProfileSha256
                 ) { "GCC cc1 compiler-engine profile differs from its authenticated source/build records" }
-                suite.engine("cc1").also { engine ->
+                val engine = suite.engine("cc1").also { engine ->
                     require(engine.buildRecordSha256 == CC1_BUILD_RECORD_SHA256 &&
                         engine.oracleManifestSha256 == CC1_MANIFEST_SHA256 &&
                         engine.fullArtifact.relativePath == "artifacts/gcc-cc1.full" &&
                         engine.strippedArtifact.relativePath == "artifacts/gcc-cc1.stripped"
                     ) { "GCC cc1 artifact records differ from the fixed structural profile" }
                 }
+                engine to suite.analysis
             }
+            val fullExportProfileSha256 = loadFullExportAuthority(
+                root, analysis.exporterSha256, analysis.ghidraArchive.sha256,
+            )
             val manifest = readJson(
                 root.resolve("cc1-oracle-manifest.json"), MAXIMUM_MANIFEST_BYTES, "gcc/oracle-manifest",
             )
@@ -280,8 +299,22 @@ internal class GccDriverStructuralInputsV1 private constructor(
             }
             val fullHeader = fullElf.objectField("header", "GCC cc1 full ELF")
             val header = strippedElf.objectField("header", "GCC cc1 stripped ELF")
-            val target = target(header)
-            require(target(fullHeader) == target && full.elfType == stripped.elfType) {
+            val targetDescriptor = readJson(
+                root.parent.parent.resolve("targets/sysv-amd64-v1.json"), MAXIMUM_CONTROL_BYTES, "target-abi",
+            )
+            requireDigest(targetDescriptor.sha256, TARGET_ABI_SHA256, "GCC target ABI descriptor")
+            val checkedTarget = targetDescriptor.document.objectField("target", "GCC target ABI descriptor")
+            require(targetDescriptor.document.stringField("id", "GCC target ABI descriptor") == "sysv-amd64-elf-v1" &&
+                checkedTarget.stringField("architecture", "GCC target ABI descriptor") == "x86_64" &&
+                checkedTarget.stringField("endianness", "GCC target ABI descriptor") == "little" &&
+                checkedTarget.longField("addressBits", "GCC target ABI descriptor") == 64L &&
+                checkedTarget.stringField("objectFormat", "GCC target ABI descriptor") == "ELF"
+            ) { "GCC target ABI descriptor differs from the checked x86-64 SysV identity" }
+            val target = target(header, targetDescriptor.document.stringField("id", "GCC target ABI descriptor"),
+                targetDescriptor.sha256)
+            require(target(fullHeader, target.id, target.descriptorSha256) == target &&
+                full.elfType == stripped.elfType
+            ) {
                 "GCC cc1 full and stripped ELF target records differ in the authenticated manifest"
             }
             val imageBase = strippedProgramHeaders.filter { it.typeName == "PT_LOAD" && it.memorySize > 0UL }
@@ -301,6 +334,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
                 profileId = PROFILE_ID,
                 version = PROFILE_VERSION,
                 compilerEngineProfileSha256 = compilerEngineProfileSha256,
+                fullExportProfileSha256 = fullExportProfileSha256,
                 sourceRevision = sourceRevision,
                 artifactManifestSha256 = cc1.oracleManifestSha256,
                 sourceLockSha256 = sourceLock.sha256,
@@ -315,12 +349,38 @@ internal class GccDriverStructuralInputsV1 private constructor(
             )
         }
 
+        private fun loadFullExportAuthority(root: Path, exporterSha256: String,
+            ghidraArchiveSha256: String): String {
+            val bytes = OracleArtifacts.read(root.resolve("structural-full-export-profile.json"),
+                OracleArtifactLimits(MAXIMUM_CONTROL_BYTES)).bytes
+            val digest = OracleArtifacts.sha256(bytes)
+            requireDigest(digest, FULL_EXPORT_PROFILE_SHA256, "GCC structural full-export profile")
+            val authority = OracleJson.parseCanonical(bytes) as? JsonObject
+                ?: profileFail("GCC structural full-export profile is not an object")
+            require(authority.keys == setOf("provider", "schemaVersion", "compilerEngineProfileSha256",
+                "exporterSha256", "exporterVersion", "recoveryMode", "ghidraArchiveSha256") &&
+                authority.stringField("provider", "GCC structural full-export profile") ==
+                    "gcc-driver-structural-full-export-profile-v1" &&
+                authority.longField("schemaVersion", "GCC structural full-export profile") == 1L &&
+                authority.stringField("compilerEngineProfileSha256", "GCC structural full-export profile") ==
+                    COMPILER_ENGINE_PROFILE_SHA256 &&
+                authority.stringField("exporterSha256", "GCC structural full-export profile") == exporterSha256 &&
+                authority.longField("exporterVersion", "GCC structural full-export profile") == 10L &&
+                authority.stringField("recoveryMode", "GCC structural full-export profile") == "full" &&
+                authority.stringField("ghidraArchiveSha256", "GCC structural full-export profile") ==
+                    ghidraArchiveSha256
+            ) { "GCC structural profile does not authorize the authenticated full-recovery exporter" }
+            return digest
+        }
+
         private fun requireTarget(
             elfClass: String,
             dataEncoding: String,
             machine: Int,
             osAbi: Int,
             elfType: String,
+            descriptorId: String,
+            descriptorSha256: String,
         ): GccDriverStructuralTargetAbiV1 {
             require(elfClass == "ELF64" && dataEncoding == "little-endian" && machine == 62 && osAbi == 3 &&
                 elfType == "ET_EXEC"
@@ -328,7 +388,8 @@ internal class GccDriverStructuralInputsV1 private constructor(
                 "GCC cc1 ELF differs from its fixed x86-64 SysV target profile"
             }
             return GccDriverStructuralTargetAbiV1(
-                id = "x86_64-sysv-amd64-v1",
+                id = descriptorId,
+                descriptorSha256 = descriptorSha256,
                 architecture = "x86_64",
                 abi = "sysv-amd64",
                 machine = machine,
@@ -342,12 +403,18 @@ internal class GccDriverStructuralInputsV1 private constructor(
             )
         }
 
-        private fun target(header: JsonObject): GccDriverStructuralTargetAbiV1 = requireTarget(
+        private fun target(
+            header: JsonObject,
+            descriptorId: String,
+            descriptorSha256: String,
+        ): GccDriverStructuralTargetAbiV1 = requireTarget(
             header.stringField("class", "GCC cc1 ELF header"),
             header.stringField("dataEncoding", "GCC cc1 ELF header"),
             Math.toIntExact(header.longField("machine", "GCC cc1 ELF header")),
             Math.toIntExact(header.longField("osAbi", "GCC cc1 ELF header")),
             header.stringField("typeName", "GCC cc1 ELF header"),
+            descriptorId,
+            descriptorSha256,
         )
 
         private fun binary(record: JsonObject, expected: GccCompilerEngineArtifactBinding): GccDriverStructuralBinaryV1 {

@@ -27,6 +27,32 @@ import java.nio.file.Path
 
 private object GCC_BUNDLED_PREPARED_OPERATION_PERMIT
 
+internal fun requireGccFullExportBindingMatchesOperation(
+    binding: GccDriverStructuralFullExportBindingV2,
+    exported: GccBundledFullExportOperation,
+    operationId: String,
+) {
+    val snapshot = exported.snapshot
+    val bindingBytes = binding.canonicalBytes
+    require(OracleArtifacts.sha256(bindingBytes) == binding.sha256) {
+        "structural full-export binding bytes differ from their digest"
+    }
+    val bound = OracleJson.parseCanonical(bindingBytes) as JsonObject
+    val boundModel = bound.getValue("programModel") as JsonObject
+    val boundLineage = bound.getValue("receiptLineage") as JsonObject
+    require(boundModel["sha256"] == JsonPrimitive(snapshot.programModelSha256) &&
+        boundModel["bytes"] == JsonPrimitive(snapshot.programModelBytes) &&
+        boundModel["functionCount"] == JsonPrimitive(snapshot.functionCount) &&
+        bound["outputTreeSha256"] == JsonPrimitive(snapshot.outputTreeSha256) &&
+        boundLineage["operationId"] == JsonPrimitive(operationId) &&
+        boundLineage["intentSha256"] == JsonPrimitive(OracleArtifacts.sha256(exported.intentBytes)) &&
+        boundLineage["executionReceiptSha256"] ==
+            JsonPrimitive(OracleArtifacts.sha256(exported.executionReceiptBytes)) &&
+        boundLineage["exportAssessmentReceiptSha256"] ==
+            JsonPrimitive(OracleArtifacts.sha256(exported.exportAssessmentReceiptBytes))
+    ) { "structural full-export binding belongs to a different contained operation" }
+}
+
 internal class GccBundledPlannedOperation(executionReceipt: ByteArray, assessmentReceipt: ByteArray,
     captured: GccBundledCapturedPlannerOutput) {
     private val execution = executionReceipt.copyOf()
@@ -60,6 +86,7 @@ internal class GccBundledFullExportOperation(
     executionReceiptBytes: ByteArray,
     exportAssessmentReceiptBytes: ByteArray,
     val snapshot: GccBundledFullExportSnapshot,
+    constructionPermit: Any,
 ) {
     val complete: Boolean = false
     val releaseEligible: Boolean = false
@@ -69,6 +96,12 @@ internal class GccBundledFullExportOperation(
     val intentBytes: ByteArray get() = intent.copyOf()
     val executionReceiptBytes: ByteArray get() = execution.copyOf()
     val exportAssessmentReceiptBytes: ByteArray get() = exportAssessment.copyOf()
+
+    init {
+        check(constructionPermit === GCC_BUNDLED_PREPARED_OPERATION_PERMIT) {
+            "GCC full export requires retained coordinator ownership"
+        }
+    }
 }
 
 internal class GccBundledInterruptedOperation(
@@ -177,7 +210,10 @@ internal class GccBundledPreparedOperation internal constructor(
             inputs.verify("after GCC full export snapshot")
             lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
             val exportReceipt = journal.recordExportAssessment(bindWallTime(captured.assessmentBytes))
-            GccBundledFullExportOperation(intent.canonicalBytes, receipt, exportReceipt, captured)
+            GccBundledFullExportOperation(
+                intent.canonicalBytes, receipt, exportReceipt, captured,
+                GCC_BUNDLED_PREPARED_OPERATION_PERMIT,
+            )
         }.also { completedFullExport = it }
     }
 
@@ -495,10 +531,8 @@ internal class GccBundledPreparedOperation internal constructor(
             lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
             val original = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(definition)
             val snapshot = exported.snapshot
+            requireGccFullExportBindingMatchesOperation(binding, exported, intent.operationId)
             val bindingBytes = binding.canonicalBytes
-            require(OracleArtifacts.sha256(bindingBytes) == binding.sha256) {
-                "structural full-export binding bytes differ from their digest"
-            }
             val bindingName = "structural-full-export-binding.json"
             val manifestName = GccBundledFullExportCliResultV2.TREE_MANIFEST_NAME
             val manifestBytes = snapshot.sidecarManifest

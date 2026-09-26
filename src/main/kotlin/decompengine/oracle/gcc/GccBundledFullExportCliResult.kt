@@ -13,12 +13,12 @@ import kotlinx.serialization.json.jsonPrimitive
 internal object GccBundledFullExportCliResultV2 {
     const val TREE_MANIFEST_NAME = "full-export-tree-manifest.json"
     const val MAXIMUM_TREE_MANIFEST_BYTES = 64 * 1024 * 1024
-    private val TREE_MANIFEST_JSON_LIMITS = StrictJsonLimits(
+    internal val TREE_MANIFEST_JSON_LIMITS = StrictJsonLimits(
         maximumInputBytes = MAXIMUM_TREE_MANIFEST_BYTES,
         maximumCanonicalBytes = MAXIMUM_TREE_MANIFEST_BYTES,
         maximumNodes = 1_000_000,
         maximumStringBytes = 4 * 1024 * 1024,
-        maximumTotalStringBytes = 32 * 1024 * 1024,
+        maximumTotalStringBytes = 48 * 1024 * 1024,
     )
 
     fun create(
@@ -72,6 +72,7 @@ internal object GccBundledFullExportCliResultV2 {
             "structural binding source revision is invalid"
         }
         val compilerEngineProfileSha256 = binding.requiredDigest("compilerEngineProfileSha256", "structural binding")
+        binding.requiredDigest("fullExportProfileSha256", "structural binding")
         binding.requiredDigest("artifactManifestSha256", "structural binding")
         require(binding.requiredDigest("outputTreeSha256", "structural binding") == outputTreeSha256) {
             "structural binding does not match the captured full-export tree"
@@ -91,6 +92,7 @@ internal object GccBundledFullExportCliResultV2 {
             "structural binding target image base is invalid"
         }
         targetDescriptor.requiredDigest("executableRangesSha256", "target descriptor")
+        targetDescriptor.requiredDigest("checkedTargetAbiSha256", "target descriptor")
 
         val inputBinary = binding.getValue("inputBinary") as? JsonObject
             ?: throw IllegalArgumentException("structural binding input binary must be an object")
@@ -212,13 +214,14 @@ internal object GccBundledFullExportCliResultV2 {
 
     private val BINDING_KEYS = setOf(
         "provider", "schemaVersion", "profileId", "profileVersion", "sourceRevision",
-        "compilerEngineProfileSha256", "artifactManifestSha256", "targetDescriptor",
+        "compilerEngineProfileSha256", "fullExportProfileSha256", "artifactManifestSha256", "targetDescriptor",
         "targetDescriptorSha256", "inputBinary", "exporter", "ghidraArchive", "programModel",
         "outputTreeSha256", "receiptLineage", "receiptLineageSha256",
     )
     private val TARGET_DESCRIPTOR_KEYS = setOf(
         "id", "architecture", "abi", "machine", "osAbi", "elfClass", "dataEncoding", "pointerBits",
         "elfType", "ghidraLanguage", "ghidraCompilerSpec", "imageBase", "executableRangesSha256",
+        "checkedTargetAbiSha256",
     )
     private val INPUT_BINARY_KEYS = setOf("sha256", "bytes")
     private val BINARY_KEYS = setOf("sha256", "bytes")
