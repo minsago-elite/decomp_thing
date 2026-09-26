@@ -24,6 +24,7 @@ private fun verifiedAuditRepairLineage(
     profile: ReconstructionProfile,
     manifest: SourceTreeManifest,
     manifestSizes: Map<String, Long>,
+    consumedBytes: Long,
     limits: ArchivalBundleLimits,
 ): ArchivedRepairReleaseLineage {
     val reportsRoot = projectDir.resolve("reports")
@@ -38,7 +39,8 @@ private fun verifiedAuditRepairLineage(
     }
     require(candidates.size <= limits.maximumEntries) { "repair audit report inventory exceeds the entry bound" }
     val history = projectDir.resolve("reports/repair_history.json")
-    var retainedBytes = 0L
+    var retainedBytes = consumedBytes
+    var retainedEntries = manifest.files.size + 1 // The source manifest is also an audited input.
     candidates.filter { path ->
         path.startsWith(repairRoot) || path == history || path.fileName.toString().endsWith(".validation.json")
     }.forEach { path ->
@@ -48,18 +50,27 @@ private fun verifiedAuditRepairLineage(
             "repair audit state contains a non-regular entry: $path"
         }
         val relative = projectDir.relativize(path).toString().replace('\\', '/')
-        val snapshot = readStableRegularFile(projectDir, relative, limits.maximumFileBytes)
+        // Manifest inputs were already hashed and charged by the caller. A profile may
+        // legitimately place a manifest-bound report at a validation-suffixed path.
+        if (relative in digests) return@forEach
+        retainedEntries = Math.addExact(retainedEntries, 1)
+        require(retainedEntries <= limits.maximumEntries) { "repair audit state exceeds the entry bound" }
+        val remainingBytes = limits.maximumTotalBytes - retainedBytes
+        require(remainingBytes > 0L) { "repair audit state exceeds the aggregate byte bound" }
+        val snapshot = readStableRegularFile(projectDir, relative, minOf(limits.maximumFileBytes, remainingBytes))
         retainedBytes = Math.addExact(retainedBytes, snapshot.bytes.size.toLong())
         require(retainedBytes <= limits.maximumTotalBytes) { "repair audit state exceeds the aggregate byte bound" }
-        require(digests.putIfAbsent(relative, snapshot.sha256) == null) {
-            "repair audit state duplicates a manifest path"
-        }
+        digests[relative] = snapshot.sha256
         sizes[relative] = snapshot.bytes.size.toLong()
     }
-    return RepairAcpEvidenceArchiveVerifier.verifyIfPresent(
+    val lineage = RepairAcpEvidenceArchiveVerifier.verifyIfPresent(
         projectDir, digests, sizes, manifest, profile,
         ReconstructionAdapters.resolve(profile).repairIndexProfile(profile),
     )
+    // A repair of an unresolved agent source is releasable only when its historical
+    // checkpoint is an authentic undispatched budget fallback.
+    ReconstructionAcpEvidenceArchiveVerifier.verify(projectDir, digests, sizes, manifest, profile, lineage)
+    return lineage
 }
 
 data class ArchivePublicationLimits(
@@ -297,11 +308,12 @@ object ArchivalProjectAuditor {
         val compilationEvidence = linkedMapOf<String, JsonObject>()
         val compilationUnresolved = mutableSetOf<String>()
         val acceptedOwners = linkedMapOf<String, List<String>>()
+        val repairedOwners = linkedMapOf<String, List<String>>()
         val acceptedSourcePaths = linkedMapOf<String, String>()
         val acceptedInputFingerprints = linkedMapOf<String, String>()
         val plannedModuleEntityIds = linkedMapOf<String, List<String>>()
         val repairLineage by lazy {
-            verifiedAuditRepairLineage(projectDir, profile, manifest, manifestSizes, effectiveLimits)
+            verifiedAuditRepairLineage(projectDir, profile, manifest, manifestSizes, totalBytes, effectiveLimits)
         }
         for (element in planJson.getValue("modules").jsonArray) {
             val module = element.jsonObject
@@ -346,6 +358,8 @@ object ArchivalProjectAuditor {
                     require(repaired.headSha256 == hashes.getValue(source)) {
                         "accepted repair source differs from authenticated repair lineage: $source"
                     }
+                    repairedOwners[identifier] = owned
+                    acceptedSourcePaths[identifier] = source
                     continue
                 }
                 acceptedOwners[identifier] = owned
@@ -433,7 +447,7 @@ object ArchivalProjectAuditor {
                 }
             }
         }
-        if (acceptedOwners.isNotEmpty()) {
+        if (acceptedOwners.isNotEmpty() || repairedOwners.isNotEmpty()) {
             val confidence = try {
                 val text = requireNotNull(confidenceText) { "accepted modules require manifest-bound confidence evidence" }
                 UniqueJsonObjectKeyValidator(text).validate()
@@ -496,10 +510,42 @@ object ArchivalProjectAuditor {
                     requireScore(module.getValue("score"), expectedScore(owned))
                     requireIds(module, "unresolvedRecoveryEntityIds", owned.filter { it in recoveryUnresolved })
                     requireIds(module, "unresolvedImplementationIds", owned.filter { it in implementationUnresolved })
+                    if (id in repairedOwners) {
+                        val revision = module.getValue("revisionEvidence").jsonObject
+                        val checkpointPath = profile.layout.declaration("module-evidence")
+                            .materialize(mapOf("module" to id))
+                        val checkpoint = Json.parseToJsonElement(
+                            readStableRegularFile(projectDir, checkpointPath, maximumFileBytes)
+                                .bytes.decodeToString(throwOnInvalidSequence = true),
+                        ).jsonObject
+                        require(revision.keys == setOf("sourcePath", "sourceSha256", "inputFingerprint",
+                            "inputFingerprintProvider", "inputBinarySha256", "modelSchemaVersion", "checkpointPath",
+                            "checkpointSha256", "acceptedImplementation", "compilation", "behavior") &&
+                            revision.string("sourcePath") == acceptedSourcePaths.getValue(id) &&
+                            revision.string("sourceSha256") == moduleRevisions.getValue(id) &&
+                            revision.string("inputFingerprint") == checkpoint.string("fingerprint") &&
+                            revision.string("inputFingerprintProvider") == "module-reconstruction-input-v2" &&
+                            revision.string("inputBinarySha256") == model.inputSha256 &&
+                            revision.getValue("modelSchemaVersion") == JsonPrimitive(model.schemaVersion) &&
+                            revision.string("checkpointPath") == checkpointPath &&
+                            revision.string("checkpointSha256") == hashes.getValue(checkpointPath) &&
+                            revision.getValue("acceptedImplementation") == JsonPrimitive(true) &&
+                            revision.getValue("compilation") == checkpoint.getValue("compilation")) {
+                            "repaired module confidence evidence differs from its authenticated revision"
+                        }
+                        val behavior = revision.getValue("behavior").jsonObject
+                        require(behavior.keys == setOf("status", "reason", "coverage", "outputAgreement", "unobservedBehavior") &&
+                            behavior.string("status") == "unknown" && behavior.getValue("coverage") == JsonNull &&
+                            behavior.getValue("outputAgreement") == JsonNull &&
+                            behavior.string("unobservedBehavior") == "unknown") {
+                            "repaired module confidence evidence overstates unobserved behavior"
+                        }
+                    }
                 }
                 byId
             } catch (failure: Exception) {
                 if (failure is InterruptedException) throw failure
+                if (repairedOwners.isNotEmpty()) throw failure
                 val reason = failure.message.orEmpty().take(512).ifEmpty { failure.javaClass.simpleName }
                 acceptedOwners.forEach { (id, owners) ->
                     if (id !in compilationEvidence) return@forEach

@@ -1425,6 +1425,11 @@ object SourceTreeGenerator {
     ): List<ModuleReconstructionIssue> {
         val entityIds = module.functionIds + module.globalIds
         val issues = reconstructed.issues.toMutableList()
+        if (reconstructed.generator == "repair-revision") {
+            issues += ModuleReconstructionIssue(
+                "reserved-generator", "repair-revision is reserved for authenticated repair publication", entityIds,
+            )
+        }
         if (source.isBlank() && entityIds.isNotEmpty()) {
             issues += ModuleReconstructionIssue("empty-source", "module source is empty", entityIds)
         }
