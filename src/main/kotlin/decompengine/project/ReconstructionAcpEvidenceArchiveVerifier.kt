@@ -162,7 +162,11 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 }
 
                 if (repairedSource == null && source.acceptedImplementation == false &&
-                    !checkpoint.accepted && source.generator.startsWith("unresolved:agent:")
+                    !checkpoint.accepted && source.generator.startsWith("unresolved:agent:") &&
+                    source.generator == "unresolved:${checkpoint.reconstructorIdentity}" &&
+                    checkpoint.promptCharacters != null && checkpoint.promptBudgetCharacters != null &&
+                    checkpoint.promptCharacters > checkpoint.promptBudgetCharacters &&
+                    checkpoint.preDispatchBudgetFailure
                 ) {
                     require(checkpoint.hasNoExecutionEvidence()) {
                         "unresolved agent fallback retains ACP execution evidence: $moduleId"
@@ -420,15 +424,22 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             "module checkpoint entity status disagrees with acceptance: $moduleId"
         }
         val issues = root.requiredArray("issues", "module checkpoint")
-        issues.forEach { element ->
+        val issueFacts = issues.map { element ->
             val issue = element.requiredObject("module checkpoint issue")
             issue.requireExactKeys(CHECKPOINT_ISSUE_FIELDS, "module checkpoint issue")
-            issue.requiredString("code", "module checkpoint issue")
-            issue.requiredString("message", "module checkpoint issue")
-            issue.requiredArray("entityIds", "module checkpoint issue").forEach {
+            val code = issue.requiredString("code", "module checkpoint issue")
+            val message = issue.requiredString("message", "module checkpoint issue")
+            val ids = issue.requiredArray("entityIds", "module checkpoint issue").map {
                 it.requiredString("module checkpoint issue entity ID")
             }
+            Triple(code, message, ids)
         }
+        val preDispatchBudgetFailure = promptCharacters != null && promptBudgetCharacters != null &&
+            issueFacts.any { (code, message, ids) ->
+                code == "context-budget-exceeded" &&
+                    message == "module context required $promptCharacters characters; limit=$promptBudgetCharacters" &&
+                    ids.size == source.entityIds.size && ids.toSet() == source.entityIds.toSet()
+            }
         require(accepted == issues.isEmpty()) {
             "module checkpoint acceptance and validation issues disagree: $moduleId"
         }
@@ -451,6 +462,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             generator,
             reconstructorIdentity,
             promptSha256,
+            promptCharacters,
             promptBudgetCharacters,
             executionEvidencePath,
             executionEvidenceSha256,
@@ -459,6 +471,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             executionTerminalOutcome,
             executionReleaseComplete,
             accepted,
+            preDispatchBudgetFailure,
         )
     }
 
@@ -1406,6 +1419,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         val generator: String,
         val reconstructorIdentity: String,
         val promptSha256: String,
+        val promptCharacters: Long?,
         val promptBudgetCharacters: Long?,
         val executionEvidencePath: String?,
         val executionEvidenceSha256: String?,
@@ -1414,6 +1428,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         val executionTerminalOutcome: String?,
         val executionReleaseComplete: Boolean?,
         val accepted: Boolean,
+        val preDispatchBudgetFailure: Boolean,
     ) {
         fun hasNoExecutionEvidence(): Boolean = listOf(
             executionEvidencePath,
