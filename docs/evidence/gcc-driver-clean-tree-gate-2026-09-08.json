@@ -21,7 +21,7 @@
       "make",
       "--jobs=4",
       "--output-sync=target",
-      "CC=gcc",
+      "CC=cc",
       "CFLAGS=-std=c11 -g -Wall -Wextra -Werror -Iinclude"
     ],
     "effectivePolicy": {
@@ -34,7 +34,7 @@
     },
     "declaredDependencies": [
       "GNU Make",
-      "C compiler (gcc)",
+      "C compiler selected by the profile (cc)",
       "POSIX shell",
       "POSIX find",
       "POSIX mkdir",
@@ -107,7 +107,7 @@
       "clean archive extraction and rebuild",
       "compiler warning failure attributed to its module",
       "link failure attributed to its referencing module",
-      "ambient build controls and disabled warnings-as-errors rejected"
+      "disabled warnings-as-errors rejected"
     ],
     "doesNotProve": [
       "complete GCC reconstruction",
