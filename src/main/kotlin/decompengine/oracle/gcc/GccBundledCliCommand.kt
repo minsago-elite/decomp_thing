@@ -44,7 +44,7 @@ internal object GccBundledCliCommand {
                 GccDriverStructuralInputsV1.load(options.profile.parent)
                 val fullExport = owner.executeFullExport()
                 val structuralInputs = GccDriverStructuralInputsV1.load(options.profile.parent)
-                owner.publishFullExportCliResult(structuralInputs.bindFullExport(fullExport))
+                owner.publishFullExportCliResult(structuralInputs.captureFullExport(fullExport))
             } else {
                 if (options.resumeAfterCheckpoint == null) owner.execute()
                 else {
