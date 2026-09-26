@@ -7,7 +7,7 @@ on:
   pull_request:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event.pull_request.number || github.sha }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && 'pull-request' || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -29,6 +29,13 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements/oracle-generation.txt
+      - name: Cache locked frontend package downloads
+        uses: actions/cache@v6
+        with:
+          path: ~/.npm
+          key: frontend-npm-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
       - name: Record toolchain and install locked dependencies
         run: |
           mkdir -p "$RUNNER_TEMP/frontend-ci"
@@ -98,10 +105,20 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-          cache: gradle
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+          cache-read-only: ${{ github.ref != 'refs/heads/master' }}
+      - name: Cache locked frontend package downloads
+        uses: actions/cache@v6
+        with:
+          path: ~/.npm
+          key: frontend-npm-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements/oracle-generation.txt
       - name: Install pinned build and browser tools
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
@@ -171,7 +188,15 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-          cache: gradle
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+          cache-read-only: ${{ github.ref != 'refs/heads/master' }}
+      - name: Cache locked frontend package downloads
+        uses: actions/cache@v6
+        with:
+          path: ~/.npm
+          key: frontend-npm-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
       - name: Install pinned build-only frontend toolchain
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
@@ -290,7 +315,10 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-          cache: gradle
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+          cache-read-only: ${{ github.ref != 'refs/heads/master' }}
       - name: Install pinned build-only frontend toolchain
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
@@ -337,7 +365,10 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-          cache: gradle
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+          cache-read-only: ${{ github.ref != 'refs/heads/master' }}
       - name: Install pinned build-only frontend toolchain
         run: |
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
