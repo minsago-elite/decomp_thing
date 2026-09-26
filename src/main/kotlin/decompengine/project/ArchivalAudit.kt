@@ -545,9 +545,12 @@ object ArchivalProjectAuditor {
                         val revision = module.getValue("revisionEvidence").jsonObject
                         val checkpointPath = profile.layout.declaration("module-evidence")
                             .materialize(mapOf("module" to id))
+                        val checkpointSnapshot = readStableRegularFile(projectDir, checkpointPath, maximumFileBytes)
+                        require(checkpointSnapshot.sha256 == hashes.getValue(checkpointPath)) {
+                            "repaired module checkpoint changed during confidence verification"
+                        }
                         val checkpoint = Json.parseToJsonElement(
-                            readStableRegularFile(projectDir, checkpointPath, maximumFileBytes)
-                                .bytes.decodeToString(throwOnInvalidSequence = true),
+                            checkpointSnapshot.bytes.decodeToString(throwOnInvalidSequence = true),
                         ).jsonObject
                         require(revision.keys == setOf("sourcePath", "sourceSha256", "inputFingerprint",
                             "inputFingerprintProvider", "inputBinarySha256", "modelSchemaVersion", "checkpointPath",

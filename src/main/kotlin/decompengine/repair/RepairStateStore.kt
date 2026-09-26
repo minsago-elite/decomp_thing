@@ -105,9 +105,19 @@ internal class RepairStateStore private constructor(
 
     fun writeRoot(name: String, bytes: ByteArray) = writeAtomically(projectRoot, name, bytes, "project-evidence")
 
-    fun writeProjectEvidence(relative: String, bytes: ByteArray) =
+    /** Retain the manifest-bound preimage until the manifest commits the derived report. */
+    fun writeProjectedEvidence(relative: String, bytes: ByteArray) =
         withProjectEvidenceParent(relative) { parent, name ->
-            writeAtomically(parent, name, bytes, "project-evidence")
+            writeAtomically(parent, name, bytes, "project-evidence", keepDisplaced = true)
+        }
+
+    fun readProjectedEvidencePreimage(relative: String, maximumBytes: Long): ByteArray? =
+        withProjectEvidenceParent(relative) { parent, name ->
+            val temporary = atomicTemporaryName(name)
+            if (!exists(parent, temporary)) null else readRequiredStable(
+                parent, LinuxFilesystemSyscalls.descriptorPath(parent), temporary, maximumBytes,
+                "repair projection preimage",
+            ).bytes
         }
 
     fun cleanupProjectEvidenceTemporary(relative: String) =
@@ -249,6 +259,7 @@ internal class RepairStateStore private constructor(
         bytes: ByteArray,
         scope: String,
         requireAbsent: Boolean = false,
+        keepDisplaced: Boolean = false,
     ) {
         checkOpen()
         val temporaryName = atomicTemporaryName(name)
@@ -262,6 +273,9 @@ internal class RepairStateStore private constructor(
             target = LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, name)
             val targetIdentity = target?.identity
             targetIdentity?.let { requireManagedRegularFile(it, parent.identity, "repair evidence target") }
+            require(!keepDisplaced || targetIdentity != null) {
+                "derived repair evidence requires a manifest-bound preimage"
+            }
             require(!requireAbsent || targetIdentity == null) {
                 "immutable repair evidence target already exists: $name"
             }
@@ -343,7 +357,7 @@ internal class RepairStateStore private constructor(
                     throw failure
                 }
             }
-            if (exchanged) {
+            if (exchanged && !keepDisplaced) {
                 // The target publication was already durable. Failure here leaves only a bounded,
                 // exact cleanup name which the next store operation removes before proceeding.
                 try {
