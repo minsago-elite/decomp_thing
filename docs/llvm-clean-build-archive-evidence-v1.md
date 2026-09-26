@@ -4,26 +4,27 @@ This document records the smallest evidence contract that can be admitted from
 the repository's current LLVM reconstruction facts. It is a retained evidence
 boundary for #115; it does not close #115 or any of its child issues.
 
-## Current admitted facts
+## Current implementation contract
 
 The fixed-container inner worker contract in
 [`llvm-behavior-hosted-clean-build-v2.md`](llvm-behavior-hosted-clean-build-v2.md)
-establishes a bounded, unsigned producer receipt for these facts:
+defines a bounded, unsigned producer receipt for a future run with these facts:
 
 - one independently verified reconstruction archive is extracted into two
   separate clean roots;
 - authenticated `src/**/*.c` inputs are compiled directly with the retained
   Clang and LLD identities;
 - the two resulting executable files are compared byte-for-byte; and
-- the receipt retains archive, source-lineage, toolchain, command, dependency,
+- the receipt would retain archive, source-lineage, toolchain, command, dependency,
   object, output, and executable commitments.
 
 The same contract explicitly excludes Make, Ninja, CMake, project callbacks,
 caller-provided commands, and a generic executable runner. Its two-build result
-therefore supports the producer facts `twoCleanBuildsCompleted=true` and
+would support the producer facts `twoCleanBuildsCompleted=true` and
 `executableReproduced=true` only within that bounded direct-build scope.
+No authenticated hosted-build receipt or resulting executable is retained here.
 
-The ACP lineage index binds accepted session/change provenance to the archive,
+The ACP lineage index can bind accepted session/change provenance to an archive,
 but it does not provide hosted-build or executable authority. ACP remains a
 read-only candidate producer and has no oracle, validation, scoring,
 certification, or release authority. The coordinator contract likewise states
@@ -37,10 +38,10 @@ not substitute for an unavailable value.
 
 | Evidence | Current state | Admission rule |
 | --- | --- | --- |
-| Archive and full-tree source/dependency provenance | Partial | The current worker binds one verified archive and lineage index. Complete accepted full-tree source, generated-input, tool, runtime, and repair provenance remains the #849 boundary. |
+| Archive and full-tree source/dependency provenance | Unavailable; binding contract implemented | The worker can bind a verified archive and lineage index, but no authenticated hosted-build receipt or executable is retained. Complete accepted full-tree source, generated-input, tool, runtime, and repair provenance remains the #849 boundary. |
 | Full-tree configure, compile, and link | Unavailable | The current worker is a fixed direct Clang/LLD path and deliberately ignores candidate build policy. Do not project it as the #850 configure/build result. |
-| Archive bytes and manifest hashes reproduced from independent roots | Unavailable | The current worker reproduces executable bytes only. #851 requires independent archive and manifest reproduction evidence. |
-| Hosted workflow, image, runtime, and cleanup authentication | Unavailable | The receipt is unsigned and explicitly leaves hosted workflow, runtime closure, containment, terminal absence, and admitted-artifact claims false. #852 remains open. |
+| Archive bytes and manifest hashes reproduced from independent roots | Unavailable | The worker contract covers executable byte reproduction only when run. #851 requires independent archive and manifest reproduction evidence. |
+| Hosted workflow, image, runtime, and cleanup authentication | Unavailable | The defined receipt is unsigned and explicitly leaves hosted workflow, runtime closure, containment, terminal absence, and admitted-artifact claims false. #852 remains open. |
 | Bundled Ghidra isolation | Preserved | Analysis continues through the bundled Ghidra Java APIs; production must not require `GHIDRA_HOME` or an external `analyzeHeadless` installation. |
 | Authenticated oracle boundary | Preserved | ACP/build receipts remain read-only evidence. They do not grant oracle, reference-authoring, scoring, certification, or release authority. |
 
