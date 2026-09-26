@@ -718,6 +718,21 @@ class SourceTreeTest {
                 assertTrue(instructions.contains("-Werror"))
                 assertTrue(instructions.contains("-c src/modules/parse.c -o /dev/null"))
                 val path = AgentWorkspacePath("project", "src/modules/parse.c")
+                val expectedRules = mapOf(
+                    "include/decomp_types.h" to setOf(AgentOperation.READ_FILE),
+                    "include/modules/parse.h" to setOf(AgentOperation.READ_FILE),
+                    "src/modules/parse_internal.h" to setOf(AgentOperation.READ_FILE),
+                    "src/modules/parse.c" to setOf(
+                        AgentOperation.READ_FILE,
+                        AgentOperation.WRITE_FILE,
+                        AgentOperation.CREATE_FILE,
+                    ),
+                )
+                assertEquals(
+                    expectedRules,
+                    request.accessPolicy.pathRules.associate { it.path.relativePath to it.operations },
+                )
+                assertEquals(expectedRules.values.flatten().toSet(), request.accessPolicy.allowedOperations)
                 assertTrue(request.accessPolicy.allows(path, AgentOperation.CREATE_FILE))
                 val source = "#include \"modules/parse.h\"\n/* fn_0000000000401000 */\nint parse_input(void) { return 17; }\n"
                 val target = path.resolve(request.workspaceRoots)
@@ -745,6 +760,55 @@ class SourceTreeTest {
         assertTrue(checkpoint.contains("agent-execution-evidence-incomplete"))
         assertTrue(checkpoint.contains("\"promptCharacters\":"))
         assertTrue(checkpoint.contains("\"promptBudgetCharacters\": 120000"))
+    }
+
+    @Test
+    fun `LLM reconstruction rejects a context role hidden by an alternate profile`() {
+        val base = GeneratedCNinjaReconstructionProfile.descriptor
+        val layout = ProjectLayoutProfile(
+            schemaVersion = base.layout.schemaVersion,
+            declarations = base.layout.declarations.map { declaration ->
+                if (declaration.id != "module-private-interface") {
+                    declaration
+                } else {
+                    ProjectFileDeclaration(
+                        id = declaration.id,
+                        pathTemplate = declaration.pathTemplate,
+                        roles = declaration.roles - ProjectFileRole.VIEWABLE,
+                        contentKind = declaration.contentKind,
+                    )
+                }
+            },
+        )
+        val alternateProfile = ReconstructionProfile(
+            schemaVersion = base.schemaVersion,
+            id = base.id,
+            layout = layout,
+            budgets = base.budgets,
+            adapterConfiguration = base.adapterConfiguration,
+        )
+        val project = createTempDirectory("source-tree-hidden-private-")
+        var called = false
+        val harness = AgentHarness { _, _ ->
+            called = true
+            error("a profile-hidden context file must not be sent to the agent")
+        }
+
+        val manifest = SourceTreeGenerator.generate(
+            oneModuleModel(),
+            project,
+            reconstructor = BoundedLlmModuleReconstructor(harness),
+            profile = alternateProfile,
+        )
+
+        assertFalse(called)
+        assertTrue("fn_0000000000401000" in manifest.unresolvedImplementationIds)
+        assertFalse(
+            ProjectFileRole.VIEWABLE in manifest.files.single { it.path == "src/modules/parse_internal.h" }.roles,
+        )
+        val checkpoint = project.resolve("reports/modules/parse.json").readText()
+        assertTrue(checkpoint.contains("\"accepted\": false"))
+        assertTrue(checkpoint.contains("\"code\": \"reconstruction-failed\""))
     }
 
     @Test

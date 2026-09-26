@@ -186,19 +186,43 @@ class BoundedLlmModuleReconstructor(
 
     override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule {
         val target = request.module.sourcePath
-        val implementation = request.profile.layout.declaration("module-implementation")
+        val layout = request.profile.layout
+        val implementation = layout.declaration("module-implementation")
         require(target == implementation.materialize(mapOf("module" to request.module.id)) &&
             ProjectFileRole.MODULE_IMPLEMENTATION in implementation.roles &&
             ProjectFileRole.EDITABLE in implementation.roles
         ) { "planned module target must match the profile-owned editable implementation" }
+        val sharedInterface = layout.declaration("shared-interface")
+        val sharedInterfacePath = sharedInterface.materialize()
+        requireViewableTextInterface(sharedInterface, ProjectFileRole.PUBLIC_INTERFACE)
+        val moduleInterface = layout.declaration("module-interface")
+        val moduleInterfacePath = moduleInterface.materialize(mapOf("module" to request.module.id))
+        require(request.module.headerPath == moduleInterfacePath) {
+            "planned module header must match the profile-declared module interface"
+        }
+        requireViewableTextInterface(moduleInterface, ProjectFileRole.PUBLIC_INTERFACE)
+        val privateInterface = layout.declaration("module-private-interface")
+        val privateInterfacePath = privateInterface.materialize(mapOf("module" to request.module.id))
+        requireViewableTextInterface(privateInterface, ProjectFileRole.PRIVATE_INTERFACE)
+        request.dependencyHeaders.keys.forEach { path ->
+            val declaration = layout.declarationForPath(path)
+            require(declaration.id == "module-interface") {
+                "module reconstruction dependency is not a declared module interface: $path"
+            }
+            requireViewableTextInterface(declaration, ProjectFileRole.PUBLIC_INTERFACE)
+        }
+        val contextPaths = listOf(sharedInterfacePath, moduleInterfacePath, privateInterfacePath) +
+            request.dependencyHeaders.keys
+        require(contextPaths.distinct().size == contextPaths.size && target !in contextPaths) {
+            "module reconstruction context paths must be distinct from each other and the editable target"
+        }
         val prompt = ReconstructionAdapters.resolve(request.profile).modulePrompt(request)
         val objective = prompt.objective
         val evidence = prompt.evidence
         val files = linkedMapOf(
-            request.profile.layout.declaration("shared-interface").materialize() to request.sharedHeader,
-            request.module.headerPath to request.moduleHeader,
-            request.profile.layout.declaration("module-private-interface")
-                .materialize(mapOf("module" to request.module.id)) to request.privateHeader,
+            sharedInterfacePath to request.sharedHeader,
+            moduleInterfacePath to request.moduleHeader,
+            privateInterfacePath to request.privateHeader,
         )
             .apply { putAll(request.dependencyHeaders) }
         val observed = request.observedBehavior ?: "<not yet available; report this limitation>"
@@ -317,6 +341,18 @@ class BoundedLlmModuleReconstructor(
                 cause = failure,
             )
         }
+    }
+}
+
+private fun requireViewableTextInterface(declaration: ProjectFileDeclaration, expectedRole: ProjectFileRole) {
+    require(expectedRole in declaration.roles) {
+        "module reconstruction context ${declaration.id} lacks its declared $expectedRole role"
+    }
+    require(ProjectFileRole.VIEWABLE in declaration.roles) {
+        "module reconstruction context ${declaration.id} is not declared viewable"
+    }
+    require(declaration.contentKind == ProjectContentKind.UTF8_TEXT) {
+        "module reconstruction context ${declaration.id} is not declared UTF-8 text"
     }
 }
 
