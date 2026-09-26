@@ -7743,16 +7743,21 @@ internal fun findObservationCgroupsForUnit(unitName: String): List<Path> {
                             throw gone
                         }
                         descendants.use {
-                            descendants.forEach { descendant ->
+                            descendants.forEach descendantEntry@ { descendant ->
                                 entries = Math.addExact(entries, 1)
                                 if (entries > MAXIMUM_CGROUP_SEARCH_ENTRIES) {
                                     isolationFail("isolated cgroup cleanup search exceeds its entry bound")
                                 }
-                                val descendantAttributes = Files.readAttributes(
-                                    descendant,
-                                    java.nio.file.attribute.BasicFileAttributes::class.java,
-                                    LinkOption.NOFOLLOW_LINKS,
-                                )
+                                val descendantAttributes = try {
+                                    Files.readAttributes(
+                                        descendant,
+                                        java.nio.file.attribute.BasicFileAttributes::class.java,
+                                        LinkOption.NOFOLLOW_LINKS,
+                                    )
+                                } catch (gone: java.nio.file.NoSuchFileException) {
+                                    if (Files.notExists(descendant, LinkOption.NOFOLLOW_LINKS)) return@descendantEntry
+                                    throw gone
+                                }
                                 if (descendantAttributes.isDirectory && !descendantAttributes.isSymbolicLink) {
                                     isolationFail("isolated cgroup cleanup search exceeds its depth bound")
                                 }
