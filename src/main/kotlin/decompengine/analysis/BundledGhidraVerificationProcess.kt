@@ -9,6 +9,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executor
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.SynchronousQueue
 import java.util.concurrent.ThreadPoolExecutor
@@ -21,6 +22,7 @@ import java.util.concurrent.TimeUnit
 internal class BundledGhidraVerificationProcess(
     private val commandFactory: (Path) -> List<String> = ::verificationCommand,
     private val processStarter: (List<String>, Path) -> Process = ::startVerificationProcess,
+    private val captureExecutor: Executor = CAPTURE_EXECUTOR,
     private val maximumStdoutBytes: Int = MAXIMUM_INVENTORY_BYTES,
     private val maximumStderrBytes: Int = MAXIMUM_DIAGNOSTIC_BYTES,
     private val maximumWallMillis: Long = MAXIMUM_WALL_MILLIS,
@@ -71,10 +73,12 @@ internal class BundledGhidraVerificationProcess(
             }
             throw failure
         }
-        val stdout = drainAsync(process.inputStream, maximumStdoutBytes, process, "inventory")
-        val stderr = drainAsync(process.errorStream, maximumStderrBytes, process, "diagnostic")
+        var stdout: CompletableFuture<ByteArray>? = null
+        var stderr: CompletableFuture<ByteArray>? = null
         var primaryFailure: Throwable? = null
         try {
+            stdout = drainAsync(process.inputStream, maximumStdoutBytes, process, "inventory")
+            stderr = drainAsync(process.errorStream, maximumStderrBytes, process, "diagnostic")
             process.outputStream.close()
             while (process.isAlive) {
                 checkpoint("while waiting for bundled Ghidra verification")
@@ -85,8 +89,8 @@ internal class BundledGhidraVerificationProcess(
                 process.waitFor(minOf(POLL_NANOS, maximumNanos - elapsed), TimeUnit.NANOSECONDS)
             }
             checkpoint("after bundled Ghidra verifier exit")
-            val outputBytes = awaitCapture(stdout, "bundled Ghidra verifier inventory")
-            val diagnosticBytes = awaitCapture(stderr, "bundled Ghidra verifier diagnostics")
+            val outputBytes = awaitCapture(checkNotNull(stdout), "bundled Ghidra verifier inventory")
+            val diagnosticBytes = awaitCapture(checkNotNull(stderr), "bundled Ghidra verifier diagnostics")
             if (process.exitValue() != 0) {
                 val diagnostic = String(diagnosticBytes, StandardCharsets.UTF_8)
                     .replace('\n', ' ').replace('\r', ' ').take(MAXIMUM_DIAGNOSTIC_MESSAGE_CHARACTERS)
@@ -119,7 +123,7 @@ internal class BundledGhidraVerificationProcess(
             } catch (failure: Throwable) {
                 recordCleanupFailure(failure)
             }
-            listOf(stdout, stderr).forEach { task ->
+            listOfNotNull(stdout, stderr).forEach { task ->
                 if (!task.isDone) task.cancel(true)
             }
             closeStream { process.inputStream.close() }
@@ -137,15 +141,19 @@ internal class BundledGhidraVerificationProcess(
         maximumBytes: Int,
         process: Process,
         label: String,
-    ): CompletableFuture<ByteArray> = CompletableFuture.supplyAsync {
-        input.use {
-            val bytes = it.readNBytes(maximumBytes + 1)
-            if (bytes.size > maximumBytes) {
-                process.destroyForcibly()
-                throw IOException("bundled Ghidra verifier $label exceeded $maximumBytes bytes")
+    ): CompletableFuture<ByteArray> = try {
+        CompletableFuture.supplyAsync({
+            input.use {
+                val bytes = it.readNBytes(maximumBytes + 1)
+                if (bytes.size > maximumBytes) {
+                    process.destroyForcibly()
+                    throw IOException("bundled Ghidra verifier $label exceeded $maximumBytes bytes")
+                }
+                bytes
             }
-            bytes
-        }
+        }, captureExecutor)
+    } catch (failure: RejectedExecutionException) {
+        throw GhidraAnalysisException("bundled Ghidra verifier capture capacity is exhausted", failure)
     }
 
     private fun awaitCapture(task: CompletableFuture<ByteArray>, label: String): ByteArray = try {
@@ -225,6 +233,11 @@ internal class BundledGhidraVerificationProcess(
         private val LAUNCH_EXECUTOR = ThreadPoolExecutor(
             0, 2, 60L, TimeUnit.SECONDS, SynchronousQueue(),
             { task -> Thread(task, "bundled-ghidra-verifier-launch").apply { isDaemon = true } },
+            ThreadPoolExecutor.AbortPolicy(),
+        )
+        private val CAPTURE_EXECUTOR = ThreadPoolExecutor(
+            0, 16, 60L, TimeUnit.SECONDS, SynchronousQueue(),
+            { task -> Thread(task, "bundled-ghidra-verifier-capture").apply { isDaemon = true } },
             ThreadPoolExecutor.AbortPolicy(),
         )
     }

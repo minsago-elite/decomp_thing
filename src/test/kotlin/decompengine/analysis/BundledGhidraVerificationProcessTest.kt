@@ -7,6 +7,8 @@ import java.io.IOException
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ThreadPoolExecutor
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.readText
@@ -109,6 +111,33 @@ class BundledGhidraVerificationProcessTest {
                 caller.join(2_000)
                 assertFalse(caller.isAlive, "fixture verification caller remained blocked")
             }
+        }
+    }
+
+    @Test
+    fun `capture saturation stops the owned verifier process`() = withFixture { bundle ->
+        val limitedCapture = ThreadPoolExecutor(
+            0, 1, 60L, TimeUnit.SECONDS, SynchronousQueue(),
+            { task -> Thread(task, "fixture-verifier-capture").apply { isDaemon = true } },
+            ThreadPoolExecutor.AbortPolicy(),
+        )
+        val launched = CompletableFuture<Process>()
+        try {
+            val verifier = BundledGhidraVerificationProcess(
+                commandFactory = { listOf("/bin/sleep", "10") },
+                processStarter = { command, root ->
+                    ProcessBuilder(command).directory(root.toFile()).start().also(launched::complete)
+                },
+                captureExecutor = limitedCapture,
+            )
+            val failure = assertFailsWith<GhidraAnalysisException> {
+                verifier.verifyAndGetLibraries(bundle.root) {}
+            }
+            assertTrue(failure.message.orEmpty().contains("capture capacity is exhausted"))
+            val worker = launched.get(2, TimeUnit.SECONDS)
+            assertFalse(worker.isAlive, "verifier worker survived rejected capture")
+        } finally {
+            limitedCapture.shutdownNow()
         }
     }
 
