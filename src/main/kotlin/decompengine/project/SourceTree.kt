@@ -121,9 +121,10 @@ class BoundedLlmModuleReconstructor(
 
     override fun cacheIdentity(profile: ReconstructionProfile): String = cacheIdentity(contextBudget(profile))
 
+    // v3 rejects checkpoints created before declared-role validation was enforced.
     private fun cacheIdentity(contextCharacters: Int): String =
         "agent:${harness.implementationIdentifier() ?: "unspecified"}:context-$contextCharacters:" +
-            "factory-${harnessProvenanceSha256 ?: "unbound"}:v2"
+            "factory-${harnessProvenanceSha256 ?: "unbound"}:v3"
 
     private fun contextBudget(profile: ReconstructionProfile): Int =
         minOf(maximumContextCharacters, profile.budgets.reconstructionMaximumContextCharacters)
