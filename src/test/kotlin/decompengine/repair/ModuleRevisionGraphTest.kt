@@ -2494,6 +2494,23 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `direct audit rejects a retained source manifest preimage for a header-only repair`() {
+        val fixture = releaseRepairFixture(
+            undispatchedFallback = true,
+            relativePath = "include/modules/alpha.h",
+        )
+        assertTrue("fn_alpha" in ArchivalProjectAuditor.audit(fixture.project).unresolvedEntityIds)
+        fixture.project.resolve(".source_tree_manifest.json.repair-atomic.tmp")
+            .writeText("stale source manifest preimage")
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ArchivalProjectAuditor.audit(fixture.project)
+        }
+
+        assertTrue(failure.message.orEmpty().contains("source-manifest atomic temporary"))
+    }
+
+    @Test
     fun `repair audit rejects nonempty directories beyond its traversal depth`() {
         val fixture = releaseRepairFixture(undispatchedFallback = true)
         var nested = fixture.project.resolve("reports")

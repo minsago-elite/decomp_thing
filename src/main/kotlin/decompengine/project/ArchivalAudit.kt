@@ -27,6 +27,10 @@ internal fun isRepairAtomicTemporary(path: Path): Boolean =
 
 private fun rejectProfileProjectionPreimages(projectDir: Path, profile: ReconstructionProfile) {
     val root = projectDir.toAbsolutePath().normalize()
+    val manifestTemporary = root.resolve(".source_tree_manifest.json.repair-atomic.tmp")
+    require(!Files.exists(manifestTemporary, LinkOption.NOFOLLOW_LINKS)) {
+        "repair audit retains a source-manifest atomic temporary: ${root.relativize(manifestTemporary)}"
+    }
     for (declarationId in listOf("confidence-evidence", "unresolved-evidence")) {
         val declaredPath = root.resolve(profile.layout.declaration(declarationId).materialize()).normalize()
         require(declaredPath.startsWith(root)) { "repair projection evidence path escapes the project" }
