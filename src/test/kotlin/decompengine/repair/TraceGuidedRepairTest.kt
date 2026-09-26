@@ -32,7 +32,6 @@ import decompengine.project.SourceTreeGenerator
 import decompengine.project.sha256
 import decompengine.validation.BehaviorCaseResult
 import decompengine.validation.BehaviorComparator
-import decompengine.validation.BehaviorExecutionOutcomeException
 import decompengine.validation.BehaviorExecutionTimeoutException
 import decompengine.validation.BehaviorOutputLimitException
 import decompengine.validation.ProcessInput
@@ -743,10 +742,12 @@ class TraceGuidedRepairTest {
             val parent = project.resolve("src/modules/reconstructed.c").readBytes()
             val slowCandidate = """
                 #define _POSIX_C_SOURCE 200809L
+                #include <stdio.h>
                 #include <time.h>
                 int decomp_engine_main(void) {
-                    struct timespec delay = { .tv_sec = 10, .tv_nsec = 0 };
+                    struct timespec delay = { .tv_sec = 3, .tv_nsec = 0 };
                     nanosleep(&delay, 0);
+                    puts("hello, world");
                     return 0;
                 }
             """.trimIndent() + "\n"
@@ -757,7 +758,7 @@ class TraceGuidedRepairTest {
                 maximumBehaviorExecutionMillis = 2_000,
             )
 
-            val failure = assertFails {
+            assertFailsWith<BehaviorExecutionTimeoutException> {
                 generatedCRepairLoop(
                     RepairClientAgentHarness(
                         FakeRepairClient(
@@ -777,10 +778,6 @@ class TraceGuidedRepairTest {
                     project.resolve("reports"),
                 )
             }
-            assertTrue(
-                failure is BehaviorExecutionTimeoutException || failure is BehaviorExecutionOutcomeException,
-                "unexpected behavior deadline failure: ${failure::class.simpleName}: ${failure.message}",
-            )
             assertContentEquals(parent, project.resolve("src/modules/reconstructed.c").readBytes())
             ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
                 assertEquals(null, graph.snapshot.pendingAttemptId)
