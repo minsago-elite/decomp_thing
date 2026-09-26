@@ -49,16 +49,18 @@ private data class VerifiedAuditRepairState(
     val inventory: List<String>,
     val directoryPaths: Set<String>,
     val additionalDigests: Map<String, String>,
+    val inventoryEntryLimit: Int,
 )
 
-private fun auditRepairInventory(projectDir: Path, limits: ArchivalBundleLimits): List<Path> {
+private fun auditRepairInventory(projectDir: Path, maximumInspectedEntries: Int): List<Path> {
+    require(maximumInspectedEntries > 0) { "repair audit has no remaining inventory entries" }
     val reportsRoot = projectDir.resolve("reports")
     val repairRoot = reportsRoot.resolve("repair-revisions")
     require(Files.isDirectory(repairRoot, LinkOption.NOFOLLOW_LINKS)) {
         "accepted repair source has no authenticated repair state"
     }
     val candidates = Files.walk(reportsRoot, MAXIMUM_AUDIT_REPORT_DEPTH).use { stream ->
-        stream.limit(limits.maximumEntries.toLong() + 1L).toList().also { paths ->
+        stream.limit(maximumInspectedEntries.toLong() + 1L).toList().also { paths ->
             paths.forEach { path ->
                 require(!isRepairAtomicTemporary(path)) {
                     "repair audit report inventory contains a retained atomic temporary: $path"
@@ -73,7 +75,9 @@ private fun auditRepairInventory(projectDir: Path, limits: ArchivalBundleLimits)
             }
         }
     }
-    require(candidates.size <= limits.maximumEntries) { "repair audit report inventory exceeds the entry bound" }
+    require(candidates.size <= maximumInspectedEntries) {
+        "repair audit report inventory exceeds the remaining entry bound"
+    }
     val history = projectDir.resolve("reports/repair_history.json")
     return candidates.filter { path ->
         path.startsWith(repairRoot) || path == history || path.fileName.toString().endsWith(".validation.json")
@@ -91,11 +95,12 @@ private fun verifiedAuditRepairLineage(
     rejectProfileProjectionPreimages(projectDir, profile)
     val digests = manifest.files.associate { it.path to it.sha256 }.toMutableMap()
     val sizes = manifestSizes.toMutableMap()
-    val inventory = auditRepairInventory(projectDir, limits)
     val additionalDigests = linkedMapOf<String, String>()
     val directoryPaths = linkedSetOf<String>()
     var retainedBytes = consumedBytes
     var retainedEntries = manifest.files.size + 1 // The source manifest is also an audited input.
+    val inventoryEntryLimit = limits.maximumEntries - retainedEntries
+    val inventory = auditRepairInventory(projectDir, inventoryEntryLimit)
     inventory.forEach { path ->
         require(!Files.isSymbolicLink(path)) { "repair audit state contains a symbolic link" }
         val relative = projectDir.relativize(path).toString().replace('\\', '/')
@@ -132,6 +137,7 @@ private fun verifiedAuditRepairLineage(
         inventory.map { projectDir.relativize(it).toString().replace('\\', '/') },
         directoryPaths.toSet(),
         additionalDigests.toMap(),
+        inventoryEntryLimit,
     )
 }
 
@@ -518,7 +524,7 @@ object ArchivalProjectAuditor {
                 }
             }
         }
-        if (acceptedOwners.isNotEmpty() || repairedOwners.isNotEmpty()) {
+        run {
             val confidence = try {
                 val text = requireNotNull(confidenceText) { "accepted modules require manifest-bound confidence evidence" }
                 UniqueJsonObjectKeyValidator(text).validate()
@@ -619,7 +625,7 @@ object ArchivalProjectAuditor {
                 byId
             } catch (failure: Exception) {
                 if (failure is InterruptedException) throw failure
-                if (repairedOwners.isNotEmpty()) throw failure
+                if (acceptedOwners.isEmpty() || repairedOwners.isNotEmpty()) throw failure
                 val reason = failure.message.orEmpty().take(512).ifEmpty { failure.javaClass.simpleName }
                 acceptedOwners.forEach { (id, owners) ->
                     if (id !in compilationEvidence) return@forEach
@@ -813,7 +819,7 @@ object ArchivalProjectAuditor {
         }
         if (repairState.isInitialized()) {
             val verified = repairState.value
-            val currentInventory = auditRepairInventory(projectDir, effectiveLimits).map {
+            val currentInventory = auditRepairInventory(projectDir, verified.inventoryEntryLimit).map {
                 projectDir.relativize(it).toString().replace('\\', '/')
             }
             require(currentInventory == verified.inventory) { "repair audit inventory changed before publication" }

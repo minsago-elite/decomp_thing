@@ -16,7 +16,9 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -184,6 +186,60 @@ class ModulePromptCompatibilityTest {
                     failure.message.orEmpty().contains("no accepted first-class ACP contribution"),
                     "unexpected candidate lineage rejection: ${failure.message}",
                 )
+            }
+        }
+    }
+
+    @Test
+    fun `audit validates confidence evidence when every implementation is an undispatched fallback`() {
+        val profile = GeneratedCMakeReconstructionProfile.descriptor
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val project = Files.createTempDirectory(scratch, "all-fallback-confidence-")
+        try {
+            val generated = SourceTreeGenerator.generate(
+                model(), project, profile = profile,
+                reconstructor = BoundedLlmModuleReconstructor(
+                    AgentHarness { _, _ -> error("must not execute") }, maximumContextCharacters = 4_096,
+                ),
+                observedBehavior = "x".repeat(4_096),
+            )
+            assertEquals(listOf("fn_alpha"), generated.unresolvedImplementationIds)
+            val module = DeterministicModulePlanner(layout = profile.layout).plan(model()).modules.single()
+            val checkpoint = Json.parseToJsonElement(project.resolve(
+                profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id)),
+            ).readText()).jsonObject
+            assertEquals(JsonPrimitive("pre-dispatch-context-budget-fallback"), checkpoint.getValue("workflowOrigin"))
+
+            val confidencePath = project.resolve("reports/confidence.json")
+            val confidence = Json.parseToJsonElement(confidencePath.readText()).jsonObject
+            val changedConfidence = JsonObject(LinkedHashMap(confidence).apply {
+                put("unresolvedImplementationIds", JsonArray(emptyList()))
+            })
+            val changedBytes = (changedConfidence.toString() + "\n").toByteArray()
+            confidencePath.writeBytes(changedBytes)
+
+            val manifestPath = project.resolve("source_tree_manifest.json")
+            val manifest = Json.parseToJsonElement(manifestPath.readText()).jsonObject
+            val confidencePathInLayout = profile.layout.declaration("confidence-evidence").materialize()
+            val files = manifest.getValue("files").jsonArray.map { item ->
+                val fields = LinkedHashMap(item.jsonObject)
+                if (fields.getValue("path").jsonPrimitive.content == confidencePathInLayout) {
+                    fields["sha256"] = JsonPrimitive(sha256(changedBytes))
+                }
+                JsonObject(fields)
+            }
+            manifestPath.writeText((JsonObject(LinkedHashMap(manifest).apply {
+                put("files", JsonArray(files))
+            }).toString()) + "\n")
+
+            val failure = assertFailsWith<IllegalArgumentException> {
+                ArchivalProjectAuditor.audit(project, profile, publish = false)
+            }
+            assertTrue(failure.message.orEmpty().contains("confidence unresolvedImplementationIds differs"))
+        } finally {
+            Files.walk(project).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
             }
         }
     }

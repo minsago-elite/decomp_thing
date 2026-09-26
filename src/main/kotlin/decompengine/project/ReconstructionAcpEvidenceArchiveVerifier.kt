@@ -448,7 +448,8 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             }
             Triple(code, message, ids)
         }
-        val preDispatchBudgetFailure = promptCharacters != null && promptBudgetCharacters != null &&
+        val preDispatchBudgetFailure = workflowOrigin == "pre-dispatch-context-budget-fallback" &&
+            promptCharacters != null && promptBudgetCharacters != null &&
             issueFacts.any { (code, message, ids) ->
                 code == "context-budget-exceeded" &&
                     message == "module context required $promptCharacters characters; limit=$promptBudgetCharacters" &&

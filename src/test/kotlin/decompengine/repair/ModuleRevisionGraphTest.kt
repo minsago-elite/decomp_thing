@@ -2422,6 +2422,22 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `repair audit bounds its inventory by entries left after manifest inputs`() {
+        val fixture = releaseRepairFixture(undispatchedFallback = true)
+        val manifest = SourceTreeManifestReader.read(fixture.project, GeneratedCMakeReconstructionProfile.descriptor)
+        val consumedEntries = manifest.files.size + 1
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ArchivalProjectAuditor.audit(
+                fixture.project,
+                limits = ArchivalBundleLimits(maximumEntries = consumedEntries),
+            )
+        }
+
+        assertTrue(failure.message.orEmpty().contains("no remaining inventory entries"))
+    }
+
+    @Test
     fun `repair and behavior reports share one audit byte budget`() {
         val fixture = releaseRepairFixture(undispatchedFallback = true)
         val manifest = SourceTreeManifestReader.read(fixture.project, GeneratedCMakeReconstructionProfile.descriptor)
@@ -2598,6 +2614,19 @@ class ModuleRevisionGraphTest {
         assertTrue("fn_alpha" in manifest.unresolvedImplementationIds)
         assertEquals(null, manifest.files.single { it.path == fixture.relativePath }.acceptedImplementation)
         assertTrue("| `fn_alpha` |" in fixture.project.resolve("UNRESOLVED.md").readText())
+    }
+
+    @Test
+    fun `direct audit authenticates header-only repair lineage`() {
+        val fixture = releaseRepairFixture(undispatchedFallback = true, relativePath = "include/modules/alpha.h")
+        val receipt = fixture.project.resolve(fixture.receiptPath)
+        receipt.writeBytes(receipt.readBytes() + "tampered".toByteArray())
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ArchivalProjectAuditor.audit(fixture.project)
+        }
+
+        assertTrue(failure.message.orEmpty().contains("receipt"))
     }
 
     @Test
