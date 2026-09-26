@@ -164,6 +164,7 @@ class GccProductionFullExportQualificationTest {
         val captured = privateDirectory(evidenceRoot.resolve("captured"))
         copyStable(modelPath, captured.resolve("program_model.json"), MAXIMUM_MODEL_BYTES, modelBytes, modelSha256)
         captureFailureDiagnostics(modelPath, treeManifest, captured)
+        val diagnosticStdout = captureCommandStdout(executionBytes, scratch, captured)
         publish(captured.resolve("result.json"), resultBytes)
         publish(captured.resolve("structural-full-export-binding.json"), bindingBytes)
         publish(captured.resolve(GccBundledFullExportCliResultV2.TREE_MANIFEST_NAME), manifestBytes)
@@ -180,6 +181,9 @@ class GccProductionFullExportQualificationTest {
             "programModelBytes" to JsonPrimitive(modelBytes),
             "functionCount" to JsonPrimitive(functionCount),
             "outputTreeSha256" to JsonPrimitive(result.requiredText("outputTreeSha256")),
+            "diagnosticStdoutBytes" to JsonPrimitive(diagnosticStdout.first),
+            "diagnosticStdoutSha256" to JsonPrimitive(diagnosticStdout.second),
+            "diagnosticStdoutAuthority" to JsonPrimitive("diagnostic-only"),
             "complete" to JsonPrimitive(false),
             "scored" to JsonPrimitive(false),
             "benchmarkAccepted" to JsonPrimitive(false),
@@ -212,6 +216,48 @@ class GccProductionFullExportQualificationTest {
         val rejected = privateDirectory(root.resolve("rejected"))
         assertFailsWith<IllegalArgumentException> { captureFailureDiagnostics(modelPath, tree, rejected) }
         assertFalse(Files.exists(rejected.resolve("failure-diagnostics/$id.json")))
+    }
+
+    @Test
+    fun `command stdout capture is bounded to its retained control directory and reported size`(@TempDir root: Path) {
+        val scratch = privateDirectory(root.resolve("scratch"))
+        val control = privateDirectory(scratch.resolve("control"))
+        val reports = privateDirectory(control.resolve("reports"))
+        val stdout = "program-model export 1/1 fn_000000000081832b status=recovered elapsedNanos=123\n".toByteArray()
+        Files.write(reports.resolve("contained-command.stdout"), stdout, CREATE_NEW, WRITE)
+        fun execution(directory: Path, size: Int) = OracleJson.canonicalBytes(JsonObject(mapOf(
+            "execution" to JsonObject(mapOf(
+                "controlDirectory" to JsonPrimitive(directory.toString()),
+                "outcome" to JsonObject(mapOf("stdoutBytes" to JsonPrimitive(size))),
+            )),
+        )))
+        val captured = privateDirectory(root.resolve("captured"))
+        assertEquals(stdout.size.toLong() to OracleArtifacts.sha256(stdout),
+            captureCommandStdout(execution(control, stdout.size), scratch, captured))
+        assertTrue(Files.readAllBytes(captured.resolve("diagnostic-stdout.bin")).contentEquals(stdout))
+
+        assertFailsWith<IllegalArgumentException> {
+            captureCommandStdout(execution(control, stdout.size + 1), scratch, privateDirectory(root.resolve("wrong-size")))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            captureCommandStdout(execution(root, stdout.size), scratch, privateDirectory(root.resolve("wrong-root")))
+        }
+    }
+
+    private fun captureCommandStdout(executionBytes: ByteArray, scratch: Path, captured: Path): Pair<Long, String> {
+        val execution = OracleJson.parseCanonical(executionBytes).jsonObject.getValue("execution").jsonObject
+        val control = Path.of(execution.requiredText("controlDirectory"))
+        require(control.isAbsolute && control.normalize() == control && control.startsWith(scratch) &&
+            control.toRealPath() == control
+        ) { "cc1 diagnostic stdout control directory is outside the retained scratch tree" }
+        val expectedBytes = execution.getValue("outcome").jsonObject.getValue("stdoutBytes").jsonPrimitive.long
+        require(expectedBytes in 1..MAXIMUM_DIAGNOSTIC_STDOUT_BYTES.toLong()) {
+            "cc1 diagnostic stdout exceeds its capture bound"
+        }
+        val stdout = readStable(control.resolve("reports/contained-command.stdout"), MAXIMUM_DIAGNOSTIC_STDOUT_BYTES)
+        require(stdout.size.toLong() == expectedBytes) { "cc1 diagnostic stdout differs from the execution byte count" }
+        publish(captured.resolve("diagnostic-stdout.bin"), stdout)
+        return stdout.size.toLong() to OracleArtifacts.sha256(stdout)
     }
 
     private fun captureFailureDiagnostics(modelPath: Path, treeManifest: JsonObject, captured: Path): Int {
@@ -318,6 +364,7 @@ class GccProductionFullExportQualificationTest {
         const val MAXIMUM_FAILURE_DIAGNOSTICS = 1024
         const val MAXIMUM_FAILURE_DIAGNOSTIC_BYTES = 64 * 1024
         const val MAXIMUM_FAILURE_DIAGNOSTIC_TOTAL_BYTES = 8L * 1024 * 1024
+        const val MAXIMUM_DIAGNOSTIC_STDOUT_BYTES = 16 * 1024 * 1024
         const val COPY_BUFFER_BYTES = 1024 * 1024
         val RESULT_KEYS = setOf(
             "provider", "schemaVersion", "complete", "releaseEligible", "scored", "operationId", "requestSha256",
