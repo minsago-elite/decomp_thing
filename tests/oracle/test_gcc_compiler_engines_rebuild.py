@@ -51,12 +51,13 @@ class RebuildCompilerEngineArtifactTests(unittest.TestCase):
             records = {"cc1": {"outputs": {"full": "artifacts/gcc-cc1.full", "stripped": "artifacts/gcc-cc1.stripped"}}}
 
             with patch.object(rebuild, "load_compiler_engine_profile", return_value=(profile, records)), \
-                    patch.object(rebuild, "verify_oracle_manifest", return_value={"artifacts": facts}):
+                    patch.object(rebuild, "verify_oracle_manifest", return_value={"artifacts": facts}) as verify_manifest:
                 selected = rebuild.verify_engine_artifacts(
                     workspace=root / "workspace", profile_path=version_root / "compiler-engines.json",
                     engine_ids=["cc1"],
                 )
                 self.assertEqual((full_path, stripped_path), selected["cc1"])
+                verify_manifest.assert_called_once_with(manifest_path, artifact_root=root / "workspace")
 
                 stripped_path.write_bytes(b"substituted cached binary")
                 with self.assertRaisesRegex(VerificationError, "differs from its checked oracle manifest"):

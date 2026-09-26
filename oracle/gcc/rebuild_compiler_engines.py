@@ -55,7 +55,9 @@ def verify_engine_artifacts(
             raise VerificationError(f"checked {identifier} oracle manifest is missing or linked")
         if _sha256(manifest_path) != engine["oracleManifestSha256"]:
             raise VerificationError(f"checked {identifier} oracle manifest differs from the compiler-engine profile")
-        manifest = verify_oracle_manifest(manifest_path)
+        # The checked manifest lives beside profile inputs, but its artifact
+        # records must be recomputed from the isolated build/cache workspace.
+        manifest = verify_oracle_manifest(manifest_path, artifact_root=workspace)
         record = records[identifier]
         observed: list[Path] = []
         for role in ("full", "stripped"):
