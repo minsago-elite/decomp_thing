@@ -28,6 +28,7 @@ from oracle.gcc.verify_source_lock import (  # noqa: E402
     load_and_validate_lock,
     verify_source_release,
 )
+from oracle.gcc.toolchain_reproduction import verify_toolchain_reproduction  # noqa: E402
 
 
 DEFAULT_VERSION_ROOT = REPOSITORY_ROOT / "oracle/gcc/16.2.0"
@@ -77,6 +78,49 @@ def _run(arguments: list[str], *, cwd: Path | None = None, capture: bool = False
             f"command failed with exit {completed.returncode}: {arguments!r}{suffix}"
         )
     return (completed.stdout or "").strip()
+
+
+def verified_container_image(
+    docker: str,
+    version_root: Path,
+    build_record_path: Path | None = None,
+) -> tuple[str, Path | None]:
+    """Return the image to run after binding it to the historical build record."""
+
+    record_path = build_record_path or version_root / "build-record.json"
+    build_record = _load_json(record_path, "build record")
+    container = build_record["environment"]["container"]
+    inspected_json = _run([docker, "image", "inspect", container["image"]], capture=True)
+    try:
+        inspected = json.loads(inspected_json)
+    except json.JSONDecodeError as error:
+        raise VerificationError("Docker image inspect returned invalid JSON") from error
+    if not isinstance(inspected, list) or len(inspected) != 1 or not isinstance(inspected[0], dict):
+        raise VerificationError("Docker image inspect must return exactly one image object")
+    observed_digest = inspected[0].get("Id")
+    if not isinstance(observed_digest, str):
+        raise VerificationError("Docker image inspect omitted its image ID")
+    if observed_digest == container["digest"]:
+        return observed_digest, None
+
+    reproduction_lock_path = version_root / "toolchain-reproduction.json"
+    if reproduction_lock_path.is_symlink():
+        raise VerificationError("toolchain reproduction lock must not be a symlink")
+    if reproduction_lock_path.exists():
+        reproduction = verify_toolchain_reproduction(
+            reproduction_lock_path,
+            record_path,
+            inspected,
+        )
+        if reproduction["recordedOrigin"]["imageDigest"] != container["digest"]:
+            raise VerificationError("toolchain reproduction origin differs from the GCC build record")
+        return reproduction["reproducedImage"]["imageDigest"], reproduction_lock_path
+
+    if observed_digest != container["digest"]:
+        raise VerificationError(
+            f"container image digest mismatch: expected {container['digest']}, got {observed_digest}"
+        )
+    return observed_digest, None
 
 
 def _safe_extract(archive_path: Path, destination: Path, expected_root: str) -> None:
@@ -255,35 +299,39 @@ def rebuild(
     validate_build_record(build_record, source_lock, _sha256(source_lock_path))
 
     container = build_record["environment"]["container"]
-    digest = container["digest"]
-    observed_digest = _run(
-        [docker, "image", "inspect", "--format", "{{.Id}}", container["image"]],
-        capture=True,
+    runtime_digest, reproduction_lock_path = verified_container_image(
+        docker,
+        version_root,
+        build_record_path,
     )
-    if observed_digest != digest:
-        raise VerificationError(
-            f"container image digest mismatch: expected {digest}, got {observed_digest}"
+    verify_command = [
+        "/usr/bin/python3",
+        "scripts/verify-gcc-oracle-build-record.py",
+        "--source-lock",
+        (container_version_root / "source-lock.json").as_posix(),
+        "--build-record",
+        (container_version_root / "build-record.json").as_posix(),
+        "--container-digest",
+        runtime_digest,
+    ]
+    if reproduction_lock_path is not None:
+        verify_command.extend(
+            [
+                "--reproduction-lock",
+                (container_version_root / reproduction_lock_path.name).as_posix(),
+            ]
         )
 
     print("==> verifyBuildEnvironment", flush=True)
     _run(
         _container_arguments(
             docker,
-            digest,
+            runtime_digest,
             container["platform"],
             build_record["environment"]["variables"],
             REPOSITORY_ROOT,
             "/oracle",
-            [
-                "/usr/bin/python3",
-                "scripts/verify-gcc-oracle-build-record.py",
-                "--source-lock",
-                (container_version_root / "source-lock.json").as_posix(),
-                "--build-record",
-                (container_version_root / "build-record.json").as_posix(),
-                "--container-digest",
-                digest,
-            ],
+            verify_command,
             read_only_mount=True,
         )
     )
@@ -315,7 +363,7 @@ def rebuild(
         _run(
             _container_arguments(
                 docker,
-                digest,
+                runtime_digest,
                 platform_name,
                 variables,
                 workspace,
@@ -336,7 +384,7 @@ def rebuild(
         _run(
             _container_arguments(
                 docker,
-                digest,
+                runtime_digest,
                 platform_name,
                 variables,
                 workspace,

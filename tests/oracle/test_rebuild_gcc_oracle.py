@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 from io import BytesIO
+import json
 from pathlib import Path
-import runpy
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
+from oracle.gcc import rebuild_oracle
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-RUNNER = runpy.run_path(str(REPOSITORY_ROOT / "scripts/rebuild-gcc-oracle.py"))
-safe_extract = RUNNER["_safe_extract"]
-VerificationError = RUNNER["VerificationError"]
+safe_extract = rebuild_oracle._safe_extract
+VerificationError = rebuild_oracle.VerificationError
 
 
 def add_file(archive: tarfile.TarFile, name: str, payload: bytes = b"fixture\n") -> None:
@@ -22,6 +23,70 @@ def add_file(archive: tarfile.TarFile, name: str, payload: bytes = b"fixture\n")
 
 
 class GccOracleRebuildRunnerTest(unittest.TestCase):
+    def _write_build_record(self, root: Path, digest: str) -> Path:
+        version_root = root / "profile"
+        version_root.mkdir()
+        record_path = version_root / "build-record.json"
+        record_path.write_text(
+            json.dumps({"environment": {"container": {"image": "pinned:gcc", "digest": digest}}}),
+            encoding="utf-8",
+        )
+        return record_path
+
+    def test_reproduced_image_is_used_only_after_toolchain_lock_verification(self) -> None:
+        origin = f"sha256:{'1' * 64}"
+        reproduced = f"sha256:{'2' * 64}"
+        inspect = {"Id": reproduced}
+        with tempfile.TemporaryDirectory(prefix="gcc-reproduced-container-") as temporary:
+            root = Path(temporary)
+            record_path = self._write_build_record(root, origin)
+            lock_path = record_path.parent / "toolchain-reproduction.json"
+            lock_path.write_text("{}", encoding="utf-8")
+            verification = {
+                "recordedOrigin": {"imageDigest": origin},
+                "reproducedImage": {"imageDigest": reproduced},
+            }
+            with patch.object(rebuild_oracle, "_run", return_value=json.dumps([inspect])) as run, \
+                    patch.object(rebuild_oracle, "verify_toolchain_reproduction", return_value=verification) as verify:
+                runtime_digest, selected_lock = rebuild_oracle.verified_container_image(
+                    "docker", record_path.parent, record_path,
+                )
+
+            self.assertEqual(reproduced, runtime_digest)
+            self.assertEqual(lock_path, selected_lock)
+            run.assert_called_once_with(["docker", "image", "inspect", "pinned:gcc"], capture=True)
+            verify.assert_called_once_with(lock_path, record_path, [inspect])
+
+    def test_unverified_reproduction_is_rejected(self) -> None:
+        origin = f"sha256:{'1' * 64}"
+        observed = f"sha256:{'2' * 64}"
+        with tempfile.TemporaryDirectory(prefix="gcc-reproduced-container-") as temporary:
+            root = Path(temporary)
+            record_path = self._write_build_record(root, origin)
+            (record_path.parent / "toolchain-reproduction.json").write_text("{}", encoding="utf-8")
+            with patch.object(rebuild_oracle, "_run", return_value=json.dumps([{"Id": observed}])), \
+                    patch.object(
+                        rebuild_oracle,
+                        "verify_toolchain_reproduction",
+                        side_effect=VerificationError("image layers differ from the checked lock"),
+                    ):
+                with self.assertRaisesRegex(VerificationError, "layers differ"):
+                    rebuild_oracle.verified_container_image("docker", record_path.parent, record_path)
+
+    def test_original_image_still_requires_the_recorded_digest(self) -> None:
+        digest = f"sha256:{'1' * 64}"
+        with tempfile.TemporaryDirectory(prefix="gcc-original-container-") as temporary:
+            root = Path(temporary)
+            record_path = self._write_build_record(root, digest)
+            with patch.object(rebuild_oracle, "_run", return_value=json.dumps([{"Id": digest}])):
+                self.assertEqual(
+                    (digest, None),
+                    rebuild_oracle.verified_container_image("docker", record_path.parent, record_path),
+                )
+            with patch.object(rebuild_oracle, "_run", return_value=json.dumps([{"Id": f"sha256:{'2' * 64}"}])):
+                with self.assertRaisesRegex(VerificationError, "container image digest mismatch"):
+                    rebuild_oracle.verified_container_image("docker", record_path.parent, record_path)
+
     def test_extracts_a_canonical_regular_tree(self) -> None:
         with tempfile.TemporaryDirectory(prefix="gcc-rebuild-extract-") as temporary:
             root = Path(temporary)

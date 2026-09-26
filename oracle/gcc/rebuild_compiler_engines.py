@@ -134,7 +134,11 @@ def rebuild_engines(
     )
     base_record = _RUNNER._load_json(version_root / "build-record.json", "base build record")
     container = base_record["environment"]["container"]
-    digest = container["digest"]
+    runtime_digest, _ = _RUNNER.verified_container_image(
+        docker,
+        version_root,
+        version_root / "build-record.json",
+    )
     outputs: dict[str, Path] = {}
     engine_by_id = {engine["id"]: engine for engine in profile["engines"]}
     for identifier in selected_ids:
@@ -150,7 +154,7 @@ def rebuild_engines(
             _RUNNER._run(
                 _RUNNER._container_arguments(
                     docker,
-                    digest,
+                    runtime_digest,
                     container["platform"],
                     record["environment"]["variables"],
                     workspace,
