@@ -26,5 +26,5 @@
 
 ## Repository Sanity Checks
 
-- Before continuing A-series work, verify the relevant milestone and issue status, dependencies, acceptance criteria, and current evidence.
+- Before continuing planned work, verify the relevant milestone and issue status, dependencies, acceptance criteria, and current evidence.
 - Check that closed issues have evidence matching their full acceptance criteria and intended scope; reopen or correct closure metadata when they were closed improperly.
