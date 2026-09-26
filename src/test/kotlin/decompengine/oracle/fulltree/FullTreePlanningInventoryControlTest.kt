@@ -35,6 +35,7 @@ class FullTreePlanningInventoryControlTest {
             "clang-lib-index" to (1 to "source/clang/lib/Index/"),
             "clang-lib-parse" to (18 to "source/clang/lib/Parse/"),
             "llvm-lib-asmparser" to (4 to "source/llvm/lib/AsmParser/"),
+            "llvm-lib-profiledata" to (18 to "source/llvm/lib/ProfileData/"),
         )
         expected.forEach { (shardId, expectedOwner) ->
             val modules = registry.requireOwnerModulesForShard(shardId)
@@ -58,6 +59,7 @@ class FullTreePlanningInventoryControlTest {
         )
         assertEquals(8, registry.sourceOnlyUnits.count { it.shardId == "clang-lib-index" })
         assertTrue(registry.sourceOnlyUnits.none { it.shardId in setOf("clang-lib-parse", "llvm-lib-asmparser") })
+        assertEquals(6, registry.sourceOnlyUnits.count { it.shardId == "llvm-lib-profiledata" })
         assertTrue(registry.sourceOnlyUnits.any { it.shardId == "llvm-tools-llvm-profdata" })
         assertTrue(registry.requireOwnerModulesForShard("llvm-tools-llvm-profdata").isEmpty())
         listOf("", "-clang-lib-driver", "clang--lib-driver", "clang_lib_driver", "clang-lib-driver-", "missing-shard",
