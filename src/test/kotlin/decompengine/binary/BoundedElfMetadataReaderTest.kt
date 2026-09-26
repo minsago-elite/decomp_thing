@@ -1,5 +1,6 @@
 package decompengine.binary
 
+import decompengine.analysis.BoundedElfMetadataInspectionProcess
 import decompengine.jobs.elfFixture
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.fulltree.FullTreeElfTestBytes
@@ -142,6 +143,21 @@ class BoundedElfMetadataReaderTest {
         }
         assertTrue(reachedTerminalAuthentication)
         assertTrue(failure.message.orEmpty().contains("elapsed-time limit exceeded"))
+    }
+
+    @Test
+    fun `isolated metadata worker preserves the exact bounded symbol inventory`() = inControlTemporaryDirectory { root ->
+        val bytes = dynamicFixture(variants.first())
+        val input = writeElf(root.resolve("isolated-dynamic.elf"), bytes)
+        val direct = BoundedElfMetadataReader.read(input)
+
+        val isolated = BoundedElfMetadataInspectionProcess().inspect(input, BoundedElfMetadataLimits()) {}
+
+        assertEquals(direct, isolated)
+        assertEquals(expectedInventory, isolated.symbolInventory)
+        assertFailsWith<UnsupportedOperationException> {
+            (isolated.symbolInventory.functions as MutableList<UnresolvedSymbol>).clear()
+        }
     }
 
     private fun dynamicFixture(variant: TestElfVariant): ByteArray {
