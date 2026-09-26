@@ -1,5 +1,6 @@
 package decompengine.oracle.gcc
 
+import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.fulltree.FullTreeDiskScratchPolicy
 import java.nio.file.Files
 import java.nio.file.Path
@@ -11,6 +12,36 @@ import kotlin.test.assertFails
 import kotlin.test.assertTrue
 
 class GccBundledCliIntentBuilderTest {
+    @Test
+    fun `CLI command and requested recovery mode must agree before controls are staged`() = fixture { root ->
+        val controls = privateDirectory(root.resolve("controls"))
+        val operationJournal = privateDirectory(root.resolve("operation-journal"))
+        val scratch = privateDirectory(root.resolve("scratch"))
+        val output = privateDirectory(root.resolve("output"))
+        val children = listOf(output, privateDirectory(output.resolve("inputs")), privateDirectory(output.resolve("journal")))
+        val identities = children.associateWith { path -> LinuxFilesystemSyscalls.openRoot(path).use { it.identity } }
+        val binary = Files.writeString(root.resolve("binary"), "fixture")
+        val archive = Files.writeString(root.resolve("archive"), "fixture")
+        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines.json").toRealPath()
+        val arguments = listOf("cc1", binary.toString(), "--profile", profile.toString(),
+            "--ghidra-archive", archive.toString(), "--output", output.toString(), "--scratch", scratch.toString())
+        for (invocationFullMode in listOf(false, true)) {
+            val options = GccBundledCliOptions.parse(arguments, fullRecoveryExport = invocationFullMode)
+            val invocation = GccBundledCliInvocation(options, arguments, identities)
+            assertFails {
+                GccBundledCliIntentBuilder.build(SHA, "cc1", GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
+                    binary, profile, archive, controls, operationJournal, scratch, options.diskPolicy,
+                    invocation, fullRecoveryExport = !invocationFullMode)
+            }
+        }
+        assertFails {
+            GccBundledCliIntentBuilder.build(SHA, "lto1", GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
+                binary, profile, archive, controls, operationJournal, scratch, POLICY, fullRecoveryExport = true)
+        }
+        assertEmpty(controls)
+        assertEmpty(operationJournal)
+    }
+
     @Test
     fun `BOOT invocation manifest derives exact ordered paths and identities from retained deployment`() = fixture { root ->
         val deploymentRoot = Path.of(checkNotNull(System.getProperty("decompengine.oracle.gcc.bootKeeperClasspathRoot"))).toRealPath()

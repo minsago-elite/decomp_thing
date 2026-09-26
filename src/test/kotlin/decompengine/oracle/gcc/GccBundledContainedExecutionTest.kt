@@ -49,7 +49,7 @@ class GccBundledContainedExecutionTest {
             val fixture = Files.createTempDirectory("gcc-bundled-contained-execution-")
             Files.setPosixFilePermissions(fixture, PosixFilePermissions.fromString("rwx------"))
             try {
-                val intent = authoredIntent(fixture, bundle)
+                val intent = authoredIntent(fixture, bundle, fullMode = true)
                 val byRole = intent.artifacts.associateBy { it.role }
                 val journal = privateDirectory(fixture.resolve("journal"))
                 val since = Instant.now().epochSecond
@@ -70,7 +70,7 @@ class GccBundledContainedExecutionTest {
                     assertFalse(prepared.startAuthorized)
                     assertFalse(prepared.releaseEligible)
                     assertFailsWith<IllegalStateException> { prepared.plan() }
-                    val executed = prepared.execute()
+                    val executed = prepared.executeFullExport()
                     val receiptBytes = executed.executionReceiptBytes
                     val receipt = OracleJson.parseCanonical(receiptBytes).jsonObject
                     assertLinkedRecord(receipt, intent, "gcc-bundled-command-executed-v1")
@@ -79,12 +79,14 @@ class GccBundledContainedExecutionTest {
                     assertExecution(command, intent)
                     executed.executionReceiptBytes[0] = '!'.code.toByte()
                     assertContentEquals(receiptBytes, executed.executionReceiptBytes)
-                    val assessment = assertExport(output, byRole)
-                    assertTrue(assessment.functionCount in 1..512)
-                    assertEquals(1L, assessment.planningBatchCount)
-                    assertEquals("non-authoritative-byte-assessment", assessment.authority)
-                    assertEquals(assessment.programModelSha256, executed.assessment.programModelSha256)
-                    assertEquals(assessment.semanticSha256, executed.assessment.semanticSha256)
+                    val snapshot = executed.snapshot
+                    assertTrue(snapshot.functionCount in 1..512)
+                    assertEquals(snapshot.functionCount, snapshot.recovered + snapshot.partial + snapshot.failed)
+                    assertEquals(0L, snapshot.reused)
+                    assertEquals(byRole.getValue(GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY).sha256, snapshot.inputSha256)
+                    assertEquals(byRole.getValue(GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE).sha256, snapshot.exporterSha256)
+                    assertEquals(byRole.getValue(GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE).sha256, snapshot.analysisToolSha256)
+                    assertTrue(snapshot.programModel.decodeToString().contains("decompiledC"))
                     val exportBytes = executed.exportAssessmentReceiptBytes
                     val export = OracleJson.parseCanonical(exportBytes).jsonObject
                     assertLinkedRecord(export, intent, "gcc-bundled-command-export-assessed-v1")
@@ -97,13 +99,18 @@ class GccBundledContainedExecutionTest {
                     assertTrue(exportTime.getValue("remainingNanos").jsonPrimitive.long > 0)
                     executed.exportAssessmentReceiptBytes[0] = '!'.code.toByte()
                     assertContentEquals(exportBytes, executed.exportAssessmentReceiptBytes)
-                    retainFixtureEvidence(fixture, intent, selectedDefinition, receiptBytes, exportBytes, assessment, executed.programModelBytes)
-                    assertCopiedExportRejectsIdentityAndLinks(fixture, output, intent.artifacts, assessment)
-                    // This legacy authored intent has no retained planner profile: never synthesize one after export.
+                    val capturedAgain = LinuxFilesystemSyscalls.openRoot(output).use { run ->
+                        LinuxFilesystemSyscalls.openDirectoryAt(run.fd, "reports").use { reports ->
+                            GccBundledFullExportCapture.capture(run, reports.identity, intent.artifacts)
+                        }
+                    }
+                    assertEquals(snapshot.outputTreeSha256, capturedAgain.outputTreeSha256)
+                    retainFullFixtureEvidence(fixture, intent, selectedDefinition, receiptBytes, exportBytes, snapshot)
+                    // This authored intent has no retained oracle profile: export bytes never grant score authority.
                     val priorPlannerDenial = names(journal.resolve(".gcc-bundled-operation-${intent.operationId}"))
                     assertFailsWith<IllegalStateException> { prepared.plan() }
                     assertEquals(priorPlannerDenial, names(journal.resolve(".gcc-bundled-operation-${intent.operationId}")))
-                    assertFailsWith<IllegalStateException> { prepared.execute() }
+                    assertFailsWith<IllegalStateException> { prepared.executeFullExport() }
                     prepared.close()
                     prepared.close()
                     owner = null
@@ -111,7 +118,7 @@ class GccBundledContainedExecutionTest {
                     assertTrue(Files.isRegularFile(output.parent.resolve("lease.json"), LinkOption.NOFOLLOW_LINKS))
                     assertTrue(Files.isDirectory(journal.resolve(".gcc-bundled-operation-${intent.operationId}"), LinkOption.NOFOLLOW_LINKS))
                     assertEquals(listOf(output.parent.fileName.toString()), names(mount))
-                    println("Bundled contained authored-ELF fixture: model=${assessment.programModelSha256}, functions=${assessment.functionCount}, execution=${OracleArtifacts.sha256(receiptBytes)}, residue retained for trusted fixture-filesystem teardown")
+                    println("Bundled contained full authored-ELF fixture: model=${snapshot.programModelSha256}, functions=${snapshot.functionCount}, execution=${OracleArtifacts.sha256(receiptBytes)}, residue retained for trusted fixture-filesystem teardown")
                 } catch (failure: Throwable) {
                     primaryFailure = failure
                     definition?.let { selected ->
@@ -365,7 +372,7 @@ class GccBundledContainedExecutionTest {
             val process = ProcessBuilder("/usr/bin/nm", "--defined-only", "--format=posix", inputs.resolve("authored.elf").toString())
                 .redirectErrorStream(true).redirectOutput(output.toFile()).start()
             try {
-                assertTrue(process.waitFor(10, TimeUnit.SECONDS))
+                assertTrue(process.waitFor(60, TimeUnit.SECONDS), "nm symbol inventory timed out")
                 assertEquals(0, process.exitValue())
                 val symbols = boundedRead(output, MAXIMUM_METADATA_BYTES).decodeToString().lineSequence().map { it.substringBefore(' ') }.toSet()
                 assertEquals(4096, symbols.count { it.startsWith("fixture_step_") })
@@ -418,7 +425,12 @@ class GccBundledContainedExecutionTest {
         return inputs
     }
 
-    private fun authoredIntent(fixture: Path, bundle: Path, interrupted: Boolean = false): GccBundledOperationIntent {
+    private fun authoredIntent(
+        fixture: Path,
+        bundle: Path,
+        interrupted: Boolean = false,
+        fullMode: Boolean = false,
+    ): GccBundledOperationIntent {
         val inputs = compileAuthoredFixture(fixture, interrupted)
         val source = inputs.resolve("authored.c")
         val binary = inputs.resolve("authored.elf")
@@ -426,7 +438,7 @@ class GccBundledContainedExecutionTest {
         val runtime = GccBundledGhidraRuntime(bundle, bundleReference.classPath.map { relative ->
             val entry = bundleReference.entries.getValue(relative)
             GccBundledGhidraClassPathEntry(bundle.resolve(relative), checkNotNull(entry.bytes), checkNotNull(entry.sha256))
-        })
+        }, invocationVersion = if (fullMode) 5 else 3)
         val bootRoot = Path.of(checkNotNull(System.getProperty("decompengine.oracle.gcc.bootKeeperClasspathRoot"))).toRealPath()
         val bootEntries = GccKotlinBootClasspathReference.open().use { it.entries }
         val bootManifest = readOnlyFile(inputs.resolve("boot-classpath.json"), OracleJson.canonicalBytes(JsonObject(mapOf(
@@ -539,6 +551,65 @@ class GccBundledContainedExecutionTest {
             "diskDisposition" to JsonPrimitive("retained residue; trusted CI fixture-filesystem teardown only"),
         ))))
         println("Retained bounded authored fixture evidence: $destination")
+        return destination
+    }
+
+    private fun retainFullFixtureEvidence(
+        fixture: Path,
+        intent: GccBundledOperationIntent,
+        definition: GccCompilerEngineValidatedContainmentDefinition,
+        execution: ByteArray,
+        exportAssessment: ByteArray,
+        snapshot: GccBundledFullExportSnapshot,
+    ): Path {
+        val parent = Path.of("build/contained-ghidra-evidence").toAbsolutePath().normalize()
+        Files.createDirectories(parent)
+        val destination = Files.createTempDirectory(parent, "authored-full-elf-")
+        Files.setPosixFilePermissions(destination, PosixFilePermissions.fromString("rwx------"))
+        var aggregate = 0L
+        fun retain(relative: String, bytes: ByteArray) {
+            aggregate = Math.addExact(aggregate, bytes.size.toLong())
+            assertTrue(aggregate <= 64L * 1024 * 1024, "authored full-export evidence exceeds its aggregate capture bound")
+            val path = destination.resolve(relative)
+            Files.createDirectories(path.parent)
+            readOnlyFile(path, bytes)
+        }
+        retain("intent.json", intent.canonicalBytes)
+        retain("execution.json", execution)
+        retain("export-assessment.json", exportAssessment)
+        retain("program-model.json", snapshot.programModel)
+        retain("sidecar-manifest.json", snapshot.sidecarManifest)
+        retain("authored.c", boundedRead(fixture.resolve("inputs/authored.c"), MAXIMUM_METADATA_BYTES))
+        retain("authored.elf", boundedRead(fixture.resolve("inputs/authored.elf"), 8 * 1024 * 1024))
+        val reports = definition.outputLease.path.resolve("reports")
+        retain("reports/program_model.json.progress.json", boundedRead(reports.resolve("program_model.json.progress.json"), MAXIMUM_METADATA_BYTES))
+        val export = reports.resolve("program_model.json.export")
+        retain("reports/program_model.json.export/state.json", boundedRead(export.resolve("state.json"), MAXIMUM_METADATA_BYTES))
+        for (directory in listOf("functions", "globals", "types", "failures")) {
+            val path = export.resolve(directory)
+            for (name in names(path)) retain("reports/program_model.json.export/$directory/$name", boundedRead(path.resolve(name), MAXIMUM_MODEL_BYTES))
+        }
+        val command = OracleJson.parseCanonical(execution).jsonObject.getValue("execution").jsonObject
+        val control = Path.of(command.getValue("controlDirectory").jsonPrimitive.content)
+        for (name in listOf("contained-command.stdout", "contained-command.stderr")) {
+            val path = control.resolve("reports").resolve(name)
+            if (Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) retain("control-reports/$name", boundedRead(path, MAXIMUM_LOG_BYTES))
+        }
+        retain("fixture-evidence.json", OracleJson.canonicalBytes(JsonObject(mapOf(
+            "provider" to JsonPrimitive("bundled-ghidra-contained-full-authored-elf-fixture-v1"),
+            "benchmarkAccepted" to JsonPrimitive(false),
+            "releaseEligible" to JsonPrimitive(false),
+            "scratchReleased" to JsonPrimitive(false),
+            "operationId" to JsonPrimitive(intent.operationId),
+            "requestSha256" to JsonPrimitive(intent.requestSha256),
+            "definitionSha256" to JsonPrimitive(OracleArtifacts.sha256(definition.canonicalBytes)),
+            "executionReceiptSha256" to JsonPrimitive(OracleArtifacts.sha256(execution)),
+            "modelSha256" to JsonPrimitive(snapshot.programModelSha256),
+            "outputTreeSha256" to JsonPrimitive(snapshot.outputTreeSha256),
+            "functionCount" to JsonPrimitive(snapshot.functionCount),
+            "diskDisposition" to JsonPrimitive("retained residue; trusted CI fixture-filesystem teardown only"),
+        ))))
+        println("Retained bounded authored full-export fixture evidence: $destination")
         return destination
     }
 

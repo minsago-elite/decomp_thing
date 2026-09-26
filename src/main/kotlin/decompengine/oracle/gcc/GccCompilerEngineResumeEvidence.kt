@@ -1544,7 +1544,7 @@ private fun requireHexAddress(value: String, label: String) {
     }
 }
 
-private class ExactByteVerifier(
+internal class ExactByteVerifier(
     private val actual: ByteArray,
     private val label: String,
     private val maximumBytes: Int,
@@ -1571,10 +1571,14 @@ private class ExactByteVerifier(
 
     fun acceptRecordArray(records: List<ByteArray>) {
         records.forEachIndexed { index, bytes ->
-            if (bytes.isEmpty()) resumeValidationFailure("$label contains an empty record")
-            accept(bytes)
-            accept(if (index + 1 == records.size) "\n" else ",\n")
+            acceptRecord(bytes, index + 1 == records.size)
         }
+    }
+
+    fun acceptRecord(bytes: ByteArray, last: Boolean) {
+        if (bytes.isEmpty()) resumeValidationFailure("$label contains an empty record")
+        accept(bytes)
+        accept(if (last) "\n" else ",\n")
     }
 
     fun finish() {

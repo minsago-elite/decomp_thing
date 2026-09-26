@@ -12,10 +12,20 @@ import java.nio.file.Path
 internal object GccBundledCliIntentBuilder {
     fun build(operationId: String, engineId: String, runKind: GccCompilerEngineContainmentRunKind,
         binary: Path, profilePath: Path, archive: Path, controls: Path, journalRoot: Path, scratch: Path,
-        diskPolicy: FullTreeDiskScratchPolicy, cliInvocation: GccBundledCliInvocation? = null): GccBundledOperationIntent {
+        diskPolicy: FullTreeDiskScratchPolicy, cliInvocation: GccBundledCliInvocation? = null,
+        fullRecoveryExport: Boolean = false): GccBundledOperationIntent {
         require(operationId.matches(Regex("[a-f0-9]{64}")))
         require(engineId in setOf("cc1", "lto1") && runKind in setOf(
             GccCompilerEngineContainmentRunKind.FRESH_CONTROL, GccCompilerEngineContainmentRunKind.INTERRUPTED))
+        require(!fullRecoveryExport || runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL) {
+            "full-recovery export requires a fresh uninterrupted operation"
+        }
+        require(!fullRecoveryExport || engineId == "cc1") {
+            "full-recovery structural export is currently supported only for cc1"
+        }
+        require(cliInvocation == null || cliInvocation.options.fullRecoveryExport == fullRecoveryExport) {
+            "CLI invocation command differs from requested recovery mode"
+        }
         val roots = listOf(controls, journalRoot, scratch)
         (roots + listOf(binary, profilePath, archive)).forEach { path ->
             requireGccBundledOperationPath(path)
@@ -67,7 +77,7 @@ internal object GccBundledCliIntentBuilder {
                             val runtime = GccBundledGhidraRuntime(bundle, reference.classPath.map { relative ->
                                 val entry = reference.entries.getValue(relative)
                                 GccBundledGhidraClassPathEntry(bundle.resolve(relative), checkNotNull(entry.bytes), checkNotNull(entry.sha256))
-                            })
+                            }, invocationVersion = if (fullRecoveryExport) 5 else 3)
                             val manifest = boot.invocationManifestBytes()
                             val exporter = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java"))
                                 .use { it.readNBytes(MAXIMUM_CONTROL_BYTES + 1) }

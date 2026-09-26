@@ -25,11 +25,12 @@ internal class GccBundledGhidraRuntime(
     classPath: List<GccBundledGhidraClassPathEntry>,
     val invocationVersion: Int = 3,
 ) {
+    val recoveryMode: String = if (invocationVersion == 5) "full" else "planning"
     val classPath: List<GccBundledGhidraClassPathEntry>
     val release: Path
 
     init {
-        require(invocationVersion in 1..4) { "bundled Ghidra invocation version is unsupported" }
+        require(invocationVersion in 1..5) { "bundled Ghidra invocation version is unsupported" }
         requireRuntimePath(root)
         val copied = ArrayList<GccBundledGhidraClassPathEntry>()
         for (entry in classPath) {
@@ -72,7 +73,7 @@ internal class GccBundledGhidraRuntime(
 
     /** Fresh leg only: choose before command hashing to avoid a self-referential JVM temp path. */
     fun freshControlDirectoryName(outputRoot: Path): String? {
-        require(invocationVersion <= 3) { "resume runtime cannot select a fresh-leg control directory" }
+        require(invocationVersion != 4) { "resume runtime cannot select a fresh-leg control directory" }
         requireRuntimePath(outputRoot)
         if (invocationVersion < 3) return null
         val digest = OracleArtifacts.sha256("gcc-bundled-fresh-control-v1\n$outputRoot".toByteArray(Charsets.UTF_8))
@@ -110,11 +111,15 @@ internal class GccBundledGhidraRuntime(
         val byRole = artifacts.associateBy { it.role }
         val exporter = byRole.getValue(GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE)
         val archive = byRole.getValue(GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE)
+        require(invocationVersion != 5 || runKind != GccCompilerEngineContainmentRunKind.INTERRUPTED) {
+            "full-recovery export does not support planning checkpoint interruption"
+        }
         val controlName = if (resumed) resumeControlDirectoryName(state, lease) else freshControlDirectoryName(lease.path)
         val controlRoot = controlName?.let(lease.path::resolve) ?: lease.path
         val project = if (resumed) controlRoot.resolve("state") else state.path
         val exporterArguments = listOf(
-            exporter.sha256, archive.sha256, "planning", lease.path.resolve("reports/program_model.json").toString(),
+            exporter.sha256, archive.sha256, if (invocationVersion == 5) "full" else "planning",
+            lease.path.resolve("reports/program_model.json").toString(),
         ) + if (runKind == GccCompilerEngineContainmentRunKind.INTERRUPTED && invocationVersion >= 3) {
             listOf("hold-first-planning-checkpoint-v1")
         } else emptyList()
@@ -165,6 +170,7 @@ internal class GccBundledGhidraRuntime(
                 "${PROVIDER_PREFIX}2" -> 2
                 "${PROVIDER_PREFIX}3" -> 3
                 "${PROVIDER_PREFIX}4" -> 4
+                "${PROVIDER_PREFIX}5" -> 5
                 else -> throw IllegalArgumentException("bundled Ghidra runtime provider is invalid")
             }
             val entries = document["classPath"] as? JsonArray
