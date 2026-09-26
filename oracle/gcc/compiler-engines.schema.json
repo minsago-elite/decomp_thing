@@ -72,9 +72,10 @@
     "budgets": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["exportWallClockSeconds", "exportMaximumResidentBytes", "plannerMaximumEntities", "plannerMaximumDependencyEdges", "plannerMaximumWorkUnits"],
+      "required": ["exportWallClockSeconds", "fullRecoveryCc1ExportWallClockSeconds", "exportMaximumResidentBytes", "plannerMaximumEntities", "plannerMaximumDependencyEdges", "plannerMaximumWorkUnits"],
       "properties": {
         "exportWallClockSeconds": {"const": 1800},
+        "fullRecoveryCc1ExportWallClockSeconds": {"const": 7200},
         "exportMaximumResidentBytes": {"const": 17179869184},
         "plannerMaximumEntities": {"type": "integer", "minimum": 1},
         "plannerMaximumDependencyEdges": {"type": "integer", "minimum": 1},

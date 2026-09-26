@@ -23,6 +23,7 @@ class GccCompilerEngineProfileTest(unittest.TestCase):
     def test_checked_profile_binds_budgets_provenance_and_derived_records(self) -> None:
         profile, records = load_compiler_engine_profile(PROFILE)
         self.assertEqual(1800, profile["budgets"]["exportWallClockSeconds"])
+        self.assertEqual(7200, profile["budgets"]["fullRecoveryCc1ExportWallClockSeconds"])
         self.assertEqual(16 * 1024 * 1024 * 1024, profile["budgets"]["exportMaximumResidentBytes"])
         self.assertEqual(["cc1", "lto1"], list(records))
         for engine in profile["engines"]:

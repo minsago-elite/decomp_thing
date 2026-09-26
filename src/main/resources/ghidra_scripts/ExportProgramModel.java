@@ -28,6 +28,7 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.UUID;
 import ghidra.app.decompiler.DecompInterface;
+import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.address.Address;
@@ -412,8 +413,10 @@ final class ExporterSemanticFingerprintV1 {
 // SEMANTIC_FINGERPRINT_TEST_END
 
 public class ExportProgramModel extends GhidraScript {
-    private static final int EXPORTER_VERSION = 10;
+    private static final int EXPORTER_VERSION = 11;
     private static final int DECOMPILE_TIMEOUT_SECONDS = 60;
+    private static final int DECOMPILE_RETRY_TIMEOUT_SECONDS = 180;
+    private static final int MAXIMUM_DECOMPILE_INSTRUCTIONS = 500_000;
     private static final long MAXIMUM_FULL_FUNCTION_RECORD_BYTES = 64L * 1024 * 1024;
     private static final int PLANNING_BATCH_FUNCTIONS = 512;
     private static final long MAXIMUM_PLANNING_BATCH_FRAGMENT_BYTES = 64L * 1024 * 1024;
@@ -421,6 +424,7 @@ public class ExportProgramModel extends GhidraScript {
     private static final int MAXIMUM_PLANNING_EVIDENCE_RECORD_BYTES = 1024 * 1024;
     private static final int MAXIMUM_PLANNING_BATCHES = 256;
     private static final long MAXIMUM_PROGRAM_MODEL_BYTES = 512L * 1024 * 1024;
+    private static final int MAXIMUM_OPEN_EVIDENCE_CURSORS = 32;
     private static final int MAXIMUM_EXPORT_STATE_BYTES = 64 * 1024;
 
     private static final class PlanningIntegrityException extends RuntimeException {
@@ -886,7 +890,8 @@ public class ExportProgramModel extends GhidraScript {
         Path globalsDirectory,
         Path typesDirectory,
         PlanningBatchEvidence planningEvidence,
-        boolean includeDecompiledC
+        boolean includeDecompiledC,
+        int decompileTimeoutSeconds
     ) throws Exception {
         Set<String> callIds = new TreeSet<>();
         Set<String> referencedGlobals = new TreeSet<>();
@@ -951,7 +956,7 @@ public class ExportProgramModel extends GhidraScript {
         String source = null;
         if (includeDecompiledC) {
             try {
-                DecompileResults result = decompiler.decompileFunction(function, DECOMPILE_TIMEOUT_SECONDS, monitor);
+                DecompileResults result = decompiler.decompileFunction(function, decompileTimeoutSeconds, monitor);
                 if (result.decompileCompleted() && result.getDecompiledFunction() != null) {
                     source = result.getDecompiledFunction().getC();
                 } else {
@@ -1005,7 +1010,7 @@ public class ExportProgramModel extends GhidraScript {
                 // production-sized batch mirrors exact first-owner behavior: a type record's
                 // sourceAddress may legitimately differ at later references to its stable identity.
                 Function function = functions.get(index);
-                FunctionExport exported = exportFunction(function, null, null, null, evidence, false);
+                FunctionExport exported = exportFunction(function, null, null, null, evidence, false, DECOMPILE_TIMEOUT_SECONDS);
                 String id = functionId(function);
                 fingerprint.beginFunction(id, exported.record);
                 functionFragmentBytes = appendBoundedPlanningRecord(
@@ -1593,7 +1598,12 @@ public class ExportProgramModel extends GhidraScript {
         }
     }
 
-    private static void appendCanonicalEvidenceArray(OutputStream output, List<BoundFragment> fragments) throws Exception {
+    private static void mergeCanonicalEvidenceArray(
+        OutputStream output, List<BoundFragment> fragments, boolean finalArray, List<String> mergedIds
+    ) throws Exception {
+        if (fragments.size() > MAXIMUM_OPEN_EVIDENCE_CURSORS) {
+            throw new PlanningIntegrityException("canonical merge exceeds its open-cursor bound");
+        }
         List<PlanningEvidenceCursor> cursors = new ArrayList<>();
         PriorityQueue<PlanningEvidenceCursor> queue = new PriorityQueue<>(
             Comparator.comparing(cursor -> cursor.currentId)
@@ -1611,10 +1621,12 @@ public class ExportProgramModel extends GhidraScript {
                     throw new PlanningIntegrityException("canonical evidence identities are duplicated or unordered: " + cursor.currentId);
                 }
                 previousId = cursor.currentId;
+                if (mergedIds != null) mergedIds.add(cursor.currentId);
                 writeUtf8(output, cursor.currentRecord);
                 cursor.advance();
                 if (cursor.currentId != null) queue.add(cursor);
-                writeUtf8(output, queue.isEmpty() ? "\n" : ",\n");
+                if (!queue.isEmpty()) writeUtf8(output, ",\n");
+                else if (finalArray) writeUtf8(output, "\n");
             }
         } finally {
             for (PlanningEvidenceCursor cursor : cursors) {
@@ -1624,6 +1636,61 @@ public class ExportProgramModel extends GhidraScript {
                     // Integrity was checked while consuming; close errors do not change accepted bytes.
                 }
             }
+        }
+    }
+
+    private static void appendCanonicalEvidenceArray(
+        OutputStream output, List<BoundFragment> fragments, Path temporaryDirectory
+    ) throws Exception {
+        if (fragments.isEmpty()) return;
+        // Full recovery writes one sidecar per global/type in identity order. Streaming these
+        // already sorted records avoids holding thousands of file descriptors at model assembly.
+        boolean singleRecordOrder = true;
+        String previousId = null;
+        for (BoundFragment fragment : fragments) {
+            if (fragment.ids.size() != 1 ||
+                (previousId != null && previousId.compareTo(fragment.ids.get(0)) >= 0)) {
+                singleRecordOrder = false;
+                break;
+            }
+            previousId = fragment.ids.get(0);
+        }
+        if (singleRecordOrder) {
+            for (int index = 0; index < fragments.size(); index++) {
+                try (PlanningEvidenceCursor cursor = new PlanningEvidenceCursor(fragments.get(index))) {
+                    writeUtf8(output, cursor.currentRecord);
+                    cursor.advance();
+                    writeUtf8(output, index + 1 == fragments.size() ? "\n" : ",\n");
+                }
+            }
+            return;
+        }
+
+        List<Path> temporary = new ArrayList<>();
+        try {
+            List<BoundFragment> active = fragments;
+            while (active.size() > MAXIMUM_OPEN_EVIDENCE_CURSORS) {
+                List<BoundFragment> next = new ArrayList<>();
+                for (int start = 0; start < active.size(); start += MAXIMUM_OPEN_EVIDENCE_CURSORS) {
+                    List<BoundFragment> group = active.subList(
+                        start, Math.min(start + MAXIMUM_OPEN_EVIDENCE_CURSORS, active.size())
+                    );
+                    Path path = Files.createTempFile(temporaryDirectory, ".evidence-merge-", ".fragment");
+                    temporary.add(path);
+                    List<String> ids = new ArrayList<>();
+                    try (OutputStream merged = new BufferedOutputStream(new BoundedOutput(
+                        Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING),
+                        MAXIMUM_PROGRAM_MODEL_BYTES
+                    ))) {
+                        mergeCanonicalEvidenceArray(merged, group, false, ids);
+                    }
+                    next.add(bindCurrentFile(path, ids));
+                }
+                active = next;
+            }
+            mergeCanonicalEvidenceArray(output, active, true, null);
+        } finally {
+            for (Path path : temporary) Files.deleteIfExists(path);
         }
     }
 
@@ -1683,9 +1750,9 @@ public class ExportProgramModel extends GhidraScript {
                 writeUtf8(output, prefix);
                 appendBoundRecordArray(output, functions);
                 writeUtf8(output, globalsPrefix);
-                appendCanonicalEvidenceArray(output, globals);
+                appendCanonicalEvidenceArray(output, globals, outputPath.getParent());
                 writeUtf8(output, typesPrefix);
-                appendCanonicalEvidenceArray(output, types);
+                appendCanonicalEvidenceArray(output, types, outputPath.getParent());
                 writeUtf8(output, suffix);
             }
             if (bounded.bytesWritten != expectedBytes) {
@@ -1741,6 +1808,12 @@ public class ExportProgramModel extends GhidraScript {
                     ",\"message\":" + json(exported.failure) + "}\n"
             );
         }
+    }
+
+    private static boolean isRetryableDecompileTimeout(FunctionExport exported) {
+        return exported.status.equals("failed") && exported.failure != null &&
+            exported.failure.contains("decompilation failed or timed out:") &&
+            exported.failure.contains("process: timeout");
     }
 
     @Override
@@ -1887,6 +1960,9 @@ public class ExportProgramModel extends GhidraScript {
             writeProgress(progressPath, "decompiling", completed, total, recovered, partial, failed, reused, null);
 
             DecompInterface decompiler = new DecompInterface();
+            DecompileOptions decompileOptions = new DecompileOptions();
+            decompileOptions.setMaxInstructions(MAXIMUM_DECOMPILE_INSTRUCTIONS);
+            decompiler.setOptions(decompileOptions);
             if (!decompiler.openProgram(currentProgram)) {
                 decompiler.dispose();
                 throw new IllegalStateException("Ghidra decompiler could not open the current program");
@@ -1905,8 +1981,23 @@ public class ExportProgramModel extends GhidraScript {
                         globalsDirectory,
                         typesDirectory,
                         null,
-                        true
+                        true,
+                        DECOMPILE_TIMEOUT_SECONDS
                     );
+                    if (isRetryableDecompileTimeout(exported)) {
+                        if (monitor.isCancelled()) throw new InterruptedException("program-model export was cancelled");
+                        println("program-model retrying timed-out function " + id + " with " + DECOMPILE_RETRY_TIMEOUT_SECONDS + " seconds");
+                        FunctionExport retry = exportFunction(
+                            function,
+                            decompiler,
+                            globalsDirectory,
+                            typesDirectory,
+                            null,
+                            true,
+                            DECOMPILE_RETRY_TIMEOUT_SECONDS
+                        );
+                        if (!retry.status.equals("failed")) exported = retry;
+                    }
                     writeFunctionFailure(failuresDirectory, id, exported);
                     if (exported.record.getBytes(StandardCharsets.UTF_8).length > MAXIMUM_FULL_FUNCTION_RECORD_BYTES) {
                         throw new IllegalStateException("full function record exceeds its byte bound: " + id);
@@ -2060,7 +2151,8 @@ public class ExportProgramModel extends GhidraScript {
                         globalsDirectory,
                         typesDirectory,
                         planningEvidence,
-                        false
+                        false,
+                        DECOMPILE_TIMEOUT_SECONDS
                     );
                     if (exported.failure != null) {
                         planningEvidence.retainFailure(id, renderFunctionFailure(id, exported));

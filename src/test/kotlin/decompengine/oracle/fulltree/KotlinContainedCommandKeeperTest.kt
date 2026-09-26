@@ -55,7 +55,15 @@ class KotlinContainedCommandKeeperTest {
         assertFailsWith<IllegalArgumentException> { KotlinContainedCommandProtocol.outcome(key, legacy, interrupted) }
         val parsed = KotlinContainedCommandProtocol.requireOutcome(KotlinContainedCommandProtocol.outcome(key, admitted, interrupted), key, admitted, 123L)
         assertEquals(interrupted, parsed)
-        assertFailsWith<IllegalArgumentException> { parsed.requireSuccessful() }
+        val failure = assertFailsWith<IllegalArgumentException> {
+            parsed.requireSuccessful("contained command stderr tail: \nworker failure fixture")
+        }
+        assertTrue(failure.message.orEmpty().contains("status=INTERRUPTED"))
+        assertTrue(failure.message.orEmpty().contains("exitCode=137"))
+        assertTrue(failure.message.orEmpty().contains("elapsedMillis=100"))
+        assertTrue(failure.message.orEmpty().contains("stdoutBytes=40"))
+        assertTrue(failure.message.orEmpty().contains("stderrBytes=50"))
+        assertTrue(failure.message.orEmpty().contains("worker failure fixture"))
     }
 
     @Test

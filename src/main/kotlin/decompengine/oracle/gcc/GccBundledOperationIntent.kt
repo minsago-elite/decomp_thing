@@ -60,7 +60,7 @@ internal class GccBundledOperationIntent(
         ) { "GCC bundled intent must bind every distinct artifact role and path exactly once" }
         this.artifacts = java.util.List.copyOf(copied.sortedBy { it.role.wireName })
         bundledRuntime.requireArtifacts(this.artifacts)
-        profilePolicy = plannerProfile?.bindInvocation(engineId, this.artifacts, budgets)
+        profilePolicy = plannerProfile?.bindInvocation(engineId, this.artifacts, budgets, bundledRuntime.invocationVersion == 5)
         val byRole = this.artifacts.associateBy { it.role }
         cliInvocation?.let { invocation ->
             val selected = invocation.options
@@ -119,7 +119,7 @@ internal class GccBundledOperationIntent(
         val retained = GccRetainedCompilerEngineProfile.open(path)
         try {
             retained.requireDisjoint(excludedRoots + bundledRuntime.root)
-            require(retained.bindInvocation(engineId, artifacts, budgets).contentEquals(expected)) {
+            require(retained.bindInvocation(engineId, artifacts, budgets, bundledRuntime.invocationVersion == 5).contentEquals(expected)) {
                 "GCC planner profile differs from its prepared operation intent"
             }
             return retained

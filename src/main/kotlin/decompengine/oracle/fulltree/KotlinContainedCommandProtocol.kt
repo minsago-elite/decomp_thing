@@ -127,8 +127,14 @@ internal data class KotlinContainedCommandOutcome(
     val stderrBytes: Long,
     val status: String,
 ) {
-    fun requireSuccessful() {
-        require(status == "EXITED" && exitCode == 0) { "contained command did not exit successfully" }
+    fun requireSuccessful(failureDiagnostics: String? = null) {
+        require(status == "EXITED" && exitCode == 0) {
+            buildString {
+                append("contained command did not exit successfully: status=$status, exitCode=$exitCode, ")
+                append("elapsedMillis=$elapsedMillis, stdoutBytes=$stdoutBytes, stderrBytes=$stderrBytes")
+                if (!failureDiagnostics.isNullOrBlank()) append('\n').append(failureDiagnostics)
+            }
+        }
     }
 }
 

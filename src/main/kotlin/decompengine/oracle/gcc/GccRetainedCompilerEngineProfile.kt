@@ -40,6 +40,7 @@ internal class GccRetainedCompilerEngineProfile private constructor(
         engineId: String,
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
         budgets: GccCompilerEngineContainmentBudgets,
+        fullRecoveryExport: Boolean,
     ): ByteArray {
         requireCurrent()
         val engine = suite.engine(engineId)
@@ -67,7 +68,8 @@ internal class GccRetainedCompilerEngineProfile private constructor(
         require(archive.bytes == suite.analysis.ghidraArchive.bytes && archive.sha256 == suite.analysis.ghidraArchive.sha256 &&
             byRole.getValue(GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE).sha256 == suite.analysis.exporterSha256
         ) { "GCC operation analysis tools differ from its retained planner profile" }
-        require(budgets.wallClockMillis <= suite.budgets.exportWallClockMillis &&
+        require(!fullRecoveryExport || engineId == "cc1") { "full-recovery budget is restricted to cc1" }
+        require(budgets.wallClockMillis <= (if (fullRecoveryExport) suite.budgets.fullRecoveryCc1ExportWallClockMillis else suite.budgets.exportWallClockMillis) &&
             budgets.maximumResidentBytes <= suite.budgets.exportMaximumResidentBytes
         ) { "GCC operation exceeds its retained profile resource ceilings" }
         requireCurrent()

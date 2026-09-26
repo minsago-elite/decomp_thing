@@ -34,9 +34,11 @@ data class GccCompilerEngineBudgets(
     val plannerMaximumEntities: Int,
     val plannerMaximumDependencyEdges: Long,
     val plannerMaximumWorkUnits: Long,
+    val fullRecoveryCc1ExportWallClockMillis: Long = exportWallClockMillis,
 ) {
     init {
         require(exportWallClockMillis in 1..MAXIMUM_EXPORT_MILLIS)
+        require(fullRecoveryCc1ExportWallClockMillis in exportWallClockMillis..MAXIMUM_EXPORT_MILLIS)
         require(exportMaximumResidentBytes in 1..MAXIMUM_RESIDENT_BYTES)
         require(plannerMaximumEntities in 1..MAXIMUM_PLANNER_ENTITIES)
         require(plannerMaximumDependencyEdges in 1..MAXIMUM_PLANNER_EDGES)
@@ -204,6 +206,7 @@ internal class GccCompilerEngineProfileLoader(
         val target = benchmark.stringField("target")
         val budgets = GccCompilerEngineBudgets(
             exportWallClockMillis = Math.multiplyExact(budgetDocument.longField("exportWallClockSeconds"), 1_000L),
+            fullRecoveryCc1ExportWallClockMillis = Math.multiplyExact(budgetDocument.longField("fullRecoveryCc1ExportWallClockSeconds"), 1_000L),
             exportMaximumResidentBytes = budgetDocument.longField("exportMaximumResidentBytes"),
             plannerMaximumEntities = budgetDocument.intField("plannerMaximumEntities"),
             plannerMaximumDependencyEdges = budgetDocument.longField("plannerMaximumDependencyEdges"),
@@ -281,7 +284,7 @@ internal class GccCompilerEngineProfileLoader(
 
     private fun authenticateAnalysisToolchain(analysis: GccCompilerEngineAnalysisToolchain) {
         if (
-            analysis.exporterId != "decompengine-ghidra-program-model" || analysis.exporterVersion != 10 ||
+            analysis.exporterId != "decompengine-ghidra-program-model" || analysis.exporterVersion != 11 ||
             analysis.exporterMode != "planning" ||
             analysis.plannerId != "deterministic-module-planner" || analysis.plannerVersion != 1
         ) {

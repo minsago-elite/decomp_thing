@@ -137,7 +137,7 @@ class GccBundledFullExportCaptureTest {
     private fun analysisToolSha() = OracleArtifacts.sha256("ghidra-archive".toByteArray())
 
     private fun writeState(root: Path, recoveryMode: String = "full", inputSha256: String = inputSha()) {
-        val state = """{"schemaVersion":2,"exporterVersion":10,"exporterSha256":"${exporterSha()}","analysisToolSha256":"${analysisToolSha()}","recoveryMode":"$recoveryMode","inputSha256":"$inputSha256","language":"x86:LE:64:default","compilerSpec":"gcc","semanticStateBinding":null}
+        val state = """{"schemaVersion":2,"exporterVersion":11,"exporterSha256":"${exporterSha()}","analysisToolSha256":"${analysisToolSha()}","recoveryMode":"$recoveryMode","inputSha256":"$inputSha256","language":"x86:LE:64:default","compilerSpec":"gcc","semanticStateBinding":null}
 """
         Files.writeString(root.resolve("reports/program_model.json.export/state.json"), state)
     }

@@ -18,6 +18,24 @@ import kotlin.test.assertTrue
 
 class DescriptorBoundAtomicStateFileTest {
     @Test
+    fun `immutable publication accepts safe mixed case artifact names`() = withStateDirectory { path ->
+        LinuxFilesystemSyscalls.openRoot(path).use { root ->
+            val name = "ExportProgramModel.java"
+            val bytes = "authenticated exporter source\n".toByteArray()
+            val snapshot = DescriptorBoundAtomicStateFile.publishManifestNoReplace(root, name, bytes, bytes.size)
+
+            assertContentEquals(bytes, snapshot.bytes)
+            assertContentEquals(bytes, DescriptorBoundAtomicStateFile.readManifestOrNull(root, name, bytes.size)?.bytes)
+            assertEquals(listOf(name), Files.list(path).use { entries ->
+                entries.map { it.fileName.toString() }.sorted().toList()
+            })
+            assertFailsWith<IllegalArgumentException> {
+                DescriptorBoundAtomicStateFile.publishManifestNoReplace(root, "../ExportProgramModel.java", bytes, bytes.size)
+            }
+        }
+    }
+
+    @Test
     fun `large manifest publication preserves read-only no-replace semantics without enlarging journal bounds`() = withStateDirectory { path ->
         LinuxFilesystemSyscalls.openRoot(path).use { root ->
             val bytes = ByteArray(1024 * 1024 + 1) { 42 }
