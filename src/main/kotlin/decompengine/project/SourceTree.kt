@@ -251,6 +251,8 @@ class BoundedLlmModuleReconstructor(
         val targetPath = AgentWorkspacePath(root.id, target)
         val sourcePath = targetPath.resolve(listOf(root))
         val before = sourcePath.takeIf { it.exists() }?.readBytes()
+        val targetOperations = setOf(AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE) +
+            if (ProjectFileRole.VIEWABLE in implementation.roles) setOf(AgentOperation.READ_FILE) else emptySet()
         var invocationEvidence: ReconstructionAgentExecutionEvidence? = null
         try {
             val agentRequest = AgentExecutionRequest(
@@ -263,7 +265,7 @@ class BoundedLlmModuleReconstructor(
                 accessPolicy = AgentAccessPolicy(
                     readRules + AgentPathRule(
                         targetPath,
-                        setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE),
+                        targetOperations,
                     ),
                 ),
                 sessionContinuation = sessionContinuation(request),

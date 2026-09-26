@@ -812,6 +812,60 @@ class SourceTreeTest {
     }
 
     @Test
+    fun `LLM reconstruction does not grant read access to a nonviewable implementation`() {
+        val base = GeneratedCNinjaReconstructionProfile.descriptor
+        val layout = ProjectLayoutProfile(
+            schemaVersion = base.layout.schemaVersion,
+            declarations = base.layout.declarations.map { declaration ->
+                if (declaration.id != "module-implementation") declaration else ProjectFileDeclaration(
+                    id = declaration.id,
+                    pathTemplate = declaration.pathTemplate,
+                    roles = declaration.roles - ProjectFileRole.VIEWABLE,
+                    contentKind = declaration.contentKind,
+                )
+            },
+        )
+        val alternateProfile = ReconstructionProfile(
+            schemaVersion = base.schemaVersion,
+            id = base.id,
+            layout = layout,
+            budgets = base.budgets,
+            adapterConfiguration = base.adapterConfiguration,
+        )
+        val project = createTempDirectory("source-tree-hidden-implementation-")
+        var called = false
+        val harness = AgentHarness { request, _ ->
+            called = true
+            val target = AgentWorkspacePath("project", "src/modules/parse.c")
+            assertEquals(
+                setOf(AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE),
+                request.accessPolicy.pathRules.single { it.path == target }.operations,
+            )
+            assertFalse(request.accessPolicy.allows(target, AgentOperation.READ_FILE))
+            assertTrue(request.accessPolicy.allows(target, AgentOperation.WRITE_FILE))
+            assertTrue(request.accessPolicy.allows(target, AgentOperation.CREATE_FILE))
+            val source = "#include \"modules/parse.h\"\n/* fn_0000000000401000 */\nint parse_input(void) { return 17; }\n"
+            target.resolve(request.workspaceRoots).writeText(source)
+            AgentExecutionResult(
+                AgentStopReason.COMPLETED,
+                "module reconstructed in workspace",
+                listOf(AgentFileChange(target, AgentFileChangeKind.CREATED, null, sha256(source.toByteArray()), source.length.toLong())),
+            )
+        }
+
+        val manifest = SourceTreeGenerator.generate(
+            oneModuleModel(),
+            project,
+            reconstructor = BoundedLlmModuleReconstructor(harness),
+            profile = alternateProfile,
+        )
+
+        assertTrue(called)
+        assertFalse(ProjectFileRole.VIEWABLE in manifest.files.single { it.path == "src/modules/parse.c" }.roles)
+        assertTrue(project.resolve("src/modules/parse.c").readText().contains("parse_input"))
+    }
+
+    @Test
     fun `LLM reconstruction enforces context budget before making a request`() {
         var called = false
         val harness = object : AgentHarness {
