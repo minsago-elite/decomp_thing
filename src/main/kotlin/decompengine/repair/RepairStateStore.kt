@@ -105,6 +105,51 @@ internal class RepairStateStore private constructor(
 
     fun writeRoot(name: String, bytes: ByteArray) = writeAtomically(projectRoot, name, bytes, "project-evidence")
 
+    /** Retain the manifest-bound preimage until the manifest commits the derived report. */
+    fun writeProjectedEvidence(relative: String, bytes: ByteArray) =
+        withProjectEvidenceParent(relative) { parent, name ->
+            writeAtomically(parent, name, bytes, "project-evidence", keepDisplaced = true)
+        }
+
+    fun readProjectedEvidencePreimage(relative: String, maximumBytes: Long): ByteArray? =
+        withProjectEvidenceParent(relative) { parent, name ->
+            val temporary = atomicTemporaryName(name)
+            if (!exists(parent, temporary)) null else readRequiredStable(
+                parent, LinuxFilesystemSyscalls.descriptorPath(parent), temporary, maximumBytes,
+                "repair projection preimage",
+            ).bytes
+        }
+
+    fun cleanupProjectEvidenceTemporary(relative: String) =
+        withProjectEvidenceParent(relative) { parent, name -> cleanupAtomicTemporary(parent, name) }
+
+    private fun <T> withProjectEvidenceParent(relative: String, action: (LinuxDescriptor, String) -> T): T {
+        checkOpen()
+        val parts = relative.split('/')
+        require(parts.isNotEmpty() && parts.all { it.isNotEmpty() && it !in setOf(".", "..") && '\\' !in it }) {
+            "invalid repair project evidence path"
+        }
+        var parent = projectRoot
+        val opened = mutableListOf<LinuxDescriptor>()
+        try {
+            for (component in parts.dropLast(1)) {
+                val child = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, component)
+                try {
+                    requireSecureDirectory(child.identity, parent.identity, "repair project evidence directory")
+                    requireNamedIdentity(parent, component, child.identity, "repair project evidence directory")
+                } catch (failure: Throwable) {
+                    child.close()
+                    throw failure
+                }
+                opened += child
+                parent = child
+            }
+            return action(parent, parts.last())
+        } finally {
+            opened.asReversed().forEach(LinuxDescriptor::close)
+        }
+    }
+
     fun blobNames(maximumEntries: Int): List<String> {
         checkOpen()
         return LinuxFilesystemSyscalls.directoryEntryNames(blobs, maximumEntries).sorted()
@@ -214,6 +259,7 @@ internal class RepairStateStore private constructor(
         bytes: ByteArray,
         scope: String,
         requireAbsent: Boolean = false,
+        keepDisplaced: Boolean = false,
     ) {
         checkOpen()
         val temporaryName = atomicTemporaryName(name)
@@ -227,6 +273,9 @@ internal class RepairStateStore private constructor(
             target = LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, name)
             val targetIdentity = target?.identity
             targetIdentity?.let { requireManagedRegularFile(it, parent.identity, "repair evidence target") }
+            require(!keepDisplaced || targetIdentity != null) {
+                "derived repair evidence requires a manifest-bound preimage"
+            }
             require(!requireAbsent || targetIdentity == null) {
                 "immutable repair evidence target already exists: $name"
             }
@@ -308,7 +357,7 @@ internal class RepairStateStore private constructor(
                     throw failure
                 }
             }
-            if (exchanged) {
+            if (exchanged && !keepDisplaced) {
                 // The target publication was already durable. Failure here leaves only a bounded,
                 // exact cleanup name which the next store operation removes before proceeding.
                 try {

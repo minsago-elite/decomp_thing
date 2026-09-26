@@ -33,17 +33,27 @@ import decompengine.agent.AgentSessionReference
 import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkspaceRoot
+import decompengine.agent.AgentHarness
 import decompengine.project.AcpExecutionReceiptDocument
 import decompengine.project.BoundedAgentExecutionEventRecorder
 import decompengine.project.RecoveredFunction
 import decompengine.project.RecoveredProgramModel
 import decompengine.project.SourceTreeGenerator
+import decompengine.project.SourceTreeManifestReader
+import decompengine.project.BoundedLlmModuleReconstructor
+import decompengine.project.GeneratedCMakeReconstructionProfile
+import decompengine.project.ReconstructionProfile
+import decompengine.project.ProjectLayoutProfile
+import decompengine.project.ProjectFileDeclaration
 import decompengine.project.ArchivalBundleVerifier
+import decompengine.project.ArchivalBundleLimits
+import decompengine.project.ArchivalProjectAuditor
 import decompengine.project.ArchivalPackager
 import decompengine.project.captureBuildSourceRevision
 import decompengine.project.MakeProjectBuilder
 import decompengine.project.GeneratedCRepairIndexProfile
 import decompengine.project.sha256
+import decompengine.project.moduleIdForPath
 import decompengine.oracle.behavior.LlvmBehaviorCandidateAcpLineageIndexV2Publisher
 import decompengine.validation.ProcessInput
 import kotlinx.serialization.json.Json
@@ -52,10 +62,12 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonArray
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.acp.acpSandboxCanonicalStringDigest
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
@@ -2311,6 +2323,214 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `accepted ACP repair of undispatched fallback clears unresolved manifest ownership`() {
+        val fixture = releaseRepairFixture(undispatchedFallback = true)
+        val manifest = SourceTreeManifestReader.read(fixture.project, GeneratedCMakeReconstructionProfile.descriptor)
+        assertFalse("fn_alpha" in manifest.unresolvedImplementationIds)
+        assertEquals(manifest.unresolvedImplementationIds,
+            manifest.files.single { it.path == "UNRESOLVED.md" }.entityIds)
+        val confidence = Json.parseToJsonElement(fixture.project.resolve("reports/confidence.json").readText()).jsonObject
+        assertEquals(manifest.unresolvedImplementationIds,
+            confidence.getValue("unresolvedImplementationIds").jsonArray.map { it.jsonPrimitive.content })
+        val alphaRevision = confidence.getValue("modules").jsonArray.map { it.jsonObject }
+            .single { it.getValue("id").jsonPrimitive.content == "alpha" }
+            .getValue("revisionEvidence").jsonObject
+        assertEquals(sha256(fixture.after), alphaRevision.getValue("sourceSha256").jsonPrimitive.content)
+        assertEquals(JsonPrimitive(true), alphaRevision.getValue("acceptedImplementation"))
+        assertFalse("fn_alpha" in ArchivalProjectAuditor.audit(fixture.project).unresolvedEntityIds)
+        val unresolved = fixture.project.resolve("UNRESOLVED.md").readText()
+        assertFalse("| `fn_alpha` |" in unresolved)
+        assertTrue("| `fn_beta` |" in unresolved)
+        val confidenceTemporary = fixture.project.resolve("reports/.confidence.json.repair-atomic.tmp")
+        val unresolvedTemporary = fixture.project.resolve(".UNRESOLVED.md.repair-atomic.tmp")
+        confidenceTemporary.writeBytes("prior confidence evidence\n".toByteArray())
+        unresolvedTemporary.writeBytes("prior unresolved evidence\n".toByteArray())
+        ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile).use { }
+        assertFalse(confidenceTemporary.exists(), "reopen retained an exchanged confidence report")
+        assertFalse(unresolvedTemporary.exists(), "reopen retained an exchanged unresolved report")
+        val archive = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("repaired-fallback.zip"))
+        val extracted = fixture.project.parent.resolve("repaired-fallback-extracted")
+        val lineage = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(archive.archivePath, extracted)
+        assertContentEquals(fixture.after, extracted.resolve(fixture.relativePath).readBytes())
+        assertEquals(1, lineage.source.acceptedAcpContributions.size)
+    }
+
+    @Test
+    fun `repair audit charges nonmanifest evidence against its remaining byte budget`() {
+        val fixture = releaseRepairFixture(undispatchedFallback = true)
+        val manifest = SourceTreeManifestReader.read(fixture.project, GeneratedCMakeReconstructionProfile.descriptor)
+        val manifestBytes = Files.size(fixture.project.resolve("source_tree_manifest.json"))
+        val manifestInputBytes = manifestBytes + manifest.files.sumOf { Files.size(fixture.project.resolve(it.path)) }
+        val largestInput = maxOf(manifestBytes, manifest.files.maxOf { Files.size(fixture.project.resolve(it.path)) })
+        assertFalse("fn_alpha" in ArchivalProjectAuditor.audit(fixture.project).unresolvedEntityIds)
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ArchivalProjectAuditor.audit(fixture.project, limits = ArchivalBundleLimits(
+                maximumFileBytes = largestInput,
+                maximumTotalBytes = manifestInputBytes,
+            ))
+        }
+        assertTrue(failure.message.orEmpty().contains("bound"))
+    }
+
+    @Test
+    fun `repair and behavior reports share one audit byte budget`() {
+        val fixture = releaseRepairFixture(undispatchedFallback = true)
+        val manifest = SourceTreeManifestReader.read(fixture.project, GeneratedCMakeReconstructionProfile.descriptor)
+        val manifestPaths = manifest.files.mapTo(hashSetOf()) { it.path }
+        val manifestBytes = Files.size(fixture.project.resolve("source_tree_manifest.json"))
+        val manifestInputBytes = manifestBytes + manifest.files.sumOf { Files.size(fixture.project.resolve(it.path)) }
+        val extraFiles = Files.walk(fixture.project.resolve("reports")).use { stream ->
+            stream.filter { Files.isRegularFile(it, LinkOption.NOFOLLOW_LINKS) }
+                .filter { path ->
+                    val relative = fixture.project.relativize(path).toString().replace('\\', '/')
+                    relative !in manifestPaths && (relative.startsWith("reports/repair-revisions/") ||
+                        relative == "reports/repair_history.json" || relative.endsWith(".validation.json"))
+                }.toList()
+        }
+        assertTrue(extraFiles.isNotEmpty())
+        val extraBytes = extraFiles.sumOf(Files::size)
+        val largestInput = maxOf(manifestBytes,
+            manifest.files.maxOf { Files.size(fixture.project.resolve(it.path)) }, extraFiles.maxOf(Files::size))
+        fixture.project.resolve("reports/extra.behavior.json").writeBytes("extra behavior".toByteArray())
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ArchivalProjectAuditor.audit(fixture.project, limits = ArchivalBundleLimits(
+                maximumFileBytes = largestInput,
+                maximumTotalBytes = manifestInputBytes + extraBytes,
+            ))
+        }
+        assertTrue(failure.message.orEmpty().contains("remaining aggregate bound"))
+    }
+
+    @Test
+    fun `repair audit rejects a historical checkpoint changed to a dispatched rejection`() {
+        val fixture = releaseRepairFixture(undispatchedFallback = true)
+        val profile = GeneratedCMakeReconstructionProfile.descriptor
+        val module = profile.layout.declaration("module-implementation").moduleIdForPath(fixture.relativePath)
+        val checkpointPath = profile.layout.declaration("module-evidence").materialize(mapOf("module" to module))
+        val checkpoint = fixture.project.resolve(checkpointPath)
+        val before = checkpoint.readBytes()
+        val after = checkpoint.readText().replace(
+            "pre-dispatch-context-budget-fallback", "reconstructor-return",
+        ).toByteArray()
+        assertFalse(before.contentEquals(after))
+        checkpoint.writeBytes(after)
+        val manifestPath = fixture.project.resolve("source_tree_manifest.json")
+        val manifestBefore = manifestPath.readText()
+        val manifestAfter = manifestBefore.replace(sha256(before), sha256(after))
+        assertFalse(manifestBefore == manifestAfter)
+        manifestPath.writeText(manifestAfter)
+
+        assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(fixture.project) }
+    }
+
+    @Test
+    fun `repair audit rejects confidence evidence cross paired with an earlier source`() {
+        val fixture = releaseRepairFixture(undispatchedFallback = true)
+        val confidencePath = fixture.project.resolve("reports/confidence.json")
+        val before = confidencePath.readBytes()
+        val after = confidencePath.readText().replace(sha256(fixture.after), "0".repeat(64)).toByteArray()
+        assertFalse(before.contentEquals(after))
+        confidencePath.writeBytes(after)
+        val manifestPath = fixture.project.resolve("source_tree_manifest.json")
+        manifestPath.writeText(manifestPath.readText().replace(sha256(before), sha256(after)))
+
+        val failure = assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(fixture.project) }
+        assertTrue(failure.message.orEmpty().contains("repaired module confidence evidence"))
+    }
+
+    @Test
+    fun `repair projection refuses a modified report without its manifest preimage`() {
+        val fixture = releaseRepairFixture(undispatchedFallback = true)
+        val confidence = fixture.project.resolve("reports/confidence.json")
+        confidence.writeText(confidence.readText().replace(
+            "structural recovery heuristic; not implementation acceptance or measured behavioral confidence",
+            "forged confidence claim",
+        ))
+        val manifestBefore = fixture.project.resolve("source_tree_manifest.json").readBytes()
+
+        ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile).use { }
+        assertContentEquals(manifestBefore, fixture.project.resolve("source_tree_manifest.json").readBytes())
+        assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(fixture.project) }
+    }
+
+    @Test
+    fun `repair projection recovers a durable report exchange from manifest preimages`() {
+        val fixture = releaseRepairFixture(undispatchedFallback = true)
+        val finalManifest = fixture.project.resolve("source_tree_manifest.json").readBytes()
+        val finalConfidence = fixture.project.resolve("reports/confidence.json").readBytes()
+        val finalUnresolved = fixture.project.resolve("UNRESOLVED.md").readBytes()
+        fixture.project.resolve("source_tree_manifest.json").writeBytes(fixture.beforeManifest)
+        val confidenceTemporary = fixture.project.resolve("reports/.confidence.json.repair-atomic.tmp")
+        val unresolvedTemporary = fixture.project.resolve(".UNRESOLVED.md.repair-atomic.tmp")
+        confidenceTemporary.writeBytes(fixture.beforeConfidence)
+        unresolvedTemporary.writeBytes(fixture.beforeUnresolved)
+
+        ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile).use { }
+
+        assertContentEquals(finalManifest, fixture.project.resolve("source_tree_manifest.json").readBytes())
+        assertContentEquals(finalConfidence, fixture.project.resolve("reports/confidence.json").readBytes())
+        assertContentEquals(finalUnresolved, fixture.project.resolve("UNRESOLVED.md").readBytes())
+        assertFalse(confidenceTemporary.exists())
+        assertFalse(unresolvedTemporary.exists())
+    }
+
+    @Test
+    fun `repair projection requires the manifest bound module plan`() {
+        val fixture = releaseRepairFixture(undispatchedFallback = true)
+        val plan = fixture.project.resolve("reports/module_plan.json")
+        plan.writeText(plan.readText() + " ")
+        val manifestBefore = fixture.project.resolve("source_tree_manifest.json").readBytes()
+        val unresolvedBefore = fixture.project.resolve("UNRESOLVED.md").readBytes()
+
+        ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile).use { }
+        assertContentEquals(manifestBefore, fixture.project.resolve("source_tree_manifest.json").readBytes())
+        assertContentEquals(unresolvedBefore, fixture.project.resolve("UNRESOLVED.md").readBytes())
+        assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(fixture.project) }
+    }
+
+    @Test
+    fun `accepted header repair does not resolve an undispatched implementation fallback`() {
+        val fixture = releaseRepairFixture(undispatchedFallback = true, relativePath = "include/modules/alpha.h")
+        val manifest = SourceTreeManifestReader.read(fixture.project, GeneratedCMakeReconstructionProfile.descriptor)
+        assertTrue("fn_alpha" in manifest.unresolvedImplementationIds)
+        assertEquals(null, manifest.files.single { it.path == fixture.relativePath }.acceptedImplementation)
+        assertTrue("| `fn_alpha` |" in fixture.project.resolve("UNRESOLVED.md").readText())
+    }
+
+    @Test
+    fun `accepted fallback repair synchronizes relocated reports`() {
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val relocated = mapOf(
+            "confidence-evidence" to "reports/assessment/confidence.validation.json",
+            "unresolved-evidence" to "reports/assessment/unresolved.md",
+            "module-plan-evidence" to "reports/planning/modules.json",
+        )
+        val layout = ProjectLayoutProfile(base.layout.schemaVersion, base.layout.declarations.map { declaration ->
+            ProjectFileDeclaration(declaration.id, relocated[declaration.id] ?: declaration.pathTemplate,
+                declaration.roles, declaration.contentKind)
+        })
+        val profile = ReconstructionProfile(base.schemaVersion, base.id, layout, base.budgets, base.adapterConfiguration)
+        val fixture = releaseRepairFixture(undispatchedFallback = true, profile = profile)
+        val manifest = SourceTreeManifestReader.read(fixture.project, profile)
+        assertFalse("fn_alpha" in manifest.unresolvedImplementationIds)
+        assertFalse("fn_alpha" in ArchivalProjectAuditor.audit(fixture.project, profile).unresolvedEntityIds)
+        assertFalse("| `fn_alpha` |" in fixture.project.resolve(relocated.getValue("unresolved-evidence")).readText())
+        val confidenceTemporary = fixture.project.resolve("reports/assessment/.confidence.validation.json.repair-atomic.tmp")
+        val unresolvedTemporary = fixture.project.resolve("reports/assessment/.unresolved.md.repair-atomic.tmp")
+        confidenceTemporary.writeBytes("prior confidence evidence\n".toByteArray())
+        unresolvedTemporary.writeBytes("prior unresolved evidence\n".toByteArray())
+        ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile.forProfile(profile)).use { }
+        assertFalse(confidenceTemporary.exists())
+        assertFalse(unresolvedTemporary.exists())
+        val archive = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("relocated-fallback.zip"),
+            profile = profile)
+        ArchivalBundleVerifier.extractAndVerify(archive.archivePath,
+            fixture.project.parent.resolve("relocated-fallback-extracted"), profile = profile)
+    }
+
+    @Test
     fun `archive includes provisional contributions only through a fully accepted composed revision`() {
         val fixture = releaseRepairFixture(includeProvisional = true)
         val bundle = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("composed-repair.zip"))
@@ -3433,8 +3653,12 @@ class ModuleRevisionGraphTest {
         }
     }
 
-    private fun generatedProject(): Path {
+    private fun generatedProject(
+        undispatchedFallback: Boolean = false,
+        profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+    ): Path {
         val project = createTempDirectory("module-revision-").resolve("project")
+        val promptContext = if (undispatchedFallback) "/* ${"context".repeat(900)} */" else null
         SourceTreeGenerator.generate(
             RecoveredProgramModel(
                 inputSha256 = "a".repeat(64),
@@ -3444,14 +3668,19 @@ class ModuleRevisionGraphTest {
                         name = "alpha_run",
                         address = 0x1000UL,
                         prototype = "int alpha_run(void)",
+                        decompiledC = promptContext,
                         calls = setOf("fn_beta"),
                     ),
-                    RecoveredFunction("fn_beta", "beta_read", 0x2000UL, "int beta_read(void)"),
-                    RecoveredFunction("fn_charlie", "charlie_emit", 0x3000UL, "int charlie_emit(void)"),
-                    RecoveredFunction("fn_delta", "delta_idle", 0x4000UL, "int delta_idle(void)"),
+                    RecoveredFunction("fn_beta", "beta_read", 0x2000UL, "int beta_read(void)", promptContext),
+                    RecoveredFunction("fn_charlie", "charlie_emit", 0x3000UL, "int charlie_emit(void)", promptContext),
+                    RecoveredFunction("fn_delta", "delta_idle", 0x4000UL, "int delta_idle(void)", promptContext),
                 ),
             ),
             project,
+            reconstructor = if (undispatchedFallback) BoundedLlmModuleReconstructor(
+                AgentHarness { _, _ -> error("pre-dispatch fixture must not execute") }, maximumContextCharacters = 4096,
+            ) else null,
+            profile = profile,
         )
         return project
     }
@@ -3462,20 +3691,29 @@ class ModuleRevisionGraphTest {
         val after: ByteArray,
         val receiptPath: String,
         val requestSha256: String,
+        val beforeManifest: ByteArray,
+        val beforeConfidence: ByteArray,
+        val beforeUnresolved: ByteArray,
     )
 
     private fun releaseRepairFixture(
         includeProvisional: Boolean = false,
         abandonProvisional: Boolean = false,
+        undispatchedFallback: Boolean = false,
+        relativePath: String = "src/modules/alpha.c",
+        profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
     ): ReleaseRepairFixture {
         require(!abandonProvisional || includeProvisional)
-        val project = generatedProject()
-        val relative = "src/modules/alpha.c"
+        val project = generatedProject(undispatchedFallback, profile)
+        val beforeManifest = project.resolve("source_tree_manifest.json").readBytes()
+        val beforeConfidence = project.resolve(profile.layout.declaration("confidence-evidence").materialize()).readBytes()
+        val beforeUnresolved = project.resolve(profile.layout.declaration("unresolved-evidence").materialize()).readBytes()
+        val relative = relativePath
         val target = project.resolve(relative)
         val before = target.readBytes()
         val after = before + "\n/* archive release ACP repair */\n".toByteArray()
         lateinit var binding: RepairAgentInvocationBinding
-        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile.forProfile(profile)).use { graph ->
             val corpus = graph.retainRegressionInputs(listOf(ProcessInput("archive-case", emptyList(), byteArrayOf())))
             graph.beginRun(if (includeProvisional && !abandonProvisional) 2 else 1, 60_000)
             fun bindObservations(proof: RepairValidationProof) {
@@ -3530,8 +3768,9 @@ class ModuleRevisionGraphTest {
             binding = requireNotNull(accepted.repairMetadata?.agentInvocation)
             graph.synchronizeRepairHistory()
         }
-        assertEquals(0, MakeProjectBuilder.build(project).returnCode)
-        return ReleaseRepairFixture(project, relative, after, binding.receiptPath, binding.requestSha256)
+        assertEquals(0, MakeProjectBuilder.build(project, profile = profile).returnCode)
+        return ReleaseRepairFixture(project, relative, after, binding.receiptPath, binding.requestSha256,
+            beforeManifest, beforeConfidence, beforeUnresolved)
     }
 
     /** Synthetic serialization fixture only; this never qualifies the real validation provider. */

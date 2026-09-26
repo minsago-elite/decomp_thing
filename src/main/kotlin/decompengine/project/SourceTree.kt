@@ -216,6 +216,7 @@ class BoundedLlmModuleReconstructor(
                 contextSize,
                 contextBudget,
                 sha256(promptEvidence.toByteArray()),
+                PRE_DISPATCH_BUDGET_PERMIT,
             )
         }
         val promptSha256 = sha256(promptEvidence.toByteArray())
@@ -322,14 +323,22 @@ class BoundedLlmModuleReconstructor(
 
 private const val MAXIMUM_HARNESS_PROVENANCE_BYTES = 4 * 1024
 
-class ModuleContextBudgetExceededException(
+private object PRE_DISPATCH_BUDGET_PERMIT
+
+class ModuleContextBudgetExceededException internal constructor(
     val moduleId: String,
     val promptCharacters: Int,
     val promptBudgetCharacters: Int,
     val promptSha256: String,
+    private val originPermit: Any?,
 ) : IllegalArgumentException(
     "module $moduleId exceeds context budget: $promptCharacters > $promptBudgetCharacters characters",
-)
+) {
+    constructor(moduleId: String, promptCharacters: Int, promptBudgetCharacters: Int, promptSha256: String) :
+        this(moduleId, promptCharacters, promptBudgetCharacters, promptSha256, null)
+
+    internal val raisedBeforeDispatch: Boolean get() = originPermit === PRE_DISPATCH_BUDGET_PERMIT
+}
 
 class ModuleReconstructionInterruptedException(
     val moduleId: String,
@@ -730,6 +739,7 @@ object SourceTreeGenerator {
                     progress.phase(AgentWorkflowPhase.ROLLED_BACK, module.id, previousAccepted.sourceSha256)
                     return attemptEvidence
                 }
+                var workflowOrigin = "reconstructor-return"
                 val attempted = try {
                     selectedReconstructor.reconstruct(request)
                 } catch (interrupted: ModuleReconstructionInterruptedException) {
@@ -751,6 +761,9 @@ object SourceTreeGenerator {
                     throw failure
                 } catch (failure: Exception) {
                     if (generateSequence<Throwable>(failure) { it.cause }.any { it is AgentSessionRecoveryException }) throw failure
+                    workflowOrigin = if (selectedReconstructor is BoundedLlmModuleReconstructor &&
+                        failure is ModuleContextBudgetExceededException && failure.raisedBeforeDispatch)
+                        "pre-dispatch-context-budget-fallback" else "exception-fallback"
                     unresolvedFallback(request, cacheIdentity, failure)
                 }
                 val normalizedSource = attempted.source.trimEnd() + "\n"
@@ -799,6 +812,7 @@ object SourceTreeGenerator {
                     fingerprint = fingerprint,
                     sourceSha256 = normalizedSourceSha256,
                     generator = attempted.generator,
+                    workflowOrigin = workflowOrigin,
                     reconstructorIdentity = cacheIdentity,
                     promptSha256 = attempted.promptSha256,
                     promptCharacters = attempted.promptCharacters,
@@ -1070,6 +1084,7 @@ object SourceTreeGenerator {
         val fingerprint: String,
         val sourceSha256: String,
         val generator: String,
+        val workflowOrigin: String = "reconstructor-return",
         val reconstructorIdentity: String,
         val promptSha256: String,
         val promptCharacters: Int?,
@@ -1093,6 +1108,8 @@ object SourceTreeGenerator {
             require(schemaVersion < 6 || (inputBinarySha256 != null && modelSchemaVersion in setOf(1, 2) &&
                 profileSha256?.matches(Regex("[0-9a-f]{64}")) == true)) { "module checkpoint lacks input identity" }
             require(schemaVersion in 2..6) { "unsupported module checkpoint schemaVersion: $schemaVersion" }
+            require(workflowOrigin in setOf("reconstructor-return", "exception-fallback",
+                "pre-dispatch-context-budget-fallback")) { "unsupported module checkpoint workflow origin" }
             require(schemaVersion < 5 || !accepted ||
                 (compilation?.passed == true && compilation.sourceSha256 == sourceSha256)
             ) { "accepted module checkpoint lacks successful compilation of its exact source bytes" }
@@ -1153,6 +1170,9 @@ object SourceTreeGenerator {
             append("\n  \"fingerprint\": \"").append(fingerprint).append("\",")
             append("\n  \"sourceSha256\": \"").append(sourceSha256).append("\",")
             append("\n  \"generator\": \"").append(generator.jsonEscape()).append("\",")
+            if (schemaVersion >= 6) {
+                append("\n  \"workflowOrigin\": \"").append(workflowOrigin).append("\",")
+            }
             append("\n  \"reconstructorIdentity\": \"").append(reconstructorIdentity.jsonEscape()).append("\",")
             append("\n  \"promptSha256\": \"").append(promptSha256).append("\",")
             append("\n  \"promptCharacters\": ").append(promptCharacters ?: "null").append(',')
@@ -1226,6 +1246,7 @@ object SourceTreeGenerator {
                 fingerprint = root.getValue("fingerprint").jsonPrimitive.content,
                 sourceSha256 = root.getValue("sourceSha256").jsonPrimitive.content,
                 generator = root.getValue("generator").jsonPrimitive.content,
+                workflowOrigin = optionalString("workflowOrigin") ?: "reconstructor-return",
                 reconstructorIdentity = root.getValue("reconstructorIdentity").jsonPrimitive.content,
                 promptSha256 = root.getValue("promptSha256").jsonPrimitive.content,
                 promptCharacters = root["promptCharacters"]?.jsonPrimitive?.intOrNull,
@@ -1404,6 +1425,11 @@ object SourceTreeGenerator {
     ): List<ModuleReconstructionIssue> {
         val entityIds = module.functionIds + module.globalIds
         val issues = reconstructed.issues.toMutableList()
+        if (reconstructed.generator == "repair-revision") {
+            issues += ModuleReconstructionIssue(
+                "reserved-generator", "repair-revision is reserved for authenticated repair publication", entityIds,
+            )
+        }
         if (source.isBlank() && entityIds.isNotEmpty()) {
             issues += ModuleReconstructionIssue("empty-source", "module source is empty", entityIds)
         }

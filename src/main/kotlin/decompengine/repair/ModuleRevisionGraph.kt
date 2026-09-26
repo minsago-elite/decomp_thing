@@ -9,6 +9,10 @@ import decompengine.acp.permissions
 import decompengine.project.AcpExecutionReceiptDocument
 import decompengine.project.agentFileChangeSetSha256
 import decompengine.project.verifyAcpExecutionReceiptDocument
+import decompengine.project.UniqueJsonObjectKeyValidator
+import decompengine.project.ReconstructionProfile
+import decompengine.project.ProjectFileRole
+import decompengine.project.moduleIdForPath
 import decompengine.project.sha256
 import decompengine.agent.receiptCommitmentBytes
 import decompengine.agent.AgentFileChange
@@ -16,6 +20,7 @@ import decompengine.agent.AgentFileChangeKind
 import decompengine.agent.AgentWorkspacePath
 import decompengine.validation.ProcessInput
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -494,6 +499,9 @@ private fun exactPathModuleId(path: String): String =
 /** Program/layout-specific indexing is an explicit injected boundary, not repair-core policy. */
 interface RepairIndexProfile {
     fun resolve(projectRoot: Path, budget: RepairResourceBudget): RepairIndexLayout
+
+    /** The source-tree contract, when this repair profile owns generated reconstruction output. */
+    fun reconstructionProfile(): ReconstructionProfile? = null
 
     /**
      * Content-independent authorization used only before crash recovery may write a source path.
@@ -3526,35 +3534,223 @@ internal class ModuleRevisionGraph private constructor(
         }
         if (acceptedChanges.isEmpty()) return
         val sourceByPath = index.sourceSnapshot().associateBy { it.path }
-        val root = Json.parseToJsonElement(decodeUtf8Strict(manifestBytes, "source_tree_manifest.json")).jsonObject
+        val manifestText = decodeUtf8Strict(manifestBytes, "source_tree_manifest.json")
+        UniqueJsonObjectKeyValidator(manifestText).validate()
+        val root = Json.parseToJsonElement(manifestText).jsonObject
         val files = root["files"]?.jsonArray ?: return
+        val reconstructionProfile = index.profile.reconstructionProfile()
+        if (reconstructionProfile != null) {
+            require(root["profileId"] == JsonPrimitive(reconstructionProfile.id) &&
+                root["profileSha256"] == JsonPrimitive(reconstructionProfile.sha256)) {
+                "repair source manifest differs from the selected reconstruction profile"
+            }
+        }
+        val confidencePath = reconstructionProfile?.layout?.declaration("confidence-evidence")?.materialize()
+            ?: "reports/confidence.json"
+        val unresolvedPath = reconstructionProfile?.layout?.declaration("unresolved-evidence")?.materialize()
+            ?: "UNRESOLVED.md"
+        // Keep displaced manifest-bound report preimages until both derived reports and the
+        // source manifest are durably synchronized. A crash may interrupt that sequence.
+        val resolvedImplementationIds = linkedSetOf<String>()
         var changed = false
         val updatedFiles = files.map { element ->
             val item = element.jsonObject
             val relative = item["path"]?.jsonPrimitive?.contentOrNull
             val revision = relative?.let(acceptedChanges::get)
             val source = relative?.let(sourceByPath::get)
-            if (revision == null || source == null || item["sha256"]?.jsonPrimitive?.contentOrNull == source.sha256) {
+            if (revision == null || source == null) {
                 element
             } else {
-                changed = true
                 val updated = LinkedHashMap(item)
-                updated["sha256"] = JsonPrimitive(source.sha256)
-                updated["generator"] = JsonPrimitive("repair-revision")
-                updated["promptSha256"] = JsonPrimitive(sha256("revision:${revision.id}".toByteArray(Charsets.UTF_8)))
-                if (item["acceptedImplementation"] !is JsonNull) {
-                    updated["acceptedImplementation"] = JsonPrimitive(true)
+                if (item["sha256"]?.jsonPrimitive?.contentOrNull != source.sha256) {
+                    changed = true
+                    updated["sha256"] = JsonPrimitive(source.sha256)
+                    updated["generator"] = JsonPrimitive("repair-revision")
+                    updated["promptSha256"] = JsonPrimitive(sha256("revision:${revision.id}".toByteArray(Charsets.UTF_8)))
+                    val implementation = item["roles"]?.jsonArray?.any {
+                        it == JsonPrimitive(ProjectFileRole.MODULE_IMPLEMENTATION.wireName)
+                    } == true
+                    if (implementation && item["acceptedImplementation"] != JsonNull) {
+                        updated["acceptedImplementation"] = JsonPrimitive(true)
+                    }
+                }
+                if (updated["roles"]?.jsonArray?.any {
+                        it == JsonPrimitive(ProjectFileRole.MODULE_IMPLEMENTATION.wireName)
+                    } == true && updated["acceptedImplementation"] == JsonPrimitive(true) &&
+                    updated["generator"] == JsonPrimitive("repair-revision")) {
+                    updated["entityIds"]?.jsonArray?.forEach { resolvedImplementationIds += it.jsonPrimitive.content }
                 }
                 JsonObject(updated)
             }
         }
-        if (changed) {
+        val unresolved = root["unresolvedImplementationIds"]?.jsonArray
+        val remaining = unresolved?.filterNot { it.jsonPrimitive.content in resolvedImplementationIds }
+        val repairedImplementations = updatedFiles.mapNotNull { element ->
+            val item = element.jsonObject
+            val relative = item["path"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            if (relative !in acceptedChanges || item["generator"] != JsonPrimitive("repair-revision") ||
+                item["acceptedImplementation"] != JsonPrimitive(true) ||
+                item["roles"]?.jsonArray?.contains(JsonPrimitive(ProjectFileRole.MODULE_IMPLEMENTATION.wireName)) != true
+            ) return@mapNotNull null
+            reconstructionProfile?.layout?.declaration("module-implementation")?.moduleIdForPath(relative)
+                ?.let { it to item.getValue("sha256").jsonPrimitive.content }
+        }.toMap()
+        if (remaining != null && remaining.size != unresolved.size) changed = true
+        if (changed || repairedImplementations.isNotEmpty()) {
             val updatedRoot = LinkedHashMap(root)
-            updatedRoot["files"] = kotlinx.serialization.json.JsonArray(updatedFiles)
+            val projectedFiles = if (remaining != null &&
+                (remaining.size != unresolved.size || repairedImplementations.isNotEmpty())) {
+                // The confidence report is a derived view of the same unresolved implementation
+                // population. Keep its current projection and manifest digest synchronized so an
+                // accepted repair does not invalidate unrelated accepted modules at archive audit.
+                val confidenceEntry = updatedFiles.single { item ->
+                    item.jsonObject["path"]?.jsonPrimitive?.contentOrNull == confidencePath
+                }.jsonObject
+                val priorSha256 = confidenceEntry.getValue("sha256").jsonPrimitive.content
+                val reportBytes = readStableRegularFile(projectRoot, confidencePath,
+                    state.budget.maximumIndexEvidenceBytes).bytes
+                val currentSha256 = sha256(reportBytes)
+                val trustedReportBytes = if (currentSha256 == priorSha256) reportBytes else {
+                    requireNotNull(stateStore.readProjectedEvidencePreimage(confidencePath,
+                        state.budget.maximumIndexEvidenceBytes)) {
+                        "repair confidence projection has no manifest-bound recovery preimage"
+                    }.also { preimage ->
+                        require(sha256(preimage) == priorSha256) {
+                            "repair confidence recovery preimage differs from the source manifest"
+                        }
+                    }
+                }
+                val reportText = decodeUtf8Strict(trustedReportBytes, confidencePath)
+                UniqueJsonObjectKeyValidator(reportText).validate()
+                val report = Json.parseToJsonElement(reportText).jsonObject
+                require(report["schemaVersion"] == JsonPrimitive(2)) { "repair confidence projection has an unsupported schema" }
+                val projectedImplementations = report.getValue("unresolvedImplementationIds").jsonArray.filterNot {
+                    it.jsonPrimitive.content in resolvedImplementationIds
+                }
+                val recovery = report.getValue("unresolvedRecoveryEntityIds").jsonArray.map { it.jsonPrimitive.content }
+                val projectedModules = report.getValue("modules").jsonArray.map { module ->
+                    val fields = LinkedHashMap(module.jsonObject)
+                    fields["unresolvedImplementationIds"] = JsonArray(
+                        module.jsonObject.getValue("unresolvedImplementationIds").jsonArray.filterNot {
+                            it.jsonPrimitive.content in resolvedImplementationIds
+                        },
+                    )
+                    repairedImplementations[fields.getValue("id").jsonPrimitive.content]?.let { sourceSha256 ->
+                        val revision = LinkedHashMap(fields.getValue("revisionEvidence").jsonObject)
+                        revision["sourceSha256"] = JsonPrimitive(sourceSha256)
+                        revision["acceptedImplementation"] = JsonPrimitive(true)
+                        fields["revisionEvidence"] = JsonObject(revision)
+                    }
+                    JsonObject(fields)
+                }
+                val projectedReport = LinkedHashMap(report)
+                projectedReport["unresolvedImplementationIds"] = JsonArray(projectedImplementations)
+                projectedReport["unresolvedEntityIds"] = JsonArray(
+                    (recovery + projectedImplementations.map { it.jsonPrimitive.content }).distinct().sorted().map(::JsonPrimitive),
+                )
+                projectedReport["modules"] = JsonArray(projectedModules)
+                val projectedBytes = (JsonObject(projectedReport).toString() + "\n").toByteArray(Charsets.UTF_8)
+                require(projectedBytes.size.toLong() <= state.budget.maximumIndexEvidenceBytes) {
+                    "repair confidence projection exceeds its byte bound"
+                }
+                val projectedSha256 = sha256(projectedBytes)
+                require(currentSha256 == priorSha256 || currentSha256 == projectedSha256) {
+                    "repair confidence projection differs from the checked source manifest"
+                }
+                val confidenceFiles = updatedFiles.map { item ->
+                    if (item.jsonObject["path"]?.jsonPrimitive?.contentOrNull != confidencePath) item else {
+                        JsonObject(LinkedHashMap(item.jsonObject).apply { put("sha256", JsonPrimitive(projectedSha256)) })
+                    }
+                }
+                val unresolvedEntry = confidenceFiles.single { item ->
+                    item.jsonObject["path"]?.jsonPrimitive?.contentOrNull == unresolvedPath
+                }.jsonObject
+                val unresolvedBytes = readStableRegularFile(projectRoot, unresolvedPath,
+                    state.budget.maximumIndexEvidenceBytes).bytes
+                val currentUnresolvedSha256 = sha256(unresolvedBytes)
+                val priorUnresolvedSha256 = unresolvedEntry.getValue("sha256").jsonPrimitive.content
+                val trustedUnresolvedBytes = if (currentUnresolvedSha256 == priorUnresolvedSha256) unresolvedBytes else {
+                    requireNotNull(stateStore.readProjectedEvidencePreimage(unresolvedPath,
+                        state.budget.maximumIndexEvidenceBytes)) {
+                        "repair unresolved projection has no manifest-bound recovery preimage"
+                    }.also { preimage ->
+                        require(sha256(preimage) == priorUnresolvedSha256) {
+                            "repair unresolved recovery preimage differs from the source manifest"
+                        }
+                    }
+                }
+                val unresolvedText = decodeUtf8Strict(trustedUnresolvedBytes, unresolvedPath)
+                val marker = "## Implementation generation\n\n"
+                require(unresolvedText.indexOf(marker) == unresolvedText.lastIndexOf(marker) && marker in unresolvedText) {
+                    "repair unresolved evidence has no unique implementation section"
+                }
+                val planPath = reconstructionProfile?.layout?.declaration("module-plan-evidence")?.materialize()
+                    ?: "reports/module_plan.json"
+                val planSnapshot = readStableRegularFile(projectRoot, planPath,
+                    state.budget.maximumIndexEvidenceBytes)
+                val planEntry = files.single { item ->
+                    item.jsonObject["path"]?.jsonPrimitive?.contentOrNull == planPath
+                }.jsonObject
+                require(planSnapshot.sha256 == planEntry.getValue("sha256").jsonPrimitive.content) {
+                    "repair module plan differs from the checked source manifest"
+                }
+                val planText = decodeUtf8Strict(planSnapshot.bytes, planPath)
+                UniqueJsonObjectKeyValidator(planText).validate()
+                val plan = Json.parseToJsonElement(planText).jsonObject
+                val owners = plan.getValue("modules").jsonArray.flatMap { module ->
+                    val fields = module.jsonObject
+                    val moduleId = fields.getValue("id").jsonPrimitive.content
+                    (fields.getValue("functionIds").jsonArray + fields.getValue("globalIds").jsonArray).map {
+                        it.jsonPrimitive.content to moduleId
+                    }
+                }.toMap()
+                val remainingIds = remaining.orEmpty().map { it.jsonPrimitive.content }
+                val implementationSection = buildString {
+                    append(marker)
+                    if (remainingIds.isEmpty()) {
+                        append("Every planner-owned implementation passed the acceptance checks.\n")
+                    } else {
+                        append("These planner-owned entities are not accepted implementations. See the attributable module report for the exact evidence.\n\n")
+                        append("| Stable ID | Owning module | Evidence |\n|---|---|---|\n")
+                        remainingIds.forEach { id ->
+                            val moduleId = requireNotNull(owners[id]) { "repair unresolved owner is absent from the module plan: $id" }
+                            val evidencePath = reconstructionProfile?.layout?.declaration("module-evidence")
+                                ?.materialize(mapOf("module" to moduleId)) ?: "reports/modules/$moduleId.json"
+                            append("| `$id` | `$moduleId` | `$evidencePath` |\n")
+                        }
+                    }
+                }
+                val projectedUnresolvedBytes = (unresolvedText.substringBefore(marker) + implementationSection)
+                    .toByteArray(Charsets.UTF_8)
+                require(projectedUnresolvedBytes.size.toLong() <= state.budget.maximumIndexEvidenceBytes) {
+                    "repair unresolved projection exceeds its byte bound"
+                }
+                val unresolvedSha256 = sha256(projectedUnresolvedBytes)
+                require(currentUnresolvedSha256 == priorUnresolvedSha256 ||
+                    currentUnresolvedSha256 == unresolvedSha256) {
+                    "repair unresolved projection differs from the checked source manifest"
+                }
+                if (currentSha256 != projectedSha256) stateStore.writeProjectedEvidence(confidencePath, projectedBytes)
+                if (currentUnresolvedSha256 != unresolvedSha256) {
+                    stateStore.writeProjectedEvidence(unresolvedPath, projectedUnresolvedBytes)
+                }
+                confidenceFiles.map { item ->
+                    if (item.jsonObject["path"]?.jsonPrimitive?.contentOrNull != unresolvedPath) item else {
+                        JsonObject(LinkedHashMap(item.jsonObject).apply {
+                            put("sha256", JsonPrimitive(unresolvedSha256))
+                            put("entityIds", JsonArray(remainingIds.map(::JsonPrimitive)))
+                        })
+                    }
+                }
+            } else updatedFiles
+            updatedRoot["files"] = JsonArray(projectedFiles)
+            if (remaining != null) updatedRoot["unresolvedImplementationIds"] = JsonArray(remaining)
             stateStore.writeRoot(
                 "source_tree_manifest.json",
                 (JsonObject(updatedRoot).toString() + "\n").toByteArray(Charsets.UTF_8),
             )
+            stateStore.cleanupProjectEvidenceTemporary(confidencePath)
+            stateStore.cleanupProjectEvidenceTemporary(unresolvedPath)
         }
     }
 

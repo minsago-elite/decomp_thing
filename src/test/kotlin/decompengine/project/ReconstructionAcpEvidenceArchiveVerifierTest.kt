@@ -220,7 +220,8 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         rewriteCheckpointAndManifest(project) { checkpoint ->
             checkpoint.replace("\"schemaVersion\": 6", "\"schemaVersion\": 4")
                 .lineSequence().filterNot { line ->
-                    listOf("inputBinarySha256", "modelSchemaVersion", "profileSha256").any { "\"$it\":" in line }
+                    listOf("inputBinarySha256", "modelSchemaVersion", "profileSha256", "workflowOrigin")
+                        .any { "\"$it\":" in line }
                 }.joinToString("\n")
                 .replace(Regex("  \"compilation\": [^\\n]*\\n"), "")
         }

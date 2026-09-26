@@ -161,6 +161,29 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                     return@forEach
                 }
 
+                if (!checkpoint.accepted &&
+                    checkpoint.workflowOrigin == "pre-dispatch-context-budget-fallback" &&
+                    checkpoint.generator.startsWith("unresolved:agent:") &&
+                    checkpoint.generator == "unresolved:${checkpoint.reconstructorIdentity}" &&
+                    checkpoint.promptCharacters != null && checkpoint.promptBudgetCharacters != null &&
+                    checkpoint.promptCharacters > checkpoint.promptBudgetCharacters &&
+                    checkpoint.preDispatchBudgetFailure
+                ) {
+                    require(checkpoint.hasNoExecutionEvidence()) {
+                        "unresolved agent fallback retains ACP execution evidence: $moduleId"
+                    }
+                    require(if (repairedSource == null) {
+                        source.acceptedImplementation == false &&
+                            source.entityIds.all(manifest.unresolvedImplementationIds::contains)
+                    } else {
+                        source.acceptedImplementation == true &&
+                            source.entityIds.none(manifest.unresolvedImplementationIds::contains)
+                    }) {
+                        "agent fallback repair status differs from authenticated source lineage: $moduleId"
+                    }
+                    return@forEach
+                }
+
                 require(source.acceptedImplementation == true && checkpoint.accepted) {
                     "agent-generated module is not accepted at the archive release gate: $moduleId"
                 }
@@ -304,14 +327,15 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         require(schemaVersion in setOf(4L, 5L, 6L)) {
             "unsupported module checkpoint schema for ACP archive evidence: $moduleId"
         }
-        root.requireExactKeys(
-            when (schemaVersion) {
-                6L -> CHECKPOINT_V6_FIELDS
-                5L -> CHECKPOINT_V5_FIELDS
-                else -> CHECKPOINT_V4_FIELDS
-            },
-            "module checkpoint",
-        )
+        val expectedFields = when (schemaVersion) {
+            6L -> CHECKPOINT_V6_FIELDS
+            5L -> CHECKPOINT_V5_FIELDS
+            else -> CHECKPOINT_V4_FIELDS
+        }
+        require(root.keys == expectedFields || schemaVersion == 6L &&
+            root.keys == expectedFields + "workflowOrigin") {
+            "module checkpoint has unsupported fields: $moduleId"
+        }
         if (schemaVersion >= 6L) {
             require(root.requiredString("inputBinarySha256", "module checkpoint") == inputBinarySha256 &&
                 root.requiredLong("modelSchemaVersion", "module checkpoint") == modelSchemaVersion.toLong() &&
@@ -322,6 +346,12 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         root.requiredSha256("fingerprint", "module checkpoint")
         val sourceSha256 = root.requiredSha256("sourceSha256", "module checkpoint")
         val generator = root.requiredString("generator", "module checkpoint")
+        val workflowOrigin = root["workflowOrigin"]?.requiredString("module checkpoint workflow origin")
+            ?: "legacy-checkpoint"
+        require(workflowOrigin in setOf("legacy-checkpoint", "reconstructor-return", "exception-fallback",
+            "pre-dispatch-context-budget-fallback")) {
+            "module checkpoint workflow origin is invalid: $moduleId"
+        }
         val reconstructorIdentity = root.requiredString("reconstructorIdentity", "module checkpoint")
         val promptSha256 = root.requiredSha256("promptSha256", "module checkpoint")
         val promptCharacters = root.optionalNonNegativeLong("promptCharacters", "module checkpoint")
@@ -408,15 +438,22 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             "module checkpoint entity status disagrees with acceptance: $moduleId"
         }
         val issues = root.requiredArray("issues", "module checkpoint")
-        issues.forEach { element ->
+        val issueFacts = issues.map { element ->
             val issue = element.requiredObject("module checkpoint issue")
             issue.requireExactKeys(CHECKPOINT_ISSUE_FIELDS, "module checkpoint issue")
-            issue.requiredString("code", "module checkpoint issue")
-            issue.requiredString("message", "module checkpoint issue")
-            issue.requiredArray("entityIds", "module checkpoint issue").forEach {
+            val code = issue.requiredString("code", "module checkpoint issue")
+            val message = issue.requiredString("message", "module checkpoint issue")
+            val ids = issue.requiredArray("entityIds", "module checkpoint issue").map {
                 it.requiredString("module checkpoint issue entity ID")
             }
+            Triple(code, message, ids)
         }
+        val preDispatchBudgetFailure = promptCharacters != null && promptBudgetCharacters != null &&
+            issueFacts.any { (code, message, ids) ->
+                code == "context-budget-exceeded" &&
+                    message == "module context required $promptCharacters characters; limit=$promptBudgetCharacters" &&
+                    ids.size == source.entityIds.size && ids.toSet() == source.entityIds.toSet()
+            }
         require(accepted == issues.isEmpty()) {
             "module checkpoint acceptance and validation issues disagree: $moduleId"
         }
@@ -437,8 +474,10 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         return ReconstructionCheckpoint(
             schemaVersion,
             generator,
+            workflowOrigin,
             reconstructorIdentity,
             promptSha256,
+            promptCharacters,
             promptBudgetCharacters,
             executionEvidencePath,
             executionEvidenceSha256,
@@ -447,6 +486,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             executionTerminalOutcome,
             executionReleaseComplete,
             accepted,
+            preDispatchBudgetFailure,
         )
     }
 
@@ -1392,8 +1432,10 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
     private data class ReconstructionCheckpoint(
         val schemaVersion: Long,
         val generator: String,
+        val workflowOrigin: String,
         val reconstructorIdentity: String,
         val promptSha256: String,
+        val promptCharacters: Long?,
         val promptBudgetCharacters: Long?,
         val executionEvidencePath: String?,
         val executionEvidenceSha256: String?,
@@ -1402,6 +1444,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         val executionTerminalOutcome: String?,
         val executionReleaseComplete: Boolean?,
         val accepted: Boolean,
+        val preDispatchBudgetFailure: Boolean,
     ) {
         fun hasNoExecutionEvidence(): Boolean = listOf(
             executionEvidencePath,
