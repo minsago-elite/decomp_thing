@@ -217,7 +217,7 @@ class ModulePromptCompatibilityTest {
                 put("unresolvedImplementationIds", JsonArray(emptyList()))
             })
             val changedBytes = (changedConfidence.toString() + "\n").toByteArray()
-            confidencePath.writeBytes(changedBytes)
+            Files.write(confidencePath, changedBytes)
 
             val manifestPath = project.resolve("source_tree_manifest.json")
             val manifest = Json.parseToJsonElement(manifestPath.readText()).jsonObject
