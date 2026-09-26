@@ -41,6 +41,9 @@ internal class GccBundledOperationIntent(
         require(bundledRuntime.invocationVersion != 5 || runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL) {
             "full-recovery export requires a fresh uninterrupted operation"
         }
+        require(bundledRuntime.invocationVersion != 5 || engineId == "cc1") {
+            "full-recovery structural export is currently supported only for cc1"
+        }
         require(budgets.wallClockMillis % 1_000L == 0L) { "GCC bundled wall budget must use whole seconds" }
         require(diskPolicy.maximumFilesystemBytes <= 1024L * 1024 * 1024 * 1024 &&
             diskPolicy.maximumFilesystemInodes <= 2_000_000L && diskPolicy.requiredAvailableInodes >= 128L
@@ -65,6 +68,7 @@ internal class GccBundledOperationIntent(
                 selected.binary == byRole.getValue(GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY).path &&
                 selected.profile == byRole.getValue(GccCompilerEngineContainmentArtifactRole.BENCHMARK_PROFILE).path &&
                 selected.archive == byRole.getValue(GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE).path &&
+                selected.fullRecoveryExport == (bundledRuntime.invocationVersion == 5) &&
                 (selected.resumeAfterCheckpoint != null) == (runKind == GccCompilerEngineContainmentRunKind.INTERRUPTED)) {
                 "CLI selection differs from operation intent"
             }
