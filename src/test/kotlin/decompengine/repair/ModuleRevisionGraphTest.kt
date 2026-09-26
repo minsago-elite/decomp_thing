@@ -2325,6 +2325,8 @@ class ModuleRevisionGraphTest {
         val fixture = releaseRepairFixture(undispatchedFallback = true)
         val manifest = SourceTreeManifestReader.read(fixture.project, GeneratedCMakeReconstructionProfile.descriptor)
         assertFalse("fn_alpha" in manifest.unresolvedImplementationIds)
+        assertEquals(manifest.unresolvedImplementationIds,
+            manifest.files.single { it.path == "UNRESOLVED.md" }.entityIds)
         val confidence = Json.parseToJsonElement(fixture.project.resolve("reports/confidence.json").readText()).jsonObject
         assertEquals(manifest.unresolvedImplementationIds,
             confidence.getValue("unresolvedImplementationIds").jsonArray.map { it.jsonPrimitive.content })
@@ -2332,6 +2334,13 @@ class ModuleRevisionGraphTest {
         val unresolved = fixture.project.resolve("UNRESOLVED.md").readText()
         assertFalse("| `fn_alpha` |" in unresolved)
         assertTrue("| `fn_beta` |" in unresolved)
+        val confidenceTemporary = fixture.project.resolve("reports/.confidence.json.repair-atomic.tmp")
+        val unresolvedTemporary = fixture.project.resolve(".UNRESOLVED.md.repair-atomic.tmp")
+        confidenceTemporary.writeBytes("prior confidence evidence\n".toByteArray())
+        unresolvedTemporary.writeBytes("prior unresolved evidence\n".toByteArray())
+        ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile).use { }
+        assertFalse(confidenceTemporary.exists(), "reopen retained an exchanged confidence report")
+        assertFalse(unresolvedTemporary.exists(), "reopen retained an exchanged unresolved report")
         val archive = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("repaired-fallback.zip"))
         val extracted = fixture.project.parent.resolve("repaired-fallback-extracted")
         val lineage = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(archive.archivePath, extracted)
@@ -2366,6 +2375,13 @@ class ModuleRevisionGraphTest {
         assertFalse("fn_alpha" in manifest.unresolvedImplementationIds)
         assertFalse("fn_alpha" in ArchivalProjectAuditor.audit(fixture.project, profile).unresolvedEntityIds)
         assertFalse("| `fn_alpha` |" in fixture.project.resolve(relocated.getValue("unresolved-evidence")).readText())
+        val confidenceTemporary = fixture.project.resolve("reports/assessment/.confidence.json.repair-atomic.tmp")
+        val unresolvedTemporary = fixture.project.resolve("reports/assessment/.unresolved.md.repair-atomic.tmp")
+        confidenceTemporary.writeBytes("prior confidence evidence\n".toByteArray())
+        unresolvedTemporary.writeBytes("prior unresolved evidence\n".toByteArray())
+        ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile.forProfile(profile)).use { }
+        assertFalse(confidenceTemporary.exists())
+        assertFalse(unresolvedTemporary.exists())
         val archive = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("relocated-fallback.zip"),
             profile = profile)
         ArchivalBundleVerifier.extractAndVerify(archive.archivePath,
