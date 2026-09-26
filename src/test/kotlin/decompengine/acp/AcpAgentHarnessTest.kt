@@ -26,10 +26,20 @@ import decompengine.agent.AgentToolEvent
 import decompengine.agent.AgentToolStatus
 import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkspaceRoot
+import decompengine.agent.AGENT_EXECUTION_CONTRACT_VERSION
 import decompengine.agent.execute
 import decompengine.agent.executeReceipt
 import decompengine.repair.CapturedRepairStagingAuthority
 import decompengine.repair.RepairResourceBudget
+import decompengine.project.ArchivalBundleVerifier
+import decompengine.project.ArchivalProjectAuditor
+import decompengine.project.ArchivalReconstructionService
+import decompengine.project.BoundedLlmModuleReconstructor
+import decompengine.project.ReconstructionProfiles
+import decompengine.project.RecoveredFunction
+import decompengine.project.RecoveredProgramModel
+import decompengine.project.ReconstructionAdapters
+import decompengine.project.budgetedAnalyzer
 import java.nio.file.Path
 import java.nio.file.Files
 import java.security.MessageDigest
@@ -58,6 +68,75 @@ import org.junit.jupiter.api.Timeout
 
 @Timeout(value = 60, unit = TimeUnit.SECONDS)
 class AcpAgentHarnessTest {
+    @Test
+    fun `public Make and Ninja archival reconstruction follows ACP file roles through verified rebuild`() {
+        val temp = createTempDirectory("acp-archival-role-workflow-")
+        val binary = temp.resolve("authored.elf")
+        val binaryBytes = byteArrayOf(9, 8, 7)
+        Files.write(binary, binaryBytes)
+
+        for (base in ReconstructionProfiles.builtIn) {
+            val profile = base
+            val model = RecoveredProgramModel(
+                inputSha256 = sha256(binaryBytes),
+                functions = listOf(
+                    RecoveredFunction(
+                        "fn_0000000000001000",
+                        "decomp_engine_main",
+                        0x1000UL,
+                        "int decomp_engine_main(void)",
+                        "int decomp_engine_main(void) { return 0; }",
+                    ),
+                ),
+            )
+            val implementationPath = profile.layout.declaration("module-implementation")
+                .materialize(mapOf("module" to "decomp"))
+            val harness = harness(
+                mode = "reconstruction-role-policy",
+                sentinel = implementationPath,
+            )
+            val factoryProvenance = AcpHarnessProvenance(
+                harness = "acp",
+                implementationId = "scripted-acp-v1",
+                agentExecutionContractVersion = AGENT_EXECUTION_CONTRACT_VERSION,
+                acpProtocolVersion = ACP_STABLE_PROTOCOL_VERSION,
+                acpSdkVersion = ACP_KOTLIN_SDK_VERSION,
+                configurationSha256 = "0".repeat(64),
+                deprecated = false,
+            )
+            val output = temp.resolve(base.id)
+            val result = try {
+                ArchivalReconstructionService(
+                    budgetedAnalyzer { supplied, _ ->
+                        assertEquals(binary, supplied)
+                        model
+                    },
+                    BoundedLlmModuleReconstructor(
+                        harness,
+                        harnessProvenanceDescriptor = factoryProvenance.stableDescriptor,
+                    ),
+                    profile = profile,
+                ).reconstruct(binary, output)
+            } catch (failure: Exception) {
+                throw AssertionError(
+                    "public ${base.id} ACP reconstruction failed; diagnostics=${harness.latestDiagnostics()}; " +
+                        "sandbox=${harness.latestSandboxEvidence()}",
+                    failure,
+                )
+            }
+
+            assertEquals(0, result.build.returnCode)
+            assertTrue(requireNotNull(result.bundle.audit).unresolvedEntityIds.isEmpty())
+            assertTrue(requireNotNull(harness.latestAcpExecutionEvidence()).sandboxEvidence.networkIsolated)
+            val extracted = temp.resolve("${base.id}-extracted")
+            ArchivalBundleVerifier.extractAndVerify(result.bundle.archivePath, extracted, profile = profile)
+            val rebuilt = ReconstructionAdapters.resolve(profile).build(extracted, profile)
+            assertEquals(0, rebuilt.returnCode)
+            assertEquals(ArchivalProjectAuditor.audit(result.projectDir, profile).toJson(),
+                ArchivalProjectAuditor.audit(extracted, profile).toJson())
+        }
+    }
+
     @Test
     fun `public harness fails closed before launch when the outer sandbox is absent`() {
         val fixture = fixture()
@@ -132,7 +211,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(67, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(68, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
