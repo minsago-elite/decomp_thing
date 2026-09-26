@@ -130,7 +130,8 @@ class ModulePromptCompatibilityTest {
     fun `workflow archives undispatched agent modules as unresolved for both profiles`() {
         for (base in ReconstructionProfiles.builtIn) {
             val profile = withBudget(base, 1)
-            val project = createTempDirectory("profile-module-budget-")
+            val qualificationRoot = createTempDirectory("profile-module-budget-")
+            val project = Files.createDirectory(qualificationRoot.resolve("project"))
             val reconstructor = BoundedLlmModuleReconstructor(AgentHarness { _, _ -> error("must not execute") })
             val manifest = SourceTreeGenerator.generate(model(), project, profile = profile, reconstructor = reconstructor)
             assertEquals(listOf("fn_alpha"), manifest.unresolvedImplementationIds)
@@ -154,10 +155,10 @@ class ModulePromptCompatibilityTest {
             assertEquals("1", moduleEvidence.getValue("promptBudgetCharacters").jsonPrimitive.content)
             assertEquals("unresolved", moduleEvidence.getValue("outcome").jsonPrimitive.content)
             assertEquals(0, ReconstructionAdapters.resolve(profile).build(project, profile).returnCode)
-            val archive = project.resolveSibling("${project.fileName}.zip")
+            val archive = qualificationRoot.resolve("${project.fileName}.zip")
             val bundle = ArchivalPackager.create(project, archive, profile = profile)
             assertEquals(listOf("fn_alpha"), requireNotNull(bundle.audit).unresolvedEntityIds)
-            val extracted = project.resolveSibling("${project.fileName}-extracted")
+            val extracted = qualificationRoot.resolve("${project.fileName}-extracted")
             ArchivalBundleVerifier.extractAndVerify(bundle.archivePath, extracted, profile = profile)
             assertEquals(listOf("fn_alpha"), ArchivalProjectAuditor.audit(extracted, profile).unresolvedEntityIds)
             if (profile.id == GeneratedCMakeReconstructionProfile.PROFILE_ID) {
