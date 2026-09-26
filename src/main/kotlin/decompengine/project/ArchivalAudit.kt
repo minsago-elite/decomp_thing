@@ -58,7 +58,7 @@ private fun verifiedAuditRepairLineage(
     }
     return RepairAcpEvidenceArchiveVerifier.verifyIfPresent(
         projectDir, digests, sizes, manifest, profile,
-        GeneratedCRepairIndexProfile.forProfile(profile),
+        ReconstructionAdapters.resolve(profile).repairIndexProfile(profile),
     )
 }
 
