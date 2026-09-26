@@ -33,11 +33,15 @@ import decompengine.agent.AgentSessionReference
 import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkspaceRoot
+import decompengine.agent.AgentHarness
 import decompengine.project.AcpExecutionReceiptDocument
 import decompengine.project.BoundedAgentExecutionEventRecorder
 import decompengine.project.RecoveredFunction
 import decompengine.project.RecoveredProgramModel
 import decompengine.project.SourceTreeGenerator
+import decompengine.project.SourceTreeManifestReader
+import decompengine.project.BoundedLlmModuleReconstructor
+import decompengine.project.GeneratedCMakeReconstructionProfile
 import decompengine.project.ArchivalBundleVerifier
 import decompengine.project.ArchivalPackager
 import decompengine.project.captureBuildSourceRevision
@@ -52,10 +56,12 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonArray
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.acp.acpSandboxCanonicalStringDigest
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
@@ -2311,6 +2317,21 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `accepted ACP repair of undispatched fallback clears unresolved manifest ownership`() {
+        val fixture = releaseRepairFixture(undispatchedFallback = true)
+        val manifest = SourceTreeManifestReader.read(fixture.project, GeneratedCMakeReconstructionProfile.descriptor)
+        assertFalse("fn_alpha" in manifest.unresolvedImplementationIds)
+        val confidence = Json.parseToJsonElement(fixture.project.resolve("reports/confidence.json").readText()).jsonObject
+        assertEquals(manifest.unresolvedImplementationIds,
+            confidence.getValue("unresolvedImplementationIds").jsonArray.map { it.jsonPrimitive.content })
+        val archive = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("repaired-fallback.zip"))
+        val extracted = fixture.project.parent.resolve("repaired-fallback-extracted")
+        val lineage = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(archive.archivePath, extracted)
+        assertContentEquals(fixture.after, extracted.resolve(fixture.relativePath).readBytes())
+        assertEquals(1, lineage.source.acceptedAcpContributions.size)
+    }
+
+    @Test
     fun `archive includes provisional contributions only through a fully accepted composed revision`() {
         val fixture = releaseRepairFixture(includeProvisional = true)
         val bundle = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("composed-repair.zip"))
@@ -3433,8 +3454,9 @@ class ModuleRevisionGraphTest {
         }
     }
 
-    private fun generatedProject(): Path {
+    private fun generatedProject(undispatchedFallback: Boolean = false): Path {
         val project = createTempDirectory("module-revision-").resolve("project")
+        val promptContext = if (undispatchedFallback) "/* ${"context".repeat(900)} */" else null
         SourceTreeGenerator.generate(
             RecoveredProgramModel(
                 inputSha256 = "a".repeat(64),
@@ -3444,14 +3466,18 @@ class ModuleRevisionGraphTest {
                         name = "alpha_run",
                         address = 0x1000UL,
                         prototype = "int alpha_run(void)",
+                        decompiledC = promptContext,
                         calls = setOf("fn_beta"),
                     ),
-                    RecoveredFunction("fn_beta", "beta_read", 0x2000UL, "int beta_read(void)"),
-                    RecoveredFunction("fn_charlie", "charlie_emit", 0x3000UL, "int charlie_emit(void)"),
-                    RecoveredFunction("fn_delta", "delta_idle", 0x4000UL, "int delta_idle(void)"),
+                    RecoveredFunction("fn_beta", "beta_read", 0x2000UL, "int beta_read(void)", promptContext),
+                    RecoveredFunction("fn_charlie", "charlie_emit", 0x3000UL, "int charlie_emit(void)", promptContext),
+                    RecoveredFunction("fn_delta", "delta_idle", 0x4000UL, "int delta_idle(void)", promptContext),
                 ),
             ),
             project,
+            reconstructor = if (undispatchedFallback) BoundedLlmModuleReconstructor(
+                AgentHarness { _, _ -> error("pre-dispatch fixture must not execute") }, maximumContextCharacters = 4096,
+            ) else null,
         )
         return project
     }
@@ -3467,9 +3493,10 @@ class ModuleRevisionGraphTest {
     private fun releaseRepairFixture(
         includeProvisional: Boolean = false,
         abandonProvisional: Boolean = false,
+        undispatchedFallback: Boolean = false,
     ): ReleaseRepairFixture {
         require(!abandonProvisional || includeProvisional)
-        val project = generatedProject()
+        val project = generatedProject(undispatchedFallback)
         val relative = "src/modules/alpha.c"
         val target = project.resolve(relative)
         val before = target.readBytes()

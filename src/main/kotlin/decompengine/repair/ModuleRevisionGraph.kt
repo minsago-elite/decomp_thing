@@ -9,6 +9,7 @@ import decompengine.acp.permissions
 import decompengine.project.AcpExecutionReceiptDocument
 import decompengine.project.agentFileChangeSetSha256
 import decompengine.project.verifyAcpExecutionReceiptDocument
+import decompengine.project.UniqueJsonObjectKeyValidator
 import decompengine.project.sha256
 import decompengine.agent.receiptCommitmentBytes
 import decompengine.agent.AgentFileChange
@@ -16,6 +17,7 @@ import decompengine.agent.AgentFileChangeKind
 import decompengine.agent.AgentWorkspacePath
 import decompengine.validation.ProcessInput
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -3526,31 +3528,94 @@ internal class ModuleRevisionGraph private constructor(
         }
         if (acceptedChanges.isEmpty()) return
         val sourceByPath = index.sourceSnapshot().associateBy { it.path }
-        val root = Json.parseToJsonElement(decodeUtf8Strict(manifestBytes, "source_tree_manifest.json")).jsonObject
+        val manifestText = decodeUtf8Strict(manifestBytes, "source_tree_manifest.json")
+        UniqueJsonObjectKeyValidator(manifestText).validate()
+        val root = Json.parseToJsonElement(manifestText).jsonObject
         val files = root["files"]?.jsonArray ?: return
+        val resolvedImplementationIds = linkedSetOf<String>()
         var changed = false
         val updatedFiles = files.map { element ->
             val item = element.jsonObject
             val relative = item["path"]?.jsonPrimitive?.contentOrNull
             val revision = relative?.let(acceptedChanges::get)
             val source = relative?.let(sourceByPath::get)
-            if (revision == null || source == null || item["sha256"]?.jsonPrimitive?.contentOrNull == source.sha256) {
+            if (revision == null || source == null) {
                 element
             } else {
-                changed = true
                 val updated = LinkedHashMap(item)
-                updated["sha256"] = JsonPrimitive(source.sha256)
-                updated["generator"] = JsonPrimitive("repair-revision")
-                updated["promptSha256"] = JsonPrimitive(sha256("revision:${revision.id}".toByteArray(Charsets.UTF_8)))
-                if (item["acceptedImplementation"] !is JsonNull) {
-                    updated["acceptedImplementation"] = JsonPrimitive(true)
+                if (item["sha256"]?.jsonPrimitive?.contentOrNull != source.sha256) {
+                    changed = true
+                    updated["sha256"] = JsonPrimitive(source.sha256)
+                    updated["generator"] = JsonPrimitive("repair-revision")
+                    updated["promptSha256"] = JsonPrimitive(sha256("revision:${revision.id}".toByteArray(Charsets.UTF_8)))
+                    if (item["acceptedImplementation"] is JsonPrimitive) {
+                        updated["acceptedImplementation"] = JsonPrimitive(true)
+                    }
+                }
+                if (updated["acceptedImplementation"] == JsonPrimitive(true) &&
+                    updated["generator"] == JsonPrimitive("repair-revision")) {
+                    updated["entityIds"]?.jsonArray?.forEach { resolvedImplementationIds += it.jsonPrimitive.content }
                 }
                 JsonObject(updated)
             }
         }
+        val unresolved = root["unresolvedImplementationIds"]?.jsonArray
+        val remaining = unresolved?.filterNot { it.jsonPrimitive.content in resolvedImplementationIds }
+        if (remaining != null && remaining.size != unresolved.size) changed = true
         if (changed) {
             val updatedRoot = LinkedHashMap(root)
-            updatedRoot["files"] = kotlinx.serialization.json.JsonArray(updatedFiles)
+            val projectedFiles = if (remaining != null && remaining.size != unresolved?.size) {
+                // The confidence report is a derived view of the same unresolved implementation
+                // population. Keep its current projection and manifest digest synchronized so an
+                // accepted repair does not invalidate unrelated accepted modules at archive audit.
+                val confidencePath = "reports/confidence.json"
+                val confidenceEntry = updatedFiles.single { item ->
+                    item.jsonObject["path"]?.jsonPrimitive?.contentOrNull == confidencePath
+                }.jsonObject
+                val priorSha256 = confidenceEntry.getValue("sha256").jsonPrimitive.content
+                val reportBytes = readStableRegularFile(projectRoot, confidencePath,
+                    state.budget.maximumIndexEvidenceBytes).bytes
+                val reportText = decodeUtf8Strict(reportBytes, confidencePath)
+                UniqueJsonObjectKeyValidator(reportText).validate()
+                val report = Json.parseToJsonElement(reportText).jsonObject
+                require(report["schemaVersion"] == JsonPrimitive(2)) { "repair confidence projection has an unsupported schema" }
+                val projectedImplementations = report.getValue("unresolvedImplementationIds").jsonArray.filterNot {
+                    it.jsonPrimitive.content in resolvedImplementationIds
+                }
+                val recovery = report.getValue("unresolvedRecoveryEntityIds").jsonArray.map { it.jsonPrimitive.content }
+                val projectedModules = report.getValue("modules").jsonArray.map { module ->
+                    val fields = LinkedHashMap(module.jsonObject)
+                    fields["unresolvedImplementationIds"] = JsonArray(
+                        module.jsonObject.getValue("unresolvedImplementationIds").jsonArray.filterNot {
+                            it.jsonPrimitive.content in resolvedImplementationIds
+                        },
+                    )
+                    JsonObject(fields)
+                }
+                val projectedReport = LinkedHashMap(report)
+                projectedReport["unresolvedImplementationIds"] = JsonArray(projectedImplementations)
+                projectedReport["unresolvedEntityIds"] = JsonArray(
+                    (recovery + projectedImplementations.map { it.jsonPrimitive.content }).distinct().sorted().map(::JsonPrimitive),
+                )
+                projectedReport["modules"] = JsonArray(projectedModules)
+                val projectedBytes = (JsonObject(projectedReport).toString() + "\n").toByteArray(Charsets.UTF_8)
+                require(projectedBytes.size.toLong() <= state.budget.maximumIndexEvidenceBytes) {
+                    "repair confidence projection exceeds its byte bound"
+                }
+                val projectedSha256 = sha256(projectedBytes)
+                val currentSha256 = sha256(reportBytes)
+                require(currentSha256 == priorSha256 || currentSha256 == projectedSha256) {
+                    "repair confidence projection differs from the checked source manifest"
+                }
+                if (currentSha256 != projectedSha256) stateStore.writeReport("confidence.json", projectedBytes)
+                updatedFiles.map { item ->
+                    if (item.jsonObject["path"]?.jsonPrimitive?.contentOrNull != confidencePath) item else {
+                        JsonObject(LinkedHashMap(item.jsonObject).apply { put("sha256", JsonPrimitive(projectedSha256)) })
+                    }
+                }
+            } else updatedFiles
+            updatedRoot["files"] = JsonArray(projectedFiles)
+            if (remaining != null) updatedRoot["unresolvedImplementationIds"] = JsonArray(remaining)
             stateStore.writeRoot(
                 "source_tree_manifest.json",
                 (JsonObject(updatedRoot).toString() + "\n").toByteArray(Charsets.UTF_8),
