@@ -835,6 +835,7 @@ object ArchivalProjectAuditor {
             require(snapshot.sha256 == expectedHash) { "behavior report changed before audit publication" }
         }
         currentProjectRecord?.let { BehaviorEvidence.requireProjectCurrent(it, BehaviorProjectContext(projectDir, profile)) }
+        if (repairState.isInitialized()) rejectProfileProjectionPreimages(projectDir, profile)
         if (publish) writeProjectEvidenceAtomically(projectDir.resolve("reports/archival_audit.json"), audit.toJson())
         return audit
     }
