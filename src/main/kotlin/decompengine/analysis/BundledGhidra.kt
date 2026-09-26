@@ -139,10 +139,14 @@ class BundledGhidra private constructor(val root: Path) {
             "Bundled Ghidra version does not match the application"
         }
         checkpoint("after bundled Ghidra verification")
+        val ghidraTree = Path.of("ghidra_${VERSION}_PUBLIC", "Ghidra")
         return expectedPaths.asSequence()
             .map(Path::of)
-            .filter { path -> path.parent?.fileName?.toString() == "lib" && path.fileName.toString().endsWith(".jar") }
-            .sortedBy(Path::toString)
+            .filter { path ->
+                path.startsWith(ghidraTree) && path.parent?.fileName?.toString() == "lib" &&
+                    path.fileName.toString().endsWith(".jar")
+            }
+            .sortedBy { it.joinToString("/") }
             .map(root::resolve)
             .toList()
     }

@@ -3,6 +3,8 @@ package decompengine.analysis
 import decompengine.project.sha256
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
@@ -19,7 +21,11 @@ class BundledGhidraVerificationProcessTest {
     fun `bounded verifier returns the authenticated sorted library inventory`() = withFixture { bundle ->
         val actual = BundledGhidraVerificationProcess().verifyAndGetLibraries(bundle.root) {}
 
-        assertEquals(listOf(bundle.release.resolve("Ghidra/Features/Base/lib/Base.jar")), actual)
+        assertEquals(listOf(
+            bundle.release.resolve("Ghidra/Features/Base/lib/Base.jar"),
+            bundle.release.resolve("Ghidra/Features/Decompiler/lib/A.jar"),
+            bundle.release.resolve("Ghidra/Features/DecompilerDependent/lib/B.jar"),
+        ), actual)
     }
 
     @Test
@@ -46,6 +52,35 @@ class BundledGhidraVerificationProcessTest {
     }
 
     @Test
+    fun `shared deadline includes process launch and reaps a late worker`() = withFixture { bundle ->
+        val releaseLaunch = CountDownLatch(1)
+        val launched = CompletableFuture<Process>()
+        val deadline = AnalysisDeadline.start(TimeUnit.MILLISECONDS.toNanos(250), "fixture launch")
+        val verifier = BundledGhidraVerificationProcess(
+            commandFactory = { listOf("/bin/sleep", "10") },
+            processStarter = { command, root ->
+                check(releaseLaunch.await(5, TimeUnit.SECONDS))
+                ProcessBuilder(command).directory(root.toFile()).start().also(launched::complete)
+            },
+        )
+        val started = System.nanoTime()
+
+        val failure = try {
+            assertFailsWith<GhidraAnalysisException> {
+                verifier.verifyAndGetLibraries(bundle.root, deadline::checkpoint)
+            }
+        } finally {
+            releaseLaunch.countDown()
+        }
+
+        assertTrue(failure.message.orEmpty().contains("fixture launch exceeded 250 milliseconds"))
+        assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(2), "blocked launch outlived the shared deadline")
+        val worker = launched.get(2, TimeUnit.SECONDS)
+        worker.onExit().get(2, TimeUnit.SECONDS)
+        assertFalse(worker.isAlive, "late verifier worker is still alive")
+    }
+
+    @Test
     fun `inventory protocol rejects extra output and escaping paths`() = withFixture { bundle ->
         val header = "${BundledGhidraVerificationProcess.INVENTORY_PROVIDER}\n${BundledGhidra.VERSION}\n"
         val extraOutput = BundledGhidraVerificationProcess(commandFactory = {
@@ -65,6 +100,9 @@ class BundledGhidraVerificationProcessTest {
             val files = linkedMapOf(
                 "decomp-ghidra-bridge.jar" to "bridge fixture\n",
                 "ghidra_${BundledGhidra.VERSION}_PUBLIC/Ghidra/Features/Base/lib/Base.jar" to "library fixture\n",
+                "ghidra_${BundledGhidra.VERSION}_PUBLIC/Ghidra/Features/Decompiler/lib/A.jar" to "first sorted fixture\n",
+                "ghidra_${BundledGhidra.VERSION}_PUBLIC/Ghidra/Features/DecompilerDependent/lib/B.jar" to "second sorted fixture\n",
+                "helpers/lib/Unrelated.jar" to "non-Ghidra fixture\n",
                 "ghidra_${BundledGhidra.VERSION}_PUBLIC/Ghidra/application.properties" to
                     "application.version=${BundledGhidra.VERSION}\napplication.release.name=PUBLIC\n",
             )

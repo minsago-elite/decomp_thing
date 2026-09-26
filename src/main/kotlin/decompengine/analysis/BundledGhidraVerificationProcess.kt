@@ -17,6 +17,7 @@ import java.util.concurrent.TimeUnit
  */
 internal class BundledGhidraVerificationProcess(
     private val commandFactory: (Path) -> List<String> = ::verificationCommand,
+    private val processStarter: (List<String>, Path) -> Process = ::startVerificationProcess,
     private val maximumStdoutBytes: Int = MAXIMUM_INVENTORY_BYTES,
     private val maximumStderrBytes: Int = MAXIMUM_DIAGNOSTIC_BYTES,
     private val maximumWallMillis: Long = MAXIMUM_WALL_MILLIS,
@@ -30,23 +31,44 @@ internal class BundledGhidraVerificationProcess(
     fun verifyAndGetLibraries(root: Path, checkpoint: (String) -> Unit): List<Path> {
         val normalizedRoot = root.toAbsolutePath().normalize()
         checkpoint("before starting bundled Ghidra verifier")
-        val command = commandFactory(normalizedRoot)
-        require(command.isNotEmpty() && command.all { it.isNotEmpty() && it.none(::isControl) }) {
-            "bundled Ghidra verifier command is empty or ambiguous"
+        val started = System.nanoTime()
+        val maximumNanos = TimeUnit.MILLISECONDS.toNanos(maximumWallMillis)
+        val launch = CompletableFuture.supplyAsync {
+            val command = commandFactory(normalizedRoot)
+            require(command.isNotEmpty() && command.all { it.isNotEmpty() && it.none(::isControl) }) {
+                "bundled Ghidra verifier command is empty or ambiguous"
+            }
+            processStarter(command, normalizedRoot)
         }
-        val process = ProcessBuilder(command).directory(normalizedRoot.toFile()).apply {
-            environment().remove("CLASSPATH")
-            environment().remove("JAVA_TOOL_OPTIONS")
-            environment().remove("JDK_JAVA_OPTIONS")
-            environment().remove("_JAVA_OPTIONS")
-        }.start()
+        val process = try {
+            var launched: Process? = null
+            while (launched == null) {
+                checkpoint("while starting bundled Ghidra verifier")
+                val elapsed = System.nanoTime() - started
+                if (elapsed < 0 || elapsed >= maximumNanos) {
+                    throw GhidraAnalysisException("bundled Ghidra verification exceeded $maximumWallMillis milliseconds")
+                }
+                try {
+                    launched = launch.get(minOf(POLL_NANOS, maximumNanos - elapsed), TimeUnit.NANOSECONDS)
+                } catch (_: java.util.concurrent.TimeoutException) {
+                    // The admitted deadline also covers command preparation and process launch.
+                } catch (failure: ExecutionException) {
+                    throw failure.cause ?: failure
+                }
+            }
+            checkNotNull(launched)
+        } catch (failure: Throwable) {
+            // A blocked launch can finish after the caller has timed out. Reap that late worker.
+            launch.whenComplete { lateProcess, _ ->
+                if (lateProcess != null) runCatching { stopWorker(lateProcess) }
+            }
+            throw failure
+        }
         val stdout = drainAsync(process.inputStream, maximumStdoutBytes, process, "inventory")
         val stderr = drainAsync(process.errorStream, maximumStderrBytes, process, "diagnostic")
         var primaryFailure: Throwable? = null
         try {
             process.outputStream.close()
-            val started = System.nanoTime()
-            val maximumNanos = TimeUnit.MILLISECONDS.toNanos(maximumWallMillis)
             while (process.isAlive) {
                 checkpoint("while waiting for bundled Ghidra verification")
                 val elapsed = System.nanoTime() - started
@@ -233,5 +255,13 @@ private fun verificationCommand(root: Path): List<String> {
         "-cp", entries.joinToString(File.pathSeparator), BundledGhidraVerificationWorker::class.java.name, root.toString(),
     )
 }
+
+private fun startVerificationProcess(command: List<String>, root: Path): Process =
+    ProcessBuilder(command).directory(root.toFile()).apply {
+        environment().remove("CLASSPATH")
+        environment().remove("JAVA_TOOL_OPTIONS")
+        environment().remove("JDK_JAVA_OPTIONS")
+        environment().remove("_JAVA_OPTIONS")
+    }.start()
 
 private fun isControl(character: Char): Boolean = character.code < 0x20 || character.code == 0x7f
