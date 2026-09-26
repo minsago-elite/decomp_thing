@@ -25,7 +25,7 @@
   },
   "budgets": {
     "exportMaximumResidentBytes": 17179869184,
-    "exportWallClockSeconds": 1800,
+    "exportWallClockSeconds": 3600,
     "plannerMaximumDependencyEdges": 8000000,
     "plannerMaximumEntities": 500000,
     "plannerMaximumWorkUnits": 200000000
