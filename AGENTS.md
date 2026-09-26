@@ -20,7 +20,7 @@
 - Do not poll a CI check that is expected to take longer than three minutes. Continue another useful task and check back later.
 - Mark pull requests ready for review instead of leaving them as drafts.
 - Do not request review from the Codex code review bot; it is added automatically when a commit is pushed to a ready pull request.
-- Do not merge a pull request until all Codex code review bot reviews are resolved.
+- Do not merge a pull request while required CI checks fail or are pending, or until all Codex code review bot reviews are resolved.
 - For privileged commands on local hosts, use `doas` instead of `sudo`.
 
 ## Repository Sanity Checks
