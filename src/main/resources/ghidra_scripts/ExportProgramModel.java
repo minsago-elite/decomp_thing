@@ -421,6 +421,7 @@ public class ExportProgramModel extends GhidraScript {
     private static final int MAXIMUM_PLANNING_EVIDENCE_RECORD_BYTES = 1024 * 1024;
     private static final int MAXIMUM_PLANNING_BATCHES = 256;
     private static final long MAXIMUM_PROGRAM_MODEL_BYTES = 512L * 1024 * 1024;
+    private static final int MAXIMUM_OPEN_EVIDENCE_CURSORS = 32;
     private static final int MAXIMUM_EXPORT_STATE_BYTES = 64 * 1024;
 
     private static final class PlanningIntegrityException extends RuntimeException {
@@ -1593,7 +1594,12 @@ public class ExportProgramModel extends GhidraScript {
         }
     }
 
-    private static void appendCanonicalEvidenceArray(OutputStream output, List<BoundFragment> fragments) throws Exception {
+    private static void mergeCanonicalEvidenceArray(
+        OutputStream output, List<BoundFragment> fragments, boolean finalArray, List<String> mergedIds
+    ) throws Exception {
+        if (fragments.size() > MAXIMUM_OPEN_EVIDENCE_CURSORS) {
+            throw new PlanningIntegrityException("canonical merge exceeds its open-cursor bound");
+        }
         List<PlanningEvidenceCursor> cursors = new ArrayList<>();
         PriorityQueue<PlanningEvidenceCursor> queue = new PriorityQueue<>(
             Comparator.comparing(cursor -> cursor.currentId)
@@ -1611,10 +1617,12 @@ public class ExportProgramModel extends GhidraScript {
                     throw new PlanningIntegrityException("canonical evidence identities are duplicated or unordered: " + cursor.currentId);
                 }
                 previousId = cursor.currentId;
+                if (mergedIds != null) mergedIds.add(cursor.currentId);
                 writeUtf8(output, cursor.currentRecord);
                 cursor.advance();
                 if (cursor.currentId != null) queue.add(cursor);
-                writeUtf8(output, queue.isEmpty() ? "\n" : ",\n");
+                if (!queue.isEmpty()) writeUtf8(output, ",\n");
+                else if (finalArray) writeUtf8(output, "\n");
             }
         } finally {
             for (PlanningEvidenceCursor cursor : cursors) {
@@ -1624,6 +1632,61 @@ public class ExportProgramModel extends GhidraScript {
                     // Integrity was checked while consuming; close errors do not change accepted bytes.
                 }
             }
+        }
+    }
+
+    private static void appendCanonicalEvidenceArray(
+        OutputStream output, List<BoundFragment> fragments, Path temporaryDirectory
+    ) throws Exception {
+        if (fragments.isEmpty()) return;
+        // Full recovery writes one sidecar per global/type in identity order. Streaming these
+        // already sorted records avoids holding thousands of file descriptors at model assembly.
+        boolean singleRecordOrder = true;
+        String previousId = null;
+        for (BoundFragment fragment : fragments) {
+            if (fragment.ids.size() != 1 ||
+                (previousId != null && previousId.compareTo(fragment.ids.get(0)) >= 0)) {
+                singleRecordOrder = false;
+                break;
+            }
+            previousId = fragment.ids.get(0);
+        }
+        if (singleRecordOrder) {
+            for (int index = 0; index < fragments.size(); index++) {
+                try (PlanningEvidenceCursor cursor = new PlanningEvidenceCursor(fragments.get(index))) {
+                    writeUtf8(output, cursor.currentRecord);
+                    cursor.advance();
+                    writeUtf8(output, index + 1 == fragments.size() ? "\n" : ",\n");
+                }
+            }
+            return;
+        }
+
+        List<Path> temporary = new ArrayList<>();
+        try {
+            List<BoundFragment> active = fragments;
+            while (active.size() > MAXIMUM_OPEN_EVIDENCE_CURSORS) {
+                List<BoundFragment> next = new ArrayList<>();
+                for (int start = 0; start < active.size(); start += MAXIMUM_OPEN_EVIDENCE_CURSORS) {
+                    List<BoundFragment> group = active.subList(
+                        start, Math.min(start + MAXIMUM_OPEN_EVIDENCE_CURSORS, active.size())
+                    );
+                    Path path = Files.createTempFile(temporaryDirectory, ".evidence-merge-", ".fragment");
+                    temporary.add(path);
+                    List<String> ids = new ArrayList<>();
+                    try (OutputStream merged = new BufferedOutputStream(new BoundedOutput(
+                        Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING),
+                        MAXIMUM_PROGRAM_MODEL_BYTES
+                    ))) {
+                        mergeCanonicalEvidenceArray(merged, group, false, ids);
+                    }
+                    next.add(bindCurrentFile(path, ids));
+                }
+                active = next;
+            }
+            mergeCanonicalEvidenceArray(output, active, true, null);
+        } finally {
+            for (Path path : temporary) Files.deleteIfExists(path);
         }
     }
 
@@ -1683,9 +1746,9 @@ public class ExportProgramModel extends GhidraScript {
                 writeUtf8(output, prefix);
                 appendBoundRecordArray(output, functions);
                 writeUtf8(output, globalsPrefix);
-                appendCanonicalEvidenceArray(output, globals);
+                appendCanonicalEvidenceArray(output, globals, outputPath.getParent());
                 writeUtf8(output, typesPrefix);
-                appendCanonicalEvidenceArray(output, types);
+                appendCanonicalEvidenceArray(output, types, outputPath.getParent());
                 writeUtf8(output, suffix);
             }
             if (bounded.bytesWritten != expectedBytes) {
