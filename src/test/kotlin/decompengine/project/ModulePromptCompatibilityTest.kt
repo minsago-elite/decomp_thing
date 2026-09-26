@@ -154,8 +154,12 @@ class ModulePromptCompatibilityTest {
             assertEquals("1", moduleEvidence.getValue("promptBudgetCharacters").jsonPrimitive.content)
             assertEquals("unresolved", moduleEvidence.getValue("outcome").jsonPrimitive.content)
             assertEquals(0, ReconstructionAdapters.resolve(profile).build(project, profile).returnCode)
-            val bundle = ArchivalPackager.create(project, project.parent.resolve("undispatched.zip"), profile = profile)
+            val archive = project.resolveSibling("${project.fileName}.zip")
+            val bundle = ArchivalPackager.create(project, archive, profile = profile)
             assertEquals(listOf("fn_alpha"), requireNotNull(bundle.audit).unresolvedEntityIds)
+            val extracted = project.resolveSibling("${project.fileName}-extracted")
+            ArchivalBundleVerifier.extractAndVerify(bundle.archivePath, extracted, profile = profile)
+            assertEquals(listOf("fn_alpha"), ArchivalProjectAuditor.audit(extracted, profile).unresolvedEntityIds)
             if (profile.id == GeneratedCMakeReconstructionProfile.PROFILE_ID) {
                 val indexParent = project.resolve("fallback-lineage-index")
                 Files.createDirectories(indexParent)
