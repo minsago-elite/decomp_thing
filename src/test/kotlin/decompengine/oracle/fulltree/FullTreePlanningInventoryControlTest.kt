@@ -58,6 +58,8 @@ class FullTreePlanningInventoryControlTest {
         )
         assertEquals(8, registry.sourceOnlyUnits.count { it.shardId == "clang-lib-index" })
         assertTrue(registry.sourceOnlyUnits.none { it.shardId in setOf("clang-lib-parse", "llvm-lib-asmparser") })
+        assertTrue(registry.sourceOnlyUnits.any { it.shardId == "llvm-tools-llvm-profdata" })
+        assertTrue(registry.requireOwnerModulesForShard("llvm-tools-llvm-profdata").isEmpty())
         listOf("", "-clang-lib-driver", "clang--lib-driver", "clang_lib_driver", "clang-lib-driver-", "missing-shard",
             "a".repeat(129), "a".repeat(4_096)).forEach { invalid ->
             assertFailsWith<FullTreeControlException>(invalid.take(40)) { registry.requireOwnerModulesForShard(invalid) }
