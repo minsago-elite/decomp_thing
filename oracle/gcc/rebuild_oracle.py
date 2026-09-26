@@ -227,6 +227,8 @@ def _container_arguments(
         "ALL",
         "--security-opt",
         "no-new-privileges",
+        "--user",
+        f"{os.getuid()}:{os.getgid()}",
         "--tmpfs",
         "/tmp:rw,nosuid,nodev,noexec",
         "--mount",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 import json
+import os
 from pathlib import Path
 import tarfile
 import tempfile
@@ -56,6 +57,21 @@ class GccOracleRebuildRunnerTest(unittest.TestCase):
             self.assertEqual(lock_path, selected_lock)
             run.assert_called_once_with(["docker", "image", "inspect", "pinned:gcc"], capture=True)
             verify.assert_called_once_with(lock_path, record_path, [inspect])
+
+    def test_container_build_runs_as_the_unprivileged_host_user(self) -> None:
+        arguments = rebuild_oracle._container_arguments(
+            "docker",
+            "sha256:" + "1" * 64,
+            "linux/amd64",
+            {},
+            Path("/tmp/gcc-workspace"),
+            "/oracle/build",
+            ["/usr/bin/make"],
+        )
+        self.assertIn("--cap-drop", arguments)
+        self.assertIn("ALL", arguments)
+        self.assertEqual(f"{os.getuid()}:{os.getgid()}", arguments[arguments.index("--user") + 1])
+        self.assertNotIn("--privileged", arguments)
 
     def test_unverified_reproduction_is_rejected(self) -> None:
         origin = f"sha256:{'1' * 64}"
