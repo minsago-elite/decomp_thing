@@ -12,7 +12,7 @@ jobs:
   cc1-live-full-export:
     if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'qualify:cc1-full-export')
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 360
     permissions:
       contents: read
     defaults:

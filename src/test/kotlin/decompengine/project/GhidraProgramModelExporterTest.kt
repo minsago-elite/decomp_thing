@@ -70,7 +70,7 @@ class GhidraProgramModelExporterTest {
         assertTrue(exporter.contains("batchCommitmentSha256"))
         assertTrue(exporter.contains("planning-exporter-visible-program"))
         assertTrue(exporter.contains("legacy export state schema 1 has no whole-program semantic binding"))
-        assertTrue(exporter.contains("exportFunction(function, null, null, null, evidence, false)"))
+        assertTrue(exporter.contains("exportFunction(function, null, null, null, evidence, false, DECOMPILE_TIMEOUT_SECONDS)"))
         assertTrue(exporter.contains("Set<String> ownedGlobalIds = new TreeSet<>()"))
         assertTrue(exporter.contains("Set<String> ownedTypeIds = new TreeSet<>()"))
         assertTrue(exporter.contains("new PlanningBatchEvidence(ownedGlobalIds, ownedTypeIds)"))
