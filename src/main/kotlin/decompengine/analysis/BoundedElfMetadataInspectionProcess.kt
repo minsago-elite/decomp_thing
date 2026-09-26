@@ -312,7 +312,7 @@ private object MetadataInspectionProtocol {
 
     fun decode(bytes: ByteArray, limits: BoundedElfMetadataLimits): BoundedElfMetadataInspection {
         try {
-            DataInputStream(BufferedInputStream(ByteArrayInputStream(bytes))).use { input ->
+            return DataInputStream(BufferedInputStream(ByteArrayInputStream(bytes))).use { input ->
                 require(input.readInt() == MAGIC && input.readInt() == VERSION) {
                     "bounded ELF metadata worker returned an unsupported protocol"
                 }
