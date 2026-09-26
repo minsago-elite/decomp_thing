@@ -31,18 +31,7 @@ class ArchivalReconstructionTest {
     @Test
     fun `archival Make and Ninja workflows enforce role policy and reject unauthenticated agent archives`() {
         for (base in ReconstructionProfiles.builtIn) {
-            val profile = ReconstructionProfile(
-                base.schemaVersion,
-                base.id,
-                base.layout,
-                base.budgets,
-                base.adapterConfiguration + mapOf(
-                    "build-executable" to listOf(
-                        if (base.id == GeneratedCNinjaReconstructionProfile.descriptor.id) "/usr/bin/ninja" else "/usr/bin/make",
-                    ),
-                    "compiler-driver" to listOf("/usr/bin/cc"),
-                ),
-            )
+            val profile = base
             val temp = createTempDirectory("archival-role-workflow-")
             val binary = temp.resolve("input.elf").also { it.writeBytes(byteArrayOf(7, 8, 9)) }
             val model = RecoveredProgramModel(

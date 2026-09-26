@@ -11,6 +11,7 @@
 - The request path policy is verified to give read access only to the declared interface inputs and read/write/create access only to the planned implementation target.
 - The Make-profile test verifies the exact request rules. The alternate Ninja-profile test removes `viewable` from the private interface, verifies the harness is never called, and verifies the implementation remains unresolved.
 - The public archival service test exercises those rules through Make and Ninja builds. A fixture harness without invocation-bound ACP evidence is refused by the archive release gate after its build succeeds. With an alternate Ninja layout that hides the private interface, the harness is not called and archive publication is also refused.
+- A scripted ACP v1 fixture now runs the archival service through `AcpAgentHarness`, its sandbox, and filesystem broker for both built-in profiles. It reads the three declared interfaces, confirms a confidence-report read and an unauthorized Makefile write are denied, writes only the declared module implementation, then builds, packages, extracts, verifies, and rebuilds the archive. This exercises the scripted fixture provider through the ACP transport; it is not evidence from a production ACP provider.
 
 ## Verification
 
@@ -29,6 +30,17 @@ Command:
 ```
 
 Result: passed; all 6 `ArchivalReconstructionTest` tests completed successfully, including the Make/Ninja role and archive-gate workflow.
+
+Command:
+
+```sh
+./gradlew -PfrontendNodeHome=/home/june/.cache/decomp-toolchains/node-v24.20.0 --offline test \
+  --tests 'decompengine.project.ArchivalReconstructionTest.archival Make and Ninja workflows enforce role policy and reject unauthenticated agent archives' \
+  --tests 'decompengine.acp.AcpAgentHarnessTest.public Make and Ninja archival reconstruction follows ACP file roles through verified rebuild' \
+  --console=plain
+```
+
+Result: passed; both focused tests completed successfully after using the built-in Make/Ninja executable names instead of assuming `/usr/bin/ninja` exists.
 
 ## Remaining qualification
 
