@@ -100,7 +100,9 @@ internal object GccBundledCliIntentBuilder {
                             artifacts += staged(GccCompilerEngineContainmentArtifactRole.BOOT_KEEPER_CLASSPATH, "boot-classpath.json", manifest)
                             artifacts += staged(GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE, "ExportProgramModel.java", exporter)
                             val intent = GccBundledOperationIntent(operationId, engineId, runKind, artifacts, runtime,
-                                GccCompilerEngineContainmentBudgets(suite.budgets.exportWallClockMillis, suite.budgets.exportMaximumResidentBytes, 128),
+                                GccCompilerEngineContainmentBudgets(
+                                    if (fullRecoveryExport) suite.budgets.fullRecoveryCc1ExportWallClockMillis else suite.budgets.exportWallClockMillis,
+                                    suite.budgets.exportMaximumResidentBytes, 128),
                                 diskPolicy, profile, cliInvocation)
                             requireDirectory()
                             require(LinuxFilesystemSyscalls.directoryEntryNames(directory, 1).isEmpty())

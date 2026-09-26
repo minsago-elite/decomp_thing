@@ -142,6 +142,7 @@ def rebuild_engines(
         version_root / "build-record.json",
     )
     outputs: dict[str, Path] = {}
+    checked_ids: list[str] = []
     engine_by_id = {engine["id"]: engine for engine in profile["engines"]}
     for identifier in selected_ids:
         engine = engine_by_id[identifier]
@@ -176,8 +177,12 @@ def rebuild_engines(
         if checked.is_file():
             if manifest_path.read_bytes() != checked.read_bytes():
                 raise VerificationError(f"clean {identifier} manifest differs from checked evidence")
+            checked_ids.append(identifier)
             print(f"reproduced checked {identifier} manifest")
         elif candidate_manifest_root is not None:
+            # Initial evidence has no checked manifest yet. Validate the
+            # generated manifest against this build before retaining it.
+            verify_oracle_manifest(manifest_path, artifact_root=workspace)
             candidate_manifest_root.mkdir(parents=True, exist_ok=True)
             candidate = candidate_manifest_root / engine["oracleManifest"]
             shutil.copy2(manifest_path, candidate)
@@ -190,7 +195,8 @@ def rebuild_engines(
             artifact = workspace / record["outputs"][role]
             print(f"  {role}: {_sha256(artifact)} ({artifact.stat().st_size} bytes)")
         outputs[identifier] = manifest_path
-    verify_engine_artifacts(workspace=workspace, profile_path=profile_path, engine_ids=selected_ids)
+    if checked_ids:
+        verify_engine_artifacts(workspace=workspace, profile_path=profile_path, engine_ids=checked_ids)
     return outputs
 
 

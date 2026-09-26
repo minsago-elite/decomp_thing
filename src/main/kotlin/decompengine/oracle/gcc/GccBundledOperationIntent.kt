@@ -41,6 +41,9 @@ internal class GccBundledOperationIntent(
         require(bundledRuntime.invocationVersion != 5 || runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL) {
             "full-recovery export requires a fresh uninterrupted operation"
         }
+        require(bundledRuntime.invocationVersion != 5 || engineId == "cc1") {
+            "full-recovery export is restricted to cc1"
+        }
         require(budgets.wallClockMillis % 1_000L == 0L) { "GCC bundled wall budget must use whole seconds" }
         require(diskPolicy.maximumFilesystemBytes <= 1024L * 1024 * 1024 * 1024 &&
             diskPolicy.maximumFilesystemInodes <= 2_000_000L && diskPolicy.requiredAvailableInodes >= 128L
@@ -57,7 +60,7 @@ internal class GccBundledOperationIntent(
         ) { "GCC bundled intent must bind every distinct artifact role and path exactly once" }
         this.artifacts = java.util.List.copyOf(copied.sortedBy { it.role.wireName })
         bundledRuntime.requireArtifacts(this.artifacts)
-        profilePolicy = plannerProfile?.bindInvocation(engineId, this.artifacts, budgets)
+        profilePolicy = plannerProfile?.bindInvocation(engineId, this.artifacts, budgets, bundledRuntime.invocationVersion == 5)
         val byRole = this.artifacts.associateBy { it.role }
         cliInvocation?.let { invocation ->
             val selected = invocation.options
@@ -65,6 +68,7 @@ internal class GccBundledOperationIntent(
                 selected.binary == byRole.getValue(GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY).path &&
                 selected.profile == byRole.getValue(GccCompilerEngineContainmentArtifactRole.BENCHMARK_PROFILE).path &&
                 selected.archive == byRole.getValue(GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE).path &&
+                selected.fullRecoveryExport == (bundledRuntime.invocationVersion == 5) &&
                 (selected.resumeAfterCheckpoint != null) == (runKind == GccCompilerEngineContainmentRunKind.INTERRUPTED)) {
                 "CLI selection differs from operation intent"
             }
@@ -115,7 +119,7 @@ internal class GccBundledOperationIntent(
         val retained = GccRetainedCompilerEngineProfile.open(path)
         try {
             retained.requireDisjoint(excludedRoots + bundledRuntime.root)
-            require(retained.bindInvocation(engineId, artifacts, budgets).contentEquals(expected)) {
+            require(retained.bindInvocation(engineId, artifacts, budgets, bundledRuntime.invocationVersion == 5).contentEquals(expected)) {
                 "GCC planner profile differs from its prepared operation intent"
             }
             return retained

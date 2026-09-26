@@ -12,7 +12,7 @@ jobs:
   cc1-live-full-export:
     if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'qualify:cc1-full-export')
     runs-on: ubuntu-24.04
-    timeout-minutes: 150
+    timeout-minutes: 180
     permissions:
       contents: read
     defaults:
@@ -43,9 +43,9 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: ${{ runner.temp }}/gcc-cc1-engine/artifacts
-          key: gcc-cc1-artifacts-v1-${{ hashFiles('oracle/gcc/16.2.0/source-lock.json', 'oracle/gcc/16.2.0/build-record.json', 'oracle/gcc/16.2.0/toolchain-reproduction.json', 'oracle/gcc/16.2.0/build-toolchain.Dockerfile', 'oracle/gcc/16.2.0/cc1-build-record.json', 'oracle/gcc/16.2.0/cc1-oracle-manifest.json') }}
+          key: gcc-cc1-artifacts-v2-${{ hashFiles('oracle/gcc/16.2.0/source-lock.json', 'oracle/gcc/16.2.0/build-record.json', 'oracle/gcc/16.2.0/toolchain-reproduction.json', 'oracle/gcc/16.2.0/build-toolchain.Dockerfile', 'oracle/gcc/16.2.0/cc1-build-record.json', 'oracle/gcc/16.2.0/cc1-oracle-manifest.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            gcc-cc1-artifacts-v1-
+            gcc-cc1-artifacts-v2-${{ hashFiles('oracle/gcc/16.2.0/source-lock.json', 'oracle/gcc/16.2.0/build-record.json', 'oracle/gcc/16.2.0/toolchain-reproduction.json', 'oracle/gcc/16.2.0/build-toolchain.Dockerfile', 'oracle/gcc/16.2.0/cc1-build-record.json', 'oracle/gcc/16.2.0/cc1-oracle-manifest.json') }}-
       - name: Validate cached cc1 binaries before using them
         id: cached-cc1-verify
         if: steps.cc1-artifact-cache.outputs.cache-matched-key != ''
@@ -102,11 +102,11 @@ jobs:
             --engine cc1 \
             --verify-artifacts
       - name: Cache the verified cc1 pair for later qualifications
-        if: steps.cc1-artifact-cache.outputs.cache-hit != 'true'
+        if: steps.cached-cc1-verify.outputs.valid != 'true'
         uses: actions/cache/save@v6
         with:
           path: ${{ runner.temp }}/gcc-cc1-engine/artifacts
-          key: gcc-cc1-artifacts-v1-${{ hashFiles('oracle/gcc/16.2.0/source-lock.json', 'oracle/gcc/16.2.0/build-record.json', 'oracle/gcc/16.2.0/toolchain-reproduction.json', 'oracle/gcc/16.2.0/build-toolchain.Dockerfile', 'oracle/gcc/16.2.0/cc1-build-record.json', 'oracle/gcc/16.2.0/cc1-oracle-manifest.json') }}
+          key: gcc-cc1-artifacts-v2-${{ hashFiles('oracle/gcc/16.2.0/source-lock.json', 'oracle/gcc/16.2.0/build-record.json', 'oracle/gcc/16.2.0/toolchain-reproduction.json', 'oracle/gcc/16.2.0/build-toolchain.Dockerfile', 'oracle/gcc/16.2.0/cc1-build-record.json', 'oracle/gcc/16.2.0/cc1-oracle-manifest.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Reclaim build-only GCC toolchain storage
         if: steps.cc1-artifact-cache.outputs.cache-matched-key == '' || steps.cached-cc1-verify.outputs.valid != 'true'
         run: |
