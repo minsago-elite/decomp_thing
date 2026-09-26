@@ -553,8 +553,8 @@ class AcpAgentHarnessTest {
             assertEquals(expectedWirePromptSha256(firstRequest), firstEvidence.wirePromptSha256)
             assertEquals(expectedWirePromptSha256(secondRequest), secondEvidence.wirePromptSha256)
             assertFalse(firstEvidence.wirePromptSha256 == secondEvidence.wirePromptSha256)
-            assertEquals(AgentStopReason.COMPLETED, assertIs<AgentExecutionOutcome.Returned>(first.outcome).result.stopReason)
-            assertEquals(AgentStopReason.COMPLETED, assertIs<AgentExecutionOutcome.Returned>(second.outcome).result.stopReason)
+            assertEquals(AgentStopReason.COMPLETED, completedStopReasonForTest("first", first, firstEvidence))
+            assertEquals(AgentStopReason.COMPLETED, completedStopReasonForTest("second", second, secondEvidence))
             assertEquals(
                 firstEvidence.wirePromptSha256,
                 assertNotNull(firstEvidence.completeExecutionEvidence, "first: ${firstEvidence.summaryForTest()}").wirePromptSha256,
@@ -574,6 +574,22 @@ class AcpAgentHarnessTest {
         "phase=$phaseReached cleanup=$cleanupDisposition audits=$completeness " +
             "negotiated=${negotiatedAgent != null} diagnostics=${diagnostics != null} " +
             "sandbox=${sandboxEvidence != null}"
+
+    private fun completedStopReasonForTest(
+        label: String,
+        receipt: AgentExecutionReceipt,
+        evidence: AcpInvocationEvidenceSnapshot,
+    ): AgentStopReason {
+        val failure = (receipt.outcome as? AgentExecutionOutcome.Failed)?.failure
+        return assertIs<AgentExecutionOutcome.Returned>(
+            receipt.outcome,
+            "$label: ${evidence.summaryForTest()} " +
+                "failureKind=${failure?.kind} failureMessage=${failure?.message} " +
+                "failureDetails=${failure?.details} " +
+                "causeType=${receipt.failureCause?.javaClass?.name} " +
+                "nestedCauseType=${receipt.failureCause?.cause?.javaClass?.name}",
+        ).result.stopReason
+    }
 
     @Test
     fun `fake agent permission request uses offered default denial and metadata-only evidence`() {
