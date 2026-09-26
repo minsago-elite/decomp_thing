@@ -105,6 +105,33 @@ internal class RepairStateStore private constructor(
 
     fun writeRoot(name: String, bytes: ByteArray) = writeAtomically(projectRoot, name, bytes, "project-evidence")
 
+    fun writeProjectEvidence(relative: String, bytes: ByteArray) {
+        checkOpen()
+        val parts = relative.split('/')
+        require(parts.isNotEmpty() && parts.all { it.isNotEmpty() && it !in setOf(".", "..") && '\\' !in it }) {
+            "invalid repair project evidence path"
+        }
+        var parent = projectRoot
+        val opened = mutableListOf<LinuxDescriptor>()
+        try {
+            for (component in parts.dropLast(1)) {
+                val child = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, component)
+                try {
+                    requireSecureDirectory(child.identity, parent.identity, "repair project evidence directory")
+                    requireNamedIdentity(parent, component, child.identity, "repair project evidence directory")
+                } catch (failure: Throwable) {
+                    child.close()
+                    throw failure
+                }
+                opened += child
+                parent = child
+            }
+            writeAtomically(parent, parts.last(), bytes, "project-evidence")
+        } finally {
+            opened.asReversed().forEach(LinuxDescriptor::close)
+        }
+    }
+
     fun blobNames(maximumEntries: Int): List<String> {
         checkOpen()
         return LinuxFilesystemSyscalls.directoryEntryNames(blobs, maximumEntries).sorted()

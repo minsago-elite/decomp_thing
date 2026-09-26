@@ -19,6 +19,49 @@ import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.util.Locale
 
+private fun verifiedAuditRepairLineage(
+    projectDir: Path,
+    profile: ReconstructionProfile,
+    manifest: SourceTreeManifest,
+    manifestSizes: Map<String, Long>,
+    limits: ArchivalBundleLimits,
+): ArchivedRepairReleaseLineage {
+    val reportsRoot = projectDir.resolve("reports")
+    val repairRoot = reportsRoot.resolve("repair-revisions")
+    require(Files.isDirectory(repairRoot, LinkOption.NOFOLLOW_LINKS)) {
+        "accepted repair source has no authenticated repair state"
+    }
+    val digests = manifest.files.associate { it.path to it.sha256 }.toMutableMap()
+    val sizes = manifestSizes.toMutableMap()
+    val candidates = Files.walk(reportsRoot).use { stream ->
+        stream.limit(limits.maximumEntries.toLong() + 1L).toList()
+    }
+    require(candidates.size <= limits.maximumEntries) { "repair audit report inventory exceeds the entry bound" }
+    val history = projectDir.resolve("reports/repair_history.json")
+    var retainedBytes = 0L
+    candidates.filter { path ->
+        path.startsWith(repairRoot) || path == history || path.fileName.toString().endsWith(".validation.json")
+    }.forEach { path ->
+        require(!Files.isSymbolicLink(path)) { "repair audit state contains a symbolic link" }
+        if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) return@forEach
+        require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+            "repair audit state contains a non-regular entry: $path"
+        }
+        val relative = projectDir.relativize(path).toString().replace('\\', '/')
+        val snapshot = readStableRegularFile(projectDir, relative, limits.maximumFileBytes)
+        retainedBytes = Math.addExact(retainedBytes, snapshot.bytes.size.toLong())
+        require(retainedBytes <= limits.maximumTotalBytes) { "repair audit state exceeds the aggregate byte bound" }
+        require(digests.putIfAbsent(relative, snapshot.sha256) == null) {
+            "repair audit state duplicates a manifest path"
+        }
+        sizes[relative] = snapshot.bytes.size.toLong()
+    }
+    return RepairAcpEvidenceArchiveVerifier.verifyIfPresent(
+        projectDir, digests, sizes, manifest, profile,
+        GeneratedCRepairIndexProfile.forProfile(profile),
+    )
+}
+
 data class ArchivePublicationLimits(
     val maximumEntries: Int,
     val maximumFileBytes: Long,
@@ -211,6 +254,7 @@ object ArchivalProjectAuditor {
         val confidencePath = profile.layout.declaration("confidence-evidence").materialize()
         val files = manifest.files.associateBy { it.path }
         val hashes = linkedMapOf<String, String>()
+        val manifestSizes = linkedMapOf<String, Long>()
         var totalBytes = manifestSnapshot.bytes.size.toLong()
         var modelText: String? = null
         var planText: String? = null
@@ -221,6 +265,7 @@ object ArchivalProjectAuditor {
             require(totalBytes <= effectiveLimits.maximumTotalBytes) { "audit input exceeds the aggregate byte bound" }
             require(snapshot.sha256 == file.sha256) { "audit manifest hash differs from current file: ${file.path}" }
             hashes[file.path] = snapshot.sha256
+            manifestSizes[file.path] = snapshot.bytes.size.toLong()
             if (file.path == modelPath) modelText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
             if (file.path == planPath) planText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
             if (file.path == confidencePath) confidenceText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
@@ -255,6 +300,9 @@ object ArchivalProjectAuditor {
         val acceptedSourcePaths = linkedMapOf<String, String>()
         val acceptedInputFingerprints = linkedMapOf<String, String>()
         val plannedModuleEntityIds = linkedMapOf<String, List<String>>()
+        val repairLineage by lazy {
+            verifiedAuditRepairLineage(projectDir, profile, manifest, manifestSizes, effectiveLimits)
+        }
         for (element in planJson.getValue("modules").jsonArray) {
             val module = element.jsonObject
             require(module.keys == setOf("id", "sourcePath", "headerPath", "functionIds", "globalIds", "typeIds", "boundaryEvidence")) {
@@ -291,6 +339,15 @@ object ArchivalProjectAuditor {
             require(moduleRevisions.put(identifier, hashes.getValue(source)) == null) { "audit module IDs are duplicated" }
             plannedModuleEntityIds[identifier] = owned + types
             if (file.acceptedImplementation == true) {
+                if (file.generator == "repair-revision") {
+                    val repaired = requireNotNull(repairLineage.repairedSource(source)) {
+                        "accepted repair source lacks authenticated repair lineage: $source"
+                    }
+                    require(repaired.headSha256 == hashes.getValue(source)) {
+                        "accepted repair source differs from authenticated repair lineage: $source"
+                    }
+                    continue
+                }
                 acceptedOwners[identifier] = owned
                 acceptedSourcePaths[identifier] = source
                 try {

@@ -42,7 +42,11 @@ import decompengine.project.SourceTreeGenerator
 import decompengine.project.SourceTreeManifestReader
 import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.GeneratedCMakeReconstructionProfile
+import decompengine.project.ReconstructionProfile
+import decompengine.project.ProjectLayoutProfile
+import decompengine.project.ProjectFileDeclaration
 import decompengine.project.ArchivalBundleVerifier
+import decompengine.project.ArchivalProjectAuditor
 import decompengine.project.ArchivalPackager
 import decompengine.project.captureBuildSourceRevision
 import decompengine.project.MakeProjectBuilder
@@ -2324,11 +2328,48 @@ class ModuleRevisionGraphTest {
         val confidence = Json.parseToJsonElement(fixture.project.resolve("reports/confidence.json").readText()).jsonObject
         assertEquals(manifest.unresolvedImplementationIds,
             confidence.getValue("unresolvedImplementationIds").jsonArray.map { it.jsonPrimitive.content })
+        assertFalse("fn_alpha" in ArchivalProjectAuditor.audit(fixture.project).unresolvedEntityIds)
+        val unresolved = fixture.project.resolve("UNRESOLVED.md").readText()
+        assertFalse("| `fn_alpha` |" in unresolved)
+        assertTrue("| `fn_beta` |" in unresolved)
         val archive = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("repaired-fallback.zip"))
         val extracted = fixture.project.parent.resolve("repaired-fallback-extracted")
         val lineage = ArchivalBundleVerifier.extractAndVerifyCandidateLineage(archive.archivePath, extracted)
         assertContentEquals(fixture.after, extracted.resolve(fixture.relativePath).readBytes())
         assertEquals(1, lineage.source.acceptedAcpContributions.size)
+    }
+
+    @Test
+    fun `accepted header repair does not resolve an undispatched implementation fallback`() {
+        val fixture = releaseRepairFixture(undispatchedFallback = true, relativePath = "include/modules/alpha.h")
+        val manifest = SourceTreeManifestReader.read(fixture.project, GeneratedCMakeReconstructionProfile.descriptor)
+        assertTrue("fn_alpha" in manifest.unresolvedImplementationIds)
+        assertEquals(null, manifest.files.single { it.path == fixture.relativePath }.acceptedImplementation)
+        assertTrue("| `fn_alpha` |" in fixture.project.resolve("UNRESOLVED.md").readText())
+    }
+
+    @Test
+    fun `accepted fallback repair synchronizes relocated reports`() {
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val relocated = mapOf(
+            "confidence-evidence" to "reports/assessment/confidence.json",
+            "unresolved-evidence" to "reports/assessment/unresolved.md",
+            "module-plan-evidence" to "reports/planning/modules.json",
+        )
+        val layout = ProjectLayoutProfile(base.layout.schemaVersion, base.layout.declarations.map { declaration ->
+            ProjectFileDeclaration(declaration.id, relocated[declaration.id] ?: declaration.pathTemplate,
+                declaration.roles, declaration.contentKind)
+        })
+        val profile = ReconstructionProfile(base.schemaVersion, base.id, layout, base.budgets, base.adapterConfiguration)
+        val fixture = releaseRepairFixture(undispatchedFallback = true, profile = profile)
+        val manifest = SourceTreeManifestReader.read(fixture.project, profile)
+        assertFalse("fn_alpha" in manifest.unresolvedImplementationIds)
+        assertFalse("fn_alpha" in ArchivalProjectAuditor.audit(fixture.project, profile).unresolvedEntityIds)
+        assertFalse("| `fn_alpha` |" in fixture.project.resolve(relocated.getValue("unresolved-evidence")).readText())
+        val archive = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("relocated-fallback.zip"),
+            profile = profile)
+        ArchivalBundleVerifier.extractAndVerify(archive.archivePath,
+            fixture.project.parent.resolve("relocated-fallback-extracted"), profile = profile)
     }
 
     @Test
@@ -3454,7 +3495,10 @@ class ModuleRevisionGraphTest {
         }
     }
 
-    private fun generatedProject(undispatchedFallback: Boolean = false): Path {
+    private fun generatedProject(
+        undispatchedFallback: Boolean = false,
+        profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+    ): Path {
         val project = createTempDirectory("module-revision-").resolve("project")
         val promptContext = if (undispatchedFallback) "/* ${"context".repeat(900)} */" else null
         SourceTreeGenerator.generate(
@@ -3478,6 +3522,7 @@ class ModuleRevisionGraphTest {
             reconstructor = if (undispatchedFallback) BoundedLlmModuleReconstructor(
                 AgentHarness { _, _ -> error("pre-dispatch fixture must not execute") }, maximumContextCharacters = 4096,
             ) else null,
+            profile = profile,
         )
         return project
     }
@@ -3494,15 +3539,17 @@ class ModuleRevisionGraphTest {
         includeProvisional: Boolean = false,
         abandonProvisional: Boolean = false,
         undispatchedFallback: Boolean = false,
+        relativePath: String = "src/modules/alpha.c",
+        profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
     ): ReleaseRepairFixture {
         require(!abandonProvisional || includeProvisional)
-        val project = generatedProject(undispatchedFallback)
-        val relative = "src/modules/alpha.c"
+        val project = generatedProject(undispatchedFallback, profile)
+        val relative = relativePath
         val target = project.resolve(relative)
         val before = target.readBytes()
         val after = before + "\n/* archive release ACP repair */\n".toByteArray()
         lateinit var binding: RepairAgentInvocationBinding
-        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile.forProfile(profile)).use { graph ->
             val corpus = graph.retainRegressionInputs(listOf(ProcessInput("archive-case", emptyList(), byteArrayOf())))
             graph.beginRun(if (includeProvisional && !abandonProvisional) 2 else 1, 60_000)
             fun bindObservations(proof: RepairValidationProof) {
@@ -3557,7 +3604,7 @@ class ModuleRevisionGraphTest {
             binding = requireNotNull(accepted.repairMetadata?.agentInvocation)
             graph.synchronizeRepairHistory()
         }
-        assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+        assertEquals(0, MakeProjectBuilder.build(project, profile = profile).returnCode)
         return ReleaseRepairFixture(project, relative, after, binding.receiptPath, binding.requestSha256)
     }
 
