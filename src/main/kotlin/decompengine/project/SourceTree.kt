@@ -153,7 +153,8 @@ class BoundedLlmModuleReconstructor(
         } catch (failure: Exception) {
             throw AgentSessionRecoveryException("could not capture the bounded reconstruction session inventory", failure)
         }
-        val workflowSha256 = sha256(("module-reconstruction-session-v1\n" + request.model.inputSha256 + "\n" +
+        // v2 isolates journals created before declared-role inventory enforcement.
+        val workflowSha256 = sha256(("module-reconstruction-session-v2\n" + request.model.inputSha256 + "\n" +
             request.profile.sha256 + "\n" + fingerprint).toByteArray())
         return AgentSessionContinuation(
             directory = root.parent.resolve(".decomp-agent-sessions")
