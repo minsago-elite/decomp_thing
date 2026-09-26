@@ -45,7 +45,7 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
         requireNormalizedProjectPath(layout.contractPath, "archive build contract path")
         requireNormalizedProjectPath(layout.artifactPath, "archive build artifact path")
         require(layout.contractPath != layout.artifactPath) { "archive build evidence paths are duplicated" }
-        val inventory = store.sourceArchiveInventory(jobId, reportPrefix, transport)
+        val inventory = store.sourceArchiveInventory(jobId, transport, reportPrefix)
         val temporary = Files.createTempDirectory("decomp-web-archive-")
         try {
             val extractedRoot = temporary.resolve("payload")
@@ -89,7 +89,7 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
             current.forEach { (relative, snapshot) ->
                 requireSame(snapshot, readArtifact(jobId, "$reportPrefix/source-tree/$relative", MAXIMUM_FILE_BYTES))
             }
-            require(inventory == store.sourceArchiveInventory(jobId, reportPrefix, transport)) { "archive source inventory changed during verification" }
+            require(inventory == store.sourceArchiveInventory(jobId, transport, reportPrefix)) { "archive source inventory changed during verification" }
             require(source.manifestDocument == sources.read(jobId, reportPrefix).manifestDocument) { "archive source revision changed during verification" }
             requireSame(executable, readArtifact(jobId, "$reportPrefix/source-tree/${layout.artifactPath}", MAXIMUM_BYTES))
             requireSame(input, store.readInput(jobId))
