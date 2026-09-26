@@ -17,6 +17,7 @@ import java.security.MessageDigest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -26,6 +27,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Tag
+import org.junit.jupiter.api.io.TempDir
 
 /** Opt-in evidence capture for a real contained cc1 full export; this does not score the model. */
 @Tag("ci-live")
@@ -161,6 +163,7 @@ class GccProductionFullExportQualificationTest {
 
         val captured = privateDirectory(evidenceRoot.resolve("captured"))
         copyStable(modelPath, captured.resolve("program_model.json"), MAXIMUM_MODEL_BYTES, modelBytes, modelSha256)
+        captureFailureDiagnostics(modelPath, treeManifest, captured)
         publish(captured.resolve("result.json"), resultBytes)
         publish(captured.resolve("structural-full-export-binding.json"), bindingBytes)
         publish(captured.resolve(GccBundledFullExportCliResultV2.TREE_MANIFEST_NAME), manifestBytes)
@@ -185,6 +188,65 @@ class GccProductionFullExportQualificationTest {
         ))
         publish(evidenceRoot.resolve("qualification.json"), OracleJson.canonicalBytes(summary))
         println("Retained unscored live cc1 full-export evidence at $captured (${modelBytes} model bytes, $functionCount functions)")
+    }
+
+    @Test
+    fun `failure diagnostics are retained only when the output tree commits their bytes`(@TempDir root: Path) {
+        val modelPath = root.resolve("program_model.json")
+        val source = privateDirectory(root.resolve("program_model.json.export"))
+        val failures = privateDirectory(source.resolve("failures"))
+        val id = "fn_000000000081832b"
+        val original = "{\"schemaVersion\":1,\"functionId\":\"$id\",\"status\":\"failed\",\"message\":\"decompilation timed out\"}\n".toByteArray()
+        Files.write(failures.resolve("$id.json"), original, CREATE_NEW, WRITE)
+        val tree = JsonObject(mapOf("tree" to JsonObject(mapOf("sidecars" to JsonObject(mapOf(
+            "failures/$id.json" to JsonObject(mapOf(
+                "bytes" to JsonPrimitive(original.size),
+                "sha256" to JsonPrimitive(OracleArtifacts.sha256(original)),
+            )),
+        ))))))
+        val captured = privateDirectory(root.resolve("captured"))
+        assertEquals(1, captureFailureDiagnostics(modelPath, tree, captured))
+        assertTrue(Files.readAllBytes(captured.resolve("failure-diagnostics/$id.json")).contentEquals(original))
+
+        Files.write(failures.resolve("$id.json"), "tampered".toByteArray())
+        val rejected = privateDirectory(root.resolve("rejected"))
+        assertFailsWith<IllegalArgumentException> { captureFailureDiagnostics(modelPath, tree, rejected) }
+        assertFalse(Files.exists(rejected.resolve("failure-diagnostics/$id.json")))
+    }
+
+    private fun captureFailureDiagnostics(modelPath: Path, treeManifest: JsonObject, captured: Path): Int {
+        val sidecars = treeManifest.getValue("tree").jsonObject.getValue("sidecars").jsonObject
+        val failures = sidecars.filterKeys { it.startsWith("failures/") }.toSortedMap()
+        require(failures.size <= MAXIMUM_FAILURE_DIAGNOSTICS) { "cc1 failure diagnostic count exceeds its capture bound" }
+        if (failures.isEmpty()) return 0
+        val source = modelPath.resolveSibling(modelPath.fileName.toString() + ".export")
+        var totalBytes = 0L
+        val verified = ArrayList<Pair<String, ByteArray>>(failures.size)
+        for ((name, entry) in failures) {
+            val id = name.removePrefix("failures/").removeSuffix(".json")
+            require(id.matches(Regex("fn_[0-9a-f]{16}")) && name == "failures/$id.json") {
+                "cc1 failure diagnostic path is invalid"
+            }
+            val commitment = entry.jsonObject
+            require(commitment.keys == setOf("bytes", "sha256")) { "cc1 failure commitment is invalid" }
+            val expectedBytes = commitment.getValue("bytes").jsonPrimitive.long
+            val expectedSha256 = commitment.getValue("sha256").jsonPrimitive.content
+            require(expectedBytes in 1..MAXIMUM_FAILURE_DIAGNOSTIC_BYTES.toLong() &&
+                expectedSha256.matches(Regex("[0-9a-f]{64}"))
+            ) { "cc1 failure diagnostic commitment exceeds its bound" }
+            totalBytes += expectedBytes
+            require(totalBytes <= MAXIMUM_FAILURE_DIAGNOSTIC_TOTAL_BYTES) {
+                "cc1 failure diagnostics exceed their aggregate capture bound"
+            }
+            val bytes = readStable(source.resolve(name), MAXIMUM_FAILURE_DIAGNOSTIC_BYTES)
+            require(bytes.size.toLong() == expectedBytes && OracleArtifacts.sha256(bytes) == expectedSha256) {
+                "cc1 failure diagnostic differs from the committed output tree"
+            }
+            verified += id to bytes
+        }
+        val destination = privateDirectory(captured.resolve("failure-diagnostics"))
+        verified.forEach { (id, bytes) -> publish(destination.resolve("$id.json"), bytes) }
+        return failures.size
     }
 
     private fun configured(name: String): Path {
@@ -253,6 +315,9 @@ class GccProductionFullExportQualificationTest {
         const val MAXIMUM_BINDING_BYTES = 256 * 1024
         const val MAXIMUM_TREE_MANIFEST_BYTES = GccBundledFullExportCliResultV2.MAXIMUM_TREE_MANIFEST_BYTES
         const val MAXIMUM_MODEL_BYTES = 512L * 1024 * 1024
+        const val MAXIMUM_FAILURE_DIAGNOSTICS = 1024
+        const val MAXIMUM_FAILURE_DIAGNOSTIC_BYTES = 64 * 1024
+        const val MAXIMUM_FAILURE_DIAGNOSTIC_TOTAL_BYTES = 8L * 1024 * 1024
         const val COPY_BUFFER_BYTES = 1024 * 1024
         val RESULT_KEYS = setOf(
             "provider", "schemaVersion", "complete", "releaseEligible", "scored", "operationId", "requestSha256",
