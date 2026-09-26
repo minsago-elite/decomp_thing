@@ -44,6 +44,8 @@ jobs:
         with:
           path: ${{ runner.temp }}/gcc-cc1-cache/artifacts
           key: gcc-cc1-artifacts-v1-${{ hashFiles('oracle/gcc/16.2.0/source-lock.json', 'oracle/gcc/16.2.0/build-record.json', 'oracle/gcc/16.2.0/toolchain-reproduction.json', 'oracle/gcc/16.2.0/build-toolchain.Dockerfile', 'oracle/gcc/16.2.0/compiler-engines.json', 'oracle/gcc/16.2.0/cc1-build-record.json', 'oracle/gcc/16.2.0/cc1-oracle-manifest.json') }}
+          restore-keys: |
+            gcc-cc1-artifacts-v1-
       - name: Validate cached cc1 binaries before using them
         id: cached-cc1-verify
         if: steps.cc1-artifact-cache.outputs.cache-hit == 'true'
