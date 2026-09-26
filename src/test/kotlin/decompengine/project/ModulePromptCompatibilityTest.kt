@@ -3,8 +3,10 @@ package decompengine.project
 import decompengine.agent.AgentHarness
 import decompengine.agent.AgentExecutionResult
 import decompengine.agent.AgentStopReason
+import decompengine.oracle.behavior.LlvmBehaviorCandidateAcpLineageIndexV2Publisher
 import java.nio.file.Path
 import java.nio.file.Files
+import java.nio.file.attribute.PosixFilePermission
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.readBytes
 import kotlin.io.path.readText
@@ -154,6 +156,22 @@ class ModulePromptCompatibilityTest {
             assertEquals(0, ReconstructionAdapters.resolve(profile).build(project, profile).returnCode)
             val bundle = ArchivalPackager.create(project, project.parent.resolve("undispatched.zip"), profile = profile)
             assertEquals(listOf("fn_alpha"), requireNotNull(bundle.audit).unresolvedEntityIds)
+            if (profile.id == GeneratedCMakeReconstructionProfile.PROFILE_ID) {
+                val indexParent = project.resolve("fallback-lineage-index")
+                Files.createDirectories(indexParent)
+                Files.setPosixFilePermissions(indexParent, setOf(
+                    PosixFilePermission.OWNER_READ,
+                    PosixFilePermission.OWNER_WRITE,
+                    PosixFilePermission.OWNER_EXECUTE,
+                ))
+                val failure = assertFailsWith<IllegalArgumentException> {
+                    LlvmBehaviorCandidateAcpLineageIndexV2Publisher.publish(
+                        bundle.archivePath,
+                        indexParent.resolve("candidate-acp-lineage-index-v2.json"),
+                    )
+                }
+                assertTrue(failure.message.orEmpty().contains("no accepted first-class ACP contribution"))
+            }
         }
     }
 
