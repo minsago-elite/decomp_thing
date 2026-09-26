@@ -162,6 +162,16 @@ internal class GccDriverStructuralInputsV1 private constructor(
         }
     }
 
+    /**
+     * Retains the exact immutable model snapshot alongside the profile binding that authenticated it.
+     * Scorers must consume this value rather than pair caller-provided model bytes with a binding.
+     * This remains input provenance only; it does not create the production scoring capability.
+     */
+    fun captureFullExport(
+        operation: GccBundledFullExportOperation,
+    ): GccDriverStructuralAuthenticatedFullExportV1 =
+        GccDriverStructuralAuthenticatedFullExportV1.capture(this, operation)
+
     companion object {
         private const val PROFILE_ID = "gcc-cc1-16.2.0"
         private const val SOURCE_PROFILE_ID = "gcc-driver-16.2.0"
