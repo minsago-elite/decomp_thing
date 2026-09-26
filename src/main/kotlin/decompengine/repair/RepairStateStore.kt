@@ -105,7 +105,15 @@ internal class RepairStateStore private constructor(
 
     fun writeRoot(name: String, bytes: ByteArray) = writeAtomically(projectRoot, name, bytes, "project-evidence")
 
-    fun writeProjectEvidence(relative: String, bytes: ByteArray) {
+    fun writeProjectEvidence(relative: String, bytes: ByteArray) =
+        withProjectEvidenceParent(relative) { parent, name ->
+            writeAtomically(parent, name, bytes, "project-evidence")
+        }
+
+    fun cleanupProjectEvidenceTemporary(relative: String) =
+        withProjectEvidenceParent(relative) { parent, name -> cleanupAtomicTemporary(parent, name) }
+
+    private fun <T> withProjectEvidenceParent(relative: String, action: (LinuxDescriptor, String) -> T): T {
         checkOpen()
         val parts = relative.split('/')
         require(parts.isNotEmpty() && parts.all { it.isNotEmpty() && it !in setOf(".", "..") && '\\' !in it }) {
@@ -126,7 +134,7 @@ internal class RepairStateStore private constructor(
                 opened += child
                 parent = child
             }
-            writeAtomically(parent, parts.last(), bytes, "project-evidence")
+            return action(parent, parts.last())
         } finally {
             opened.asReversed().forEach(LinuxDescriptor::close)
         }

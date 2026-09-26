@@ -3544,6 +3544,14 @@ internal class ModuleRevisionGraph private constructor(
                 "repair source manifest differs from the selected reconstruction profile"
             }
         }
+        val confidencePath = reconstructionProfile?.layout?.declaration("confidence-evidence")?.materialize()
+            ?: "reports/confidence.json"
+        val unresolvedPath = reconstructionProfile?.layout?.declaration("unresolved-evidence")?.materialize()
+            ?: "UNRESOLVED.md"
+        // Crash recovery must remove an exchanged prior file even when both current reports and
+        // the manifest already have their final digests and no new write would be attempted.
+        stateStore.cleanupProjectEvidenceTemporary(confidencePath)
+        stateStore.cleanupProjectEvidenceTemporary(unresolvedPath)
         val resolvedImplementationIds = linkedSetOf<String>()
         var changed = false
         val updatedFiles = files.map { element ->
@@ -3585,8 +3593,6 @@ internal class ModuleRevisionGraph private constructor(
                 // The confidence report is a derived view of the same unresolved implementation
                 // population. Keep its current projection and manifest digest synchronized so an
                 // accepted repair does not invalidate unrelated accepted modules at archive audit.
-                val confidencePath = reconstructionProfile?.layout?.declaration("confidence-evidence")?.materialize()
-                    ?: "reports/confidence.json"
                 val confidenceEntry = updatedFiles.single { item ->
                     item.jsonObject["path"]?.jsonPrimitive?.contentOrNull == confidencePath
                 }.jsonObject
@@ -3630,8 +3636,6 @@ internal class ModuleRevisionGraph private constructor(
                         JsonObject(LinkedHashMap(item.jsonObject).apply { put("sha256", JsonPrimitive(projectedSha256)) })
                     }
                 }
-                val unresolvedPath = reconstructionProfile?.layout?.declaration("unresolved-evidence")?.materialize()
-                    ?: "UNRESOLVED.md"
                 val unresolvedEntry = confidenceFiles.single { item ->
                     item.jsonObject["path"]?.jsonPrimitive?.contentOrNull == unresolvedPath
                 }.jsonObject
@@ -3688,7 +3692,10 @@ internal class ModuleRevisionGraph private constructor(
                 }
                 confidenceFiles.map { item ->
                     if (item.jsonObject["path"]?.jsonPrimitive?.contentOrNull != unresolvedPath) item else {
-                        JsonObject(LinkedHashMap(item.jsonObject).apply { put("sha256", JsonPrimitive(unresolvedSha256)) })
+                        JsonObject(LinkedHashMap(item.jsonObject).apply {
+                            put("sha256", JsonPrimitive(unresolvedSha256))
+                            put("entityIds", JsonArray(remainingIds.map(::JsonPrimitive)))
+                        })
                     }
                 }
             } else updatedFiles
