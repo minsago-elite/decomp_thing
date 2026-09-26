@@ -3549,10 +3549,8 @@ internal class ModuleRevisionGraph private constructor(
             ?: "reports/confidence.json"
         val unresolvedPath = reconstructionProfile?.layout?.declaration("unresolved-evidence")?.materialize()
             ?: "UNRESOLVED.md"
-        // Crash recovery must remove an exchanged prior file even when both current reports and
-        // the manifest already have their final digests and no new write would be attempted.
-        stateStore.cleanupProjectEvidenceTemporary(confidencePath)
-        stateStore.cleanupProjectEvidenceTemporary(unresolvedPath)
+        // Keep displaced manifest-bound report preimages until both derived reports and the
+        // source manifest are durably synchronized. A crash may interrupt that sequence.
         val resolvedImplementationIds = linkedSetOf<String>()
         var changed = false
         val updatedFiles = files.map { element ->
@@ -3611,7 +3609,18 @@ internal class ModuleRevisionGraph private constructor(
                 val priorSha256 = confidenceEntry.getValue("sha256").jsonPrimitive.content
                 val reportBytes = readStableRegularFile(projectRoot, confidencePath,
                     state.budget.maximumIndexEvidenceBytes).bytes
-                val reportText = decodeUtf8Strict(reportBytes, confidencePath)
+                val currentSha256 = sha256(reportBytes)
+                val trustedReportBytes = if (currentSha256 == priorSha256) reportBytes else {
+                    requireNotNull(stateStore.readProjectedEvidencePreimage(confidencePath,
+                        state.budget.maximumIndexEvidenceBytes)) {
+                        "repair confidence projection has no manifest-bound recovery preimage"
+                    }.also { preimage ->
+                        require(sha256(preimage) == priorSha256) {
+                            "repair confidence recovery preimage differs from the source manifest"
+                        }
+                    }
+                }
+                val reportText = decodeUtf8Strict(trustedReportBytes, confidencePath)
                 UniqueJsonObjectKeyValidator(reportText).validate()
                 val report = Json.parseToJsonElement(reportText).jsonObject
                 require(report["schemaVersion"] == JsonPrimitive(2)) { "repair confidence projection has an unsupported schema" }
@@ -3645,7 +3654,6 @@ internal class ModuleRevisionGraph private constructor(
                     "repair confidence projection exceeds its byte bound"
                 }
                 val projectedSha256 = sha256(projectedBytes)
-                val currentSha256 = sha256(reportBytes)
                 require(currentSha256 == priorSha256 || currentSha256 == projectedSha256) {
                     "repair confidence projection differs from the checked source manifest"
                 }
@@ -3659,15 +3667,34 @@ internal class ModuleRevisionGraph private constructor(
                 }.jsonObject
                 val unresolvedBytes = readStableRegularFile(projectRoot, unresolvedPath,
                     state.budget.maximumIndexEvidenceBytes).bytes
-                val unresolvedText = decodeUtf8Strict(unresolvedBytes, unresolvedPath)
+                val currentUnresolvedSha256 = sha256(unresolvedBytes)
+                val priorUnresolvedSha256 = unresolvedEntry.getValue("sha256").jsonPrimitive.content
+                val trustedUnresolvedBytes = if (currentUnresolvedSha256 == priorUnresolvedSha256) unresolvedBytes else {
+                    requireNotNull(stateStore.readProjectedEvidencePreimage(unresolvedPath,
+                        state.budget.maximumIndexEvidenceBytes)) {
+                        "repair unresolved projection has no manifest-bound recovery preimage"
+                    }.also { preimage ->
+                        require(sha256(preimage) == priorUnresolvedSha256) {
+                            "repair unresolved recovery preimage differs from the source manifest"
+                        }
+                    }
+                }
+                val unresolvedText = decodeUtf8Strict(trustedUnresolvedBytes, unresolvedPath)
                 val marker = "## Implementation generation\n\n"
                 require(unresolvedText.indexOf(marker) == unresolvedText.lastIndexOf(marker) && marker in unresolvedText) {
                     "repair unresolved evidence has no unique implementation section"
                 }
                 val planPath = reconstructionProfile?.layout?.declaration("module-plan-evidence")?.materialize()
                     ?: "reports/module_plan.json"
-                val planText = decodeUtf8Strict(readStableRegularFile(projectRoot, planPath,
-                    state.budget.maximumIndexEvidenceBytes).bytes, planPath)
+                val planSnapshot = readStableRegularFile(projectRoot, planPath,
+                    state.budget.maximumIndexEvidenceBytes)
+                val planEntry = files.single { item ->
+                    item.jsonObject["path"]?.jsonPrimitive?.contentOrNull == planPath
+                }.jsonObject
+                require(planSnapshot.sha256 == planEntry.getValue("sha256").jsonPrimitive.content) {
+                    "repair module plan differs from the checked source manifest"
+                }
+                val planText = decodeUtf8Strict(planSnapshot.bytes, planPath)
                 UniqueJsonObjectKeyValidator(planText).validate()
                 val plan = Json.parseToJsonElement(planText).jsonObject
                 val owners = plan.getValue("modules").jsonArray.flatMap { module ->
@@ -3699,14 +3726,13 @@ internal class ModuleRevisionGraph private constructor(
                     "repair unresolved projection exceeds its byte bound"
                 }
                 val unresolvedSha256 = sha256(projectedUnresolvedBytes)
-                val currentUnresolvedSha256 = sha256(unresolvedBytes)
-                require(currentUnresolvedSha256 == unresolvedEntry.getValue("sha256").jsonPrimitive.content ||
+                require(currentUnresolvedSha256 == priorUnresolvedSha256 ||
                     currentUnresolvedSha256 == unresolvedSha256) {
                     "repair unresolved projection differs from the checked source manifest"
                 }
-                if (currentSha256 != projectedSha256) stateStore.writeProjectEvidence(confidencePath, projectedBytes)
+                if (currentSha256 != projectedSha256) stateStore.writeProjectedEvidence(confidencePath, projectedBytes)
                 if (currentUnresolvedSha256 != unresolvedSha256) {
-                    stateStore.writeProjectEvidence(unresolvedPath, projectedUnresolvedBytes)
+                    stateStore.writeProjectedEvidence(unresolvedPath, projectedUnresolvedBytes)
                 }
                 confidenceFiles.map { item ->
                     if (item.jsonObject["path"]?.jsonPrimitive?.contentOrNull != unresolvedPath) item else {
@@ -3723,6 +3749,8 @@ internal class ModuleRevisionGraph private constructor(
                 "source_tree_manifest.json",
                 (JsonObject(updatedRoot).toString() + "\n").toByteArray(Charsets.UTF_8),
             )
+            stateStore.cleanupProjectEvidenceTemporary(confidencePath)
+            stateStore.cleanupProjectEvidenceTemporary(unresolvedPath)
         }
     }
 

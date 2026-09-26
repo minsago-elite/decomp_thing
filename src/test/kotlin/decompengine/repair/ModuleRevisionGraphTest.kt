@@ -2441,6 +2441,56 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `repair projection refuses a modified report without its manifest preimage`() {
+        val fixture = releaseRepairFixture(undispatchedFallback = true)
+        val confidence = fixture.project.resolve("reports/confidence.json")
+        confidence.writeText(confidence.readText().replace(
+            "structural recovery heuristic; not implementation acceptance or measured behavioral confidence",
+            "forged confidence claim",
+        ))
+        val manifestBefore = fixture.project.resolve("source_tree_manifest.json").readBytes()
+
+        ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile).use { }
+        assertContentEquals(manifestBefore, fixture.project.resolve("source_tree_manifest.json").readBytes())
+        assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(fixture.project) }
+    }
+
+    @Test
+    fun `repair projection recovers a durable report exchange from manifest preimages`() {
+        val fixture = releaseRepairFixture(undispatchedFallback = true)
+        val finalManifest = fixture.project.resolve("source_tree_manifest.json").readBytes()
+        val finalConfidence = fixture.project.resolve("reports/confidence.json").readBytes()
+        val finalUnresolved = fixture.project.resolve("UNRESOLVED.md").readBytes()
+        fixture.project.resolve("source_tree_manifest.json").writeBytes(fixture.beforeManifest)
+        val confidenceTemporary = fixture.project.resolve("reports/.confidence.json.repair-atomic.tmp")
+        val unresolvedTemporary = fixture.project.resolve(".UNRESOLVED.md.repair-atomic.tmp")
+        confidenceTemporary.writeBytes(fixture.beforeConfidence)
+        unresolvedTemporary.writeBytes(fixture.beforeUnresolved)
+
+        ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile).use { }
+
+        assertContentEquals(finalManifest, fixture.project.resolve("source_tree_manifest.json").readBytes())
+        assertContentEquals(finalConfidence, fixture.project.resolve("reports/confidence.json").readBytes())
+        assertContentEquals(finalUnresolved, fixture.project.resolve("UNRESOLVED.md").readBytes())
+        assertFalse(confidenceTemporary.exists())
+        assertFalse(unresolvedTemporary.exists())
+    }
+
+    @Test
+    fun `repair projection requires the manifest bound module plan`() {
+        val fixture = releaseRepairFixture(undispatchedFallback = true)
+        val plan = fixture.project.resolve("reports/module_plan.json")
+        plan.writeText(plan.readText() + " ")
+        val manifestBefore = fixture.project.resolve("source_tree_manifest.json").readBytes()
+        val unresolvedBefore = fixture.project.resolve("UNRESOLVED.md").readBytes()
+
+        ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile).use { }
+        assertContentEquals(manifestBefore, fixture.project.resolve("source_tree_manifest.json").readBytes())
+        assertContentEquals(unresolvedBefore, fixture.project.resolve("UNRESOLVED.md").readBytes())
+        assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(fixture.project) }
+    }
+
+    @Test
     fun `accepted header repair does not resolve an undispatched implementation fallback`() {
         val fixture = releaseRepairFixture(undispatchedFallback = true, relativePath = "include/modules/alpha.h")
         val manifest = SourceTreeManifestReader.read(fixture.project, GeneratedCMakeReconstructionProfile.descriptor)
@@ -3641,6 +3691,9 @@ class ModuleRevisionGraphTest {
         val after: ByteArray,
         val receiptPath: String,
         val requestSha256: String,
+        val beforeManifest: ByteArray,
+        val beforeConfidence: ByteArray,
+        val beforeUnresolved: ByteArray,
     )
 
     private fun releaseRepairFixture(
@@ -3652,6 +3705,9 @@ class ModuleRevisionGraphTest {
     ): ReleaseRepairFixture {
         require(!abandonProvisional || includeProvisional)
         val project = generatedProject(undispatchedFallback, profile)
+        val beforeManifest = project.resolve("source_tree_manifest.json").readBytes()
+        val beforeConfidence = project.resolve(profile.layout.declaration("confidence-evidence").materialize()).readBytes()
+        val beforeUnresolved = project.resolve(profile.layout.declaration("unresolved-evidence").materialize()).readBytes()
         val relative = relativePath
         val target = project.resolve(relative)
         val before = target.readBytes()
@@ -3713,7 +3769,8 @@ class ModuleRevisionGraphTest {
             graph.synchronizeRepairHistory()
         }
         assertEquals(0, MakeProjectBuilder.build(project, profile = profile).returnCode)
-        return ReleaseRepairFixture(project, relative, after, binding.receiptPath, binding.requestSha256)
+        return ReleaseRepairFixture(project, relative, after, binding.receiptPath, binding.requestSha256,
+            beforeManifest, beforeConfidence, beforeUnresolved)
     }
 
     /** Synthetic serialization fixture only; this never qualifies the real validation provider. */
