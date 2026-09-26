@@ -12,6 +12,7 @@ import decompengine.project.verifyAcpExecutionReceiptDocument
 import decompengine.project.UniqueJsonObjectKeyValidator
 import decompengine.project.ReconstructionProfile
 import decompengine.project.ProjectFileRole
+import decompengine.project.moduleIdForPath
 import decompengine.project.sha256
 import decompengine.agent.receiptCommitmentBytes
 import decompengine.agent.AgentFileChange
@@ -3586,10 +3587,21 @@ internal class ModuleRevisionGraph private constructor(
         }
         val unresolved = root["unresolvedImplementationIds"]?.jsonArray
         val remaining = unresolved?.filterNot { it.jsonPrimitive.content in resolvedImplementationIds }
+        val repairedImplementations = updatedFiles.mapNotNull { element ->
+            val item = element.jsonObject
+            val relative = item["path"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            if (relative !in acceptedChanges || item["generator"] != JsonPrimitive("repair-revision") ||
+                item["acceptedImplementation"] != JsonPrimitive(true) ||
+                item["roles"]?.jsonArray?.contains(JsonPrimitive(ProjectFileRole.MODULE_IMPLEMENTATION.wireName)) != true
+            ) return@mapNotNull null
+            reconstructionProfile?.layout?.declaration("module-implementation")?.moduleIdForPath(relative)
+                ?.let { it to item.getValue("sha256").jsonPrimitive.content }
+        }.toMap()
         if (remaining != null && remaining.size != unresolved.size) changed = true
-        if (changed) {
+        if (changed || repairedImplementations.isNotEmpty()) {
             val updatedRoot = LinkedHashMap(root)
-            val projectedFiles = if (remaining != null && remaining.size != unresolved?.size) {
+            val projectedFiles = if (remaining != null &&
+                (remaining.size != unresolved.size || repairedImplementations.isNotEmpty())) {
                 // The confidence report is a derived view of the same unresolved implementation
                 // population. Keep its current projection and manifest digest synchronized so an
                 // accepted repair does not invalidate unrelated accepted modules at archive audit.
@@ -3614,6 +3626,12 @@ internal class ModuleRevisionGraph private constructor(
                             it.jsonPrimitive.content in resolvedImplementationIds
                         },
                     )
+                    repairedImplementations[fields.getValue("id").jsonPrimitive.content]?.let { sourceSha256 ->
+                        val revision = LinkedHashMap(fields.getValue("revisionEvidence").jsonObject)
+                        revision["sourceSha256"] = JsonPrimitive(sourceSha256)
+                        revision["acceptedImplementation"] = JsonPrimitive(true)
+                        fields["revisionEvidence"] = JsonObject(revision)
+                    }
                     JsonObject(fields)
                 }
                 val projectedReport = LinkedHashMap(report)

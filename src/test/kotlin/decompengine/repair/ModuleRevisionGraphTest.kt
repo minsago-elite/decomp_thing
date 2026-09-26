@@ -46,12 +46,14 @@ import decompengine.project.ReconstructionProfile
 import decompengine.project.ProjectLayoutProfile
 import decompengine.project.ProjectFileDeclaration
 import decompengine.project.ArchivalBundleVerifier
+import decompengine.project.ArchivalBundleLimits
 import decompengine.project.ArchivalProjectAuditor
 import decompengine.project.ArchivalPackager
 import decompengine.project.captureBuildSourceRevision
 import decompengine.project.MakeProjectBuilder
 import decompengine.project.GeneratedCRepairIndexProfile
 import decompengine.project.sha256
+import decompengine.project.moduleIdForPath
 import decompengine.oracle.behavior.LlvmBehaviorCandidateAcpLineageIndexV2Publisher
 import decompengine.validation.ProcessInput
 import kotlinx.serialization.json.Json
@@ -2330,6 +2332,11 @@ class ModuleRevisionGraphTest {
         val confidence = Json.parseToJsonElement(fixture.project.resolve("reports/confidence.json").readText()).jsonObject
         assertEquals(manifest.unresolvedImplementationIds,
             confidence.getValue("unresolvedImplementationIds").jsonArray.map { it.jsonPrimitive.content })
+        val alphaRevision = confidence.getValue("modules").jsonArray.map { it.jsonObject }
+            .single { it.getValue("id").jsonPrimitive.content == "alpha" }
+            .getValue("revisionEvidence").jsonObject
+        assertEquals(sha256(fixture.after), alphaRevision.getValue("sourceSha256").jsonPrimitive.content)
+        assertEquals(JsonPrimitive(true), alphaRevision.getValue("acceptedImplementation"))
         assertFalse("fn_alpha" in ArchivalProjectAuditor.audit(fixture.project).unresolvedEntityIds)
         val unresolved = fixture.project.resolve("UNRESOLVED.md").readText()
         assertFalse("| `fn_alpha` |" in unresolved)
@@ -2349,6 +2356,61 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `repair audit charges nonmanifest evidence against its remaining byte budget`() {
+        val fixture = releaseRepairFixture(undispatchedFallback = true)
+        val manifest = SourceTreeManifestReader.read(fixture.project, GeneratedCMakeReconstructionProfile.descriptor)
+        val manifestBytes = Files.size(fixture.project.resolve("source_tree_manifest.json"))
+        val manifestInputBytes = manifestBytes + manifest.files.sumOf { Files.size(fixture.project.resolve(it.path)) }
+        val largestInput = maxOf(manifestBytes, manifest.files.maxOf { Files.size(fixture.project.resolve(it.path)) })
+        assertFalse("fn_alpha" in ArchivalProjectAuditor.audit(fixture.project).unresolvedEntityIds)
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ArchivalProjectAuditor.audit(fixture.project, limits = ArchivalBundleLimits(
+                maximumFileBytes = largestInput,
+                maximumTotalBytes = manifestInputBytes,
+            ))
+        }
+        assertTrue(failure.message.orEmpty().contains("bound"))
+    }
+
+    @Test
+    fun `repair audit rejects a historical checkpoint changed to a dispatched rejection`() {
+        val fixture = releaseRepairFixture(undispatchedFallback = true)
+        val profile = GeneratedCMakeReconstructionProfile.descriptor
+        val module = profile.layout.declaration("module-implementation").moduleIdForPath(fixture.relativePath)
+        val checkpointPath = profile.layout.declaration("module-evidence").materialize(mapOf("module" to module))
+        val checkpoint = fixture.project.resolve(checkpointPath)
+        val before = checkpoint.readBytes()
+        val after = checkpoint.readText().replace(
+            "pre-dispatch-context-budget-fallback", "reconstructor-return",
+        ).toByteArray()
+        assertFalse(before.contentEquals(after))
+        checkpoint.writeBytes(after)
+        val manifestPath = fixture.project.resolve("source_tree_manifest.json")
+        val manifestBefore = manifestPath.readText()
+        val manifestAfter = manifestBefore.replace(sha256(before), sha256(after))
+        assertFalse(manifestBefore == manifestAfter)
+        manifestPath.writeText(manifestAfter)
+
+        assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(fixture.project) }
+    }
+
+    @Test
+    fun `repair audit rejects confidence evidence cross paired with an earlier source`() {
+        val fixture = releaseRepairFixture(undispatchedFallback = true)
+        val confidencePath = fixture.project.resolve("reports/confidence.json")
+        val before = confidencePath.readBytes()
+        val after = confidencePath.readText().replace(sha256(fixture.after), "0".repeat(64)).toByteArray()
+        assertFalse(before.contentEquals(after))
+        confidencePath.writeBytes(after)
+        val manifestPath = fixture.project.resolve("source_tree_manifest.json")
+        manifestPath.writeText(manifestPath.readText().replace(sha256(before), sha256(after)))
+
+        val failure = assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(fixture.project) }
+        assertTrue(failure.message.orEmpty().contains("repaired module confidence evidence"))
+    }
+
+    @Test
     fun `accepted header repair does not resolve an undispatched implementation fallback`() {
         val fixture = releaseRepairFixture(undispatchedFallback = true, relativePath = "include/modules/alpha.h")
         val manifest = SourceTreeManifestReader.read(fixture.project, GeneratedCMakeReconstructionProfile.descriptor)
@@ -2361,7 +2423,7 @@ class ModuleRevisionGraphTest {
     fun `accepted fallback repair synchronizes relocated reports`() {
         val base = GeneratedCMakeReconstructionProfile.descriptor
         val relocated = mapOf(
-            "confidence-evidence" to "reports/assessment/confidence.json",
+            "confidence-evidence" to "reports/assessment/confidence.validation.json",
             "unresolved-evidence" to "reports/assessment/unresolved.md",
             "module-plan-evidence" to "reports/planning/modules.json",
         )
@@ -2375,7 +2437,7 @@ class ModuleRevisionGraphTest {
         assertFalse("fn_alpha" in manifest.unresolvedImplementationIds)
         assertFalse("fn_alpha" in ArchivalProjectAuditor.audit(fixture.project, profile).unresolvedEntityIds)
         assertFalse("| `fn_alpha` |" in fixture.project.resolve(relocated.getValue("unresolved-evidence")).readText())
-        val confidenceTemporary = fixture.project.resolve("reports/assessment/.confidence.json.repair-atomic.tmp")
+        val confidenceTemporary = fixture.project.resolve("reports/assessment/.confidence.validation.json.repair-atomic.tmp")
         val unresolvedTemporary = fixture.project.resolve("reports/assessment/.unresolved.md.repair-atomic.tmp")
         confidenceTemporary.writeBytes("prior confidence evidence\n".toByteArray())
         unresolvedTemporary.writeBytes("prior unresolved evidence\n".toByteArray())
