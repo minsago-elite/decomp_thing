@@ -515,7 +515,7 @@ internal class GccBundledPreparedOperation internal constructor(
 
     /** Publishes the descriptor-captured full model and its authenticated profile binding, never a score. */
     @Synchronized
-    fun publishFullExportCliResult(binding: GccDriverStructuralFullExportBindingV2): Path {
+    fun publishFullExportCliResult(authenticatedExport: GccDriverStructuralAuthenticatedFullExportV1): Path {
         check(!closed && !poisoned && !cliPublicationAttempted)
         check(intent.bundledRuntime.recoveryMode == "full") {
             "structural binding publication requires a full-recovery operation"
@@ -531,6 +531,11 @@ internal class GccBundledPreparedOperation internal constructor(
             lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
             val original = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(definition)
             val snapshot = exported.snapshot
+            authenticatedExport.requireSameSnapshot(snapshot)
+            check(!authenticatedExport.scored && !authenticatedExport.releaseEligible) {
+                "full-export input provenance cannot grant score or release authority"
+            }
+            val binding = authenticatedExport.binding
             requireGccFullExportBindingMatchesOperation(binding, exported, intent.operationId)
             val bindingBytes = binding.canonicalBytes
             val bindingName = "structural-full-export-binding.json"
