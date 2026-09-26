@@ -2360,8 +2360,6 @@ class ModuleRevisionGraphTest {
         val fixture = releaseRepairFixture(undispatchedFallback = true)
         fixture.project.resolve("reports/.confidence.json.repair-atomic.tmp")
             .writeText("stale confidence preimage")
-        fixture.project.resolve(".UNRESOLVED.md.repair-atomic.tmp")
-            .writeText("stale unresolved preimage")
         val archive = fixture.project.parent.resolve("retained-repair-preimages.zip")
 
         assertFailsWith<IllegalArgumentException> {
@@ -2373,6 +2371,36 @@ class ModuleRevisionGraphTest {
 
         assertTrue(failure.message.orEmpty().contains("retained repair atomic temporary"))
         assertFalse(archive.exists())
+    }
+
+    @Test
+    fun `direct audit rejects root-level unresolved report preimage`() {
+        val fixture = releaseRepairFixture(undispatchedFallback = true)
+        fixture.project.resolve(".UNRESOLVED.md.repair-atomic.tmp")
+            .writeText("stale unresolved preimage")
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ArchivalProjectAuditor.audit(fixture.project)
+        }
+
+        assertTrue(failure.message.orEmpty().contains("profile-declared atomic temporary"))
+    }
+
+    @Test
+    fun `archive verification rejects a retained repair projection temporary`() {
+        val fixture = releaseRepairFixture(undispatchedFallback = true)
+        val valid = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("valid-repair.zip"))
+        val tampered = fixture.project.parent.resolve("retained-repair-temp.zip")
+        rewriteArchive(valid.archivePath, tampered) { entries ->
+            entries[".UNRESOLVED.md.repair-atomic.tmp"] = "stale unresolved preimage".toByteArray()
+        }
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ArchivalBundleVerifier.extractAndVerify(tampered, fixture.project.parent.resolve("rejected-temp-extract"))
+        }
+
+        assertTrue(failure.message.orEmpty().contains("retained repair atomic temporary"))
+        assertFalse(fixture.project.parent.resolve("rejected-temp-extract").exists())
     }
 
     @Test
@@ -2580,6 +2608,13 @@ class ModuleRevisionGraphTest {
         ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile.forProfile(profile)).use { }
         assertFalse(confidenceTemporary.exists())
         assertFalse(unresolvedTemporary.exists())
+        val retainedProjection = fixture.project.resolve("reports/assessment/.unresolved.md.repair-atomic.tmp")
+        retainedProjection.writeText("stale relocated unresolved preimage")
+        val auditFailure = assertFailsWith<IllegalArgumentException> {
+            ArchivalProjectAuditor.audit(fixture.project, profile)
+        }
+        assertTrue(auditFailure.message.orEmpty().contains("profile-declared atomic temporary"))
+        Files.delete(retainedProjection)
         val archive = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("relocated-fallback.zip"),
             profile = profile)
         ArchivalBundleVerifier.extractAndVerify(archive.archivePath,

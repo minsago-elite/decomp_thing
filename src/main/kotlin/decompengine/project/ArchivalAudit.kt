@@ -20,9 +20,23 @@ import java.nio.file.Path
 import java.util.Locale
 
 private const val MAXIMUM_AUDIT_REPORT_DEPTH = 32
+private val REPAIR_ATOMIC_TEMPORARY_NAME = Regex("^\\..+\\.repair-atomic\\.tmp$")
 
 internal fun isRepairAtomicTemporary(path: Path): Boolean =
-    path.fileName?.toString()?.endsWith(".repair-atomic.tmp") == true
+    path.fileName?.toString()?.matches(REPAIR_ATOMIC_TEMPORARY_NAME) == true
+
+private fun rejectProfileProjectionPreimages(projectDir: Path, profile: ReconstructionProfile) {
+    val root = projectDir.toAbsolutePath().normalize()
+    for (declarationId in listOf("confidence-evidence", "unresolved-evidence")) {
+        val declaredPath = root.resolve(profile.layout.declaration(declarationId).materialize()).normalize()
+        require(declaredPath.startsWith(root)) { "repair projection evidence path escapes the project" }
+        val targetName = requireNotNull(declaredPath.fileName).toString()
+        val temporary = declaredPath.resolveSibling(".$targetName.repair-atomic.tmp")
+        require(!Files.exists(temporary, LinkOption.NOFOLLOW_LINKS)) {
+            "repair audit retains a profile-declared atomic temporary: ${root.relativize(temporary)}"
+        }
+    }
+}
 
 private data class VerifiedAuditRepairState(
     val lineage: ArchivedRepairReleaseLineage,
@@ -70,6 +84,7 @@ private fun verifiedAuditRepairLineage(
     consumedBytes: Long,
     limits: ArchivalBundleLimits,
 ): VerifiedAuditRepairState {
+    rejectProfileProjectionPreimages(projectDir, profile)
     val digests = manifest.files.associate { it.path to it.sha256 }.toMutableMap()
     val sizes = manifestSizes.toMutableMap()
     val inventory = auditRepairInventory(projectDir, limits)

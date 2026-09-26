@@ -214,6 +214,9 @@ object ArchivalPackager {
                     return@forEach
                 }
                 validateRelativePath(relative)
+                require(!isRepairAtomicTemporary(Path.of(relative))) {
+                    "archive project contains a retained repair atomic temporary: $relative"
+                }
                 require(portablePaths.add(portablePathKey(relative))) {
                     "archive project contains a non-portable colliding path: $relative"
                 }
@@ -357,6 +360,9 @@ object ArchivalBundleVerifier {
                     require(!entry.isDirectory) { "archive contains directory entries" }
                     val normalizedName = entry.name
                     validateRelativePath(normalizedName)
+                    require(!isRepairAtomicTemporary(Path.of(normalizedName))) {
+                        "archive contains a retained repair atomic temporary: $normalizedName"
+                    }
                     require(normalizedName.split('/').size <= maximumPathDepth) { "archive path exceeds its depth bound" }
                     if (normalizedName != HASH_MANIFEST) rejectPrivateOrCachedPath(normalizedName)
                     require(normalizedName !in seen && seenPortable.add(portablePathKey(normalizedName))) {
