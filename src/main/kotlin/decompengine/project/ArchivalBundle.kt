@@ -493,7 +493,7 @@ private fun validateSourceManifest(
         payloadSizes = payload.mapValues { (_, item) -> item.size },
         manifest = manifest,
         reconstructionProfile = expectedProfile,
-        repairProfile = GeneratedCRepairIndexProfile.forProfile(expectedProfile),
+        repairProfile = ReconstructionAdapters.resolve(expectedProfile).repairIndexProfile(expectedProfile),
     )
     val reconstructionContributions = ReconstructionAcpEvidenceArchiveVerifier.verify(
         projectDir = projectDir,

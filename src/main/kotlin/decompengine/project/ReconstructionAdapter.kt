@@ -1,5 +1,6 @@
 package decompengine.project
 
+import decompengine.repair.RepairIndexProfile
 import java.nio.file.Path
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -11,6 +12,7 @@ internal interface ReconstructionAdapter {
     val archiveBuild: ArchiveBuildPolicy
     val behaviorBuild: BehaviorBuildPolicy
     val mvpPatchCompiler: MvpPatchCompilerPolicy
+    fun repairIndexProfile(profile: ReconstructionProfile): RepairIndexProfile
     fun build(
         projectDir: Path,
         profile: ReconstructionProfile,
