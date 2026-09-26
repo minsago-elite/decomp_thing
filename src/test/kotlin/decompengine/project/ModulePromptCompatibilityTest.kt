@@ -135,7 +135,10 @@ class ModulePromptCompatibilityTest {
             val reconstructor = BoundedLlmModuleReconstructor(
                 AgentHarness { _, _ -> error("must not execute") }, maximumContextCharacters = 4_096,
             )
-            val manifest = SourceTreeGenerator.generate(model(), project, profile = profile, reconstructor = reconstructor)
+            val manifest = SourceTreeGenerator.generate(
+                model(), project, profile = profile, reconstructor = reconstructor,
+                observedBehavior = "x".repeat(4_096),
+            )
             assertEquals(listOf("fn_alpha"), manifest.unresolvedImplementationIds)
             val module = DeterministicModulePlanner(layout = profile.layout).plan(model()).modules.single()
             val checkpoint = Json.parseToJsonElement(project.resolve(
@@ -153,8 +156,8 @@ class ModulePromptCompatibilityTest {
                 project.resolve("reports/confidence.json").readText(),
             ).jsonObject.getValue("sourceGenerationBudgetEvidence").jsonObject
             val moduleEvidence = generationEvidence.getValue("modules").jsonArray.single().jsonObject
-            assertTrue(moduleEvidence.getValue("promptCharacters").jsonPrimitive.content.toInt() > 1)
-            assertEquals("1", moduleEvidence.getValue("promptBudgetCharacters").jsonPrimitive.content)
+            assertTrue(moduleEvidence.getValue("promptCharacters").jsonPrimitive.content.toInt() > 4_096)
+            assertEquals("4096", moduleEvidence.getValue("promptBudgetCharacters").jsonPrimitive.content)
             assertEquals("unresolved", moduleEvidence.getValue("outcome").jsonPrimitive.content)
             assertEquals(0, ReconstructionAdapters.resolve(profile).build(project, profile).returnCode)
             val archive = qualificationRoot.resolve("${project.fileName}.zip")
