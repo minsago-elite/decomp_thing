@@ -32,6 +32,8 @@ import decompengine.project.SourceTreeGenerator
 import decompengine.project.sha256
 import decompengine.validation.BehaviorCaseResult
 import decompengine.validation.BehaviorComparator
+import decompengine.validation.BehaviorExecutionOutcomeException
+import decompengine.validation.BehaviorExecutionTimeoutException
 import decompengine.validation.BehaviorOutputLimitException
 import decompengine.validation.ProcessInput
 import decompengine.validation.ProcessOutput
@@ -725,6 +727,68 @@ class TraceGuidedRepairTest {
         ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
             assertEquals(null, graph.snapshot.pendingAttemptId)
             assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
+        }
+    }
+
+    @Test
+    fun `candidate exceeding selected behavior deadline is rejected and leaves graph reopenable`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val tempDir = Files.createTempDirectory(scratch, "repair-behavior-deadline-")
+        try {
+            val original = compileC(tempDir, "original", helloProgramSource("hello, world"))
+            val project = createProject(tempDir.resolve("project"), reconstructedSource = helloMainSource("wrong"))
+            val initial = MakeProjectBuilder.build(project).projectDir.resolve("build/reconstructed")
+            val parent = project.resolve("src/modules/reconstructed.c").readBytes()
+            val slowCandidate = """
+                #define _POSIX_C_SOURCE 200809L
+                #include <time.h>
+                int decomp_engine_main(void) {
+                    struct timespec delay = { .tv_sec = 10, .tv_nsec = 0 };
+                    nanosleep(&delay, 0);
+                    return 0;
+                }
+            """.trimIndent() + "\n"
+            val budget = RepairResourceBudget(
+                maximumBehaviorStdoutBytes = 1_024,
+                maximumBehaviorStderrBytes = 1_024,
+                maximumBehaviorOutputBytes = 2_048,
+                maximumBehaviorExecutionMillis = 2_000,
+            )
+
+            val failure = assertFails {
+                generatedCRepairLoop(
+                    RepairClientAgentHarness(
+                        FakeRepairClient(
+                            RepairResponse(
+                                "slow candidate",
+                                listOf(SourcePatch("src/modules/reconstructed.c", slowCandidate)),
+                            ),
+                        ),
+                    ),
+                    RepairHistory(project.resolve("reports/repair_history.json")),
+                    budget,
+                ).repairBehaviorMismatch(
+                    project,
+                    original,
+                    initial,
+                    listOf(ProcessInput("default")),
+                    project.resolve("reports"),
+                )
+            }
+            assertTrue(
+                failure is BehaviorExecutionTimeoutException || failure is BehaviorExecutionOutcomeException,
+                "unexpected behavior deadline failure: ${failure::class.simpleName}: ${failure.message}",
+            )
+            assertContentEquals(parent, project.resolve("src/modules/reconstructed.c").readBytes())
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
+                assertEquals(null, graph.snapshot.pendingAttemptId)
+                assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
+            }
+        } finally {
+            Files.walk(tempDir).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
         }
     }
 
