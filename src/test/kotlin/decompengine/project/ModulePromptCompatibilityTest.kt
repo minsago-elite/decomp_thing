@@ -174,7 +174,10 @@ class ModulePromptCompatibilityTest {
                         indexParent.resolve("candidate-acp-lineage-index-v2.json"),
                     )
                 }
-                assertTrue(failure.message.orEmpty().contains("no accepted first-class ACP contribution"))
+                assertTrue(
+                    failure.message.orEmpty().contains("no accepted first-class ACP contribution"),
+                    "unexpected candidate lineage rejection: ${failure.message}",
+                )
             }
         }
     }
