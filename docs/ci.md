@@ -28,6 +28,8 @@ It also rejects changes to checked frontend or contract inputs produced by those
 commands. CI restores npm's package-download cache keyed to the lockfile, while
 each job still installs clean `node_modules` and builds the current bundle. No
 generated bundle or `node_modules` tree is restored.
+Gradle jobs restore the shared master dependency cache on pull requests; only
+master writes new Gradle cache entries, avoiding one large cache per pull request.
 
 Run the frontend checks locally with the pinned tools:
 
