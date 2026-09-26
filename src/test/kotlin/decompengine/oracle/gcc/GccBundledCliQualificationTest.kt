@@ -132,6 +132,28 @@ class GccBundledCliQualificationTest {
         assertEquals(JsonPrimitive(request.modelSha256), exported.getValue("programModelSha256"))
         assertEquals(JsonPrimitive(request.functionCount), exported.getValue("functionCount"))
         if (resumed) {
+            val authorization = OracleJson.parseCanonical(records.getValue("interrupt-authorized.json"))
+                .jsonObject.getValue("authorization").jsonObject
+            val stoppedExecution = OracleJson.parseCanonical(records.getValue("interrupted-execution.json"))
+                .jsonObject.getValue("execution").jsonObject
+            val stoppedOutcome = stoppedExecution.getValue("outcome").jsonObject
+            assertEquals(authorization, stoppedExecution.getValue("interruptionAuthorization"))
+            assertEquals(
+                JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(authorization))),
+                stoppedExecution.getValue("interruptionAuthorizationSha256"),
+            )
+            assertEquals(
+                JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(stoppedOutcome))),
+                stoppedExecution.getValue("outcomeSha256"),
+            )
+            assertEquals(JsonPrimitive("OUTCOME"), stoppedOutcome.getValue("event"))
+            assertEquals(JsonPrimitive("INTERRUPTED"), stoppedOutcome.getValue("status"))
+            assertEquals(authorization.getValue("keeperPid"), stoppedOutcome.getValue("keeperPid"))
+            assertEquals(authorization.getValue("requestSha256"), stoppedOutcome.getValue("requestSha256"))
+            assertEquals(authorization.getValue("requestSha256"), stoppedExecution.getValue("requestSha256"))
+            val keeperPid = stoppedOutcome.getValue("keeperPid").jsonPrimitive.content.toLong()
+            val childPid = stoppedOutcome.getValue("childPid").jsonPrimitive.content.toLong()
+            assertTrue(keeperPid > 0 && childPid > 0 && childPid != keeperPid)
             val prefix = OracleJson.parseCanonical(records.getValue("interrupted-prefix-assessment.json")).jsonObject.getValue("assessment").jsonObject
             assertTrue(prefix.getValue("completed").jsonPrimitive.content.toLong() >= 512)
             assertEquals(prefix.getValue("completed"), exported.getValue("reused"))
