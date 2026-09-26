@@ -89,7 +89,7 @@ private fun auditRepairInventory(
             val selected = path.startsWith(repairRoot) || path == history ||
                 path.fileName.toString().endsWith(".validation.json")
             if (selected) {
-                candidates += path
+                candidates.add(path)
                 val relative = projectDir.relativize(path).toString().replace('\\', '/')
                 if (Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) && relative !in manifestPaths) {
                     additionalFiles = Math.addExact(additionalFiles, 1)
