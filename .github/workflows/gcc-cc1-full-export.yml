@@ -65,9 +65,6 @@ jobs:
             echo 'Cached cc1 artifacts failed the pinned manifest check; rebuilding the pair.'
             echo 'valid=false' >> "$GITHUB_OUTPUT"
           fi
-      - name: Prepare the exact GCC build environment after a cache miss
-        if: steps.cc1-artifact-cache.outputs.cache-hit != 'true' || steps.cached-cc1-verify.outputs.valid != 'true'
-        uses: docker/setup-buildx-action@v4
       - name: Rebuild only cc1 from the authenticated GCC source
         if: steps.cc1-artifact-cache.outputs.cache-hit != 'true' || steps.cached-cc1-verify.outputs.valid != 'true'
         run: |
