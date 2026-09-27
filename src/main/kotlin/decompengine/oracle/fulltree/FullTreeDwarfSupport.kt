@@ -632,6 +632,7 @@ internal object FullTreeDwarfForms {
         limits: FullTreeControlLimits,
         label: String,
         maximumCharacters: Int = 4096,
+        allowEmpty: Boolean = false,
     ): String {
         if (maximumCharacters !in 1..FULL_TREE_MAXIMUM_DWARF_STRING_CHARACTERS) {
             throw FullTreeControlException("$label character bound is invalid")
@@ -671,7 +672,7 @@ internal object FullTreeDwarfForms {
             throw FullTreeControlException("$label is not UTF-8", failure)
         }
         if (
-            decoded.isEmpty() || '\u0000' in decoded ||
+            (!allowEmpty && decoded.isEmpty()) || '\u0000' in decoded ||
             decoded.codePointCount(0, decoded.length) > maximumCharacters
         ) {
             throw FullTreeControlException(

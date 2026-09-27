@@ -595,7 +595,12 @@ internal class FunctionDwarfUnitRepository(
     retainedTags: Set<Long> = setOf(DW_TAG_SUBPROGRAM),
     private val contextForAttribute: (FullTreeDwarfAbbreviationAttribute) -> FullTreeDwarfFormContext =
         ::functionAttributeContext,
+    private val retainAllRecords: Boolean = false,
+    private val maximumAggregateUnitBytes: Long? = null,
 ) {
+    // Cumulative, not LRU-resident: callers may hold units through reference graphs after eviction.
+    // Charging every load also bounds copies reloaded while an earlier instance is still live.
+    private var aggregateUnitBytes = 0L
     private val info = sections.required(".debug_info")
     private val abbreviations = sections.required(".debug_abbrev")
     private val retainedTags = Collections.unmodifiableSet(retainedTags.toSet())
@@ -605,16 +610,30 @@ internal class FunctionDwarfUnitRepository(
     }
 
     fun load(header: FullTreeDwarfCompilationUnitHeader): FunctionDwarfUnit = cache[header.offset] ?: run {
+        val available = maximumAggregateUnitBytes?.let { maximum ->
+            val remaining = (maximum - aggregateUnitBytes) / 2L
+            if (remaining <= 0L) throw FullTreeControlException("DWARF repository exceeds aggregate loaded-unit byte bound")
+            remaining
+        }
         val index = FullTreeDwarfDies.readCompilationUnit(
             info,
             abbreviations,
             header,
             controlLimits,
-            producerLimits.dieLimits,
+            available?.let { producerLimits.dieLimits.copy(
+                maximumRetainedBytes = minOf(it, producerLimits.dieLimits.maximumRetainedBytes),
+            ) } ?: producerLimits.dieLimits,
             parseBudget,
             contextForAttribute = contextForAttribute,
-            retainRecord = { tag, depth -> depth == 0 || tag in retainedTags },
+            retainRecord = { tag, depth -> retainAllRecords || depth == 0 || tag in retainedTags },
         )
+        if (maximumAggregateUnitBytes != null) {
+            // The second half reserves room for unit-local child indexes and graph bookkeeping.
+            aggregateUnitBytes = Math.addExact(aggregateUnitBytes, Math.multiplyExact(index.modeledRetainedBytes, 2L))
+            if (aggregateUnitBytes > maximumAggregateUnitBytes) {
+                throw FullTreeControlException("DWARF repository exceeds aggregate loaded-unit byte bound")
+            }
+        }
         FunctionDwarfUnit(
             header,
             index,
@@ -708,6 +727,14 @@ internal class FunctionDwarfUnit(
     val sections: FullTreeDwarfSections,
     private val parseBudget: FullTreeDwarfParseBudget,
 ) {
+    private val childrenByParent: Map<Long?, List<FullTreeDwarfDieRecord>> by lazy {
+        index.recordsInPhysicalOrder.groupBy { it.parentOffset }
+    }
+
+    /** Physical direct children, indexed once while this bounded unit is retained. */
+    fun directChildren(record: FullTreeDwarfDieRecord): List<FullTreeDwarfDieRecord> =
+        childrenByParent[record.offset].orEmpty()
+
     val stringOffsetsBase: Long? = index.root.optionalNonNegativeLong(
         DW_AT_STR_OFFSETS_BASE,
         "DW_AT_str_offsets_base",
