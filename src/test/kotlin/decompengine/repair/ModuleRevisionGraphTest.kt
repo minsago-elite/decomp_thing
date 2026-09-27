@@ -2739,6 +2739,95 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `custom repair synchronizes source manifest without assuming relocated report semantics`() {
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val relocated = mapOf(
+            "confidence-evidence" to "reports/assessment/confidence.validation.json",
+            "unresolved-evidence" to "reports/assessment/unresolved.md",
+            "module-plan-evidence" to "reports/planning/modules.json",
+        )
+        val layout = ProjectLayoutProfile(base.layout.schemaVersion, base.layout.declarations.map { declaration ->
+            ProjectFileDeclaration(declaration.id, relocated[declaration.id] ?: declaration.pathTemplate,
+                declaration.roles, declaration.contentKind)
+        })
+        val reconstruction = ReconstructionProfile(base.schemaVersion, base.id, layout, base.budgets, base.adapterConfiguration)
+        val parent = Path.of("build", "custom-repair-manifest-fixtures").toAbsolutePath().createDirectories()
+        val directory = Files.createTempDirectory(parent, "case-")
+        val project = directory.resolve("project")
+        try {
+            SourceTreeGenerator.generate(
+                RecoveredProgramModel(inputSha256 = "a".repeat(64), functions = listOf(
+                    RecoveredFunction("fn_alpha", "alpha_run", 0x1000UL, "int alpha_run(void)",
+                        decompiledC = "/* ${"context".repeat(900)} */"),
+                )),
+                project,
+                reconstructor = BoundedLlmModuleReconstructor(
+                    AgentHarness { _, _ -> error("pre-dispatch fixture must not execute") }, maximumContextCharacters = 4096,
+                ),
+                profile = reconstruction,
+            )
+            val generatedPolicy = GeneratedCRepairIndexProfile.forProfile(reconstruction)
+            val customRepairIndexProfile = object : RepairIndexProfile by generatedPolicy {
+                override fun reconstructionProfile(): ReconstructionProfile? = null
+            }
+            assertEquals(null, customRepairIndexProfile.reconstructionProfile())
+            val relative = "src/modules/alpha.c"
+            val source = project.resolve(relative)
+            val candidate = source.readBytes() + "\n/* accepted custom-profile repair */\n".toByteArray()
+            val manifestPath = project.resolve("source_tree_manifest.json")
+            val originalManifest = manifestPath.readBytes()
+            val before = SourceTreeManifestReader.read(project, reconstruction)
+            assertTrue("fn_alpha" in before.unresolvedImplementationIds)
+            assertEquals(false, before.files.single { it.path == relative }.acceptedImplementation)
+            val reportBytes = relocated.values.associateWith { project.resolve(it).readBytes() }
+            val unownedTemporaries = listOf("reports/.confidence.json.repair-atomic.tmp", ".UNRESOLVED.md.repair-atomic.tmp")
+                .associateWith { "custom-owned temporary: $it\n".toByteArray() }
+            unownedTemporaries.forEach { (path, bytes) -> project.resolve(path).writeBytes(bytes) }
+
+            fun assertSourcePublication(acceptedId: String) {
+                val manifest = SourceTreeManifestReader.read(project, reconstruction)
+                val updated = manifest.files.single { it.path == relative }
+                assertEquals(sha256(candidate), updated.sha256)
+                assertEquals("repair-revision", updated.generator)
+                assertEquals(sha256("revision:$acceptedId".toByteArray(Charsets.UTF_8)), updated.promptSha256)
+                assertEquals(true, updated.acceptedImplementation)
+                assertFalse("fn_alpha" in manifest.unresolvedImplementationIds)
+                assertContentEquals(candidate, source.readBytes())
+                reportBytes.forEach { (path, bytes) ->
+                    assertContentEquals(bytes, project.resolve(path).readBytes())
+                    assertEquals(before.files.single { it.path == path }.sha256, manifest.files.single { it.path == path }.sha256)
+                }
+                unownedTemporaries.forEach { (path, bytes) -> assertContentEquals(bytes, project.resolve(path).readBytes()) }
+                assertFalse(project.resolve("reports/confidence.json").exists())
+                assertFalse(project.resolve("UNRESOLVED.md").exists())
+            }
+
+            val acceptedId = ModuleRevisionGraph.open(project, customRepairIndexProfile).use { graph ->
+                val attempt = graph.beginAttempt(listOf(relative))
+                graph.installCandidate(attempt, mapOf(relative to candidate))
+                val accepted = graph.accept(attempt, RepairEvidence("valid", "custom-profile candidate accepted"))
+                assertEquals(ModuleRevisionStatus.ACCEPTED, accepted.status)
+                assertEquals(accepted.id, graph.snapshot.headId)
+                assertSourcePublication(accepted.id)
+                accepted.id
+            }
+            val publishedManifest = manifestPath.readBytes()
+            // A durable accepted head can be reopened before its derived source manifest was written.
+            manifestPath.writeBytes(originalManifest)
+            ModuleRevisionGraph.open(project, customRepairIndexProfile).use { reopened ->
+                assertEquals(acceptedId, reopened.snapshot.headId)
+                assertSourcePublication(acceptedId)
+            }
+            assertContentEquals(publishedManifest, manifestPath.readBytes())
+            ModuleRevisionGraph.open(project, customRepairIndexProfile).use { }
+            assertContentEquals(publishedManifest, manifestPath.readBytes())
+            assertSourcePublication(acceptedId)
+        } finally {
+            Files.walk(directory).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
+        }
+    }
+
+    @Test
     fun `accepted fallback repair synchronizes relocated reports`() {
         val base = GeneratedCMakeReconstructionProfile.descriptor
         val relocated = mapOf(

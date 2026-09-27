@@ -3545,10 +3545,6 @@ internal class ModuleRevisionGraph private constructor(
                 "repair source manifest differs from the selected reconstruction profile"
             }
         }
-        val confidencePath = reconstructionProfile?.layout?.declaration("confidence-evidence")?.materialize()
-            ?: "reports/confidence.json"
-        val unresolvedPath = reconstructionProfile?.layout?.declaration("unresolved-evidence")?.materialize()
-            ?: "UNRESOLVED.md"
         // Keep displaced manifest-bound report preimages until both derived reports and the
         // source manifest are durably synchronized. A crash may interrupt that sequence.
         val resolvedImplementationIds = linkedSetOf<String>()
@@ -3597,8 +3593,12 @@ internal class ModuleRevisionGraph private constructor(
         if (remaining != null && remaining.size != unresolved.size) changed = true
         if (changed || repairedModules.isNotEmpty()) {
             val updatedRoot = LinkedHashMap(root)
-            val projectedFiles = if (remaining != null &&
+            // Custom index profiles still own accepted source publication, but only a declared
+            // reconstruction contract identifies the derived reports and their projection rules.
+            val projectedFiles = if (reconstructionProfile != null && remaining != null &&
                 (remaining.size != unresolved.size || repairedModules.isNotEmpty())) {
+                val confidencePath = reconstructionProfile.layout.declaration("confidence-evidence").materialize()
+                val unresolvedPath = reconstructionProfile.layout.declaration("unresolved-evidence").materialize()
                 // The confidence report is a derived view of the same unresolved implementation
                 // population. Keep its current projection and manifest digest synchronized so an
                 // accepted repair does not invalidate unrelated accepted modules at archive audit.
@@ -3677,8 +3677,7 @@ internal class ModuleRevisionGraph private constructor(
                 require(unresolvedText.indexOf(marker) == unresolvedText.lastIndexOf(marker) && marker in unresolvedText) {
                     "repair unresolved evidence has no unique implementation section"
                 }
-                val planPath = reconstructionProfile?.layout?.declaration("module-plan-evidence")?.materialize()
-                    ?: "reports/module_plan.json"
+                val planPath = reconstructionProfile.layout.declaration("module-plan-evidence").materialize()
                 val planSnapshot = readStableRegularFile(projectRoot, planPath,
                     state.budget.maximumIndexEvidenceBytes)
                 val planEntry = files.single { item ->
@@ -3707,8 +3706,8 @@ internal class ModuleRevisionGraph private constructor(
                         append("| Stable ID | Owning module | Evidence |\n|---|---|---|\n")
                         remainingIds.forEach { id ->
                             val moduleId = requireNotNull(owners[id]) { "repair unresolved owner is absent from the module plan: $id" }
-                            val evidencePath = reconstructionProfile?.layout?.declaration("module-evidence")
-                                ?.materialize(mapOf("module" to moduleId)) ?: "reports/modules/$moduleId.json"
+                            val evidencePath = reconstructionProfile.layout.declaration("module-evidence")
+                                .materialize(mapOf("module" to moduleId))
                             append("| `$id` | `$moduleId` | `$evidencePath` |\n")
                         }
                     }
@@ -3742,8 +3741,10 @@ internal class ModuleRevisionGraph private constructor(
                 "source_tree_manifest.json",
                 (JsonObject(updatedRoot).toString() + "\n").toByteArray(Charsets.UTF_8),
             )
-            stateStore.cleanupProjectEvidenceTemporary(confidencePath)
-            stateStore.cleanupProjectEvidenceTemporary(unresolvedPath)
+            if (reconstructionProfile != null) {
+                stateStore.cleanupProjectEvidenceTemporary(reconstructionProfile.layout.declaration("confidence-evidence").materialize())
+                stateStore.cleanupProjectEvidenceTemporary(reconstructionProfile.layout.declaration("unresolved-evidence").materialize())
+            }
         }
     }
 
