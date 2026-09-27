@@ -413,7 +413,7 @@ final class ExporterSemanticFingerprintV1 {
 // SEMANTIC_FINGERPRINT_TEST_END
 
 public class ExportProgramModel extends GhidraScript {
-    private static final int EXPORTER_VERSION = 12;
+    private static final int EXPORTER_VERSION = 13;
     private static final int DECOMPILE_TIMEOUT_SECONDS = 60;
     private static final int DECOMPILE_RETRY_TIMEOUT_SECONDS = 180;
     private static final int MAXIMUM_DECOMPILE_INSTRUCTIONS = 500_000;
@@ -1975,6 +1975,7 @@ public class ExportProgramModel extends GhidraScript {
                     Path record = functionsDirectory.resolve(id + ".json");
                     if (isAcceptedRecord(record)) continue;
                     if (monitor.isCancelled()) throw new InterruptedException("program-model export was cancelled");
+                    long functionStartedNanos = System.nanoTime();
                     writeProgress(progressPath, "decompiling", completed, total, recovered, partial, failed, reused, id);
                     FunctionExport exported = exportFunction(
                         function,
@@ -2009,7 +2010,8 @@ public class ExportProgramModel extends GhidraScript {
                     else if (exported.status.equals("partial")) partial++;
                     else failed++;
                     writeProgress(progressPath, "decompiling", completed, total, recovered, partial, failed, reused, null);
-                    println("program-model export " + completed + "/" + total + " " + id + " status=" + exported.status);
+                    println("program-model export " + completed + "/" + total + " " + id +
+                        " status=" + exported.status + " elapsedNanos=" + (System.nanoTime() - functionStartedNanos));
                 }
             } finally {
                 decompiler.dispose();

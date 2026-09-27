@@ -78,7 +78,7 @@ class GccBundledFullExportCaptureTest {
         for (mutate in listOf<(Path) -> Unit>(
             { path -> writeState(path, recoveryMode = "planning") },
             { path -> writeState(path, inputSha256 = "f".repeat(64)) },
-            { path -> writeState(path, exporterVersion = 11) },
+            { path -> writeState(path, exporterVersion = 12) },
             { path -> writeProgress(path, completed = 0, phase = "decompiling") },
             { path -> Files.writeString(path.resolve("reports/program_model.json.export/planning-batches/stray"), "x") },
         )) fixture { root, run, reports ->
@@ -722,7 +722,7 @@ class GccBundledFullExportCaptureTest {
         root: Path,
         recoveryMode: String = "full",
         inputSha256: String = inputSha(),
-        exporterVersion: Int = 12,
+        exporterVersion: Int = 13,
         language: String = "x86:LE:64:default",
         compilerSpec: String = "gcc",
     ) {

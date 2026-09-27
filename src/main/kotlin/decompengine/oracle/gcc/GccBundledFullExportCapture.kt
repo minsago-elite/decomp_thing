@@ -389,7 +389,7 @@ internal object GccBundledFullExportCapture {
             "schemaVersion", "exporterVersion", "exporterSha256", "analysisToolSha256", "recoveryMode",
             "inputSha256", "language", "compilerSpec", "semanticStateBinding",
         )) { "GCC full exporter state fields are invalid" }
-        require(number(root, "schemaVersion") == 2L && number(root, "exporterVersion") == 12L &&
+        require(number(root, "schemaVersion") == 2L && number(root, "exporterVersion") == 13L &&
             string(root, "recoveryMode") == "full" && root.getValue("semanticStateBinding") == JsonNull &&
             string(root, "inputSha256") == expectedInput && string(root, "exporterSha256") == expectedExporter &&
             string(root, "analysisToolSha256") == expectedAnalysisTool

@@ -1,5 +1,6 @@
 package decompengine.oracle.gcc
 
+import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
@@ -18,6 +19,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -63,164 +65,170 @@ class GccProductionFullExportQualificationTest {
             "--output", output.toString(),
             "--scratch", scratch.toString(),
         )
-        assertEquals(
-            0,
-            invokeInstalledGccCli(
-                arguments,
-                launcherEvidence,
-                timeoutSeconds = if (engine == "driver") 2100 else 9900,
-                installation = installation,
-                command = "gcc-engine-full-export",
-            ),
-            "installed GCC full-export CLI failed; inspect retained launcher evidence",
-        )
-        val launcherSummary = verifyInstalledCliEvidence(
-            launcherEvidence, arguments, installation, expectedExit = 0, command = "gcc-engine-full-export",
-        )
-
-        val resultBytes = readStable(output.resolve("result.json"), MAXIMUM_RESULT_BYTES)
-        val result = OracleJson.parseCanonical(resultBytes).jsonObject
-        assertEquals(RESULT_KEYS, result.keys)
-        assertEquals("gcc-bundled-cli-full-export-result-v2", result.requiredText("provider"))
-        assertEquals(2L, result.getValue("schemaVersion").jsonPrimitive.long)
-        assertFalse(result.getValue("complete").jsonPrimitive.boolean)
-        assertFalse(result.getValue("scored").jsonPrimitive.boolean)
-        assertFalse(result.getValue("releaseEligible").jsonPrimitive.boolean)
-
-        val operationId = result.requiredText("operationId")
-        assertTrue(operationId.matches(Regex("[a-f0-9]{64}")))
-        val journal = Path.of(result.requiredText("journal"))
-        assertEquals(output.resolve("journal").toRealPath(), journal.parent.toRealPath())
-        assertEquals(".gcc-bundled-operation-$operationId", journal.fileName.toString())
-        val intentBytes = readStable(journal.resolve("intent.json"), MAXIMUM_RECEIPT_BYTES)
-        assertEquals(OracleArtifacts.sha256(intentBytes), result.requiredText("requestSha256"))
-        val executionBytes = readStable(journal.resolve("execution.json"), MAXIMUM_RECEIPT_BYTES)
-        assertEquals(OracleArtifacts.sha256(executionBytes), result.requiredText("executionReceiptSha256"))
-        val assessmentBytes = readStable(journal.resolve("export-assessment.json"), MAXIMUM_RECEIPT_BYTES)
-        assertEquals(OracleArtifacts.sha256(assessmentBytes), result.requiredText("exportAssessmentReceiptSha256"))
-
-        val modelPath = Path.of(result.requiredText("programModel"))
-        assertTrue(modelPath.startsWith(scratch) && modelPath.toRealPath() == modelPath)
-        val modelBytes = result.getValue("programModelBytes").jsonPrimitive.long
-        val modelSha256 = result.requiredText("programModelSha256")
-        val functionCount = result.getValue("functionCount").jsonPrimitive.long
-        assertTrue(modelBytes > 0L && modelBytes <= MAXIMUM_MODEL_BYTES)
-        assertTrue(functionCount > 0L)
-
-        val bindingPath = Path.of(result.requiredText("structuralBinding"))
-        val manifestPath = Path.of(result.requiredText("outputTreeManifest"))
-        assertEquals(output, bindingPath.parent)
-        assertEquals(output, manifestPath.parent)
-        assertEquals("structural-full-export-binding.json", bindingPath.fileName.toString())
-        assertEquals(GccBundledFullExportCliResultV2.TREE_MANIFEST_NAME, manifestPath.fileName.toString())
-        val bindingBytes = readStable(bindingPath, MAXIMUM_BINDING_BYTES)
-        assertEquals(OracleArtifacts.sha256(bindingBytes), result.requiredText("structuralBindingSha256"))
-        val binding = OracleJson.parseCanonical(bindingBytes).jsonObject
-        assertEquals("gcc-compiler-engine-structural-full-export-binding-v2", binding.requiredText("provider"))
-        assertEquals(engine, binding.getValue("receiptLineage").jsonObject.requiredText("engineId"))
-        assertEquals(operationId, binding.getValue("receiptLineage").jsonObject.requiredText("operationId"))
-        assertEquals(result.requiredText("requestSha256"), binding.getValue("receiptLineage").jsonObject.requiredText("intentSha256"))
-        assertEquals(result.requiredText("executionReceiptSha256"), binding.getValue("receiptLineage").jsonObject.requiredText("executionReceiptSha256"))
-        assertEquals(result.requiredText("exportAssessmentReceiptSha256"), binding.getValue("receiptLineage").jsonObject.requiredText("exportAssessmentReceiptSha256"))
-        assertEquals(result.requiredText("outputTreeSha256"), binding.requiredText("outputTreeSha256"))
-
-        val structural = GccDriverStructuralInputsV1.load(profilePath.parent, engine)
-        assertEquals(structural.profileId, binding.requiredText("profileId"))
-        assertEquals(structural.version, binding.requiredText("profileVersion"))
-        assertEquals(structural.sourceRevision, binding.requiredText("sourceRevision"))
-        assertEquals(structural.compilerEngineProfileSha256, binding.requiredText("compilerEngineProfileSha256"))
-        assertEquals(structural.artifactManifestSha256, binding.requiredText("artifactManifestSha256"))
-        val input = binding.getValue("inputBinary").jsonObject
-        assertEquals(structural.strippedBinary.sha256, input.requiredText("sha256"))
-        assertEquals(structural.strippedBinary.bytes, input.getValue("bytes").jsonPrimitive.long)
-        val target = binding.getValue("targetDescriptor").jsonObject
-        assertEquals(structural.targetAbi.id, target.requiredText("id"))
-        assertEquals(structural.targetAbi.ghidraLanguage, target.requiredText("ghidraLanguage"))
-        assertEquals(structural.targetAbi.ghidraCompilerSpec, target.requiredText("ghidraCompilerSpec"))
-        assertEquals("0x${structural.imageBase.toString(16)}", target.requiredText("imageBase"))
-        assertEquals(structural.inputBinary.executableRangesSha256, target.requiredText("executableRangesSha256"))
-
-        val analysis = GccRetainedCompilerEngineProfile.open(profilePath).use { it.suite.analysis }
-        val exporter = binding.getValue("exporter").jsonObject
-        assertEquals(analysis.exporterSha256, exporter.requiredText("sha256"))
-        assertEquals("full", exporter.requiredText("recoveryMode"))
-        val exporterBytes = GccCompilerEngineProfiles::class.java
-            .getResourceAsStream("/ghidra_scripts/ExportProgramModel.java")!!.use {
-                it.readNBytes(4 * 1024 * 1024 + 1)
-            }
-        assertTrue(exporterBytes.size <= 4 * 1024 * 1024)
-        assertEquals(exporterBytes.size.toLong(), exporter.getValue("bytes").jsonPrimitive.long)
-        val archiveBinding = binding.getValue("ghidraArchive").jsonObject
-        assertEquals(analysis.ghidraArchive.sha256, archiveBinding.requiredText("sha256"))
-        assertEquals(analysis.ghidraArchive.bytes, archiveBinding.getValue("bytes").jsonPrimitive.long)
-
-        val programModel = binding.getValue("programModel").jsonObject
-        assertEquals(modelSha256, programModel.requiredText("sha256"))
-        assertEquals(modelBytes, programModel.getValue("bytes").jsonPrimitive.long)
-        assertEquals(functionCount, programModel.getValue("functionCount").jsonPrimitive.long)
-        val manifestBytes = readStable(manifestPath, MAXIMUM_TREE_MANIFEST_BYTES)
-        assertEquals(OracleArtifacts.sha256(manifestBytes), result.requiredText("outputTreeManifestSha256"))
-        val treeManifest = OracleJson.parseCanonical(manifestBytes, TREE_MANIFEST_LIMITS).jsonObject
-        assertEquals(result.requiredText("outputTreeSha256"), treeManifest.requiredText("outputTreeSha256"))
-        assertEquals(
-            binding.requiredText("outputTreeSha256"),
-            OracleArtifacts.sha256(OracleJson.canonicalBytes(treeManifest.getValue("tree").jsonObject, TREE_MANIFEST_LIMITS)),
-        )
-
-        val captured = privateDirectory(evidenceRoot.resolve("captured"))
-        copyStable(modelPath, captured.resolve("program_model.json"), MAXIMUM_MODEL_BYTES, modelBytes, modelSha256)
-        captureFailureDiagnostics(modelPath, treeManifest, binding.requiredText("outputTreeSha256"), captured)
-        publish(captured.resolve("result.json"), resultBytes)
-        publish(captured.resolve("structural-full-export-binding.json"), bindingBytes)
-        publish(captured.resolve(GccBundledFullExportCliResultV2.TREE_MANIFEST_NAME), manifestBytes)
-        publish(captured.resolve("intent.json"), intentBytes)
-        publish(captured.resolve("execution.json"), executionBytes)
-        publish(captured.resolve("export-assessment.json"), assessmentBytes)
-        publish(captured.resolve("launcher-summary.json"), OracleJson.canonicalBytes(launcherSummary))
-        val boundaryFields = if (engine == "driver") {
-            val observationName = GccDriverStructuralBoundaryEvidenceV1.OBSERVATION_NAME
-            val boundaryName = GccDriverStructuralBoundaryEvidenceV1.BINDING_NAME
-            val observationBytes = readStable(output.resolve(observationName),
-                GccDriverStructuralBoundaryEvidenceV1.MAXIMUM_OBSERVATION_BYTES)
-            val boundaryBytes = readStable(output.resolve(boundaryName),
-                GccDriverStructuralBoundaryEvidenceV1.MAXIMUM_BINDING_BYTES)
-            val capturedModel = readStable(captured.resolve("program_model.json"), MAXIMUM_MODEL_BYTES.toInt())
-            GccDriverStructuralBoundaryEvidenceV1.verifyRetained(
-                structural, bindingBytes, capturedModel, observationBytes, boundaryBytes,
+        withFailedCommandStdout(scratch, evidenceRoot) {
+            assertEquals(
+                0,
+                invokeInstalledGccCli(
+                    arguments,
+                    launcherEvidence,
+                    timeoutSeconds = if (engine == "driver") 2100 else 9900,
+                    installation = installation,
+                    command = "gcc-engine-full-export",
+                ),
+                "installed GCC full-export CLI failed; inspect retained launcher evidence",
             )
-            val detachedBinding = OracleJson.canonicalBytes(JsonObject(binding +
-                ("outputTreeSha256" to JsonPrimitive("0".repeat(64)))))
-            assertFailsWith<IllegalArgumentException>("boundary evidence must reject a substituted full-export tree") {
+            val launcherSummary = verifyInstalledCliEvidence(
+                launcherEvidence, arguments, installation, expectedExit = 0, command = "gcc-engine-full-export",
+            )
+
+            val resultBytes = readStable(output.resolve("result.json"), MAXIMUM_RESULT_BYTES)
+            val result = OracleJson.parseCanonical(resultBytes).jsonObject
+            assertEquals(RESULT_KEYS, result.keys)
+            assertEquals("gcc-bundled-cli-full-export-result-v2", result.requiredText("provider"))
+            assertEquals(2L, result.getValue("schemaVersion").jsonPrimitive.long)
+            assertFalse(result.getValue("complete").jsonPrimitive.boolean)
+            assertFalse(result.getValue("scored").jsonPrimitive.boolean)
+            assertFalse(result.getValue("releaseEligible").jsonPrimitive.boolean)
+
+            val operationId = result.requiredText("operationId")
+            assertTrue(operationId.matches(Regex("[a-f0-9]{64}")))
+            val journal = Path.of(result.requiredText("journal"))
+            assertEquals(output.resolve("journal").toRealPath(), journal.parent.toRealPath())
+            assertEquals(".gcc-bundled-operation-$operationId", journal.fileName.toString())
+            val intentBytes = readStable(journal.resolve("intent.json"), MAXIMUM_RECEIPT_BYTES)
+            assertEquals(OracleArtifacts.sha256(intentBytes), result.requiredText("requestSha256"))
+            val executionBytes = readStable(journal.resolve("execution.json"), MAXIMUM_RECEIPT_BYTES)
+            assertEquals(OracleArtifacts.sha256(executionBytes), result.requiredText("executionReceiptSha256"))
+            val assessmentBytes = readStable(journal.resolve("export-assessment.json"), MAXIMUM_RECEIPT_BYTES)
+            assertEquals(OracleArtifacts.sha256(assessmentBytes), result.requiredText("exportAssessmentReceiptSha256"))
+
+            val modelPath = Path.of(result.requiredText("programModel"))
+            assertTrue(modelPath.startsWith(scratch) && modelPath.toRealPath() == modelPath)
+            val modelBytes = result.getValue("programModelBytes").jsonPrimitive.long
+            val modelSha256 = result.requiredText("programModelSha256")
+            val functionCount = result.getValue("functionCount").jsonPrimitive.long
+            assertTrue(modelBytes > 0L && modelBytes <= MAXIMUM_MODEL_BYTES)
+            assertTrue(functionCount > 0L)
+
+            val bindingPath = Path.of(result.requiredText("structuralBinding"))
+            val manifestPath = Path.of(result.requiredText("outputTreeManifest"))
+            assertEquals(output, bindingPath.parent)
+            assertEquals(output, manifestPath.parent)
+            assertEquals("structural-full-export-binding.json", bindingPath.fileName.toString())
+            assertEquals(GccBundledFullExportCliResultV2.TREE_MANIFEST_NAME, manifestPath.fileName.toString())
+            val bindingBytes = readStable(bindingPath, MAXIMUM_BINDING_BYTES)
+            assertEquals(OracleArtifacts.sha256(bindingBytes), result.requiredText("structuralBindingSha256"))
+            val binding = OracleJson.parseCanonical(bindingBytes).jsonObject
+            assertEquals("gcc-compiler-engine-structural-full-export-binding-v2", binding.requiredText("provider"))
+            assertEquals(engine, binding.getValue("receiptLineage").jsonObject.requiredText("engineId"))
+            assertEquals(operationId, binding.getValue("receiptLineage").jsonObject.requiredText("operationId"))
+            assertEquals(result.requiredText("requestSha256"), binding.getValue("receiptLineage").jsonObject.requiredText("intentSha256"))
+            assertEquals(result.requiredText("executionReceiptSha256"), binding.getValue("receiptLineage").jsonObject.requiredText("executionReceiptSha256"))
+            assertEquals(result.requiredText("exportAssessmentReceiptSha256"), binding.getValue("receiptLineage").jsonObject.requiredText("exportAssessmentReceiptSha256"))
+            assertEquals(result.requiredText("outputTreeSha256"), binding.requiredText("outputTreeSha256"))
+
+            val structural = GccDriverStructuralInputsV1.load(profilePath.parent, engine)
+            assertEquals(structural.profileId, binding.requiredText("profileId"))
+            assertEquals(structural.version, binding.requiredText("profileVersion"))
+            assertEquals(structural.sourceRevision, binding.requiredText("sourceRevision"))
+            assertEquals(structural.compilerEngineProfileSha256, binding.requiredText("compilerEngineProfileSha256"))
+            assertEquals(structural.artifactManifestSha256, binding.requiredText("artifactManifestSha256"))
+            val input = binding.getValue("inputBinary").jsonObject
+            assertEquals(structural.strippedBinary.sha256, input.requiredText("sha256"))
+            assertEquals(structural.strippedBinary.bytes, input.getValue("bytes").jsonPrimitive.long)
+            val target = binding.getValue("targetDescriptor").jsonObject
+            assertEquals(structural.targetAbi.id, target.requiredText("id"))
+            assertEquals(structural.targetAbi.ghidraLanguage, target.requiredText("ghidraLanguage"))
+            assertEquals(structural.targetAbi.ghidraCompilerSpec, target.requiredText("ghidraCompilerSpec"))
+            assertEquals("0x${structural.imageBase.toString(16)}", target.requiredText("imageBase"))
+            assertEquals(structural.inputBinary.executableRangesSha256, target.requiredText("executableRangesSha256"))
+
+            val analysis = GccRetainedCompilerEngineProfile.open(profilePath).use { it.suite.analysis }
+            val exporter = binding.getValue("exporter").jsonObject
+            assertEquals(analysis.exporterSha256, exporter.requiredText("sha256"))
+            assertEquals("full", exporter.requiredText("recoveryMode"))
+            val exporterBytes = GccCompilerEngineProfiles::class.java
+                .getResourceAsStream("/ghidra_scripts/ExportProgramModel.java")!!.use {
+                    it.readNBytes(4 * 1024 * 1024 + 1)
+                }
+            assertTrue(exporterBytes.size <= 4 * 1024 * 1024)
+            assertEquals(exporterBytes.size.toLong(), exporter.getValue("bytes").jsonPrimitive.long)
+            val archiveBinding = binding.getValue("ghidraArchive").jsonObject
+            assertEquals(analysis.ghidraArchive.sha256, archiveBinding.requiredText("sha256"))
+            assertEquals(analysis.ghidraArchive.bytes, archiveBinding.getValue("bytes").jsonPrimitive.long)
+
+            val programModel = binding.getValue("programModel").jsonObject
+            assertEquals(modelSha256, programModel.requiredText("sha256"))
+            assertEquals(modelBytes, programModel.getValue("bytes").jsonPrimitive.long)
+            assertEquals(functionCount, programModel.getValue("functionCount").jsonPrimitive.long)
+            val manifestBytes = readStable(manifestPath, MAXIMUM_TREE_MANIFEST_BYTES)
+            assertEquals(OracleArtifacts.sha256(manifestBytes), result.requiredText("outputTreeManifestSha256"))
+            val treeManifest = OracleJson.parseCanonical(manifestBytes, TREE_MANIFEST_LIMITS).jsonObject
+            assertEquals(result.requiredText("outputTreeSha256"), treeManifest.requiredText("outputTreeSha256"))
+            assertEquals(
+                binding.requiredText("outputTreeSha256"),
+                OracleArtifacts.sha256(OracleJson.canonicalBytes(treeManifest.getValue("tree").jsonObject, TREE_MANIFEST_LIMITS)),
+            )
+
+            val captured = privateDirectory(evidenceRoot.resolve("captured"))
+            copyStable(modelPath, captured.resolve("program_model.json"), MAXIMUM_MODEL_BYTES, modelBytes, modelSha256)
+            captureFailureDiagnostics(modelPath, treeManifest, binding.requiredText("outputTreeSha256"), captured)
+            val diagnosticStdout = captureCommandStdout(executionBytes, scratch, captured)
+            publish(captured.resolve("result.json"), resultBytes)
+            publish(captured.resolve("structural-full-export-binding.json"), bindingBytes)
+            publish(captured.resolve(GccBundledFullExportCliResultV2.TREE_MANIFEST_NAME), manifestBytes)
+            publish(captured.resolve("intent.json"), intentBytes)
+            publish(captured.resolve("execution.json"), executionBytes)
+            publish(captured.resolve("export-assessment.json"), assessmentBytes)
+            publish(captured.resolve("launcher-summary.json"), OracleJson.canonicalBytes(launcherSummary))
+            val boundaryFields = if (engine == "driver") {
+                val observationName = GccDriverStructuralBoundaryEvidenceV1.OBSERVATION_NAME
+                val boundaryName = GccDriverStructuralBoundaryEvidenceV1.BINDING_NAME
+                val observationBytes = readStable(output.resolve(observationName),
+                    GccDriverStructuralBoundaryEvidenceV1.MAXIMUM_OBSERVATION_BYTES)
+                val boundaryBytes = readStable(output.resolve(boundaryName),
+                    GccDriverStructuralBoundaryEvidenceV1.MAXIMUM_BINDING_BYTES)
+                val capturedModel = readStable(captured.resolve("program_model.json"), MAXIMUM_MODEL_BYTES.toInt())
                 GccDriverStructuralBoundaryEvidenceV1.verifyRetained(
-                    structural, detachedBinding, capturedModel, observationBytes, boundaryBytes,
+                    structural, bindingBytes, capturedModel, observationBytes, boundaryBytes,
                 )
-            }
-            publish(captured.resolve(observationName), observationBytes)
-            publish(captured.resolve(boundaryName), boundaryBytes)
-            mapOf(
-                "boundaryObservationSha256" to JsonPrimitive(OracleArtifacts.sha256(observationBytes)),
-                "boundaryBindingSha256" to JsonPrimitive(OracleArtifacts.sha256(boundaryBytes)),
-            )
-        } else emptyMap()
-        val summary = JsonObject(mapOf(
-            "provider" to JsonPrimitive(if (engine == "driver") "gcc-driver-live-full-export-capture-v1" else "gcc-live-full-export-capture-v1"),
-            "engine" to JsonPrimitive(engine),
-            "operationId" to JsonPrimitive(operationId),
-            "requestSha256" to JsonPrimitive(result.requiredText("requestSha256")),
-            "programModelSha256" to JsonPrimitive(modelSha256),
-            "programModelBytes" to JsonPrimitive(modelBytes),
-            "functionCount" to JsonPrimitive(functionCount),
-            "outputTreeSha256" to JsonPrimitive(result.requiredText("outputTreeSha256")),
-            "complete" to JsonPrimitive(false),
-            "scored" to JsonPrimitive(false),
-            "benchmarkAccepted" to JsonPrimitive(false),
-            "releaseEligible" to JsonPrimitive(false),
-            "limitation" to JsonPrimitive(if (engine == "driver")
-                "live contained driver export and selected function-boundary replay only; structural identity admission and production scoring remain open"
-                else "live contained export only; independent identity replay and production scoring remain open"),
-        ) + boundaryFields)
-        publish(evidenceRoot.resolve("qualification.json"), OracleJson.canonicalBytes(summary))
-        println("Retained unscored live $engine full-export evidence at $captured (${modelBytes} model bytes, $functionCount functions)")
+                val detachedBinding = OracleJson.canonicalBytes(JsonObject(binding +
+                    ("outputTreeSha256" to JsonPrimitive("0".repeat(64)))))
+                assertFailsWith<IllegalArgumentException>("boundary evidence must reject a substituted full-export tree") {
+                    GccDriverStructuralBoundaryEvidenceV1.verifyRetained(
+                        structural, detachedBinding, capturedModel, observationBytes, boundaryBytes,
+                    )
+                }
+                publish(captured.resolve(observationName), observationBytes)
+                publish(captured.resolve(boundaryName), boundaryBytes)
+                mapOf(
+                    "boundaryObservationSha256" to JsonPrimitive(OracleArtifacts.sha256(observationBytes)),
+                    "boundaryBindingSha256" to JsonPrimitive(OracleArtifacts.sha256(boundaryBytes)),
+                )
+            } else emptyMap()
+            val summary = JsonObject(mapOf(
+                "provider" to JsonPrimitive(if (engine == "driver") "gcc-driver-live-full-export-capture-v1" else "gcc-live-full-export-capture-v1"),
+                "engine" to JsonPrimitive(engine),
+                "operationId" to JsonPrimitive(operationId),
+                "requestSha256" to JsonPrimitive(result.requiredText("requestSha256")),
+                "programModelSha256" to JsonPrimitive(modelSha256),
+                "programModelBytes" to JsonPrimitive(modelBytes),
+                "functionCount" to JsonPrimitive(functionCount),
+                "outputTreeSha256" to JsonPrimitive(result.requiredText("outputTreeSha256")),
+                "diagnosticStdoutBytes" to JsonPrimitive(diagnosticStdout.first),
+                "diagnosticStdoutSha256" to JsonPrimitive(diagnosticStdout.second),
+                "diagnosticStdoutAuthority" to JsonPrimitive("diagnostic-only"),
+                "complete" to JsonPrimitive(false),
+                "scored" to JsonPrimitive(false),
+                "benchmarkAccepted" to JsonPrimitive(false),
+                "releaseEligible" to JsonPrimitive(false),
+                "limitation" to JsonPrimitive(if (engine == "driver")
+                    "live contained driver export and selected function-boundary replay only; structural identity admission and production scoring remain open"
+                    else "live contained export only; independent identity replay and production scoring remain open"),
+            ) + boundaryFields)
+            publish(evidenceRoot.resolve("qualification.json"), OracleJson.canonicalBytes(summary))
+            println("Retained unscored live $engine full-export evidence at $captured (${modelBytes} model bytes, $functionCount functions)")
+        }
     }
 
     @Test
@@ -268,6 +276,169 @@ class GccProductionFullExportQualificationTest {
             captureFailureDiagnostics(modelPath, substitutedManifest, outputTreeSha256, rejectedReplacement)
         }
         assertFalse(Files.exists(rejectedReplacement.resolve("failure-diagnostics/$id.json")))
+    }
+
+    @Test
+    fun `command stdout capture is bounded to its retained control directory and reported size`(@TempDir root: Path) {
+        val scratch = privateDirectory(root.resolve("scratch"))
+        val control = privateDirectory(scratch.resolve("control"))
+        val reports = privateDirectory(control.resolve("reports"))
+        val stdout = "program-model export 1/1 fn_000000000081832b status=recovered elapsedNanos=123\n".toByteArray()
+        Files.write(reports.resolve("contained-command.stdout"), stdout, CREATE_NEW, WRITE)
+        fun execution(directory: Path, size: Int) = OracleJson.canonicalBytes(JsonObject(mapOf(
+            "execution" to JsonObject(mapOf(
+                "controlDirectory" to JsonPrimitive(directory.toString()),
+                "outcome" to JsonObject(mapOf("stdoutBytes" to JsonPrimitive(size))),
+            )),
+        )))
+        val captured = privateDirectory(root.resolve("captured"))
+        assertEquals(stdout.size.toLong() to OracleArtifacts.sha256(stdout),
+            captureCommandStdout(execution(control, stdout.size), scratch, captured))
+        assertTrue(Files.readAllBytes(captured.resolve("diagnostic-stdout.bin")).contentEquals(stdout))
+
+        assertFailsWith<IllegalArgumentException> {
+            captureCommandStdout(execution(control, stdout.size + 1), scratch, privateDirectory(root.resolve("wrong-size")))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            captureCommandStdout(execution(root, stdout.size), scratch, privateDirectory(root.resolve("wrong-root")))
+        }
+    }
+
+    @Test
+    fun `failed and timed out exports retain stdout without an execution receipt`(@TempDir root: Path) {
+        for ((name, failure) in listOf(
+            "nonzero" to AssertionError("installed cc1 full-export CLI failed"),
+            "deadline" to IllegalStateException("installed CLI exceeded outer qualification deadline"),
+        )) {
+            val scratch = privateDirectory(root.resolve("$name-scratch"))
+            val stdoutPath = failureStdoutFixture(scratch)
+            val stdout = "program-model export 1/2 elapsedNanos=123\n".toByteArray()
+            val evidence = privateDirectory(root.resolve("$name-evidence"))
+            // Keep a writer open: timeout diagnostics must not require a finalized execution receipt or read lease.
+            FileChannel.open(stdoutPath, CREATE_NEW, WRITE).use { writer ->
+                writer.write(ByteBuffer.wrap(stdout))
+                val observed = assertFailsWith<Throwable> {
+                    withFailedCommandStdout(scratch, evidence) { throw failure }
+                }
+                assertSame(failure, observed)
+            }
+            assertTrue(Files.readAllBytes(evidence.resolve("failed-command-stdout.bin")).contentEquals(stdout))
+            val diagnostic = OracleJson.parseCanonical(
+                Files.readAllBytes(evidence.resolve("failed-command-stdout.json")),
+            ).jsonObject
+            assertEquals(JsonPrimitive("diagnostic-only"), diagnostic["authority"])
+            assertEquals(JsonPrimitive(false), diagnostic["complete"])
+            assertEquals(JsonPrimitive(false), diagnostic["releaseEligible"])
+            assertFalse(Files.exists(evidence.resolve("qualification.json")))
+        }
+    }
+
+    @Test
+    fun `failure diagnostic capture cannot replace the original failure or follow stdout symlinks`(@TempDir root: Path) {
+        val scratch = privateDirectory(root.resolve("scratch"))
+        val stdoutPath = failureStdoutFixture(scratch)
+        val unrelated = root.resolve("unrelated")
+        Files.writeString(unrelated, "must not be copied", CREATE_NEW)
+        Files.createSymbolicLink(stdoutPath, unrelated)
+        val evidence = privateDirectory(root.resolve("evidence"))
+        val failure = AssertionError("original CLI failure")
+        val observed = assertFailsWith<AssertionError> {
+            withFailedCommandStdout(scratch, evidence) { throw failure }
+        }
+        assertSame(failure, observed)
+        assertEquals(1, observed.suppressed.size)
+        assertFalse(Files.exists(evidence.resolve("failed-command-stdout.bin")))
+    }
+
+    @Test
+    fun `failure diagnostic stdout is limited to its bounded prefix`(@TempDir root: Path) {
+        val scratch = privateDirectory(root.resolve("scratch"))
+        val stdoutPath = failureStdoutFixture(scratch)
+        FileChannel.open(stdoutPath, CREATE_NEW, WRITE).use {
+            it.position(MAXIMUM_DIAGNOSTIC_STDOUT_BYTES.toLong())
+            it.write(ByteBuffer.wrap(byteArrayOf(1)))
+        }
+        val evidence = privateDirectory(root.resolve("evidence"))
+        val failure = AssertionError("original CLI failure")
+        assertSame(failure, assertFailsWith<AssertionError> {
+            withFailedCommandStdout(scratch, evidence) { throw failure }
+        })
+        assertEquals(MAXIMUM_DIAGNOSTIC_STDOUT_BYTES.toLong(), Files.size(evidence.resolve("failed-command-stdout.bin")))
+        val diagnostic = OracleJson.parseCanonical(
+            Files.readAllBytes(evidence.resolve("failed-command-stdout.json")),
+        ).jsonObject
+        assertEquals(JsonPrimitive(true), diagnostic["captureLimitReached"])
+    }
+
+    private fun failureStdoutFixture(scratch: Path): Path {
+        val operationId = "a".repeat(64)
+        val lease = privateDirectory(scratch.resolve(".decomp-oracle-lease-$operationId"))
+        val run = privateDirectory(lease.resolve(".function-observation-run-$operationId"))
+        val control = privateDirectory(run.resolve("control-${"b".repeat(64)}"))
+        return privateDirectory(control.resolve("reports")).resolve("contained-command.stdout")
+    }
+
+    private inline fun <T> withFailedCommandStdout(scratch: Path, evidenceRoot: Path, operation: () -> T): T = try {
+        operation()
+    } catch (failure: Throwable) {
+        try {
+            captureFailedCommandStdout(scratch, evidenceRoot)
+        } catch (captureFailure: Throwable) {
+            failure.addSuppressed(captureFailure)
+        }
+        throw failure
+    }
+
+    /** A bounded diagnostic snapshot only: an outer timeout may leave no execution receipt or stopped writer. */
+    private fun captureFailedCommandStdout(scratch: Path, evidenceRoot: Path) {
+        require(scratch.isAbsolute && scratch.normalize() == scratch && scratch.toRealPath() == scratch)
+        LinuxFilesystemSyscalls.openRoot(scratch).use { root ->
+            val leaseName = LinuxFilesystemSyscalls.directoryEntryNames(root, 1).singleOrNull() ?: return
+            require(leaseName.matches(Regex("\\.decomp-oracle-lease-[a-f0-9]{64}")))
+            val operationId = leaseName.removePrefix(".decomp-oracle-lease-")
+            LinuxFilesystemSyscalls.openDirectoryAt(root.fd, leaseName).use { lease ->
+                LinuxFilesystemSyscalls.openDirectoryAt(lease.fd, ".function-observation-run-$operationId").use { run ->
+                    val controlName = LinuxFilesystemSyscalls.directoryEntryNames(run, 16)
+                        .filter { it.matches(Regex("control-[a-f0-9]{64}")) }.singleOrNull() ?: return
+                    LinuxFilesystemSyscalls.openDirectoryAt(run.fd, controlName).use { control ->
+                        LinuxFilesystemSyscalls.openDirectoryAt(control.fd, "reports").use { reports ->
+                            LinuxFilesystemSyscalls.openRegularFileAtOrNull(reports.fd, "contained-command.stdout")?.use { stdout ->
+                                val bytes = LinuxFilesystemSyscalls.readPrefix(stdout, MAXIMUM_DIAGNOSTIC_STDOUT_BYTES)
+                                if (bytes.isEmpty()) return
+                                publish(evidenceRoot.resolve("failed-command-stdout.bin"), bytes)
+                                publish(evidenceRoot.resolve("failed-command-stdout.json"), OracleJson.canonicalBytes(JsonObject(mapOf(
+                                    "provider" to JsonPrimitive("gcc-failed-command-stdout-snapshot-v1"),
+                                    "authority" to JsonPrimitive("diagnostic-only"),
+                                    "source" to JsonPrimitive("$leaseName/.function-observation-run-$operationId/$controlName/reports/contained-command.stdout"),
+                                    "capturedBytes" to JsonPrimitive(bytes.size),
+                                    "capturedSha256" to JsonPrimitive(OracleArtifacts.sha256(bytes)),
+                                    "captureLimitReached" to JsonPrimitive(bytes.size == MAXIMUM_DIAGNOSTIC_STDOUT_BYTES),
+                                    "complete" to JsonPrimitive(false),
+                                    "scored" to JsonPrimitive(false),
+                                    "releaseEligible" to JsonPrimitive(false),
+                                ))))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun captureCommandStdout(executionBytes: ByteArray, scratch: Path, captured: Path): Pair<Long, String> {
+        val execution = OracleJson.parseCanonical(executionBytes).jsonObject.getValue("execution").jsonObject
+        val control = Path.of(execution.requiredText("controlDirectory"))
+        require(control.isAbsolute && control.normalize() == control && control.startsWith(scratch) &&
+            control.toRealPath() == control
+        ) { "cc1 diagnostic stdout control directory is outside the retained scratch tree" }
+        val expectedBytes = execution.getValue("outcome").jsonObject.getValue("stdoutBytes").jsonPrimitive.long
+        require(expectedBytes in 1..MAXIMUM_DIAGNOSTIC_STDOUT_BYTES.toLong()) {
+            "cc1 diagnostic stdout exceeds its capture bound"
+        }
+        val stdout = readStable(control.resolve("reports/contained-command.stdout"), MAXIMUM_DIAGNOSTIC_STDOUT_BYTES)
+        require(stdout.size.toLong() == expectedBytes) { "cc1 diagnostic stdout differs from the execution byte count" }
+        publish(captured.resolve("diagnostic-stdout.bin"), stdout)
+        return stdout.size.toLong() to OracleArtifacts.sha256(stdout)
     }
 
     private fun captureFailureDiagnostics(
@@ -386,6 +557,7 @@ class GccProductionFullExportQualificationTest {
         const val MAXIMUM_FAILURE_DIAGNOSTICS = 1024
         const val MAXIMUM_FAILURE_DIAGNOSTIC_BYTES = 64 * 1024
         const val MAXIMUM_FAILURE_DIAGNOSTIC_TOTAL_BYTES = 8L * 1024 * 1024
+        const val MAXIMUM_DIAGNOSTIC_STDOUT_BYTES = 16 * 1024 * 1024
         const val COPY_BUFFER_BYTES = 1024 * 1024
         val RESULT_KEYS = setOf(
             "provider", "schemaVersion", "complete", "releaseEligible", "scored", "operationId", "requestSha256",
