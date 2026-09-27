@@ -593,6 +593,11 @@ internal object GccBundledFullExportCapture {
         ) { "GCC full failure record is malformed or is bound to another function" }
         val message = string(root, "message")
         require(message.isNotBlank()) { "GCC full failure message must not be blank" }
+        // appendFailure replaces CR/LF and applies Java String.trim before each retained phase.
+        // Match that ASCII/control trim precisely; other Unicode whitespace can occur in diagnostics.
+        require(message.none { it == '\r' || it == '\n' } && message == message.trim { it <= ' ' }) {
+            "GCC full failure message contradicts producer normalization"
+        }
         val maximumUnits = if (expectedStatus == "failed") MAXIMUM_FAILED_FAILURE_UNITS else MAXIMUM_PARTIAL_FAILURE_UNITS
         require(message.length <= maximumUnits) { "GCC full failure message exceeds its producer UTF-16 bound" }
         require(message.toByteArray(StandardCharsets.UTF_8).size <= MAXIMUM_FULL_EVIDENCE_RECORD_BYTES) {
