@@ -12,6 +12,18 @@ internal object GeneratedCReconstructionAdapter : ReconstructionAdapter {
     override val archiveBuild: ArchiveBuildPolicy = GeneratedCArchiveBuildPolicy
     override val behaviorBuild: BehaviorBuildPolicy = GeneratedCBehaviorBuildPolicy
     override val mvpPatchCompiler: MvpPatchCompilerPolicy = GeneratedCMvpPatchCompilerPolicy
+    override fun validateProfile(profile: ReconstructionProfile) { GeneratedCEvidenceCarrier.isSelected(profile) }
+    override fun evidenceOnlyProfile(profile: ReconstructionProfile): ReconstructionProfile = GeneratedCEvidenceCarrier.profile(profile)
+    override fun evidenceOnlyReconstructor(profile: ReconstructionProfile): ModuleReconstructor {
+        validateProfile(profile)
+        return GeneratedCEvidenceCarrier.reconstructor
+    }
+    override fun requireImplementationPurpose(profile: ReconstructionProfile, operation: String) =
+        GeneratedCEvidenceCarrier.requireImplementationPurpose(profile, operation)
+    override fun verifyArchivePurpose(projectDir: Path, profile: ReconstructionProfile, manifest: SourceTreeManifest,
+        payloadPaths: Set<String>) = GeneratedCEvidenceCarrier.verifyArchivePurpose(projectDir, profile, manifest, payloadPaths)
+    override fun validateArchivedCheckpoint(profile: ReconstructionProfile, source: GeneratedFileEvidence,
+        checkpoint: ArchivedModuleCheckpointProvenance) = GeneratedCEvidenceCarrier.validateArchivedCheckpoint(profile, source, checkpoint)
     override fun rendering(model: RecoveredProgramModel, plan: ModulePlan, profile: ReconstructionProfile): ProjectRendering =
         if (GeneratedCEvidenceCarrier.isSelected(profile)) GeneratedCEvidenceCarrier.rendering(model, plan, profile)
         else GeneratedCProjectRendering(model, plan)
@@ -20,6 +32,10 @@ internal object GeneratedCReconstructionAdapter : ReconstructionAdapter {
         GeneratedCEvidenceCarrier.requireWorkspacePurpose(projectDir, profile)
     }
     override fun requiresUnresolvedOutput(profile: ReconstructionProfile): Boolean = GeneratedCEvidenceCarrier.isSelected(profile)
+    override fun diagnosticPurposeDescription(profile: ReconstructionProfile): String {
+        require(GeneratedCEvidenceCarrier.isSelected(profile))
+        return GeneratedCEvidenceCarrier.PURPOSE
+    }
     override fun validateSourceContent(profile: ReconstructionProfile, bytes: ByteArray, label: String) {
         if (!GeneratedCEvidenceCarrier.isSelected(profile)) GeneratedCEvidenceCarrier.rejectCarrierContent(bytes, label)
     }

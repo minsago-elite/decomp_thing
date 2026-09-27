@@ -1,7 +1,7 @@
 package decompengine.validation
 
 import decompengine.project.writeProjectEvidenceAtomically
-import decompengine.project.GeneratedCEvidenceCarrier
+import decompengine.project.ReconstructionAdapters
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -479,7 +479,7 @@ class BehaviorComparator(
         fileInputs: Map<String, Map<String, Path>> = emptyMap(),
         expectedCorpusSha256: String? = null,
     ): BehaviorComparisonReport {
-        project?.let { GeneratedCEvidenceCarrier.requireImplementationPurpose(it.profile, "behavior evaluation") }
+        project?.let { ReconstructionAdapters.resolve(it.profile).requireImplementationPurpose(it.profile, "behavior evaluation") }
         require(expectedCorpusSha256 == null || expectedCorpusSha256.matches(Regex("[0-9a-f]{64}"))) {
             "expected behavior corpus digest must be a lowercase SHA-256"
         }

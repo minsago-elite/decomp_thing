@@ -11,6 +11,11 @@ internal interface ReconstructionAdapter {
     val archiveBuild: ArchiveBuildPolicy
     val behaviorBuild: BehaviorBuildPolicy
     val mvpPatchCompiler: MvpPatchCompilerPolicy
+    fun validateProfile(profile: ReconstructionProfile) = Unit
+    fun evidenceOnlyProfile(profile: ReconstructionProfile): ReconstructionProfile =
+        throw IllegalArgumentException("adapter does not support evidence-only reconstruction: ${profile.id}")
+    fun evidenceOnlyReconstructor(profile: ReconstructionProfile): ModuleReconstructor =
+        throw IllegalArgumentException("adapter does not support evidence-only reconstruction: ${profile.id}")
     fun build(
         projectDir: Path,
         profile: ReconstructionProfile,
@@ -19,13 +24,32 @@ internal interface ReconstructionAdapter {
     fun rendering(model: RecoveredProgramModel, plan: ModulePlan, profile: ReconstructionProfile): ProjectRendering
     fun admitGeneration(projectDir: Path, profile: ReconstructionProfile, reconstructor: ModuleReconstructor) = Unit
     fun requiresUnresolvedOutput(profile: ReconstructionProfile): Boolean = false
+    fun diagnosticPurposeDescription(profile: ReconstructionProfile): String = "diagnostic-only output"
+    fun requireImplementationPurpose(profile: ReconstructionProfile, operation: String) {
+        require(!requiresUnresolvedOutput(profile)) { "diagnostic-only output cannot authorize $operation" }
+    }
     fun validateSourceContent(profile: ReconstructionProfile, bytes: ByteArray, label: String) = Unit
+    fun verifyArchivePurpose(projectDir: Path, profile: ReconstructionProfile, manifest: SourceTreeManifest,
+        payloadPaths: Set<String>) = Unit
+    fun validateArchivedCheckpoint(profile: ReconstructionProfile, source: GeneratedFileEvidence,
+        checkpoint: ArchivedModuleCheckpointProvenance) = Unit
     fun modulePrompt(request: ModuleReconstructionRequest): ModulePromptContent
     fun defaultReconstructor(): ModuleReconstructor
     fun assess(module: PlannedModule, model: RecoveredProgramModel, generator: String, source: String): List<ModuleReconstructionIssue>
     fun assess(module: PlannedModule, model: RecoveredProgramModel, generator: String, source: String, profile: ReconstructionProfile): List<ModuleReconstructionIssue> = assess(module, model, generator, source)
     fun toolchainEvidence(profile: ReconstructionProfile): String
 }
+
+/** Parsed archive facts only; the selected adapter determines what authority they can establish. */
+internal data class ArchivedModuleCheckpointProvenance(
+    val schemaVersion: Long,
+    val generator: String,
+    val reconstructorIdentity: String,
+    val accepted: Boolean,
+    val compilationPresent: Boolean,
+    val executionEvidencePresent: Boolean,
+    val repairLineagePresent: Boolean,
+)
 
 internal data class ModulePromptContent(val objective: String, val evidence: String)
 
@@ -42,12 +66,13 @@ internal data class RenderedEntrypoint(val source: String, val entityIds: List<S
 /** Application-owned dispatch; profile data cannot register executable implementations. */
 internal object ReconstructionAdapters {
     fun resolve(profile: ReconstructionProfile): ReconstructionAdapter {
-        GeneratedCEvidenceCarrier.isSelected(profile)
-        return when (profile.id) {
+        val adapter = when (profile.id) {
         GeneratedCMakeReconstructionProfile.PROFILE_ID -> GeneratedCReconstructionAdapter
         GeneratedCNinjaReconstructionProfile.PROFILE_ID -> GeneratedCNinjaReconstructionAdapter
         else -> throw IllegalArgumentException("no reconstruction adapter registered for profile: ${profile.id}")
         }
+        adapter.validateProfile(profile)
+        return adapter
     }
 }
 

@@ -14,7 +14,8 @@ import decompengine.project.GeneratedCMakeReconstructionProfile
 import decompengine.project.ReconstructionProfiles
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
-import decompengine.project.GeneratedCEvidenceCarrier
+import decompengine.project.ReconstructionAdapters
+import decompengine.project.ReconstructionProfile
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.project.ModuleReconstructor
 import decompengine.agent.AgentHarness
@@ -113,7 +114,7 @@ private fun runReconstruct(args: List<String>) {
         onPhase = { System.err.println("reconstruction: ${it.name.lowercase().replace('_', ' ')}") },
     ).use { progress ->
         val strategy = try {
-            selectReconstructionStrategy(evidenceOnly, maximumContext, harnessOverride, environment, progress)
+            selectReconstructionStrategy(evidenceOnly, maximumContext, harnessOverride, environment, progress, profile)
         } catch (e: IllegalArgumentException) {
             progress.phase(AgentWorkflowPhase.FAILED)
             progress.close()
@@ -126,7 +127,7 @@ private fun runReconstruct(args: List<String>) {
         val result = try {
             ArchivalReconstructionService(
                 GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor,
-                profile = if (evidenceOnly) GeneratedCEvidenceCarrier.profile(profile) else profile, progress = progress,
+                profile = strategy.profile, progress = progress,
             ).reconstruct(binary, output)
         } catch (failure: Exception) {
             progress.phase(AgentWorkflowPhase.FAILED)
@@ -142,6 +143,7 @@ private fun runReconstruct(args: List<String>) {
 internal data class ReconstructionStrategy(
     val reconstructor: ModuleReconstructor,
     val harnessProvenance: String?,
+    val profile: ReconstructionProfile,
 )
 
 internal fun selectReconstructionStrategy(
@@ -150,12 +152,15 @@ internal fun selectReconstructionStrategy(
     harnessOverride: String?,
     environment: Map<String, String>,
     progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
+    profile: ReconstructionProfile = ReconstructionProfiles.default,
 ): ReconstructionStrategy {
     require(!evidenceOnly || harnessOverride == null) {
         "--harness cannot be used with --evidence-only"
     }
     if (evidenceOnly) {
-        return ReconstructionStrategy(GeneratedCEvidenceCarrier.reconstructor, null)
+        val selectedProfile = ReconstructionAdapters.resolve(profile).evidenceOnlyProfile(profile)
+        return ReconstructionStrategy(ReconstructionAdapters.resolve(selectedProfile).evidenceOnlyReconstructor(selectedProfile),
+            null, selectedProfile)
     }
 
     val effectiveEnvironment = withHarnessOverride(environment, harnessOverride)
@@ -168,6 +173,7 @@ internal fun selectReconstructionStrategy(
             progress = progress,
         ),
         selection.provenance.stableDescriptor,
+        profile,
     )
 }
 

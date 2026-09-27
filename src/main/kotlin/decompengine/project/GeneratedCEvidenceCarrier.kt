@@ -200,6 +200,34 @@ internal object GeneratedCEvidenceCarrier {
         return CarrierRendering(model, plan, profile)
     }
 
+    fun verifyArchivePurpose(projectDir: Path, profile: ReconstructionProfile, manifest: SourceTreeManifest,
+        payloadPaths: Set<String>) {
+        if (!isSelected(profile)) return
+        verifyProject(projectDir, profile, manifest)
+        require(manifest.files.none { it.generator == "repair-revision" } &&
+            payloadPaths.none { it.startsWith("reports/repair-revisions/") }) {
+            "evidence-carrier output cannot retain accepted repair lineage"
+        }
+    }
+
+    fun validateArchivedCheckpoint(profile: ReconstructionProfile, source: GeneratedFileEvidence,
+        checkpoint: ArchivedModuleCheckpointProvenance) {
+        if (isSelected(profile)) {
+            require(!checkpoint.repairLineagePresent && checkpoint.schemaVersion == 6L &&
+                source.acceptedImplementation == false && !checkpoint.accepted &&
+                source.generator == IDENTITY && checkpoint.generator == IDENTITY &&
+                checkpoint.reconstructorIdentity == IDENTITY &&
+                !checkpoint.compilationPresent && !checkpoint.executionEvidencePresent) {
+                "evidence-carrier checkpoint cannot claim implementation, compiler, ACP or repair authority: ${source.path}"
+            }
+        } else {
+            require(source.generator != IDENTITY && checkpoint.generator != IDENTITY &&
+                checkpoint.reconstructorIdentity != IDENTITY) {
+                "evidence-carrier identity cannot authorize an implementation checkpoint: ${source.path}"
+            }
+        }
+    }
+
     /** Called by both direct audit and archive verification, independently of mutable generator labels. */
     fun verifyProject(projectDir: Path, profile: ReconstructionProfile, manifest: SourceTreeManifest) {
         require(isSelected(profile))

@@ -204,7 +204,7 @@ object ArchivalProjectAuditor {
         val adapter = ReconstructionAdapters.resolve(profile)
         val unresolvedOutput = adapter.requiresUnresolvedOutput(profile)
         val requiredCorpora = snapshotRequiredBehaviorCorpora(requiredCorpusSha256)
-        require(!unresolvedOutput || requiredCorpora.isEmpty()) { "evidence-carrier output cannot qualify behavior corpora" }
+        require(!unresolvedOutput || requiredCorpora.isEmpty()) { "diagnostic-only output cannot qualify behavior corpora" }
         val maximumFileBytes = minOf(effectiveLimits.maximumFileBytes, Int.MAX_VALUE.toLong() - 1L)
         val manifestSnapshot = readStableRegularFile(projectDir, "source_tree_manifest.json", maximumFileBytes)
         val manifest = SourceTreeManifestReader.parse(manifestSnapshot.bytes.decodeToString(throwOnInvalidSequence = true), profile)
@@ -540,7 +540,7 @@ object ArchivalProjectAuditor {
             }
         }
         val behaviorPaths = discoverBehaviorReports()
-        require(!unresolvedOutput || behaviorPaths.isEmpty()) { "evidence-carrier output cannot retain behavior qualification reports" }
+        require(!unresolvedOutput || behaviorPaths.isEmpty()) { "diagnostic-only output cannot retain behavior qualification reports" }
         val problems = linkedMapOf<String, String>()
         val verifiedBehavior = linkedMapOf<String, Boolean>()
         val behaviorHashes = linkedMapOf<String, String>()

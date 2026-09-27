@@ -51,6 +51,10 @@
       "reason": "Generated-C declaration normalization and C identifier rendering."
     },
     {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCEvidenceCarrier.kt",
+      "reason": "Closed generated-C diagnostic declaration policy, fixed reconstructor, deterministic carrier rendering and provenance checks, reached through generic reconstruction adapter hooks."
+    },
+    {
       "path": "src/main/kotlin/decompengine/project/GeneratedCEvidenceModuleReconstructor.kt",
       "reason": "Generated-C recovered-source and explicitly unresolved placeholder rendering."
     },
