@@ -134,8 +134,8 @@ internal object GccBundledFullExportCapture {
     private val FUNCTION_ARRAY_FIELDS = setOf("calls", "referencedGlobals", "strings")
     private const val TYPE_C_NAME = "[A-Za-z_][A-Za-z0-9_]*"
     private val COMPOSITE_TYPE = Regex("typedef struct ($TYPE_C_NAME) \\{ unsigned char _data\\[([1-9][0-9]{0,9})]; } ($TYPE_C_NAME);")
-    private val ENUM_TYPE = Regex("typedef int $TYPE_C_NAME;")
-    private val SCALAR_TYPE = Regex("typedef unsigned char $TYPE_C_NAME\\[([1-9][0-9]{0,9})];")
+    private val ENUM_TYPE = Regex("typedef int ($TYPE_C_NAME);")
+    private val SCALAR_TYPE = Regex("typedef unsigned char ($TYPE_C_NAME)\\[([1-9][0-9]{0,9})];")
     // appendFailure retains at most 2,048 UTF-16 units plus "..." for each phase.
     // Calls, data references and types contribute three phases; only failed decompilation adds a fourth.
     private const val MAXIMUM_FAILURE_PHASE_UNITS = 2048
@@ -572,15 +572,61 @@ internal object GccBundledFullExportCapture {
         }
         val suffix = declaration.substring(pathEnd + " */ ".length)
         val composite = COMPOSITE_TYPE.matchEntire(suffix)
+        val enumeration = ENUM_TYPE.matchEntire(suffix)
         val scalar = SCALAR_TYPE.matchEntire(suffix)
-        // Ghidra paths concatenate a category and a raw name, which can itself contain '/'.
-        // The retained path therefore cannot uniquely recover the producer's sanitized C name.
-        require(ENUM_TYPE.matches(suffix) ||
+        require(enumeration != null ||
             (composite != null && composite.groupValues[1] == composite.groupValues[3] &&
                 composite.groupValues[2].toIntOrNull()?.let { it > 0 } == true) ||
-            (scalar != null && scalar.groupValues[1].toIntOrNull()?.let { it > 0 } == true)
+            (scalar != null && scalar.groupValues[2].toIntOrNull()?.let { it > 0 } == true)
         ) { "GCC full type declaration suffix differs from the exporter typedef templates" }
+        val declaredName = checkNotNull(composite ?: enumeration ?: scalar).groupValues[1]
+        require(hasProducerTypeName(path.content, declaredName, expectedId)) {
+            "GCC full type declaration name differs from retained Ghidra path"
+        }
         requirePrettyExporterRecord(bytes, root, "type", TYPE_FIELDS)
+    }
+
+    /**
+     * DataTypePath appends the raw type name, so slash-containing names permit several splits.
+     * CategoryPath escapes slashes but not existing backslashes; an escaped trailing slash can
+     * itself be the type boundary. Keep every renderable prefix without unescaping the raw suffix.
+     */
+    private fun hasProducerTypeName(path: String, declaredName: String, id: String): Boolean {
+        if (!path.startsWith('/')) return false
+        // Sanitization emits one ASCII character per Unicode code point. Therefore only one raw
+        // suffix can have this literal sanitized name's length; compare it once, in reverse.
+        var literalStart = path.length
+        for (index in declaredName.indices.reversed()) {
+            if (literalStart == 0) { literalStart = -1; break }
+            val point = path.codePointBefore(literalStart)
+            val sanitized = when (point) {
+                in 'A'.code..'Z'.code, in 'a'.code..'z'.code, in '0'.code..'9'.code, '_'.code -> point.toChar()
+                else -> '_'
+            }
+            if (sanitized != declaredName[index]) { literalStart = -1; break }
+            literalStart -= Character.charCount(point)
+        }
+        val recovered = declaredName == "recovered_$id"
+        fun matches(start: Int): Boolean = start == literalStart ||
+            (recovered && (start == path.length || path[start] in '0'..'9'))
+        if (matches(1)) return true // Root category.
+        var nonblankComponent = false
+        for (index in 1 until path.length) {
+            val character = path[index]
+            if (character == '/') {
+                // DataTypePath adds a delimiter only if the category does not already end in '/'.
+                if (nonblankComponent && path[index - 1] != '/' && matches(index + 1)) return true
+                // Keeping a backslash/slash pair within a category component preserves every
+                // possible prefix: splitting it cannot rescue an otherwise blank component.
+                if (path[index - 1] != '\\') {
+                    if (!nonblankComponent) return false
+                    nonblankComponent = false
+                }
+            } else if (!Character.isWhitespace(character)) {
+                nonblankComponent = true
+            }
+        }
+        return false
     }
 
     /** Matches ExportProgramModel.json(path), with every slash escaped for a C comment. */
