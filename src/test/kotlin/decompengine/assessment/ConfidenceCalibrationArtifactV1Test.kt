@@ -136,6 +136,26 @@ class ConfidenceCalibrationArtifactV1Test {
     }
 
     @Test
+    fun everyBandReportsItsFitProbabilityAndHeldOutOracleErrorRate() {
+        val artifact = load(threeBandDocument())
+        val observations = listOf(
+            Triple(0.399, 0.9, 0.1),
+            Triple(0.4, 0.8, 0.15),
+            Triple(1.0, 0.7, 0.2),
+        )
+
+        observations.forEach { (score, expectedProbability, expectedErrorRate) ->
+            val result = artifact.interpret(score, scope())
+
+            assertEquals("calibrated", result.calibrationStatus, "score $score")
+            assertEquals(expectedProbability, assertNotNull(result.calibratedProbability), 1e-12, "score $score")
+            assertEquals(expectedErrorRate, assertNotNull(result.empiricalErrorRate), 1e-12, "score $score")
+            assertNotNull(result.validationErrorRate95, "score $score")
+            assertNull(result.reason, "score $score")
+        }
+    }
+
+    @Test
     fun schemaIntegerValuesWithDecimalNotationAreAcceptedExactly() {
         val original = document()
         val support = original.getValue("supportPolicy") as JsonObject
@@ -171,6 +191,40 @@ class ConfidenceCalibrationArtifactV1Test {
         ))
         return JsonObject(document() + ("bands" to JsonArray(listOf(first, second))))
     }
+
+    private fun threeBandDocument(): JsonObject {
+        val bands = listOf(
+            calibrationBand(0.0, 0.4, includesUpperBound = false, fitErrors = 1, validationErrors = 2),
+            calibrationBand(0.4, 0.7, includesUpperBound = false, fitErrors = 2, validationErrors = 3),
+            calibrationBand(0.7, 1.0, includesUpperBound = true, fitErrors = 3, validationErrors = 4),
+        )
+        return JsonObject(document(
+            fitSamples = 30,
+            fitErrors = 0,
+            fitRate = 0.0,
+            validationSamples = 60,
+            validationErrors = 0,
+            validationRate = 0.0,
+        ) + ("bands" to JsonArray(bands)))
+    }
+
+    private fun calibrationBand(
+        lowerInclusive: Double,
+        upperExclusive: Double,
+        includesUpperBound: Boolean,
+        fitErrors: Int,
+        validationErrors: Int,
+    ) = JsonObject(mapOf(
+        "lowerInclusive" to JsonPrimitive(lowerInclusive),
+        "upperExclusive" to JsonPrimitive(upperExclusive),
+        "includesUpperBound" to JsonPrimitive(includesUpperBound),
+        "fitSamples" to JsonPrimitive(10),
+        "fitErrors" to JsonPrimitive(fitErrors),
+        "fitErrorRate" to JsonPrimitive(fitErrors / 10.0),
+        "validationSamples" to JsonPrimitive(20),
+        "validationErrors" to JsonPrimitive(validationErrors),
+        "validationErrorRate" to JsonPrimitive(validationErrors / 20.0),
+    ))
 
     private fun assertUncalibrated(result: ConfidenceCalibrationEvaluationV1, reason: String) {
         assertEquals("uncalibrated", result.calibrationStatus)
