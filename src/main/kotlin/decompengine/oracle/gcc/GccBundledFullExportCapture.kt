@@ -8,6 +8,7 @@ import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import java.nio.charset.StandardCharsets
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -226,6 +227,8 @@ internal object GccBundledFullExportCapture {
         }
         val entries = linkedMapOf<String, JsonObject>()
         val functionStatuses = linkedMapOf<String, String>()
+        val globalIds = globalNames.mapTo(hashSetOf()) { it.removeSuffix(".json") }
+        val sourceAddresses = hashSetOf<String>()
         fun addFiles(prefix: String, directory: LinuxDescriptor, names: List<String>, maximum: Int,
             includedInModel: Boolean = false) {
             require(entries.size + names.size <= MAXIMUM_SIDECAR_FILES) {
@@ -235,11 +238,9 @@ internal object GccBundledFullExportCapture {
                 val bytes = capture.read(directory, name, maximum)
                 when (prefix) {
                     "functions" -> functionStatuses[name.removeSuffix(".json")] =
-                        requireFullFunctionRecord(bytes, name.removeSuffix(".json"))
-                    "globals" -> requireFullGlobalRecord(bytes, name.removeSuffix(".json"))
-                    "types" -> requireFullNamedRecord(bytes, name.removeSuffix(".json"), "partial", setOf(
-                        "id", "declaration", "sourceAddress", "extractionStatus", "recoveryAssessment",
-                    ))
+                        requireFullFunctionRecord(bytes, name.removeSuffix(".json"), globalIds, sourceAddresses)
+                    "globals" -> sourceAddresses += requireFullGlobalRecord(bytes, name.removeSuffix(".json"))
+                    "types" -> requireFullTypeRecord(bytes, name.removeSuffix(".json"), sourceAddresses)
                     "failures" -> requireFullFailureRecord(
                         bytes, name.removeSuffix(".json"), functionStatuses[name.removeSuffix(".json")],
                     )
@@ -406,7 +407,12 @@ internal object GccBundledFullExportCapture {
         ) { "GCC full program model does not have the exporter-bound input envelope" }
     }
 
-    private fun requireFullFunctionRecord(bytes: ByteArray, expectedId: String): String {
+    private fun requireFullFunctionRecord(
+        bytes: ByteArray,
+        expectedId: String,
+        globalIds: Set<String>,
+        sourceAddresses: MutableSet<String>,
+    ): String {
         val root = strictRecordObject(bytes, MAXIMUM_FULL_FUNCTION_RECORD_BYTES, "function record")
         val status = string(root, "extractionStatus")
         require(root.keys == setOf(
@@ -416,18 +422,46 @@ internal object GccBundledFullExportCapture {
             status in setOf("recovered", "partial", "failed") &&
             string(root, "recoveryAssessment") == "unassessed"
         ) { "GCC full function record is malformed or is bound to another identity" }
+        val source = root.getValue("decompiledC")
+        require(if (status == "failed") source == JsonNull else source is JsonPrimitive && source.isString) {
+            "GCC full function decompiledC contradicts its extraction status"
+        }
+        val references = root["referencedGlobals"] as? JsonArray
+            ?: throw IllegalArgumentException("GCC full function referencedGlobals must be an array")
+        require(references.all { it is JsonPrimitive && it.isString && it.content in globalIds }) {
+            "GCC full function referencedGlobals contains an absent or invalid global identity"
+        }
+        val address = string(root, "address")
+        require(canonicalAddress(address) && expectedId == "fn_" + address.removePrefix("0x").padStart(16, '0')) {
+            "GCC full function record identity does not match its canonical 64-bit address"
+        }
+        sourceAddresses += address
         return status
     }
 
-    private fun requireFullGlobalRecord(bytes: ByteArray, expectedId: String) {
+    private fun requireFullGlobalRecord(bytes: ByteArray, expectedId: String): String {
         val root = requireFullNamedRecord(bytes, expectedId, "recovered", setOf(
             "id", "name", "address", "type", "initializer", "extractionStatus", "recoveryAssessment",
         ))
         val address = string(root, "address")
-        require(address.length in 3..18 && address.matches(Regex("0x(?:0|[1-9a-f][0-9a-f]*)")) &&
-            expectedId == "global_" + address.removePrefix("0x").padStart(16, '0')
-        ) { "GCC full global record identity does not match its canonical 64-bit address" }
+        require(canonicalAddress(address) && expectedId == "global_" + address.removePrefix("0x").padStart(16, '0')) {
+            "GCC full global record identity does not match its canonical 64-bit address"
+        }
+        return address
     }
+
+    private fun requireFullTypeRecord(bytes: ByteArray, expectedId: String, sourceAddresses: Set<String>) {
+        val root = requireFullNamedRecord(bytes, expectedId, "partial", setOf(
+            "id", "declaration", "sourceAddress", "extractionStatus", "recoveryAssessment",
+        ))
+        val address = string(root, "sourceAddress")
+        require(canonicalAddress(address) && address in sourceAddresses) {
+            "GCC full type sourceAddress is not a captured function or global address"
+        }
+    }
+
+    private fun canonicalAddress(address: String): Boolean =
+        address.length in 3..18 && address.matches(Regex("0x(?:0|[1-9a-f][0-9a-f]*)"))
 
     private fun requireFullNamedRecord(
         bytes: ByteArray,
