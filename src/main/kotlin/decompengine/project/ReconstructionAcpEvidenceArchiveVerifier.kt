@@ -117,6 +117,18 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         }
         val model = ProgramModelJson.read(modelBytes.decodeToString(throwOnInvalidSequence = true))
         require(model.inputSha256 == manifest.inputSha256) { "program model input differs from its source manifest" }
+        val promptInputs by lazy {
+            val planPath = profile.layout.declaration("module-plan-evidence").materialize()
+            val planBound = minOf(profile.budgets.archiveMaximumFileBytes, 512L * 1024 * 1024).toInt()
+            val planBytes = readBoundedRegularFile(projectDir, planPath, planBound)
+            requirePayloadIdentity(planPath, planBytes, payloadSha256, payloadSizes)
+            require(sha256(planBytes) == manifestByPath.getValue(planPath).sha256) {
+                "module plan differs from its source manifest"
+            }
+            val plan = ModulePlanJson.readCanonical(planBytes, planBound)
+            ModulePlanJson.requireExactOwnership(plan, model, profile.layout, profile.budgets.maximumFunctionsPerModule)
+            ProfileModulePromptInputs(model, plan, profile)
+        }
         val expectedExecutionPaths = linkedSetOf<String>()
         val acceptedContributions = mutableListOf<VerifiedCandidateAcpContribution>()
 
@@ -182,6 +194,26 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                         ))
                     ) {
                         "pre-dispatch fallback prompt budget differs from the reconstruction profile or reconstructor identity: $moduleId"
+                    }
+                    val request = promptInputs.request(moduleId, projectDir, checkpoint.preDispatchObservedBehavior)
+                    require(request.module.sourcePath == source.path &&
+                        (request.module.functionIds + request.module.globalIds).sorted() == source.entityIds) {
+                        "pre-dispatch fallback differs from the retained module plan: $moduleId"
+                    }
+                    val prompt = modulePromptEvidence(request).text
+                    require(prompt.length.toLong() == checkpoint.promptCharacters &&
+                        sha256(prompt.toByteArray(StandardCharsets.UTF_8)) == checkpoint.promptSha256 &&
+                        promptInputs.fingerprint(request) == checkpoint.fingerprint) {
+                        "pre-dispatch fallback prompt differs from independently rendered inputs: $moduleId"
+                    }
+                    // Retained observation text is caller input, not proof of historical dispatch.
+                    // Even a forged, padded observation must never exempt returned agent code.
+                    // Only the profile's deterministic unresolved stub (or its repair root) qualifies.
+                    val fallbackBytes = (ReconstructionAdapters.resolve(profile).defaultReconstructor()
+                        .reconstruct(request).source.trimEnd() + "\n").toByteArray(StandardCharsets.UTF_8)
+                    require(sha256(fallbackBytes) == (repairedSource?.rootSha256 ?: source.sha256) &&
+                        fallbackBytes.size.toLong() == (repairedSource?.rootBytes ?: requirePayloadSize(source.path, payloadSizes))) {
+                        "pre-dispatch fallback source differs from the profile-produced unresolved stub: $moduleId"
                     }
                     require(checkpoint.hasNoExecutionEvidence()) {
                         "unresolved agent fallback retains ACP execution evidence: $moduleId"
@@ -347,7 +379,8 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             else -> CHECKPOINT_V4_FIELDS
         }
         require(root.keys == expectedFields || schemaVersion == 6L &&
-            root.keys == expectedFields + "workflowOrigin") {
+            (root.keys == expectedFields + "workflowOrigin" ||
+                root.keys == expectedFields + setOf("workflowOrigin", "preDispatchObservedBehavior"))) {
             "module checkpoint has unsupported fields: $moduleId"
         }
         if (schemaVersion >= 6L) {
@@ -357,7 +390,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 "module checkpoint input identity differs from the archived model or profile: $moduleId"
             }
         }
-        root.requiredSha256("fingerprint", "module checkpoint")
+        val fingerprint = root.requiredSha256("fingerprint", "module checkpoint")
         val sourceSha256 = root.requiredSha256("sourceSha256", "module checkpoint")
         val generator = root.requiredString("generator", "module checkpoint")
         val workflowOrigin = root["workflowOrigin"]?.requiredString("module checkpoint workflow origin")
@@ -366,6 +399,13 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             "pre-dispatch-context-budget-fallback")) {
             "module checkpoint workflow origin is invalid: $moduleId"
         }
+        val preDispatchObservedBehavior = if ("preDispatchObservedBehavior" in root) {
+            require(workflowOrigin == "pre-dispatch-context-budget-fallback") {
+                "retained pre-dispatch prompt input requires an undispatched fallback: $moduleId"
+            }
+            root.optionalString("preDispatchObservedBehavior", "module checkpoint")
+                .also(::requireRetainableModuleObservation)
+        } else null // Older null-observation fallbacks can still pass exact prompt replay.
         val reconstructorIdentity = root.requiredString("reconstructorIdentity", "module checkpoint")
         val promptSha256 = root.requiredSha256("promptSha256", "module checkpoint")
         val promptCharacters = root.optionalNonNegativeLong("promptCharacters", "module checkpoint")
@@ -487,6 +527,8 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             }
         }
         return ReconstructionCheckpoint(
+            fingerprint,
+            preDispatchObservedBehavior,
             schemaVersion,
             generator,
             workflowOrigin,
@@ -1445,6 +1487,8 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         .joinToString("") { "%02x".format(it) }
 
     private data class ReconstructionCheckpoint(
+        val fingerprint: String,
+        val preDispatchObservedBehavior: String?,
         val schemaVersion: Long,
         val generator: String,
         val workflowOrigin: String,

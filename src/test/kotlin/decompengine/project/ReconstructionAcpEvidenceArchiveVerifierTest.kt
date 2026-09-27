@@ -52,6 +52,7 @@ import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
@@ -303,6 +304,120 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     }
 
     @Test
+    fun `rehashed rejected ACP candidates cannot impersonate undispatched budget fallbacks`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "forged-fallback-replay-")
+        try {
+            val baseline = createAgentProject(temp.resolve("baseline"), accepted = false)
+            val original = Json.parseToJsonElement(baseline.resolve(CHECKPOINT_PATH).readText()).jsonObject
+            assertEquals(JsonPrimitive(false), original.getValue("accepted"))
+            assertEquals(JsonPrimitive("reconstructor-return"), original.getValue("workflowOrigin"))
+            assertTrue(baseline.resolve(EVIDENCE_PATH).exists())
+            val sourceSha256 = sha256(baseline.resolve(SOURCE_PATH).readBytes())
+            val profile = GeneratedCMakeReconstructionProfile.descriptor
+            val model = ProgramModelJson.read(baseline.resolve("reports/program_model.json").readText())
+            val plan = ModulePlanJson.readCanonical(baseline.resolve("reports/module_plan.json").readBytes(), 4 * 1024 * 1024)
+            val inputs = ProfileModulePromptInputs(model, plan, profile)
+            val identity = original.getValue("reconstructorIdentity").jsonPrimitive.content
+                .replace(Regex(":context-[0-9]+:factory-"), ":context-4096:factory-")
+
+            for (paddedObservation in listOf(false, true)) {
+                val name = if (paddedObservation) "padded-observation" else "fabricated-prompt"
+                val project = temp.resolve(name)
+                copyTree(baseline, project)
+                val observed = if (paddedObservation) "x".repeat(4_096) else null
+                val request = inputs.request("parse", project, observed)
+                val prompt = modulePromptEvidence(request).text
+                assertEquals(paddedObservation, prompt.length > 4_096)
+                val claimedCharacters = if (paddedObservation) prompt.length else prompt.length + 4_096
+                val forged = JsonObject(original + mapOf(
+                    "generator" to JsonPrimitive("unresolved:$identity"),
+                    "reconstructorIdentity" to JsonPrimitive(identity),
+                    "workflowOrigin" to JsonPrimitive("pre-dispatch-context-budget-fallback"),
+                    "preDispatchObservedBehavior" to (observed?.let(::JsonPrimitive) ?: JsonNull),
+                    "promptCharacters" to JsonPrimitive(claimedCharacters),
+                    "promptBudgetCharacters" to JsonPrimitive(4_096),
+                    "promptSha256" to JsonPrimitive(sha256(prompt.toByteArray())),
+                    "fingerprint" to JsonPrimitive(inputs.fingerprint(request)),
+                    "executionEvidencePath" to JsonNull,
+                    "executionEvidenceSha256" to JsonNull,
+                    "executionEvidenceSchemaVersion" to JsonNull,
+                    "executionRequestSha256" to JsonNull,
+                    "executionTerminalOutcome" to JsonNull,
+                    "executionReleaseComplete" to JsonNull,
+                    "issues" to JsonArray(listOf(JsonObject(mapOf(
+                        "code" to JsonPrimitive("context-budget-exceeded"),
+                        "message" to JsonPrimitive("module context required $claimedCharacters characters; limit=4096"),
+                        "entityIds" to JsonArray(request.module.functionIds.map(::JsonPrimitive)),
+                    )))),
+                ))
+                rewriteCheckpointConfidenceAndManifest(project, forged, removeExecutionEvidence = true)
+                assertEquals(sourceSha256, sha256(project.resolve(SOURCE_PATH).readBytes()))
+                assertFalse(project.resolve(EVIDENCE_PATH).exists())
+                assertTrue(ArchivalProjectAuditor.audit(project).moduleConfidenceEvidenceProblems.isEmpty())
+
+                // The padded case carries a valid prompt commitment and input fingerprint, but
+                // retains the rejected harness output instead of the profile's deterministic stub.
+                val expected = if (paddedObservation) "fallback source differs" else "fallback prompt differs"
+                val archive = temp.resolve("$name.zip")
+                val failure = assertFailsWith<IllegalArgumentException>(name) {
+                    ArchivalPackager.create(project, archive)
+                }
+                assertTrue(failure.message.orEmpty().contains(expected), "$name: ${failure.message}")
+                assertFalse(archive.exists())
+            }
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
+    fun `legacy null observation fallback passes independently replayed model overflow`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "legacy-fallback-replay-")
+        try {
+            val project = temp.resolve("project")
+            SourceTreeGenerator.generate(
+                RecoveredProgramModel(
+                    inputSha256 = "a".repeat(64),
+                    functions = listOf(RecoveredFunction(
+                        "fn_0000000000401000", "parse_input", 0x401000UL, "int parse_input(void)",
+                        "/* ${"context".repeat(2_000)} */",
+                        referencedGlobals = setOf("aa_global"),
+                    )),
+                    // Manifest entity IDs are sorted globally, not functions-before-globals.
+                    globals = listOf(RecoveredGlobal("aa_global", "parse_counter", 0x402000UL, "int", "7")),
+                ),
+                project,
+                reconstructor = BoundedLlmModuleReconstructor(
+                    AgentHarness { _, _ -> error("oversized prompt must not dispatch") },
+                    maximumContextCharacters = 4_096,
+                ),
+            )
+            val checkpoint = Json.parseToJsonElement(project.resolve(CHECKPOINT_PATH).readText()).jsonObject
+            assertEquals(JsonPrimitive("pre-dispatch-context-budget-fallback"), checkpoint.getValue("workflowOrigin"))
+            assertEquals(JsonNull, checkpoint.getValue("preDispatchObservedBehavior"))
+            assertEquals(listOf("aa_global", "fn_0000000000401000"),
+                checkpoint.getValue("entityStatuses").jsonArray.map { it.jsonObject.getValue("id").jsonPrimitive.content })
+            assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+            ArchivalPackager.create(project, temp.resolve("current.zip"))
+
+            rewriteCheckpointConfidenceAndManifest(project, JsonObject(checkpoint - "preDispatchObservedBehavior"))
+            val archive = temp.resolve("legacy.zip")
+            ArchivalPackager.create(project, archive)
+            assertTrue(archive.exists())
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
     fun `all fallback and mixed accepted archives reject rehashed confidence claims`() {
         val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
         Files.createDirectories(scratch)
@@ -454,6 +569,51 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         val newSha256 = sha256(checkpoint.readBytes())
         val manifest = project.resolve("source_tree_manifest.json")
         manifest.writeText(manifest.readText().replace(oldSha256, newSha256))
+    }
+
+    /** Rebind every mutable commitment so tamper cases reach semantic fallback validation. */
+    private fun rewriteCheckpointConfidenceAndManifest(
+        project: Path,
+        checkpoint: JsonObject,
+        removeExecutionEvidence: Boolean = false,
+    ) {
+        val checkpointBytes = (checkpoint.toString() + "\n").toByteArray()
+        Files.write(project.resolve(CHECKPOINT_PATH), checkpointBytes)
+        val confidencePath = project.resolve("reports/confidence.json")
+        val confidence = Json.parseToJsonElement(confidencePath.readText()).jsonObject
+        val modules = confidence.getValue("modules").jsonArray.map { item ->
+            val module = item.jsonObject
+            if (module.getValue("id").jsonPrimitive.content != "parse") module else {
+                val revision = module.getValue("revisionEvidence").jsonObject
+                JsonObject(module + ("revisionEvidence" to JsonObject(revision + mapOf(
+                    "checkpointSha256" to JsonPrimitive(sha256(checkpointBytes)),
+                    "sourceSha256" to checkpoint.getValue("sourceSha256"),
+                    "inputFingerprint" to checkpoint.getValue("fingerprint"),
+                    "acceptedImplementation" to checkpoint.getValue("accepted"),
+                    "compilation" to checkpoint.getValue("compilation"),
+                ))))
+            }
+        }
+        val confidenceBytes = (JsonObject(confidence + ("modules" to JsonArray(modules))).toString() + "\n").toByteArray()
+        Files.write(confidencePath, confidenceBytes)
+        val manifestPath = project.resolve("source_tree_manifest.json")
+        val manifest = Json.parseToJsonElement(manifestPath.readText()).jsonObject
+        val files = manifest.getValue("files").jsonArray.mapNotNull { item ->
+            val file = item.jsonObject
+            when (file.getValue("path").jsonPrimitive.content) {
+                EVIDENCE_PATH -> if (removeExecutionEvidence) null else file
+                CHECKPOINT_PATH -> JsonObject(file + ("sha256" to JsonPrimitive(sha256(checkpointBytes))))
+                "reports/confidence.json" -> JsonObject(file + ("sha256" to JsonPrimitive(sha256(confidenceBytes))))
+                SOURCE_PATH -> JsonObject(file + mapOf(
+                    "generator" to checkpoint.getValue("generator"),
+                    "promptSha256" to checkpoint.getValue("promptSha256"),
+                    "acceptedImplementation" to checkpoint.getValue("accepted"),
+                ))
+                else -> file
+            }
+        }
+        manifestPath.writeText(JsonObject(manifest + ("files" to JsonArray(files))).toString() + "\n")
+        if (removeExecutionEvidence) Files.delete(project.resolve(EVIDENCE_PATH))
     }
 
     private fun copyTree(source: Path, destination: Path) {

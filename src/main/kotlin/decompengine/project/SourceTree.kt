@@ -190,52 +190,13 @@ class BoundedLlmModuleReconstructor(
 
     override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule {
         val target = request.module.sourcePath
-        val layout = request.profile.layout
-        val implementation = layout.declaration("module-implementation")
-        require(target == implementation.materialize(mapOf("module" to request.module.id)) &&
-            ProjectFileRole.MODULE_IMPLEMENTATION in implementation.roles &&
-            ProjectFileRole.EDITABLE in implementation.roles
-        ) { "planned module target must match the profile-owned editable implementation" }
-        val sharedInterface = layout.declaration("shared-interface")
-        val sharedInterfacePath = sharedInterface.materialize()
-        requireViewableTextInterface(sharedInterface, ProjectFileRole.PUBLIC_INTERFACE)
-        val moduleInterface = layout.declaration("module-interface")
-        val moduleInterfacePath = moduleInterface.materialize(mapOf("module" to request.module.id))
-        require(request.module.headerPath == moduleInterfacePath) {
-            "planned module header must match the profile-declared module interface"
-        }
-        requireViewableTextInterface(moduleInterface, ProjectFileRole.PUBLIC_INTERFACE)
-        val privateInterface = layout.declaration("module-private-interface")
-        val privateInterfacePath = privateInterface.materialize(mapOf("module" to request.module.id))
-        requireViewableTextInterface(privateInterface, ProjectFileRole.PRIVATE_INTERFACE)
-        request.dependencyHeaders.keys.forEach { path ->
-            val declaration = layout.declarationForPath(path)
-            require(declaration.id == "module-interface") {
-                "module reconstruction dependency is not a declared module interface: $path"
-            }
-            requireViewableTextInterface(declaration, ProjectFileRole.PUBLIC_INTERFACE)
-        }
-        val contextPaths = listOf(sharedInterfacePath, moduleInterfacePath, privateInterfacePath) +
-            request.dependencyHeaders.keys
-        require(contextPaths.distinct().size == contextPaths.size && target !in contextPaths) {
-            "module reconstruction context paths must be distinct from each other and the editable target"
-        }
-        val prompt = ReconstructionAdapters.resolve(request.profile).modulePrompt(request)
+        val implementation = request.profile.layout.declaration("module-implementation")
+        val prompt = modulePromptEvidence(request)
         val objective = prompt.objective
         val evidence = prompt.evidence
-        val files = linkedMapOf(
-            sharedInterfacePath to request.sharedHeader,
-            moduleInterfacePath to request.moduleHeader,
-            privateInterfacePath to request.privateHeader,
-        )
-            .apply { putAll(request.dependencyHeaders) }
-        val observed = request.observedBehavior ?: "<not yet available; report this limitation>"
-        val promptEvidence = buildString {
-            append(objective).append("\n\n").append(evidence).append("\n\n").append(observed)
-            files.toSortedMap().forEach { (path, content) ->
-                append("\n\n--- ").append(path).append(" ---\n").append(content)
-            }
-        }
+        val files = prompt.files
+        val observed = prompt.observed
+        val promptEvidence = prompt.text
         val contextSize = promptEvidence.length
         val contextBudget = contextBudget(request.profile)
         if (contextSize > contextBudget) {
@@ -348,18 +309,6 @@ class BoundedLlmModuleReconstructor(
                 cause = failure,
             )
         }
-    }
-}
-
-private fun requireViewableTextInterface(declaration: ProjectFileDeclaration, expectedRole: ProjectFileRole) {
-    require(expectedRole in declaration.roles) {
-        "module reconstruction context ${declaration.id} lacks its declared $expectedRole role"
-    }
-    require(ProjectFileRole.VIEWABLE in declaration.roles) {
-        "module reconstruction context ${declaration.id} is not declared viewable"
-    }
-    require(declaration.contentKind == ProjectContentKind.UTF8_TEXT) {
-        "module reconstruction context ${declaration.id} is not declared UTF-8 text"
     }
 }
 
@@ -626,15 +575,7 @@ object SourceTreeGenerator {
         typesHeaderFile.writeText(typesHeader)
         val headers = plan.modules.associate { module -> module.id to rendering.moduleInterface(module) }
         val moduleById = plan.modules.associateBy { it.id }
-        val functionById = model.functions.associateBy { it.id }
-        val functionOwners = plan.modules.flatMap { module -> module.functionIds.map { it to module.id } }.toMap()
-        val globalOwners = plan.modules.flatMap { module -> module.globalIds.map { it to module.id } }.toMap()
-        val dependenciesByModule = plan.modules.associate { module -> module.id to
-            module.functionIds.flatMap { id ->
-                val function = functionById.getValue(id)
-                function.calls.mapNotNull(functionOwners::get) + function.referencedGlobals.mapNotNull(globalOwners::get)
-            }.filter { it != module.id }.distinct().sorted()
-        }
+        val dependenciesByModule = moduleDependencies(model, plan)
         val headerHashes = headers.mapValues { sha256(it.value.toByteArray()) }
         val interfaceFingerprints = moduleInterfaceFingerprints(dependenciesByModule, headerHashes)
         val privateHeaders = plan.modules.associate { module -> module.id to rendering.privateInterface(module) }
@@ -855,6 +796,9 @@ object SourceTreeGenerator {
                     sourceSha256 = normalizedSourceSha256,
                     generator = attempted.generator,
                     workflowOrigin = workflowOrigin,
+                    preDispatchObservedBehavior = observedBehavior.takeIf {
+                        workflowOrigin == "pre-dispatch-context-budget-fallback"
+                    },
                     reconstructorIdentity = cacheIdentity,
                     promptSha256 = attempted.promptSha256,
                     promptCharacters = attempted.promptCharacters,
@@ -1127,6 +1071,7 @@ object SourceTreeGenerator {
         val sourceSha256: String,
         val generator: String,
         val workflowOrigin: String = "reconstructor-return",
+        val preDispatchObservedBehavior: String? = null,
         val reconstructorIdentity: String,
         val promptSha256: String,
         val promptCharacters: Int?,
@@ -1152,6 +1097,11 @@ object SourceTreeGenerator {
             require(schemaVersion in 2..6) { "unsupported module checkpoint schemaVersion: $schemaVersion" }
             require(workflowOrigin in setOf("reconstructor-return", "exception-fallback",
                 "pre-dispatch-context-budget-fallback")) { "unsupported module checkpoint workflow origin" }
+            require(preDispatchObservedBehavior == null ||
+                workflowOrigin == "pre-dispatch-context-budget-fallback") {
+                "retained pre-dispatch prompt input requires an undispatched fallback"
+            }
+            requireRetainableModuleObservation(preDispatchObservedBehavior)
             require(schemaVersion < 5 || !accepted ||
                 (compilation?.passed == true && compilation.sourceSha256 == sourceSha256)
             ) { "accepted module checkpoint lacks successful compilation of its exact source bytes" }
@@ -1214,6 +1164,10 @@ object SourceTreeGenerator {
             append("\n  \"generator\": \"").append(generator.jsonEscape()).append("\",")
             if (schemaVersion >= 6) {
                 append("\n  \"workflowOrigin\": \"").append(workflowOrigin).append("\",")
+            }
+            if (schemaVersion >= 6 && workflowOrigin == "pre-dispatch-context-budget-fallback") {
+                append("\n  \"preDispatchObservedBehavior\": ")
+                append(preDispatchObservedBehavior?.let { kotlinx.serialization.json.JsonPrimitive(it) } ?: JsonNull).append(',')
             }
             append("\n  \"reconstructorIdentity\": \"").append(reconstructorIdentity.jsonEscape()).append("\",")
             append("\n  \"promptSha256\": \"").append(promptSha256).append("\",")
@@ -1289,6 +1243,7 @@ object SourceTreeGenerator {
                 sourceSha256 = root.getValue("sourceSha256").jsonPrimitive.content,
                 generator = root.getValue("generator").jsonPrimitive.content,
                 workflowOrigin = optionalString("workflowOrigin") ?: "reconstructor-return",
+                preDispatchObservedBehavior = optionalString("preDispatchObservedBehavior"),
                 reconstructorIdentity = root.getValue("reconstructorIdentity").jsonPrimitive.content,
                 promptSha256 = root.getValue("promptSha256").jsonPrimitive.content,
                 promptCharacters = root["promptCharacters"]?.jsonPrimitive?.intOrNull,
@@ -1544,7 +1499,7 @@ object SourceTreeGenerator {
         }
     }
 
-    private fun moduleFingerprint(
+    internal fun moduleFingerprint(
         module: PlannedModule,
         model: RecoveredProgramModel,
         sharedHeader: String,
