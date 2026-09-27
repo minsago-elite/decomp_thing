@@ -17,6 +17,97 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class GeneratedCPreprocessorAttributionTest {
     @Test
+    fun `continued string and character literals retain attribution bytes and strict compilation`() {
+        for (newline in listOf("\n", "\r\n")) {
+            val text = "\"a\\" + newline + "b\""
+            val quote = "\"a" + "\\".repeat(2) + newline + "\"} /* #if */\""
+            val slash = "\"a" + "\\".repeat(3) + newline + "\""
+            val letter = "'\\" + newline + "x'"
+            val body = " const char *quoted = $quote; const char *slashed = $slash; " +
+                "return item[1] == 'b' && quoted[1] == '\"' && slashed[1] == '\\\\' && $letter == 'x' ? 17 : 0; "
+            val recovered = "int convert(int unused) {$body}"
+            val convert = RecoveredFunction("fn_convert", "convert", 200UL, "int convert(int unused)", recovered,
+                referencedGlobals = setOf("global_item"))
+            val main = main().copy(decompiledC = "int main(void) { return convert(9); }", calls = setOf("fn_convert"))
+            val item = global("const char *").copy(initializer = text)
+            val program = model(item, functions = listOf(main, convert))
+            val source = "/* global_item */\n${globalDeclaration(item, false)}\n/* fn_convert */\n$recovered\n/* fn_main */\n${main.decompiledC}"
+            assertNull(generatedCAttributionPreprocessorIssue(source), source)
+            assertTrue(generatedCGlobalDefinition(source, "item"), source)
+            assertEquals(body, generatedCFunctionBody(recovered, "convert"))
+            val marked = markRecoveredParametersUsed(recovered, convert)
+            assertTrue(marked.contains("(void)unused;"), marked)
+            assertTrue(marked.endsWith(body + "}"), "parameter bookkeeping must retain original literal bytes")
+            assertTrue(assess(program, source).isEmpty(), assess(program, source).toString())
+            val canonical = program.toJson()
+            val project = project()
+            val manifest = SourceTreeGenerator.generate(program, project, overrides = OWNERS + ("fn_convert" to "core"),
+                reconstructor = RecoveredCModuleReconstructor())
+            assertEquals(canonical, program.toJson())
+            assertTrue(manifest.unresolvedImplementationIds.isEmpty(), manifest.unresolvedImplementationIds.toString())
+            val emitted = project.resolve("src/modules/core.c").readText()
+            assertTrue(emitted.contains(text) && emitted.contains(quote) && emitted.contains(slash) && emitted.contains(letter), emitted)
+            assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+            assertEquals(17, ProcessBuilder(project.resolve("build/reconstructed").toAbsolutePath().toString()).start().waitFor())
+        }
+    }
+
+    @Test
+    fun `literal-looking quotes cannot permit comment code or directive splicing`() {
+        for (newline in listOf("\n", "\r\n")) {
+            for (prefix in listOf(
+                "// fake quote \" ",
+                "/* fake quote \" ",
+                "#include \"std",
+                "%:include \"std",
+                "??=include \"std",
+                "#include /* across\ncomment */ \"std",
+                "int ite",
+            )) {
+                val source = prefix + "\\" + newline + "int.h\"\n/* global_item */ int item = 7;"
+                assertTrue(generatedCAttributionPreprocessorIssue(source).orEmpty().contains("escaped physical lines"), source)
+                assertUnsupported(model(global("int")), source, "global_item")
+            }
+            val source = "const char *note = \"a\\" + newline + "b\";\n#if 0\n/* global_item */ int item = 7;\n#endif"
+            assertUnsupported(model(global("int")), source, "global_item")
+        }
+    }
+
+    @Test
+    fun `continued literals cannot supply fake function definitions or corrupt real body offsets`() {
+        val program = model(functions = listOf(main()))
+        for (newline in listOf("\n", "\r\n")) {
+            val fake = "/* fn_main */\nconst char *note = \"int main(void) { " + "\\" + newline + "return 0; }\";\n"
+            assertNull(generatedCAttributionPreprocessorIssue(fake), fake)
+            assertNull(generatedCFunctionBody(fake, "main"), fake)
+            assertTrue(assess(program, fake).any { it.code == "missing-function-definition" }, fake)
+            val real = fake + "int main(void) { return 17; }"
+            assertTrue(assess(program, real).isEmpty(), assess(program, real).toString())
+            val quotedEvidence = model(functions = listOf(main().copy(decompiledC = fake)))
+            assertTrue(assess(quotedEvidence, "/* fn_main */ int main(void) { return 0; }")
+                .any { it.code == "generic-return-placeholder" }, fake)
+            for (bodyOnly in listOf("{ return \"nonzero\"; }", "{ return 'x'; }")) {
+                val literalEvidence = model(functions = listOf(main().copy(decompiledC = bodyOnly)))
+                assertTrue(assess(literalEvidence, "/* fn_main */ int main(void) { return 0; }")
+                    .any { it.code == "generic-return-placeholder" }, bodyOnly)
+            }
+            for (slashes in listOf("\\\\", "??/\\", "\\??/", "??/??/")) {
+                val body = " const char *note = \"a" + slashes + newline + "\"}\"; return note[0]; "
+                val recovered = "int convert(int unused) {$body}"
+                val function = RecoveredFunction("fn_convert", "convert", 200UL, "int convert(int unused)", recovered)
+                assertEquals(body, generatedCFunctionBody(recovered, "convert"), recovered)
+                assertTrue(markRecoveredParametersUsed(recovered, function).endsWith(body + "}"), recovered)
+            }
+            // Phase two must not manufacture a new phase-one trigraph during attribution.
+            val pointerReturn = "int (*factory(void))(void) { return 0; }"
+            val separatedTrigraph = "const char *note = \"??" + "\\" + newline + "/\";\n/* fn_factory */\n" + pointerReturn
+            val factory = RecoveredFunction("fn_factory", "factory", 200UL, "int (*factory(void))(void)", pointerReturn)
+            assertEquals(" return 0; ", generatedCFunctionBody(separatedTrigraph, "factory"))
+            assertTrue(assess(model(functions = listOf(factory)), separatedTrigraph).isEmpty(), separatedTrigraph)
+        }
+    }
+
+    @Test
     fun `inactive scalar and qualified function pointer globals never satisfy either attribution path`() {
         for ((type, declaration) in listOf("int" to "int item = 7;", "int (* const)(int)" to "int (* const item)(int) = 0;")) {
             val model = model(global(type))

@@ -749,6 +749,21 @@ private class CDeclarationParser(raw: String, private val symbolicName: String? 
 
 private val cStorageSpecifiers = setOf("extern", "static", "register", "auto", "inline", "_Noreturn", "_Thread_local", "typedef")
 
+/** End offset for C physical-line joining, including the already guarded trigraph/whitespace forms. */
+internal fun generatedCPhysicalLineSpliceEnd(source: String, start: Int): Int? {
+    var cursor = when {
+        source[start] == '\\' -> start + 1
+        source.startsWith("??/", start) -> start + 3
+        else -> return null
+    }
+    while (cursor < source.length && source[cursor] in " \t\u000b\u000c") cursor++
+    return when (source.getOrNull(cursor)) {
+        '\n' -> cursor + 1
+        '\r' -> cursor + if (source.getOrNull(cursor + 1) == '\n') 2 else 1
+        else -> null
+    }
+}
+
 /** Lexical offsets let rendering retain original whitespace, qualifiers, and comments. */
 private fun cDeclarationTokens(
     source: String,
@@ -783,12 +798,22 @@ private fun cDeclarationTokens(
             }
             source[cursor] == '"' || source[cursor] == '\'' -> {
                 val quote = source[cursor++]
-                while (cursor < source.length && source[cursor] != quote) {
-                    if (source[cursor] == '\\') cursor++
-                    cursor++
+                var escaped = false
+                var closed = false
+                while (cursor < source.length) {
+                    val spliceEnd = generatedCPhysicalLineSpliceEnd(source, cursor)
+                    if (spliceEnd != null) {
+                        cursor = spliceEnd
+                        continue
+                    }
+                    val character = if (source.startsWith("??/", cursor)) { cursor += 3; '\\' } else source[cursor++]
+                    when {
+                        escaped -> escaped = false
+                        character == '\\' -> escaped = true
+                        character == quote -> { closed = true; break }
+                    }
                 }
-                require(cursor < source.length) { "unclosed literal" }
-                cursor++
+                require(closed) { "unclosed literal" }
                 result += CToken(source.substring(start, cursor), start, cursor)
             }
             symbolicName?.isNotEmpty() == true && source.startsWith(symbolicName, cursor) &&

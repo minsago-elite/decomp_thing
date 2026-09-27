@@ -7,7 +7,6 @@ internal fun generatedCAttributionPreprocessorIssue(source: String): String? =
 /** Generated-C source checks. Invocation and release acceptance remain in orchestration. */
 internal object GeneratedCCandidateValidation {
     private val declarationContexts = GeneratedCDeclarationContextCache()
-    private val escapedPhysicalLine = Regex("""(?:\\|\?\?/)[ \t\u000b\f]*(?:\r\n?|\n)""")
     private val literalSystemInclude = Regex("<[^<>\\r\\n]+>")
     fun assess(
         module: PlannedModule,
@@ -15,7 +14,8 @@ internal object GeneratedCCandidateValidation {
         generator: String,
         source: String,
     ): List<ModuleReconstructionIssue> {
-        generatedCAttributionPreprocessorIssue(source)?.let { reason ->
+        val lexical = attributionLexicalView(source)
+        preprocessorAttributionIssue(lexical)?.let { reason ->
             return (module.functionIds + module.globalIds).map { id ->
                 ModuleReconstructionIssue(
                     "unsupported-preprocessor-attribution",
@@ -26,7 +26,7 @@ internal object GeneratedCCandidateValidation {
         }
         val issues = mutableListOf<ModuleReconstructionIssue>()
         val declarationContext = declarationContexts.forTypes(model.types)
-        val codeOnly = codeWithoutCommentsOrLiterals(source)
+        val codeOnly = lexical.code
         // The compiler gate resolves type names; spelling-only checks reject valid
         // identifiers and explicitly defined typedefs.
         module.functionIds.forEach { id ->
@@ -38,7 +38,7 @@ internal object GeneratedCCandidateValidation {
                     listOf(function.id),
                 )
             }
-            val body = findFunctionBody(source, safeCName(function.name))
+            val body = findFunctionBody(lexical.syntax, lexical.code, safeCName(function.name))
             if (body == null) {
                 issues += ModuleReconstructionIssue(
                     "missing-function-definition",
@@ -66,7 +66,7 @@ internal object GeneratedCCandidateValidation {
                     listOf(id),
                 )
             }
-            if (!hasGlobalDefinition(codeOnly, safeCName(global.name)) && !generatedCGlobalDefinition(source, safeCName(global.name))) {
+            if (!hasGlobalDefinition(codeOnly, safeCName(global.name)) && !generatedCGlobalDefinition(lexical.syntax, safeCName(global.name))) {
                 issues += ModuleReconstructionIssue(
                     "missing-global-definition",
                     "candidate source does not define ${safeCName(global.name)} for $id",
@@ -77,15 +77,15 @@ internal object GeneratedCCandidateValidation {
         return issues.distinctBy { Triple(it.code, it.message, it.entityIds.sorted()) }
     }
 
-    private fun findFunctionBody(source: String, functionName: String): String? {
-        val candidates = Regex("\\b${Regex.escape(functionName)}\\s*\\(").findAll(source)
+    private fun findFunctionBody(source: String, code: String, functionName: String): String? {
+        val candidates = Regex("\\b${Regex.escape(functionName)}\\s*\\(").findAll(code)
         candidates.forEach { candidate ->
-            val parameterStart = source.indexOf('(', candidate.range.first)
-            val parameterEnd = matchingDelimiter(source, parameterStart, '(', ')') ?: return@forEach
+            val parameterStart = code.indexOf('(', candidate.range.first)
+            val parameterEnd = matchingDelimiter(code, parameterStart, '(', ')') ?: return@forEach
             var bodyStart = parameterEnd + 1
-            while (bodyStart < source.length && source[bodyStart].isWhitespace()) bodyStart++
-            if (bodyStart >= source.length || source[bodyStart] != '{') return@forEach
-            val bodyEnd = matchingDelimiter(source, bodyStart, '{', '}') ?: return@forEach
+            while (bodyStart < code.length && code[bodyStart].isWhitespace()) bodyStart++
+            if (bodyStart >= code.length || code[bodyStart] != '{') return@forEach
+            val bodyEnd = matchingDelimiter(code, bodyStart, '{', '}') ?: return@forEach
             return source.substring(bodyStart + 1, bodyEnd)
         }
         return generatedCFunctionBody(source, functionName)
@@ -136,19 +136,24 @@ internal object GeneratedCCandidateValidation {
 
     private fun recoveredEvidenceIsTrivial(function: RecoveredFunction, context: GeneratedCDeclarationContext): Boolean =
         function.decompiledC?.let { recovered ->
-            if (generatedCAttributionPreprocessorIssue(recovered) != null) return@let false
-            findFunctionBody(recovered, function.name)?.let { genericReturnBody(it) || isGeneratedCPlaceholderBody(function, it, context) }
-                ?: Regex("\\{\\s*return(?:\\s+0)?\\s*;\\s*}", RegexOption.DOT_MATCHES_ALL).containsMatchIn(recovered)
+            val lexical = attributionLexicalView(recovered)
+            if (preprocessorAttributionIssue(lexical) != null) return@let false
+            findFunctionBody(lexical.syntax, lexical.code, function.name)?.let { genericReturnBody(it) || isGeneratedCPlaceholderBody(function, it, context) }
+                ?: Regex("\\{\\s*return(?:\\s+0)?\\s*;\\s*}", RegexOption.DOT_MATCHES_ALL).findAll(lexical.code).any { match ->
+                    // Masking identifies real braces, but can erase a returned literal. Judge
+                    // triviality from the retained body rather than its masked expression.
+                    genericReturnBody(lexical.syntax.substring(match.range.first + 1, match.range.last))
+                }
         } == true
 
     /** A linear lexical guard, not a preprocessor: even a known-looking #if condition is rejected. */
-    internal fun preprocessorAttributionIssue(source: String): String? {
-        // C splices physical lines before recognizing comments or directives. The attribution
-        // scanners do not perform that translation, so never let a splice conceal source syntax.
-        if (escapedPhysicalLine.containsMatchIn(source)) {
+    internal fun preprocessorAttributionIssue(source: String): String? = preprocessorAttributionIssue(attributionLexicalView(source))
+
+    private fun preprocessorAttributionIssue(lexical: AttributionLexicalView): String? {
+        if (lexical.spliceOutsideLiteral) {
             return "escaped physical lines require preprocessing before definition attribution"
         }
-        for (line in codeWithoutCommentsOrLiterals(source).lineSequence()) {
+        for (line in lexical.code.lineSequence()) {
             val text = line.trimStart()
             val markerLength = when {
                 text.startsWith('#') -> 1
@@ -170,34 +175,59 @@ internal object GeneratedCCandidateValidation {
         return null
     }
 
+    private data class AttributionLexicalView(val syntax: String, val code: String, val spliceOutsideLiteral: Boolean = false)
+
     /**
-     * Preserve code layout while hiding tokens that occur only in comments and literals. This keeps
-     * acceptance checks from treating diagnostics such as "copied 1 byte" as C type declarations.
+     * Mask literal continuations before interpreting escapes, as C translation phase two does.
+     * A splice leaves the escape state unchanged: a preceding backslash can still escape a quote
+     * after the joined line. Keep raw offsets and source bytes for the declaration tokenizer:
+     * joining physical lines could otherwise manufacture a new phase-one trigraph on a second pass.
+     * Comments and literals are masked so their text cannot establish declarations.
      */
-    private fun codeWithoutCommentsOrLiterals(source: String): String = buildString(source.length) {
+    private fun attributionLexicalView(source: String): AttributionLexicalView {
+        val code = StringBuilder(source.length)
         var index = 0
         var lineComment = false
         var blockComment = false
         var quoted: Char? = null
         var escaped = false
+        var directive = false
         while (index < source.length) {
             val character = source[index]
             val next = source.getOrNull(index + 1)
+            val spliceEnd = generatedCPhysicalLineSpliceEnd(source, index)
+            if (spliceEnd != null) {
+                if (quoted == null || directive) return AttributionLexicalView(source, "", spliceOutsideLiteral = true)
+                repeat(spliceEnd - index) { code.append(' ') }
+                index = spliceEnd
+                continue
+            }
+            // Phase one also makes a non-spliced trigraph a backslash. Retain its
+            // bytes in the syntax view, but interpret the resulting escape state.
+            if (quoted != null && source.startsWith("??/", index)) {
+                code.append("   ")
+                escaped = !escaped
+                index += 3
+                continue
+            }
+            if (!blockComment && quoted == null && (character == '\r' || character == '\n')) directive = false
+            if (!lineComment && !blockComment && quoted == null &&
+                (character == '#' || source.startsWith("%:", index) || source.startsWith("??=", index))) directive = true
             when {
                 lineComment -> {
-                    append(if (character == '\n' || character == '\r') character else ' ')
+                    code.append(if (character == '\n' || character == '\r') character else ' ')
                     if (character == '\n' || character == '\r') lineComment = false
                 }
                 blockComment -> {
-                    append(if (character == '\n' || character == '\r') character else ' ')
+                    code.append(if (character == '\n' || character == '\r') character else ' ')
                     if (character == '*' && next == '/') {
-                        append(' ')
+                        code.append(' ')
                         index++
                         blockComment = false
                     }
                 }
                 quoted != null -> {
-                    append(if (character == '\n' || character == '\r') character else ' ')
+                    code.append(if (character == '\n' || character == '\r') character else ' ')
                     when {
                         escaped -> escaped = false
                         character == '\\' -> escaped = true
@@ -205,23 +235,24 @@ internal object GeneratedCCandidateValidation {
                     }
                 }
                 character == '/' && next == '/' -> {
-                    append("  ")
+                    code.append("  ")
                     index++
                     lineComment = true
                 }
                 character == '/' && next == '*' -> {
-                    append("  ")
+                    code.append("  ")
                     index++
                     blockComment = true
                 }
                 character == '"' || character == '\'' -> {
-                    append(' ')
+                    code.append(' ')
                     quoted = character
                 }
-                else -> append(character)
+                else -> code.append(character)
             }
             index++
         }
+        return AttributionLexicalView(source, code.toString())
     }
 
     /**
