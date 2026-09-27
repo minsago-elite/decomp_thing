@@ -187,6 +187,12 @@ class GccBundledContainedExecutionTest {
                 for (field in listOf("unitAbsent", "cgroupAbsent", "processesAbsent")) assertTrue(stoppedCommand.getValue(field).jsonPrimitive.boolean)
                 val originalJournal = journal.resolve(".gcc-bundled-operation-${intent.operationId}")
                 val originalRecords = names(originalJournal).associateWith { boundedRead(originalJournal.resolve(it), MAXIMUM_METADATA_BYTES) }
+                val authorization = OracleJson.parseCanonical(originalRecords.getValue("interrupt-authorized.json"))
+                    .jsonObject.getValue("authorization").jsonObject
+                val stoppedOutcome = stoppedCommand.getValue("outcome").jsonObject
+                assertEquals(authorization, stoppedCommand.getValue("interruptionAuthorization"))
+                assertEquals(JsonPrimitive("INTERRUPTED"), stoppedOutcome.getValue("status"))
+                assertEquals(authorization.getValue("keeperPid"), stoppedOutcome.getValue("keeperPid"))
                 owner.requireInterruptedStateCurrent()
                 assertFailsWith<IllegalStateException> { owner.plan() }
                 val result = owner.resume()
