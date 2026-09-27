@@ -160,6 +160,7 @@ object OracleSchemas {
         "bounded-shard-index",
         "build-record",
         "clang-diagnostic-matrix",
+        "confidence-calibration-artifact",
         "full-tree-call-baseline",
         "full-tree-call-observations",
         "full-tree-call-observations-v2",
