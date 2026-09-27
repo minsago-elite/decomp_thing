@@ -138,8 +138,10 @@ internal object GccBundledFullExportCapture {
     private val SCALAR_TYPE = Regex("typedef unsigned char $TYPE_C_NAME\\[([1-9][0-9]{0,9})];")
     // appendFailure retains at most 2,048 UTF-16 units plus "..." for each phase.
     // Calls, data references and types contribute three phases; only failed decompilation adds a fourth.
-    private const val MAXIMUM_PARTIAL_FAILURE_UNITS = 3 * 2051 + 2 * 2
-    private const val MAXIMUM_FAILED_FAILURE_UNITS = 4 * 2051 + 3 * 2
+    private const val MAXIMUM_FAILURE_PHASE_UNITS = 2048
+    private const val TRUNCATED_FAILURE_PHASE_UNITS = MAXIMUM_FAILURE_PHASE_UNITS + 3
+    private const val MAXIMUM_PARTIAL_FAILURE_UNITS = 3 * TRUNCATED_FAILURE_PHASE_UNITS + 2 * 2
+    private const val MAXIMUM_FAILED_FAILURE_UNITS = 4 * TRUNCATED_FAILURE_PHASE_UNITS + 3 * 2
 
     fun capture(
         run: LinuxDescriptor,
@@ -593,8 +595,16 @@ internal object GccBundledFullExportCapture {
         ) { "GCC full failure record is malformed or is bound to another function" }
         val message = string(root, "message")
         require(message.isNotBlank()) { "GCC full failure message must not be blank" }
+        // appendFailure replaces CR/LF and applies Java String.trim before each retained phase.
+        // Match that ASCII/control trim precisely; other Unicode whitespace can occur in diagnostics.
+        require(message.none { it == '\r' || it == '\n' } && message == message.trim { it <= ' ' }) {
+            "GCC full failure message contradicts producer normalization"
+        }
         val maximumUnits = if (expectedStatus == "failed") MAXIMUM_FAILED_FAILURE_UNITS else MAXIMUM_PARTIAL_FAILURE_UNITS
         require(message.length <= maximumUnits) { "GCC full failure message exceeds its producer UTF-16 bound" }
+        require(hasProducerFailurePhases(message, if (expectedStatus == "failed") 4 else 3)) {
+            "GCC full failure message contradicts producer phase bounds"
+        }
         require(message.toByteArray(StandardCharsets.UTF_8).size <= MAXIMUM_FULL_EVIDENCE_RECORD_BYTES) {
             "GCC full failure message exceeds its byte bound"
         }
@@ -607,6 +617,38 @@ internal object GccBundledFullExportCapture {
             verifier.acceptExporterString(message)
             verifier.accept("}\n")
         }
+    }
+
+    /**
+     * Exception details may themselves contain "; ", so validate that some producer partition exists.
+     * Each pass adds one phase. A sliding window finds untruncated phases; the single 2,051-unit
+     * candidate must end in the producer's truncation marker. Work is O(maximumPhases * message.length)
+     * after the aggregate bound, without allocating or enumerating every possible partition.
+     */
+    private fun hasProducerFailurePhases(message: String, maximumPhases: Int): Boolean {
+        var starts = BooleanArray(message.length).also { it[0] = true }
+        repeat(maximumPhases) {
+            val nextStarts = BooleanArray(message.length)
+            var shortStartCount = 0
+            for (end in 1..message.length) {
+                if (starts[end - 1]) shortStartCount++
+                val expired = end - MAXIMUM_FAILURE_PHASE_UNITS - 1
+                if (expired >= 0 && starts[expired]) shortStartCount--
+                if (message[end - 1] <= ' ') continue
+                val finalPhase = end == message.length
+                if (!finalPhase && (end + 1 >= message.length || message[end] != ';' || message[end + 1] != ' ')) continue
+                val truncatedStart = end - TRUNCATED_FAILURE_PHASE_UNITS
+                val truncated = truncatedStart >= 0 && starts[truncatedStart] &&
+                    message[end - 3] == '.' && message[end - 2] == '.' && message[end - 1] == '.'
+                if (shortStartCount > 0 || truncated) {
+                    if (finalPhase) return true
+                    val next = end + 2
+                    if (next < message.length && message[next] > ' ') nextStarts[next] = true
+                }
+            }
+            starts = nextStarts
+        }
+        return false
     }
 
     private fun requirePrettyExporterRecord(
