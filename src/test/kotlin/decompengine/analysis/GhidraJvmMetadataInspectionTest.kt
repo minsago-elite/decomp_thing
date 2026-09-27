@@ -17,6 +17,7 @@ import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.io.path.exists
@@ -37,6 +38,20 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 
 class GhidraJvmMetadataInspectionTest {
+    @Test
+    fun `three argument analyzer constructor remains available to JVM callers`() {
+        val constructor = GhidraJvmAnalyzer::class.java.getConstructor(
+            ProgramModelAnalyzer::class.java,
+            BoundedElfMetadataLimits::class.java,
+            BoundedElfMetadataInspectionProcess::class.java,
+        )
+        assertNotNull(constructor.newInstance(
+            budgetCapable { _, _ -> model("a".repeat(64)) },
+            BoundedElfMetadataLimits(),
+            BoundedElfMetadataInspectionProcess(),
+        ))
+    }
+
     @Test
     fun `analysis report records authenticated metadata identity limits and usage`() = inControlTemporaryDirectory { root ->
         val bytes = elfFixture()
@@ -176,7 +191,10 @@ class GhidraJvmMetadataInspectionTest {
                         if (!firstWrite.compareAndSet(true, false)) return
                         blockedWriteEntered.set(true)
                         try {
-                            CountDownLatch(1).await()
+                            assertTrue(
+                                CountDownLatch(1).await(10, TimeUnit.SECONDS),
+                                "deadline watchdog did not interrupt the staged report write within ten seconds",
+                            )
                         } catch (interrupted: InterruptedException) {
                             throw InterruptedIOException("staged report write interrupted").also { it.initCause(interrupted) }
                         }

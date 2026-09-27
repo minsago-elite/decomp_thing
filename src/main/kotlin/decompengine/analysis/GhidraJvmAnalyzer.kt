@@ -39,8 +39,15 @@ class GhidraJvmAnalyzer internal constructor(
     private val analyzer: ProgramModelAnalyzer,
     private val metadataLimits: BoundedElfMetadataLimits,
     private val metadataInspectionProcess: BoundedElfMetadataInspectionProcess,
-    private val reportOutputStreamFactory: (Path) -> OutputStream = ::openStagedJsonReportOutput,
+    private val reportOutputStreamFactory: (Path) -> OutputStream,
 ) {
+    /** Preserve the JVM constructor used before report-output injection was added. */
+    internal constructor(
+        analyzer: ProgramModelAnalyzer,
+        metadataLimits: BoundedElfMetadataLimits,
+        metadataInspectionProcess: BoundedElfMetadataInspectionProcess,
+    ) : this(analyzer, metadataLimits, metadataInspectionProcess, ::openStagedJsonReportOutput)
+
     constructor() : this(
         GhidraHeadlessProgramModelAnalyzer(),
         BoundedElfMetadataLimits(),
