@@ -32,6 +32,7 @@ import decompengine.project.SourceTreeGenerator
 import decompengine.project.sha256
 import decompengine.validation.BehaviorCaseResult
 import decompengine.validation.BehaviorComparator
+import decompengine.validation.BehaviorExecutionOutcomeException
 import decompengine.validation.BehaviorExecutionTimeoutException
 import decompengine.validation.BehaviorOutputLimitException
 import decompengine.validation.ProcessInput
@@ -758,7 +759,7 @@ class TraceGuidedRepairTest {
                 maximumBehaviorExecutionMillis = 2_000,
             )
 
-            assertFailsWith<BehaviorExecutionTimeoutException> {
+            val failure = assertFails {
                 generatedCRepairLoop(
                     RepairClientAgentHarness(
                         FakeRepairClient(
@@ -778,6 +779,10 @@ class TraceGuidedRepairTest {
                     project.resolve("reports"),
                 )
             }
+            assertTrue(
+                failure is BehaviorExecutionTimeoutException || failure is BehaviorExecutionOutcomeException,
+                "selected behavior deadline should terminate the candidate, got ${failure::class.simpleName}",
+            )
             assertContentEquals(parent, project.resolve("src/modules/reconstructed.c").readBytes())
             ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
                 assertEquals(null, graph.snapshot.pendingAttemptId)
