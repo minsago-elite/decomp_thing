@@ -626,14 +626,25 @@ class AcpAgentHarnessTest {
             val second = secondFuture.get(20, TimeUnit.SECONDS)
             val firstEvidence = assertIs<AcpInvocationEvidenceSnapshot>(first.providerEvidence)
             val secondEvidence = assertIs<AcpInvocationEvidenceSnapshot>(second.providerEvidence)
+            val outcomes = listOf("first" to first, "second" to second).joinToString("; ") { (label, receipt) ->
+                val failure = (receipt.outcome as? AgentExecutionOutcome.Failed)?.failure
+                val evidence = receipt.providerEvidence as AcpInvocationEvidenceSnapshot
+                val diagnostics = evidence.diagnostics
+                "$label: failureKind=${failure?.kind} failureMessage=${failure?.message} failureDetails=${failure?.details} " +
+                    "${evidence.summaryForTest()} exitCode=${diagnostics?.exitCode} " +
+                    "forcedTermination=${diagnostics?.forcedTermination} " +
+                    "rootTerminationRequested=${diagnostics?.rootTerminationRequested} " +
+                    "remainingProcesses=${diagnostics?.remainingProcessIds?.size} " +
+                    "outputLimitExceeded=${diagnostics?.outputLimitExceeded}"
+            }
 
             assertEquals(AgentExecutionRequestBinding.capture(firstRequest), first.requestBinding)
             assertEquals(AgentExecutionRequestBinding.capture(secondRequest), second.requestBinding)
             assertEquals(expectedWirePromptSha256(firstRequest), firstEvidence.wirePromptSha256)
             assertEquals(expectedWirePromptSha256(secondRequest), secondEvidence.wirePromptSha256)
             assertFalse(firstEvidence.wirePromptSha256 == secondEvidence.wirePromptSha256)
-            assertEquals(AgentStopReason.COMPLETED, assertIs<AgentExecutionOutcome.Returned>(first.outcome).result.stopReason)
-            assertEquals(AgentStopReason.COMPLETED, assertIs<AgentExecutionOutcome.Returned>(second.outcome).result.stopReason)
+            assertEquals(AgentStopReason.COMPLETED, assertIs<AgentExecutionOutcome.Returned>(first.outcome, outcomes).result.stopReason)
+            assertEquals(AgentStopReason.COMPLETED, assertIs<AgentExecutionOutcome.Returned>(second.outcome, outcomes).result.stopReason)
             assertEquals(
                 firstEvidence.wirePromptSha256,
                 assertNotNull(firstEvidence.completeExecutionEvidence, "first: ${firstEvidence.summaryForTest()}").wirePromptSha256,
