@@ -3,6 +3,9 @@ package decompengine.oracle.gcc
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.StrictJsonLimits
+import decompengine.oracle.structural.CanonicalProgramModelStreaming
+import decompengine.oracle.structural.CanonicalProgramModelStreamingLimits
+import decompengine.oracle.structural.StructuralRecoveryV1Exception
 import decompengine.project.RecoveredFunction
 import decompengine.project.RecoveredProgramModel
 import java.nio.file.Files
@@ -19,6 +22,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 
 class GccDriverStructuralProfileTest {
     @Test
@@ -183,6 +187,79 @@ class GccDriverStructuralProfileTest {
             document.getValue("receiptLineageSha256").jsonPrimitive.content,
         )
         assertEquals(64, binding.sha256.length)
+    }
+
+    @Test
+    fun `full export binding accepts source beyond historical text limit without truncation`() {
+        val profile = profile()
+        val address = executableAddress(profile)
+        val historical = CanonicalProgramModelStreamingLimits()
+        val model = RecoveredProgramModel(
+            schemaVersion = 2,
+            inputSha256 = profile.strippedBinary.sha256,
+            functions = listOf(RecoveredFunction(
+                id = "fn_${address.toString(16).padStart(16, '0')}",
+                name = "driver_function",
+                address = address,
+                prototype = "void driver_function(void)",
+                decompiledC = "/*${"x".repeat(historical.maximumTextCodePoints + 1)}*/",
+            )),
+        )
+        val bytes = model.toJson().toByteArray()
+        // Even the entire model fits one admitted function record; no 64 MiB fixture is needed.
+        assertTrue(bytes.size < GccBundledFullExportCapture.MAXIMUM_FULL_FUNCTION_RECORD_BYTES)
+        val historicalFailure = assertFailsWith<StructuralRecoveryV1Exception> {
+            CanonicalProgramModelStreaming.readCanonical(bytes)
+        }
+        assertTrue(historicalFailure.message.orEmpty().contains("decompiledC"))
+
+        val binding = profile.bindFullExport(fullOperation(profile, fullSnapshot(profile, bytes)))
+        val committedModel = OracleJson.parseCanonical(binding.canonicalBytes).jsonObject
+            .getValue("programModel").jsonObject
+        assertEquals(OracleArtifacts.sha256(bytes), committedModel.getValue("sha256").jsonPrimitive.content)
+        assertEquals(bytes.size.toLong(), committedModel.getValue("bytes").jsonPrimitive.long)
+
+        val failure = assertFailsWith<StructuralRecoveryV1Exception> {
+            CanonicalProgramModelStreaming.readCanonical(bytes,
+                GccDriverStructuralInputsV1.FULL_EXPORT_MODEL_LIMITS.copy(
+                    maximumTextCodePoints = model.functions.single().decompiledC!!.length - 1,
+                ))
+        }
+        assertTrue(failure.message.orEmpty().contains("decompiledC"))
+    }
+
+    @Test
+    fun `full export name prototype and reference limits follow the captured record envelope`() {
+        val profile = profile()
+        val address = executableAddress(profile)
+        val historical = CanonicalProgramModelStreamingLimits()
+        val function = RecoveredFunction(
+            id = "fn_${address.toString(16).padStart(16, '0')}",
+            name = "n".repeat(historical.maximumIdentifierCodePoints + 1),
+            address = address,
+            prototype = "p".repeat(historical.maximumPrototypeCodePoints + 1),
+            decompiledC = "void driver_function(void) {}",
+            calls = (0..historical.maximumReferencesPerFunction).mapTo(linkedSetOf()) {
+                "fn_${it.toString(16).padStart(16, '0')}"
+            },
+        )
+        val model = RecoveredProgramModel(2, profile.strippedBinary.sha256, listOf(function))
+        val bytes = model.toJson().toByteArray()
+        assertTrue(bytes.size < GccBundledFullExportCapture.MAXIMUM_FULL_FUNCTION_RECORD_BYTES)
+        val limits = GccDriverStructuralInputsV1.FULL_EXPORT_MODEL_LIMITS
+        assertEquals(model, CanonicalProgramModelStreaming.readCanonical(bytes, limits).model)
+        profile.bindFullExport(fullOperation(profile, fullSnapshot(profile, bytes)))
+
+        listOf(
+            limits.copy(maximumIdentifierCodePoints = function.name.length - 1) to "function name",
+            limits.copy(maximumPrototypeCodePoints = function.prototype.length - 1) to "function prototype",
+            limits.copy(maximumReferencesPerFunction = function.calls.size - 1) to "collection-entry limit",
+        ).forEach { (bounded, message) ->
+            val failure = assertFailsWith<StructuralRecoveryV1Exception> {
+                CanonicalProgramModelStreaming.readCanonical(bytes, bounded)
+            }
+            assertTrue(failure.message.orEmpty().contains(message))
+        }
     }
 
     @Test
