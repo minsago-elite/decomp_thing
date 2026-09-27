@@ -161,8 +161,8 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                         "\"executionTerminalOutcome\": \"returned-refused\"",
                     )
                     else -> checkpoint.replace(
-                        Regex("factory-[0-9a-f]{64}:v2"),
-                        "factory-${"0".repeat(64)}:v2",
+                        Regex("factory-[0-9a-f]{64}:v3"),
+                        "factory-${"0".repeat(64)}:v3",
                     )
                 }
             }
