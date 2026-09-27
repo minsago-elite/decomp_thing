@@ -475,6 +475,9 @@ internal object GccBundledFullExportCapture {
             status in setOf("recovered", "partial", "failed") &&
             string(root, "recoveryAssessment") == "unassessed"
         ) { "GCC full function record is malformed or is bound to another identity" }
+        require(hasProducerFunctionPrototype(string(root, "name"), string(root, "prototype"))) {
+            "GCC full function prototype does not contain its producer-rendered name"
+        }
         val source = root.getValue("decompiledC")
         require(if (status == "failed") source == JsonNull else source is JsonPrimitive && source.isString) {
             "GCC full function decompiledC contradicts its extraction status"
@@ -497,6 +500,33 @@ internal object GccBundledFullExportCapture {
         sourceAddresses += address
         requirePrettyExporterRecord(bytes, root, "function", FUNCTION_FIELDS, FUNCTION_ARRAY_FIELDS, "decompiledC")
         return status
+    }
+
+    /**
+     * FunctionDB.getPrototypeString(false, false) concatenates the return display name, a space,
+     * getName(), and parenthesized parameter display text. Those raw display names may themselves
+     * contain spaces and parentheses: validate a possible literal rendering boundary, not a unique
+     * C declarator. A linear matcher keeps long or repetitive retained strings within their bounds.
+     */
+    private fun hasProducerFunctionPrototype(name: String, prototype: String): Boolean {
+        if (name.isEmpty() || !prototype.endsWith(')')) return false
+        val marker = " $name("
+        // At least one return-display character precedes the marker; ')' follows it.
+        if (marker.length > prototype.length - 2) return false
+        val fallback = IntArray(marker.length)
+        var matched = 0
+        for (index in 1 until marker.length) {
+            while (matched > 0 && marker[index] != marker[matched]) matched = fallback[matched - 1]
+            if (marker[index] == marker[matched]) matched++
+            fallback[index] = matched
+        }
+        matched = 0
+        for (index in 1 until prototype.lastIndex) {
+            while (matched > 0 && prototype[index] != marker[matched]) matched = fallback[matched - 1]
+            if (prototype[index] == marker[matched]) matched++
+            if (matched == marker.length) return true
+        }
+        return false
     }
 
     private fun requireFullGlobalRecord(bytes: ByteArray, expectedId: String): String {
