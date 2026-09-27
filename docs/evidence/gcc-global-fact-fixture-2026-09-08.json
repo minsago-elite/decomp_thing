@@ -1,0 +1,114 @@
+{
+  "evidenceId": "gcc-global-fact-fixture-v1",
+  "schemaVersion": 1,
+  "scope": "fixture-only",
+  "authority": "fixture-digest-only",
+  "purpose": "Tiny #694 contract slice for observable global storage, linkage, and type facts; it is not GCC production qualification.",
+  "inputs": {
+    "targetAbi": {
+      "path": "src/test/resources/oracle/structural-v1/target-abi.json",
+      "sha256": "d251d5e6a0edc17655c355fb8fd757d557f064a6e67095ad53c8ca1e7569a343"
+    },
+    "structuralOracle": {
+      "path": "src/test/resources/oracle/structural-v1/structural-oracle.json",
+      "sha256": "9a479186e5d0595a0820e399e2d789f2a108497f0089f4b64e8247e3fbfa129d",
+      "identity": "neutral-structural-fixture-v1"
+    },
+    "recoveredModel": {
+      "path": "src/test/resources/oracle/structural-v1/recovered.json",
+      "sha256": "ea0cbf88f2212a271e966e348be00ac943aa0c375ffe631d32fdf44b87996a65",
+      "identity": "neutral-recovered-structure-v1"
+    },
+    "identityMap": {
+      "path": "src/test/resources/oracle/structural-v1/identity-map.json",
+      "sha256": "836f2f29dc233c29a9da8356c7f4f8d51d0d7c80ce8c338963568f2b7ec93ae9",
+      "attestation": "fixture-digest"
+    },
+    "boundaryScore": {
+      "path": "src/test/resources/oracle/structural-v1/boundary-score.json",
+      "sha256": "b05d85d9f21e704c2581b84ded3ea5442eb4695ed75e74d25778e417a5a8d593"
+    },
+    "expectedScore": {
+      "path": "src/test/resources/oracle/structural-v1/expected-score.json",
+      "sha256": "2dbff117253ba927a84df1e428f62d97b1f0efde049d4e6b78dc050dc5456ce6"
+    }
+  },
+  "profile": {
+    "normalizationProfileId": "structural-source-normalization",
+    "normalizationProfileVersion": 1,
+    "normalizationProfileConfigurationSha256": "4385f86a45a39e55a8f9f072e5563720f4775edbb53d8d4c290f9f232982ae80"
+  },
+  "identityMappings": [
+    {
+      "kind": "global",
+      "oracleId": "global.counter",
+      "recoveredId": "recovered.global.900",
+      "verifier": "fixture exact-RVA review"
+    }
+  ],
+  "dimensions": [
+    {
+      "dimension": "global.storage",
+      "oracleDenominator": 1,
+      "recoveredDenominator": 2,
+      "credit": {"numerator": 1, "denominator": 1, "value": 1.0},
+      "outcomes": {"exact": 1, "abi-equivalent": 0, "recovered-unknown": 0, "oracle-unobservable": 0, "contradicted": 0, "fabricated": 1},
+      "findings": [
+        {"oracleId": "global.counter", "recoveredId": "recovered.global.900", "oracleFactId": "truth-global-storage", "recoveredFactId": "claim-global-storage", "outcome": "exact"},
+        {"oracleId": null, "recoveredId": "recovered.global.extra", "oracleFactId": null, "recoveredFactId": "claim-fabricated-storage", "outcome": "fabricated"}
+      ]
+    },
+    {
+      "dimension": "global.linkage",
+      "oracleDenominator": 1,
+      "recoveredDenominator": 1,
+      "credit": {"numerator": 0, "denominator": 1, "value": 0.0},
+      "outcomes": {"exact": 0, "abi-equivalent": 0, "recovered-unknown": 0, "oracle-unobservable": 0, "contradicted": 1, "fabricated": 0},
+      "findings": [
+        {"oracleId": "global.counter", "recoveredId": "recovered.global.900", "oracleFactId": "truth-global-linkage", "recoveredFactId": "claim-global-linkage", "outcome": "contradicted"}
+      ]
+    },
+    {
+      "dimension": "global.type",
+      "oracleDenominator": 1,
+      "recoveredDenominator": 1,
+      "credit": {"numerator": 1, "denominator": 1, "value": 1.0},
+      "outcomes": {"exact": 1, "abi-equivalent": 0, "recovered-unknown": 0, "oracle-unobservable": 0, "contradicted": 0, "fabricated": 0},
+      "findings": [
+        {"oracleId": "global.counter", "recoveredId": "recovered.global.900", "oracleFactId": "truth-global-type", "recoveredFactId": "claim-global-type", "outcome": "exact"}
+      ]
+    }
+  ],
+  "focusedTotals": {
+    "oracleDenominator": 3,
+    "recoveredDenominator": 4,
+    "observableOracleCount": 3,
+    "unobservableOracleCount": 0,
+    "credit": {"numerator": 2, "denominator": 3, "value": 0.666667},
+    "outcomes": {"exact": 2, "abi-equivalent": 0, "recovered-unknown": 0, "oracle-unobservable": 0, "contradicted": 1, "fabricated": 1}
+  },
+  "reproduction": {
+    "hashes": "sha256sum src/test/resources/oracle/structural-v1/{target-abi.json,structural-oracle.json,recovered.json,identity-map.json,boundary-score.json,expected-score.json}",
+    "score": "python3 scripts/score-structural-recovery.py --target-abi src/test/resources/oracle/structural-v1/target-abi.json --oracle src/test/resources/oracle/structural-v1/structural-oracle.json --boundary-score src/test/resources/oracle/structural-v1/boundary-score.json --boundary-twin rich --identity-map src/test/resources/oracle/structural-v1/identity-map.json --recovered-model src/test/resources/oracle/structural-v1/recovered.json --json-output /tmp/structural-score.json",
+    "fixtureTests": "python3 -m unittest tests.oracle.test_structural_recovery -v"
+  },
+  "compilerDiagnostics": {
+    "status": "unavailable",
+    "reason": "This fixture slice performs no GCC generated-declaration or production build; no compiler diagnostic is applicable."
+  },
+  "productionGap": {
+    "requiredThreshold": {"numeratorAtLeast": 0.9, "denominator": "authenticated observable GCC global facts"},
+    "observedFixtureScore": 0.666667,
+    "status": "unresolved",
+    "productionVerified": false,
+    "adapterReplayVerified": false,
+    "unavailableGates": [
+      "#692 observable GCC denominator and unresolved-fact evidence is still open.",
+      "No checked GCC production global oracle, recovered model, authenticated identity-map replay, or production score is retained.",
+      "StructuralReplayAdapterRegistry.production is empty; fixture scoring cannot become production authority.",
+      "No production generated-C compile or compiler-diagnostic archive exists for this slice."
+    ],
+    "ghidraIsolation": "No Ghidra analysis is invoked here. Any production path must use the bundled Ghidra Java APIs and must not require GHIDRA_HOME or an external analyzeHeadless installation.",
+    "unresolvedHandling": "The report keeps recovered-unknown and oracle-unobservable as zero-valued explicit outcomes for this narrow fixture population; no missing fact is credited."
+  }
+}

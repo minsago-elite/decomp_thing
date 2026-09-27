@@ -32,6 +32,7 @@ data class ArchivalBundle(
     val archiveSha256: String,
     val payloadFiles: List<String>,
     val audit: ArchivalAudit? = null,
+    val publication: ArchivePublicationEvidence? = null,
 )
 
 data class ArchivalBundleLimits(
@@ -46,6 +47,12 @@ data class ArchivalBundleLimits(
         }
         require(maximumTotalBytes >= maximumFileBytes) { "archive total limit must be at least the file limit" }
     }
+
+    fun constrainedTo(profile: ReconstructionProfile): ArchivalBundleLimits = copy(
+        maximumEntries = minOf(maximumEntries, profile.budgets.archiveMaximumEntries),
+        maximumFileBytes = minOf(maximumFileBytes, profile.budgets.archiveMaximumFileBytes),
+        maximumTotalBytes = minOf(maximumTotalBytes, profile.budgets.archiveMaximumTotalBytes),
+    )
 }
 
 private data class ArchivePayload(
@@ -66,7 +73,10 @@ object ArchivalPackager {
         limits: ArchivalBundleLimits = ArchivalBundleLimits(),
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
         requiredCorpusSha256: Set<String> = emptySet(),
+        hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
     ): ArchivalBundle {
+        hostSafetyLimits.requireAllows(profile.budgets)
+        val effectiveLimits = limits.constrainedTo(profile)
         val archiveBuild = ReconstructionAdapters.resolve(profile).archiveBuild
         val transport = archiveBuild.checkedTransportLayout(profile)
         val requiredCorpora = snapshotRequiredBehaviorCorpora(requiredCorpusSha256)
@@ -74,7 +84,7 @@ object ArchivalPackager {
         require(projectDir.resolve("source_tree_manifest.json").isRegularFile(LinkOption.NOFOLLOW_LINKS)) {
             "project is missing source_tree_manifest.json"
         }
-        preflightProjectTree(projectDir, limits, transport)
+        preflightProjectTree(projectDir, effectiveLimits, transport)
         val projectBase = projectDir.toRealPath()
         val archiveAbsolute = archivePath.toAbsolutePath().normalize()
         val archiveLexicalParent = archiveAbsolute.parent
@@ -92,8 +102,16 @@ object ArchivalPackager {
             "archive output must not be a symbolic link: $archivePath"
         }
         archiveBuild.validate(projectDir, profile, requireArtifact = true)
-        val audit = ArchivalProjectAuditor.audit(projectDir, profile, requiredCorpora)
+        val publication = ArchivePublicationEvidence.forProfile(
+            profile, hostSafetyLimits, effectiveLimits, "prepared",
+        )
+        val audit = ArchivalProjectAuditor.audit(
+            projectDir, profile, requiredCorpora, hostSafetyLimits, publication, effectiveLimits,
+        )
         require(audit.provenanceComplete) { "archive project has incomplete model or source provenance" }
+        require(audit.moduleConfidenceEvidenceProblems.isEmpty()) {
+            "archive project has missing or cross-paired accepted module evidence"
+        }
         require(requiredCorpora.isEmpty() || audit.behaviorMatched == true) {
             "archive project does not satisfy the required behavior corpora"
         }
@@ -109,17 +127,23 @@ object ArchivalPackager {
             Verify payload hashes with `ARCHIVE_MANIFEST.sha256` before use.
             """.trimIndent() + "\n",
         )
-        val payload = collectPayload(projectDir, archiveDestination, limits, transport)
+        val payload = collectPayload(projectDir, archiveDestination, effectiveLimits, transport)
         validateSourceManifest(projectDir, payload.associateBy { it.relativePath }, profile)
+        val archivedBehaviorHashes = payload.asSequence()
+            .filter { it.relativePath.endsWith(".behavior.json") }
+            .associate { it.relativePath to it.sha256 }
+        require(archivedBehaviorHashes == audit.behaviorReportSha256) {
+            "behavior report bytes changed between audit and archive capture"
+        }
         val payloadBytes = payload.fold(0L) { total, item -> Math.addExact(total, item.size) }
         val hashManifestBytes = payload.fold(0L) { total, item ->
             Math.addExact(total, 67L + item.relativePath.toByteArray(Charsets.UTF_8).size)
         }
-        require(hashManifestBytes <= limits.maximumFileBytes) {
-            "$HASH_MANIFEST exceeds the ${limits.maximumFileBytes}-byte file limit"
+        require(hashManifestBytes <= effectiveLimits.maximumFileBytes) {
+            "$HASH_MANIFEST exceeds the ${effectiveLimits.maximumFileBytes}-byte file limit"
         }
-        require(Math.addExact(payloadBytes, hashManifestBytes) <= limits.maximumTotalBytes) {
-            "archive exceeds ${limits.maximumTotalBytes} payload bytes"
+        require(Math.addExact(payloadBytes, hashManifestBytes) <= effectiveLimits.maximumTotalBytes) {
+            "archive exceeds ${effectiveLimits.maximumTotalBytes} payload bytes"
         }
         val hashManifestPath = projectDir.resolve(HASH_MANIFEST)
         require(!Files.isSymbolicLink(hashManifestPath)) { "$HASH_MANIFEST must not be a symbolic link" }
@@ -128,8 +152,8 @@ object ArchivalPackager {
                 output.write("${item.sha256}  ${item.relativePath}\n".toByteArray(Charsets.UTF_8))
             }
         }
-        val manifestPayload = inspectPayload(HASH_MANIFEST, hashManifestPath, limits)
-        require(payload.size + 1 <= limits.maximumEntries) { "archive exceeds ${limits.maximumEntries} entries" }
+        val manifestPayload = inspectPayload(HASH_MANIFEST, hashManifestPath, effectiveLimits)
+        require(payload.size + 1 <= effectiveLimits.maximumEntries) { "archive exceeds ${effectiveLimits.maximumEntries} entries" }
         check(manifestPayload.size == hashManifestBytes) { "$HASH_MANIFEST changed while it was prepared" }
         val temporaryArchive = Files.createTempFile(archiveParent, ".${archivePath.fileName}.", ".tmp")
         try {
@@ -163,7 +187,13 @@ object ArchivalPackager {
         } finally {
             Files.deleteIfExists(temporaryArchive)
         }
-        return ArchivalBundle(archivePath, digestFile(archiveDestination), payload.map { it.relativePath }, audit)
+        return ArchivalBundle(
+            archivePath = archivePath,
+            archiveSha256 = digestFile(archiveDestination),
+            payloadFiles = payload.map { it.relativePath },
+            audit = audit,
+            publication = publication.copy(outcome = "published"),
+        )
     }
 
     private fun collectPayload(
@@ -179,7 +209,7 @@ object ArchivalPackager {
             paths.forEach { path ->
                 if (path == projectDir) return@forEach
                 val relative = archiveRelativePath(projectDir, path)
-                if (transport.excludes(relative)) return@forEach
+                if (transport.excludes(relative) || relative == "ARCHIVE_MANIFEST.sha256") return@forEach
                 if (path.toAbsolutePath().normalize() == archiveAbsolute || relative == HASH_MANIFEST) {
                     return@forEach
                 }
@@ -217,8 +247,20 @@ object ArchivalBundleVerifier {
         limits: ArchivalBundleLimits,
         profile: ReconstructionProfile,
         maximumPathDepth: Int,
-    ): List<Path> = archiveBytes.inputStream().use { input ->
-        extractAndVerifyInternal(input, targetDir, limits, profile, maximumPathDepth, strictControlJson = true).paths
+        hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+    ): List<Path> {
+        hostSafetyLimits.requireAllows(profile.budgets)
+        return archiveBytes.inputStream().use { input ->
+        extractAndVerifyInternal(
+            input,
+            targetDir,
+            limits,
+            profile,
+            maximumPathDepth,
+            strictControlJson = true,
+            hostSafetyLimits = hostSafetyLimits,
+        ).paths
+        }
     }
 
     @JvmOverloads
@@ -227,7 +269,10 @@ object ArchivalBundleVerifier {
         targetDir: Path,
         limits: ArchivalBundleLimits = ArchivalBundleLimits(),
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
-    ): List<Path> = extractAndVerifyInternal(archivePath, targetDir, limits, profile).paths
+        hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+    ): List<Path> = extractAndVerifyInternal(
+        archivePath, targetDir, limits, profile, hostSafetyLimits = hostSafetyLimits,
+    ).paths
 
     internal fun extractAndVerifyCandidateLineage(
         archivePath: Path,
@@ -257,12 +302,14 @@ object ArchivalBundleVerifier {
         targetDir: Path,
         limits: ArchivalBundleLimits,
         profile: ReconstructionProfile,
+        hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
     ): VerifiedArchiveExtraction {
+        hostSafetyLimits.requireAllows(profile.budgets)
         require(Files.isRegularFile(archivePath, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(archivePath)) {
             "archive must be a regular non-symbolic-link file"
         }
         return Files.newInputStream(archivePath).use { archiveInput ->
-            extractAndVerifyInternal(archiveInput, targetDir, limits, profile)
+            extractAndVerifyInternal(archiveInput, targetDir, limits, profile, hostSafetyLimits = hostSafetyLimits)
         }
     }
 
@@ -273,8 +320,11 @@ object ArchivalBundleVerifier {
         profile: ReconstructionProfile,
         maximumPathDepth: Int = 2048,
         strictControlJson: Boolean = false,
+        hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
     ): VerifiedArchiveExtraction {
         require(maximumPathDepth in 1..2048) { "archive path depth bound is invalid" }
+        hostSafetyLimits.requireAllows(profile.budgets)
+        val effectiveLimits = limits.constrainedTo(profile)
         val archiveBuild = ReconstructionAdapters.resolve(profile).archiveBuild
         val transport = archiveBuild.checkedTransportLayout(profile)
         val targetBase = targetDir.toAbsolutePath().normalize()
@@ -303,7 +353,7 @@ object ArchivalBundleVerifier {
                 while (true) {
                     val entry = zip.nextEntry ?: break
                     entryCount++
-                    require(entryCount <= limits.maximumEntries) { "archive exceeds ${limits.maximumEntries} entries" }
+                    require(entryCount <= effectiveLimits.maximumEntries) { "archive exceeds ${effectiveLimits.maximumEntries} entries" }
                     require(!entry.isDirectory) { "archive contains directory entries" }
                     val normalizedName = entry.name
                     validateRelativePath(normalizedName)
@@ -313,9 +363,9 @@ object ArchivalBundleVerifier {
                         "archive contains a duplicate or non-portable colliding path: ${entry.name}"
                     }
                     require(entry.method == ZipEntry.STORED) { "archive entry must use the bounded stored format: ${entry.name}" }
-                    require(entry.size in 0..limits.maximumFileBytes) { "archive entry exceeds the file limit: ${entry.name}" }
+                    require(entry.size in 0..effectiveLimits.maximumFileBytes) { "archive entry exceeds the file limit: ${entry.name}" }
                     totalBytes = Math.addExact(totalBytes, entry.size)
-                    require(totalBytes <= limits.maximumTotalBytes) { "archive exceeds ${limits.maximumTotalBytes} payload bytes" }
+                    require(totalBytes <= effectiveLimits.maximumTotalBytes) { "archive exceeds ${effectiveLimits.maximumTotalBytes} payload bytes" }
                     seen += normalizedName
                     val target = staging.resolve(normalizedName).normalize()
                     require(target.startsWith(staging)) { "archive entry escapes extraction target: ${entry.name}" }
@@ -327,7 +377,7 @@ object ArchivalBundleVerifier {
                             val count = zip.read(buffer)
                             if (count < 0) break
                             observed = Math.addExact(observed, count.toLong())
-                            require(observed <= entry.size && observed <= limits.maximumFileBytes) {
+                            require(observed <= entry.size && observed <= effectiveLimits.maximumFileBytes) {
                                 "archive entry exceeds its declared or configured size: ${entry.name}"
                             }
                             output.write(buffer, 0, count)
@@ -371,6 +421,12 @@ object ArchivalBundleVerifier {
                 ArchivePayload(relative, path, Files.size(path), hash, 0)
             }.associateBy { it.relativePath }
             val sourceLineage = validateSourceManifest(staging, payload, profile)
+            val audit = ArchivalProjectAuditor.audit(
+                staging, profile, hostSafetyLimits = hostSafetyLimits, limits = effectiveLimits, publish = false,
+            )
+            require(audit.moduleConfidenceEvidenceProblems.isEmpty()) {
+                "archive contains missing or cross-paired accepted module evidence"
+            }
             val candidateLineage = VerifiedCandidateArchiveLineage(
                 archiveManifestBytes = Files.size(manifestPath),
                 archiveManifestSha256 = digestFile(manifestPath),
@@ -552,6 +608,7 @@ private fun archiveRelativePath(root: Path, path: Path): String =
 private fun preflightProjectTree(projectDir: Path, limits: ArchivalBundleLimits, transport: ArchiveTransportLayout) {
     val portablePaths = mutableSetOf<String>()
     var entryCount = 0
+    var totalBytes = 0L
     Files.walk(projectDir).use { paths ->
         paths.forEach { path ->
             if (path == projectDir) return@forEach
@@ -571,6 +628,14 @@ private fun preflightProjectTree(projectDir: Path, limits: ArchivalBundleLimits,
                 "archive project contains a non-regular file: $relative"
             }
             rejectPrivateOrCachedPath(relative)
+            val size = Files.size(path)
+            require(size <= limits.maximumFileBytes) {
+                "archive payload exceeds the file limit: $relative"
+            }
+            totalBytes = Math.addExact(totalBytes, size)
+            require(totalBytes <= limits.maximumTotalBytes) {
+                "archive exceeds ${limits.maximumTotalBytes} payload bytes"
+            }
         }
     }
 }

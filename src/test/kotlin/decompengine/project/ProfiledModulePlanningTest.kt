@@ -1,5 +1,8 @@
 package decompengine.project
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.Path
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
@@ -59,6 +62,40 @@ class ProfiledModulePlanningTest {
             val selected = profile(base, base.budgets.copy(maximumFunctionsPerModule = 3))
             val (_, plan) = generateAndReadPlan(selected, DeterministicModulePlanner(maximumFunctionsPerModule = 1))
             assertSingleFunctionOwnership(plan)
+        }
+    }
+
+    @Test
+    fun `planning evidence retains selected profile effective limits and measured outcome`() {
+        for (base in ReconstructionProfiles.builtIn) {
+            val selected = profile(base, base.budgets.copy(maximumFunctionsPerModule = 3))
+            val (project, plan) = generateAndReadPlan(selected,
+                DeterministicModulePlanner(maximumFunctionsPerModule = 1))
+            val evidence = Json.parseToJsonElement(
+                project.resolve("reports/confidence.json").toFile().readText(),
+            ).jsonObject.getValue("semanticPlanningBudgetEvidence").jsonObject
+            val selectedProfile = evidence.getValue("selectedProfile").jsonObject
+            assertEquals(selected.id, selectedProfile.getValue("id").jsonPrimitive.content)
+            assertEquals(selected.sha256, selectedProfile.getValue("sha256").jsonPrimitive.content)
+            assertEquals(Json.parseToJsonElement(selected.canonicalJson()),
+                selectedProfile.getValue("descriptor"))
+            assertEquals(Json.parseToJsonElement(ReconstructionHostSafetyLimits.DEFAULT.maximum.canonicalJson()),
+                evidence.getValue("hostSafetyLimits"))
+            val limits = evidence.getValue("effectivePlannerLimits").jsonObject
+            assertEquals("1", limits.getValue("maximumFunctionsPerModule").jsonPrimitive.content)
+            assertEquals(selected.budgets.plannerMaximumEntities.toString(),
+                limits.getValue("maximumEntities").jsonPrimitive.content)
+            assertEquals(selected.budgets.plannerMaximumDependencyEdges.toString(),
+                limits.getValue("maximumDependencyEdges").jsonPrimitive.content)
+            assertEquals(selected.budgets.plannerMaximumWorkUnits.toString(),
+                limits.getValue("maximumWorkUnits").jsonPrimitive.content)
+            val outcome = evidence.getValue("outcome").jsonObject
+            assertEquals("planned", outcome.getValue("status").jsonPrimitive.content)
+            assertEquals(plan.modules.size.toString(), outcome.getValue("plannedModules").jsonPrimitive.content)
+            assertEquals("3", outcome.getValue("functionCount").jsonPrimitive.content)
+            assertEquals("2", outcome.getValue("dependencyEdges").jsonPrimitive.content)
+            assertTrue(outcome.getValue("sparseWorkUnits").jsonPrimitive.content.toLong() <=
+                selected.budgets.plannerMaximumWorkUnits)
         }
     }
 

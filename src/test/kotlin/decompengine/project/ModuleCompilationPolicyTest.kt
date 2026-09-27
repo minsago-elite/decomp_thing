@@ -29,6 +29,9 @@ class ModuleCompilationPolicyTest {
         val base = GeneratedCMakeReconstructionProfile.descriptor
         val unsupported = ReconstructionProfile(base.schemaVersion, "unregistered-fixture-v1",
             base.layout, base.budgets, base.adapterConfiguration)
+        assertFailsWith<IllegalArgumentException> {
+            ReconstructionCompilationPolicies.resolve(unsupported)
+        }
         val project = Files.createTempDirectory("unsupported-profile-").resolve("project")
         var calls = 0
         val model = RecoveredProgramModel(inputSha256 = "a".repeat(64), functions = emptyList())

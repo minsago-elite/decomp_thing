@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "recordKind": "gcc-driver-release-eligibility",
+  "issue": 719,
+  "parentIssue": 54,
+  "recordedOnUtc": "2026-09-08",
+  "evidenceBasis": {
+    "repositoryCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+    "profileId": "gcc-16-2-0-driver-behavior",
+    "reference": {
+      "sourceLock": {
+        "path": "oracle/gcc/16.2.0/source-lock.json",
+        "sha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc"
+      },
+      "oracleManifest": {
+        "path": "oracle/gcc/16.2.0/oracle-manifest.json",
+        "sha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9"
+      },
+      "buildRecord": {
+        "path": "oracle/gcc/16.2.0/build-record.json",
+        "sha256": "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
+      },
+      "behaviorEvidence": {
+        "path": "oracle/gcc/16.2.0/behavior-corpus-evidence.json",
+        "sha256": "9dcf787aea232615a1ff8721144b86bc1f5e9a2a7068fa9e9280db0bc4ad6803",
+        "cases": 14,
+        "passed": 14
+      },
+      "oracleExecutable": {
+        "path": "oracle/gcc/16.2.0/artifacts/gcc-driver.stripped",
+        "sha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4"
+      }
+    }
+  },
+  "authorityBoundary": {
+    "oracleEvidence": "authenticated-retained-reference-only",
+    "candidateEvidence": "must-be-independently-authenticated",
+    "releaseDecision": "deterministic-kotlin-jvm-verifier-required",
+    "presentationMayAuthorizeRelease": false,
+    "analysis": {
+      "provider": "bundled-ghidra-java-api",
+      "isolatedWorkerRequired": true,
+      "externalGhidraHomeRequired": false,
+      "externalAnalyzeHeadlessAllowed": false
+    }
+  },
+  "qualificationContract": {
+    "rule": "every required gate must be authenticated, complete, passing, and reproduced by clean repeated runs",
+    "missingStaleUntrustedFailedOrUnresolvedBlocks": true,
+    "status": "unresolved",
+    "releaseEligible": false,
+    "requiredGates": [
+      {
+        "id": "structural-a6-a7",
+        "issues": [40, 42, 45],
+        "status": "unavailable",
+        "reason": "Authenticated production structural replay, calibration, and threshold evidence are not retained."
+      },
+      {
+        "id": "accepted-reconstructed-archive",
+        "issues": [50],
+        "status": "unavailable",
+        "reason": "The accepted reconstructed source/build archive and candidate identity are not retained."
+      },
+      {
+        "id": "candidate-behavior-observations",
+        "issues": [51, 52, 53],
+        "status": "unavailable",
+        "reason": "Authenticated candidate metadata, preprocessing, and compile/link/runtime observations are not retained."
+      },
+      {
+        "id": "clean-repeated-runs",
+        "status": "unavailable",
+        "reason": "No complete authenticated production qualification run set is retained."
+      }
+    ]
+  },
+  "blockingEvidence": {
+    "state": "unresolved",
+    "kind": "missing-candidate-evidence",
+    "observedCandidateMismatch": false,
+    "blocksRelease": true,
+    "reason": "The retained reference pass and oracle executable do not qualify a reconstructed GCC release."
+  },
+  "productionGap": "Issue #718 report rendering and the retained reference artifacts do not supply the complete authenticated #40/#42/#45/#50/#51-#53 evidence set or clean repeated production runs required by #719."
+}

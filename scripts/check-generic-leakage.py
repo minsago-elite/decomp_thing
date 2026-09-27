@@ -242,7 +242,7 @@ def main() -> int:
             print(f"{finding.path}:{finding.line}: {finding.rule}: {finding.text}")
         status = "FAIL" if result.findings else "PASS"
         print(f"{status}: {len(result.findings)} lexical neutrality findings in {result.scanned_files} files ({result.scanned_bytes} bytes)")
-        print("Scope: supported source/scripts/resources; benchmark namespaces and Markdown exempt; generic rules use declared roots and exact adapter ownership.")
+        print("Scope: supported source/scripts/resources; benchmark namespaces and declared documentation exempt; generic rules use declared roots and exact adapter ownership.")
     return 1 if result.findings else 0
 
 

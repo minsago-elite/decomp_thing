@@ -1,0 +1,25 @@
+{
+  "apiVersion": 1,
+  "kind": "report",
+  "requestId": "request_example_1",
+  "data": {
+    "reportId": "report_example_1",
+    "binding": {
+      "jobId": "1234567890abcdef1234567890abcdef",
+      "runId": "run_example_1",
+      "revisionId": "revision_example_1"
+    },
+    "reportType": "exploration",
+    "adapterVersion": 1,
+    "producerSchemaVersion": null,
+    "state": "missing",
+    "authority": "observations",
+    "sourceArtifact": null,
+    "acceptance": "unknown",
+    "acceptanceArtifactId": null,
+    "limitations": [
+      "Synthetic missing evidence state."
+    ],
+    "summary": null
+  }
+}

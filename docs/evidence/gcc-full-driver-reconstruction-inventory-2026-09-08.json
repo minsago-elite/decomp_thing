@@ -1,0 +1,97 @@
+{
+  "evidenceId": "gcc-full-driver-reconstruction-inventory-v1",
+  "schemaVersion": 1,
+  "scope": "repository-fact-inventory",
+  "authority": "provenance-and-layout-only",
+  "purpose": "Tiny #698 contract slice for the full-driver source and reconstruction receipt publication boundary; it is not a production reconstruction result.",
+  "oracleBoundary": {
+    "profile": "gcc-driver-16.2.0",
+    "sourceLock": {
+      "path": "oracle/gcc/16.2.0/source-lock.json",
+      "sha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc",
+      "sourceArchiveSha256": "e6738e29597f733270731aa90600f37ffdc045079dfc27ec7e8192cc81085c3e",
+      "sourceRevision": "78d4ac73dd391005b895a6148cd9831e28e1208b"
+    },
+    "artifactManifest": {
+      "path": "oracle/gcc/16.2.0/oracle-manifest.json",
+      "sha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9",
+      "richArtifactSha256": "8009c7cfc4f66017aa932d86a6d4ec7f374e6ab7a01b3ef5ab3d2fcc78c2378b",
+      "strippedArtifactSha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4",
+      "sharedBuildId": "df5e4869383c150bbb3aab0ebac4eacb1dcd07d0"
+    },
+    "functionOracle": {
+      "path": "oracle/gcc/16.2.0/function-recovery-oracle.json",
+      "sha256": "b49b8a72a96580bd8727d9dc530753f40f78185a656f472ebe83a7a1f6fc9aae",
+      "scope": "production",
+      "artifactManifestSha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9"
+    }
+  },
+  "reconstructionContract": {
+    "profileId": "generated-c-make-v1",
+    "sourceAndBuildSlots": [
+      "include/decomp_types.h",
+      "include/modules/{module}.h",
+      "src/modules/{module}_internal.h",
+      "src/modules/{module}.c",
+      "src/main.c",
+      "Makefile"
+    ],
+    "evidenceSlots": [
+      "reports/modules/{module}.json",
+      "reports/agent-executions/{module}.json",
+      "reports/program_model.json",
+      "reports/module_plan.json",
+      "reports/confidence.json",
+      "reports/toolchain.json",
+      "UNRESOLVED.md"
+    ],
+    "receiptMinimum": [
+      "moduleId",
+      "reconstructorIdentity",
+      "promptSha256",
+      "executionEvidencePath",
+      "accepted-or-unresolved status"
+    ]
+  },
+  "publicationInventory": [
+    {
+      "id": "full-driver-source-manifest",
+      "status": "unavailable",
+      "requiredEvidence": "A generated full-driver source tree and its source manifest bound to the authenticated model and profile.",
+      "repositoryFact": "No complete generated GCC driver tree or source manifest is retained in the checked repository."
+    },
+    {
+      "id": "unresolved-inventory",
+      "status": "unavailable",
+      "requiredPath": "UNRESOLVED.md",
+      "requiredEvidence": "The generated tree's explicit unresolved entity and implementation inventory.",
+      "repositoryFact": "The profile declares the unresolved inventory path, but no full-driver generated project is retained from which to publish it."
+    },
+    {
+      "id": "prompt-and-receipt-inventory",
+      "status": "unavailable",
+      "requiredEvidence": "One bounded authenticated ACP-v2 receipt and prompt digest for every owned module.",
+      "repositoryFact": "The repository contains the receipt verifier contract and fixture tests, but no complete-driver production receipt set."
+    },
+    {
+      "id": "production-run-identities",
+      "status": "unavailable",
+      "requiredEvidence": "Authenticated agent session/turn and terminal run identities for the complete driver request.",
+      "repositoryFact": "No complete-driver production run identity is checked in."
+    }
+  ],
+  "productionGap": {
+    "status": "unresolved",
+    "productionVerified": false,
+    "unavailableGates": [
+      "#696 complete authenticated driver generation and per-module acceptance receipts.",
+      "#697 complete interruption/restart evidence with unchanged accepted hashes.",
+      "#699 clean compile and link of the resulting full-driver tree.",
+      "#700 production-sized attribution of strict build failures.",
+      "Qualified contained compiler, input/output closure, and independent ACP reconstruction evidence remain unavailable."
+    ],
+    "ghidraIsolation": "Any production analysis must use the bundled Ghidra Java APIs in an isolated worker; GHIDRA_HOME and external analyzeHeadless are not production prerequisites.",
+    "oracleBoundary": "The authenticated GCC source lock, artifact manifest, and function oracle are oracle inputs only; they do not authorize reconstructed source, receipts, run identities, or build claims.",
+    "unresolvedHandling": "Unavailable production artifacts remain explicitly unresolved and are not counted as accepted modules or successful gates."
+  }
+}

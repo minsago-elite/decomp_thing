@@ -17,6 +17,10 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: gradle
+      - name: Install pinned build-only frontend toolchain
+        run: |
+          bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
+          echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
       - name: Build the pinned LLVM toolchain image
         run: |
           bash scripts/ci-build-llvm-toolchain.sh

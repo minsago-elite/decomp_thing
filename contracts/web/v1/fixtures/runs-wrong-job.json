@@ -1,0 +1,44 @@
+{
+  "apiVersion": 1,
+  "kind": "runs",
+  "requestId": "request_example_1",
+  "data": {
+    "jobId": "1234567890abcdef1234567890abcdef",
+    "items": [
+      {
+        "runId": "run_example_1",
+        "jobId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "workflow": "reconstruct",
+        "state": "completed",
+        "version": "run_version_2",
+        "createdAt": "2026-09-05T00:00:00Z",
+        "startedAt": "2026-09-05T00:00:00Z",
+        "endedAt": "2026-09-05T00:00:01Z",
+        "previousRunId": null,
+        "inputRevisionId": null,
+        "resultRevisionId": "revision_example_1",
+        "acceptance": "not-evaluated",
+        "harnessCapabilityId": "harness_acp",
+        "terminalReason": "COMPLETED",
+        "usage": {
+          "inputTokens": "9007199254740993",
+          "outputTokens": null,
+          "cachedInputTokens": null,
+          "toolCalls": "1",
+          "wallClockMs": "1000"
+        },
+        "limits": {
+          "wallClockMs": "60000",
+          "idleMs": "15000",
+          "maxOutputBytes": "1048576",
+          "maxToolCalls": "16"
+        }
+      }
+    ],
+    "page": {
+      "limit": 50,
+      "snapshotVersion": "version_example_1",
+      "nextCursor": null
+    }
+  }
+}

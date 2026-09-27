@@ -60,6 +60,9 @@ release-ineligible; issue #291 and its parent issues track that qualification.
 `GccBundledCliQualificationTest`. It sets required mode, disables test caching,
 and fails on missing inputs or prerequisites. Ordinary test runs skip its two
 real-engine cases unless `DECOMP_REQUIRE_GCC_ENGINE_CLI=true` is selected.
+Set `DECOMP_GCC_CLI_ENGINE=cc1` or `lto1` to run one engine with its binary and
+two fresh/resume scratch mounts; omit it or use `all` to require both engines
+and four mounts. The selected mounts must be disjoint.
 The runner does not invoke the broad CI script or vulnerability-reproduction tests.
 
 Supply canonical paths in these environment variables:
@@ -69,13 +72,16 @@ Supply canonical paths in these environment variables:
 - `DECOMP_GCC_CLI_PROFILE` and `DECOMP_GCC_CLI_ARCHIVE`: the retained compiler-engine
   profile and matching Ghidra provenance archive.
 - `DECOMP_GCC_CLI_CC1_BINARY` and `DECOMP_GCC_CLI_LTO1_BINARY`: genuine stripped
-  binaries matching that profile. `scripts/rebuild-gcc-compiler-engines.py` is the
+  binaries matching that profile, required for each selected engine.
+  `scripts/rebuild-gcc-compiler-engines.py` is the
   existing authenticated rebuild path; an authored substitute does not qualify.
 - `DECOMP_GCC_CLI_CC1_FRESH_SCRATCH`, `DECOMP_GCC_CLI_CC1_RESUME_SCRATCH`,
   `DECOMP_GCC_CLI_LTO1_FRESH_SCRATCH`, `DECOMP_GCC_CLI_LTO1_RESUME_SCRATCH`: four
-  distinct, empty dedicated mounts satisfying the CLI's default scratch policy.
+  distinct, empty dedicated mounts satisfying the CLI's default scratch policy;
+  only the selected engine's two mounts are required in single-engine mode.
 - `DECOMP_GCC_CLI_EVIDENCE_ROOT`: an existing private evidence directory disjoint
-  from all inputs and scratch mounts, with capacity for four captured model/plan pairs.
+  from all inputs and scratch mounts, with capacity for two captured model/plan pairs
+  per selected engine.
 
 On a trusted GitHub Actions provisioner with noninteractive sudo, the existing
 scratch setup script has four explicit real-engine selections:
@@ -101,17 +107,6 @@ the exact profile paths and loop-device detachment. These helpers do not replace
 Kotlin lifecycle validation or establish crash recovery. Their privileged engine
 mount paths still require provisioned-host qualification.
 
-The trusted provisioner can stage the complete installation with
-`bash scripts/ci-prepare-bundled-ghidra-runtime.sh --application`. This copies
-`installDist` into a distinct root-owned deployment and publishes
-`DECOMP_GCC_CLI_INSTALLATION` for subsequent steps. It uses the same bounded,
-descriptor-relative copy and ownership marker as the Ghidra-only fixture mode.
-The installed CLI resolves its references relative to this complete installation;
-the Ghidra-only fixture environment variable does not redirect it.
-
-After confirmed worker absence, the matching trusted teardown command is
-`bash scripts/ci-release-bundled-ghidra-runtime.sh --application`. It requires the
-same run identity and checks the exact application target and ownership marker.
 The application mode's privileged copy/release still requires host qualification.
 
 Provision the reviewed root-owned JVM/system libraries, native helpers and bundled

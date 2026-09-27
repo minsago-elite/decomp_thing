@@ -5,9 +5,9 @@ import java.util.TreeSet
 /**
  * Counts index entries and sparse-graph visits performed by one planner run.
  *
- * This is internal benchmark instrumentation rather than part of the archive schema. It lets the
- * scale regression tests distinguish work proportional to recovered evidence from an accidental
- * return to scanning every pair of functions.
+ * These measurements support scale regression tests and local planning budget evidence. They
+ * distinguish work proportional to recovered evidence from an accidental return to scanning
+ * every pair of functions; they do not certify production execution.
  */
 internal data class PlannerComplexity(
     val functionCount: Int,
@@ -25,6 +25,13 @@ internal data class PlannerComplexity(
 }
 
 internal data class IndexedPlannerRun(val plan: ModulePlan, val complexity: PlannerComplexity)
+
+internal data class PlannerBudgetLimits(
+    val maximumFunctionsPerModule: Int,
+    val maximumEntities: Int,
+    val maximumDependencyEdges: Long,
+    val maximumWorkUnits: Long,
+)
 
 private class MutablePlannerComplexity(entityCount: Int, private val maximumWorkUnits: Long) {
     private var chargedWorkUnits = entityCount.toLong()
@@ -89,6 +96,10 @@ class DeterministicModulePlanner(
         require(maximumDependencyEdges > 0)
         require(maximumWorkUnits > 0)
     }
+
+    internal val budgetLimits: PlannerBudgetLimits
+        get() = PlannerBudgetLimits(maximumFunctionsPerModule, maximumEntities,
+            maximumDependencyEdges, maximumWorkUnits)
 
     /** Preserve stricter caller limits while binding generation to its admitted profile. */
     internal fun withProfileBounds(profile: ReconstructionProfile): DeterministicModulePlanner {

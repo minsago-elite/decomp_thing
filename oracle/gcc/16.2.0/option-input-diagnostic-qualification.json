@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "issue": 708,
+  "parentIssue": 51,
+  "dependencyIssue": 706,
+  "status": "unresolved",
+  "qualification": "candidate-execution-required",
+  "oracle": {
+    "id": "gcc-driver-16.2.0",
+    "version": "16.2.0",
+    "sourceRevision": "78d4ac73dd391005b895a6148cd9831e28e1208b",
+    "sourceLock": {
+      "path": "oracle/gcc/16.2.0/source-lock.json",
+      "sha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc"
+    },
+    "artifactManifest": {
+      "path": "oracle/gcc/16.2.0/oracle-manifest.json",
+      "sha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9",
+      "strippedArtifactSha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4"
+    },
+    "buildRecord": {
+      "path": "oracle/gcc/16.2.0/build-record.json",
+      "sha256": "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637",
+      "runtimeImage": "sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248"
+    },
+    "corpus": {
+      "path": "oracle/gcc/16.2.0/behavior-corpus.json",
+      "sha256": "bcc1a14ca8c54f94106c943f0bc5698cb9af3151b7bf20a49ae3c8828baaad0e"
+    },
+    "referenceEvidence": {
+      "path": "oracle/gcc/16.2.0/behavior-corpus-evidence.json",
+      "sha256": "9dcf787aea232615a1ff8721144b86bc1f5e9a2a7068fa9e9280db0bc4ad6803"
+    }
+  },
+  "comparisonContract": {
+    "referenceStatus": "passed",
+    "caseCount": 2,
+    "requiredFields": ["exitCode", "stdout", "stderr"],
+    "normalizations": [],
+    "cases": [
+      {
+        "id": "diagnostic-invalid-input",
+        "arguments": ["-B/workspace/tools/", "-c", "missing.c", "-o", "missing.o"],
+        "referenceStatus": "passed",
+        "exitCode": 1,
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "normalizations": []
+        },
+        "stderr": {
+          "bytes": 34,
+          "sha256": "fc6d35d325e7984d3b9bd91720f37631f04cac325ba8460aedd13376ec5125a8",
+          "normalizations": []
+        },
+        "expectedArtifacts": [
+          {"path": "missing.o", "present": false}
+        ]
+      },
+      {
+        "id": "diagnostic-invalid-option",
+        "arguments": ["--definitely-not-a-supported-corpus-option"],
+        "referenceStatus": "passed",
+        "exitCode": 1,
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "normalizations": []
+        },
+        "stderr": {
+          "bytes": 153,
+          "sha256": "525b39acc7388841c74e1411725f7d2207b6a1f5214f691b938492cf09e1416c",
+          "normalizations": []
+        },
+        "expectedArtifacts": []
+      }
+    ]
+  },
+  "candidate": {
+    "status": "unresolved",
+    "requiredEvidence": [
+      "Authenticated reconstructed-driver execution for both cases under the pinned environment.",
+      "Candidate source, build, executable, and run-receipt identities bound to the oracle boundary.",
+      "Independent byte-for-byte comparison of candidate exit code and normalized stdout/stderr, retaining every mismatch as release-blocking evidence."
+    ],
+    "productionVerified": false,
+    "unavailableGates": [
+      "No reconstructed candidate execution receipts are present in the checked repository.",
+      "No candidate comparison or release qualification can be inferred from the passed reference evidence.",
+      "The corpus has no distinct malformed-input case; that inventory category remains unavailable."
+    ]
+  },
+  "boundaries": {
+    "oracle": "The locked source, manifest, build record, corpus, and reference evidence are read-only authenticated oracle inputs. They do not establish reconstructed source, candidate fidelity, or release eligibility.",
+    "ghidra": "Any production analysis must use the application-bundled Ghidra Java APIs in an isolated worker; GHIDRA_HOME and an external analyzeHeadless installation are not production prerequisites.",
+    "unresolved": "Absent candidate receipts, unavailable categories, and mismatches remain unresolved and cannot be counted as accepted behavior."
+  }
+}

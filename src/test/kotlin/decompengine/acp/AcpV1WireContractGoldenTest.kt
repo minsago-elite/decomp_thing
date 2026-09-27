@@ -74,6 +74,10 @@ class AcpV1WireContractGoldenTest {
     @Test
     fun `sdk serializers match every versioned v1 golden message`() {
         assertExchange("initialize", AcpMethod.AgentMethods.V1.Initialize)
+        assertResponse("initialize-auth-variants.response", "initialize.request", AcpMethod.AgentMethods.V1.Initialize)
+        assertResponse("initialize-auth.response", "initialize.request", AcpMethod.AgentMethods.V1.Initialize)
+        assertExchange("authenticate", AcpMethod.AgentMethods.V1.Authenticate)
+        assertExchange("logout", AcpMethod.AgentMethods.V1.Logout)
         assertExchange("session-new", AcpMethod.AgentMethods.V1.SessionNew)
         assertExchange("session-load", AcpMethod.AgentMethods.V1.SessionLoad)
         assertResponse("session-load-configured.response", "session-load.request", AcpMethod.AgentMethods.V1.SessionLoad)
@@ -148,6 +152,43 @@ class AcpV1WireContractGoldenTest {
             messages.keys,
             "ACP v1 golden fixture has an unvalidated or missing message",
         )
+    }
+
+    @Test
+    fun `authentication selection and logout advertisement are distinct typed v1 fields`() {
+        val advertised = ACPJson.decodeFromJsonElement(AcpMethod.AgentMethods.V1.Initialize.responseSerializer,
+            message("initialize-auth.response").getValue("result"))
+        val absent = ACPJson.decodeFromJsonElement(AcpMethod.AgentMethods.V1.Initialize.responseSerializer,
+            message("initialize.response").getValue("result"))
+        val request = ACPJson.decodeFromJsonElement(AcpMethod.AgentMethods.V1.Authenticate.requestSerializer,
+            message("authenticate.request").getValue("params"))
+        val method = assertIs<com.agentclientprotocol.model.AuthMethod.AgentAuth>(advertised.authMethods.single())
+        assertEquals(method.id, request.methodId)
+        assertNotNull(advertised.agentCapabilities.auth.logout)
+        assertEquals(emptyList(), absent.authMethods)
+        assertEquals(null, absent.agentCapabilities.auth.logout)
+    }
+
+    @Test
+    fun `environment terminal and unknown authentication advertisements retain their distinct payloads`() {
+        val response = ACPJson.decodeFromJsonElement(AcpMethod.AgentMethods.V1.Initialize.responseSerializer,
+            message("initialize-auth-variants.response").getValue("result"))
+        val environment = assertIs<com.agentclientprotocol.model.AuthMethod.EnvVarAuth>(response.authMethods[0])
+        assertEquals("FIXTURE_TOKEN", environment.vars.single().name)
+        assertEquals(true, environment.vars.single().secret)
+        assertEquals(false, environment.vars.single().optional)
+        assertEquals("https://auth.example.invalid/setup", environment.link)
+        val terminal = assertIs<com.agentclientprotocol.model.AuthMethod.TerminalAuth>(response.authMethods[1])
+        assertEquals(listOf("fixture-login", "--interactive"), terminal.args)
+        assertEquals(mapOf("FIXTURE_CONTEXT" to "operator"), terminal.env)
+        val unknown = assertIs<com.agentclientprotocol.model.AuthMethod.UnknownAuthMethod>(response.authMethods[2])
+        assertEquals("future_fixture", unknown.type)
+        assertEquals("opaque-fixture-value", unknown.rawJson.getValue("fixturePayload")
+            .jsonObject.getValue("hint").jsonPrimitive.content)
+        val inventory = AcpAuthenticationInventory.capture(response.authMethods, emptyList())
+        assertEquals(listOf("environment", "terminal", "unknown"), inventory.methods.map { it.variant })
+        assertEquals(listOf(false, false, false), inventory.methods.map { it.loginSupported })
+        assertEquals(false, inventory.logoutAdvertised)
     }
 
     private fun <TRequest : AcpRequest, TResponse : AcpResponse> assertExchange(
@@ -270,6 +311,12 @@ class AcpV1WireContractGoldenTest {
         val EXPECTED_MESSAGE_NAMES: Set<String> = linkedSetOf(
             "initialize.request",
             "initialize.response",
+            "initialize-auth.response",
+            "initialize-auth-variants.response",
+            "authenticate.request",
+            "authenticate.response",
+            "logout.request",
+            "logout.response",
             "session-load.request",
             "session-load.response",
             "session-load-configured.response",

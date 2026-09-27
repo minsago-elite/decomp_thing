@@ -1,0 +1,12 @@
+{
+  "suite": "decompengine.web.UploadServerTest",
+  "failures": [
+    {
+      "test": "shutdown timeout retains store ownership until the worker exits and cleanup is retried()",
+      "message": "java.lang.IllegalStateException: HTTP requests remain active after server stop",
+      "trace": "java.lang.IllegalStateException: HTTP requests remain active after server stop\n\tat decompengine.web.UploadServer.stop(UploadServer.kt:364)\n\tat decompengine.web.UploadServer.stop$default(UploadServer.kt:325)\n\tat decompengine.web.UploadServerTest.shutdown timeout retains store ownership until the worker exits and cleanup is retried(UploadServerTest.kt:688)\n\tat java.base/java.lang.reflect.Method.invoke(Method.java:580)\n\tat java.base/java.util.ArrayList.forEach(ArrayList.java:1596)\n\tat java.base/java.util.ArrayList.forEach(ArrayList.java:1596)\n"
+    }
+  ],
+  "resolved": false,
+  "trackingIssue": 224
+}

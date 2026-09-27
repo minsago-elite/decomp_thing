@@ -38,10 +38,11 @@ class BehaviorEvidenceTest {
         val shim = fixture.original.parent.resolve("authored-runner-shim")
         val ready = fixture.original.parent.resolve("capture-ready")
         val originalShim = shim.readText()
+        val probe = originalShim.lines().first { "echo --json-status-fd" in it }
         val header = originalShim.lines().first { "child-pid" in it }
         // A test-owned execution owner announces readiness before waiting. No
         // application output or namespace assertion qualifies this negative run.
-        shim.writeText("#!/bin/sh\n" + header + "\n" +
+        shim.writeText("#!/bin/sh\n" + probe + "\n" + header + "\n" +
             "printf '%s\\n' \"${'$'}${'$'}\" > \"$ready\"\n" +
             "exec /bin/sleep 5\n")
         for (interrupt in listOf(true, false)) {
@@ -376,8 +377,19 @@ class BehaviorEvidenceTest {
             fileInputs = mapOf("file" to mapOf("nested/input.bin" to input)),
         )
         val record = BehaviorEvidence.decode(report.reportPath.readBytes())
-        assertEquals(4, record.integer("schemaVersion"))
+        assertEquals(6, record.integer("schemaVersion"))
         val case = record.getValue("cases").jsonArray.single().jsonObject
+        val executionSnapshots = record.getValue("executionSnapshots").jsonObject
+        val originalSnapshot = executionSnapshots.getValue("original").jsonObject
+        val rebuiltSnapshot = executionSnapshots.getValue("rebuilt").jsonObject
+        assertEquals(record.getValue("originalIdentity").jsonObject, JsonObject(originalSnapshot - "path"))
+        assertEquals(record.getValue("rebuiltIdentity").jsonObject, JsonObject(rebuiltSnapshot - "path"))
+        val originalCommand = case.getValue("original").jsonObject.getValue("sandboxCommand").jsonArray.map { it.jsonPrimitive.content }
+        val rebuiltCommand = case.getValue("rebuilt").jsonObject.getValue("sandboxCommand").jsonArray.map { it.jsonPrimitive.content }
+        assertTrue(originalCommand.windowed(3).any { it == listOf("--ro-bind", originalSnapshot.string("path"), "/program/executable") })
+        assertTrue(rebuiltCommand.windowed(3).any { it == listOf("--ro-bind", rebuiltSnapshot.string("path"), "/program/executable") })
+        assertFalse(Files.exists(Path.of(originalSnapshot.string("path"))))
+        assertFalse(Files.exists(Path.of(rebuiltSnapshot.string("path"))))
         val retained = case.getValue("fileInputs").jsonArray.single().jsonObject
         assertEquals("00017fff", retained.string("contentHex"))
         assertEquals(OracleArtifacts.sha256(bytes), retained.string("sha256"))
@@ -426,6 +438,20 @@ class BehaviorEvidenceTest {
         val fixture = fixture()
         val report = fixture.evaluate()
         val record = BehaviorEvidence.decode(report.reportPath.readBytes())
+        assertEquals(6, record.integer("schemaVersion"))
+        val snapshots = record.getValue("executionSnapshots").jsonObject
+        val runtimeClosure = snapshots.getValue("runtimeClosure").jsonObject
+        assertEquals(1, runtimeClosure.integer("schemaVersion"))
+        assertEquals("/runtime/lib", runtimeClosure.string("visibleSearchPath"))
+        assertFalse(runtimeClosure.boolean("hostRuntimeRootsVisible"))
+        assertTrue(runtimeClosure.getValue("libraries").jsonArray.any {
+            it.jsonObject.string("name") == "libc.so.6"
+        })
+        for ((side, identityName) in listOf("original" to "originalIdentity", "rebuilt" to "rebuiltIdentity")) {
+            val snapshot = snapshots.getValue(side).jsonObject
+            assertEquals(record.getValue(identityName).jsonObject, JsonObject(snapshot - "path"))
+            assertFalse(Files.exists(Path.of(snapshot.string("path"))))
+        }
         BehaviorEvidence.requireProjectCurrent(record, BehaviorProjectContext(fixture.project))
         val audit = ArchivalProjectAuditor.audit(fixture.project)
         assertEquals(true, audit.behaviorMatched)
@@ -434,6 +460,18 @@ class BehaviorEvidenceTest {
         assertTrue(audit.networkIsolation.isEmpty())
         assertTrue(audit.toJson().contains("\"moduleBehaviorEvidence\": []"))
         assertTrue(record.getValue("executionPolicy").jsonObject.string("assurance").contains("not-production-authority"))
+
+        val changedClosureBody = JsonObject(runtimeClosure - "closureSha256" +
+            ("hostRuntimeRootsVisible" to JsonPrimitive(true)))
+        val changedClosure = JsonObject(changedClosureBody + ("closureSha256" to JsonPrimitive(
+            OracleArtifacts.sha256(OracleJson.canonicalBytes(changedClosureBody)),
+        )))
+        val changedSnapshots = JsonObject(snapshots + ("runtimeClosure" to changedClosure))
+        val changedRecord = JsonObject(record + ("executionSnapshots" to changedSnapshots))
+        val rehashedRecord = JsonObject(changedRecord + ("reportSha256" to JsonPrimitive(
+            OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(changedRecord - "reportSha256"))),
+        )))
+        assertFails { BehaviorEvidence.decode(OracleJson.canonicalBytes(rehashedRecord)) }
     }
 
     @Test
@@ -614,10 +652,22 @@ class BehaviorEvidenceTest {
     }
 
     private fun historicalCompletionRecord(record: JsonObject, version: Int): JsonObject {
+        val executionSnapshots = record.getValue("executionSnapshots").jsonObject
+        val policy = record.getValue("executionPolicy").jsonObject
         val cases = JsonArray(record.getValue("cases").jsonArray.map { element ->
             val case = element.jsonObject
             val stripped = JsonObject(case + listOf("original", "rebuilt").associateWith { side ->
-                JsonObject(case.getValue(side).jsonObject - "completionEvidence")
+                val output = case.getValue(side).jsonObject
+                val sourcePath = record.string("${side}Binary")
+                val files = case.getValue("fileInputs").jsonArray.associate { file ->
+                    file.jsonObject.string("name") to Path.of(file.jsonObject.string("sourcePath"))
+                }
+                val commandArguments = case.getValue("args").jsonArray.map { it.jsonPrimitive.content }
+                val command = behaviorSandboxCommand(Path.of(sourcePath), commandArguments,
+                    policy.count("timeoutMillis"), Path.of(policy.getValue("bubblewrap").jsonObject.string("path")),
+                    Path.of(policy.getValue("timeout").jsonObject.string("path")), policy.boolean("networkIsolationRequested"), files)
+                    .toMutableList().apply { this[1] = "${maxOf(1L, policy.count("timeoutMillis") / 1000L)}s" }
+                JsonObject(output - "completionEvidence" + ("sandboxCommand" to JsonArray(command.map(::JsonPrimitive))))
             })
             if (version == 1) JsonObject(stripped - "fileInputs") else stripped
         })
@@ -628,11 +678,16 @@ class BehaviorEvidenceTest {
                 JsonObject(it.jsonObject - "sourcePath")
             })))
         })
-        val changed = JsonObject(record + mapOf(
+        val changed = JsonObject((record - "executionSnapshots") + mapOf(
             "schemaVersion" to JsonPrimitive(version),
             "provider" to JsonPrimitive("local-revision-bound-behavior-v$version"),
             "cases" to cases,
-            "executionPolicy" to JsonObject(record.getValue("executionPolicy").jsonObject - setOf("completionLauncher", "maximumCompletionBytes")),
+            "executionPolicy" to JsonObject(
+                (policy - setOf("completionLauncher", "maximumCompletionBytes")) + mapOf(
+                    "assurance" to JsonPrimitive("local-path-stability-checks-not-production-authority"),
+                    "environment" to JsonObject(mapOf("PATH" to JsonPrimitive("/usr/bin"))),
+                ),
+            ),
             "corpusSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(corpus))),
             "observationsSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(cases))),
         ))
@@ -661,6 +716,7 @@ class BehaviorEvidenceTest {
         val runner = root.resolve("authored-runner-shim").also { path ->
             path.writeText("""
                 #!/bin/sh
+                if [ "${'$'}1" = "--help" ]; then echo --json-status-fd; exit 0; fi
                 printf '{ "child-pid": %s, "mnt-namespace": 1, "pid-namespace": 2 }\n' "${'$'}${'$'}" >&3
                 program=
                 while [ "${'$'}#" -gt 0 ]; do

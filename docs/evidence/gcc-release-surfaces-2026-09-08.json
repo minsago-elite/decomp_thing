@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "recordKind": "gcc-driver-release-surfaces",
+  "issue": 718,
+  "recordedOnUtc": "2026-09-08",
+  "evidenceBasis": {
+    "repositoryCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+    "profileId": "gcc-16-2-0-driver-behavior",
+    "canonicalGateEvidence": {
+      "path": "docs/evidence/gcc-release-gate-2026-09-08.json",
+      "sha256": "f1cd6cbc6333b0a92a926c69118ac3312cfb18c040128640c7d93141ba5b6878"
+    }
+  },
+  "surfaceContract": {
+    "status": "contract-only",
+    "canonicalAuthority": "canonicalGateEvidence",
+    "presentationMayAuthorizeRelease": false,
+    "sharedFields": [
+      "releaseGate.status",
+      "releaseGate.releaseEligible",
+      "releaseGate.productionQualification",
+      "persistentMismatchLedger.entries"
+    ],
+    "surfaces": ["machine-report", "human-report", "cli", "gui"]
+  },
+  "releaseResult": {
+    "status": "unresolved",
+    "productionQualification": "unavailable",
+    "releaseEligible": false,
+    "referenceResult": "available",
+    "candidateResult": "unavailable",
+    "referenceBehaviorCases": {"cases": 14, "passed": 14}
+  },
+  "persistentMismatchLedger": {
+    "status": "persistent-unresolved",
+    "identityRule": "sha256(profileId + newline + caseSet + newline + dimension + newline + candidateSourceRevisionOrUnavailable)",
+    "entries": [
+      {
+        "id": "gcc-release-edafdf537d8e019d935c680956578d57390a00a7ccd3a1c5ec212be67fa4e4b3",
+        "state": "unresolved",
+        "kind": "missing-candidate-evidence",
+        "caseSet": "all-required-cases",
+        "dimension": "candidate-observation",
+        "module": "driver-release",
+        "candidateSourceRevision": null,
+        "observedCandidateMismatch": false,
+        "persistsAcrossRevisions": true,
+        "blocksRelease": true,
+        "reason": "No authenticated reconstructed GCC archive, candidate executable, or candidate observation report is retained. This is an evidence blocker, not an invented candidate mismatch."
+      }
+    ]
+  },
+  "productionGap": {
+    "status": "unavailable",
+    "missing": [
+      "authenticated #40/#42/#45 structural evidence",
+      "#50 accepted reconstructed source/archive identity",
+      "#51-#53 authenticated candidate behavior observations",
+      "repeated clean production qualification runs",
+      "production wiring from this contract to the existing CLI and GUI surfaces"
+    ],
+    "analysisBoundary": {
+      "provider": "bundled-ghidra-java-api",
+      "isolatedWorkerRequired": true,
+      "externalGhidraHomeRequired": false,
+      "externalAnalyzeHeadlessAllowed": false
+    }
+  }
+}

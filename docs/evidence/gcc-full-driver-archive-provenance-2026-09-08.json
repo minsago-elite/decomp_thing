@@ -1,0 +1,89 @@
+{
+  "evidenceId": "gcc-full-driver-archive-provenance-v1",
+  "schemaVersion": 1,
+  "issue": 704,
+  "recordedOnUtc": "2026-09-08",
+  "scope": "repository-fact-contract",
+  "status": "unresolved",
+  "evidenceBasis": {
+    "repositoryCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+    "profileId": "generated-c-make-v1",
+    "archiveImplementation": "src/main/kotlin/decompengine/project/ArchivalBundle.kt",
+    "fixtureVerification": "src/test/kotlin/decompengine/project/ArchivalBundleTest.kt"
+  },
+  "oracleBoundary": {
+    "status": "available",
+    "sourceLock": {
+      "path": "oracle/gcc/16.2.0/source-lock.json",
+      "sha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc",
+      "sourceRevision": "78d4ac73dd391005b895a6148cd9831e28e1208b",
+      "sourceArchiveSha256": "e6738e29597f733270731aa90600f37ffdc045079dfc27ec7e8192cc81085c3e"
+    },
+    "artifactManifest": {
+      "path": "oracle/gcc/16.2.0/oracle-manifest.json",
+      "sha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9",
+      "richArtifactSha256": "8009c7cfc4f66017aa932d86a6d4ec7f374e6ab7a01b3ef5ab3d2fcc78c2378b",
+      "strippedArtifactSha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4",
+      "sharedBuildId": "df5e4869383c150bbb3aab0ebac4eacb1dcd07d0"
+    },
+    "functionOracle": {
+      "path": "oracle/gcc/16.2.0/function-recovery-oracle.json",
+      "sha256": "b49b8a72a96580bd8727d9dc530753f40f78185a656f472ebe83a7a1f6fc9aae"
+    },
+    "use": "These authenticated artifacts are oracle inputs only; they do not authorize reconstructed source, receipts, archives, or build claims."
+  },
+  "archiveContract": {
+    "requiredControl": [
+      "source_tree_manifest.json",
+      "ARCHIVE_MANIFEST.sha256",
+      "reports/program_model.json",
+      "reports/module_plan.json",
+      "reports/confidence.json",
+      "reports/toolchain.json",
+      "UNRESOLVED.md"
+    ],
+    "requiredModuleEvidence": [
+      "reports/modules/{module}.json",
+      "reports/agent-executions/{module}.json"
+    ],
+    "deterministicFixtureFacts": [
+      "ArchivalBundleTest.identical source trees produce byte-identical verified archives",
+      "ArchivalBundleTest.separately rooted builds produce identical artifacts contracts and archives"
+    ],
+    "productionQualification": "Fixture determinism is not production full-driver evidence."
+  },
+  "productionGap": {
+    "status": "unresolved",
+    "unavailableGates": [
+      {
+        "id": "acceptedDriverRevision",
+        "status": "unresolved",
+        "reason": "No accepted production reconstructed GCC driver tree or source manifest is retained."
+      },
+      {
+        "id": "completePayloadInventory",
+        "status": "unresolved",
+        "reason": "No production archive, ARCHIVE_MANIFEST.sha256, complete ACP receipts, behavior reports, toolchain declaration, or unresolved inventory is retained as one payload."
+      },
+      {
+        "id": "twoIndependentArchiveRoots",
+        "status": "unresolved",
+        "reason": "The repository retains only synthetic fixture cross-root tests; no production archive pair or byte comparison is retained."
+      },
+      {
+        "id": "isolatedCleanRebuild",
+        "status": "unresolved",
+        "reason": "No credential-free, cache-free, network-isolated rebuild of an accepted production archive is retained."
+      },
+      {
+        "id": "resourceAndIndependentVerification",
+        "status": "unresolved",
+        "reason": "Production resource measurements, diagnostics, and independent archive verification are unavailable."
+      }
+    ]
+  },
+  "analysisPolicy": {
+    "ghidra": "Production analysis must use the bundled Ghidra Java APIs in an isolated worker; GHIDRA_HOME and external analyzeHeadless are not production prerequisites.",
+    "unresolvedHandling": "Unavailable production evidence remains unresolved and cannot count as an accepted archive or successful gate."
+  }
+}

@@ -14,10 +14,14 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import decompengine.repair.readStableRegularFile
 
 /** Existing generated-C/Make source and artifact verification for archival builds. */
 internal object GeneratedCArchiveBuildPolicy : ArchiveBuildPolicy {
-    private val transport = ArchiveTransportLayout(setOf("build"), setOf("reports/build_contract.json"))
+    private val transport = ArchiveTransportLayout(
+        setOf("build", ".ninja_log", ".ninja_deps"),
+        setOf("reports/build_contract.json"),
+    )
     override fun transportLayout(profile: ReconstructionProfile): ArchiveTransportLayout = transport
     override val rebuildInstructions = "Build with the exact parallel warnings-as-errors command in `BUILDING.md`. The recovered program model, module plan, confidence, unresolved entities, build logs, and per-module provenance are under `reports/`."
     override fun requiredPaths(profile: ReconstructionProfile): Set<String> = setOf(
@@ -35,10 +39,17 @@ internal object GeneratedCArchiveBuildPolicy : ArchiveBuildPolicy {
                     "archive project is missing required evidence: $relative"
                 }
         }
-        val contract = Json.parseToJsonElement(projectDir.resolve("reports/build_contract.json").readText()).jsonObject
-        require(contract["schemaVersion"]?.jsonPrimitive?.intOrNull == 2) {
-            "archive build contract must use source-bound schema version 2"
+        val contract = Json.parseToJsonElement(
+            readStableRegularFile(
+                projectDir,
+                "reports/build_contract.json",
+                minOf(profile.budgets.archiveMaximumFileBytes, ArchivalBundleLimits().maximumFileBytes.toLong()),
+            ).bytes.toString(Charsets.UTF_8),
+        ).jsonObject
+        require(contract["schemaVersion"]?.jsonPrimitive?.intOrNull == GENERATED_C_BUILD_CONTRACT_SCHEMA_VERSION) {
+            "archive build contract must use source-bound schema version $GENERATED_C_BUILD_CONTRACT_SCHEMA_VERSION"
         }
+        contract.requireGeneratedCBuildBudgetEvidence(profile)
         require(contract["returnCode"]?.jsonPrimitive?.intOrNull == 0) { "archive build contract is not successful" }
         require(contract["sourceStableDuringBuild"]?.jsonPrimitive?.booleanOrNull == true) {
             "archive build contract does not prove stable source inputs"

@@ -14,6 +14,10 @@ import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
+import java.util.zip.CRC32
+import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
+import java.util.zip.ZipOutputStream
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
@@ -37,6 +41,22 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 
 class SourceTreeTest {
+    @Test
+    fun `rerun with the other profile removes the stale build definition`() {
+        val project = createTempDirectory("source-tree-profile-rerun-")
+        val model = oneModuleModel()
+        val makeProfile = GeneratedCMakeReconstructionProfile.descriptor
+        val ninjaProfile = GeneratedCNinjaReconstructionProfile.descriptor
+        SourceTreeGenerator.generate(model, project, reconstructor = validReconstructor(), profile = makeProfile)
+        assertTrue(project.resolve("Makefile").exists())
+        SourceTreeGenerator.generate(model, project, reconstructor = validReconstructor(), profile = ninjaProfile)
+        assertTrue(project.resolve("build.ninja").exists())
+        assertFalse(project.resolve("Makefile").exists(), "make-to-ninja rerun must not retain a stale Makefile")
+        SourceTreeGenerator.generate(model, project, reconstructor = validReconstructor(), profile = makeProfile)
+        assertTrue(project.resolve("Makefile").exists())
+        assertFalse(project.resolve("build.ninja").exists(), "ninja-to-make rerun must not retain a stale build.ninja")
+    }
+
     @Test
     fun `module cache binds binary identity and model schema while reusing unchanged inputs`() {
         val project = createTempDirectory("source-tree-model-identity-")
@@ -252,11 +272,16 @@ class SourceTreeTest {
         val overrides = functions.associate { it.id to it.id }
         val project = createTempDirectory("source-transitive-resume-")
         val calls = mutableListOf<String>()
+        var rejectLeafRepair = false
         var interruptRoot = false
         val reconstructor = object : ModuleReconstructor {
             override fun cacheIdentity() = "transitive-resume-test"
             override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule {
                 calls += request.module.id
+                if (rejectLeafRepair && request.module.id == "leaf") {
+                    val invalid = "int leaf(void) { return ; }\n"
+                    return ReconstructedModule(invalid, "scripted", sha256(invalid.toByteArray()))
+                }
                 if (interruptRoot && request.module.id == "root") {
                     throw ModuleReconstructionInterruptedException("root", AgentStopReason.CANCELLED, "test checkpoint interruption")
                 }
@@ -281,7 +306,19 @@ class SourceTreeTest {
         assertTrue(initialAudit.moduleCompilationEvidenceProblems.isEmpty())
         val unrelatedCheckpoint = project.resolve("reports/modules/unrelated.json").readText()
         val changed = model.copy(functions = functions.map { if (it.id == "leaf") it.copy(prototype = "long leaf(void)") else it })
+        val previousLeafSource = project.resolve("src/modules/leaf.c").readText()
+        val previousLeafCheckpoint = project.resolve("reports/modules/leaf.json").readText()
         calls.clear()
+        rejectLeafRepair = true
+        assertFailsWith<ModuleReconstructionRevisionRejectedException> {
+            SourceTreeGenerator.generate(changed, project, reconstructor = reconstructor, overrides = overrides)
+        }
+        assertEquals(listOf("leaf"), calls)
+        assertEquals(previousLeafSource, project.resolve("src/modules/leaf.c").readText())
+        assertEquals(previousLeafCheckpoint, project.resolve("reports/modules/leaf.json").readText())
+        assertTrue(project.resolve("reports/modules/leaf.attempt.json").exists())
+        calls.clear()
+        rejectLeafRepair = false
         interruptRoot = true
         assertFailsWith<ModuleReconstructionInterruptedException> {
             SourceTreeGenerator.generate(changed, project, reconstructor = reconstructor, overrides = overrides)
@@ -293,6 +330,7 @@ class SourceTreeTest {
         val manifest = SourceTreeGenerator.generate(changed, project, reconstructor = reconstructor, overrides = overrides)
         assertEquals(listOf("root"), calls)
         assertTrue(manifest.unresolvedImplementationIds.isEmpty())
+        assertFalse(project.resolve("reports/modules/leaf.attempt.json").exists())
         completed.forEach { (id, bytes) -> assertEquals(bytes, project.resolve("reports/modules/$id.json").readText()) }
         assertEquals(unrelatedCheckpoint, project.resolve("reports/modules/unrelated.json").readText())
         val confidence = Json.parseToJsonElement(project.resolve("reports/confidence.json").readText()).jsonObject
@@ -318,6 +356,7 @@ class SourceTreeTest {
             val audit = ArchivalProjectAuditor.audit(directory)
             assertTrue(audit.provenanceComplete)
             assertTrue(audit.moduleCompilationEvidenceProblems.isEmpty())
+            assertTrue(audit.moduleConfidenceEvidenceProblems.isEmpty())
             assertEquals(expectedRevisions, audit.moduleRevisionSha256)
             assertTrue(audit.unresolvedEntityIds.isEmpty())
             assertNull(audit.behaviorMatched)
@@ -414,6 +453,114 @@ class SourceTreeTest {
     }
 
     @Test
+    fun `audit and archive reject missing or cross-paired accepted module confidence evidence`() {
+        val project = createTempDirectory("source-confidence-cross-pair-")
+        SourceTreeGenerator.generate(
+            model().copy(inputSha256 = sha256("archived confidence fixture".toByteArray())),
+            project,
+            reconstructor = validReconstructor(),
+        )
+        assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+        assertTrue(ArchivalProjectAuditor.audit(project).moduleCompilationEvidenceProblems.isEmpty())
+        val validArchive = project.parent.resolve(project.fileName.toString() + "-valid.zip")
+        ArchivalPackager.create(project, validArchive)
+        val confidencePath = project.resolve("reports/confidence.json")
+        val original = Json.parseToJsonElement(confidencePath.readText()).jsonObject
+        val modules = original.getValue("modules").jsonArray.map { it.jsonObject }
+        assertTrue(modules.size >= 2)
+        val ids = modules.map { it.getValue("id").jsonPrimitive.content }.toSet()
+
+        fun publish(document: JsonObject) {
+            val bytes = document.toString().toByteArray()
+            confidencePath.writeText(bytes.decodeToString())
+            val manifestPath = project.resolve("source_tree_manifest.json")
+            val manifest = Json.parseToJsonElement(manifestPath.readText()).jsonObject
+            val files = manifest.getValue("files").jsonArray.map { element ->
+                val file = element.jsonObject
+                if (file.getValue("path").jsonPrimitive.content == "reports/confidence.json") {
+                    JsonObject(file + ("sha256" to JsonPrimitive(sha256(bytes))))
+                } else file
+            }
+            manifestPath.writeText(JsonObject(manifest + ("files" to JsonArray(files))).toString())
+        }
+
+        val swapped = modules.toMutableList()
+        swapped[0] = JsonObject(modules[0] + ("revisionEvidence" to modules[1].getValue("revisionEvidence")))
+        swapped[1] = JsonObject(modules[1] + ("revisionEvidence" to modules[0].getValue("revisionEvidence")))
+        publish(JsonObject(original + ("modules" to JsonArray(swapped))))
+        val crossPaired = ArchivalProjectAuditor.audit(project)
+        assertEquals(ids, crossPaired.moduleCompilationEvidenceProblems.keys)
+        assertEquals(ids, crossPaired.moduleConfidenceEvidenceProblems.keys)
+        assertTrue(crossPaired.moduleCompilationEvidence.isEmpty())
+        val archive = project.parent.resolve(project.fileName.toString() + ".zip")
+        val rejected = assertFailsWith<IllegalArgumentException> { ArchivalPackager.create(project, archive) }
+        assertTrue(rejected.message.orEmpty().contains("cross-paired accepted module evidence"))
+        assertFalse(archive.exists())
+
+        val payload = linkedMapOf<String, ByteArray>()
+        ZipInputStream(Files.newInputStream(validArchive)).use { zip ->
+            while (true) {
+                val entry = zip.nextEntry ?: break
+                payload[entry.name] = zip.readBytes()
+                zip.closeEntry()
+            }
+        }
+        payload["reports/confidence.json"] = confidencePath.readBytes()
+        payload["source_tree_manifest.json"] = project.resolve("source_tree_manifest.json").readBytes()
+        payload["ARCHIVE_MANIFEST.sha256"] = payload.filterKeys { it != "ARCHIVE_MANIFEST.sha256" }
+            .toSortedMap().entries.joinToString("", transform = { (path, bytes) -> "${sha256(bytes)}  $path\n" }).toByteArray()
+        val forgedArchive = project.parent.resolve(project.fileName.toString() + "-forged.zip")
+        ZipOutputStream(Files.newOutputStream(forgedArchive)).use { zip ->
+            for ((path, bytes) in payload) {
+                val crc = CRC32().apply { update(bytes) }
+                zip.putNextEntry(ZipEntry(path).apply {
+                    method = ZipEntry.STORED
+                    size = bytes.size.toLong()
+                    compressedSize = size
+                    this.crc = crc.value
+                })
+                zip.write(bytes)
+                zip.closeEntry()
+            }
+        }
+        val extracted = project.parent.resolve(project.fileName.toString() + "-forged-extracted")
+        val extractionFailure = assertFailsWith<IllegalArgumentException> {
+            ArchivalBundleVerifier.extractAndVerify(forgedArchive, extracted)
+        }
+        assertTrue(extractionFailure.message.orEmpty().contains("cross-paired accepted module evidence"))
+        assertFalse(extracted.exists())
+
+        val missing = modules.toMutableList()
+        missing[0] = JsonObject(modules[0] + ("revisionEvidence" to
+            JsonObject(modules[0].getValue("revisionEvidence").jsonObject - "compilation")))
+        publish(JsonObject(original + ("modules" to JsonArray(missing))))
+        val incomplete = ArchivalProjectAuditor.audit(project)
+        assertTrue(modules[0].getValue("id").jsonPrimitive.content in incomplete.moduleCompilationEvidenceProblems)
+        assertTrue(modules[0].getValue("id").jsonPrimitive.content in incomplete.moduleConfidenceEvidenceProblems)
+        assertEquals(ids.size - 1, incomplete.moduleCompilationEvidence.size)
+
+        publish(JsonObject(original + ("scoreMeaning" to JsonPrimitive("measured behavioral confidence"))))
+        val mislabeled = ArchivalProjectAuditor.audit(project)
+        assertEquals(ids, mislabeled.moduleCompilationEvidenceProblems.keys)
+        assertEquals(ids, mislabeled.moduleConfidenceEvidenceProblems.keys)
+        assertTrue(mislabeled.moduleCompilationEvidence.isEmpty())
+
+        val falseScores = modules.toMutableList()
+        falseScores[0] = JsonObject(modules[0] + ("score" to JsonPrimitive(0.1234)))
+        publish(JsonObject(original + ("modules" to JsonArray(falseScores))))
+        val misleading = ArchivalProjectAuditor.audit(project)
+        assertEquals(ids, misleading.moduleConfidenceEvidenceProblems.keys)
+        assertTrue(misleading.moduleCompilationEvidence.isEmpty())
+
+        assertTrue(original.getValue("unresolvedRecoveryEntityIds").jsonArray.isEmpty())
+        publish(JsonObject(original + ("unresolvedRecoveryEntityIds" to
+            JsonArray(listOf(JsonPrimitive("fn_0000000000401000"))))))
+        val forgedRecovery = ArchivalProjectAuditor.audit(project)
+        assertEquals(ids, forgedRecovery.moduleConfidenceEvidenceProblems.keys)
+        assertTrue(forgedRecovery.moduleCompilationEvidence.isEmpty())
+    }
+
+    @Test
     fun `fully recovered entities still report unresolved implementations in confidence`() {
         val recovered = model().let { original -> original.copy(
             functions = original.functions.map { it.copy(status = RecoveryStatus.RECOVERED) },
@@ -477,7 +624,7 @@ class SourceTreeTest {
         ).cacheIdentity()
 
         assertNotEquals(first, second)
-        assertTrue(first.endsWith(":v2"))
+        assertTrue(first.endsWith(":v3"))
         assertFalse(first.contains(firstDescriptor))
     }
 
@@ -571,6 +718,21 @@ class SourceTreeTest {
                 assertTrue(instructions.contains("-Werror"))
                 assertTrue(instructions.contains("-c src/modules/parse.c -o /dev/null"))
                 val path = AgentWorkspacePath("project", "src/modules/parse.c")
+                val expectedRules = mapOf(
+                    "include/decomp_types.h" to setOf(AgentOperation.READ_FILE),
+                    "include/modules/parse.h" to setOf(AgentOperation.READ_FILE),
+                    "src/modules/parse_internal.h" to setOf(AgentOperation.READ_FILE),
+                    "src/modules/parse.c" to setOf(
+                        AgentOperation.READ_FILE,
+                        AgentOperation.WRITE_FILE,
+                        AgentOperation.CREATE_FILE,
+                    ),
+                )
+                assertEquals(
+                    expectedRules,
+                    request.accessPolicy.pathRules.associate { it.path.relativePath to it.operations },
+                )
+                assertEquals(expectedRules.values.flatten().toSet(), request.accessPolicy.allowedOperations)
                 assertTrue(request.accessPolicy.allows(path, AgentOperation.CREATE_FILE))
                 val source = "#include \"modules/parse.h\"\n/* fn_0000000000401000 */\nint parse_input(void) { return 17; }\n"
                 val target = path.resolve(request.workspaceRoots)
@@ -598,6 +760,115 @@ class SourceTreeTest {
         assertTrue(checkpoint.contains("agent-execution-evidence-incomplete"))
         assertTrue(checkpoint.contains("\"promptCharacters\":"))
         assertTrue(checkpoint.contains("\"promptBudgetCharacters\": 120000"))
+    }
+
+    @Test
+    fun `LLM reconstruction rejects a context role hidden by an alternate profile`() {
+        val base = GeneratedCNinjaReconstructionProfile.descriptor
+        val layout = ProjectLayoutProfile(
+            schemaVersion = base.layout.schemaVersion,
+            declarations = base.layout.declarations.map { declaration ->
+                if (declaration.id != "module-private-interface") {
+                    declaration
+                } else {
+                    ProjectFileDeclaration(
+                        id = declaration.id,
+                        pathTemplate = declaration.pathTemplate,
+                        roles = declaration.roles - ProjectFileRole.VIEWABLE,
+                        contentKind = declaration.contentKind,
+                    )
+                }
+            },
+        )
+        val alternateProfile = ReconstructionProfile(
+            schemaVersion = base.schemaVersion,
+            id = base.id,
+            layout = layout,
+            budgets = base.budgets,
+            adapterConfiguration = base.adapterConfiguration,
+        )
+        val project = createTempDirectory("source-tree-hidden-private-")
+        var called = false
+        val harness = AgentHarness { _, _ ->
+            called = true
+            error("a profile-hidden context file must not be sent to the agent")
+        }
+
+        val manifest = SourceTreeGenerator.generate(
+            oneModuleModel(),
+            project,
+            reconstructor = BoundedLlmModuleReconstructor(harness),
+            profile = alternateProfile,
+        )
+
+        assertFalse(called)
+        assertTrue("fn_0000000000401000" in manifest.unresolvedImplementationIds)
+        assertFalse(
+            ProjectFileRole.VIEWABLE in manifest.files.single { it.path == "src/modules/parse_internal.h" }.roles,
+        )
+        val checkpoint = project.resolve("reports/modules/parse.json").readText()
+        assertTrue(checkpoint.contains("\"accepted\": false"))
+        assertTrue(checkpoint.contains("\"code\": \"reconstruction-failed\""))
+    }
+
+    @Test
+    fun `LLM reconstruction does not grant read access to a nonviewable implementation`() {
+        val base = GeneratedCNinjaReconstructionProfile.descriptor
+        val layout = ProjectLayoutProfile(
+            schemaVersion = base.layout.schemaVersion,
+            declarations = base.layout.declarations.map { declaration ->
+                if (declaration.id != "module-implementation") declaration else ProjectFileDeclaration(
+                    id = declaration.id,
+                    pathTemplate = declaration.pathTemplate,
+                    roles = declaration.roles - ProjectFileRole.VIEWABLE,
+                    contentKind = declaration.contentKind,
+                )
+            },
+        )
+        val alternateProfile = ReconstructionProfile(
+            schemaVersion = base.schemaVersion,
+            id = base.id,
+            layout = layout,
+            budgets = base.budgets,
+            adapterConfiguration = base.adapterConfiguration,
+        )
+        val project = createTempDirectory("source-tree-hidden-implementation-")
+        var called = false
+        val harness = AgentHarness { request, _ ->
+            called = true
+            val target = AgentWorkspacePath("project", "src/modules/parse.c")
+            assertEquals(
+                setOf(AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE),
+                request.accessPolicy.pathRules.single { it.path == target }.operations,
+            )
+            assertFalse(request.accessPolicy.allows(target, AgentOperation.READ_FILE))
+            assertTrue(request.accessPolicy.allows(target, AgentOperation.WRITE_FILE))
+            assertTrue(request.accessPolicy.allows(target, AgentOperation.CREATE_FILE))
+            val continuation = requireNotNull(request.sessionContinuation)
+            assertFalse(target in continuation.workspaceFiles)
+            assertTrue(continuation.workspaceFiles.keys.all { request.accessPolicy.allows(it, AgentOperation.READ_FILE) })
+            val source = "#include \"modules/parse.h\"\n/* fn_0000000000401000 */\nint parse_input(void) { return 17; }\n"
+            target.resolve(request.workspaceRoots).writeText(source)
+            AgentExecutionResult(
+                AgentStopReason.COMPLETED,
+                "module reconstructed in workspace",
+                listOf(AgentFileChange(target, AgentFileChangeKind.CREATED, null, sha256(source.toByteArray()), source.length.toLong())),
+            )
+        }
+
+        val manifest = SourceTreeGenerator.generate(
+            oneModuleModel(),
+            project,
+            reconstructor = BoundedLlmModuleReconstructor(
+                harness,
+                harnessProvenanceDescriptor = "agent-harness-v1:acp:configuration-${"a".repeat(64)}",
+            ),
+            profile = alternateProfile,
+        )
+
+        assertTrue(called)
+        assertFalse(ProjectFileRole.VIEWABLE in manifest.files.single { it.path == "src/modules/parse.c" }.roles)
+        assertTrue(project.resolve("src/modules/parse.c").readText().contains("parse_input"))
     }
 
     @Test
@@ -946,6 +1217,34 @@ class SourceTreeTest {
         }
 
         SourceTreeGenerator.generate(input, project, reconstructor = refusing)
+    }
+
+    @Test
+    fun `accepted agent-free checkpoints revalidate recorded prompt budgets on reuse`() {
+        val project = createTempDirectory("source-tree-legacy-prompt-budget-")
+        val input = oneModuleModel()
+        SourceTreeGenerator.generate(
+            input,
+            project,
+            reconstructor = cacheReconstructor("scripted-valid", "scripted-legacy"),
+        )
+        val checkpoint = project.resolve("reports/modules/parse.json")
+        // A checkpoint accepted before prompt budgets were validated for custom reconstructors.
+        val overBudget = checkpoint.readText()
+            .replace("\"promptCharacters\": null", "\"promptCharacters\": 999999")
+            .replace("\"promptBudgetCharacters\": null", "\"promptBudgetCharacters\": 999999")
+        check(overBudget != checkpoint.readText()) { "test checkpoint did not record empty prompt metadata" }
+        checkpoint.writeText(overBudget)
+        var calls = 0
+        val reconstructor = cacheReconstructor("scripted-valid", "scripted-legacy") { calls++ }
+
+        SourceTreeGenerator.generate(input, project, reconstructor = reconstructor)
+
+        assertEquals(1, calls, "over-budget prompt metadata must not be reused as accepted")
+        assertTrue(checkpoint.readText().contains("\"promptCharacters\": null"))
+        assertTrue(checkpoint.readText().contains("\"accepted\": true"))
+        SourceTreeGenerator.generate(input, project, reconstructor = reconstructor)
+        assertEquals(1, calls, "repaired checkpoint must resume")
     }
 
     @Test

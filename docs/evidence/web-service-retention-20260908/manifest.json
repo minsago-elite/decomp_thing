@@ -1,0 +1,36 @@
+{
+  "status": "passed",
+  "sourceCommit": "f934731d66e966e1d6232be9d9039766a0e5d59a",
+  "verification": {
+    "tests": 266,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "command": "./gradlew -PfrontendNodeHome=/home/june/decomp_thing/build/tools/decomp-node-24.20.0/node-v24.20.0-linux-x64 test --tests 'decompengine.web.*' --tests 'decompengine.jobs.AgentProgressJournal*Test' --tests 'decompengine.jobs.WorkflowAttemptStoreTest'",
+  "automaticExpiryEnabled": false,
+  "workflowExecutionStarted": false,
+  "coverage": [
+    "Protected and pre-deadline bytes retained",
+    "Actual terminal expiry reaches authenticated SSE as an unnumbered gap and closure",
+    "Old polling cursor returns EVENT_GAP",
+    "Fresh empty snapshot preserves cutover and permits idle polling",
+    "Run metadata unchanged and repeat maintenance is idle",
+    "Foreign attempt and stopping service rejected"
+  ],
+  "retainedXml": {
+    "file": "TEST-decompengine.web.WebProgressCutoverTest.xml",
+    "tests": 4,
+    "sha256": "2ffae03c104494f7ea693666f2f18ad667488501cbbefd5caecb3b6e9550e054"
+  },
+  "notRepeated": [
+    "frontend tests",
+    "package build",
+    "packaged browser qualification"
+  ],
+  "limitations": [
+    "Automatic scheduling, persistent pin policy and service maintenance reporting remain unfinished.",
+    "The active-worker and upload guards are implemented but are not exercised by this inert HTTP fixture.",
+    "The retained XML includes two earlier cutover tests and two new service-retention tests; totals cover the complete selected suite."
+  ]
+}

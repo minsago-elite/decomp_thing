@@ -33,7 +33,81 @@ import org.junit.jupiter.api.Timeout
 @Timeout(value = 90, unit = TimeUnit.SECONDS)
 class AcpDoctorPreflightTest {
     @Test
-    fun `doctor defaults to a factory-selected prompt-free contained ACP preflight`() {
+    fun `cancelled preflight retains terminal receipt before launch and during initialize`() {
+        requireLiveSandboxHost()
+        for (duringInitialize in listOf(false, true)) {
+            val temporary = createTempDirectory("doctor-cancel-")
+            val harness = factoryHarness(writeProvisioning(temporary.resolve("acp.json"), mode = "no-initialize"))
+            val cancellation = decompengine.agent.AgentCancellation {
+                !duringInitialize || Thread.currentThread().stackTrace.any {
+                    it.className.contains("AcpAgentHarness") && it.methodName.startsWith("awaitPhase")
+                }
+            }
+            val cancelled = assertFailsWith<AcpPreflightCancelledException> {
+                harness.preflight(AcpPreflightWorkflow.WEB, cancellation)
+            }
+            val result = assertIs<AgentExecutionOutcome.Returned>(cancelled.receipt.outcome).result
+            assertEquals(decompengine.agent.AgentStopReason.CANCELLED, result.stopReason)
+            val evidence = assertIs<AcpInvocationEvidenceSnapshot>(cancelled.receipt.providerEvidence)
+            assertEquals(if (duringInitialize) AcpExecutionCleanupDisposition.VERIFIED else AcpExecutionCleanupDisposition.NOT_REQUIRED,
+                evidence.cleanupDisposition)
+            if (duringInitialize) assertTrue(assertNotNull(evidence.diagnostics).remainingProcessIds.isEmpty())
+            assertEquals(null, evidence.completeExecutionEvidence)
+        }
+    }
+
+    @Test
+    fun `contained preflight inspects environment terminal and unknown methods without executing them`() {
+        requireLiveSandboxHost()
+        val temporary = createTempDirectory("doctor-auth-variants-")
+        val harness = factoryHarness(writeProvisioning(temporary.resolve("acp.json"), mode = "doctor-auth-variants"))
+        val result = harness.preflight()
+        assertEquals(listOf("environment-login", "terminal-login", "future-login"), result.authentication.methods.map { it.id })
+        assertEquals(listOf("environment", "terminal", "unknown"), result.authentication.methods.map { it.variant })
+        assertTrue(result.authentication.methods.none { it.loginSupported })
+        assertFalse(result.authentication.logoutAdvertised)
+        assertFalse(result.authentication.logoutSupported)
+        assertTrue(result.diagnostics.sandboxCleanupVerified)
+        assertTrue(result.diagnostics.remainingProcessIds.isEmpty())
+        assertFalse(result.stableDescriptor.contains("fixture-login"))
+        assertFalse(result.stableDescriptor.contains("opaque-fixture-value"))
+    }
+
+    @Test
+    fun `invalid authentication inventories fail preflight as protocol errors with cleanup`() {
+        requireLiveSandboxHost()
+        for (mode in listOf("doctor-auth-duplicate", "doctor-auth-count", "doctor-auth-blank", "doctor-auth-text", "doctor-auth-unicode", "doctor-auth-payload")) {
+            val temporary = createTempDirectory("doctor-auth-invalid-")
+            val harness = factoryHarness(writeProvisioning(temporary.resolve("acp.json"), mode = mode))
+            val error = assertFailsWith<AgentExecutionException> { harness.preflight() }
+            assertEquals(AgentFailureKind.PROTOCOL, error.failure.kind, mode)
+            assertEquals("invalidAuthenticationInventory", error.failure.details["reason"], mode)
+            assertEquals("ACP agent advertised an invalid authentication inventory", error.failure.message)
+            val receipt = assertNotNull(error.receipt)
+            val invocation = assertIs<AcpInvocationEvidenceSnapshot>(receipt.providerEvidence)
+            assertEquals(AcpExecutionCleanupDisposition.VERIFIED, invocation.cleanupDisposition, mode)
+            assertTrue(assertNotNull(invocation.diagnostics).remainingProcessIds.isEmpty(), mode)
+            assertEquals(null, invocation.completeExecutionEvidence)
+        }
+    }
+
+    @Test
+    fun `doctor reports the bounded invalid authentication inventory reason`() {
+        requireLiveSandboxHost()
+        val temporary = createTempDirectory("doctor-auth-reason-")
+        val config = writeProvisioning(temporary.resolve("acp.json"), mode = "doctor-auth-duplicate")
+        val doctor = Doctor(environment = mapOf("ACP_CONFIG_FILE" to config.toString()),
+            commandProbe = CommandProbe { _, _ -> CommandProbeResult(0, "available") },
+            connectivityProbe = ConnectivityProbe { _, _ -> error("inspection must not use direct HTTP") })
+        val report = doctor.inspect(DoctorOptions(temporary.resolve("output"), showAuthMethods = true))
+        val preflight = report.checks.single { it.name == "ACP preflight" }
+        assertFalse(preflight.passed)
+        assertTrue(preflight.detail.contains("kind=protocol"), preflight.detail)
+        assertTrue(preflight.detail.contains("reason=invalidAuthenticationInventory"), preflight.detail)
+    }
+
+    @Test
+    fun `doctor exposes authentication previews only through explicit prompt-free inspection`() {
         requireLiveSandboxHost()
         val temporary = createTempDirectory("doctor-acp-live-")
         val ghidra = temporary.resolve("ghidra/support").createDirectories().resolve("analyzeHeadless")
@@ -65,7 +139,10 @@ class AcpDoctorPreflightTest {
             connectivityProbe = ConnectivityProbe { _, _ -> error("ACP doctor must not use direct HTTP") },
         )
 
-        val report = doctor.inspect(DoctorOptions(temporary.resolve("output")))
+        val defaults = doctor.inspect(DoctorOptions(temporary.resolve("default-output")))
+        assertTrue(defaults.passed)
+        assertFalse(defaults.checks.any { it.name.startsWith("ACP authentication method") })
+        val report = doctor.inspect(DoctorOptions(temporary.resolve("output"), showAuthMethods = true))
 
         assertTrue(report.passed, report.checks.toString())
         val harness = report.checks.single { it.name == "ACP harness" }
@@ -75,7 +152,18 @@ class AcpDoctorPreflightTest {
         assertTrue(preflight.detail.startsWith("acp-preflight-v1:workflow-all:protocol-1:"), preflight.detail)
         assertTrue(preflight.detail.contains("client-fs-read-true:client-fs-write-true"))
         assertTrue(preflight.detail.contains("client-terminal-false"))
+        assertTrue(preflight.detail.contains("auth-methods-1:auth-inventory-commitment-"))
+        assertTrue(preflight.detail.contains("auth-inventory-format-sdk-auth-methods-hmac-sha256-v2"))
+        assertTrue(preflight.detail.contains("auth-inventory-scope-"))
+        assertFalse(preflight.detail.contains("auth-inventory-sha256-"))
+        assertTrue(preflight.detail.contains("auth-logout-advertised-true:auth-logout-supported-false"))
+        assertFalse(preflight.detail.contains("operator-login"))
+        assertFalse(preflight.detail.contains("fixture-credential"))
         assertTrue(preflight.detail.contains("network-isolated-true:cleanup-verified-true"))
+        val auth = report.checks.single { it.name == "ACP authentication method 1" }
+        assertTrue(auth.detail.contains("operator-login"))
+        assertTrue(auth.detail.contains("login unsupported; no login attempted"))
+        assertFalse(auth.detail.contains("fixture-credential"))
         val rendered = report.checks.joinToString("\n") { "${it.name}: ${it.detail}" }
         assertFalse(rendered.contains(SECRET_CANARY))
         assertFalse(rendered.contains("legacy-transport-must-not-run"))

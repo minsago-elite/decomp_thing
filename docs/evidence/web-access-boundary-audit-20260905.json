@@ -1,0 +1,44 @@
+{
+  "issue": 161,
+  "implementationCheckpoint": "4269c51208fb3b983b23c5c08a63e236406a9fd5",
+  "audit": "docs/web-access-boundary-audit.md",
+  "additionalVerification": "Actual HTTP response helpers reject any Access-Control-* header across legacy and v1 requests.",
+  "jvm": {
+    "tests": 178,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "jvmSelection": [
+    "decompengine.web.*",
+    "decompengine.jobs.AgentProgressJournal*Test"
+  ],
+  "embeddedScript": {
+    "command": "node --test scripts/legacy-session.test.mjs",
+    "tests": 6,
+    "failures": 0,
+    "model": "Controlled browser objects, responses and timers; actual embedded source evaluated."
+  },
+  "criteriaSatisfied": [
+    3,
+    5
+  ],
+  "criteriaPartial": [
+    1,
+    2,
+    4,
+    6
+  ],
+  "remaining": [
+    "Authenticated production proxy profile #216",
+    "Complete browser expiry/history lifecycle qualification",
+    "Planned resumable stream/reconnect qualification #174"
+  ],
+  "browserReportsReused": [
+    "web-legacy-session-browser-20260905.json",
+    "web-legacy-session-spa-regression-20260905.json",
+    "web-legacy-session-invalidation-20260905.json"
+  ],
+  "browserRerun": false,
+  "browserRerunReason": "Only tests and documentation changed; retained reports identify their earlier implementation/archive checkpoints."
+}

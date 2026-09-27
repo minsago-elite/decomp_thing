@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "kind": "gcc-preprocessing-dependency-boundary-v1",
+  "status": "blocked",
+  "corpus": {
+    "id": "gcc-16-2-0-driver-behavior",
+    "path": "behavior-corpus.json",
+    "sha256": "bcc1a14ca8c54f94106c943f0bc5698cb9af3151b7bf20a49ae3c8828baaad0e"
+  },
+  "evidence": {
+    "path": "behavior-corpus-evidence.json",
+    "sha256": "9dcf787aea232615a1ff8721144b86bc1f5e9a2a7068fa9e9280db0bc4ad6803",
+    "cases": 14,
+    "passed": 14
+  },
+  "provenance": {
+    "executableSha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4",
+    "oracleManifestSha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9",
+    "sourceLockSha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc",
+    "buildRecordSha256": "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
+  },
+  "runtime": {
+    "executor": "exact-authenticated-oci-profile-required",
+    "liveReproduction": "unresolved",
+    "profileMismatchResult": "unavailable"
+  },
+  "workflows": [
+    {
+      "id": "preprocess-file",
+      "status": "mock-forwarding-only",
+      "caseId": "preprocess-file",
+      "input": "staged tools/cc1 emits fixed MOCK-PREPROCESSED output"
+    },
+    {
+      "id": "preprocess-stdin",
+      "status": "mock-forwarding-only",
+      "caseId": "preprocess-stdin",
+      "input": "staged tools/cc1 emits fixed MOCK-PREPROCESSED output"
+    },
+    {"id": "include-search", "status": "unavailable"},
+    {"id": "macro-definition", "status": "unavailable"},
+    {"id": "macro-undefinition", "status": "unavailable"},
+    {"id": "language-selection", "status": "unavailable"},
+    {"id": "preprocessing-diagnostics", "status": "unavailable"},
+    {"id": "dependency-generation", "status": "unavailable"},
+    {"id": "candidate-comparison", "status": "unavailable"}
+  ],
+  "productionGap": "The checked report proves only the authenticated driver forwarding path. It does not establish real GCC frontend preprocessing, dependency output, or reconstructed-candidate equivalence."
+}

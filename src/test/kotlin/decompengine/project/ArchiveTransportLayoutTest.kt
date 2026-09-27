@@ -10,6 +10,31 @@ import kotlin.io.path.exists
 
 class ArchiveTransportLayoutTest {
     @Test
+    fun `registered generated C profiles keep build controls and payload separate from outputs`() {
+        for (profile in ReconstructionProfiles.builtIn) {
+            val policy = ReconstructionAdapters.resolve(profile).archiveBuild
+            val layout = policy.transportLayout(profile)
+            val required = policy.requiredPaths(profile)
+            val buildDefinition = profile.layout.declaration("build-definition").materialize()
+
+            assertEquals(setOf("build", ".ninja_log", ".ninja_deps"), layout.excludedOutputRoots)
+            assertEquals(setOf("reports/build_contract.json"), layout.strictBuildControlPaths)
+            assertTrue(buildDefinition in required)
+            assertTrue("reports/build_contract.json" in required)
+            assertTrue("ARCHIVE_README.md" in required)
+            assertFalse(layout.excludes(buildDefinition))
+            assertFalse(layout.excludes("reports/build_contract.json"))
+            assertTrue(layout.excludes("build/reconstructed"))
+
+            profile.layout.declarations
+                .filter { ProjectFileRole.ARCHIVE_PAYLOAD in it.roles }
+                .forEach { declaration ->
+                    assertFalse(layout.excludedOutputRoots.any(declaration::canMaterializeUnder), declaration.pathTemplate)
+                }
+        }
+    }
+
+    @Test
     fun `archive rejects omitted declared inputs before creating output paths`() {
         val root = createTempDirectory("archive-layout-admission-")
         try {
@@ -51,6 +76,17 @@ class ArchiveTransportLayoutTest {
         }
         layout.requireRetainsDeclarations(listOf("build-{module}/unit.txt", "src/{module}/unit.txt",
             "scratch/objects/{module}.txt", "{module}.txt").map(::declaration))
+    }
+
+    @Test
+    fun `ninja transport omits build history state files`() {
+        val layout = GeneratedCNinjaArchiveBuildPolicy.transportLayout(GeneratedCNinjaReconstructionProfile.descriptor)
+
+        assertTrue(layout.excludes("build"))
+        assertTrue(layout.excludes("build/reconstructed"))
+        assertTrue(layout.excludes(".ninja_log"))
+        assertTrue(layout.excludes(".ninja_deps"))
+        assertFalse(layout.excludes("reports/build_contract.json"))
     }
 
     @Test

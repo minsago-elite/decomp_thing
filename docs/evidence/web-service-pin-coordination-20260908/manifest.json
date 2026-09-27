@@ -1,0 +1,32 @@
+{
+  "status": "passed",
+  "sourceCommit": "b18911e4a28fed184d0e9144f84b281b1b1673a4",
+  "command": "./gradlew -PfrontendNodeHome=/home/june/decomp_thing/build/tools/decomp-node-24.20.0/node-v24.20.0-linux-x64 test --tests 'decompengine.web.*' --tests 'decompengine.jobs.AgentProgressJournal*Test' --tests 'decompengine.jobs.WorkflowAttemptStoreTest'",
+  "verification": {
+    "tests": 280,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "retainedXml": {
+    "file": "TEST-decompengine.web.DurableWebWorkflowTest.xml",
+    "tests": 18,
+    "sha256": "9c4025c5c20716327061f3138b3623e842f5abb8a3eb012369eeb869e4f84157"
+  },
+  "coverage": [
+    "Queued pin updates cached lifecycle version; stale CAS rejects and no-op preserves metadata bytes",
+    "Running pin preserves immutable invocation context and successful final publication",
+    "Pre-rename failure preserves queued execution; post-rename uncertainty revokes queued execution",
+    "Uncertain running pin retains ownership until callback exit and prevents final overwrite; restart preserves pin"
+  ],
+  "fixtureExecution": "Inert adapter callbacks only; no binary analysis, provider or native workflow execution.",
+  "notRepeated": [
+    "frontend tests",
+    "package build",
+    "packaged browser qualification"
+  ],
+  "limitations": [
+    "Internal command only; authenticated HTTP pin controls, audit and UI remain unfinished.",
+    "Periodic maintenance remains opt-in; broader job/evidence retention is incomplete."
+  ]
+}

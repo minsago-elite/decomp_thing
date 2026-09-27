@@ -200,7 +200,7 @@ class GccBundledGhidraRetainedRuntimeTest {
             runKind = GccCompilerEngineContainmentRunKind.INTERRUPTED,
             artifacts = artifacts,
             analysisState = state,
-            command = runtime.command(artifacts, state, lease),
+            command = runtime.command(artifacts, state, lease, GccCompilerEngineContainmentRunKind.INTERRUPTED),
             environment = mapOf("LANG" to "C.UTF-8", "LC_ALL" to "C.UTF-8", "TZ" to "UTC"),
             outputLease = lease,
             budgets = GccCompilerEngineContainmentBudgets(1_800_000, 16L * 1024 * 1024 * 1024, 256),

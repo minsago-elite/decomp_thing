@@ -1,0 +1,645 @@
+{
+  "status": "passed",
+  "mode": "history",
+  "testDirectory": "/home/june/decomp_thing/build/packaged-browser-tJ5sAx",
+  "driverNode": "24.20.0",
+  "tools": {
+    "node": "/home/june/decomp_thing/build/tools/decomp-node-24.20.0/node-v24.20.0-linux-x64/bin/node",
+    "chrome": "/tmp/decomp-web-browser-pin-yp1jzpiy/installed/chrome",
+    "javaHome": "/opt/openjdk-bin-21",
+    "python": "/usr/bin/python3",
+    "chromeSha256": "2d18db9d8608b052b6a552ee00ec1e830f93692e928b65ecc67d693bd33fe801"
+  },
+  "requests": {
+    "normal": [
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/",
+        "type": "Document"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-BJuRyI8N.css",
+        "type": "Stylesheet"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-wjjG-6Lx.js",
+        "type": "Script"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/api/v1/bootstrap",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/mark-DPpOXuhp.svg",
+        "type": "Image"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/favicon.ico",
+        "type": "Other"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/upload",
+        "type": "Document"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-BJuRyI8N.css",
+        "type": "Stylesheet"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-wjjG-6Lx.js",
+        "type": "Script"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/api/v1/bootstrap",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/mark-DPpOXuhp.svg",
+        "type": "Image"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/Runtime-C6D5H-WG.js",
+        "type": "Script"
+      }
+    ],
+    "recovery": [
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/",
+        "type": "Document"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-BJuRyI8N.css",
+        "type": "Stylesheet"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-wjjG-6Lx.js",
+        "type": "Script"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/api/v1/bootstrap",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/mark-DPpOXuhp.svg",
+        "type": "Image"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/Runtime-C6D5H-WG.js",
+        "type": "Script"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/runtime",
+        "type": "Document"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-BJuRyI8N.css",
+        "type": "Stylesheet"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-wjjG-6Lx.js",
+        "type": "Script"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/api/v1/bootstrap",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/mark-DPpOXuhp.svg",
+        "type": "Image"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/Runtime-C6D5H-WG.js",
+        "type": "Script"
+      }
+    ],
+    "job": [
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/jobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "type": "Document"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-BJuRyI8N.css",
+        "type": "Stylesheet"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-wjjG-6Lx.js",
+        "type": "Script"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/api/v1/bootstrap",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/mark-DPpOXuhp.svg",
+        "type": "Image"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/Job-CUxOifHi.js",
+        "type": "Script"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/api/v1/jobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/jobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "type": "Document"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-BJuRyI8N.css",
+        "type": "Stylesheet"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-wjjG-6Lx.js",
+        "type": "Script"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/api/v1/bootstrap",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/mark-DPpOXuhp.svg",
+        "type": "Image"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/Job-CUxOifHi.js",
+        "type": "Script"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/api/v1/jobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "type": "Fetch"
+      }
+    ],
+    "attempt": [
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/jobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/runs/run_missing",
+        "type": "Document"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-BJuRyI8N.css",
+        "type": "Stylesheet"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-wjjG-6Lx.js",
+        "type": "Script"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/api/v1/bootstrap",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/mark-DPpOXuhp.svg",
+        "type": "Image"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/Run-B7VY-utc.js",
+        "type": "Script"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/api/v1/jobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/runs/run_missing",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/jobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/runs/run_missing",
+        "type": "Document"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-BJuRyI8N.css",
+        "type": "Stylesheet"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-wjjG-6Lx.js",
+        "type": "Script"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/api/v1/bootstrap",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/mark-DPpOXuhp.svg",
+        "type": "Image"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/Run-B7VY-utc.js",
+        "type": "Script"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/api/v1/jobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/runs/run_missing",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/RunHistory-DhvODK09.js",
+        "type": "Script"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/api/v1/jobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/runs",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/jobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/runs",
+        "type": "Document"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-BJuRyI8N.css",
+        "type": "Stylesheet"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-wjjG-6Lx.js",
+        "type": "Script"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/api/v1/bootstrap",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/mark-DPpOXuhp.svg",
+        "type": "Image"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/RunHistory-DhvODK09.js",
+        "type": "Script"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/api/v1/jobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/runs",
+        "type": "Fetch"
+      }
+    ],
+    "authenticated": [
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/",
+        "type": "Document"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-BJuRyI8N.css",
+        "type": "Stylesheet"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-wjjG-6Lx.js",
+        "type": "Script"
+      },
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:46599/nested/api/v1/session",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/mark-DPpOXuhp.svg",
+        "type": "Image"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/api/v1/bootstrap",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/api/v1/jobs",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/api/v1/jobs",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/",
+        "type": "Document"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-BJuRyI8N.css",
+        "type": "Stylesheet"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-wjjG-6Lx.js",
+        "type": "Script"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/api/v1/bootstrap",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/mark-DPpOXuhp.svg",
+        "type": "Image"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/api/v1/jobs",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/api/v1/jobs",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/Runtime-C6D5H-WG.js",
+        "type": "Script"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/runtime",
+        "type": "Document"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-BJuRyI8N.css",
+        "type": "Stylesheet"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-wjjG-6Lx.js",
+        "type": "Script"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/api/v1/bootstrap",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/mark-DPpOXuhp.svg",
+        "type": "Image"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/Runtime-C6D5H-WG.js",
+        "type": "Script"
+      },
+      {
+        "method": "DELETE",
+        "url": "http://127.0.0.1:46599/nested/api/v1/session",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/runtime",
+        "type": "Document"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-BJuRyI8N.css",
+        "type": "Stylesheet"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-wjjG-6Lx.js",
+        "type": "Script"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/api/v1/bootstrap",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/mark-DPpOXuhp.svg",
+        "type": "Image"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/Runtime-C6D5H-WG.js",
+        "type": "Script"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/",
+        "type": "Document"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-BJuRyI8N.css",
+        "type": "Stylesheet"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/index-wjjG-6Lx.js",
+        "type": "Script"
+      },
+      {
+        "method": "POST",
+        "url": "http://127.0.0.1:46599/nested/api/v1/session",
+        "type": "Fetch"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:46599/nested/assets/ui/assets/mark-DPpOXuhp.svg",
+        "type": "Image"
+      }
+    ]
+  },
+  "workDirectory": "/home/june/decomp_thing/build/packaged-browser-work-fQXGrw",
+  "archive": "llm_bin_patch-0.1.0.zip",
+  "archivePath": "/home/june/decomp_thing/build/distributions/llm_bin_patch-0.1.0.zip",
+  "archiveSha256": "f98e210b74b460c78337dcedf162aa36b7d7cb816f6625c4c106d64b88a242f4",
+  "applicationJar": "llm-bin-patch-0.1.0.jar",
+  "applicationJarSha256": "f95bfc53c5b93a2efd3effb395ac2414b58cfb19e4c0bdae79563abfe79ea32d",
+  "buildId": "2bcebab7e53fa0bab39d997ecc8c5032cc3cdf1d70a158af1d98cab49c5edcab",
+  "applicationVersion": "0.1.0",
+  "resourceBudget": {
+    "expandedBytes": 956624107,
+    "requiredBytes": 1023732971,
+    "availableBytes": 98423463936,
+    "requiredInodes": 7768,
+    "availableInodes": 192238795
+  },
+  "unrelatedWorkingDirectory": "/home/june/decomp_thing/build/packaged-browser-work-fQXGrw/unrelated working directory",
+  "basePath": "/nested/",
+  "nodeOnApplicationPath": false,
+  "npmOnApplicationPath": false,
+  "readOnlyInstallation": true,
+  "origin": "http://127.0.0.1:46599",
+  "browserTempDirectory": "/home/june/decomp_thing/build/ct-1UGh9c",
+  "browser": {
+    "protocolVersion": "1.3",
+    "product": "Chrome/149.0.7827.55",
+    "revision": "@3188f8a607ae7e067593be8aab7f02d2451fec07",
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/149.0.0.0 Safari/537.36",
+    "jsVersion": "14.9.207.21"
+  },
+  "browserSandboxDisabled": true,
+  "uploadRoute": {
+    "clientNavigation": true,
+    "directReload": true,
+    "pageTitle": true,
+    "breadcrumbs": true,
+    "mutationRequests": 0
+  },
+  "home": {
+    "heading": "Your work, with its evidence",
+    "icon": "http://127.0.0.1:46599/nested/assets/ui/assets/mark-DPpOXuhp.svg",
+    "iconWidth": 28,
+    "bodyMargin": "0px",
+    "layout": "grid",
+    "identity": {
+      "buildId": "2bcebab7e53fa0bab39d997ecc8c5032cc3cdf1d70a158af1d98cab49c5edcab",
+      "applicationVersion": "0.1.0",
+      "page": "/nested/",
+      "text": "Skip to content\nDecomp Workbench\nEarly preview\n\nChecking local session…\n\nWorkspace\nUpload\nRuntime status\n\nRECONSTRUCTION WORKSPACE\n\nYour work, with its evidence\n\nReview reconstructed source, inspect validation evidence, and follow each revision.\n\nUpload a binary\n\nChoose one supported ELF binary. Uploading saves a job without starting analysis. The server checks the file format and size.\n\nBinary file\n\nUse the file picker or drop one file here.\n\nConnect a local session with upload support to submit. A selected file stays in memory while this page remains open.\n\nUpload binary\n\nThis tab retains the retry key and filename/size for up to 24 hours, without storing the binary. After reload or navigation, reselect the original file to retry. Closing the tab can discard recovery context; check Uploaded jobs before submitting again.\n\nThe workbench shell is ready\n\nConnect a local session to browse uploaded jobs. The public shell does not read jobs or start workflows.\n\nExisting command-line workflows remain available.\n\nSource and validation evidence stay connected to their revision."
+    }
+  },
+  "runtime": {
+    "identity": {
+      "buildId": "2bcebab7e53fa0bab39d997ecc8c5032cc3cdf1d70a158af1d98cab49c5edcab",
+      "applicationVersion": "0.1.0",
+      "page": "/nested/runtime",
+      "text": "Skip to content\nDecomp Workbench\nEarly preview\n\nTo access private work, open the sign-in link printed by your local application.\n\nCheck session\nWorkspace\nUpload\nRuntime status\n\nAll jobs\nRuntime status\n\nAPPLICATION\n\nRuntime status\nPage build identity\n\nThese values identify the application that served this page.\n\nApplication version\n0.1.0\nUI build\n2bcebab7e53fa0bab39d997ecc8c5032cc3cdf1d70a158af1d98cab49c5edcab\nRuntime information is not connected\n\nConnect a local session to see reported tool availability and workflow capabilities. Opening this page does not run a tool or check a provider.\n\nSource and validation evidence stay connected to their revision."
+    },
+    "lazyChunk": "assets/Runtime-C6D5H-WG.js",
+    "responseStatus": 200
+  },
+  "recovery": {
+    "interceptedLazyChunk": "assets/Runtime-C6D5H-WG.js",
+    "simulatedStatus": 404,
+    "warningCount": 1,
+    "observationSeconds": 5,
+    "automaticReloads": 0,
+    "automaticChunkRetries": 0,
+    "explicitReloadDocumentRequests": 1,
+    "recoveredRuntime": true,
+    "mutationRequests": 0,
+    "noticeTitleWithinViewport": true
+  },
+  "jobDataCreated": true,
+  "dashboard": {
+    "emptyLibrary": false,
+    "populatedLibrary": true,
+    "noMatches": true,
+    "filtersSurviveReload": true,
+    "resetFilters": true,
+    "exactRowMetadata": true,
+    "jobAndRunIdentityDistinct": true,
+    "jobDeepLinkAndRefresh": true,
+    "missingJobExplained": true
+  },
+  "runtimeSnapshot": {
+    "connected": true,
+    "unavailableCapabilitiesExplained": true,
+    "navigationRequests": 0,
+    "clearedOnLogout": true
+  },
+  "attemptRoute": {
+    "directLink": true,
+    "reload": true,
+    "missingExplained": true,
+    "exactJobReturn": true,
+    "mutationRequests": 0
+  },
+  "attemptHistory": {
+    "navigation": true,
+    "directReload": true,
+    "missingExplained": true,
+    "mutationRequests": 0
+  },
+  "populatedHistory": {
+    "progressPolling": true,
+    "progressBytesUnchanged": true,
+    "fixtureAttempts": 55,
+    "firstPage": 50,
+    "secondPage": 5,
+    "exactOrder": true,
+    "cursorReload": true,
+    "earlierAttemptReload": true,
+    "previousInterruptedAttempt": true,
+    "exactUnsignedUsage": true,
+    "unacceptedCandidate": true,
+    "explorationSummary": true,
+    "nativeReportDownload": true,
+    "downloadedBytesMatch": true,
+    "reportBytesUnchanged": true,
+    "retainedBytesUnchanged": true,
+    "mutationRequests": 0,
+    "executionStarted": false
+  },
+  "session": {
+    "authenticated": true,
+    "cookie": {
+      "httpOnly": true,
+      "sameSite": "Strict",
+      "path": "/nested/",
+      "secure": false
+    },
+    "fragmentRemovedBeforeFetch": true,
+    "restoredAfterReload": true,
+    "explicitLogoutRequests": 1,
+    "successfulExchangeRequests": 1,
+    "consumedLinkRequests": 1,
+    "automaticMutationRetries": 0,
+    "storageEntries": 0,
+    "installationUnchanged": true,
+    "jobDataCreated": true
+  },
+  "installationUnchanged": true,
+  "shutdownConfirmed": true,
+  "workRetained": false,
+  "workCleanupConfirmed": true
+}

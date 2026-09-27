@@ -47,6 +47,8 @@ GENERIC_CONTRACT_MODES = {
     "wait-for-cancel",
     "wrong-jsonrpc-prompt",
     "session-preferences",
+    "session-preferences-overlapping-choices",
+    "session-preferences-cross-preferences",
     "session-preferences-no-models",
     "session-preferences-no-modes",
     "session-preferences-no-config-options",
@@ -58,6 +60,7 @@ GENERIC_CONTRACT_MODES = {
     "session-preferences-pipelined-update",
     "session-preferences-pipelined-work",
 }
+RECONSTRUCTION_MODES = {"reconstruction-role-policy"}
 MVP_VULNERABLE_SOURCE = """#include <stdio.h>
 int main(void) {
     char badge[8];
@@ -144,6 +147,36 @@ def write_workspace_file(path, content, request_id):
     response = read_message()
     if response is None or response.get("id") != request_id or "error" in response:
         raise SystemExit(120)
+
+
+def read_workspace_file(path, request_id):
+    send({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "fs/read_text_file",
+        "params": {"sessionId": "fixture-session", "path": path},
+    })
+    response = read_message()
+    if response is None or response.get("id") != request_id:
+        raise SystemExit(121)
+    return response
+
+
+def try_write_workspace_file(path, content, request_id):
+    send({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "fs/write_text_file",
+        "params": {
+            "sessionId": "fixture-session",
+            "path": path,
+            "content": content,
+        },
+    })
+    response = read_message()
+    if response is None or response.get("id") != request_id:
+        raise SystemExit(122)
+    return response
 
 
 def join_path(root, relative):
@@ -253,6 +286,28 @@ initialize_result = {
     "agentCapabilities": capabilities,
     "agentInfo": {"name": "scripted-fixture", "version": "1.0"},
 }
+if MODE == "doctor-preflight":
+    initialize_result["agentCapabilities"]["auth"] = {"logout": {}}
+    initialize_result["authMethods"] = [{"id": "operator-login", "name": "Fixture login", "description": "Bearer fixture-credential"}]
+if MODE.startswith("doctor-auth-"):
+    method = {"id": "private-method-id", "name": "Fixture login"}
+    if MODE == "doctor-auth-variants":
+        methods = [{'id': 'environment-login', 'name': 'Environment login', 'type': 'env_var', 'vars': [{'name': 'FIXTURE_TOKEN', 'label': 'Fixture token', 'secret': True, 'optional': False}], 'link': 'https://auth.example.invalid/setup'}, {'id': 'terminal-login', 'name': 'Terminal login', 'type': 'terminal', 'args': ['fixture-login', '--interactive'], 'env': {'FIXTURE_CONTEXT': 'operator'}}, {'id': 'future-login', 'name': 'Future login', 'type': 'future_fixture', 'fixturePayload': {'hint': 'opaque-fixture-value'}}]
+    elif MODE == "doctor-auth-duplicate":
+        methods = [method, method]
+    elif MODE == "doctor-auth-count":
+        methods = [{"id": "method-" + str(i), "name": "Fixture login"} for i in range(33)]
+    elif MODE == "doctor-auth-blank":
+        methods = [{"id": " ", "name": "Fixture login"}]
+    elif MODE == "doctor-auth-unicode":
+        methods = [{"id": "private-method-id", "name": "\ud800"}]
+    elif MODE == "doctor-auth-payload":
+        methods = [{"id": "private-method-id", "name": "Fixture login", "_meta": {"secret": "x" * 17000}}]
+    elif MODE == "doctor-auth-text":
+        methods = [{"id": "private-method-id", "name": "x" * 513}]
+    else:
+        raise SystemExit(122)
+    initialize_result["authMethods"] = methods
 respond(initialize, initialize_result)
 
 if MODE == "duplicate-response-id":
@@ -263,7 +318,7 @@ if MODE == "duplicate-response-id":
 if MODE == "crash-after-initialize":
     raise SystemExit(17)
 
-if MODE in (
+if MODE.startswith("doctor-auth-") or MODE in (
     "doctor-preflight",
     "doctor-preflight-child-hang",
     "doctor-preflight-shutdown-burst",
@@ -330,6 +385,15 @@ if MODE.startswith("session-preferences"):
         }
     if MODE != "session-preferences-no-config-options":
         session_result["configOptions"] = advertised_session_config()
+if MODE == "session-preferences-overlapping-choices":
+    session_result["models"]["availableModels"].insert(0, {"modelId": "prefix-model-secret-canary", "name": "Overlap"})
+    session_result["modes"]["availableModes"].insert(0, {"id": "prefix-mode-secret-canary", "name": "Overlap"})
+    session_result["configOptions"][0]["options"].insert(0, {"value": "prefix-value-secret-canary", "name": "Overlap"})
+    session_result["configOptions"].insert(0, {"type": "boolean", "id": "prefix-option-secret-canary", "name": "Overlap", "currentValue": False})
+if MODE == "session-preferences-cross-preferences":
+    session_result["models"]["availableModels"] = [
+        {"modelId": "prefix-" + value, "name": "Overlap"} for value in
+        ["model-secret-canary", "mode-secret-canary", "option-secret-canary", "value-secret-canary"]]
 respond(session_new, {} if expected_session_method == "session/load" else session_result)
 if MODE == "session-preferences-pipelined-update":
     update({
@@ -475,7 +539,9 @@ prompt = read_message()
 if prompt is None or prompt.get("method") != "session/prompt":
     raise SystemExit(94)
 prompt_text = prompt.get("params", {}).get("prompt", [{}])[0].get("text", "")
-if MODE in ("mvp-patch", "mvp-patch-bad-fix"):
+if MODE in RECONSTRUCTION_MODES:
+    prompt_valid = SENTINEL in prompt_text and "decomp_engine_main" in prompt_text
+elif MODE in ("mvp-patch", "mvp-patch-bad-fix"):
     prompt_valid = (
         "Convert the Ghidra decompiler output" in prompt_text
         or "Apply the smallest clear memory-safety fix" in prompt_text
@@ -1043,7 +1109,32 @@ update({
     "status": "in_progress",
 })
 
-if MODE in ("mvp-patch", "mvp-patch-bad-fix"):
+if MODE in RECONSTRUCTION_MODES:
+    module_id = SENTINEL.rsplit("/", 1)[-1].removesuffix(".c")
+    for ordinal, relative in enumerate((
+        "include/decomp_types.h",
+        f"include/modules/{module_id}.h",
+        f"src/modules/{module_id}_internal.h",
+    )):
+        response = read_workspace_file(join_path(cwd, relative), 810 + ordinal)
+        if "error" in response or not response.get("result", {}).get("content", "").strip():
+            raise SystemExit(123)
+
+    denied_read = read_workspace_file(join_path(cwd, "reports/confidence.json"), 814)
+    if denied_read.get("error", {}).get("code") != -32602:
+        raise SystemExit(124)
+    denied_write = try_write_workspace_file(join_path(cwd, "Makefile"), "unauthorized\n", 815)
+    if denied_write.get("error", {}).get("code") != -32602:
+        raise SystemExit(125)
+
+    source = join_path(cwd, SENTINEL)
+    content = (
+        f'#include "modules/{module_id}.h"\n'
+        "/* fn_0000000000001000 */\n"
+        "int decomp_engine_main(void) { return 0; }\n"
+    )
+    write_workspace_file(source, content, 816)
+elif MODE in ("mvp-patch", "mvp-patch-bad-fix"):
     reconstructing = "Convert the Ghidra decompiler output" in prompt_text
     source = join_path(cwd, "decompiled.c" if reconstructing else "patched.c")
     if reconstructing:
@@ -1058,7 +1149,7 @@ else:
         "contract/artifact.txt" if MODE in GENERIC_CONTRACT_MODES else "src/module.c",
     )
     content = "updated artifact\n" if MODE in GENERIC_CONTRACT_MODES else "new source\n"
-if MODE not in ("fs-read-write", "repair-quota-retry"):
+if MODE not in ("fs-read-write", "repair-quota-retry") and MODE not in RECONSTRUCTION_MODES:
     write_workspace_file(source, content, 803)
 
 update({

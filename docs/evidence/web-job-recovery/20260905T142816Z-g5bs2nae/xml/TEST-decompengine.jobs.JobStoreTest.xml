@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.jobs.JobStoreTest" tests="12" skipped="0" failures="0" errors="0" timestamp="2026-09-05T14:28:24.282Z" hostname="whatsername" time="0.246">
+  <properties/>
+  <testcase name="backend resolves only job-local artifact files()" classname="decompengine.jobs.JobStoreTest" time="0.01"/>
+  <testcase name="backend marks interrupted analysis jobs failed on recovery()" classname="decompengine.jobs.JobStoreTest" time="0.02"/>
+  <testcase name="publication failures preserve a reviewable job identity without claiming rollback()" classname="decompengine.jobs.JobStoreTest" time="0.029"/>
+  <testcase name="oversized input is rejected before storage is created()" classname="decompengine.jobs.JobStoreTest" time="0.006"/>
+  <testcase name="backend stores uploaded ELF job and metadata()" classname="decompengine.jobs.JobStoreTest" time="0.024"/>
+  <testcase name="metadata publication preserves the complete snapshot held by an existing reader()" classname="decompengine.jobs.JobStoreTest" time="0.018"/>
+  <testcase name="backend rejects non-ELF upload()" classname="decompengine.jobs.JobStoreTest" time="0.0"/>
+  <testcase name="interrupted upload leaves no discoverable partial job or staging directory()" classname="decompengine.jobs.JobStoreTest" time="0.011"/>
+  <testcase name="interrupted metadata update preserves the previous readable record()" classname="decompengine.jobs.JobStoreTest" time="0.011"/>
+  <testcase name="metadata byte limit rejects unroundtrippable uploads and preserves readable jobs()" classname="decompengine.jobs.JobStoreTest" time="0.079"/>
+  <testcase name="backend lists jobs and persists analysis status()" classname="decompengine.jobs.JobStoreTest" time="0.024"/>
+  <testcase name="caller mutation after parsing cannot change the published input()" classname="decompengine.jobs.JobStoreTest" time="0.01"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

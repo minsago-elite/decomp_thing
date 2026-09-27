@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "applicationVersion": "0.1.0",
+  "entryScript": "assets/index-BF530Odo.js",
+  "entryStyles": [
+    "assets/index-DmsUN96c.css"
+  ],
+  "files": [
+    {
+      "path": ".vite/manifest.json",
+      "mediaType": "application/json; charset=utf-8",
+      "sizeBytes": 1301,
+      "sha256": "63dccdb6b3e1348a10f255c55ef2d293a7fa600dcb9eee1a94c94af4c8d14020",
+      "public": false
+    },
+    {
+      "path": "assets/Job-_Fhkhbpf.js",
+      "mediaType": "text/javascript; charset=utf-8",
+      "sizeBytes": 2536,
+      "sha256": "c2ea945a03eba339b4b7236a9b112e744479920982fe7630dce15c4b33e9fdd4",
+      "public": true
+    },
+    {
+      "path": "assets/Run-Bj_JPeFG.js",
+      "mediaType": "text/javascript; charset=utf-8",
+      "sizeBytes": 18868,
+      "sha256": "567598a8180b85a008b761a2f53f1f28cacb7ac86122eb3045ac1168e87566b7",
+      "public": true
+    },
+    {
+      "path": "assets/RunHistory-YrbUTtLC.js",
+      "mediaType": "text/javascript; charset=utf-8",
+      "sizeBytes": 3045,
+      "sha256": "d9046ff55e659313c8a207c29402f9e4043f00369c12ae49faf00fc1faebcb3f",
+      "public": true
+    },
+    {
+      "path": "assets/Runtime-DUOdE7y5.js",
+      "mediaType": "text/javascript; charset=utf-8",
+      "sizeBytes": 3877,
+      "sha256": "041a481760895f3f2f2264dfa7089d1b99da5c6347722df423e99557a6f34031",
+      "public": true
+    },
+    {
+      "path": "assets/index-BF530Odo.js",
+      "mediaType": "text/javascript; charset=utf-8",
+      "sizeBytes": 96041,
+      "sha256": "f2a289935e21342f9ca316faa0ef8c809cb7558d0487d4092c5d3639e37d0dd7",
+      "public": true
+    },
+    {
+      "path": "assets/index-DmsUN96c.css",
+      "mediaType": "text/css; charset=utf-8",
+      "sizeBytes": 5278,
+      "sha256": "ff72e0ba9a30c21a8b15281650d0267a1b0bedbb6c150b90b058f6b3b834ea64",
+      "public": true
+    },
+    {
+      "path": "assets/mark-DPpOXuhp.svg",
+      "mediaType": "image/svg+xml",
+      "sizeBytes": 289,
+      "sha256": "0a7608e6061d66bfeff7515d0a300d5b31c593beee2e8cf0ff2decc7567c979c",
+      "public": true
+    },
+    {
+      "path": "index.html",
+      "mediaType": "text/html; charset=utf-8",
+      "sizeBytes": 664,
+      "sha256": "23adce9514c2e69086636e149e191dd4ee2fd2f2c839830e9e49af38e05e5417",
+      "public": false
+    }
+  ],
+  "buildId": "d305e22070c22253a4ca9e0279ebe5b7e585d157b7975f56a6d9cbb60aa3b11f"
+}

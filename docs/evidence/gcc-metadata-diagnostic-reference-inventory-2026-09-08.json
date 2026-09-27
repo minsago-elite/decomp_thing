@@ -1,0 +1,101 @@
+{
+  "evidenceId": "gcc-metadata-diagnostic-reference-inventory-v1",
+  "schemaVersion": 1,
+  "issue": 706,
+  "status": "unresolved",
+  "scope": "Checked repository facts only; no reconstructed candidate execution or production qualification was performed.",
+  "sourceBaseCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "oracleBoundary": {
+    "profile": "gcc-driver-16.2.0",
+    "sourceLock": {
+      "path": "oracle/gcc/16.2.0/source-lock.json",
+      "sha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc",
+      "sourceRevision": "78d4ac73dd391005b895a6148cd9831e28e1208b"
+    },
+    "artifactManifest": {
+      "path": "oracle/gcc/16.2.0/oracle-manifest.json",
+      "sha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9",
+      "strippedArtifactSha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4"
+    },
+    "buildRecord": {
+      "path": "oracle/gcc/16.2.0/build-record.json",
+      "sha256": "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637",
+      "runtimeImage": "sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248"
+    }
+  },
+  "referenceInventory": {
+    "corpus": {
+      "path": "oracle/gcc/16.2.0/behavior-corpus.json",
+      "sha256": "bcc1a14ca8c54f94106c943f0bc5698cb9af3151b7bf20a49ae3c8828baaad0e",
+      "scope": "production",
+      "caseCount": 14,
+      "normalizationCount": 0
+    },
+    "evidence": {
+      "path": "oracle/gcc/16.2.0/behavior-corpus-evidence.json",
+      "sha256": "9dcf787aea232615a1ff8721144b86bc1f5e9a2a7068fa9e9280db0bc4ad6803",
+      "referencePassCount": 14
+    },
+    "requiredCategories": [
+      {
+        "id": "version",
+        "status": "covered",
+        "caseIds": ["metadata-version", "metadata-dumpversion"]
+      },
+      {
+        "id": "target",
+        "status": "covered",
+        "caseIds": ["metadata-dumpmachine"]
+      },
+      {
+        "id": "search-directory",
+        "status": "covered",
+        "caseIds": ["environment-search-path"]
+      },
+      {
+        "id": "help",
+        "status": "covered",
+        "caseIds": ["help-driver"]
+      },
+      {
+        "id": "option-validation",
+        "status": "covered-by-invalid-option-case",
+        "caseIds": ["diagnostic-invalid-option"],
+        "boundary": "The recorded unsupported option is the only checked option-validation reference; no separate option matrix is inferred."
+      },
+      {
+        "id": "missing-input",
+        "status": "covered",
+        "caseIds": ["diagnostic-invalid-input"]
+      },
+      {
+        "id": "malformed-input",
+        "status": "unavailable",
+        "caseIds": [],
+        "boundary": "The checked corpus has no distinct malformed-input case; invalid-input coverage is not promoted to this category."
+      },
+      {
+        "id": "unsupported-option",
+        "status": "covered-by-invalid-option-case",
+        "caseIds": ["diagnostic-invalid-option"],
+        "boundary": "The exact argument and stderr bytes remain those of the checked case; no alternate identity or output is substituted."
+      }
+    ]
+  },
+  "identitySubstitutionPolicy": {
+    "status": "none",
+    "rule": "Required candidate comparisons must retain exact exit code and normalized stdout/stderr bytes from the versioned reference case. The corpus declares zero normalizations; no version, target, path, diagnostic, or artifact identity substitution is permitted by this record."
+  },
+  "productionGap": {
+    "productionVerified": false,
+    "unavailableGates": [
+      "Authenticated reconstructed-driver replay for every inventory case, including candidate executable, source/build revision, and run receipt.",
+      "Independent candidate comparison of exit code and normalized stdout/stderr, with every mismatch retained as release-blocking evidence.",
+      "Malformed-input reference capture required to close the inventory category marked unavailable.",
+      "Downstream qualification and release-gate consumers (#707, #708, #717, #718, and #719) remain open."
+    ],
+    "ghidraIsolation": "Any production analysis must use the application-bundled Ghidra Java APIs in an isolated worker; GHIDRA_HOME and external analyzeHeadless installations are not production prerequisites.",
+    "oracleBoundary": "The authenticated source lock, oracle manifest, build record, and reference corpus are read-only oracle inputs. They do not establish reconstructed source, candidate receipts, candidate fidelity, or release eligibility.",
+    "unresolvedHandling": "Unavailable cases and production artifacts remain explicitly unresolved and are not counted as accepted candidate behavior."
+  }
+}

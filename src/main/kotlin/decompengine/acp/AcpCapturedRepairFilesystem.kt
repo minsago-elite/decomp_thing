@@ -129,6 +129,12 @@ internal class AcpCapturedRepairFilesystem(
         }
     }
 
+    /** Trusted staging metadata consumers may hash a detached view while callbacks remain open. */
+    fun snapshot(): Map<String, ByteArray> = synchronized(lock) {
+        checkNotNull(session) { "captured ACP filesystem was not opened" }
+        currentFiles.mapValuesTo(TreeMap()) { (_, bytes) -> bytes.copyOf() }
+    }
+
     private inner class CapturedSession(
         private val request: AgentExecutionRequest,
         private val limits: AcpFilesystemLimits,

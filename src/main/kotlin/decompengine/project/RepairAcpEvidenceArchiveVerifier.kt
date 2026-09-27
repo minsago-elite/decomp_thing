@@ -159,7 +159,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
         )
         val verifiedReceipts = verifyReceipts(graph, projectDir, payloadSha256, payloadSizes)
         verifyHistory(graph, projectDir, payloadSha256, payloadSizes)
-        verifyValidationReceipts(graph, projectDir, payloadSha256, payloadSizes)
+        verifyValidationReceipts(graph, projectDir, payloadSha256, payloadSizes, reconstructionProfile)
 
         val nodesById = graph.nodes.associateBy(ReleaseRepairNode::id)
         val qualifiedContributions = linkedSetOf<String>()
@@ -542,7 +542,9 @@ internal object RepairAcpEvidenceArchiveVerifier {
         projectDir: Path,
         payloadSha256: Map<String, String>,
         payloadSizes: Map<String, Long>,
+        reconstructionProfile: ReconstructionProfile,
     ) {
+        val buildDefinition = reconstructionProfile.layout.declaration("build-definition").materialize()
         val runs = graph.runs.associateBy(ReleaseRepairRun::id)
         val required = graph.nodes.mapNotNull { node -> node.validationProof?.let {
             Triple(it, runs.getValue(requireNotNull(node.repairMetadata?.runId)), node.status == "accepted")
@@ -557,7 +559,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 payloadSha256, payloadSizes)
             val receipt = strictObject(bytes, HISTORY_JSON_LIMITS, "repair validation receipt")
             receipt.requireExactKeys(VALIDATION_RECEIPT_FIELDS, "repair validation receipt")
-            require(receipt.requiredInt("schemaVersion", "validation") == 1 &&
+            require(receipt.requiredInt("schemaVersion", "validation") == 2 &&
                 receipt.requiredString("provider", "validation") == "generated-c-linux-bubblewrap-cgroup-v1" &&
                 receipt.requiredString("profileId", "validation") == graph.profileId &&
                 receipt.requiredBoolean("cleanupVerified", "validation") &&
@@ -570,6 +572,10 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 require(receipt.requiredSha256(field, "validation") == expected) {
                     "repair validation receipt is cross-paired: $field"
                 }
+            }
+            require(receipt.getValue("behaviorBudgetEvidence") ==
+                GeneratedCValidationBudgetPolicy.DEFAULT.admit(graph.budget)) {
+                "repair validation behavior budgets differ from the graph and host safety policy"
             }
             val runtime = receipt.getValue("runtimeConfiguration").requiredObject("validation runtime")
             require(sha256(OracleJson.canonicalBytes(runtime, HISTORY_JSON_LIMITS)) == proof.runtimeSha256) {
@@ -629,7 +635,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 val path = file.requiredString("path", "validation source")
                 requireNormalizedPath(path, "validation source")
                 require(file.requiredString("role", "validation source") ==
-                    (if (path == "Makefile") "build-file" else "source") &&
+                    (if (path == buildDefinition) "build-file" else "source") &&
                     file.requiredInt("mode", "validation source") == 292) {
                     "repair validation source role or immutable mode is invalid"
                 }
@@ -1598,7 +1604,8 @@ private val VALIDATION_PROOF_FIELDS = setOf(
 private val REPAIR_LEGACY_PATH = Regex("reports/repair-revisions/legacy-(?:graph|history)-([0-9a-f]{64})\\.json")
 private val VALIDATION_RECEIPT_FIELDS = setOf(
     "schemaVersion", "provider", "profileId", "profileSha256", "indexSha256", "sourceRevisionSha256",
-    "regressionCorpusSha256", "runtimeSha256", "runtimeConfiguration", "sourceSnapshot", "buildOutputLink",
+    "regressionCorpusSha256", "runtimeSha256", "runtimeConfiguration", "behaviorBudgetEvidence",
+    "sourceSnapshot", "buildOutputLink",
     "originalExecutable", "rebuiltExecutable", "inputs", "scopes", "outcome", "caseCount", "matches",
     "cleanupVerified", "assurance",
 )

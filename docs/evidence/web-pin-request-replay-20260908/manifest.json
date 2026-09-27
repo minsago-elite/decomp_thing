@@ -1,0 +1,45 @@
+{
+  "status": "passed",
+  "sourceCommit": "42e12e84ca7ac45d366af5111165580e464c1aa1",
+  "command": "./gradlew -PfrontendNodeHome=/home/june/decomp_thing/build/tools/decomp-node-24.20.0/node-v24.20.0-linux-x64 test --tests 'decompengine.web.*' --tests 'decompengine.jobs.AgentProgressJournal*Test' --tests 'decompengine.jobs.WorkflowAttemptStoreTest' --tests 'decompengine.jobs.WorkflowPin*Test'",
+  "verification": {
+    "tests": 292,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "retainedXml": [
+    {
+      "file": "TEST-decompengine.jobs.WorkflowPinRequestTest.xml",
+      "tests": 6,
+      "sha256": "16be11d6003974e478cd75535b36d5765034546177e601f836e112db9269e269"
+    },
+    {
+      "file": "TEST-decompengine.web.DurableWebWorkflowTest.xml",
+      "tests": 19,
+      "sha256": "2ebbe8804267f337c083a9a74372153685f35d92fb866e16ca0b0debc35f4b81"
+    }
+  ],
+  "coverage": [
+    "Replay precedes CAS and returns original receipt alongside current attempt",
+    "Changed boolean/precondition conflicts without rewriting",
+    "Successful no-op recorded once without changing run version",
+    "Actor/job scope and concurrent duplicate single-publication",
+    "All five injected publication interruption points",
+    "256 receipt cap preserves first 24 hours, including exact boundary and internal change refusal",
+    "Malformed keys, duplicate scoped keys and inconsistent outcomes fail without rewriting",
+    "Queued task publication uses current attempt after replay of older policy"
+  ],
+  "fixtureExecution": "Owned inert records and adapter callback; no binary analysis/provider/native workflow execution.",
+  "notRepeated": [
+    "frontend tests",
+    "package build",
+    "packaged browser qualification"
+  ],
+  "limitations": [
+    "Internal storage/service integration only; authenticated HTTP and typed client remain to be implemented.",
+    "Denied/stale/failed request auditing and broader sensitive-operation coverage remain incomplete.",
+    "Storage replay survives reopen for the same actor; browser session authentication has a separate lifetime and is not preserved by these receipts.",
+    "Periodic maintenance remains opt-in."
+  ]
+}

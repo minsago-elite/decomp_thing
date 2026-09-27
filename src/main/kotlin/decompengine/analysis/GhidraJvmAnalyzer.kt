@@ -2,7 +2,6 @@ package decompengine.analysis
 
 import decompengine.binary.BoundedElfMetadataInspection
 import decompengine.binary.BoundedElfMetadataLimits
-import decompengine.binary.BoundedElfMetadataReader
 import decompengine.binary.ElfMetadata
 import decompengine.binary.SymbolInventory
 import decompengine.oracle.fulltree.FullTreeControlException
@@ -34,14 +33,19 @@ data class GhidraAnalysis(
 
 class GhidraAnalysisException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
 
-class GhidraJvmAnalyzer private constructor(
+class GhidraJvmAnalyzer internal constructor(
     private val analyzer: ProgramModelAnalyzer,
     private val metadataLimits: BoundedElfMetadataLimits,
+    private val metadataInspectionProcess: BoundedElfMetadataInspectionProcess,
 ) {
-    constructor() : this(GhidraHeadlessProgramModelAnalyzer(), BoundedElfMetadataLimits())
+    constructor() : this(
+        GhidraHeadlessProgramModelAnalyzer(),
+        BoundedElfMetadataLimits(),
+        BoundedElfMetadataInspectionProcess(),
+    )
 
     constructor(analyzer: ProgramModelAnalyzer = GhidraHeadlessProgramModelAnalyzer()) :
-        this(analyzer, BoundedElfMetadataLimits())
+        this(analyzer, BoundedElfMetadataLimits(), BoundedElfMetadataInspectionProcess())
 
     /** Binds worker export limits; callers still admit the requested budgets against host policy. */
     fun withExportBudgets(budgets: ReconstructionBudgets): GhidraJvmAnalyzer {
@@ -51,48 +55,53 @@ class GhidraJvmAnalyzer private constructor(
             maximumWallClockMillis = minOf(metadataLimits.maximumWallClockMillis, budgets.exportWallClockMillis),
             maximumModeledMetadataBytes = minOf(metadataLimits.maximumModeledMetadataBytes, budgets.exportMaximumResidentBytes),
         )
-        return GhidraJvmAnalyzer(bounded.withExportBudgets(budgets), selectedMetadataLimits)
+        return GhidraJvmAnalyzer(bounded.withExportBudgets(budgets), selectedMetadataLimits, metadataInspectionProcess)
     }
 
     fun analyze(binaryPath: Path, outputDir: Path): GhidraAnalysis {
         val deadline = AnalysisDeadline.start(
             TimeUnit.MILLISECONDS.toNanos(metadataLimits.maximumWallClockMillis), "analysis and metadata",
+            timeoutAdvice = if (analyzer is GhidraHeadlessProgramModelAnalyzer) {
+                AnalysisDeadline.RECOVERY_TIMEOUT_ADVICE
+            } else null,
         )
-        fun checkpoint(stage: String) = deadline.checkpoint(stage)
-        checkpoint("before analysis")
-        val reportsDir = outputDir.resolve("reports").createDirectories()
-        checkpoint("before export")
-        val programModel = if (analyzer is GhidraHeadlessProgramModelAnalyzer) {
-            analyzer.analyzeWithDeadline(binaryPath, outputDir, deadline)
-        } else {
-            analyzer.analyze(binaryPath, outputDir)
+        return deadline.enforceDuring("analysis and metadata") {
+            fun checkpoint(stage: String) = deadline.checkpoint(stage)
+            checkpoint("before analysis")
+            val reportsDir = outputDir.resolve("reports").createDirectories()
+            checkpoint("before export")
+            val programModel = if (analyzer is GhidraHeadlessProgramModelAnalyzer) {
+                analyzer.analyzeWithDeadline(binaryPath, outputDir, deadline)
+            } else {
+                analyzer.analyze(binaryPath, outputDir)
+            }
+            checkpoint("after export")
+            val inspection = try {
+                metadataInspectionProcess.inspect(binaryPath, metadataLimits, ::checkpoint)
+            } catch (failure: FullTreeControlException) {
+                // Initial authentication preserves callback failures as causes after releasing its input.
+                val cause = failure.cause
+                if (cause is GhidraAnalysisException) throw cause
+                throw failure
+            }
+            require(inspection.inputSha256 == programModel.inputSha256) {
+                "ELF metadata input identity does not match the exported program model"
+            }
+            val analysis = GhidraAnalysis(
+                binaryPath = binaryPath,
+                reportsDir = reportsDir,
+                metadata = inspection.metadata,
+                symbolInventory = inspection.symbolInventory,
+                programModel = programModel,
+                mainClass = BundledGhidra.WORKER_CLASS,
+                args = listOf("analyze", outputDir.resolve("ghidra_project").toAbsolutePath().toString(),
+                    "archival_reconstruction", binaryPath.toAbsolutePath().toString()),
+                returnCode = 0,
+            )
+            checkpoint("before analysis report")
+            analysis.writeReport(inspection, metadataLimits, ::checkpoint)
+            analysis
         }
-        checkpoint("after export")
-        val inspection = try {
-            BoundedElfMetadataReader.read(binaryPath, metadataLimits, ::checkpoint)
-        } catch (failure: FullTreeControlException) {
-            // Initial authentication preserves callback failures as causes after releasing its input.
-            val cause = failure.cause
-            if (cause is GhidraAnalysisException) throw cause
-            throw failure
-        }
-        require(inspection.inputSha256 == programModel.inputSha256) {
-            "ELF metadata input identity does not match the exported program model"
-        }
-        val analysis = GhidraAnalysis(
-            binaryPath = binaryPath,
-            reportsDir = reportsDir,
-            metadata = inspection.metadata,
-            symbolInventory = inspection.symbolInventory,
-            programModel = programModel,
-            mainClass = BundledGhidra.WORKER_CLASS,
-            args = listOf("analyze", outputDir.resolve("ghidra_project").toAbsolutePath().toString(),
-                "archival_reconstruction", binaryPath.toAbsolutePath().toString()),
-            returnCode = 0,
-        )
-        checkpoint("before analysis report")
-        analysis.writeReport(inspection, metadataLimits, ::checkpoint)
-        return analysis
     }
 }
 

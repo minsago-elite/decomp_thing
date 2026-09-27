@@ -1,0 +1,39 @@
+{
+  "authority": {
+    "acpMayWriteOracleTruth": false,
+    "bundledGhidraProductionBoundary": "application-bundled-java-api; no external GHIDRA_HOME or analyzeHeadless",
+    "legacyDirectHttp": "deprecated-compatibility-only",
+    "oracleTruth": "authenticated-read-only"
+  },
+  "decision": "blocked",
+  "evidence": {
+    "machineReportPath": "oracle/llvm/22.1.6/full-tree-release-evidence.json",
+    "machineReportBytesSha256": "2a0f7c69848dda29452bf0dfbb0465df2406dee869ce89de55afe34048a8dbb5",
+    "machineReportSha256": "0b806fa10d19110bfa8b877f7c532867d082944f56a6441e46df753d2e5f9ffc",
+    "scopeSha256": "48d15d0db12c67944473feae016123195cf9e1da37c5849d9131ba31248c4b57"
+  },
+  "gate": "clang-llvm-full-tree-fidelity-release",
+  "productionGaps": [
+    {
+      "status": "unavailable",
+      "gate": "hosted-clean-reconstruction",
+      "reason": "No complete accepted source archive or full-tree hosted configure/compile/link result is supplied; issue #115 remains open."
+    },
+    {
+      "status": "unavailable",
+      "gate": "full-tree-behavior-replay",
+      "reason": "No required hosted clean-build and repeated reference/candidate replay pass for one revision is supplied; issue #112 remains open."
+    },
+    {
+      "status": "unavailable",
+      "gate": "kotlin-only-release-authority",
+      "reason": "Issue #136 remains open; the repository documents remaining Python compatibility/full-tree release orchestration work."
+    }
+  ],
+  "releaseEligible": false,
+  "schemaVersion": 1,
+  "unresolved": [
+    "This is an evidence disposition, not a release certificate.",
+    "The checked report proves deterministic oracle observations/truth, zero unexplained data entities, and baseline arithmetic only."
+  ]
+}

@@ -5,6 +5,7 @@ import decompengine.agent.AgentExecutionException
 import decompengine.agent.AgentFailure
 import decompengine.agent.AgentFailureKind
 import java.time.Duration
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
@@ -67,52 +68,86 @@ internal class AcpExecutionScheduler(
         val queueStartedAt = System.nanoTime()
         val queueTimeoutNanos = limits.maximumQueueWait.toNanos()
         val waiter = Waiter(workspaceGroup)
+        var queued = false
         try {
-            lock.lockInterruptibly()
-        } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
-            return null
-        }
-        try {
-            if (cancellation.isCancellationRequested()) return null
-            if (requestExpired()) throw schedulingFailure("requestDeadline", AgentFailureKind.TIMEOUT)
-            if (quarantinedByGroup.containsKey(workspaceGroup) || quarantinedCount() == limits.maximumActive) {
-                throw schedulingFailure("cleanupUnverified", AgentFailureKind.UNAVAILABLE, retryable = false)
-            }
-            // Queue bounds charge waiting work only. If every older waiter is blocked by its
-            // workspace, immediate admission to spare capacity does not enlarge the queue.
-            if (active < limits.maximumActive && eligible(workspaceGroup) && queue.none { eligible(it.group) }) {
-                return admit(workspaceGroup)
-            }
-            if (queue.size >= limits.maximumQueued ||
-                queue.count { it.group == workspaceGroup } >= limits.maximumQueuedPerWorkspace
-            ) {
-                throw schedulingFailure("queueCapacity", AgentFailureKind.RESOURCE_EXHAUSTED)
-            }
-            queue.add(waiter)
-            while (true) {
-                if (Thread.currentThread().isInterrupted || cancellation.isCancellationRequested()) return null
-                if (requestExpired()) throw schedulingFailure("requestDeadline", AgentFailureKind.TIMEOUT)
+            // The queue position is reserved before the caller's first observer runs, so a
+            // slow observer can neither be overtaken by later callers nor wait outside the
+            // queue bounds.
+            lock.withLock {
                 if (quarantinedByGroup.containsKey(workspaceGroup) || quarantinedCount() == limits.maximumActive) {
                     throw schedulingFailure("cleanupUnverified", AgentFailureKind.UNAVAILABLE, retryable = false)
                 }
+                val immediatelyAdmissible = active < limits.maximumActive &&
+                    eligible(workspaceGroup) &&
+                    queue.none { eligible(it.group) }
+                if (!immediatelyAdmissible) {
+                    if (queue.size >= limits.maximumQueued ||
+                        queue.count { it.group == workspaceGroup } >= limits.maximumQueuedPerWorkspace
+                    ) {
+                        throw schedulingFailure("queueCapacity", AgentFailureKind.RESOURCE_EXHAUSTED)
+                    }
+                    queue.add(waiter)
+                    queued = true
+                }
+            }
+            while (true) {
+                // Caller-provided observers must never hold the process-wide scheduler lock.
+                // A slow observer must not prevent permit release or observation of scheduler state.
+                if (Thread.currentThread().isInterrupted || cancellation.isCancellationRequested()) return null
+                if (requestExpired()) throw schedulingFailure("requestDeadline", AgentFailureKind.TIMEOUT)
                 val elapsed = (System.nanoTime() - queueStartedAt).coerceAtLeast(0)
                 if (elapsed >= queueTimeoutNanos) throw schedulingFailure("queueDeadline", AgentFailureKind.TIMEOUT)
-                if (active < limits.maximumActive && queue.firstOrNull { eligible(it.group) } === waiter) {
-                    queue.remove(waiter)
-                    return admit(workspaceGroup)
-                }
+                // The observations above are current. Admission may only commit while they
+                // stay current: waiting for the lock invalidates them, so that pass gives up
+                // its admission decisions and the state is re-observed before the next one.
+                var current = true
                 try {
-                    changed.awaitNanos(minOf(POLL_NANOS, queueTimeoutNanos - elapsed))
+                    if (!lock.tryLock()) {
+                        if (!lock.tryLock(minOf(POLL_NANOS, queueTimeoutNanos - elapsed), TimeUnit.NANOSECONDS)) continue
+                        current = false
+                    }
+                    try {
+                        val remaining = queueTimeoutNanos - (System.nanoTime() - queueStartedAt).coerceAtLeast(0)
+                        if (remaining <= 0) throw schedulingFailure("queueDeadline", AgentFailureKind.TIMEOUT)
+                        if (quarantinedByGroup.containsKey(workspaceGroup) || quarantinedCount() == limits.maximumActive) {
+                            throw schedulingFailure("cleanupUnverified", AgentFailureKind.UNAVAILABLE, retryable = false)
+                        }
+                        if (!queued) {
+                            // Queue bounds charge waiting work only. A blocked workspace cannot
+                            // prevent immediate admission to spare capacity for an eligible group.
+                            if (active < limits.maximumActive && eligible(workspaceGroup) && queue.none { eligible(it.group) }) {
+                                if (current) return admit(workspaceGroup)
+                                continue
+                            }
+                            if (queue.size >= limits.maximumQueued ||
+                                queue.count { it.group == workspaceGroup } >= limits.maximumQueuedPerWorkspace
+                            ) {
+                                throw schedulingFailure("queueCapacity", AgentFailureKind.RESOURCE_EXHAUSTED)
+                            }
+                            queue.add(waiter)
+                            queued = true
+                        }
+                        if (active < limits.maximumActive && queue.firstOrNull { eligible(it.group) } === waiter) {
+                            if (current) {
+                                queue.remove(waiter)
+                                return admit(workspaceGroup)
+                            }
+                            continue
+                        }
+                        changed.awaitNanos(minOf(POLL_NANOS, remaining))
+                    } finally {
+                        lock.unlock()
+                    }
                 } catch (_: InterruptedException) {
                     Thread.currentThread().interrupt()
                     return null
                 }
             }
         } finally {
-            queue.remove(waiter)
-            changed.signalAll()
-            lock.unlock()
+            if (queued) lock.withLock {
+                queue.remove(waiter)
+                changed.signalAll()
+            }
         }
     }
 

@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-09-08T13:26:14Z",
+  "issue": 354,
+  "scope": "Local completion-channel contract evidence; not production qualification.",
+  "sourceBaseCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "contract": {
+    "path": "docs/local-behavior-completion-channel.md",
+    "sha256": "4a72d9ffb5d80bff049c56fcd9b142d510f11f54511bbfd275488434b5975e25"
+  },
+  "implementationCheckpoints": [
+    "c4f60ddd828200a6d6ded2eca2de88f905c4cc95",
+    "d3a03353155a3cc303eb60d4a1cfa77d42e1af23",
+    "e335f1845ecffb7eb74ceef63bf9aadf1db24974",
+    "5ad29f442b57a33a82c07ef6ec2f6583d68dae14",
+    "fb2bd3e65f969036266dad276677e7ca9df5de21",
+    "cab3030fa6ae8ba7db9dee039d094424954b8ec6"
+  ],
+  "localContractFacts": {
+    "genuineApplicationExit124": "locally distinguishable when the separate terminal record is complete and agrees with the wrapper exit",
+    "missingOrContradictoryCompletion": "cannot qualify an observation or replace prior evidence",
+    "deadlineFailure": "cannot be overridden by a matching terminal status",
+    "historicalSchemas": "remain readable but unresolved because they lack independent completion evidence"
+  },
+  "existingFocusedCheckpoint": {
+    "commit": "cab3030fa6ae8ba7db9dee039d094424954b8ec6",
+    "reportedTests": 36,
+    "failures": 0,
+    "errors": 0,
+    "skips": 0,
+    "source": "Issue #354 local acceptance verification through draft #376"
+  },
+  "productionGates": [
+    {
+      "name": "authenticated completion-channel authority",
+      "status": "unavailable",
+      "reason": "The parser does not authenticate the channel or caller-provided JSON."
+    },
+    {
+      "name": "immutable executable and runtime identity",
+      "status": "unavailable",
+      "reason": "Production identity and same-user replacement protection remain separate requirements."
+    },
+    {
+      "name": "production containment attestation",
+      "status": "unavailable",
+      "reason": "The retained completion record is a local observation, not containment authority."
+    }
+  ],
+  "preservedBoundaries": {
+    "bundledGhidra": "This local behavior record does not qualify or replace the bundled direct-Java Ghidra boundary.",
+    "authenticatedOracle": "This record supplies no oracle authority; production execution and release decisions remain behind the authenticated oracle boundary.",
+    "unresolvedState": "Unavailable gates remain explicit and do not become a passing behavior claim."
+  }
+}

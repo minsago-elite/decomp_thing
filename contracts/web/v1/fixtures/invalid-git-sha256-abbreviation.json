@@ -1,0 +1,33 @@
+{
+  "apiVersion": 1,
+  "kind": "gitWorkspace",
+  "requestId": "request_example_1",
+  "data": {
+    "repositoryId": "repository_example_1",
+    "worktreeId": "worktree_example_1",
+    "repositoryVersion": "repo_version_1",
+    "worktreeVersion": "worktree_version_1",
+    "objectFormat": "sha256",
+    "headObjectId": "cdef1234",
+    "headRefId": "ref_main",
+    "candidateRevisionId": "revision_example_1",
+    "dirty": false,
+    "refs": [
+      {
+        "refId": "ref_main",
+        "displayName": "refs/heads/main",
+        "objectId": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "version": "ref_version_1"
+      }
+    ],
+    "mapping": {
+      "repositoryId": "repository_example_1",
+      "objectId": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "revisionId": "revision_example_1",
+      "sourceSha256": "abababababababababababababababababababababababababababababababab",
+      "archiveArtifactId": "archive_example_1",
+      "acceptance": "accepted",
+      "acceptanceArtifactId": "artifact_example_1"
+    }
+  }
+}

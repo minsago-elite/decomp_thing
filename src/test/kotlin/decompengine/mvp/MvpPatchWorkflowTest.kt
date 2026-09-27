@@ -1,5 +1,8 @@
 package decompengine.mvp
 
+import decompengine.project.ReconstructionAdapters
+import decompengine.project.ReconstructionProfile
+import decompengine.project.ReconstructionProfiles
 import decompengine.repair.RepairClient
 import decompengine.repair.RepairClientAgentHarness
 import decompengine.repair.RepairClientInvocation
@@ -59,6 +62,7 @@ class MvpPatchWorkflowTest {
         assertTrue(summary.contains("[REDACTED]"))
         assertTrue(summary.contains("approved interactively"))
         assertTrue(summary.contains("Agent harness: `agent-harness-unprovisioned`"))
+        assertTrue(summary.contains("Reconstruction profile: `generated-c-make-v1`"))
         assertTrue(summary.contains("| verify | PASS |"))
         assertTrue(summary.contains("binary hardening inspection | PASS"))
         assertTrue(summary.contains("behavior validation | PASS"))
@@ -74,6 +78,43 @@ class MvpPatchWorkflowTest {
         val patched = ProcessBuilder(output.resolve(".work/patched_release").pathString).start()
         assertEquals(0, patched.waitFor())
         assertEquals("[03] Alexandria Stone\n", patched.inputStream.bufferedReader().readText())
+    }
+
+    @Test
+    fun `MVP compiler comes from the admitted Make or Ninja profile`() {
+        val source = Path.of("/private/source.c")
+        val target = Path.of("/private/output")
+        for (profile in ReconstructionProfiles.builtIn) {
+            val compiler = ReconstructionAdapters.resolve(profile).mvpPatchCompiler
+            val sanitizer = compiler.command(profile, source, target, sanitizer = true, warningsAsErrors = false)
+            val release = compiler.command(profile, source, target, sanitizer = false, warningsAsErrors = true)
+            assertEquals(profile.adapterConfiguration.getValue("compiler-driver").single(), sanitizer.first())
+            assertEquals(sanitizer.first(), release.first())
+            assertTrue("-fsanitize=address,undefined" in sanitizer)
+            assertTrue("-Werror" in release)
+            assertTrue("-Wl,-z,relro,-z,now" in release)
+        }
+    }
+
+    @Test
+    fun `MVP rejects a forged compiler profile before touching output`() {
+        val builtIn = ReconstructionProfiles.default
+        val forged = ReconstructionProfile(
+            builtIn.schemaVersion,
+            builtIn.id,
+            builtIn.layout,
+            builtIn.budgets,
+            builtIn.adapterConfiguration + ("compiler-driver" to listOf("false")),
+        )
+        val output = createTempDirectory("mvp-forged-profile-").resolve("output")
+        val failure = assertFailsWith<IllegalArgumentException> {
+            MvpPatchWorkflow(
+                harness = RepairClientAgentHarness(QueueRepairClient()),
+                binaryExecution = testExecutionBoundary(),
+            ).run(MvpPatchOptions(Path.of("/absent/input"), output), forged)
+        }
+        assertTrue(failure.message.orEmpty().contains("not admitted"))
+        assertFalse(output.exists())
     }
 
     @Test

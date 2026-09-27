@@ -80,6 +80,11 @@ class GccBundledGhidraRuntimeTest {
         assertTrue(name.matches(Regex("control-[a-f0-9]{64}")))
         assertNotEquals(name, current.freshControlDirectoryName(Path.of("/scratch/another-run")))
         val command = current.command(artifacts(current), state(), lease())
+        val interruptedCommand = current.command(
+            artifacts(current), state(), lease(), GccCompilerEngineContainmentRunKind.INTERRUPTED,
+        )
+        assertEquals(command.size + 1, interruptedCommand.size)
+        assertEquals("hold-first-planning-checkpoint-v1", interruptedCommand.last())
         val oldCommand = previous.command(artifacts(previous), state(), lease())
         assertEquals(oldCommand.toMutableList().also {
             it[1] = "-Duser.home=/scratch/run/$name/tmp"
@@ -504,7 +509,9 @@ class GccBundledGhidraRuntimeTest {
     private fun request(
         runtime: GccBundledGhidraRuntime? = runtime(),
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity> = artifacts(requireNotNull(runtime)),
-        command: List<String> = requireNotNull(runtime).command(artifacts, state(), lease()),
+        command: List<String> = requireNotNull(runtime).command(
+            artifacts, state(), lease(), GccCompilerEngineContainmentRunKind.INTERRUPTED,
+        ),
         environment: Map<String, String> = ENVIRONMENT,
         outputLease: GccCompilerEngineOutputLeaseIdentity = lease(),
     ) = GccCompilerEngineContainmentRequest(

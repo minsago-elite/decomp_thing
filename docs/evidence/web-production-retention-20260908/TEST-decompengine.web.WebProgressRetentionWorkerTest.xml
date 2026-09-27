@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.web.WebProgressRetentionWorkerTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-09-08T07:03:30.012Z" hostname="whatsername" time="0.186">
+  <properties/>
+  <testcase name="periodic reads never create storage or acquire ownership for a missing root()" classname="decompengine.web.WebProgressRetentionWorkerTest" time="0.031"/>
+  <testcase name="blocked owner notification does not hold the executor termination lock()" classname="decompengine.web.WebProgressRetentionWorkerTest" time="0.002"/>
+  <testcase name="stopped worker remains non-idle until its callback releases()" classname="decompengine.web.WebProgressRetentionWorkerTest" time="0.033"/>
+  <testcase name="opt-in service maintenance expires eligible runs preserves pins and isolates malformed journals()" classname="decompengine.web.WebProgressRetentionWorkerTest" time="0.119"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

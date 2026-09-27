@@ -234,7 +234,7 @@ internal class GccBundledPreparedOperation internal constructor(
                 totalBytes = retained.analysisState.totalBytes)
             val resumedBytes = GccCompilerEngineContainmentContract.assessDefinition(GccCompilerEngineContainmentRequest(
                 original.engineId, GccCompilerEngineContainmentRunKind.RESUMED, original.artifacts, state,
-                runtime.command(original.artifacts, state, original.outputLease), original.environment,
+                runtime.command(original.artifacts, state, original.outputLease, GccCompilerEngineContainmentRunKind.RESUMED), original.environment,
                 original.outputLease, original.budgets.copy(wallClockMillis = checkNotNull(operationDeadline)
                     .remainingWholeSecondsMillis(original.budgets.wallClockMillis)), runtime,
             )).canonicalBytes
@@ -636,7 +636,7 @@ internal object GccBundledOperationCoordinator {
                     )
                     GccCompilerEngineContainmentContract.assessDefinition(GccCompilerEngineContainmentRequest(
                         intent.engineId, intent.runKind, intent.artifacts, state,
-                        intent.bundledRuntime.command(intent.artifacts, state, output), intent.environment,
+                        intent.bundledRuntime.command(intent.artifacts, state, output, intent.runKind), intent.environment,
                         output, intent.budgets, intent.bundledRuntime,
                     )).canonicalBytes
                 }

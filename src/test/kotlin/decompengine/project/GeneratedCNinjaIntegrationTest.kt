@@ -38,7 +38,7 @@ class GeneratedCNinjaIntegrationTest {
     fun `Ninja profile generates validates archives extracts and rebuilds accepted modules without Make`() {
         val temp = createTempDirectory("ninja-reconstruction-")
         val profile = GeneratedCNinjaReconstructionProfile.descriptor
-        val analyzer = ProgramModelAnalyzer { _, _ -> model() }
+        val analyzer = budgetedAnalyzer { _, _ -> model() }
         val phases = mutableListOf<AgentWorkflowPhase>()
         val progress = object : AgentWorkflowProgress by AgentWorkflowProgress.NONE {
             override fun phase(phase: AgentWorkflowPhase, taskId: String?, acceptedRevisionSha256: String?) {

@@ -3,14 +3,17 @@ package decompengine.oracle.gcc
 import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
+import decompengine.acp.LinuxNamedRegularFileReplacedException
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
+import decompengine.oracle.structural.CanonicalProgramModelStreaming
 import decompengine.project.DeterministicModulePlanner
 import decompengine.project.ProgramModelJson
 import java.lang.reflect.Modifier
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.FileTime
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.util.TreeMap
@@ -23,6 +26,8 @@ import kotlin.test.assertFails
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.boolean
@@ -103,6 +108,25 @@ class GccCompilerEngineResumeEvidenceValidationTest {
     }
 
     @Test
+    fun `captured live progress classifies same-inode metadata changes as a missed sample`() {
+        val fixture = transitionFixture(twoBatchFixture()).interrupted
+        withDescriptorExportFixture(fixture, includeModel = false) { captured ->
+            LinuxFilesystemSyscalls.openDirectoryAt(captured.root.fd, "reports").use { reports ->
+                val files = GccBoundExportFiles(1024 * 1024)
+                files.read(reports, "program_model.json.progress.json", fixture.progress.size)
+
+                // Preserve the inode, owner, mode, and link count while changing captured metadata.
+                val progress = captured.directory.resolve("reports/program_model.json.progress.json")
+                Files.setLastModifiedTime(
+                    progress,
+                    FileTime.fromMillis(Files.getLastModifiedTime(progress).toMillis() + 2_000),
+                )
+                assertFailsWith<LinuxNamedRegularFileReplacedException> { files.verify() }
+            }
+        }
+    }
+
+    @Test
     fun `captured model handoff survives filesystem replacement and caller mutation for both execution legs`() {
         val transition = transitionFixture(twoBatchFixture())
         withDescriptorExportFixture(transition.interrupted, includeModel = false) { interrupted ->
@@ -175,6 +199,52 @@ class GccCompilerEngineResumeEvidenceValidationTest {
             withDescriptorExportFixture(changedLineage.resumed) { changed ->
                 assertFails { GccBundledExportCapture.captureResumed(changed.root, changed.reportsIdentity, changed.artifacts, retained) }
             }
+        }
+    }
+
+    @Test
+    fun `resumed schema two export keeps unknown global type unassessed`() {
+        val base = twoBatchFixture()
+        val first = base.specs.first()
+        val unknownGlobal = record(globalId(1), globalRecord(globalId(1), "shared", type = "undefined8"))
+        val completed = buildFixture(listOf(
+            first.copy(globals = listOf(unknownGlobal)),
+            base.specs.last(),
+        ))
+        val transition = transitionFixture(completed)
+        val retainedState = transition.interrupted.state.copyOf()
+        val retainedCheckpoint = transition.interrupted.batches.single().checkpoint.copyOf()
+
+        val assessed = assessTransition(transition)
+        assertEquals("non-authoritative-byte-assessment", assessed.authority)
+        assertEquals(sha(transition.resumed.model), assessed.programModelSha256)
+        assertContentEquals(transition.resumed.model, transition.fresh.model)
+        val typed = ProgramModelJson.readCanonical(transition.resumed.model)
+        val streaming = CanonicalProgramModelStreaming.readCanonical(transition.resumed.model)
+        assertEquals(typed, streaming.model)
+        assertContentEquals(transition.resumed.model, streaming.model.toJson().toByteArray(StandardCharsets.UTF_8))
+        val document = Json.parseToJsonElement(transition.resumed.model.decodeToString()).jsonObject
+        val global = document.getValue("globals").jsonArray.single().jsonObject
+        assertEquals("recovered", global.getValue("extractionStatus").jsonPrimitive.content)
+        assertEquals("undefined8", global.getValue("type").jsonPrimitive.content)
+        assertEquals("unassessed", global.getValue("recoveryAssessment").jsonPrimitive.content)
+
+        withDescriptorExportFixture(transition.interrupted, includeModel = false) { interrupted ->
+            val retained = GccBundledExportCapture.captureInterruptedSnapshot(
+                interrupted.root, interrupted.reportsIdentity, interrupted.artifacts)
+            withDescriptorExportFixture(transition.resumed) { resumed ->
+                val captured = GccBundledExportCapture.captureResumed(
+                    resumed.root, resumed.reportsIdentity, resumed.artifacts, retained)
+                assertContentEquals(transition.resumed.model, captured.programModelBytes)
+            }
+            withDescriptorExportFixture(transition.fresh) { fresh ->
+                val captured = GccBundledExportCapture.capture(fresh.root, fresh.reportsIdentity, fresh.artifacts)
+                assertContentEquals(transition.resumed.model, captured.programModelBytes)
+            }
+            assertContentEquals(retainedState, Files.readAllBytes(
+                interrupted.directory.resolve("reports/program_model.json.export/state.json")))
+            assertContentEquals(retainedCheckpoint, Files.readAllBytes(
+                interrupted.directory.resolve("reports/program_model.json.export/planning-batches/batch-00000000-00000512.checkpoint")))
         }
     }
 
@@ -773,7 +843,7 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         )
         assertFailsWith<GccCompilerEngineResumeEvidenceException> { assessInterrupted(countDrift) }
         val statusDrift = transition.interrupted.batches.single().functions.decodeToString()
-            .replaceFirst("\"status\": \"partial\"", "\"status\": \"failed\"")
+            .replaceFirst("\"extractionStatus\": \"partial\"", "\"extractionStatus\": \"failed\"")
             .toByteArray()
         assertFailsWith<GccCompilerEngineResumeEvidenceException> {
             assessInterrupted(
@@ -1559,12 +1629,12 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         }.toByteArray(),
     )
 
-    private fun globalRecord(id: String, name: String): ByteArray = buildString {
+    private fun globalRecord(id: String, name: String, type: String = "int"): ByteArray = buildString {
         append("    {\n")
         append("      \"id\": \"$id\",\n")
         append("      \"name\": \"$name\",\n")
         append("      \"address\": \"${addressForId(id)}\",\n")
-        append("      \"type\": \"int\",\n")
+        append("      \"type\": ${kotlinx.serialization.json.JsonPrimitive(type)},\n")
         append("      \"initializer\": null,\n")
         append("      \"extractionStatus\": \"recovered\",\n")
         append("      \"recoveryAssessment\": \"unassessed\"\n")

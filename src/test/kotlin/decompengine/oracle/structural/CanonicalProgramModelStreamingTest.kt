@@ -22,6 +22,8 @@ class CanonicalProgramModelStreamingTest {
         assertEquals(model, snapshot.model)
         assertEquals(model, ProgramModelJson.readCanonical(bytes))
         assertContentEquals(bytes, snapshot.model.toJson().toByteArray(StandardCharsets.UTF_8))
+        assertEquals("int alpha_λ(void) {\n\treturn 1;\n}", snapshot.model.functions.first().decompiledC)
+        assertTrue(snapshot.model.isRecoveryUnresolved(snapshot.model.functions.first().status))
         val text = bytes.toString(StandardCharsets.UTF_8)
         assertTrue("\"status\":" !in text)
         assertEquals(model.functions.size + model.globals.size + model.types.size,

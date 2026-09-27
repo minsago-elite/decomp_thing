@@ -425,8 +425,9 @@ class KotlinContainedCommandKeeperTest {
         val started = System.nanoTime()
         while (System.nanoTime() - started < TimeUnit.SECONDS.toNanos(30L)) {
             if (Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
-                assertTrue(Files.size(path) in 1L..KotlinContainedCommandProtocol.MAXIMUM_PROTOCOL_BYTES.toLong())
-                return Files.readAllBytes(path)
+                val size = Files.size(path)
+                assertTrue(size <= KotlinContainedCommandProtocol.MAXIMUM_PROTOCOL_BYTES.toLong())
+                if (size > 0L) return Files.readAllBytes(path)
             }
             if (!process.isAlive) {
                 val diagnostics = Files.newInputStream(run.parent.resolve("keeper.log")).use { it.readNBytes(8193) }

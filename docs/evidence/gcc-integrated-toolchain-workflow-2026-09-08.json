@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "recordKind": "gcc-integrated-toolchain-workflow",
+  "issue": 57,
+  "recordedOnUtc": "2026-09-08",
+  "repositoryRevision": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "status": "unresolved",
+  "scope": "Repository-supported contract and current evidence boundary; no production qualification claim.",
+  "provenance": {
+    "profile": "oracle/gcc/16.2.0/compiler-engines.json",
+    "profileEngines": ["cc1", "lto1"],
+    "boundInputs": [
+      "oracle/gcc/16.2.0/source-lock.json",
+      "oracle/gcc/16.2.0/build-record.json",
+      "oracle/gcc/16.2.0/toolchain-reproduction.json",
+      "oracle/gcc/16.2.0/cc1-build-record.json",
+      "oracle/gcc/16.2.0/lto1-build-record.json",
+      "oracle/gcc/16.2.0/cc1-oracle-manifest.json",
+      "oracle/gcc/16.2.0/lto1-oracle-manifest.json"
+    ],
+    "loader": "src/main/kotlin/decompengine/oracle/gcc/GccCompilerEngineProfile.kt",
+    "profileChecks": "tests/oracle/test_gcc_compiler_engines.py"
+  },
+  "integratedWorkflowContract": {
+    "entrypoint": "gcc-engine-plan",
+    "requiredInputs": [
+      "complete application installation with its bundled Ghidra runtime",
+      "matching compiler-engine profile, genuine cc1/lto1 binaries, and Ghidra archive",
+      "four distinct dedicated scratch mounts for cc1/lto1 fresh and same-owner resume legs",
+      "private evidence output root"
+    ],
+    "retainedEvidence": ["invocation.json", "operation journal", "result.json", "comparison.json"],
+    "workflowGates": [
+      "authenticate source, build, engine, archive, launcher, and runtime identities",
+      "run contained fresh and checkpoint-resumed cc1 and lto1 operations",
+      "retain exact model/plan and journal bindings plus process-absence evidence",
+      "compare fresh/resumed results and require explicit benchmark and release decisions"
+    ],
+    "references": [
+      "docs/gcc-bundled-prepared-operations.md",
+      "docs/gcc-bundled-ghidra-deployment-reference.md",
+      "docs/oracle-acp-trust-boundary.md"
+    ]
+  },
+  "gateStatus": [
+    {
+      "gate": "bundled-ghidra-isolation",
+      "status": "contract-present",
+      "fact": "Production analysis uses the application-bundled Java APIs; GHIDRA_HOME and external analyzeHeadless are not required."
+    },
+    {
+      "gate": "authenticated-oracle-boundary",
+      "status": "contract-present",
+      "fact": "The authenticated oracle is a read-only input to candidate evaluation and cannot be supplied by ACP."
+    },
+    {
+      "gate": "provisioned-real-engine-execution",
+      "status": "unresolved",
+      "fact": "The real-engine CLI qualification runner and provisioned-host execution are documented, but the runner has not completed on a provisioned host."
+    },
+    {
+      "gate": "fresh-resume-equivalence-and-resource-qualification",
+      "status": "unresolved",
+      "fact": "The required cc1/lto1 fresh/resume comparisons, full-engine resource qualification, and cold recovery remain open."
+    },
+    {
+      "gate": "release",
+      "status": "blocked",
+      "fact": "Contained operation records remain complete=false and releaseEligible=false; no integrated production result is retained."
+    }
+  ],
+  "productionGap": [
+    "No retained provisioned-host result demonstrates reconstructed source input through cc1/lto1 execution to executable output.",
+    "No accepted integrated comparison.json or resource/nondeterminism qualification closes the required per-case production gates.",
+    "The profile and fixture contracts therefore remain evidence and admission prerequisites, not issue completion."
+  ],
+  "unresolvedDependencies": [47, 54, 55, 63, 84, 136]
+}

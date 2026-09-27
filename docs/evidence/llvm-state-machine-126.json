@@ -1,0 +1,69 @@
+{
+  "issue": 126,
+  "kind": "reference-state-machine-evidence",
+  "authority": "checked-historical-reference",
+  "sources": {
+    "corpus": "oracle/llvm/22.1.6/behavior-corpus.json",
+    "referenceReport": "oracle/llvm/22.1.6/behavior-corpus-evidence.json",
+    "inputPlanV2": "oracle/llvm/22.1.6/behavior-reference-input-plan-v2.json"
+  },
+  "referenceFacts": {
+    "caseCount": 48,
+    "passedCaseCount": 48,
+    "normalizations": [],
+    "stateMachineCases": [
+      "include-cycle-guarded",
+      "include-framework-order",
+      "include-search-order",
+      "include-trace",
+      "preprocess-dependencies",
+      "preprocess-file",
+      "preprocess-macro-state",
+      "preprocess-malformed-macro",
+      "preprocess-pragma-once",
+      "preprocess-stdin",
+      "response-file",
+      "response-file-nested",
+      "response-file-quoted-paths",
+      "response-file-recursion",
+      "response-file-stdin",
+      "modules-flag-supported",
+      "precompile-header",
+      "pch-reuse-valid",
+      "pch-reuse-wrong-target"
+    ],
+    "observedExitCodes": {
+      "pch-reuse-valid": 0,
+      "pch-reuse-wrong-target": 1,
+      "response-file-recursion": 1
+    },
+    "moduleFlagCase": {
+      "id": "modules-flag-supported",
+      "categories": ["cxx", "modules", "syntax-only"],
+      "artifactCount": 0,
+      "meaning": "declared flag capability only; no module cache lifecycle evidence"
+    }
+  },
+  "pchContract": {
+    "consumerCases": ["pch-reuse-valid", "pch-reuse-wrong-target"],
+    "producerCase": "precompile-header",
+    "producerArtifact": "answer.pch",
+    "freshness": "same-repetition-produced-not-literal-input",
+    "compatibilityInputPaths": ["answer.h"]
+  },
+  "productionGap": {
+    "status": "unresolved",
+    "missing": [
+      "fresh Kotlin-authenticated v2 runtime and three byte-identical reference repetitions",
+      "clean reconstructed-candidate replay",
+      "authenticated module cache create/reuse/invalidation with host-cache exclusion",
+      "file-count, include-depth, response-depth, output-byte, wall-time, and clean-workspace repetition failure evidence"
+    ]
+  },
+  "provenanceBoundary": {
+    "v2InputPlanAuthority": "inputs only; no observation, START, scoring, certification, or release authority",
+    "candidateAuthority": "separate authenticated candidate lineage; cannot author reference truth",
+    "bundledGhidra": "unchanged; this record adds no GHIDRA_HOME or external analyzeHeadless dependency",
+    "unresolvedStates": "preserved; this record does not close issue 126 or child issues 894-897"
+  }
+}

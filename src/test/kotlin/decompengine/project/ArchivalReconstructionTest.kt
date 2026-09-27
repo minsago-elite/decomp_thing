@@ -1,5 +1,12 @@
 package decompengine.project
 
+import decompengine.agent.AgentExecutionResult
+import decompengine.agent.AgentFileChange
+import decompengine.agent.AgentFileChangeKind
+import decompengine.agent.AgentHarness
+import decompengine.agent.AgentOperation
+import decompengine.agent.AgentStopReason
+import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowPhase
 
@@ -22,10 +29,131 @@ import kotlin.test.assertFalse
 
 class ArchivalReconstructionTest {
     @Test
+    fun `archival Make and Ninja workflows enforce role policy and reject unauthenticated agent archives`() {
+        for (base in ReconstructionProfiles.builtIn) {
+            val profile = base
+            val temp = createTempDirectory("archival-role-workflow-")
+            val binary = temp.resolve("input.elf").also { it.writeBytes(byteArrayOf(7, 8, 9)) }
+            val model = RecoveredProgramModel(
+                inputSha256 = sha256(binary.toFile().readBytes()),
+                functions = listOf(
+                    RecoveredFunction(
+                        "fn_1000", "decomp_engine_main", 0x1000UL,
+                        "int decomp_engine_main(void)", "int decomp_engine_main(void) { return 0; }",
+                    ),
+                ),
+            )
+            var calls = 0
+            val harness = AgentHarness { request, _ ->
+                calls++
+                val targetRule = request.accessPolicy.pathRules.single { AgentOperation.CREATE_FILE in it.operations }
+                val target = targetRule.path
+                val moduleId = target.relativePath.substringAfter("src/modules/").substringBefore(".c")
+                assertEquals(
+                    profile.layout.declaration("module-implementation").materialize(mapOf("module" to moduleId)),
+                    target.relativePath,
+                )
+                assertEquals(
+                    setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE),
+                    targetRule.operations,
+                )
+                val expectedReadRoles = mapOf(
+                    profile.layout.declaration("shared-interface").materialize() to ProjectFileRole.PUBLIC_INTERFACE,
+                    profile.layout.declaration("module-interface").materialize(mapOf("module" to moduleId)) to
+                        ProjectFileRole.PUBLIC_INTERFACE,
+                    profile.layout.declaration("module-private-interface").materialize(mapOf("module" to moduleId)) to
+                        ProjectFileRole.PRIVATE_INTERFACE,
+                )
+                val readRules = request.accessPolicy.pathRules.filter { it.path != target }
+                assertEquals(expectedReadRoles.keys, readRules.map { it.path.relativePath }.toSet())
+                assertTrue(readRules.all { it.operations == setOf(AgentOperation.READ_FILE) })
+                assertEquals(setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE),
+                    request.accessPolicy.allowedOperations)
+                for ((path, role) in expectedReadRoles) {
+                    val declaration = profile.layout.declarationForPath(path)
+                    assertTrue(ProjectFileRole.VIEWABLE in declaration.roles, path)
+                    assertTrue(role in declaration.roles, path)
+                    assertEquals(ProjectContentKind.UTF8_TEXT, declaration.contentKind, path)
+                    assertTrue(
+                        AgentWorkspacePath("project", path).resolve(request.workspaceRoots).readText().isNotBlank(),
+                        path,
+                    )
+                }
+
+                val source = "#include \"modules/$moduleId.h\"\n/* fn_1000 */\nint decomp_engine_main(void) { return 0; }\n"
+                val sourceBytes = source.toByteArray()
+                val targetFile = target.resolve(request.workspaceRoots)
+                targetFile.writeBytes(sourceBytes)
+                AgentExecutionResult(
+                    AgentStopReason.COMPLETED,
+                    "role-bounded archival reconstruction",
+                    listOf(AgentFileChange(
+                        target, AgentFileChangeKind.CREATED, null, sha256(sourceBytes), sourceBytes.size.toLong(),
+                    )),
+                )
+            }
+            val analyzer = budgetedAnalyzer { _, _ -> model }
+
+            val output = temp.resolve("result")
+            val failure = assertFailsWith<IllegalArgumentException> {
+                ArchivalReconstructionService(
+                    analyzer, BoundedLlmModuleReconstructor(harness), profile = profile,
+                ).reconstruct(binary, output)
+            }
+            assertTrue(failure.message.orEmpty().contains("agent-generated module is not accepted"))
+            assertEquals(1, calls)
+            val project = output.resolve("source-tree")
+            assertTrue(project.resolve("build/reconstructed").exists())
+            assertEquals("0", Json.parseToJsonElement(project.resolve("reports/build_contract.json").readText())
+                .jsonObject.getValue("returnCode").jsonPrimitive.content)
+            assertTrue(ArchivalProjectAuditor.audit(project, profile).unresolvedEntityIds.isNotEmpty())
+            assertFalse(output.resolve("source-tree.zip").exists())
+
+            if (base.id == GeneratedCNinjaReconstructionProfile.descriptor.id) {
+                val hiddenPrivateLayout = ProjectLayoutProfile(
+                    profile.layout.schemaVersion,
+                    profile.layout.declarations.map { declaration ->
+                        if (declaration.id == "module-private-interface") {
+                            ProjectFileDeclaration(
+                                declaration.id,
+                                declaration.pathTemplate,
+                                declaration.roles - ProjectFileRole.VIEWABLE,
+                                declaration.contentKind,
+                            )
+                        } else declaration
+                    },
+                )
+                val alternate = ReconstructionProfile(
+                    profile.schemaVersion, profile.id, hiddenPrivateLayout, profile.budgets, profile.adapterConfiguration,
+                )
+                var alternateCalls = 0
+                val alternateHarness = AgentHarness { _, _ ->
+                    alternateCalls++
+                    error("a hidden private interface must not reach the harness")
+                }
+                val alternateOutput = temp.resolve("alternate")
+                val alternateFailure = assertFailsWith<IllegalArgumentException> {
+                    ArchivalReconstructionService(
+                        analyzer, BoundedLlmModuleReconstructor(alternateHarness), profile = alternate,
+                    ).reconstruct(binary, alternateOutput)
+                }
+                assertTrue(alternateFailure.message.orEmpty().contains("agent-generated module is not accepted"))
+                assertEquals(0, alternateCalls)
+                val alternateProject = alternateOutput.resolve("source-tree")
+                assertTrue(alternateProject.resolve("build/reconstructed").exists())
+                assertEquals("0", Json.parseToJsonElement(alternateProject.resolve("reports/build_contract.json").readText())
+                    .jsonObject.getValue("returnCode").jsonPrimitive.content)
+                assertTrue(ArchivalProjectAuditor.audit(alternateProject, alternate).unresolvedEntityIds.isNotEmpty())
+                assertFalse(alternateOutput.resolve("source-tree.zip").exists())
+            }
+        }
+    }
+
+    @Test
     fun `service recovers builds and packages a complete source tree`() {
         val temp = createTempDirectory("archival-service-")
         val binary = temp.resolve("input.elf").also { it.writeBytes(byteArrayOf(1, 2, 3)) }
-        val analyzer = ProgramModelAnalyzer { supplied, work ->
+        val analyzer = budgetedAnalyzer { supplied, work ->
             assertEquals(binary, supplied)
             assertTrue(work.toString().endsWith("analysis"))
             RecoveredProgramModel(
@@ -98,7 +226,7 @@ class ArchivalReconstructionTest {
         val profile = ReconstructionProfile(base.schemaVersion, base.id, layout, base.budgets, base.adapterConfiguration)
         val temp = createTempDirectory("declared-archive-reports-")
         val input = temp.resolve("input.bin").also { it.writeBytes(byteArrayOf(4, 5, 6)) }
-        val analyzer = ProgramModelAnalyzer { _, _ -> RecoveredProgramModel(
+        val analyzer = budgetedAnalyzer { _, _ -> RecoveredProgramModel(
             inputSha256 = sha256(input.toFile().readBytes()),
             functions = listOf(RecoveredFunction("fn_1000", "decomp_engine_main", 0x1000UL, "int decomp_engine_main(void)")),
         ) }
@@ -138,7 +266,7 @@ class ArchivalReconstructionTest {
         val profile = ReconstructionProfile(base.schemaVersion, base.id, base.layout,
             base.budgets.copy(reconstructionMaximumContextCharacters = 8), base.adapterConfiguration)
         var calls = 0
-        val analyzer = ProgramModelAnalyzer { _, _ -> calls++; error("must not analyze") }
+        val analyzer = budgetedAnalyzer { _, _ -> calls++; error("must not analyze") }
         val cases = listOf(
             "123456789".toByteArray() to IllegalArgumentException::class,
             "x".repeat(33).toByteArray() to decompengine.repair.RepairBudgetExceededException::class,
@@ -168,7 +296,7 @@ class ArchivalReconstructionTest {
         val profile = ReconstructionProfile(base.schemaVersion, base.id, base.layout, raised, base.adapterConfiguration)
         val digest = profile.sha256
         var calls = 0
-        val analyzer = ProgramModelAnalyzer { _, _ -> calls++; error("must not analyze") }
+        val analyzer = budgetedAnalyzer { _, _ -> calls++; error("must not analyze") }
         val failure = assertFailsWith<IllegalArgumentException> {
             ArchivalReconstructionService(analyzer, profile = profile)
         }
@@ -194,7 +322,7 @@ class ArchivalReconstructionTest {
         val temp = createTempDirectory("unsupported-service-")
         val output = temp.resolve("result")
         var calls = 0
-        val analyzer = ProgramModelAnalyzer { _, _ -> calls++; error("must not analyze") }
+        val analyzer = budgetedAnalyzer { _, _ -> calls++; error("must not analyze") }
         assertFailsWith<IllegalArgumentException> {
             ArchivalReconstructionService(analyzer, profile = profile).reconstruct(temp.resolve("unused"), output)
         }

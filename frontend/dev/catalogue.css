@@ -1,0 +1,5 @@
+#decomp-development-notice { padding: 0.75rem 1.5rem; }
+#fixture-view section { margin-block: 1.5rem; }
+#fixture-view section button { margin: 0.25rem 0.5rem 0.25rem 0; }
+#fixture-view pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+#fixture-view > p { overflow-wrap: anywhere; }

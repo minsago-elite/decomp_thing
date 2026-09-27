@@ -62,7 +62,7 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
 
     override fun privateInterface(module: PlannedModule): String = buildString {
         val guard = "DECOMP_MODULE_${module.id.uppercase()}_INTERNAL_H"
-        append("#ifndef $guard\n#define $guard\n\n#include \"modules/${module.id}.h\"\n\n")
+        append("#ifndef $guard\n#define $guard\n\n#include \"${module.headerPath.removePrefix("include/")}\"\n\n")
         module.functionIds.map { id -> functions.getValue(id) }
             .filterNot { it.id in externallyCalled || safeCName(it.name) in setOf("main", "decomp_engine_main") }
             .forEach { function -> append(normalizedPrototype(function)).append("; /* private ${function.id} @ 0x${function.address.toString(16)} */\n") }

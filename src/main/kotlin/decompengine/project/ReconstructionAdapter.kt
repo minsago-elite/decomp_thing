@@ -10,7 +10,12 @@ internal interface ReconstructionAdapter {
     val compilation: ModuleCompilationPolicy
     val archiveBuild: ArchiveBuildPolicy
     val behaviorBuild: BehaviorBuildPolicy
-    fun build(projectDir: Path, profile: ReconstructionProfile): BuildReport
+    val mvpPatchCompiler: MvpPatchCompilerPolicy
+    fun build(
+        projectDir: Path,
+        profile: ReconstructionProfile,
+        hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+    ): BuildReport
     fun rendering(model: RecoveredProgramModel, plan: ModulePlan): ProjectRendering
     fun modulePrompt(request: ModuleReconstructionRequest): ModulePromptContent
     fun defaultReconstructor(): ModuleReconstructor

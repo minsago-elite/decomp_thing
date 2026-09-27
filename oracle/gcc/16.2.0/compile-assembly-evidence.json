@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "id": "gcc-16-2-0-compile-assembly-evidence",
+  "issue": 713,
+  "status": "reference-forwarding-only",
+  "provenance": {
+    "profile": "oracle/gcc/16.2.0",
+    "corpus": {
+      "path": "behavior-corpus.json",
+      "sha256": "bcc1a14ca8c54f94106c943f0bc5698cb9af3151b7bf20a49ae3c8828baaad0e"
+    },
+    "evidence": {
+      "path": "behavior-corpus-evidence.json",
+      "sha256": "9dcf787aea232615a1ff8721144b86bc1f5e9a2a7068fa9e9280db0bc4ad6803"
+    },
+    "driver": {
+      "path": "artifacts/gcc-driver.stripped",
+      "bytes": 2349296,
+      "sha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4"
+    }
+  },
+  "authenticatedBoundary": {
+    "executor": {
+      "backend": "oci-container-v1",
+      "imageDigest": "sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248",
+      "platform": "linux/amd64"
+    },
+    "analysisRuntime": {
+      "status": "not-used-by-this-record",
+      "requiredBoundary": "bundled-ghidra-java-api-worker",
+      "externalGhidraHomeOrAnalyzeHeadless": "forbidden"
+    }
+  },
+  "observations": [
+    {
+      "case": "compile-file",
+      "arguments": ["-B/workspace/tools/", "-c", "source.c", "-o", "file.o"],
+      "phaseInputs": [
+        {
+          "phase": "compiler",
+          "path": "tools/cc1",
+          "status": "fixture-only",
+          "bytes": 1023,
+          "sha256": "847484f59a66b70de4cac77751e4f712672cf52ee0b037b07a2413a7547ae2cb"
+        },
+        {
+          "phase": "assembler",
+          "path": "tools/as",
+          "status": "fixture-only",
+          "bytes": 338,
+          "sha256": "59f48d8aa41d6febe825c19cfce157461c5dce8b0401104d3c825fb80004b2d1"
+        }
+      ],
+      "result": {
+        "exitCode": 0,
+        "stdout": {"bytes": 0, "base64": "", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+        "stderr": {"bytes": 0, "base64": "", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+        "artifact": {
+          "path": "file.o",
+          "present": true,
+          "bytes": 15,
+          "mode": "0o644",
+          "base64": "TU9DSy1PQkpFQ1QAdjEK",
+          "sha256": "e5e021333c0fd167a18f93780b1a03bc65f0aef311d0232b24e6a2d06153e9a5"
+        }
+      }
+    },
+    {
+      "case": "assembly-file",
+      "arguments": ["-B/workspace/tools/", "-c", "input.s", "-o", "assembly.o"],
+      "phaseInputs": [
+        {
+          "phase": "assembler",
+          "path": "tools/as",
+          "status": "fixture-only",
+          "bytes": 338,
+          "sha256": "59f48d8aa41d6febe825c19cfce157461c5dce8b0401104d3c825fb80004b2d1"
+        }
+      ],
+      "result": {
+        "exitCode": 0,
+        "stdout": {"bytes": 0, "base64": "", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+        "stderr": {"bytes": 0, "base64": "", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+        "artifact": {
+          "path": "assembly.o",
+          "present": true,
+          "bytes": 15,
+          "mode": "0o644",
+          "base64": "TU9DSy1PQkpFQ1QAdjEK",
+          "sha256": "e5e021333c0fd167a18f93780b1a03bc65f0aef311d0232b24e6a2d06153e9a5"
+        }
+      }
+    },
+    {
+      "case": "diagnostic-invalid-input",
+      "arguments": ["-B/workspace/tools/", "-c", "missing.c", "-o", "missing.o"],
+      "result": {
+        "exitCode": 1,
+        "stdout": {"bytes": 0, "base64": "", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+        "stderr": {"bytes": 34, "base64": "bW9jayBjYzE6IG1pc3NpbmcgaW5wdXQgbWlzc2luZy5jCg==", "sha256": "fc6d35d325e7984d3b9bd91720f37631f04cac325ba8460aedd13376ec5125a8"},
+        "artifact": {"path": "missing.o", "present": false}
+      },
+      "qualification": "fixture-driver diagnostic only; this is not an independent real-phase failure receipt"
+    }
+  ],
+  "productionQualification": {
+    "qualified": false,
+    "releaseEligible": false,
+    "unresolved": [
+      "real C compilation and assembly with the authenticated GCC phase executables",
+      "real object format, symbol, and relocation checks",
+      "multi-file input orchestration",
+      "independent compiler or assembler subprocess-failure propagation",
+      "reconstructed candidate replay against this reference"
+    ],
+    "reason": "The retained cases use fixture scripts and the successful object bytes are MOCK-OBJECT\\u0000v1\\n; no production gate is inferred from these passes."
+  }
+}

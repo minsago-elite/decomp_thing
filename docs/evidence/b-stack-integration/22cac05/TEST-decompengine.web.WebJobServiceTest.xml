@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.web.WebJobServiceTest" tests="12" skipped="0" failures="0" errors="0" timestamp="2026-09-05T17:55:20.530Z" hostname="whatsername" time="1.175">
+  <properties/>
+  <testcase name="shutdown continues revoking tasks after one damaged record()" classname="decompengine.web.WebJobServiceTest" time="0.123"/>
+  <testcase name="upload and reads stay inert and explicit adapters share the same stored job()" classname="decompengine.web.WebJobServiceTest" time="0.133"/>
+  <testcase name="worker rejection releases admission and supports a deliberate later retry()" classname="decompengine.web.WebJobServiceTest" time="0.152"/>
+  <testcase name="scheduler reads preserve absent storage and distinguish shutdown and unknown executor metrics()" classname="decompengine.web.WebJobServiceTest" time="0.003"/>
+  <testcase name="unexpected submission failure preserves its cause and releases a retryable job()" classname="decompengine.web.WebJobServiceTest" time="0.129"/>
+  <testcase name="workflow failure stores a safe diagnostic without raw exception content()" classname="decompengine.web.WebJobServiceTest" time="0.087"/>
+  <testcase name="startup reconciles orphan staging under ownership and releases lease when cleanup refuses storage()" classname="decompengine.web.WebJobServiceTest" time="0.012"/>
+  <testcase name="close revokes borrowed pending tasks and late delivery is inert()" classname="decompengine.web.WebJobServiceTest" time="0.068"/>
+  <testcase name="failed initial state transition cannot strand active job ownership()" classname="decompengine.web.WebJobServiceTest" time="0.101"/>
+  <testcase name="retained report bytes deny upload before reading body and leave status readable()" classname="decompengine.web.WebJobServiceTest" time="0.036"/>
+  <testcase name="owned workers and waiting workflows are independently bounded()" classname="decompengine.web.WebJobServiceTest" time="0.236"/>
+  <testcase name="concurrent starts admit exactly one workflow for a job()" classname="decompengine.web.WebJobServiceTest" time="0.09"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

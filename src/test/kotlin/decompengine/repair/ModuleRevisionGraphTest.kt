@@ -429,7 +429,7 @@ class ModuleRevisionGraphTest {
         val project = generatedProject()
         val index = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
         project.resolve("reports/build_contract.json").writeText(
-            "{\"schemaVersion\":2,\"sourceStableDuringBuild\":true," +
+            "{\"schemaVersion\":3,\"sourceStableDuringBuild\":true," +
                 "\"sourceRevisionSha256\":\"${index.sourceRevisionSha256}\"," +
                 "\"failedOwners\":[\"charlie\"],\"modules\":[{\"id\":\"charlie\"}]}",
         )
@@ -466,7 +466,7 @@ class ModuleRevisionGraphTest {
             val budget = RepairResourceBudget(maximumContextModules = 1)
             val index = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile, budget)
             project.resolve("reports/build_contract.json").writeText(
-                "{\"schemaVersion\":2,\"sourceStableDuringBuild\":true," +
+                "{\"schemaVersion\":3,\"sourceStableDuringBuild\":true," +
                     "\"sourceRevisionSha256\":\"${index.sourceRevisionSha256}\"," +
                     "\"failedOwners\":[\"alpha\",\"beta\"]," +
                     "\"modules\":[{\"id\":\"alpha\"},{\"id\":\"beta\"}]}",
@@ -994,7 +994,7 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
-    fun `generated C fallback roots do not collide with explicitly owned entry sources`() {
+    fun `generated C rejects a module plan that claims the entry source`() {
         val project = genericProject(
             "repair-generated-entry-owner-",
             mapOf(
@@ -1016,12 +1016,10 @@ class ModuleRevisionGraphTest {
             ),
         )
 
-        val index = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
-        val selection = index.select("behavior", "")
-
-        assertEquals(listOf("owned_entry"), selection.seedModules)
-        assertFalse("entrypoint" in index.moduleIds)
-        assertEquals(listOf("include/main.h", "src/main.c"), selection.writablePaths)
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile)
+        }
+        assertTrue(failure.message.orEmpty().contains("declared discovered input"))
     }
 
     @Test
@@ -2472,6 +2470,11 @@ class ModuleRevisionGraphTest {
             Mutation("snapshot", "source manifest", { receipt -> receipt.changed("sourceSnapshot",
                 receipt.getValue("sourceSnapshot").jsonObject.changed("manifestSha256", JsonPrimitive("0".repeat(64)))) }),
             Mutation("runtime", "runtime configuration", { it.changed("runtimeConfiguration", JsonObject(emptyMap())) }),
+            Mutation("behavior-budgets", "behavior budgets differ", { receipt ->
+                val evidence = receipt.getValue("behaviorBudgetEvidence").jsonObject
+                val limits = evidence.getValue("effectiveLimits").jsonObject
+                receipt.changed("behaviorBudgetEvidence", evidence.changed("effectiveLimits",
+                    limits.changed("maximumExecutionMillis", JsonPrimitive(1)))) }),
             Mutation("corpus", "retained corpus", { it.changed("inputs", JsonArray(emptyList())) }),
             Mutation("omitted-scope", "scope inventory", { it.changed("scopes", JsonArray((it.getValue("scopes") as JsonArray).dropLast(1))) }),
             Mutation("case-count", "scope inventory", { it.changed("caseCount", JsonPrimitive(0)) }),
@@ -3605,11 +3608,12 @@ class ModuleRevisionGraphTest {
                 "sandboxFields" to fields.map { listOf(it.key, it.value) }, "writableQuota" to outputQuota,
                 "cleanupVerified" to true)
         }
-        val receipt = obj("schemaVersion" to 1, "provider" to "generated-c-linux-bubblewrap-cgroup-v1",
+        val receipt = obj("schemaVersion" to 2, "provider" to "generated-c-linux-bubblewrap-cgroup-v1",
             "profileId" to GeneratedCRepairIndexProfile.profileId(), "profileSha256" to snapshot.profileSha256,
             "indexSha256" to snapshot.indexSha256, "sourceRevisionSha256" to sourceDigest,
             "regressionCorpusSha256" to repairRegressionCorpusSha256(inputs), "runtimeSha256" to runtimeDigest,
             "runtimeConfiguration" to runtime,
+            "behaviorBudgetEvidence" to decompengine.project.GeneratedCValidationBudgetPolicy.DEFAULT.admit(RepairResourceBudget()),
             "sourceSnapshot" to obj("manifestSha256" to sha256(canonical(files)), "files" to files,
                 "quota" to quota(101, "/fixture/source")),
             "buildOutputLink" to obj("path" to "build", "role" to "application-owned-output-link",

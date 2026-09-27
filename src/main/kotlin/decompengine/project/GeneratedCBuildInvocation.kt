@@ -20,8 +20,9 @@ internal data class GeneratedCBuildInvocation(
 /** Compatibility entry point for existing generated-C/Make callers. */
 object MakeProjectBuilder {
     fun build(projectDir: Path, configuration: ProjectBuildConfiguration = ProjectBuildConfiguration(),
-        profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor): BuildReport =
-        GeneratedCProjectBuilder.build(projectDir, configuration, profile)
+        profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+        hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT): BuildReport =
+        GeneratedCProjectBuilder.build(projectDir, configuration, profile, hostSafetyLimits = hostSafetyLimits)
     internal fun terminateBuildProcess(process: Process, graceMillis: Long) =
         GeneratedCProjectBuilder.terminateBuildProcess(process, graceMillis)
     internal fun sanitizeBuildEnvironment(environment: MutableMap<String, String>) =

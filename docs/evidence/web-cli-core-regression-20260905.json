@@ -1,0 +1,258 @@
+{
+  "status": "passed",
+  "sourceCommit": "8ae61d5c08d3e14274d6abf9b0b59bca5254b8b0",
+  "issue": 158,
+  "newlySatisfiedCriterion": 6,
+  "command": "./gradlew -PfrontendNodeHome=/home/june/decomp_thing/build/tools/decomp-node-24.20.0/node-v24.20.0-linux-x64 test --tests 'decompengine.web.*' --tests 'decompengine.jobs.AgentProgressJournal*Test' --tests 'decompengine.jobs.JobStoreTest' --tests 'decompengine.jobs.WorkflowAttemptStoreTest' --tests 'decompengine.RepairCliProgressTest' --tests 'decompengine.RepairCliPresentationTest' --tests 'decompengine.ReconstructionCliTest' --tests 'decompengine.PatchCliTest' --tests 'decompengine.project.ProgramModelTest' --tests 'decompengine.project.ReconstructionProfileTest' --tests 'decompengine.project.ReconstructionPipelineTest'",
+  "totals": {
+    "tests": 234,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "suites": [
+    {
+      "name": "decompengine.PatchCliTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.ReconstructionCliTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.RepairCliPresentationTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.RepairCliProgressTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.jobs.AgentProgressJournalDecodeTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.jobs.AgentProgressJournalTest",
+      "tests": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.jobs.JobStoreTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.jobs.WorkflowAttemptStoreTest",
+      "tests": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.project.ProgramModelTest",
+      "tests": 13,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.project.ReconstructionPipelineTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.project.ReconstructionProfileTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.web.DurableWebWorkflowTest",
+      "tests": 14,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.web.EmbeddedWebAssetsTest",
+      "tests": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.web.LocalWebAccessTest",
+      "tests": 19,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.web.SourceTreeJobReconstructorTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.web.StreamingMultipartUploadTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.web.StreamingUploadServiceTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.web.UploadServerSpaTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.web.UploadServerTest",
+      "tests": 32,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.web.WebApiControllerTest",
+      "tests": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.web.WebArchiveEvidenceTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.web.WebExplorationArtifactTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.web.WebExplorationReportTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.web.WebJobPagesTest",
+      "tests": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.web.WebJobServiceTest",
+      "tests": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.web.WebProgressObservationTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.web.WebProgressPagesTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.web.WebRunPagesTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.web.WebRunPresentationTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.web.WebSchedulerSnapshotTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.web.WebShutdownTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.web.WebUploadProgressTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "decompengine.web.WebUploadStorageTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  ],
+  "logSha256": "8f7a9b0c388eac1ce89e2796c07f0997632781f0e065d4d1c07fc45e9debfb32",
+  "scope": [
+    "CLI selection/provenance, safe presentation, persisted progress and bounded console handling",
+    "Program-model/planner/profile contracts and generated-project reconstruction with an injected analyzer",
+    "Generated fixture projects are compiled with the project builder",
+    "Web, journal and job/attempt persistence regression suites"
+  ],
+  "notQualified": [
+    "Live providers or real-target native analysis",
+    "Full archive/source qualification and every CLI command or end-to-end workflow",
+    "Frontend/browser or full release qualification"
+  ]
+}

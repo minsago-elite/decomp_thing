@@ -18,17 +18,19 @@ internal object GeneratedCBehaviorBuildPolicy : BehaviorBuildPolicy {
     )
 
     override fun parseContract(contract: JsonObject, profile: ReconstructionProfile): BehaviorBuildContract {
-        require(contract.keys == setOf("schemaVersion", "command", "parallelism", "wallClockTimeoutMillis",
+        require(contract.keys == setOf("schemaVersion", "profileId", "profileSha256", "profileBudgets", "hostSafetyLimits",
+            "configuration", "command", "parallelism", "wallClockTimeoutMillis",
             "maximumOutputBytes", "warningsAsErrors", "reproduciblePathMapping", "declaredDependencies",
             "apiCredentialsRequired", "analysisCachesRequired", "returnCode", "sourceStableDuringBuild",
             "sourceRevisionSha256", "sourceInputs", "artifact", "failedOwners", "modules")) {
             "behavior build contract has missing or unknown fields"
         }
-        require(contract.integer("schemaVersion") == 2 && contract.integer("returnCode") == 0 &&
+        require(contract.integer("schemaVersion") == GENERATED_C_BUILD_CONTRACT_SCHEMA_VERSION && contract.integer("returnCode") == 0 &&
             contract.boolean("sourceStableDuringBuild") && contract.boolean("warningsAsErrors") &&
             contract.boolean("reproduciblePathMapping") && !contract.boolean("apiCredentialsRequired") &&
             !contract.boolean("analysisCachesRequired") && contract.getValue("failedOwners").jsonArray.isEmpty()
         ) { "behavior requires a successful source-stable build contract" }
+        contract.requireGeneratedCBuildBudgetEvidence(profile)
         require(contract.integer("parallelism") in 1..256 && contract.count("wallClockTimeoutMillis") > 0 &&
             contract.count("maximumOutputBytes") > 0)
         listOf("command", "declaredDependencies").forEach { name ->

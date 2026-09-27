@@ -4453,7 +4453,7 @@ private class TrustedObservationBoundary(
                 mount.source.resolve(mount.destination.relativize(input)) == input
             }
         }
-        requireSyntheticMountPlan(mounts, mountedInputs, writableRoot)
+        requireSyntheticMountPlan(mounts, mountedInputs, writableRoot, runDirectory)
         mounts.forEachIndexed { index, mount ->
             require(!pathsOverlap(mount.source, writableRoot)) { "contained command runtime source overlaps writable output" }
             require(mounts.drop(index + 1).none { pathsOverlap(mount.destination, it.destination) }) {
@@ -4500,6 +4500,7 @@ private class TrustedObservationBoundary(
         mounts: List<FullTreeFunctionObservationRuntimeMount>,
         readOnlyInputs: List<Path>,
         runDirectory: Path,
+        classPathRunDirectory: Path = runDirectory,
     ) {
         val reserved = listOf(Path.of("/proc"), Path.of("/dev"), configuration.systemdUserRuntimeDirectory)
         if (reserved.any { pathsOverlap(runDirectory, it) }) {
@@ -4517,7 +4518,7 @@ private class TrustedObservationBoundary(
                 reserved.any { pathsOverlap(mount.destination, it) }
             ) isolationFail("isolated runtime mount overlaps another synthetic-root authority")
         }
-        val classPathRoot = runDirectory.resolve(RUNTIME_DIRECTORY)
+        val classPathRoot = classPathRunDirectory.resolve(RUNTIME_DIRECTORY)
         materializedClassPath.paths.forEach { entry ->
             if (entry.parent != classPathRoot || !Files.isRegularFile(entry, LinkOption.NOFOLLOW_LINKS)) {
                 isolationFail("isolated class-path snapshot escaped its private runtime directory")
@@ -7704,17 +7705,30 @@ internal fun findObservationCgroupsForUnit(unitName: String): List<Path> {
         var entries = 0
         while (pending.isNotEmpty()) {
             val (directory, depth) = pending.removeFirst()
-            Files.newDirectoryStream(directory).use { children ->
+            val children = try {
+                Files.newDirectoryStream(directory)
+            } catch (gone: java.nio.file.NoSuchFileException) {
+                // systemd can retire an unrelated transient cgroup after it
+                // was queued. Only a confirmed disappearance is safe to skip.
+                if (directory != CGROUP_ROOT && Files.notExists(directory, LinkOption.NOFOLLOW_LINKS)) continue
+                throw gone
+            }
+            children.use {
                 children.forEach { child ->
                     entries = Math.addExact(entries, 1)
                     if (entries > MAXIMUM_CGROUP_SEARCH_ENTRIES) {
                         isolationFail("isolated cgroup cleanup search exceeds its entry bound")
                     }
-                    val attributes = Files.readAttributes(
-                        child,
-                        java.nio.file.attribute.BasicFileAttributes::class.java,
-                        LinkOption.NOFOLLOW_LINKS,
-                    )
+                    val attributes = try {
+                        Files.readAttributes(
+                            child,
+                            java.nio.file.attribute.BasicFileAttributes::class.java,
+                            LinkOption.NOFOLLOW_LINKS,
+                        )
+                    } catch (gone: java.nio.file.NoSuchFileException) {
+                        if (Files.notExists(child, LinkOption.NOFOLLOW_LINKS)) return@forEach
+                        throw gone
+                    }
                     if (!attributes.isDirectory || attributes.isSymbolicLink) return@forEach
                     val normalized = child.toAbsolutePath().normalize()
                     if (!normalized.startsWith(CGROUP_ROOT)) {
@@ -7722,17 +7736,28 @@ internal fun findObservationCgroupsForUnit(unitName: String): List<Path> {
                     }
                     if (normalized.fileName?.toString() == unitName) matches.add(normalized)
                     if (depth >= MAXIMUM_CGROUP_SEARCH_DEPTH) {
-                        Files.newDirectoryStream(normalized).use { descendants ->
-                            descendants.forEach { descendant ->
+                        val descendants = try {
+                            Files.newDirectoryStream(normalized)
+                        } catch (gone: java.nio.file.NoSuchFileException) {
+                            if (Files.notExists(normalized, LinkOption.NOFOLLOW_LINKS)) return@forEach
+                            throw gone
+                        }
+                        descendants.use {
+                            descendants.forEach descendantEntry@ { descendant ->
                                 entries = Math.addExact(entries, 1)
                                 if (entries > MAXIMUM_CGROUP_SEARCH_ENTRIES) {
                                     isolationFail("isolated cgroup cleanup search exceeds its entry bound")
                                 }
-                                val descendantAttributes = Files.readAttributes(
-                                    descendant,
-                                    java.nio.file.attribute.BasicFileAttributes::class.java,
-                                    LinkOption.NOFOLLOW_LINKS,
-                                )
+                                val descendantAttributes = try {
+                                    Files.readAttributes(
+                                        descendant,
+                                        java.nio.file.attribute.BasicFileAttributes::class.java,
+                                        LinkOption.NOFOLLOW_LINKS,
+                                    )
+                                } catch (gone: java.nio.file.NoSuchFileException) {
+                                    if (Files.notExists(descendant, LinkOption.NOFOLLOW_LINKS)) return@descendantEntry
+                                    throw gone
+                                }
                                 if (descendantAttributes.isDirectory && !descendantAttributes.isSymbolicLink) {
                                     isolationFail("isolated cgroup cleanup search exceeds its depth bound")
                                 }

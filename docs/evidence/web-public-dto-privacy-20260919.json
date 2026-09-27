@@ -1,0 +1,72 @@
+{
+  "status": "passed",
+  "issue": 472,
+  "sourceCommit": "ffde1a81d905734c970c7bac540d663b8d10038c",
+  "priorProjectionCommit": "ec3395febd6b1efbcae48af2fef40eae118b98a6",
+  "mergedBehaviorVerified": false,
+  "productionQualified": false,
+  "date": "2026-09-19",
+  "scope": "semantic public web DTO projection",
+  "contract": {
+    "command": "python3 contracts/web/v1/verify.py",
+    "validAccepted": 46,
+    "invalidRejected": 45
+  },
+  "generatedClient": {
+    "generateCommand": "/home/june/.bun/bin/bun scripts/generate-web-api.mjs",
+    "checkCommand": "/home/june/.bun/bin/bun scripts/generate-web-api.mjs --check",
+    "schemaHash": "1a608945eb3f"
+  },
+  "frontend": {
+    "bunVersion": "1.3.1",
+    "dependencyInstaller": "/home/june/.bun/bin/bun",
+    "testRuntime": "Node 24.20.0 provisioned through Bun",
+    "testRuntimeNote": "Direct Bun Vitest workers were incompatible; Bun installed and provisioned dependencies, while Node executed Vitest.",
+    "verificationScope": "Verified on the prior projection commit; frontend sources did not change in the retained ELF metadata and durable-version follow-up.",
+    "affectedSuites": 7,
+    "tests": 172,
+    "failures": 0,
+    "typecheckCommand": "/home/june/.bun/bin/bun x tsc --noEmit",
+    "lintCommand": "/home/june/.bun/bin/bun x eslint . --max-warnings 0",
+    "productionBuildCommand": "/home/june/.bun/bin/bun x vite build",
+    "assetManifestBuildId": "2e9f81ad28d467fa1e8ec4c2bca0af5bf282ca9b8db8d472a8149791f83b4482"
+  },
+  "jvm": {
+    "compileTask": "compileTestKotlin -x stageFrontend --no-daemon",
+    "focusedSuites": [
+      "WebPublicProjectionTest",
+      "UploadServerTest",
+      "DurableWebWorkflowTest",
+      "WebApiControllerTest"
+    ],
+    "tests": 84,
+    "failures": 0,
+    "errors": 0,
+    "frontendGradleTasksExcluded": true,
+    "priorProjectionFocusedTests": 111
+  },
+  "jobVersionSemantics": {
+    "noDurableAttempts": "SHA-256 of the public job fields only",
+    "durableAttempts": "Validated opaque workflow-store token matching version_[a-f0-9]{32}; pin and lifecycle changes advance it",
+    "privateLegacyPathOrMessageChange": "Does not alter the no-attempt public version or an unchanged durable token"
+  },
+  "canaries": [
+    "binary_path",
+    "host roots",
+    "environment-like values",
+    "raw exception messages and unknown diagnostic codes",
+    "raw task, workflow and revision labels",
+    "paths, observation prose and plan-entry prose",
+    "private-only versus public-field v1 version changes",
+    "validated durable version changes after progress pin mutation",
+    "all five ELF category fields reject injected host, environment and exception prose in legacy JSON/HTML and v1 HTTP",
+    "canonical lower and upper unknown(n) producer boundaries",
+    "negative elapsed durations",
+    "forward-compatible and metadata-sparse retained progress"
+  ],
+  "limits": [
+    "No packaged browser qualification was run for this semantic projection checkpoint.",
+    "Report, source and artifact content endpoints are not DTO metadata and remain separately bounded and authorized.",
+    "No native analysis or live agent workflow ran."
+  ]
+}

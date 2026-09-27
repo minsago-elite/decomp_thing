@@ -106,6 +106,24 @@ class DoctorInvocationTest {
                 assertEquals("--tools-only cannot be combined with $option", failure.message)
             }
         }
+        for (args in listOf(listOf("--tools-only", "--auth-methods"), listOf("--auth-methods", "--tools-only"))) {
+            val failure = assertFailsWith<IllegalArgumentException> {
+                parseDoctorInvocation(args, defaultOutput)
+            }
+            assertEquals("--tools-only cannot be combined with --auth-methods", failure.message)
+        }
+    }
+
+    @Test
+    fun `auth methods flag is independent of profile and workflow selections`() {
+        val selectedProfile = ReconstructionProfiles.builtIn.last()
+        val invocation = parseDoctorInvocation(
+            listOf("--auth-methods", "--profile", selectedProfile.id, "--workflow", "web"),
+            defaultOutput,
+        )
+        assertTrue(invocation.options.showAuthMethods)
+        assertSame(selectedProfile, invocation.profile)
+        assertEquals(AcpPreflightWorkflow.WEB, invocation.options.workflowOverride)
     }
 
     @Test

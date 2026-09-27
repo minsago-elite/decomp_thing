@@ -195,11 +195,14 @@ internal object GeneratedCCandidateValidation {
         var parenthesisDepth = 0
         var bracketDepth = 0
         var statementStart = 0
+        var declaratorStart = 0
         for (index in code.indices) {
             if (index == occurrence.range.first) {
                 if (braceDepth == 0 && bracketDepth == 0) {
                     val prefix = code.substring(statementStart, occurrence.range.first)
-                    val functionPointerDeclarator = parenthesisDepth == 1 && prefix.trimEnd().endsWith("(*")
+                    val declaratorPrefix = code.substring(declaratorStart, occurrence.range.first)
+                    val functionPointerDeclarator =
+                        parenthesisDepth == 1 && declaratorPrefix.trimEnd().endsWith("(*")
                     val declarationPrefix = parenthesisDepth == 0 || functionPointerDeclarator
                     val hasType = Regex("[A-Za-z_]\\w*").containsMatchIn(prefix)
                     val isExternal = Regex("\\bextern\\b").containsMatchIn(prefix)
@@ -210,7 +213,13 @@ internal object GeneratedCCandidateValidation {
                         suffix.isEmpty() -> true
                         else -> suffix.first() in setOf(';', '=', ',', '[')
                     }
-                    if (declarationPrefix && hasType && !isExternal && '=' !in prefix && declaratorSuffix) {
+                    if (
+                        declarationPrefix &&
+                        hasType &&
+                        !isExternal &&
+                        '=' !in declaratorPrefix &&
+                        declaratorSuffix
+                    ) {
                         return true
                     }
                 }
@@ -229,6 +238,10 @@ internal object GeneratedCCandidateValidation {
                 ']' -> if (bracketDepth > 0) bracketDepth--
                 ';' -> if (braceDepth == 0 && parenthesisDepth == 0 && bracketDepth == 0) {
                     statementStart = index + 1
+                    declaratorStart = statementStart
+                }
+                ',' -> if (braceDepth == 0 && parenthesisDepth == 0 && bracketDepth == 0) {
+                    declaratorStart = index + 1
                 }
             }
         }

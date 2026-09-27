@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "product": "chrome",
+  "platform": "linux64",
+  "version": "149.0.7827.55",
+  "revision": "1625079",
+  "metadataUrl": "https://googlechromelabs.github.io/chrome-for-testing/149.0.7827.55.json",
+  "url": "https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.55/linux64/chrome-linux64.zip",
+  "bytes": 185646494,
+  "sha256": "13113b963ac22fffdad898a677591028e4397c46c1daa9e61811258eed6e35b5",
+  "entries": 308,
+  "expandedBytes": 396335288
+}

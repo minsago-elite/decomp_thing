@@ -58,7 +58,22 @@ public final class BundledGhidraWorker {
             postScripts.add(new Pair<>(script, Arrays.copyOfRange(arguments, index, index + count)));
             index += count;
         }
+        Path workingDirectory = Path.of("").toAbsolutePath().normalize();
+        Path runRoot = workingDirectory.getParent();
+        if (runRoot != null && runRoot.getFileName().toString().startsWith(".function-observation-run-")) {
+            if (!workingDirectory.getFileName().toString().matches("control-[a-f0-9]{64}") ||
+                !(project.equals(workingDirectory.resolve("state")) || project.equals(runRoot.resolve("state")))) {
+                throw new IllegalArgumentException("Bundled project is outside the active contained state directory");
+            }
+        }
         Files.createDirectories(project);
+        Path projectAlias = null;
+        Path projectLocation = project;
+        if (runRoot != null && runRoot.getFileName().toString().startsWith(".function-observation-run-")) {
+            projectAlias = workingDirectory.resolve("tmp/bundled-project-location");
+            Files.createSymbolicLink(projectAlias, project);
+            projectLocation = Path.of("/proc/self/cwd/tmp/bundled-project-location");
+        }
         HeadlessAnalyzer analyzer = HeadlessAnalyzer.getInstance();
         analyzer.getOptions().enableOverwriteOnConflict(true);
         analyzer.getOptions().setScriptDirectories(List.of(bundle.getParent().resolve("scripts").toString(), scripts.toString()));
@@ -70,7 +85,11 @@ public final class BundledGhidraWorker {
         }
         analyzer.getOptions().setPostScriptsWithArgs(List.of(new Pair<>(
             "RunBundledExports.class", guardedArguments.toArray(String[]::new))));
-        analyzer.processLocal(project.toString(), projectName, "/", List.of(binary.toFile()));
+        try {
+            analyzer.processLocal(projectLocation.toString(), projectName, "/", List.of(binary.toFile()));
+        } finally {
+            if (projectAlias != null) Files.deleteIfExists(projectAlias);
+        }
         if (analyzer.checkAnalysisTimedOut()) throw new IllegalStateException("Ghidra analysis timed out");
         if (!exportsCompleted) throw new IllegalStateException("Bundled Ghidra import or export failed; existing output is not a successful result");
     }

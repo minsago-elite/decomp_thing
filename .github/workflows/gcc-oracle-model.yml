@@ -2,7 +2,13 @@ name: GCC oracle model
 
 on:
   push:
+    branches: [master]
+    tags: ['**']
   pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   provenance-and-elf-verifier:

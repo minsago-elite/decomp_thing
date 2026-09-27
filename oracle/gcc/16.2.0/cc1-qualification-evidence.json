@@ -1,0 +1,163 @@
+{
+  "schemaVersion": 1,
+  "recordKind": "gcc-cc1-qualification-evidence",
+  "issue": 720,
+  "parentIssue": 55,
+  "recordedOnUtc": "2026-09-08",
+  "engine": "cc1",
+  "status": "unresolved",
+  "releaseEligible": false,
+  "evidenceBasis": {
+    "repositoryCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+    "profile": {
+      "path": "oracle/gcc/16.2.0/compiler-engines.json",
+      "sha256": "e0ca60b7e856e9330e45fd58e61828313e8dd824413ee0df7ef76ee5d2b47bdc",
+      "engineId": "gcc-compiler-engines-16.2.0",
+      "target": "x86_64-linux-gnu"
+    },
+    "source": {
+      "path": "oracle/gcc/16.2.0/source-lock.json",
+      "sha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc",
+      "revision": "78d4ac73dd391005b895a6148cd9831e28e1208b"
+    },
+    "analysis": {
+      "exporter": {
+        "id": "decompengine-ghidra-program-model",
+        "version": 10,
+        "sha256": "dc0debe2808c2744792f736d150d25aaefd6a46fd90910af7175a454686c6ab9",
+        "recoveryMode": "planning"
+      },
+      "ghidra": {
+        "version": "12.1.3",
+        "archive": "ghidra_12.1.3_PUBLIC_20260817.zip",
+        "archiveBytes": 569445154,
+        "archiveSha256": "93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54"
+      },
+      "planner": {
+        "id": "deterministic-module-planner",
+        "version": 1
+      },
+      "budgets": {
+        "exportWallClockSeconds": 1800,
+        "exportMaximumResidentBytes": 17179869184,
+        "plannerMaximumEntities": 500000,
+        "plannerMaximumDependencyEdges": 8000000,
+        "plannerMaximumWorkUnits": 200000000
+      }
+    },
+    "cc1Inputs": {
+      "buildRecord": {
+        "path": "oracle/gcc/16.2.0/cc1-build-record.json",
+        "sha256": "f6b2711d4f82562195acebe7250d7dc62eb9425af4f736736e0ea69b65103e8e"
+      },
+      "oracleManifest": {
+        "path": "oracle/gcc/16.2.0/cc1-oracle-manifest.json",
+        "sha256": "dbef520c025d268f5126229ace8ad5b08a15722573d45b5e1ab934611905abb4"
+      },
+      "localByteInventory": {
+        "path": "oracle/gcc/16.2.0/local-engine-byte-inventory.json",
+        "sha256": "aaffdfcb134b7e432abfda69055d4e598a538c05b79ad1b998ec242e16af8b39",
+        "provider": "local-engine-byte-inventory-v1",
+        "cc1": {
+          "full": {
+            "bytes": 374477144,
+            "sha256": "ba9b2f314bfb3d92a172e67f8ce993a2e98b9bc14aabf00ff6d58e4631037621",
+            "manifestMatches": true,
+            "stableDuringRead": true
+          },
+          "stripped": {
+            "bytes": 41935768,
+            "sha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905",
+            "manifestMatches": true,
+            "stableDuringRead": true
+          }
+        },
+        "benchmarkAccepted": false,
+        "productionVerified": false,
+        "releaseEligible": false,
+        "limitation": "Read-only local byte inventory; no authenticated process, root-owned deployment, runtime closure or benchmark execution."
+      }
+    }
+  },
+  "contractAssessment": {
+    "retained": [
+      {
+        "id": "authenticated-input-provenance",
+        "status": "available-input-only",
+        "evidence": [
+          "compiler-engines.json",
+          "cc1-build-record.json",
+          "cc1-oracle-manifest.json",
+          "local-engine-byte-inventory.json"
+        ],
+        "meaning": "The checked source, build, exporter, bundled Ghidra archive, profile, manifest and local byte identities are bound; this does not authenticate execution."
+      },
+      {
+        "id": "kotlin-planning-and-ownership-boundary",
+        "status": "implemented-non-authoritative",
+        "evidence": [
+          "oracle/gcc/16.2.0/README.md",
+          "src/main/kotlin/decompengine/oracle/gcc/GccCompilerEnginePlanning.kt",
+          "oracle/gcc/compiler-engine-plan-evidence.schema.json"
+        ],
+        "meaning": "The current planning path checks supplied bytes and ownership relationships but emits non-authoritative planning assessment with complete=false and releaseEligible=false."
+      },
+      {
+        "id": "structural-replay-admission",
+        "status": "fail-closed-no-production-adapter",
+        "evidence": [
+          "src/main/kotlin/decompengine/oracle/structural/StructuralReplayAdapterRegistry.kt",
+          "src/main/kotlin/decompengine/oracle/structural/StructuralProductionReplayContract.kt"
+        ],
+        "meaning": "The production registry is empty and the verified structural-input capability has no creator; fixture replay cannot become production scoring authority."
+      }
+    ],
+    "productionGates": [
+      {
+        "id": "authenticated-cc1-export",
+        "status": "unavailable",
+        "ownerIssues": [720, 137, 138],
+        "gap": "No retained authenticated cc1 process, command, checkpoint, complete model, resource receipt or output publication exists; the byte inventory explicitly records no benchmark execution."
+      },
+      {
+        "id": "exact-once-function-global-type-ownership",
+        "status": "unavailable",
+        "ownerIssues": [720],
+        "gap": "The contract exists in the planner and exporter validators, but no accepted cc1 production model or plan evidence proves exact ownership for this engine."
+      },
+      {
+        "id": "a6-deep-structural-replay-and-score",
+        "status": "unavailable",
+        "ownerIssues": [720, 136],
+        "gap": "No authenticated cc1 recovered model, independently replayed interface/global/type facts, identity-map receipt or production structural score is retained."
+      },
+      {
+        "id": "normal-cli-resume-equivalence",
+        "status": "unavailable",
+        "ownerIssues": [137],
+        "gap": "The repository retains byte-assessment and containment groundwork, but no accepted normal-CLI interrupted/resumed/fresh cc1 equivalence evidence."
+      },
+      {
+        "id": "host-owned-scratch-and-worker-lifecycle",
+        "status": "unavailable",
+        "ownerIssues": [138],
+        "gap": "The retained inventory observed no mounted ext4 scratch filesystem and does not authorize production START, output adoption or terminal cleanup."
+      }
+    ]
+  },
+  "authorityBoundary": {
+    "oracle": "Checked source/build/profile/manifest and byte-inventory facts are reference inputs only.",
+    "eligibility": "Kotlin/JVM must own authenticated validation and release decisions; this record cannot promote any gate.",
+    "analysis": "Production analysis must use the application-bundled Ghidra Java APIs in an isolated worker and must not require GHIDRA_HOME or an external analyzeHeadless installation.",
+    "downstreamAcp": "Read-only consumer of accepted evidence; ACP cannot author, validate, score or certify oracle truth.",
+    "unresolvedStates": [
+      "missing",
+      "unavailable",
+      "non-authoritative",
+      "oracle-unobservable",
+      "recovered-unknown",
+      "contradicted",
+      "fabricated"
+    ]
+  }
+}

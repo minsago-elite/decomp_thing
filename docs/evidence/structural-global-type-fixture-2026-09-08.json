@@ -1,0 +1,52 @@
+{
+  "evidenceId": "structural-global-type-fixture-v1",
+  "schemaVersion": 1,
+  "scope": "fixture-only",
+  "authority": "fixture-digest-only",
+  "sources": {
+    "targetAbi": {"path": "src/test/resources/oracle/structural-v1/target-abi.json", "sha256": "d251d5e6a0edc17655c355fb8fd757d557f064a6e67095ad53c8ca1e7569a343"},
+    "structuralOracle": {"path": "src/test/resources/oracle/structural-v1/structural-oracle.json", "sha256": "9a479186e5d0595a0820e399e2d789f2a108497f0089f4b64e8247e3fbfa129d"},
+    "recoveredStructure": {"path": "src/test/resources/oracle/structural-v1/recovered.json", "sha256": "ea0cbf88f2212a271e966e348be00ac943aa0c375ffe631d32fdf44b87996a65"},
+    "identityMap": {"path": "src/test/resources/oracle/structural-v1/identity-map.json", "sha256": "836f2f29dc233c29a9da8356c7f4f8d51d0d7c80ce8c338963568f2b7ec93ae9"},
+    "expectedScore": {"path": "src/test/resources/oracle/structural-v1/expected-score.json", "sha256": "2dbff117253ba927a84df1e428f62d97b1f0efde049d4e6b78dc050dc5456ce6"}
+  },
+  "identityMappings": [
+    {"kind": "global", "oracleId": "global.counter", "recoveredId": "recovered.global.900"},
+    {"kind": "type", "oracleId": "type.mode", "recoveredId": "recovered.type.mode"},
+    {"kind": "type", "oracleId": "type.packet", "recoveredId": "recovered.type.packet"},
+    {"kind": "type", "oracleId": "type.s32", "recoveredId": "recovered.type.i32"}
+  ],
+  "dimensions": [
+    {"dimension": "global.reference", "oracleDenominator": 1, "recoveredDenominator": 1, "credit": {"numerator": 1, "denominator": 1, "value": 1.0}, "unobservableOracleCount": 0, "outcomes": {"exact": 1, "abi-equivalent": 0, "recovered-unknown": 0, "oracle-unobservable": 0, "contradicted": 0, "fabricated": 0}},
+    {"dimension": "global.storage", "oracleDenominator": 1, "recoveredDenominator": 2, "credit": {"numerator": 1, "denominator": 1, "value": 1.0}, "unobservableOracleCount": 0, "outcomes": {"exact": 1, "abi-equivalent": 0, "recovered-unknown": 0, "oracle-unobservable": 0, "contradicted": 0, "fabricated": 1}},
+    {"dimension": "global.linkage", "oracleDenominator": 1, "recoveredDenominator": 1, "credit": {"numerator": 0, "denominator": 1, "value": 0.0}, "unobservableOracleCount": 0, "outcomes": {"exact": 0, "abi-equivalent": 0, "recovered-unknown": 0, "oracle-unobservable": 0, "contradicted": 1, "fabricated": 0}},
+    {"dimension": "global.type", "oracleDenominator": 1, "recoveredDenominator": 1, "credit": {"numerator": 1, "denominator": 1, "value": 1.0}, "unobservableOracleCount": 0, "outcomes": {"exact": 1, "abi-equivalent": 0, "recovered-unknown": 0, "oracle-unobservable": 0, "contradicted": 0, "fabricated": 0}},
+    {"dimension": "type.aggregate.kind", "oracleDenominator": 1, "recoveredDenominator": 1, "credit": {"numerator": 1, "denominator": 1, "value": 1.0}, "unobservableOracleCount": 0, "outcomes": {"exact": 1, "abi-equivalent": 0, "recovered-unknown": 0, "oracle-unobservable": 0, "contradicted": 0, "fabricated": 0}},
+    {"dimension": "type.aggregate.size-bits", "oracleDenominator": 1, "recoveredDenominator": 1, "credit": {"numerator": 1, "denominator": 1, "value": 1.0}, "unobservableOracleCount": 0, "outcomes": {"exact": 1, "abi-equivalent": 0, "recovered-unknown": 0, "oracle-unobservable": 0, "contradicted": 0, "fabricated": 0}},
+    {"dimension": "type.aggregate.alignment-bits", "oracleDenominator": 1, "recoveredDenominator": 1, "credit": {"numerator": 0, "denominator": 1, "value": 0.0}, "unobservableOracleCount": 0, "outcomes": {"exact": 0, "abi-equivalent": 0, "recovered-unknown": 1, "oracle-unobservable": 0, "contradicted": 0, "fabricated": 0}},
+    {"dimension": "type.aggregate.member-offset-bits", "oracleDenominator": 1, "recoveredDenominator": 2, "credit": {"numerator": 1, "denominator": 1, "value": 1.0}, "unobservableOracleCount": 0, "outcomes": {"exact": 1, "abi-equivalent": 0, "recovered-unknown": 0, "oracle-unobservable": 0, "contradicted": 0, "fabricated": 1}},
+    {"dimension": "type.aggregate.member-type", "oracleDenominator": 1, "recoveredDenominator": 1, "credit": {"numerator": 1, "denominator": 1, "value": 1.0}, "unobservableOracleCount": 0, "outcomes": {"exact": 1, "abi-equivalent": 0, "recovered-unknown": 0, "oracle-unobservable": 0, "contradicted": 0, "fabricated": 0}},
+    {"dimension": "type.enum.underlying-abi-class", "oracleDenominator": 1, "recoveredDenominator": 1, "credit": {"numerator": 1, "denominator": 1, "value": 1.0}, "unobservableOracleCount": 0, "outcomes": {"exact": 0, "abi-equivalent": 1, "recovered-unknown": 0, "oracle-unobservable": 0, "contradicted": 0, "fabricated": 0}},
+    {"dimension": "type.enum.enumerator-value", "oracleDenominator": 1, "recoveredDenominator": 1, "credit": {"numerator": 1, "denominator": 1, "value": 1.0}, "unobservableOracleCount": 0, "outcomes": {"exact": 1, "abi-equivalent": 0, "recovered-unknown": 0, "oracle-unobservable": 0, "contradicted": 0, "fabricated": 0}},
+    {"dimension": "type.typedef.target", "oracleDenominator": 1, "recoveredDenominator": 1, "credit": {"numerator": 1, "denominator": 1, "value": 1.0}, "unobservableOracleCount": 0, "outcomes": {"exact": 0, "abi-equivalent": 1, "recovered-unknown": 0, "oracle-unobservable": 0, "contradicted": 0, "fabricated": 0}}
+  ],
+  "focusedTotals": {
+    "oracleDenominator": 12,
+    "recoveredDenominator": 14,
+    "observableOracleCount": 12,
+    "unobservableOracleCount": 0,
+    "credit": {"numerator": 10, "denominator": 12, "value": 0.833333},
+    "outcomes": {"exact": 8, "abi-equivalent": 2, "recovered-unknown": 1, "oracle-unobservable": 0, "contradicted": 1, "fabricated": 2}
+  },
+  "productionQualification": {
+    "productionVerified": false,
+    "adapterReplayVerified": false,
+    "status": "fixture-digest-only",
+    "unavailableGates": [
+      "#679 authenticated production replay inputs: StructuralReplayAdapterRegistry.production is empty.",
+      "#682 production score: no checked GCC production oracle, recovered model, identity-map replay, or global/type score exists.",
+      "#45 and #46 downstream qualification: function/call thresholds and ABI/global declaration gates remain unestablished."
+    ],
+    "isolation": "No external GHIDRA_HOME or analyzeHeadless production path is asserted by this evidence."
+  }
+}

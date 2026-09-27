@@ -48,7 +48,7 @@ class ContainedCommandOperationDeadlineTest {
         now += 10_000_000L
         assertEquals(1_990, wrapped.remainingMillis(2_000))
         var clock = 10L
-        val regressed = ContainedCommandOperationDeadline(1_000) { clock }
+        val regressed = ContainedCommandOperationDeadline(2_000) { clock }
         clock = 9L
         assertFails { regressed.requireCurrent() }
         clock = 11L
@@ -57,7 +57,7 @@ class ContainedCommandOperationDeadlineTest {
 
     @Test
     fun `operation deadlines require finite whole-second policy bounds`() {
-        for (budget in listOf(0L, 999L, 1_001L, 86_400_001L, Long.MAX_VALUE)) {
+        for (budget in listOf(0L, 999L, 1_000L, 1_001L, 86_400_001L, Long.MAX_VALUE)) {
             assertFails { ContainedCommandOperationDeadline(budget) }
         }
     }

@@ -9,6 +9,7 @@ import decompengine.project.ProjectFileRole
 import decompengine.project.ReconstructionProfile
 import decompengine.project.SourceTreeManifest
 import decompengine.project.SourceTreeManifestReader
+import decompengine.project.moduleIdForPath
 import decompengine.repair.StableRegularFile
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
@@ -24,6 +25,7 @@ data class SourceTreeView(
 internal class WebSourceEvidence(
     private val store: JobStore,
     profiles: List<ReconstructionProfile>,
+    private val readArtifact: (String, String, Long) -> StableRegularFile = store::readArtifact,
 ) {
     private val profiles = profiles.associateBy(ReconstructionProfile::id)
 
@@ -33,9 +35,11 @@ internal class WebSourceEvidence(
         }
     }
 
-    fun read(jobId: String): WebSourceSnapshot {
+    fun read(jobId: String, reportPrefix: String = "reports"): WebSourceSnapshot {
+        val manifestPath = "$reportPrefix/source-tree/source_tree_manifest.json"
+        canonicalReportSegments(manifestPath)
         val input = store.readInput(jobId)
-        val manifestSnapshot = store.readArtifact(jobId, MANIFEST_PATH, MAXIMUM_MANIFEST_BYTES)
+        val manifestSnapshot = readArtifact(jobId, manifestPath, MAXIMUM_MANIFEST_BYTES)
         val manifestDocument = OracleJson.parse(manifestSnapshot.bytes, JSON_LIMITS) as? JsonObject
             ?: throw IllegalArgumentException("source manifest must be an object")
         val profileId = manifestDocument["profileId"]?.jsonPrimitive?.content
@@ -47,7 +51,7 @@ internal class WebSourceEvidence(
         val files = manifest.files.associate { entry ->
             val remaining = MAXIMUM_TOTAL_BYTES - total
             require(remaining > 0L) { "source tree exceeds its aggregate read bound" }
-            val snapshot = store.readArtifact(jobId, "reports/source-tree/${entry.path}", minOf(MAXIMUM_SOURCE_BYTES, remaining))
+            val snapshot = readArtifact(jobId, "$reportPrefix/source-tree/${entry.path}", minOf(MAXIMUM_SOURCE_BYTES, remaining))
             require(snapshot.sha256 == entry.sha256) { "source file differs from its manifest: ${entry.path}" }
             total += snapshot.bytes.size
             entry.path to snapshot
@@ -58,15 +62,14 @@ internal class WebSourceEvidence(
             }
         }
         manifest.files.forEach { entry ->
-            requireSame(files.getValue(entry.path), store.readArtifact(jobId, "reports/source-tree/${entry.path}", MAXIMUM_SOURCE_BYTES))
+            requireSame(files.getValue(entry.path), readArtifact(jobId, "$reportPrefix/source-tree/${entry.path}", MAXIMUM_SOURCE_BYTES))
         }
-        requireSame(manifestSnapshot, store.readArtifact(jobId, MANIFEST_PATH, MAXIMUM_MANIFEST_BYTES))
+        requireSame(manifestSnapshot, readArtifact(jobId, manifestPath, MAXIMUM_MANIFEST_BYTES))
         requireSame(input, store.readInput(jobId))
         return WebSourceSnapshot(manifest, manifestDocument, files, profile)
     }
 
     companion object {
-        private const val MANIFEST_PATH = "reports/source-tree/source_tree_manifest.json"
         private const val MAXIMUM_MANIFEST_BYTES = 1024L * 1024
         private const val MAXIMUM_SOURCE_BYTES = 4L * 1024 * 1024
         private const val MAXIMUM_TOTAL_BYTES = 64L * 1024 * 1024
@@ -91,13 +94,18 @@ internal class WebSourceSnapshot(
         ProjectFileRole.VIEWABLE in it.roles && it.contentKind == ProjectContentKind.UTF8_TEXT
     }
 
-    val confidence: JsonObject? = viewable.singleOrNull { it.path == "reports/confidence.json" }?.let {
+    val confidence: JsonObject? = profile.layout.declarations.singleOrNull { it.id == "confidence-evidence" }
+        ?.materialize()?.let { path -> viewable.singleOrNull { it.path == path } }?.let {
         runCatching { OracleJson.parse(files.getValue(it.path).bytes, WebSourceEvidence.JSON_LIMITS) as? JsonObject }.getOrNull()
     }
 
     fun view(): SourceTreeView = SourceTreeView(viewable, confidence)
 
     fun revision(): WebSourceRevision = WebSourceRevision(profile, manifestDocument, view())
+
+    fun moduleId(relative: String): String? = profile.layout.declarationForPath(relative).let { declaration ->
+        if (ProjectFileRole.MODULE_IMPLEMENTATION in declaration.roles) declaration.moduleIdForPath(relative) else null
+    }
 
     fun text(relative: String): String {
         require(viewable.any { it.path == relative }) { "source file is not declared as viewable UTF-8 text" }

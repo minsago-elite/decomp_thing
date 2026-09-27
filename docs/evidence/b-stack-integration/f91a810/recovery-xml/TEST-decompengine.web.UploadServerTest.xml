@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.web.UploadServerTest" tests="29" skipped="0" failures="0" errors="0" timestamp="2026-09-05T16:04:53.117Z" hostname="whatsername" time="11.327">
+  <properties/>
+  <testcase name="job event endpoint and refresh render the persisted bounded stream()" classname="decompengine.web.UploadServerTest" time="0.201"/>
+  <testcase name="shutdown discards caller-queued work and late delivery cannot alter a new owner state()" classname="decompengine.web.UploadServerTest" time="0.038"/>
+  <testcase name="web UI uploads ELF and returns job JSON()" classname="decompengine.web.UploadServerTest" time="0.015"/>
+  <testcase name="GUI launches analysis renders evidence and downloads artifacts()" classname="decompengine.web.UploadServerTest" time="0.166"/>
+  <testcase name="early stop signal prevents successful completion publication before cleanup()" classname="decompengine.web.UploadServerTest" time="0.035"/>
+  <testcase name="source rendering never reads linked or oversized provenance metadata()" classname="decompengine.web.UploadServerTest" time="0.101"/>
+  <testcase name="job state page shows status metadata and repair iteration history()" classname="decompengine.web.UploadServerTest" time="0.064"/>
+  <testcase name="dashboard shows retained recovery data without exposing private files()" classname="decompengine.web.UploadServerTest" time="0.008"/>
+  <testcase name="source and archive response reads reject oversized sparse files()" classname="decompengine.web.UploadServerTest" time="0.117"/>
+  <testcase name="shutdown timeout retains store ownership until the worker exits and cleanup is retried()" classname="decompengine.web.UploadServerTest" time="5.039"/>
+  <testcase name="verified archive links pin bytes and reject stale source build and archive identities()" classname="decompengine.web.UploadServerTest" time="1.278"/>
+  <testcase name="source roles and text kinds come from an admitted alternate profile not suffixes()" classname="decompengine.web.UploadServerTest" time="0.29"/>
+  <testcase name="GUI launches reconstruction browses escaped source and rejects an unverified archive()" classname="decompengine.web.UploadServerTest" time="0.214"/>
+  <testcase name="source responses reject malformed UTF8 without replacement decoding()" classname="decompengine.web.UploadServerTest" time="0.066"/>
+  <testcase name="recovery endpoint returns a read-only summary without private names or contents()" classname="decompengine.web.UploadServerTest" time="0.002"/>
+  <testcase name="dashboard reports unavailable when a published job becomes unreadable()" classname="decompengine.web.UploadServerTest" time="0.108"/>
+  <testcase name="rejected admission can be retried without a stale job reservation()" classname="decompengine.web.UploadServerTest" time="0.125"/>
+  <testcase name="early stop signal discards delivered queued work before cleanup takes the lifecycle lock()" classname="decompengine.web.UploadServerTest" time="0.022"/>
+  <testcase name="upload rejects non-ELF content()" classname="decompengine.web.UploadServerTest" time="0.003"/>
+  <testcase name="owned workers bound pending jobs reject overflow and discard queued work at shutdown()" classname="decompengine.web.UploadServerTest" time="2.366"/>
+  <testcase name="routes reject a substituted job directory instead of following its reports()" classname="decompengine.web.UploadServerTest" time="0.152"/>
+  <testcase name="upload page has ELF form()" classname="decompengine.web.UploadServerTest" time="0.002"/>
+  <testcase name="dashboard shows incomplete recovery inspection even with zero counted candidates()" classname="decompengine.web.UploadServerTest" time="0.001"/>
+  <testcase name="background diagnostics redact secrets before persistence and rendering()" classname="decompengine.web.UploadServerTest" time="0.174"/>
+  <testcase name="artifact routes reject noncanonical paths and nonregular targets()" classname="decompengine.web.UploadServerTest" time="0.188"/>
+  <testcase name="progress refresh distinguishes hidden rows lost history and unreadable snapshots()" classname="decompengine.web.UploadServerTest" time="0.106"/>
+  <testcase name="artifact and source routes reject final file and parent directory indirection()" classname="decompengine.web.UploadServerTest" time="0.139"/>
+  <testcase name="changed source input and same-byte source indirection cannot reuse manifest evidence()" classname="decompengine.web.UploadServerTest" time="0.239"/>
+  <testcase name="dashboard lists uploaded jobs()" classname="decompengine.web.UploadServerTest" time="0.056"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

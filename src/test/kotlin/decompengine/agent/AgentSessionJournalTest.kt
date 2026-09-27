@@ -10,6 +10,33 @@ class AgentSessionJournalTest {
     @TempDir lateinit var directory: Path
 
     @Test
+    fun `pending publication blocks existing journal admission without changing evidence`() {
+        val fixture = fixture()
+        complete(fixture)
+        val continuation = fixture.continuation()
+        val record = continuation.directory.resolve("session.json")
+        val before = Files.readAllBytes(record)
+        for (name in listOf("session.json.pending", "quarantine.json.pending")) {
+            val pending = continuation.directory.resolve(name)
+            val pendingBytes = "incomplete private candidate".toByteArray()
+            Files.write(pending, pendingBytes)
+            repeat(2) {
+                val failure = assertFailsWith<IllegalArgumentException> { AgentSessionJournal.open(continuation) }
+                assertEquals("incomplete session publication requires inspection", failure.message)
+                assertContentEquals(before, Files.readAllBytes(record))
+                assertContentEquals(pendingBytes, Files.readAllBytes(pending))
+                assertEquals("initial", Files.readString(fixture.source))
+            }
+            // Test-only inspection resolution; production admission must never remove this file.
+            Files.delete(pending)
+        }
+        AgentSessionJournal.open(continuation).use { journal ->
+            journal.reconcileWorkspace(listOf(fixture.root))
+            assertEquals(1, journal.completedTurns)
+        }
+    }
+
+    @Test
     fun `completed conversation loads after reopening and accepted publication is idempotent`() {
         val fixture = fixture()
         val request = fixture.request(fixture.continuation())

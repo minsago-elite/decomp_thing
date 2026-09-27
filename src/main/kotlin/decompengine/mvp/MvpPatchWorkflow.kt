@@ -14,6 +14,10 @@ import decompengine.agent.AgentWorkspacePath
 import decompengine.project.AcpExecutionOutcomeIssue
 import decompengine.project.AcpExecutionReceiptDocument
 import decompengine.project.BoundedAgentExecutionEventRecorder
+import decompengine.project.MvpPatchCompilerPolicy
+import decompengine.project.ReconstructionAdapters
+import decompengine.project.ReconstructionProfile
+import decompengine.project.ReconstructionProfiles
 import decompengine.project.sha256
 import decompengine.repair.CapturedRepairStagingAuthority
 import decompengine.repair.RepairClientAgentHarness
@@ -60,7 +64,13 @@ class MvpPatchWorkflow(
     private val publicationMode: MvpPublicationMode = MvpPublicationMode.REQUIRE_ACP_RELEASE,
     private val persistAgentEvidence: (Path, String) -> Unit = ::writeRepairEvidenceAtomically,
 ) {
-    fun run(options: MvpPatchOptions) {
+    fun run(options: MvpPatchOptions) = run(options, ReconstructionProfiles.default)
+
+    fun run(options: MvpPatchOptions, profile: ReconstructionProfile) {
+        require(ReconstructionProfiles.builtIn.any { it.id == profile.id && it.sha256 == profile.sha256 }) {
+            "MVP patch profile is not admitted by this application"
+        }
+        val compilerPolicy = ReconstructionAdapters.resolve(profile).mvpPatchCompiler
         val input = options.inputElf.toAbsolutePath().normalize()
         val output = options.outputDir.toAbsolutePath().normalize()
         require(input.isRegularFile()) { "input ELF does not exist: $input" }
@@ -76,7 +86,7 @@ class MvpPatchWorkflow(
         val finalBinary = patchedBinaryDir.resolve("patched_binary")
         finalBinary.deleteIfExists()
         val logger = StreamingLogger(logs.resolve("patch-${Instant.now().toEpochMilli()}.log"))
-        val evidence = MvpRunEvidence(environment, harnessProvenance ?: fallbackHarnessIdentity())
+        val evidence = MvpRunEvidence(environment, harnessProvenance ?: fallbackHarnessIdentity(), profile.id, profile.sha256)
         var phase = "inspect"
         var reconstructionAgentEvidence: AcpExecutionReceiptDocument? = null
         var reconstructionCandidate: ByteArray? = null
@@ -132,7 +142,7 @@ class MvpPatchWorkflow(
                 evidence.startPhase(phase)
                 it.phase(phase)
                 val vulnerable = work.resolve("reconstructed_asan")
-                compile(it, reconstructed, vulnerable, sanitizer = true, warningsAsErrors = false)
+                compile(it, compilerPolicy, profile, reconstructed, vulnerable, sanitizer = true, warningsAsErrors = false)
                 evidence.check("reconstructed sanitizer build", true, "compiled with AddressSanitizer and UBSan")
                 evidence.passPhase(phase, "reconstructed source compiled with sanitizers")
 
@@ -211,12 +221,12 @@ class MvpPatchWorkflow(
                 evidence.startPhase(phase)
                 it.phase(phase)
                 val patchedAsan = work.resolve("patched_asan")
-                compile(it, proposedSource, patchedAsan, sanitizer = true, warningsAsErrors = true)
+                compile(it, compilerPolicy, profile, proposedSource, patchedAsan, sanitizer = true, warningsAsErrors = true)
                 evidence.check("patched sanitizer build", true, "compiled with -Werror, AddressSanitizer, and UBSan")
                 verify(it, patchedAsan, original, "sanitizer security validation")
                 evidence.check("sanitizer security validation", true, "CWE-787 reproducer no longer reports a sanitizer failure")
                 val release = work.resolve("patched_release")
-                compile(it, proposedSource, release, sanitizer = false, warningsAsErrors = true)
+                compile(it, compilerPolicy, profile, proposedSource, release, sanitizer = false, warningsAsErrors = true)
                 evidence.check("hardened release build", true, "compiled with FORTIFY_SOURCE=2, stack protector, PIE, RELRO, and immediate binding")
                 verifyHardening(it, release)
                 evidence.check("binary hardening inspection", true, "ELF is PIE with GNU_RELRO and immediate binding")
@@ -289,13 +299,20 @@ class MvpPatchWorkflow(
         }
     }
 
-    private fun compile(logger: StreamingLogger, source: Path, target: Path, sanitizer: Boolean, warningsAsErrors: Boolean) {
-        val command = mutableListOf("gcc", "-std=c11", "-O1", "-g", "-Wall", "-Wextra")
-        if (warningsAsErrors) command += "-Werror"
-        if (sanitizer) command += listOf("-U_FORTIFY_SOURCE", "-D_FORTIFY_SOURCE=0", "-fsanitize=address,undefined", "-fno-omit-frame-pointer")
-        else command += listOf("-D_FORTIFY_SOURCE=2", "-fstack-protector-strong", "-fPIE", "-pie", "-Wl,-z,relro,-z,now")
-        command += listOf(source.pathString, "-o", target.pathString)
-        logger.command(command, target.parent, "compile ${target.fileName}")
+    private fun compile(
+        logger: StreamingLogger,
+        compilerPolicy: MvpPatchCompilerPolicy,
+        profile: ReconstructionProfile,
+        source: Path,
+        target: Path,
+        sanitizer: Boolean,
+        warningsAsErrors: Boolean,
+    ) {
+        logger.command(
+            compilerPolicy.command(profile, source, target, sanitizer, warningsAsErrors),
+            target.parent,
+            "compile ${target.fileName}",
+        )
     }
 
     private fun verify(logger: StreamingLogger, binary: Path, expected: BinaryExecutionResult, label: String) {

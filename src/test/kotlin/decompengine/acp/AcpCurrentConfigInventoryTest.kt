@@ -10,6 +10,46 @@ import kotlin.test.*
 @OptIn(UnstableApi::class)
 class AcpCurrentConfigInventoryTest {
     @Test
+    fun `full environment budget and complete preferences share redaction without exhausting limits`() {
+        val environment = List(4096) { it.toString().padStart(256, 'x') }
+        val preferences = AcpSessionPreferences("model-private", "mode-private", List(64) {
+            AcpSessionConfigPreference("option-$it", AcpSessionConfigValue.Select("value-$it"))
+        })
+        val identifiers = preferences.privateIdentifiers()
+        assertEquals(130, identifiers.size)
+        val preview = previewSessionChoices(sequenceOf("prefix-mode-private", "prefix-option-63", "prefix-value-63"),
+            environment, identifiers)
+        assertFalse(preview.contains("mode-private"))
+        assertFalse(preview.contains("option-63"))
+        assertFalse(preview.contains("value-63"))
+        assertTrue(preview.contains("[redacted]"))
+        val failure = assertFailsWith<AgentExecutionException> {
+            requireCurrentSessionConfigPreference(inventory("session-new-configured.response"),
+                preferences.configOptions.first(), 0, environment, identifiers)
+        }
+        assertEquals(AgentFailureKind.CONFIGURATION, failure.failure.kind)
+    }
+
+    @Test
+    fun `current choices redact configured identifiers embedded in advertised values`() {
+        val original = inventory("session-new-configured.response").first()
+        val option = Json.decodeFromString<SessionConfigOption>(Json.encodeToString(SessionConfigOption.serializer(), original)
+            .replace("reasoning", "prefix-private-option").replace("high", "prefix-private-value"))
+        for (preference in listOf(
+            AcpSessionConfigPreference("private-option", AcpSessionConfigValue.BooleanValue(false)),
+            AcpSessionConfigPreference("prefix-private-option", AcpSessionConfigValue.Select("private-value")),
+        )) {
+            val failure = assertFailsWith<AgentExecutionException> {
+                requireCurrentSessionConfigPreference(listOf(option), preference, 0)
+            }
+            assertFalse(failure.stackTraceToString().contains(preference.id))
+            if (preference.value is AcpSessionConfigValue.Select) {
+                assertFalse(failure.stackTraceToString().contains("private-value"))
+            }
+        }
+    }
+
+    @Test
     fun `flat and grouped current inventories must retain a unique configured value`() {
         val preference = AcpSessionConfigPreference("reasoning", AcpSessionConfigValue.Select("high"))
         listOf("session-new-configured.response", "session-new-grouped-config.response").forEach { name ->
@@ -63,6 +103,53 @@ class AcpCurrentConfigInventoryTest {
         assertTrue(failure.message.orEmpty().contains("[redacted]"))
         assertTrue(failure.message.orEmpty().contains("more choices omitted"))
         assertTrue(failure.message.orEmpty().length < 1024)
+    }
+
+    @Test
+    fun `shared choice preview bounds enumeration and escapes redacted peer text`() {
+        val choices = sequence {
+            yield("private-value\nquoted\"choice")
+            repeat(4) { yield("x".repeat(100)) }
+            error("preview must not enumerate beyond its lookahead")
+        }
+        val preview = previewSessionChoices(choices, listOf("private-value"))
+        assertFalse(preview.contains("private-value"))
+        assertFalse(preview.contains('\n'))
+        assertTrue(preview.contains("[redacted]"))
+        assertTrue(preview.endsWith(" (more choices omitted)"))
+        val decoded = Json.parseToJsonElement(preview.removeSuffix(" (more choices omitted)")).jsonArray
+        assertEquals(4, decoded.size)
+        assertTrue(decoded.all { it.jsonPrimitive.content.length <= 48 + "… [preview truncated]".length })
+        assertTrue(decoded[1].jsonPrimitive.content.endsWith("… [preview truncated]"))
+        assertEquals("[]", previewSessionChoices(emptySequence(), emptyList()))
+    }
+
+    @Test
+    fun `whitespace-only configured identifiers remain private in choice previews`() {
+        val preferences = AcpSessionPreferences(" ", "  ", listOf(
+            AcpSessionConfigPreference("   ", AcpSessionConfigValue.Select("    "))))
+        for (id in preferences.privateIdentifiers()) {
+            val preview = previewSessionChoices(sequenceOf("prefix" + id + "suffix"), emptyList(), preferences.privateIdentifiers())
+            assertFalse(preview.contains(id))
+            assertTrue(preview.contains("[redacted]"))
+        }
+    }
+
+    @Test
+    fun `final preview omits private identifiers synthesized by replacements and formatting`() {
+        val cases = listOf(
+            listOf("[redacted]X", "foobar") to sequenceOf("foobarX"),
+            listOf("\"model-safe\"") to sequenceOf("model-safe"),
+            listOf(" (more choices omitted)") to (1..5).asSequence().map { "choice-$it" },
+            listOf("[]") to emptySequence<String>(),
+        )
+        for ((privateIds, choices) in cases) {
+            val preview = previewSessionChoices(choices, emptyList(), privateIds)
+            // Multi-pass redaction removes synthesized identifiers; omit the preview entirely
+            // if any configured identifier would still survive into the display-only hint.
+            if (privateIds.any { preview.contains(it) }) assertEquals("", preview)
+            privateIds.forEach { assertFalse(preview.contains(it)) }
+        }
     }
 
     private fun inventory(name: String): List<SessionConfigOption> {

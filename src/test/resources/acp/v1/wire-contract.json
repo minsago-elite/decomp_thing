@@ -788,6 +788,126 @@
           }
         ]
       }
+    },
+    "initialize-auth.response": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "protocolVersion": 1,
+        "agentCapabilities": {
+          "loadSession": false,
+          "promptCapabilities": {
+            "audio": false,
+            "image": false,
+            "embeddedContext": false
+          },
+          "mcpCapabilities": {
+            "http": false,
+            "sse": false
+          },
+          "sessionCapabilities": {},
+          "auth": {
+            "logout": {}
+          }
+        },
+        "authMethods": [
+          {
+            "id": "operator-login",
+            "name": "Fixture login",
+            "description": "Operator-controlled login",
+            "type": "agent"
+          }
+        ],
+        "agentInfo": {
+          "name": "contract-fixture-agent",
+          "version": "1.0"
+        }
+      }
+    },
+    "authenticate.request": {
+      "jsonrpc": "2.0",
+      "id": 71,
+      "method": "authenticate",
+      "params": {
+        "methodId": "operator-login"
+      }
+    },
+    "authenticate.response": {
+      "jsonrpc": "2.0",
+      "id": 71,
+      "result": {}
+    },
+    "logout.request": {
+      "jsonrpc": "2.0",
+      "id": 72,
+      "method": "logout",
+      "params": {}
+    },
+    "logout.response": {
+      "jsonrpc": "2.0",
+      "id": 72,
+      "result": {}
+    },
+    "initialize-auth-variants.response": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "protocolVersion": 1,
+        "agentCapabilities": {
+          "loadSession": false,
+          "promptCapabilities": {
+            "audio": false,
+            "image": false,
+            "embeddedContext": false
+          },
+          "mcpCapabilities": {
+            "http": false,
+            "sse": false
+          },
+          "sessionCapabilities": {},
+          "auth": {}
+        },
+        "authMethods": [
+          {
+            "id": "environment-login",
+            "name": "Environment login",
+            "type": "env_var",
+            "vars": [
+              {
+                "name": "FIXTURE_TOKEN",
+                "label": "Fixture token",
+                "secret": true,
+                "optional": false
+              }
+            ],
+            "link": "https://auth.example.invalid/setup"
+          },
+          {
+            "id": "terminal-login",
+            "name": "Terminal login",
+            "type": "terminal",
+            "args": [
+              "fixture-login",
+              "--interactive"
+            ],
+            "env": {
+              "FIXTURE_CONTEXT": "operator"
+            }
+          },
+          {
+            "id": "future-login",
+            "name": "Future login",
+            "type": "future_fixture",
+            "fixturePayload": {
+              "hint": "opaque-fixture-value"
+            }
+          }
+        ],
+        "agentInfo": {
+          "name": "contract-fixture-agent",
+          "version": "1.0"
+        }
+      }
     }
   }
 }

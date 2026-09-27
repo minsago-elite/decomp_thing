@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 1,
+  "id": "gcc-16-2-0-produced-program-evidence",
+  "issue": 715,
+  "status": "reference-artifact-only",
+  "provenance": {
+    "profile": "oracle/gcc/16.2.0",
+    "sourceLock": {
+      "path": "source-lock.json",
+      "sha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc",
+      "tag": "releases/gcc-16.2.0",
+      "commit": "78d4ac73dd391005b895a6148cd9831e28e1208b",
+      "archiveSha256": "e6738e29597f733270731aa90600f37ffdc045079dfc27ec7e8192cc81085c3e"
+    },
+    "corpus": {
+      "path": "behavior-corpus.json",
+      "sha256": "bcc1a14ca8c54f94106c943f0bc5698cb9af3151b7bf20a49ae3c8828baaad0e"
+    },
+    "corpusEvidence": {
+      "path": "behavior-corpus-evidence.json",
+      "sha256": "9dcf787aea232615a1ff8721144b86bc1f5e9a2a7068fa9e9280db0bc4ad6803"
+    },
+    "driver": {
+      "path": "artifacts/gcc-driver.stripped",
+      "bytes": 2349296,
+      "sha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4"
+    }
+  },
+  "authenticatedBoundary": {
+    "executor": {
+      "backend": "oci-container-v1",
+      "imageDigest": "sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248",
+      "platform": "linux/amd64"
+    },
+    "runtime": {
+      "state": "unresolved",
+      "required": "authenticated runtime boundary for the produced program"
+    },
+    "analysisRuntime": {
+      "requiredBoundary": "bundled-ghidra-java-api-worker",
+      "externalGhidraHomeOrAnalyzeHeadless": "forbidden"
+    }
+  },
+  "observation": {
+    "case": "linking",
+    "arguments": [
+      "-B/workspace/tools/",
+      "-fno-use-linker-plugin",
+      "-nostdlib",
+      "source.c",
+      "-o",
+      "linked.bin"
+    ],
+    "source": {
+      "path": "source.c",
+      "bytes": 29,
+      "sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949"
+    },
+    "phaseInputs": [
+      {
+        "phase": "compiler",
+        "path": "tools/cc1",
+        "status": "fixture-only",
+        "bytes": 1023,
+        "sha256": "847484f59a66b70de4cac77751e4f712672cf52ee0b037b07a2413a7547ae2cb"
+      },
+      {
+        "phase": "assembler",
+        "path": "tools/as",
+        "status": "fixture-only",
+        "bytes": 338,
+        "sha256": "59f48d8aa41d6febe825c19cfce157461c5dce8b0401104d3c825fb80004b2d1"
+      },
+      {
+        "phase": "linker",
+        "path": "tools/collect2",
+        "status": "fixture-only",
+        "bytes": 368,
+        "sha256": "a7e8d29a7ed6bf83b556b9f6b1b872f84e93a4bb9948121e36f55226d047f01c"
+      }
+    ],
+    "result": {
+      "exitCode": 0,
+      "stdout": {
+        "bytes": 0,
+        "base64": "",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stderr": {
+        "bytes": 0,
+        "base64": "",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "artifact": {
+        "path": "linked.bin",
+        "present": true,
+        "bytes": 19,
+        "mode": "0o700",
+        "base64": "TU9DSy1FWEVDVVRBQkxFAHYxCg==",
+        "sha256": "611d8ceedfe67437b495a97682eaf5818f93b4c93eedbcddf72737c24b4f303a"
+      }
+    },
+    "artifactQualification": {
+      "format": "unresolved",
+      "symbols": "unresolved",
+      "relocations": "unresolved"
+    },
+    "runtime": {
+      "state": "unresolved",
+      "observations": "No authenticated produced-program exit, stdout, or stderr receipt is retained."
+    }
+  },
+  "productionQualification": {
+    "qualified": false,
+    "releaseEligible": false,
+    "unresolved": [
+      "authenticated execution of linked.bin through the runtime boundary",
+      "exact produced-program exit, stdout, and stderr observations",
+      "real object/executable format, symbol, and relocation checks",
+      "reconstructed candidate replay with a retained source revision"
+    ],
+    "reason": "The retained linking case uses fixture phase scripts and produces MOCK-EXECUTABLE\\u0000v1\\n; its passing exit status and bytes do not establish production behavior."
+  }
+}

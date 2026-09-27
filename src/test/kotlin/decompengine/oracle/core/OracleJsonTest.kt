@@ -117,9 +117,20 @@ class OracleJsonTest {
         }
 
         val sorted = OracleJson.canonicalBytes(
-            JsonObject(linkedMapOf("𐀀" to JsonPrimitive(2), "" to JsonPrimitive(1))),
+            JsonObject(linkedMapOf("𐀀" to JsonPrimitive(2), "" to JsonPrimitive(1))),
         ).decodeToString()
-        assertTrue(sorted.indexOf("") < sorted.indexOf("𐀀"), sorted)
+        assertTrue(sorted.indexOf("") < sorted.indexOf("𐀀"), sorted)
+    }
+
+    @Test
+    fun `encoder enforces the node limit before copying and sorting object entries`() {
+        val flat = JsonObject(buildMap {
+            repeat(5_000) { index -> put("key-$index", JsonPrimitive(index)) }
+        })
+        val failure = assertFailsWith<StrictJsonException> {
+            OracleJson.canonicalBytes(flat, StrictJsonLimits(maximumNodes = 4_096, maximumCanonicalBytes = 128))
+        }
+        assertEquals("JSON value exceeds the configured node limit", failure.message)
     }
 
     @Test

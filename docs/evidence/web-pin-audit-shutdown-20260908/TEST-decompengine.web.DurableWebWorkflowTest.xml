@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.web.DurableWebWorkflowTest" tests="18" skipped="0" failures="0" errors="0" timestamp="2026-09-08T06:15:51.147Z" hostname="whatsername" time="0.141">
+  <properties/>
+  <testcase name="deliberate legacy retry overrides historical interruption and each status changes the shared version()" classname="decompengine.web.DurableWebWorkflowTest" time="0.007"/>
+  <testcase name="artifact parser rejects noncanonical components before namespace dispatch()" classname="decompengine.web.DurableWebWorkflowTest" time="0.001"/>
+  <testcase name="available dashboard jobs retain created time descending and identity tie ordering()" classname="decompengine.web.DurableWebWorkflowTest" time="0.003"/>
+  <testcase name="service pin updates queued task version before start and rejects stale pin requests()" classname="decompengine.web.DurableWebWorkflowTest" time="0.003"/>
+  <testcase name="shutdown revokes borrowed queued attempts and late delivery cannot write or execute()" classname="decompengine.web.DurableWebWorkflowTest" time="0.001"/>
+  <testcase name="pin publication failure before rename preserves queued execution while uncertainty revokes it()" classname="decompengine.web.DurableWebWorkflowTest" time="0.004"/>
+  <testcase name="startup interrupts abandoned attempts preserves accepted references and reads never recover again()" classname="decompengine.web.DurableWebWorkflowTest" time="0.004"/>
+  <testcase name="concurrent durable starts compare job versions before any adapter can execute()" classname="decompengine.web.DurableWebWorkflowTest" time="0.002"/>
+  <testcase name="cooperative interrupted return publishes interruption and restores the worker interrupt flag()" classname="decompengine.web.DurableWebWorkflowTest" time="0.001"/>
+  <testcase name="durable retries retain reports outcomes and exact input without accepting successful candidates()" classname="decompengine.web.DurableWebWorkflowTest" time="0.006"/>
+  <testcase name="uncertain running pin retains ownership until callback exit without publishing over it()" classname="decompengine.web.DurableWebWorkflowTest" time="0.026"/>
+  <testcase name="empty preview initialization and unsupported durable requests perform no storage work()" classname="decompengine.web.DurableWebWorkflowTest" time="0.001"/>
+  <testcase name="failed final publication remains explicitly unavailable and is never retried by the worker()" classname="decompengine.web.DurableWebWorkflowTest" time="0.004"/>
+  <testcase name="corrupt records remain visible as safe isolated diagnostic rows()" classname="decompengine.web.DurableWebWorkflowTest" time="0.012"/>
+  <testcase name="unfinished adapter retains ownership after shutdown deadline until its worker really exits()" classname="decompengine.web.DurableWebWorkflowTest" time="0.023"/>
+  <testcase name="pinning running work preserves its immutable invocation context and final publication()" classname="decompengine.web.DurableWebWorkflowTest" time="0.003"/>
+  <testcase name="selected report context keeps links bound to the original run across a later retry()" classname="decompengine.web.DurableWebWorkflowTest" time="0.031"/>
+  <testcase name="capacity rejection retains an unstarted refused attempt and deliberate retry gets a new identity()" classname="decompengine.web.DurableWebWorkflowTest" time="0.003"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

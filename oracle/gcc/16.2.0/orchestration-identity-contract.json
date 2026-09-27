@@ -1,0 +1,114 @@
+{
+  "schemaVersion": 1,
+  "kind": "gcc-orchestration-identity-contract-v1",
+  "issue": 712,
+  "status": "reference-contract-only",
+  "profile": "oracle/gcc/16.2.0",
+  "provenance": {
+    "corpus": {
+      "path": "behavior-corpus.json",
+      "sha256": "bcc1a14ca8c54f94106c943f0bc5698cb9af3151b7bf20a49ae3c8828baaad0e"
+    },
+    "referenceEvidence": {
+      "path": "behavior-corpus-evidence.json",
+      "sha256": "9dcf787aea232615a1ff8721144b86bc1f5e9a2a7068fa9e9280db0bc4ad6803",
+      "cases": 14,
+      "passed": 14
+    },
+    "driver": {
+      "path": "artifacts/gcc-driver.stripped",
+      "bytes": 2349296,
+      "sha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4"
+    },
+    "oracleManifestSha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9",
+    "sourceLockSha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc",
+    "buildRecordSha256": "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
+  },
+  "invocationPolicy": {
+    "mode": "closed",
+    "requiredReceiptFields": [
+      "caseId",
+      "phase",
+      "toolPath",
+      "toolSha256",
+      "argv",
+      "exitCode",
+      "stdout",
+      "stderr"
+    ],
+    "requiredArguments": {
+      "source": "behavior-corpus.json#/cases[*].arguments",
+      "rule": "Preserve each case argument in order in the authenticated driver expansion; unbound arguments fail closed.",
+      "normalizations": []
+    },
+    "missingReceipt": "unresolved"
+  },
+  "phaseIdentities": [
+    {
+      "phase": "compiler",
+      "tool": {
+        "path": "tools/cc1",
+        "bytes": 1023,
+        "sha256": "847484f59a66b70de4cac77751e4f712672cf52ee0b037b07a2413a7547ae2cb",
+        "source": "behavior-corpus.json#/cases[*].inputs"
+      },
+      "caseIds": ["preprocess-file", "preprocess-stdin", "compile-file", "compile-stdin", "response-file", "linking"]
+    },
+    {
+      "phase": "assembler",
+      "tool": {
+        "path": "tools/as",
+        "bytes": 338,
+        "sha256": "59f48d8aa41d6febe825c19cfce157461c5dce8b0401104d3c825fb80004b2d1",
+        "source": "behavior-corpus.json#/cases[*].inputs"
+      },
+      "caseIds": ["assembly-file", "compile-file", "compile-stdin", "response-file", "linking"]
+    },
+    {
+      "phase": "linker",
+      "tool": {
+        "path": "tools/collect2",
+        "bytes": 368,
+        "sha256": "a7e8d29a7ed6bf83b556b9f6b1b872f84e93a4bb9948121e36f55226d047f01c",
+        "source": "behavior-corpus.json#/cases[*].inputs"
+      },
+      "caseIds": ["linking"]
+    },
+    {
+      "phase": "runtime",
+      "tool": {
+        "backend": "oci-container-v1",
+        "imageDigest": "sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248",
+        "platform": "linux/amd64",
+        "source": "behavior-corpus.json#/sandbox"
+      },
+      "caseIds": ["all-14-corpus-cases"]
+    }
+  ],
+  "referenceExpectations": {
+    "source": "behavior-corpus.json#/cases[*].expected",
+    "observations": "behavior-corpus-evidence.json#/cases[*]",
+    "independent": true,
+    "normalizations": [],
+    "selectedArtifactExpectations": {
+      "compile-file": {
+        "path": "file.o",
+        "sha256": "e5e021333c0fd167a18f93780b1a03bc65f0aef311d0232b24e6a2d06153e9a5",
+        "bytes": 15,
+        "status": "mock-object"
+      },
+      "linking": {
+        "path": "linked.bin",
+        "sha256": "611d8ceedfe67437b495a97682eaf5818f93b4c93eedbcddf72737c24b4f303a",
+        "bytes": 19,
+        "status": "mock-executable"
+      }
+    }
+  },
+  "productionGap": [
+    "The checked evidence has no phase invocation receipts; tool identity and argument equivalence remain declared policy rather than observed qualification.",
+    "The compile and link cases emit mock bytes, so real object/ELF structure, symbols, relocations, and produced-program runtime behavior are unavailable.",
+    "No authenticated reconstructed-candidate replay is retained; releaseEligible is false."
+  ],
+  "releaseEligible": false
+}

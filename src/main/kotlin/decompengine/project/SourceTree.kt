@@ -121,9 +121,10 @@ class BoundedLlmModuleReconstructor(
 
     override fun cacheIdentity(profile: ReconstructionProfile): String = cacheIdentity(contextBudget(profile))
 
+    // v3 rejects checkpoints created before declared-role validation was enforced.
     private fun cacheIdentity(contextCharacters: Int): String =
         "agent:${harness.implementationIdentifier() ?: "unspecified"}:context-$contextCharacters:" +
-            "factory-${harnessProvenanceSha256 ?: "unbound"}:v2"
+            "factory-${harnessProvenanceSha256 ?: "unbound"}:v3"
 
     private fun contextBudget(profile: ReconstructionProfile): Int =
         minOf(maximumContextCharacters, profile.budgets.reconstructionMaximumContextCharacters)
@@ -137,12 +138,14 @@ class BoundedLlmModuleReconstructor(
         val fingerprint = request.sessionEvidenceFingerprint ?: return null
         if (harnessProvenanceSha256 == null) return null
         val root = request.workspaceRoot.toAbsolutePath().normalize()
+        val implementationViewable = ProjectFileRole.VIEWABLE in
+            request.profile.layout.declaration("module-implementation").roles
         val paths = (listOf(
             request.profile.layout.declaration("shared-interface").materialize(),
             request.module.headerPath,
             request.profile.layout.declaration("module-private-interface").materialize(mapOf("module" to request.module.id)),
-            request.module.sourcePath,
-        ) + request.dependencyHeaders.keys).distinct()
+        ) + (if (implementationViewable) listOf(request.module.sourcePath) else emptyList()) +
+            request.dependencyHeaders.keys).distinct()
         val files = try {
             AgentSessionJournal.captureWorkspaceFiles(
                 paths.map { AgentWorkspacePath("project", it) }, listOf(AgentWorkspaceRoot("project", root)),
@@ -150,7 +153,8 @@ class BoundedLlmModuleReconstructor(
         } catch (failure: Exception) {
             throw AgentSessionRecoveryException("could not capture the bounded reconstruction session inventory", failure)
         }
-        val workflowSha256 = sha256(("module-reconstruction-session-v1\n" + request.model.inputSha256 + "\n" +
+        // v2 isolates journals created before declared-role inventory enforcement.
+        val workflowSha256 = sha256(("module-reconstruction-session-v2\n" + request.model.inputSha256 + "\n" +
             request.profile.sha256 + "\n" + fingerprint).toByteArray())
         return AgentSessionContinuation(
             directory = root.parent.resolve(".decomp-agent-sessions")
@@ -186,19 +190,43 @@ class BoundedLlmModuleReconstructor(
 
     override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule {
         val target = request.module.sourcePath
-        val implementation = request.profile.layout.declaration("module-implementation")
+        val layout = request.profile.layout
+        val implementation = layout.declaration("module-implementation")
         require(target == implementation.materialize(mapOf("module" to request.module.id)) &&
             ProjectFileRole.MODULE_IMPLEMENTATION in implementation.roles &&
             ProjectFileRole.EDITABLE in implementation.roles
         ) { "planned module target must match the profile-owned editable implementation" }
+        val sharedInterface = layout.declaration("shared-interface")
+        val sharedInterfacePath = sharedInterface.materialize()
+        requireViewableTextInterface(sharedInterface, ProjectFileRole.PUBLIC_INTERFACE)
+        val moduleInterface = layout.declaration("module-interface")
+        val moduleInterfacePath = moduleInterface.materialize(mapOf("module" to request.module.id))
+        require(request.module.headerPath == moduleInterfacePath) {
+            "planned module header must match the profile-declared module interface"
+        }
+        requireViewableTextInterface(moduleInterface, ProjectFileRole.PUBLIC_INTERFACE)
+        val privateInterface = layout.declaration("module-private-interface")
+        val privateInterfacePath = privateInterface.materialize(mapOf("module" to request.module.id))
+        requireViewableTextInterface(privateInterface, ProjectFileRole.PRIVATE_INTERFACE)
+        request.dependencyHeaders.keys.forEach { path ->
+            val declaration = layout.declarationForPath(path)
+            require(declaration.id == "module-interface") {
+                "module reconstruction dependency is not a declared module interface: $path"
+            }
+            requireViewableTextInterface(declaration, ProjectFileRole.PUBLIC_INTERFACE)
+        }
+        val contextPaths = listOf(sharedInterfacePath, moduleInterfacePath, privateInterfacePath) +
+            request.dependencyHeaders.keys
+        require(contextPaths.distinct().size == contextPaths.size && target !in contextPaths) {
+            "module reconstruction context paths must be distinct from each other and the editable target"
+        }
         val prompt = ReconstructionAdapters.resolve(request.profile).modulePrompt(request)
         val objective = prompt.objective
         val evidence = prompt.evidence
         val files = linkedMapOf(
-            request.profile.layout.declaration("shared-interface").materialize() to request.sharedHeader,
-            request.module.headerPath to request.moduleHeader,
-            request.profile.layout.declaration("module-private-interface")
-                .materialize(mapOf("module" to request.module.id)) to request.privateHeader,
+            sharedInterfacePath to request.sharedHeader,
+            moduleInterfacePath to request.moduleHeader,
+            privateInterfacePath to request.privateHeader,
         )
             .apply { putAll(request.dependencyHeaders) }
         val observed = request.observedBehavior ?: "<not yet available; report this limitation>"
@@ -227,6 +255,8 @@ class BoundedLlmModuleReconstructor(
         val targetPath = AgentWorkspacePath(root.id, target)
         val sourcePath = targetPath.resolve(listOf(root))
         val before = sourcePath.takeIf { it.exists() }?.readBytes()
+        val targetOperations = setOf(AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE) +
+            if (ProjectFileRole.VIEWABLE in implementation.roles) setOf(AgentOperation.READ_FILE) else emptySet()
         var invocationEvidence: ReconstructionAgentExecutionEvidence? = null
         try {
             val agentRequest = AgentExecutionRequest(
@@ -239,7 +269,7 @@ class BoundedLlmModuleReconstructor(
                 accessPolicy = AgentAccessPolicy(
                     readRules + AgentPathRule(
                         targetPath,
-                        setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE),
+                        targetOperations,
                     ),
                 ),
                 sessionContinuation = sessionContinuation(request),
@@ -317,6 +347,18 @@ class BoundedLlmModuleReconstructor(
                 cause = failure,
             )
         }
+    }
+}
+
+private fun requireViewableTextInterface(declaration: ProjectFileDeclaration, expectedRole: ProjectFileRole) {
+    require(expectedRole in declaration.roles) {
+        "module reconstruction context ${declaration.id} lacks its declared $expectedRole role"
+    }
+    require(ProjectFileRole.VIEWABLE in declaration.roles) {
+        "module reconstruction context ${declaration.id} is not declared viewable"
+    }
+    require(declaration.contentKind == ProjectContentKind.UTF8_TEXT) {
+        "module reconstruction context ${declaration.id} is not declared UTF-8 text"
     }
 }
 
@@ -514,6 +556,14 @@ internal const val MAXIMUM_CHECKPOINT_EXECUTION_EVIDENCE_BYTES: Int = 64 * 1024 
 object SourceTreeGenerator {
     private const val INPUT_FINGERPRINT_PROVIDER = "module-reconstruction-input-v2"
 
+    private data class ModuleGenerationBudgetObservation(
+        val moduleId: String,
+        val outcome: String,
+        val sourceBytes: Long,
+        val promptCharacters: Int?,
+        val promptBudgetCharacters: Int?,
+    )
+
     fun generate(
         model: RecoveredProgramModel,
         projectDir: Path,
@@ -552,11 +602,14 @@ object SourceTreeGenerator {
     ): SourceTreeManifest {
         hostSafetyLimits.requireAllows(profile.budgets)
         val adapter = ReconstructionAdapters.resolve(profile)
+        requireWorkflowOwnedPathsAreReserved(profile)
         val selectedReconstructor = reconstructor ?: adapter.defaultReconstructor()
         val compilationPolicy = adapter.compilation
         val selectedPlanner = planner?.withProfileBounds(profile) ?: DeterministicModulePlanner.forProfile(profile)
-        val plan = selectedPlanner.plan(model, overrides)
+        val planning = selectedPlanner.planWithComplexity(model, overrides)
+        val plan = planning.plan
         val rendering = adapter.rendering(model, plan)
+        requireProjectedArchiveEntryBudget(profile, plan.modules.size, rendering.entrypoint() != null)
         val typesHeader = rendering.sharedInterface()
         val typesHeaderPath = profile.layout.declaration("shared-interface").materialize()
         val typesHeaderFile = projectDir.resolve(typesHeaderPath)
@@ -607,6 +660,8 @@ object SourceTreeGenerator {
         }
         val unresolvedImplementations = sortedSetOf<String>()
         val moduleRevisionEvidence = mutableMapOf<String, String>()
+        val generationBudgetObservations = mutableListOf<ModuleGenerationBudgetObservation>()
+        var generatedSourceBytes = 0L
 
         moduleDependencyOrder(dependenciesByModule).map(moduleById::getValue).forEachIndexed { index, module ->
             val dependencies = dependenciesByModule.getValue(module.id)
@@ -654,8 +709,12 @@ object SourceTreeGenerator {
                 schemaVersion == 6 && inputBinarySha256 == model.inputSha256 &&
                     modelSchemaVersion == model.schemaVersion && profileSha256 == profile.sha256 &&
                     accepted && issues.isEmpty() &&
-                    (!moduleClaimsAgentExecution(generator, reconstructorIdentity) ||
-                        modulePromptBudgetIsValid(promptCharacters?.toLong(), promptBudgetCharacters?.toLong(), profile)) &&
+                    modulePromptAttributionIsValid(
+                        moduleClaimsAgentExecution(generator, reconstructorIdentity),
+                        promptCharacters?.toLong(),
+                        promptBudgetCharacters?.toLong(),
+                        profile,
+                    ) &&
                     entityIds.size == entityIds.toSet().size &&
                     entityIds.toSet() == (module.functionIds + module.globalIds).toSet() &&
                     compilation?.passed == true &&
@@ -828,8 +887,23 @@ object SourceTreeGenerator {
                 checkpoint.executionRequestSha256, checkpoint.executionEvidenceSha256,
             )
             val normalizedSource = sourcePath.readText()
+            val sourceBytes = normalizedSource.toByteArray().size.toLong()
+            require(sourceBytes <= profile.budgets.archiveMaximumFileBytes) {
+                "generated source for module ${module.id} exceeds archive file byte budget"
+            }
+            generatedSourceBytes = Math.addExact(generatedSourceBytes, sourceBytes)
+            require(generatedSourceBytes <= profile.budgets.archiveMaximumTotalBytes) {
+                "generated module sources exceed aggregate archive byte budget"
+            }
             val moduleEntityIds = module.functionIds + module.globalIds
             if (!checkpoint.accepted) unresolvedImplementations += moduleEntityIds
+            generationBudgetObservations += ModuleGenerationBudgetObservation(
+                moduleId = module.id,
+                outcome = if (checkpoint.accepted) "accepted" else "unresolved",
+                sourceBytes = normalizedSource.toByteArray().size.toLong(),
+                promptCharacters = checkpoint.promptCharacters,
+                promptBudgetCharacters = checkpoint.promptBudgetCharacters,
+            )
             progress.phase(
                 if (checkpoint.accepted) AgentWorkflowPhase.ACCEPTED else AgentWorkflowPhase.UNRESOLVED,
                 module.id,
@@ -895,8 +969,40 @@ object SourceTreeGenerator {
         }.map { it.path }.sorted()
         val makefile = rendering.buildDefinition(sourcePaths, profile)
         val makefilePath = profile.layout.declaration("build-definition").materialize()
+        // A rerun with a different built-in profile must not leave the previous
+        // profile's generated build definition beside the new one. Both built-in
+        // generated-C profiles declare their definition under this id.
+        for (candidate in ReconstructionProfiles.builtIn.map {
+            it.layout.declaration("build-definition").materialize()
+        }.toSet()) {
+            if (candidate != makefilePath) projectDir.resolve(candidate).deleteIfExists()
+        }
         val makefileFile = projectDir.resolve(makefilePath)
         makefileFile.parent.createDirectories()
+        // Only remove an inactive built-in definition when the previous manifest
+        // proves that the generator owned it. An arbitrary file in a reused
+        // project directory (for example, a user's Makefile) is not ours to delete.
+        val previouslyGeneratedBuildDefinitions = runCatching {
+            val manifest = projectDir.resolve("source_tree_manifest.json")
+            if (!manifest.exists()) emptySet() else {
+                Json.parseToJsonElement(manifest.readText()).jsonObject
+                    .getValue("files").jsonArray
+                    .mapNotNull { file ->
+                        val item = file.jsonObject
+                        val roles = item.getValue("roles").jsonArray.map { it.jsonPrimitive.content }
+                        item.getValue("path").jsonPrimitive.content.takeIf {
+                            ProjectFileRole.BUILD_DEFINITION.wireName in roles
+                        }
+                    }.toSet()
+            }
+        }.getOrDefault(emptySet())
+        for (candidate in ReconstructionProfiles.builtIn) {
+            val stalePath = candidate.layout.declaration("build-definition").materialize()
+            if (stalePath != makefilePath && stalePath in previouslyGeneratedBuildDefinitions &&
+                !runCatching { profile.layout.declarationForPath(stalePath) }.isSuccess) {
+                projectDir.resolve(stalePath).deleteIfExists()
+            }
+        }
         makefileFile.writeText(makefile)
         generated += evidence(profile, makefilePath, makefile, "planner", emptyList())
 
@@ -909,7 +1015,17 @@ object SourceTreeGenerator {
         projectDir.resolve(modulePlanPath).also { it.parent.createDirectories() }.writeText(plan.toJson())
         generated += evidence(profile, programModelPath, model.toJson(), "analysis", model.functions.map { it.id } + model.globals.map { it.id })
         generated += evidence(profile, modulePlanPath, plan.toJson(), "planner", model.functions.map { it.id } + model.globals.map { it.id })
-        val confidence = renderConfidence(model, plan, unresolvedImplementations, moduleRevisionEvidence)
+        val confidence = renderConfidence(
+            model,
+            plan,
+            unresolvedImplementations,
+            moduleRevisionEvidence,
+            profile,
+            hostSafetyLimits,
+            selectedPlanner.budgetLimits,
+            planning.complexity,
+            generationBudgetObservations,
+        )
         projectDir.resolve(confidencePath).also { it.parent.createDirectories() }.writeText(confidence)
         generated += evidence(profile, confidencePath, confidence, "evidence", model.functions.map { it.id } + model.globals.map { it.id })
         val toolchain = adapter.toolchainEvidence(profile)
@@ -930,6 +1046,43 @@ object SourceTreeGenerator {
         )
         projectDir.resolve("source_tree_manifest.json").writeText(manifest.toJson())
         return manifest
+    }
+
+    private fun requireWorkflowOwnedPathsAreReserved(profile: ReconstructionProfile) {
+        val buildArtifact = ReconstructionAdapters.resolve(profile).behaviorBuild.layout(profile).artifactPath
+        requireNormalizedProjectPath(buildArtifact, "profile build artifact")
+        val workflowOwned = listOf(
+            "BUILDING.md",
+            "source_tree_manifest.json",
+            "reports/build.log",
+            "reports/build_contract.json",
+            "reports/archival_audit.json",
+            buildArtifact,
+        )
+        profile.layout.declarations.forEach { declaration ->
+            workflowOwned.forEach { path ->
+                require(!declaration.canMaterializeUnder(path) && !declaration.canMaterializeAbove(path)) {
+                    "profile declaration ${declaration.id} collides with workflow-owned path $path"
+                }
+            }
+        }
+    }
+
+    private fun requireProjectedArchiveEntryBudget(
+        profile: ReconstructionProfile,
+        moduleCount: Int,
+        hasEntrypoint: Boolean,
+    ) {
+        // Each module writes a public header, private header, implementation,
+        // checkpoint, optional agent execution evidence, and (during the generated
+        // project build) an owner diagnostic. Reserve slots for the fixed project
+        // evidence files, build diagnostics, and manifest as well.
+        val fixedEntries = 8 + if (hasEntrypoint) 1 else 0
+        val projectedEntries = moduleCount.toLong() * 6L + fixedEntries
+        require(projectedEntries <= profile.budgets.archiveMaximumEntries.toLong()) {
+            "projected generated file count $projectedEntries exceeds archive entry budget " +
+                "${profile.budgets.archiveMaximumEntries}"
+        }
     }
 
     private fun evidence(
@@ -1296,7 +1449,8 @@ object SourceTreeGenerator {
         if (source.isBlank() && entityIds.isNotEmpty()) {
             issues += ModuleReconstructionIssue("empty-source", "module source is empty", entityIds)
         }
-        if (moduleClaimsAgentExecution(reconstructed.generator, reconstructorIdentity)) {
+        val claimsAgentExecution = moduleClaimsAgentExecution(reconstructed.generator, reconstructorIdentity)
+        if (claimsAgentExecution) {
             if (reconstructed.source != source) {
                 issues += ModuleReconstructionIssue(
                     "agent-source-normalization-changed-bytes",
@@ -1311,25 +1465,33 @@ object SourceTreeGenerator {
                     entityIds,
                 )
             }
-            val promptCharacters = reconstructed.promptCharacters
-            val promptBudget = reconstructed.promptBudgetCharacters
-            when {
-                promptCharacters == null || promptBudget == null -> issues += ModuleReconstructionIssue(
+        }
+        val promptCharacters = reconstructed.promptCharacters
+        val promptBudget = reconstructed.promptBudgetCharacters
+        if (claimsAgentExecution || promptCharacters != null || promptBudget != null) {
+            if (promptCharacters == null || promptBudget == null) {
+                issues += ModuleReconstructionIssue(
                     "prompt-budget-unattributed",
                     "agent result does not record prompt size and configured budget",
                     entityIds,
                 )
-                promptCharacters > promptBudget -> issues += ModuleReconstructionIssue(
-                    "context-budget-exceeded",
-                    "agent prompt used $promptCharacters characters with a $promptBudget character budget",
-                    entityIds,
-                )
-                !modulePromptBudgetIsValid(promptCharacters.toLong(), promptBudget.toLong(), profile) ->
+            } else {
+                // Each violation is retained independently so recorded evidence shows both
+                // a usage overrun and a budget the selected profile never authorized.
+                if (promptCharacters > promptBudget) {
+                    issues += ModuleReconstructionIssue(
+                        "context-budget-exceeded",
+                        "agent prompt used $promptCharacters characters with a $promptBudget character budget",
+                        entityIds,
+                    )
+                }
+                if (!modulePromptBudgetIsValid(promptCharacters.toLong(), promptBudget.toLong(), profile)) {
                     issues += ModuleReconstructionIssue(
                         "prompt-budget-invalid",
                         "agent prompt size or budget is outside the selected reconstruction profile",
                         entityIds,
                     )
+                }
             }
         }
         issues += adapter.assess(module, model, reconstructed.generator, source)
@@ -1393,6 +1555,11 @@ object SourceTreeGenerator {
         plan: ModulePlan,
         unresolvedImplementations: Set<String>,
         moduleRevisionEvidence: Map<String, String>,
+        profile: ReconstructionProfile,
+        hostSafetyLimits: ReconstructionHostSafetyLimits,
+        plannerLimits: PlannerBudgetLimits,
+        plannerComplexity: PlannerComplexity,
+        generationBudgetObservations: List<ModuleGenerationBudgetObservation>,
     ): String {
         fun score(status: RecoveryStatus) = when (status) {
             RecoveryStatus.RECOVERED -> 1.0
@@ -1437,6 +1604,60 @@ object SourceTreeGenerator {
             append("\n  ],\n  \"unresolvedRecoveryEntityIds\": ").append(idsJson(unresolvedRecovery))
             append(",\n  \"unresolvedImplementationIds\": ").append(idsJson(unresolvedImplementations))
             append(",\n  \"unresolvedEntityIds\": ").append(idsJson(unresolvedRecovery + unresolvedImplementations))
+            append(",\n  \"semanticPlanningBudgetEvidence\": {")
+            append("\n    \"schemaVersion\":1,")
+            append("\n    \"selectedProfile\":{")
+            append("\"id\":\"").append(profile.id.jsonEscape()).append("\",")
+            append("\"sha256\":\"").append(profile.sha256).append("\",")
+            append("\"descriptor\":").append(profile.canonicalJson()).append("},")
+            append("\n    \"hostSafetyLimits\":").append(hostSafetyLimits.maximum.canonicalJson()).append(',')
+            append("\n    \"effectivePlannerLimits\":{")
+            append("\"maximumFunctionsPerModule\":").append(plannerLimits.maximumFunctionsPerModule).append(',')
+            append("\"maximumEntities\":").append(plannerLimits.maximumEntities).append(',')
+            append("\"maximumDependencyEdges\":").append(plannerLimits.maximumDependencyEdges).append(',')
+            append("\"maximumWorkUnits\":").append(plannerLimits.maximumWorkUnits).append("},")
+            append("\n    \"outcome\":{")
+            append("\"status\":\"planned\",")
+            append("\"plannedModules\":").append(plan.modules.size).append(',')
+            append("\"functionCount\":").append(plannerComplexity.functionCount).append(',')
+            append("\"globalCount\":").append(plannerComplexity.globalCount).append(',')
+            append("\"typeCount\":").append(plannerComplexity.typeCount).append(',')
+            append("\"dependencyEdges\":").append(model.functions.sumOf {
+                it.calls.size.toLong() + it.referencedGlobals.size.toLong()
+            }).append(',')
+            append("\"sparseWorkUnits\":").append(plannerComplexity.sparseWorkUnits).append("},")
+            append("\n    \"limitations\":[\"local planning evidence; no production execution authority\"]")
+            append("\n  }")
+            append(",\n  \"sourceGenerationBudgetEvidence\": {")
+            append("\n    \"schemaVersion\": 1,")
+            append("\n    \"selectedProfile\": {")
+            append("\n      \"id\":\"").append(profile.id.jsonEscape()).append("\",")
+            append("\n      \"sha256\":\"").append(profile.sha256).append("\",")
+            append("\n      \"descriptor\":").append(profile.canonicalJson())
+            append("\n    },")
+            append("\n    \"hostSafetyLimits\":{")
+            append("\n      \"budgets\":").append(hostSafetyLimits.maximum.canonicalJson())
+            append("\n    },")
+            append("\n    \"admission\":{\"profileWithinHost\":true},")
+            append("\n    \"outcome\":{")
+            append("\n      \"plannedModules\":").append(plan.modules.size).append(',')
+            append("\n      \"completedModules\":").append(generationBudgetObservations.size).append(',')
+            append("\n      \"acceptedModules\":").append(generationBudgetObservations.count { it.outcome == "accepted" }).append(',')
+            append("\n      \"unresolvedModules\":").append(generationBudgetObservations.count { it.outcome == "unresolved" })
+            append("\n    },")
+            append("\n    \"modules\":[")
+            append(generationBudgetObservations.sortedBy { it.moduleId }.joinToString(",") { observation ->
+                "\n      {\"moduleId\":\"${observation.moduleId.jsonEscape()}\",\"outcome\":\"${observation.outcome}\"," +
+                    "\"sourceBytes\":${observation.sourceBytes}," +
+                    "\"promptCharacters\":${observation.promptCharacters ?: "null"}," +
+                    "\"promptBudgetCharacters\":${observation.promptBudgetCharacters ?: "null"}}"
+            })
+            append("\n    ],")
+            append("\n    \"limitations\":[")
+            append("\"profile and host ceilings are local admission commitments; this record does not authenticate production execution\",")
+            append("\"prompt usage is retained only when the selected reconstructor reports it; null is not a measured prompt\",")
+            append("\"module outcomes and source byte counts are local generation observations, not behavioral equivalence evidence\"")
+            append("]\n  }")
             append("\n}\n")
         }
     }
@@ -1523,7 +1744,11 @@ object SourceTreeManifestReader {
     fun read(projectDir: Path, expectedProfile: ReconstructionProfile): SourceTreeManifest {
         val path = projectDir.resolve("source_tree_manifest.json")
         require(path.exists()) { "project is missing source_tree_manifest.json" }
-        return parse(path.readText(), expectedProfile)
+        val ceiling = minOf(expectedProfile.budgets.archiveMaximumFileBytes, Int.MAX_VALUE.toLong() - 1L)
+        require(ceiling >= 1L) { "build output ceiling is invalid" }
+        val snapshot = decompengine.repair.readStableRegularFile(projectDir, "source_tree_manifest.json", ceiling)
+        require(snapshot.bytes.isNotEmpty()) { "source tree manifest must not be empty" }
+        return parse(snapshot.bytes.toString(Charsets.UTF_8), expectedProfile)
     }
 
     fun parse(text: String, expectedProfile: ReconstructionProfile): SourceTreeManifest {

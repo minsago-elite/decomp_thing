@@ -1,0 +1,132 @@
+{
+  "issue": 518,
+  "status": "focused packaged qualification passed; broader parent qualification remains open",
+  "sourceCommitBeforeEvidence": "64777a54a200f516462341b871f7cf571f5caa4c",
+  "productionImplementationCommit": "4c2729844bbe3ee8108b06032acd6f2b2f5c73de",
+  "sourceRelationship": "The distribution was built after the production implementation commit; later source commits changed only browser drivers, installer helper/tests and documentation. All three final browser runs used the source driver at sourceCommitBeforeEvidence.",
+  "distribution": {
+    "name": "llm_bin_patch-0.1.0.zip",
+    "sha256": "b5e512f0ec014a220e70e3b0b9da94dac1dcd24da00171422ad4cd15b817008b",
+    "applicationJarSha256": "cf7545124f0037a64098217852337f97a466d7e073341a3f0e518aa54a5b0254",
+    "uiBuildId": "cd2be2e2d434f644f16cfd3faff5320b6886b925bfcbf936c68ab0b8fdbdd24f"
+  },
+  "tools": {
+    "browser": "Chrome for Testing 149.0.7827.55",
+    "browserSha256": "2d18db9d8608b052b6a552ee00ec1e830f93692e928b65ecc67d693bd33fe801",
+    "driverNode": "24.20.0 (pinned by .node-version)",
+    "frontendDependencySetup": "Bun 1.3.1: bun install --no-save --ignore-scripts; no bun.lock committed",
+    "java": "Temurin 21.0.12.1+1",
+    "python": "3.14.7"
+  },
+  "verification": {
+    "focusedJvmTests": { "tests": 29, "failures": 0, "errors": 0, "skipped": 0 },
+    "installerHelperTests": { "tests": 4, "failures": 0 },
+    "syntax": "Pinned Node --check passed on both packaged browser scripts; git diff --check passed",
+    "frontend": "Bun API-contract check, TypeScript noEmit, Vite build, bundle report, and asset manifest write/verify passed",
+    "package": "Gradle compileKotlin/compileTestKotlin, distZip and verifyPackagedWeb passed"
+  },
+  "browserRunContract": {
+    "invocation": "pinned Node scripts/check-packaged-web-browser.mjs --mode <public|history|legacy> --archive <distribution> --chrome <pinned Chrome> --java-home <JDK 21> --work-parent <isolated /tmp build> --no-sandbox",
+    "productionFlags": "No development frontend origin or CSP exception; --no-sandbox applies only to test Chrome",
+    "positiveControlEachRun": {
+      "blockedInlineScript": true,
+      "blockedExternalImage": true,
+      "violationEvents": 2,
+      "securityLogEntries": 2,
+      "cspBlockedRequests": 1,
+      "auditIssues": 2,
+      "excludedFromApplicationViolationTotal": true
+    },
+    "perDocumentGate": "Every observed product Document request, including the 308 redirect hop, must correlate to a response with CSP, no unsafe-inline/unsafe-eval, no orphan or unresolved response, and zero product violations."
+  },
+  "runs": [
+    {
+      "mode": "public",
+      "status": "passed",
+      "localReport": "build/packaged-browser-hu24DG/report.json",
+      "reportSha256": "72ddcf4a0a4c68bcb316a2296dcb196972f38d5123a0cebcc3a86462fd31bf5f",
+      "inspectedApplicationTargets": 4,
+      "documentRequests": 9,
+      "documentResponses": 9,
+      "redirectResponses": 1,
+      "unresolvedRequests": 0,
+      "orphanResponses": 0,
+      "missingPolicies": 0,
+      "unsafePolicies": 0,
+      "productViolations": 0,
+      "routes": [
+        { "path": "/nested/", "status": 200, "count": 3 },
+        { "path": "/nested/upload", "status": 200, "count": 1 },
+        { "path": "/nested/not-a-packaged-route", "status": 404, "count": 1 },
+        { "path": "/nested/api/v1/bootstrap", "status": 401, "count": 1 },
+        { "path": "/nested/runtime/", "status": 308, "count": 1, "responseSource": "requestWillBeSent.redirectResponse" },
+        { "path": "/nested/runtime", "status": 200, "count": 2 }
+      ],
+      "behavior": "SPA home, upload direct reload, lazy Runtime, client NotFound, inert 404/JSON navigation, 308 canonical redirect, chunk failure and explicit recovery",
+      "readOnlyInstallationAndShutdownCleanup": true
+    },
+    {
+      "mode": "history",
+      "status": "passed",
+      "localReport": "build/packaged-browser-Ab8qTi/report.json",
+      "reportSha256": "d3b045eb6d00d3ace1c876239979c21ae8a2aee32a2349784f2b76b526c5b46c",
+      "inspectedApplicationTargets": 10,
+      "documentRequests": 25,
+      "documentResponses": 25,
+      "redirectResponses": 1,
+      "unresolvedRequests": 0,
+      "orphanResponses": 0,
+      "missingPolicies": 0,
+      "unsafePolicies": 0,
+      "productViolations": 0,
+      "routes": [
+        { "path": "/nested/", "status": 200, "count": 6 },
+        { "path": "/nested/upload", "status": 200, "count": 1 },
+        { "path": "/nested/not-a-packaged-route", "status": 404, "count": 1 },
+        { "path": "/nested/api/v1/bootstrap", "status": 401, "count": 1 },
+        { "path": "/nested/runtime/", "status": 308, "count": 1, "responseSource": "requestWillBeSent.redirectResponse" },
+        { "path": "/nested/runtime", "status": 200, "count": 5 },
+        { "path": "/nested/jobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "status": 200, "count": 2 },
+        { "path": "/nested/jobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/runs/run_missing", "status": 200, "count": 2 },
+        { "path": "/nested/jobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/runs", "status": 200, "count": 1 },
+        { "path": "/nested/jobs/dddddddddddddddddddddddddddddddd/runs", "status": 200, "count": 2 },
+        { "path": "/nested/jobs/dddddddddddddddddddddddddddddddd/runs/run_fixture_3", "status": 200, "count": 3 }
+      ],
+      "behavior": "Public journey plus authenticated session, populated job/attempt/history direct loads and reloads, lazy Job/Run/RunHistory chunks, activity SSE/polling, report presentation/download and logout revocation",
+      "readOnlyInstallationAndShutdownCleanup": true
+    },
+    {
+      "mode": "legacy",
+      "status": "passed",
+      "localReport": "build/packaged-browser-Jxqeeh/report.json",
+      "reportSha256": "35e996df6fc730eb92d071e9595412cba3dfe1263313ccbe3f7b319a4830dc32",
+      "inspectedApplicationTargets": 3,
+      "documentRequests": 15,
+      "documentResponses": 15,
+      "redirectResponses": 0,
+      "unresolvedRequests": 0,
+      "orphanResponses": 0,
+      "missingPolicies": 0,
+      "unsafePolicies": 0,
+      "productViolations": 0,
+      "routes": [
+        { "path": "/jobs/cccccccccccccccccccccccccccccccc", "status": 401, "count": 1 },
+        { "path": "/login", "status": 200, "count": 4 },
+        { "path": "/", "status": 200, "count": 2 },
+        { "path": "/jobs/cccccccccccccccccccccccccccccccc", "status": 200, "count": 4 },
+        { "path": "/jobs/cccccccccccccccccccccccccccccccc/source/src/modules/fixture.c", "status": 200, "count": 2 },
+        { "path": "/jobs/05c73316dc604aff8103466425821148", "status": 200, "count": 2 }
+      ],
+      "behavior": "Legacy login/dashboard/job, polling, escaped plain-code generated source direct load and reload with inert script-shaped text, artifact fetch, authenticated upload, logout and peer invalidation",
+      "readOnlyInstallationAndShutdownCleanup": true
+    }
+  ],
+  "limitations": [
+    "The raw browser reports remain in ignored local build/ directories and are SHA-256-bound here; this committed manifest is the redacted portable summary, not a claim that the raw reports are retained in Git.",
+    "Upload, scale, development proxy and upgrade browser modes were not run with this final driver; history covers the current SPA route templates but does not replace those modes' separate feature qualification.",
+    "The current SPA has no source route or syntax-highlighter dependency; the browser source assertion covers escaped plain-code legacy rendering. A future SPA source/highlighter implementation requires its own CSP browser run.",
+    "Successful JSON, SSE, artifact and report download were exercised as fetch/stream/download, not as every possible Document navigation; focused JVM tests cover their security headers.",
+    "The bundle emits no worker or downloadable font, so the local worker/font policy bounds were not exercised by runtime browser code. No real workflow execution or full release/CI qualification was performed.",
+    "Chrome used test-only --no-sandbox; production server had no development CSP exception."
+  ]
+}

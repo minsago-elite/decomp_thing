@@ -23,6 +23,7 @@ class BundledGhidraCheckpointTest {
         assertEquals("after bundled Ghidra verification", stages.last())
         assertTrue(stages.count { it == "after reading bundled Ghidra file: $libraryPath" } >= 3)
         assertTrue("after visiting bundled Ghidra file inventory path" in stages)
+        assertTrue("after reading bundled Ghidra checksum manifest bytes" in stages)
         assertTrue("after reading bundled Ghidra application properties bytes" in stages)
 
         val invocation = GhidraInvocation(
@@ -63,6 +64,24 @@ class BundledGhidraCheckpointTest {
         assertEquals(1, stages.count { it == stopStage })
         assertFalse("before opening bundled Ghidra file inventory" in stages)
         assertEquals(libraryContent, bundle.root.resolve(libraryPath).readText())
+        bundle.verify()
+    }
+
+    @Test
+    fun `checksum manifest cancellation stops verification before records are trusted`() = withFixture { bundle ->
+        val cancellation = InterruptedException("caller cancelled checksum manifest read")
+        val stages = mutableListOf<String>()
+
+        val failure = assertFailsWith<InterruptedException> {
+            bundle.verify { stage ->
+                stages += stage
+                if (stage == "after reading bundled Ghidra checksum manifest bytes") throw cancellation
+            }
+        }
+
+        assertSame(cancellation, failure)
+        assertEquals("after reading bundled Ghidra checksum manifest bytes", stages.last())
+        assertFalse("before checking bundled Ghidra checksum record" in stages)
         bundle.verify()
     }
 

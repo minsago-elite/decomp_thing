@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "issue": 722,
+  "recordedAtUtc": "2026-09-08",
+  "sourceCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "status": "implementation-evidence-only",
+  "scope": "The checked cc1/lto1 planning inputs and downstream source-generation contracts are recorded; no complete engine source tree is claimed.",
+  "authenticatedInputs": {
+    "profile": [
+      "oracle/gcc/16.2.0/compiler-engines.json",
+      "e0ca60b7e856e9330e45fd58e61828313e8dd824413ee0df7ef76ee5d2b47bdc"
+    ],
+    "sourceLock": [
+      "oracle/gcc/16.2.0/source-lock.json",
+      "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc"
+    ],
+    "baseBuildRecord": [
+      "oracle/gcc/16.2.0/build-record.json",
+      "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
+    ],
+    "toolchainReproduction": [
+      "oracle/gcc/16.2.0/toolchain-reproduction.json",
+      "5c2c159d7287305159a220a1260f6ff6bffe9ec78bb1cbe2fb24f85b68a7d4de"
+    ],
+    "engines": ["cc1", "lto1"]
+  },
+  "authority": {
+    "planningService": "GccCompilerEnginePlanningService",
+    "assessment": {
+      "complete": false,
+      "releaseEligible": false,
+      "authority": "non-authoritative-caller-supplied-analyzer-v1"
+    },
+    "acp": "read-only consumer of later authenticated plans; ACP cannot create, validate, score, or certify GCC oracle truth"
+  },
+  "requiredForRelease": [
+    "An authenticated completed model and exact ownership plan for each engine.",
+    "Every required implementation accepted through configured ACP with bounded module/dependency context and complete invocation-bound protocol, capability, session, turn, event, change, policy, sandbox, and validation receipts.",
+    "Explicit unresolved implementations and interfaces retained in the source manifest; any required unresolved item blocks release.",
+    "Independent clean configure/build/link and reproducible archive evidence for both engines."
+  ],
+  "unavailableProductionGates": [
+    "Contained fresh cc1/lto1 export with authenticated process lifecycle and whole-operation resource evidence.",
+    "Production ACP provisioning and accepted source bytes for complete cc1 and lto1 trees.",
+    "Root-owned bundled-Ghidra deployment and dedicated scratch/output qualification; no GHIDRA_HOME or external analyzeHeadless fallback is admitted.",
+    "Clean full-engine build/archive and integrated reconstructed-toolchain qualification."
+  ],
+  "provenanceBoundary": "The profile, dependency digests, bundled-Ghidra contract, planner assessment, ACP receipts, source manifest, and build evidence remain separate authority-bearing records; local fixtures or caller-supplied assessments cannot substitute for missing production evidence."
+}

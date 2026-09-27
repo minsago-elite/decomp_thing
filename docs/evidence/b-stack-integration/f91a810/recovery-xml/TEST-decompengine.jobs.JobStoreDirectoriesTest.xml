@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.jobs.JobStoreDirectoriesTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-09-05T16:04:48.307Z" hostname="whatsername" time="2.174">
+  <properties/>
+  <testcase name="failed ancestor confirmation cannot publish and retry confirms existing directories again()" classname="decompengine.jobs.JobStoreDirectoriesTest" time="1.354"/>
+  <testcase name="production directory confirmation supports a fresh nested local store()" classname="decompengine.jobs.JobStoreDirectoriesTest" time="0.379"/>
+  <testcase name="directory confirmation failure preserves existing published jobs()" classname="decompengine.jobs.JobStoreDirectoriesTest" time="0.432"/>
+  <testcase name="nested store confirms canonical directories from leaf through filesystem root on every attempt()" classname="decompengine.jobs.JobStoreDirectoriesTest" time="0.004"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

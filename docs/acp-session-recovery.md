@@ -79,7 +79,7 @@ clean interruption, unknown-cleanup refusal, unexplained source/metadata changes
 exclusive ownership, cancellation and aggregate hashing limits.
 `AcpAgentHarnessTest` uses benign scripted peers in fresh contained subprocesses
 for advertised load, unavailable-load fallback and load failure. The stable-v1
-wire corpus contains 52 messages, including three new load request/empty-response/configured-response entries. `SourceTreeTest` proves
+wire corpus contains 58 messages, including the three load request/empty-response/configured-response entries and six later authentication advertisement/exchange entries. `SourceTreeTest` proves
 that a lost acknowledgement after durable acceptance is replayed without another
 reconstruction and that recovery failures preserve source without publishing an
 unresolved checkpoint.
@@ -97,3 +97,28 @@ matrix coverage, and independently qualified external-agent persistence remain
 outstanding. #62 wire/runtime checks and #67 external-agent qualification are
 prerequisites for broader claims; this local session journal does not establish
 #72 production release eligibility.
+
+Separate-JVM journal-owner tests now halt without running `finally` before a prompt, after a
+persisted streaming event, and after a plain-text edit. On restart, the journal lock can be acquired,
+but missing cleanup proof blocks workspace reconciliation and no completed turn or accepted revision
+is inferred. Repeated reopen attempts preserve source bytes and the recorded event cursor. These
+fixtures do not launch an ACP peer or prove cleanup of surviving descendants; automatic host-death
+recovery and exactly-once workflow acceptance still require their separate lifecycle qualification.
+
+The journal-only crash fixture also halts immediately before or after acceptance acknowledgement,
+following a synthetic completed cleanup-verified turn and an externally supplied text commitment.
+Restart supplies that same commitment to the public acknowledgement API. A missing acknowledgement
+is completed; replay after publication preserves journal bytes and modification time, retains one
+completed turn, and reconciles the unchanged text. This tests the journal's idempotent acknowledgement,
+not source checkpoint durability, compiler/behavior validation, or exactly-once workflow dispatch.
+The fixture releases the journal lock for the public API before these two halt points.
+
+Admission checks for `session.json.pending` and `quarantine.json.pending` while holding the journal
+lock, before loading or creating session state. Either remnant blocks opening with a fixed inspection
+message, even when an older session record is readable. Admission preserves the remnant, old journal
+and workspace bytes, and releases ownership on failure. It does not promote or delete a candidate,
+or automatically decide whether an interrupted write is safe to retry.
+
+Session and quarantine publication candidates request owner-only permissions in the file creation
+operation itself, matching the existing private lock-file creation contract. The previous post-open
+permission change is no longer needed; content writing still follows successful private creation.

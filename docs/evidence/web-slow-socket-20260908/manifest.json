@@ -1,0 +1,38 @@
+{
+  "status": "passed",
+  "sourceCommit": "fe1e445620e13d009ed7b5805f8287ea315d7521",
+  "verification": {
+    "tests": 251,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "command": "./gradlew -PfrontendNodeHome=/home/june/decomp_thing/build/tools/decomp-node-24.20.0/node-v24.20.0-linux-x64 test --tests 'decompengine.web.*' --tests 'decompengine.jobs.AgentProgressJournal*Test' --tests 'decompengine.jobs.WorkflowAttemptStoreTest'",
+  "qualification": {
+    "ownedUnreadLoopbackPeers": 1,
+    "ordinaryHttpWorkers": 1,
+    "leaseMs": 6000,
+    "parkedSocketChannelWriteObserved": true,
+    "healthAndAuthenticatedPollingWhileReserved": true,
+    "sourceReads": 3,
+    "capacityReleasedWhilePeerStillUnread": true,
+    "cleanupFailures": 0
+  },
+  "runtimeImplementationChanged": false,
+  "workflowExecutionStarted": false,
+  "notRepeated": [
+    "frontend tests",
+    "package build",
+    "packaged browser qualification"
+  ],
+  "limitations": [
+    "The parked-write assertion observes JDK 21 SocketChannelImpl stack frames.",
+    "One bounded owned peer does not establish production throughput or cross-platform behavior.",
+    "Timed terminal-run retention remains outstanding."
+  ],
+  "retainedXml": {
+    "file": "TEST-decompengine.web.WebEventStreamTest.xml",
+    "tests": 7,
+    "sha256": "634bb48a0506b7eb668daba1fe354557b5313893c2ea705dc2833dda468280d9"
+  }
+}

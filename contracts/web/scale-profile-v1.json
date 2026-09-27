@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "synthetic": true,
+  "epoch": "2026-01-01T00:00:00.000Z",
+  "jobs": 10000,
+  "functions": 100000,
+  "sourceFiles": 25000,
+  "largeSourceBytes": 8388608,
+  "longLineBytes": 262144,
+  "logBytes": 67108864,
+  "events": 120000,
+  "historyEntries": 10000,
+  "changedFiles": 2000,
+  "refs": 200
+}

@@ -130,7 +130,7 @@ class TraceGuidedRepairTest {
             createTempDirectory("trace-completed-no-change-").resolve("project"),
             reconstructedSource = "int decomp_engine_main(void) {\n",
         )
-        val source = project.resolve("src/reconstructed.c").readBytes()
+        val source = project.resolve("src/modules/reconstructed.c").readBytes()
         val rootHead = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { it.snapshot.headId }
         val harness = object : CapturedRepairAgentHarness {
             override fun execute(request: AgentExecutionRequest, onEvent: (AgentExecutionEvent) -> Unit) =
@@ -154,7 +154,7 @@ class TraceGuidedRepairTest {
             assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
             assertEquals("agent-no-change", graph.derivedRepairIterations().single().after?.kind)
         }
-        assertContentEquals(source, project.resolve("src/reconstructed.c").readBytes())
+        assertContentEquals(source, project.resolve("src/modules/reconstructed.c").readBytes())
     }
 
     @Test
@@ -230,7 +230,7 @@ class TraceGuidedRepairTest {
                 onEvent: (AgentExecutionEvent) -> Unit,
             ): AgentExecutionResult {
                 captured = request
-                val path = AgentWorkspacePath("project", "src/reconstructed.c")
+                val path = AgentWorkspacePath("project", "src/modules/reconstructed.c")
                 assertTrue(request.accessPolicy.allows(path, AgentOperation.WRITE_FILE))
                 assertTrue(!request.workspaceRoots.single().path.exists())
                 val before = initialFiles.getValue(path.relativePath)
@@ -262,7 +262,7 @@ class TraceGuidedRepairTest {
         assertEquals(listOf("hello_default"), iteration.retainedRegressionIds)
         assertEquals("compile-valid", iteration.after?.kind)
         assertEquals(RepairAttemptDisposition.PROVISIONAL, iteration.disposition)
-        assertEquals("int decomp_engine_main(void) {\n", projectDir.resolve("src/reconstructed.c").readText())
+        assertEquals("int decomp_engine_main(void) {\n", projectDir.resolve("src/modules/reconstructed.c").readText())
         assertEquals(goodHelloSource(), iteration.patches.single().replacementBytes.toString(Charsets.UTF_8))
         assertFalse(history.all().single().summary.contains("close missing brace"))
         assertEquals(RepairPublicationMode.TEST_ONLY_NON_RELEASE, history.all().single().publicationMode)
@@ -290,7 +290,7 @@ class TraceGuidedRepairTest {
                 invocation: RepairClientInvocation,
             ): RepairResponse {
                 observed = invocation
-                return RepairResponse("bounded repair", listOf(SourcePatch("src/reconstructed.c", goodHelloSource())))
+                return RepairResponse("bounded repair", listOf(SourcePatch("src/modules/reconstructed.c", goodHelloSource())))
             }
         }
 
@@ -322,7 +322,7 @@ class TraceGuidedRepairTest {
                   "choices": [
                     {
                       "message": {
-                        "content": "{\"summary\":\"fix \\\"quoted\\\" compile error\",\"patches\":[{\"relativePath\":\"src/reconstructed.c\",\"replacement\":\"int decomp_engine_main(void) {\\n    return 0;\\n}\\n\"}]}"
+                        "content": "{\"summary\":\"fix \\\"quoted\\\" compile error\",\"patches\":[{\"relativePath\":\"src/modules/reconstructed.c\",\"replacement\":\"int decomp_engine_main(void) {\\n    return 0;\\n}\\n\"}]}"
                       }
                     }
                   ]
@@ -346,13 +346,13 @@ class TraceGuidedRepairTest {
                 RepairRequest(
                     failureKind = "compile",
                     prompt = "compiler stderr",
-                    projectFiles = mapOf("src/reconstructed.c" to "broken"),
+                    projectFiles = mapOf("src/modules/reconstructed.c" to "broken"),
                     regressionInputs = listOf(ProcessInput(id = "default")),
                 ),
             )
 
             assertEquals("fix \"quoted\" compile error", response.summary)
-            assertEquals("src/reconstructed.c", response.patches.single().relativePath)
+            assertEquals("src/modules/reconstructed.c", response.patches.single().relativePath)
             assertTrue(response.patches.single().replacement.contains("return 0;"))
             val requestJson = Json.parseToJsonElement(requests.single()).jsonObject
             assertEquals("compatible/test", requestJson.getValue("model").jsonPrimitive.content)
@@ -653,7 +653,7 @@ class TraceGuidedRepairTest {
         val client = FakeRepairClient(
             RepairResponse(
                 summary = "match observed stdout",
-                patches = listOf(SourcePatch("src/reconstructed.c", goodHelloSource())),
+                patches = listOf(SourcePatch("src/modules/reconstructed.c", goodHelloSource())),
             ),
         )
         val inputs = listOf(ProcessInput(id = "hello_default"))
@@ -686,7 +686,7 @@ class TraceGuidedRepairTest {
         val original = compileC(tempDir, "original", helloProgramSource("hello, world"))
         val project = createProject(tempDir.resolve("project"), reconstructedSource = helloMainSource("wrong"))
         val initial = MakeProjectBuilder.build(project).projectDir.resolve("build/reconstructed")
-        val parent = project.resolve("src/reconstructed.c").readBytes()
+        val parent = project.resolve("src/modules/reconstructed.c").readBytes()
         val flooding = """
             #include <stdio.h>
             int decomp_engine_main(void) {
@@ -706,7 +706,7 @@ class TraceGuidedRepairTest {
                     FakeRepairClient(
                         RepairResponse(
                             "flood candidate",
-                            listOf(SourcePatch("src/reconstructed.c", flooding)),
+                            listOf(SourcePatch("src/modules/reconstructed.c", flooding)),
                         ),
                     ),
                 ),
@@ -721,7 +721,7 @@ class TraceGuidedRepairTest {
             )
         }
 
-        assertContentEquals(parent, project.resolve("src/reconstructed.c").readBytes())
+        assertContentEquals(parent, project.resolve("src/modules/reconstructed.c").readBytes())
         ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
             assertEquals(null, graph.snapshot.pendingAttemptId)
             assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
@@ -765,7 +765,7 @@ class TraceGuidedRepairTest {
         )
 
         generatedCRepairLoop(
-            RepairClientAgentHarness(FakeRepairClient(RepairResponse("fix", listOf(SourcePatch("src/reconstructed.c", goodHelloSource()))))),
+            RepairClientAgentHarness(FakeRepairClient(RepairResponse("fix", listOf(SourcePatch("src/modules/reconstructed.c", goodHelloSource()))))),
             history,
         )
             .repairCompileError(projectDir, collectCompileFailure(projectDir), inputs)
@@ -787,8 +787,8 @@ class TraceGuidedRepairTest {
             ProcessInput(id = "argument", args = listOf("kept")),
         )
         val client = QueueRepairClient(
-            RepairResponse("make it compile", listOf(SourcePatch("src/reconstructed.c", helloMainSource("wrong")))),
-            RepairResponse("match observed output", listOf(SourcePatch("src/reconstructed.c", goodHelloSource()))),
+            RepairResponse("make it compile", listOf(SourcePatch("src/modules/reconstructed.c", helloMainSource("wrong")))),
+            RepairResponse("match observed output", listOf(SourcePatch("src/modules/reconstructed.c", goodHelloSource()))),
         )
 
         val result = generatedCRepairLoop(RepairClientAgentHarness(client), RepairHistory(historyPath)).repairUntilValid(
@@ -827,7 +827,7 @@ class TraceGuidedRepairTest {
         val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = "int decomp_engine_main(void) {\n")
         val historyPath = projectDir.resolve("reports/repair_history.json")
         RepairHistory(historyPath).retain(listOf(ProcessInput("earlier", stdin = "old\n".toByteArray())))
-        val client = QueueRepairClient(RepairResponse("fix", listOf(SourcePatch("src/reconstructed.c", goodHelloSource()))))
+        val client = QueueRepairClient(RepairResponse("fix", listOf(SourcePatch("src/modules/reconstructed.c", goodHelloSource()))))
 
         generatedCRepairLoop(RepairClientAgentHarness(client), RepairHistory(historyPath)).repairCompileError(
             projectDir,
@@ -904,8 +904,8 @@ class TraceGuidedRepairTest {
         val original = compileC(tempDir, "original", helloProgramSource("hello, world"))
         val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = helloMainSource("wrong"))
         MakeProjectBuilder.build(projectDir)
-        val before = projectDir.resolve("src/reconstructed.c").readText()
-        val client = QueueRepairClient(RepairResponse("bad repair", listOf(SourcePatch("src/reconstructed.c", "int broken(\n"))))
+        val before = projectDir.resolve("src/modules/reconstructed.c").readText()
+        val client = QueueRepairClient(RepairResponse("bad repair", listOf(SourcePatch("src/modules/reconstructed.c", "int broken(\n"))))
 
         assertFailsWith<RepairExhaustedException> {
             generatedCRepairLoop(
@@ -919,7 +919,7 @@ class TraceGuidedRepairTest {
             )
         }
 
-        assertEquals(before, projectDir.resolve("src/reconstructed.c").readText())
+        assertEquals(before, projectDir.resolve("src/modules/reconstructed.c").readText())
         assertEquals(0, MakeProjectBuilder.build(projectDir).returnCode)
         assertTrue(projectDir.resolve("reports/source_revisions.jsonl").readText().contains("\"accepted\":false"))
     }
@@ -929,15 +929,15 @@ class TraceGuidedRepairTest {
         val tempDir = createTempDirectory("repair-pending-public-")
         val original = compileC(tempDir, "original", helloProgramSource("hello, world"))
         val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = "int decomp_engine_main(void) {\n")
-        val target = projectDir.resolve("src/reconstructed.c")
+        val target = projectDir.resolve("src/modules/reconstructed.c")
         val parentBytes = target.readBytes()
         val interrupted = ModuleRevisionGraph.open(projectDir, GeneratedCRepairIndexProfile)
-        val pending = interrupted.beginAttempt(listOf("src/reconstructed.c"))
-        interrupted.installCandidate(pending, mapOf("src/reconstructed.c" to goodHelloSource().toByteArray()))
+        val pending = interrupted.beginAttempt(listOf("src/modules/reconstructed.c"))
+        interrupted.installCandidate(pending, mapOf("src/modules/reconstructed.c" to goodHelloSource().toByteArray()))
         interrupted.close()
         assertTrue(!target.readBytes().contentEquals(parentBytes))
         val client = QueueRepairClient(
-            RepairResponse("repair recovered parent", listOf(SourcePatch("src/reconstructed.c", goodHelloSource()))),
+            RepairResponse("repair recovered parent", listOf(SourcePatch("src/modules/reconstructed.c", goodHelloSource()))),
         )
 
         val result = generatedCRepairLoop(
@@ -958,10 +958,10 @@ class TraceGuidedRepairTest {
         val original = compileC(tempDir, "original", helloProgramSource("hello, world"))
         val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = helloMainSource("wrong"))
         val initialBuild = MakeProjectBuilder.build(projectDir)
-        val target = projectDir.resolve("src/reconstructed.c")
+        val target = projectDir.resolve("src/modules/reconstructed.c")
         val before = target.readBytes()
         val client = FakeRepairClient(
-            RepairResponse("still wrong", listOf(SourcePatch("src/reconstructed.c", helloMainSource("also wrong")))),
+            RepairResponse("still wrong", listOf(SourcePatch("src/modules/reconstructed.c", helloMainSource("also wrong")))),
         )
 
         val iteration = generatedCRepairLoop(
@@ -988,15 +988,15 @@ class TraceGuidedRepairTest {
             "original",
             "#include <stdio.h>\nint main(int argc, char **argv) { (void)argv; puts(argc > 1 ? \"arg\" : \"zero\"); return 0; }\n",
         )
-        val beforeSource = "#include <stdio.h>\nint main(void) { puts(\"zero\"); return 0; }\n"
+        val beforeSource = "#include <stdio.h>\nint decomp_engine_main(int argc) { (void)argc; puts(\"zero\"); return 0; }\n"
         val projectDir = createSingleSourceProject(tempDir.resolve("project"), beforeSource)
-        val candidate = "#include <stdio.h>\nint main(void) { puts(\"arg\"); return 0; }\n"
-        val target = projectDir.resolve("src/program.c")
+        val candidate = "#include <stdio.h>\nint decomp_engine_main(int argc) { (void)argc; puts(\"arg\"); return 0; }\n"
+        val target = projectDir.resolve("src/modules/reconstructed.c")
 
         assertFailsWith<RepairExhaustedException> {
             generatedCRepairLoop(
                 RepairClientAgentHarness(
-                    FakeRepairClient(RepairResponse("swap the mismatch", listOf(SourcePatch("src/program.c", candidate)))),
+                    FakeRepairClient(RepairResponse("swap the mismatch", listOf(SourcePatch("src/modules/reconstructed.c", candidate)))),
                 ),
                 RepairHistory(projectDir.resolve("reports/repair_history.json")),
             ).repairUntilValid(
@@ -1016,7 +1016,7 @@ class TraceGuidedRepairTest {
     fun `strict staging refuses an ordinary writable-directory harness before execution`() {
         val tempDir = createTempDirectory("repair-staging-host-refused-")
         val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = "int decomp_engine_main(void) {\n")
-        val target = projectDir.resolve("src/reconstructed.c")
+        val target = projectDir.resolve("src/modules/reconstructed.c")
         val before = target.readBytes()
         var executed = false
         val hostHarness = AgentHarness { _, _ ->
@@ -1040,7 +1040,7 @@ class TraceGuidedRepairTest {
     fun `agent termination closes the pending graph and releases its root lock`() {
         val tempDir = createTempDirectory("repair-agent-termination-")
         val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = "int decomp_engine_main(void) {\n")
-        val target = projectDir.resolve("src/reconstructed.c")
+        val target = projectDir.resolve("src/modules/reconstructed.c")
         val before = target.readBytes()
         val budget = RepairResourceBudget(maximumGraphLockWaitMillis = 100)
         val harness = object : CapturedRepairAgentHarness {
@@ -1078,7 +1078,7 @@ class TraceGuidedRepairTest {
     fun `staging rejects oversized agent output before allocation beyond its budget`() {
         val tempDir = createTempDirectory("repair-staging-oversize-")
         val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = "int decomp_engine_main(void) {\n")
-        val target = projectDir.resolve("src/reconstructed.c")
+        val target = projectDir.resolve("src/modules/reconstructed.c")
         val before = target.readBytes()
         val budget = RepairResourceBudget(maximumPatchBytes = 1024)
         val harness = capturedReplacingHarness(ByteArray(1025) { 'x'.code.toByte() })
@@ -1306,14 +1306,14 @@ class TraceGuidedRepairTest {
         val tempDir = createTempDirectory("repair-compile-throw-")
         val parent = "int decomp_engine_main(void) {\n"
         val project = createProject(tempDir.resolve("project"), parent)
-        val target = project.resolve("src/reconstructed.c")
+        val target = project.resolve("src/modules/reconstructed.c")
         val candidate = goodHelloSource().toByteArray()
         val originalFailure = IllegalStateException("compile boundary failed after observing candidate")
         val validation = object : RepairValidationStrategy {
             override val assurance = RepairValidationAssurance.TEST_ONLY_HOST_PROCESS
             override fun requireAvailable() = Unit
             override fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure? {
-                assertContentEquals(candidate, projectDir.resolve("src/reconstructed.c").readBytes())
+                assertContentEquals(candidate, projectDir.resolve("src/modules/reconstructed.c").readBytes())
                 assertEquals(parent, target.readText())
                 throw originalFailure
             }
@@ -1340,7 +1340,7 @@ class TraceGuidedRepairTest {
         val observed = assertFailsWith<IllegalStateException> {
             loop.repairCompileError(
                 project,
-                CompileFailure(listOf("cc"), 1, "", "src/reconstructed.c: error"),
+                CompileFailure(listOf("cc"), 1, "", "src/modules/reconstructed.c: error"),
                 emptyList(),
             )
         }
@@ -1441,7 +1441,7 @@ class TraceGuidedRepairTest {
         val tempDir = createTempDirectory("repair-evidence-reconcile-")
         val original = compileC(tempDir, "original", helloProgramSource("hello, world"))
         val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = goodHelloSource())
-        val target = projectDir.resolve("src/reconstructed.c")
+        val target = projectDir.resolve("src/modules/reconstructed.c")
         val candidate = target.readText() + "\n/* behavior-preserving repair */\n"
         val graph = ModuleRevisionGraph.openForTesting(
             projectDir,
@@ -1452,7 +1452,7 @@ class TraceGuidedRepairTest {
         )
         val corpus = graph.retainRegressionInputs(listOf(ProcessInput("default")))
         val attempt = graph.beginAttempt(
-            listOf("src/reconstructed.c"),
+            listOf("src/modules/reconstructed.c"),
             RevisionRepairMetadata(
                 1,
                 "behavior",
@@ -1465,7 +1465,7 @@ class TraceGuidedRepairTest {
             ),
         )
         graph.annotateAttempt(attempt, "append a harmless comment")
-        graph.installCandidate(attempt, mapOf("src/reconstructed.c" to candidate.toByteArray()))
+        graph.installCandidate(attempt, mapOf("src/modules/reconstructed.c" to candidate.toByteArray()))
         assertFailsWith<SimulatedEvidenceCrash> {
             graph.accept(attempt, RepairEvidence("valid", "retained behavior matched", "reports/valid.json"))
         }
@@ -1616,7 +1616,7 @@ class TraceGuidedRepairTest {
             output: BoundedRepairOutput,
             onEvent: (AgentExecutionEvent) -> Unit,
         ): AgentExecutionResult {
-            val path = AgentWorkspacePath("project", "src/reconstructed.c")
+            val path = AgentWorkspacePath("project", "src/modules/reconstructed.c")
             val before = initialFiles.getValue(path.relativePath)
             output.replace(path.relativePath, replacement)
             return AgentExecutionResult(
@@ -1636,15 +1636,20 @@ class TraceGuidedRepairTest {
     }
 
     private fun createSingleSourceProject(projectDir: Path, source: String): Path {
-        projectDir.resolve("src").createDirectories()
-        projectDir.resolve("include").createDirectories()
+        projectDir.resolve("src/modules").createDirectories()
+        projectDir.resolve("include/modules").createDirectories()
         projectDir.resolve("reports").createDirectories()
         projectDir.resolve("Makefile").writeText(
-            "CC ?= cc\nCFLAGS ?= -std=c11 -Wall -Wextra -Werror\nTARGET ?= build/reconstructed\n" +
-                "all: ${'$'}(TARGET)\n${'$'}(TARGET): src/program.c\n\t@mkdir -p ${'$'}(dir ${'$'}@)\n" +
-                "\t${'$'}(CC) ${'$'}(CFLAGS) src/program.c -o ${'$'}@\n",
+            "CC ?= cc\nCFLAGS ?= -std=c11 -Wall -Wextra -Werror -Iinclude\nTARGET ?= build/reconstructed\n" +
+                "all: ${'$'}(TARGET)\n${'$'}(TARGET): src/main.c src/modules/reconstructed.c include/modules/reconstructed.h\n" +
+                "\t@mkdir -p ${'$'}(dir ${'$'}@)\n" +
+                "\t${'$'}(CC) ${'$'}(CFLAGS) src/main.c src/modules/reconstructed.c -o ${'$'}@\n",
         )
-        projectDir.resolve("src/program.c").writeText(source)
+        projectDir.resolve("include/modules/reconstructed.h").writeText("int decomp_engine_main(int argc);\n")
+        projectDir.resolve("src/main.c").writeText(
+            "#include \"modules/reconstructed.h\"\nint main(int argc, char **argv) { (void)argv; return decomp_engine_main(argc); }\n",
+        )
+        projectDir.resolve("src/modules/reconstructed.c").writeText(source)
         return projectDir
     }
 
@@ -1663,23 +1668,24 @@ class TraceGuidedRepairTest {
 
     private fun createProject(projectDir: java.nio.file.Path, reconstructedSource: String): java.nio.file.Path {
         projectDir.resolve("src").createDirectories()
-        projectDir.resolve("include").createDirectories()
+        projectDir.resolve("src/modules").createDirectories()
+        projectDir.resolve("include/modules").createDirectories()
         projectDir.resolve("reports").createDirectories()
         projectDir.resolve("Makefile").writeText(
             """
             CC ?= gcc
             CFLAGS ?= -std=c11 -Wall -Wextra -Werror -Iinclude
             TARGET ?= build/reconstructed
-            SOURCES := src/main.c src/reconstructed.c
+            SOURCES := src/main.c src/modules/reconstructed.c
 
             all: ${'$'}(TARGET)
 
-            ${'$'}(TARGET): ${'$'}(SOURCES) include/decomp_engine.h
+            ${'$'}(TARGET): ${'$'}(SOURCES) include/modules/reconstructed.h
             	@mkdir -p ${'$'}(dir ${'$'}@)
             	${'$'}(CC) ${'$'}(CFLAGS) ${'$'}(SOURCES) -o ${'$'}@
             """.trimIndent() + "\n",
         )
-        projectDir.resolve("include/decomp_engine.h").writeText(
+        projectDir.resolve("include/modules/reconstructed.h").writeText(
             """
             #ifndef DECOMP_ENGINE_H
             #define DECOMP_ENGINE_H
@@ -1691,14 +1697,14 @@ class TraceGuidedRepairTest {
         )
         projectDir.resolve("src/main.c").writeText(
             """
-            #include "decomp_engine.h"
+            #include "modules/reconstructed.h"
 
             int main(void) {
                 return decomp_engine_main();
             }
             """.trimIndent() + "\n",
         )
-        projectDir.resolve("src/reconstructed.c").writeText(reconstructedSource)
+        projectDir.resolve("src/modules/reconstructed.c").writeText(reconstructedSource)
         return projectDir
     }
 

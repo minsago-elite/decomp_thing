@@ -97,6 +97,15 @@ class ProjectFileDeclaration(
         return compileTemplateMatcher(components.take(rootDepth).joinToString("/")).matches(root)
     }
 
+    internal fun canMaterializeAbove(path: String): Boolean {
+        val normalizedPath = requireNormalizedProjectPath(path, "project path")
+        val pathComponents = normalizedPath.split('/')
+        val templateComponents = pathTemplate.split('/')
+        if (templateComponents.size > pathComponents.size) return false
+        return compileTemplateMatcher(templateComponents.joinToString("/"))
+            .matches(pathComponents.take(templateComponents.size).joinToString("/"))
+    }
+
     internal fun canonicalJson(): String = buildString {
         append('{')
         append("\"id\":").append(id.canonicalJsonString()).append(',')
@@ -113,6 +122,27 @@ class ProjectFileDeclaration(
     override fun hashCode(): Int = arrayOf(id, pathTemplate, roles, contentKind).contentHashCode()
 
     override fun toString(): String = "ProjectFileDeclaration(id=$id, pathTemplate=$pathTemplate, roles=$roles, contentKind=$contentKind)"
+}
+
+/** Recover an authenticated module key from its declared implementation path. */
+internal fun ProjectFileDeclaration.moduleIdForPath(path: String): String {
+    require(ProjectFileRole.MODULE_IMPLEMENTATION in roles) {
+        "module identity requires an implementation declaration"
+    }
+    val marker = "{module}"
+    require(pathTemplate.indexOf(marker) >= 0 && pathTemplate.indexOf(marker) == pathTemplate.lastIndexOf(marker)) {
+        "module implementation declaration must contain exactly one module placeholder"
+    }
+    val prefix = pathTemplate.substringBefore(marker)
+    val suffix = pathTemplate.substringAfter(marker)
+    require(path.startsWith(prefix) && path.endsWith(suffix) && path.length > prefix.length + suffix.length) {
+        "module implementation path does not match the reconstruction profile: $path"
+    }
+    val moduleId = path.substring(prefix.length, path.length - suffix.length)
+    require(materialize(mapOf("module" to moduleId)) == path) {
+        "module implementation path does not bind one safe module identity: $path"
+    }
+    return moduleId
 }
 
 /** Immutable, versioned mapping from logical file declarations to exact paths and roles. */

@@ -29,7 +29,9 @@ import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.jupiter.api.Assumptions.assumeTrue
+import org.junit.jupiter.api.Tag
 
+@Tag("ci-live")
 class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
     @Test
     fun `prepared fixture cleanup removes bounded nested JVM-like temporary residue`() {

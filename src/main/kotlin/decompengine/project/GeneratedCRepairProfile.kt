@@ -9,6 +9,7 @@ import decompengine.repair.RepairEntityEvidence
 import decompengine.repair.RepairFailureOwnership
 import decompengine.repair.RepairModuleEvidence
 import decompengine.repair.RepairResourceBudget
+import decompengine.repair.canonicalJson
 import decompengine.repair.CompileFailure
 import decompengine.repair.RepairValidationStrategy
 import decompengine.repair.RepairValidationAssurance
@@ -58,10 +59,11 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
     private val modelRelative = profile.layout.declaration("program-model-evidence").materialize()
 
     override fun profileId(): String = profile.id
-    private val configurationIdentity = sha256(
-        ("generated-c-repair-index-v3\n" + profile.sha256 + "\n").toByteArray(Charsets.UTF_8),
+    override fun configurationSha256(): String = configurationSha256(RepairResourceBudget())
+    override fun configurationSha256(budget: RepairResourceBudget): String = sha256(
+        ("generated-c-repair-index-v5\n" + profile.sha256 + "\n" + budget.canonicalJson() + "\n")
+            .toByteArray(Charsets.UTF_8),
     )
-    override fun configurationSha256(): String = configurationIdentity
 
     override fun authorizesRecoveryLayout(
         sourcePaths: List<String>,
@@ -580,9 +582,12 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
 
     private fun discoverSourcePaths(root: Path, budget: RepairResourceBudget): List<String> {
         val paths = TreeSet<String>()
+        val seenEntries = HashSet<String>()
+        val seenDirectories = HashSet<String>()
         var entries = 0
         var directories = 0
         fun countEntry(relative: String) {
+            if (!seenEntries.add(relative)) return
             entries = Math.addExact(entries, 1)
             if (entries > budget.maximumDiscoveryEntries) {
                 throw RepairBudgetExceededException(
@@ -594,6 +599,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
             require(depth <= budget.maximumDiscoveryDepth) {
                 "generated C discovery exceeds depth ${budget.maximumDiscoveryDepth} at $relative"
             }
+            if (!seenDirectories.add(relative)) return
             directories = Math.addExact(directories, 1)
             if (directories > budget.maximumDiscoveryDirectories) {
                 throw RepairBudgetExceededException(
@@ -664,30 +670,36 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
             }
         }
 
-        val buildComponents = buildDefinition.split('/')
-        require(buildComponents.size <= budget.maximumDiscoveryDepth) {
-            "generated C build definition exceeds discovery depth ${budget.maximumDiscoveryDepth}"
-        }
-        fun discoverBuildDefinition(directory: LinuxDescriptor, component: Int, rootMount: Long) {
-            val name = buildComponents[component]
-            val relative = buildComponents.take(component + 1).joinToString("/")
+        fun discoverDeclaredPath(
+            directory: LinuxDescriptor,
+            components: List<String>,
+            component: Int,
+            rootMount: Long,
+            sourceRoot: Boolean,
+        ) {
+            val name = components[component]
+            val relative = components.take(component + 1).joinToString("/")
             val entry = LinuxFilesystemSyscalls.openPathAtOrNull(directory.fd, name) ?: return
             entry.use {
                 countEntry(relative)
                 require(!entry.identity.isSymbolicLink && entry.identity.mountId == rootMount) {
-                    "generated C build definition rejects links or mounted entries: $relative"
+                    "generated C declared input rejects links or mounted entries: $relative"
                 }
-                if (component == buildComponents.lastIndex) {
-                    require(entry.identity.isRegularFile) { "generated C build definition is not a regular file" }
-                    paths += buildDefinition
+                if (component == components.lastIndex && !sourceRoot) {
+                    require(entry.identity.isRegularFile) { "generated C declared input is not a regular file: $relative" }
+                    paths += relative
                 } else {
-                    require(entry.identity.isDirectory) { "generated C build definition parent is not a directory: $relative" }
+                    require(entry.identity.isDirectory) { "generated C declared input parent is not a directory: $relative" }
                     countDirectory(relative, component + 1)
                     LinuxFilesystemSyscalls.openDirectoryAt(directory.fd, name).use { child ->
                         require(child.identity.key == entry.identity.key && child.identity.mountId == rootMount) {
-                            "generated C build definition parent changed identity: $relative"
+                            "generated C declared input directory changed identity: $relative"
                         }
-                        discoverBuildDefinition(child, component + 1, rootMount)
+                        if (component == components.lastIndex) {
+                            traverse(child, relative, component + 1, false, rootMount)
+                        } else {
+                            discoverDeclaredPath(child, components, component + 1, rootMount, sourceRoot)
+                        }
                     }
                 }
             }
@@ -695,24 +707,20 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
 
         openRepairRootDirectory(root).use { rootDescriptor ->
             val rootMount = rootDescriptor.identity.mountId
-            discoverBuildDefinition(rootDescriptor, 0, rootMount)
-            listOf("include", "src").forEach { directoryName ->
-                val authorized = LinuxFilesystemSyscalls.openPathAtOrNull(rootDescriptor.fd, directoryName)
-                    ?: return@forEach
-                authorized.use {
-                    countEntry(directoryName)
-                    require(authorized.identity.isDirectory && !authorized.identity.isSymbolicLink &&
-                        authorized.identity.mountId == rootMount) {
-                        "generated C source root is not a regular contained directory: $directoryName"
-                    }
-                    countDirectory(directoryName, 1)
-                    LinuxFilesystemSyscalls.openDirectoryAt(rootDescriptor.fd, directoryName).use { directory ->
-                        require(directory.identity.key == authorized.identity.key && directory.identity.mountId == rootMount) {
-                            "generated C source root changed identity: $directoryName"
-                        }
-                        traverse(directory, directoryName, 1, false, rootMount)
-                    }
+            val exactFiles = (sourcePolicy.rootFiles + buildDefinition).distinct().sorted()
+            exactFiles.forEach { relative ->
+                val components = relative.split('/')
+                require(components.size <= budget.maximumDiscoveryDepth) {
+                    "generated C build definition exceeds discovery depth ${budget.maximumDiscoveryDepth}"
                 }
+                discoverDeclaredPath(rootDescriptor, components, 0, rootMount, false)
+            }
+            sourcePolicy.sourceRoots.forEach { relative ->
+                val components = relative.split('/')
+                require(components.size <= budget.maximumDiscoveryDepth) {
+                    "generated C source root exceeds discovery depth ${budget.maximumDiscoveryDepth}"
+                }
+                discoverDeclaredPath(rootDescriptor, components, 0, rootMount, true)
             }
         }
         if (paths.size > budget.maximumSourceFiles) {
@@ -761,7 +769,7 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
                 val parent = Path.of(includingPath).parent ?: Path.of("")
                 add(parent.resolve(includeName).normalize().pathString.replace('\\', '/'))
             }
-            add("include/$includeName")
+            sourcePolicy.interfaceRoots.forEach { add("$it/$includeName") }
             add(includeName)
         }
         return candidates.firstOrNull { candidate ->
@@ -778,9 +786,11 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
 
     private val LEGACY_PLAN_SCHEMA_VERSION = 1
     private val PLAN_SCHEMA_VERSION = 2
-    private val BUILD_CONTRACT_SCHEMA_VERSION = 2
+    private val BUILD_CONTRACT_SCHEMA_VERSION = 3
     private val MAXIMUM_EVIDENCE_IDENTIFIER_CHARACTERS = 4_096
     private val MAXIMUM_EVIDENCE_TEXT_CHARACTERS = 16 * 1024 * 1024
+    private val MAKEFILE = "Makefile"
+    private val TYPES_HEADER = "include/decomp_types.h"
     private val SHARED_BUILD_OWNERS = setOf("link", "project")
     private val PLAN_ROOT_KEYS = setOf("schemaVersion", "modules", "dependencyCycles")
     private val LEGACY_PLAN_MODULE_KEYS = setOf(

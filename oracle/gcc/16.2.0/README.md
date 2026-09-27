@@ -289,6 +289,18 @@ reproduce the checked GCC evidence. The production adapter continues to require
 the historical digest and exact executor profile above, so that narrower live
 comparison skips rather than silently substituting the reproduction identity.
 
+### Issue #709 evidence boundary
+
+`preprocessing-reference-evidence.json` retains one exact fact from the checked
+`preprocess-file` case: its source hash, staged `tools/cc1` hash, exit status,
+and byte-exact `MOCK-PREPROCESSED` stream. The staged frontend is explicitly a
+deterministic companion program, so this record is driver-orchestration evidence
+with `status: incomplete`, not a real GCC semantic reference. Real frontend
+captures for include search, macro definition/undefinition, language selection,
+and stdin remain unavailable, as does authenticated candidate comparison.
+No Ghidra analysis is performed by this record; the bundled Ghidra and
+authenticated oracle boundaries remain unchanged.
+
 That skip is deliberately narrow: only a well-formed executor that retains all
 mandatory isolation capabilities but differs from an authenticated exact
 profile field returns status 78. A client/image/runtime lookup failure, daemon

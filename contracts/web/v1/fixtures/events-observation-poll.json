@@ -1,0 +1,42 @@
+{
+  "apiVersion": 1,
+  "kind": "events",
+  "requestId": "request_fixture_poll",
+  "data": {
+    "items": [
+      {
+        "apiVersion": 1,
+        "kind": "event",
+        "type": "workflow.observation",
+        "jobId": "1234567890abcdef1234567890abcdef",
+        "runId": "run_example_1",
+        "cursor": "cursor_example_2",
+        "sequence": "9007199254740993",
+        "occurredAt": "2026-09-05T00:00:00Z",
+        "originRequestId": null,
+        "agentInvocationId": null,
+        "agentSequence": "9007199254740992",
+        "payload": {
+          "authority": "observations",
+          "writerId": "writer_fixture_1",
+          "workflow": "repair",
+          "observationKind": "workflow_run_state",
+          "fields": {
+            "phase": "accepted",
+            "workflowRunIdSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "taskIdSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "turnId": "turn_fixture_1",
+            "requestSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "revisionIdSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "acceptedRevisionSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "inputTokens": "18446744073709551615",
+            "textOmitted": true
+          },
+          "omittedFieldCount": "2"
+        }
+      }
+    ],
+    "nextCursor": "cursor_example_2",
+    "hasMore": false
+  }
+}

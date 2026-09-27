@@ -768,9 +768,14 @@ internal object LinuxFilesystemSyscalls {
         named.use {
             val namedIdentity = identity(named.fd)
             val openedAfter = identity(opened.fd)
-            requireRegularIdentity(openedBefore, namedIdentity, "authenticate $description")
+            if (!namedIdentity.isRegularFile || namedIdentity.isDirectory || namedIdentity.isSymbolicLink) {
+                throw IOException("authenticate $description requires an authenticated regular file")
+            }
+            if (!sameDescriptorObject(openedBefore, namedIdentity)) {
+                throw LinuxNamedRegularFileReplacedException()
+            }
             if (!sameDescriptorObject(namedIdentity, openedAfter)) {
-                throw IOException("$description identity changed while it was authenticated")
+                throw LinuxNamedRegularFileReplacedException()
             }
         }
         opened
@@ -1113,6 +1118,9 @@ internal class LinuxSyscallException(
 ) : IOException("$operation failed with errno $errno")
 
 internal class LinuxResourceLimitException : IOException("filesystem read exceeds configured size limit")
+
+/** A regular name changed between two authenticated opens; callers may retry live observations. */
+internal class LinuxNamedRegularFileReplacedException : IOException("named regular file changed during authentication")
 
 private fun Map<String, Any>.getValue(name: String): Any =
     this[name] ?: throw IOException("filesystem provider did not expose unix:$name")

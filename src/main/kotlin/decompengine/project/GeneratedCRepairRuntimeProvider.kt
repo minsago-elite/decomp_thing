@@ -6,10 +6,11 @@ import decompengine.repair.RepairValidationStrategy
 
 /** Application adapter registration for generated C/Make projects. */
 class GeneratedCRepairRuntimeProvider : RepairRuntimeProfileProvider {
-    override fun profileId(): String = GeneratedCRepairIndexProfile.profileId()
+    private val registration = GeneratedCValidationProfile.registeredMake
+    override fun profileId(): String = registration.indexProfile.profileId()
 
-    override fun indexProfile(): RepairIndexProfile = GeneratedCRepairIndexProfile
+    override fun indexProfile(): RepairIndexProfile = registration.indexProfile
 
     override fun createValidationStrategy(): RepairValidationStrategy =
-        GeneratedCRepairValidationStrategy(LinuxGeneratedCRepairValidationBoundary.create())
+        GeneratedCRepairValidationStrategy(LinuxGeneratedCRepairValidationBoundary.create(registration))
 }

@@ -34,8 +34,10 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import org.junit.jupiter.api.Assumptions.assumeTrue
+import org.junit.jupiter.api.Tag
 import org.opentest4j.TestAbortedException
 
+@Tag("ci-live")
 class GccBundledContainedExecutionTest {
     @Test
     fun `authored ELF completes bundled direct API export in retained scope without benchmark or release authority`() {
@@ -185,6 +187,12 @@ class GccBundledContainedExecutionTest {
                 for (field in listOf("unitAbsent", "cgroupAbsent", "processesAbsent")) assertTrue(stoppedCommand.getValue(field).jsonPrimitive.boolean)
                 val originalJournal = journal.resolve(".gcc-bundled-operation-${intent.operationId}")
                 val originalRecords = names(originalJournal).associateWith { boundedRead(originalJournal.resolve(it), MAXIMUM_METADATA_BYTES) }
+                val authorization = OracleJson.parseCanonical(originalRecords.getValue("interrupt-authorized.json"))
+                    .jsonObject.getValue("authorization").jsonObject
+                val stoppedOutcome = stoppedCommand.getValue("outcome").jsonObject
+                assertEquals(authorization, stoppedCommand.getValue("interruptionAuthorization"))
+                assertEquals(JsonPrimitive("INTERRUPTED"), stoppedOutcome.getValue("status"))
+                assertEquals(authorization.getValue("keeperPid"), stoppedOutcome.getValue("keeperPid"))
                 owner.requireInterruptedStateCurrent()
                 assertFailsWith<IllegalStateException> { owner.plan() }
                 val result = owner.resume()
@@ -435,8 +443,10 @@ class GccBundledContainedExecutionTest {
                 "bytes" to JsonPrimitive(entry.bytes), "sha256" to JsonPrimitive(entry.sha256),
             )) }),
         ))))
-        val exporter = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java")).use { it.readNBytes(4 * 1024 * 1024 + 1) }
-        assertTrue(exporter.size in 1..4 * 1024 * 1024)
+        val productionExporter = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java"))
+            .use { it.readNBytes(4 * 1024 * 1024 + 1) }
+        assertTrue(productionExporter.size in 1..4 * 1024 * 1024)
+        val exporter = productionExporter
         val tools = mapOf(
             GccCompilerEngineContainmentArtifactRole.JAVA_EXECUTABLE to Path.of(System.getProperty("java.home"), "bin", "java"),
             GccCompilerEngineContainmentArtifactRole.BUBBLEWRAP_EXECUTABLE to Path.of("/usr/bin/bwrap"),

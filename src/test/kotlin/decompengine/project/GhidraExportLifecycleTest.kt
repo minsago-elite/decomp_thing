@@ -2,12 +2,16 @@ package decompengine.project
 
 import decompengine.analysis.GhidraAnalysisException
 import java.nio.file.Path
+import java.time.Duration
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
 import kotlin.io.path.readBytes
 import kotlin.io.path.readText
+import kotlin.io.path.writeBytes
+import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -68,6 +72,60 @@ class GhidraExportLifecycleTest {
             process?.let { if (it.isAlive) it.destroyForcibly() }
             if (worker.isAlive) worker.interrupt()
             worker.join(5_000)
+        }
+    }
+
+    @Test
+    fun `cancelled export bounds cleanup for a worker tree and preserves prior model evidence`() {
+        val root = createTempDirectory("export-tree-cleanup-")
+        val pidFile = root.resolve("worker-tree.pids")
+        val work = root.resolve("analysis")
+        val priorModel = "previous accepted model bytes\n".toByteArray()
+        work.resolve("reports").createDirectories()
+        work.resolve("reports/program_model.json").writeBytes(priorModel)
+        val script = root.resolve("export-worker.sh")
+        script.writeText(listOf(
+            "trap '' TERM",
+            "printf '%s\\n' \"${'$'}${'$'}\" > \"${'$'}1\"",
+            "for i in 1 2 3 4 5 6 7 8; do",
+            "  (trap '' TERM; exec /bin/sleep 10) &",
+            "  printf '%s\\n' \"${'$'}!\" >> \"${'$'}1\"",
+            "done",
+            "wait",
+        ).joinToString("\n"))
+        val command = listOf("/bin/sh", script.toString(), pidFile.toString())
+        val analyzer = GhidraHeadlessProgramModelAnalyzer(
+            { command },
+            GhidraProgramModelExportLimits(terminationGrace = Duration.ofMillis(200)),
+        )
+        val failure = AtomicReference<Throwable?>()
+        val worker = Thread {
+            try { analyzer.analyze(root.resolve("unused-authored-input"), work) }
+            catch (error: Throwable) { failure.set(error) }
+        }
+        var pids = emptyList<Long>()
+        try {
+            worker.start()
+            val launchDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (pids.size < 9 && worker.isAlive && System.nanoTime() < launchDeadline) {
+                pids = if (pidFile.exists()) pidFile.readText().lineSequence().mapNotNull(String::toLongOrNull).toList()
+                    else emptyList()
+                if (pids.size < 9) Thread.sleep(5)
+            }
+            assertEquals(9, pids.size, "worker tree did not finish launching: ${failure.get()}")
+            val cleanupStarted = System.nanoTime()
+            worker.interrupt()
+            worker.join(6_000)
+
+            assertFalse(worker.isAlive, "worker cleanup exceeded one bounded process-tree window")
+            assertTrue(System.nanoTime() - cleanupStarted < TimeUnit.SECONDS.toNanos(6))
+            assertIs<InterruptedException>(failure.get())
+            assertTrue(pids.none { pid -> ProcessHandle.of(pid).map { it.isAlive }.orElse(false) }, "an owned process survived cancellation")
+            assertTrue(work.resolve("reports/program_model.json").readBytes().contentEquals(priorModel))
+        } finally {
+            pids.forEach { pid -> ProcessHandle.of(pid).orElse(null)?.let { if (it.isAlive) it.destroyForcibly() } }
+            if (worker.isAlive) worker.interrupt()
+            worker.join(6_000)
         }
     }
 

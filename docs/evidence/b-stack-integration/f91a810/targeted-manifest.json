@@ -1,0 +1,84 @@
+{
+  "sourceCommit": "f91a81093a012b3f82e2831d7d332c20bc11bdbd",
+  "status": "passed",
+  "offline": true,
+  "requiredLiveAcpContract": true,
+  "totals": {
+    "tests": 85,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "suites": {
+    "decompengine.acp.AcpAuthenticationInventoryTest": {
+      "tests": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "efb47b7b9f2ca9d78aaf066b5e061656ffb99d4526fb1d0abf81fa37b9477510"
+    },
+    "decompengine.acp.AcpExecutionSchedulerTest": {
+      "tests": 14,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "05de420e23cdfc30f7c1138f5088eb5879d7e15cb9d56048cb4bee4bc5d9e302"
+    },
+    "decompengine.acp.AcpCurrentConfigInventoryTest": {
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "2772a4f25cfcf94ebb267b46eb7a2ce48a3a8affee40ad56fe6467b933ca9abf"
+    },
+    "decompengine.acp.AcpDoctorPreflightTest": {
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "96515130dc5c82fedc1e127fead64a0aea01a5c94926d2dd437859677f059a63"
+    },
+    "decompengine.acp.AcpV1WireContractGoldenTest": {
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "9ba2c8bab1215554149a678cbe5edc592b516382bb7a93cfdf0e72573c6a796b"
+    },
+    "decompengine.acp.AcpAgentHarnessTest": {
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "fece18eac56c6b7015e45753528b9a4dcb746d3951fb4805bfcc61c19cd4e90b"
+    },
+    "decompengine.acp.WorkspaceSnapshotLimitsTest": {
+      "tests": 22,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "6e3b83b54b8aee6c12b5cf5918c12a73e2f3dd9da62e061b83718eae79cfbc3f"
+    },
+    "decompengine.jobs.AgentProgressJournalTest": {
+      "tests": 15,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "523d4436c45102750f06a9321ff6abe624f3898c9f6e396709f2beac00178273"
+    },
+    "decompengine.web.WebAuthenticationInspectionTest": {
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "17a2f910d07f017f3e24796d1890cee242d768080671b9e7e162e70aa044e163"
+    },
+    "decompengine.doctor.DoctorTest": {
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "xmlSha256": "2413efb9ae1e301762dace34f76f05d3bc37e7fc9c98090fdd06d55654395e4d"
+    }
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "apiVersion": 1,
+  "kind": "jobs",
+  "requestId": "request_example_1",
+  "data": {
+    "items": [
+      {
+        "jobId": "1234567890abcdef1234567890abcdef",
+        "displayFilename": "synthetic.elf",
+        "status": "uploaded",
+        "createdAt": "2026-09-05T00:00:00Z",
+        "updatedAt": "2026-09-05T00:00:00Z",
+        "sizeBytes": "9007199254740993",
+        "binary": {
+          "format": "ELF64",
+          "endianness": "little",
+          "objectType": "EXEC",
+          "machine": "x86-64",
+          "osAbi": "System V",
+          "entryPoint": "0xffffffffffffffff"
+        },
+        "version": "job_version_1",
+        "latestRunId": null,
+        "acceptedRevisionId": null
+      },
+      {
+        "jobId": "job_other",
+        "displayFilename": "synthetic.elf",
+        "status": "uploaded",
+        "createdAt": "2026-09-05T00:00:00Z",
+        "updatedAt": "2026-09-05T00:00:00Z",
+        "sizeBytes": "9007199254740993",
+        "binary": {
+          "format": "ELF64",
+          "endianness": "little",
+          "objectType": "EXEC",
+          "machine": "x86-64",
+          "osAbi": "System V",
+          "entryPoint": "0xffffffffffffffff"
+        },
+        "version": "job_version_1",
+        "latestRunId": null,
+        "acceptedRevisionId": null
+      }
+    ],
+    "page": {
+      "nextCursor": null,
+      "snapshotVersion": "listing_snapshot_1",
+      "limit": 1
+    }
+  }
+}

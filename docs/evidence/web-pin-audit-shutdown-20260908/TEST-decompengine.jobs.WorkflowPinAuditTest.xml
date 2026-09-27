@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="decompengine.jobs.WorkflowPinAuditTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-09-08T06:15:50.354Z" hostname="whatsername" time="0.792">
+  <properties/>
+  <testcase name="applied pin receipt is attributed versioned and preserved through lifecycle and restart()" classname="decompengine.jobs.WorkflowPinAuditTest" time="0.011"/>
+  <testcase name="pin and applied receipt converge together across each publication interruption()" classname="decompengine.jobs.WorkflowPinAuditTest" time="0.015"/>
+  <testcase name="invalid audit metadata is preserved and rejected instead of losing attribution()" classname="decompengine.jobs.WorkflowPinAuditTest" time="0.007"/>
+  <testcase name="receipt history bounds records and explicitly counts omitted prefix()" classname="decompengine.jobs.WorkflowPinAuditTest" time="0.757"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

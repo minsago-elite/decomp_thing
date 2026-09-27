@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "id": "gcc-16-2-0-driver-orchestration-evidence",
+  "status": "reference-forwarding-only",
+  "profile": "oracle/gcc/16.2.0",
+  "provenance": {
+    "oracle": {
+      "id": "gcc-driver-16.2.0",
+      "version": "16.2.0",
+      "sourceRevision": "78d4ac73dd391005b895a6148cd9831e28e1208b",
+      "sourceLockSha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc",
+      "buildRecordSha256": "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637",
+      "toolchainReproductionSha256": "5c2c159d7287305159a220a1260f6ff6bffe9ec78bb1cbe2fb24f85b68a7d4de"
+    },
+    "manifest": {
+      "path": "oracle-manifest.json",
+      "sha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9"
+    },
+    "corpus": {
+      "path": "behavior-corpus.json",
+      "sha256": "bcc1a14ca8c54f94106c943f0bc5698cb9af3151b7bf20a49ae3c8828baaad0e",
+      "scope": "production",
+      "cases": 14
+    },
+    "referenceEvidence": {
+      "path": "behavior-corpus-evidence.json",
+      "sha256": "9dcf787aea232615a1ff8721144b86bc1f5e9a2a7068fa9e9280db0bc4ad6803",
+      "passedCases": 14
+    }
+  },
+  "authenticatedBoundary": {
+    "driver": {
+      "source": "oracle-manifest.json#/artifacts/stripped",
+      "path": "artifacts/gcc-driver.stripped",
+      "bytes": 2349296,
+      "sha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4"
+    },
+    "executor": {
+      "source": "behavior-corpus.json#/sandbox",
+      "backend": "oci-container-v1",
+      "imageDigest": "sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248",
+      "platform": "linux/amd64"
+    },
+    "analysisRuntime": {
+      "status": "not-used-by-this-record",
+      "requiredBoundary": "bundled-ghidra-java-api-worker",
+      "externalGhidraHomeOrAnalyzeHeadless": "forbidden"
+    }
+  },
+  "observed": {
+    "phaseInputs": [
+      {
+        "phase": "compiler",
+        "path": "tools/cc1",
+        "bytes": 1023,
+        "sha256": "847484f59a66b70de4cac77751e4f712672cf52ee0b037b07a2413a7547ae2cb",
+        "status": "fixture-only"
+      },
+      {
+        "phase": "assembler",
+        "path": "tools/as",
+        "bytes": 338,
+        "sha256": "59f48d8aa41d6febe825c19cfce157461c5dce8b0401104d3c825fb80004b2d1",
+        "status": "fixture-only"
+      },
+      {
+        "phase": "linker",
+        "path": "tools/collect2",
+        "bytes": 368,
+        "sha256": "a7e8d29a7ed6bf83b556b9f6b1b872f84e93a4bb9948121e36f55226d047f01c",
+        "status": "fixture-only"
+      }
+    ],
+    "referencePassesAreNotProductionQualification": true,
+    "mockArtifacts": {
+      "object": "MOCK-OBJECT\\u0000v1\\n",
+      "linked": "MOCK-EXECUTABLE\\u0000v1\\n"
+    }
+  },
+  "unresolved": [
+    {
+      "gate": "real-compile-assemble-object",
+      "status": "unresolved",
+      "reason": "The retained compile and assembly cases invoke fixture scripts and emit mock object bytes."
+    },
+    {
+      "gate": "multi-file-forwarding-and-subprocess-failure",
+      "status": "unresolved",
+      "reason": "The current corpus has no real multi-file workflow or independent failing phase receipt."
+    },
+    {
+      "gate": "real-link-artifact-structure",
+      "status": "unresolved",
+      "reason": "The linked fixture is not an ELF artifact, so format, symbol, and relocation checks are unavailable."
+    },
+    {
+      "gate": "produced-program-runtime",
+      "status": "unresolved",
+      "reason": "No produced program is retained or executed through the authenticated runtime boundary."
+    },
+    {
+      "gate": "reconstructed-candidate-replay",
+      "status": "unresolved",
+      "reason": "No accepted #50 candidate replay is retained for comparison with this reference record."
+    }
+  ],
+  "releaseEligible": false
+}

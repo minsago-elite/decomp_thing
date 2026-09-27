@@ -2,7 +2,13 @@ name: LLVM oracle model
 
 on:
   push:
+    branches: [master]
+    tags: ['**']
   pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   provenance-artifacts-and-ground-truth:
@@ -15,6 +21,10 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: gradle
+      - name: Install pinned build-only frontend toolchain
+        run: |
+          bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
+          echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -22,13 +32,31 @@ jobs:
           cache-dependency-path: requirements/oracle-generation.txt
       - name: Install non-authoritative Python compatibility dependencies
         run: python3 -m pip install -r requirements/oracle-generation.txt
+      - name: Restore locked LLVM source artifacts
+        id: llvm-source-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ runner.temp }}/llvm-source/llvm-project-22.1.6.src.tar.xz
+            ${{ runner.temp }}/llvm-source/llvm-project-22.1.6.src.tar.xz.sig
+          key: llvm-source-v1-${{ hashFiles('oracle/llvm/22.1.6/source-lock.json') }}
       - name: Verify authenticated LLVM source
         run: |
           ./gradlew --no-daemon fetchLlvmSourceArchive \
             --args="--lock oracle/llvm/22.1.6/source-lock.json --output $RUNNER_TEMP/llvm-source"
+      - name: Save authenticated LLVM source artifacts
+        if: steps.llvm-source-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ runner.temp }}/llvm-source/llvm-project-22.1.6.src.tar.xz
+            ${{ runner.temp }}/llvm-source/llvm-project-22.1.6.src.tar.xz.sig
+          key: ${{ steps.llvm-source-cache.outputs.cache-primary-key }}
       - name: Fetch hash-locked Clang release artifacts
         run: |
-          ./gradlew --no-daemon fetchLlvmReleaseArtifacts \
+          bash scripts/test-ci-fetch-llvm-release-artifacts.sh
+          bash scripts/ci-fetch-llvm-release-artifacts.sh \
+            ./gradlew --no-daemon fetchLlvmReleaseArtifacts \
             --args="$RUNNER_TEMP/llvm-oracle-release"
           echo "LLVM_ORACLE_ARTIFACT_ROOT=$RUNNER_TEMP/llvm-oracle-release" \
             >> "$GITHUB_ENV"

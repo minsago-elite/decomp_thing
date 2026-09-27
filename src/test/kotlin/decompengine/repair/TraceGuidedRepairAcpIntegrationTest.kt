@@ -88,7 +88,7 @@ class TraceGuidedRepairAcpIntegrationTest {
                 it.repairBehaviorMismatch(fixture.project, fixture.original, rebuilt, INPUTS, fixture.reports)
             }
             assertFalse(iteration.succeeded)
-            assertEquals("compile", iteration.after?.kind)
+            assertEquals("retained-regression", iteration.after?.kind)
             assertRejected(fixture, head, before, acp)
         }
     }
