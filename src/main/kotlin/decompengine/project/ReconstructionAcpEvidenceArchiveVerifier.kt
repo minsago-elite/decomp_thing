@@ -1417,7 +1417,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 "agent reconstruction checkpoint is missing its prompt budget"
             }
             return "agent:${factory.implementationId}:context-$budget:" +
-                "factory-${sha256(factory.descriptor.toByteArray(StandardCharsets.UTF_8))}:v2"
+                "factory-${sha256(factory.descriptor.toByteArray(StandardCharsets.UTF_8))}:v3"
         }
     }
 
