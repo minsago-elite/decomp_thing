@@ -192,11 +192,12 @@ class GccDriverDwarfInterfaceEvidenceTest {
             "provider" to JsonPrimitive("gcc-driver-dwarf-interface-evidence-v2"),
             "complete" to JsonPrimitive(false), "scored" to JsonPrimitive(false),
             "productionVerified" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false)))
-        val kinds = listOf("metadata", "functions", "types", "globals", "objectSymbols", "strippedObjects",
+        val kinds = listOf("metadata", "functions", "types", "typeChildren", "globals", "objectSymbols", "strippedObjects",
             "projectedTypes", "projectedFunctions", "projectedGlobalTypes", "oracleFunctions", "unmatchedFunctions", "globalProjection")
-        fun bundle() = GccDriverDwarfInterfaceEvidence.pack(base) { consume ->
+        fun bundle(order: List<String> = kinds) = GccDriverDwarfInterfaceEvidence.pack(base) { consume ->
             val writer = BoundedDwarfCanonicalShardWriter(GccDriverDwarfInterfaceEvidence.SHARD_LIMITS, consume)
-            kinds.forEach { writer.write(it, sequenceOf(JsonObject(mapOf("identity" to JsonPrimitive(it))))) }
+            order.forEach { writer.write(it, if (it == "typeChildren") emptySequence()
+                else sequenceOf(JsonObject(mapOf("identity" to JsonPrimitive(it))))) }
             writer.finish()
         }
         val first = bundle(); val second = bundle()
@@ -212,6 +213,12 @@ class GccDriverDwarfInterfaceEvidenceTest {
         }
         val manifest = OracleJson.parseCanonical(first.canonicalBytes()).jsonObject
         val descriptors = manifest.getValue("parts").jsonArray
+        assertEquals(JsonPrimitive(0), descriptors.single {
+            it.jsonObject["kind"] == JsonPrimitive("typeChildren")
+        }.jsonObject["recordCount"])
+        assertFailsWith<IllegalArgumentException> { bundle(kinds - "typeChildren") }
+        assertFailsWith<IllegalArgumentException> { bundle((kinds - "typeChildren") + "typeChildren") }
+        assertFailsWith<IllegalArgumentException> { bundle(kinds.map { if (it == "typeChildren") "unknownChildren" else it }) }
         val changedManifest = OracleJson.canonicalBytes(JsonObject(manifest + ("parts" to JsonArray(descriptors.reversed()))))
         assertFailsWith<IllegalArgumentException> { GccDriverDwarfInterfaceEvidence.verifyBundle(changedManifest, parts.reversed()) }
         for (numeric in listOf("ordinal", "recordCount")) {

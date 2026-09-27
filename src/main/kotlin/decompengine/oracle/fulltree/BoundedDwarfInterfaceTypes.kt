@@ -73,7 +73,7 @@ internal class DwarfInterfaceTypeChild(
 internal class BoundedDwarfInterfaceTypeResolver(
     private val repository: FunctionDwarfUnitRepository,
     private val limits: BoundedDwarfInterfaceFactLimits,
-    private val budget: DwarfInterfaceOutputBudget,
+    private val budget: DwarfInterfaceFactBudget,
 ) {
     private val completed = LinkedHashMap<String, DwarfInterfaceTypeNode>()
     private val scheduled = LinkedHashSet<String>()
@@ -88,7 +88,7 @@ internal class BoundedDwarfInterfaceTypeResolver(
     fun referenceOnly(source: ResolvedFunctionDie): DwarfInterfaceFact<String> =
         referenceFact(source, TYPE_AT_TYPE, 0, expand = false).let {
             val reason = "type-graph-not-expanded-for-automatic-local"
-            budget.charge(32L + reason.length.toLong() * 6L, "DWARF local type reason")
+            budget.charge(32L + reason.length.toLong() * 2L, "DWARF local type reason")
             DwarfInterfaceFact(it.state, it.values, it.evidence,
                 it.reasons + reason)
         }
@@ -100,39 +100,130 @@ internal class BoundedDwarfInterfaceTypeResolver(
 
     /** Validate the completed graph once, independent of discovery order and cached cycle tails. */
     private fun validateGraphDepth() {
+        data class DepthResult(val height: Int, val cyclic: Boolean, val minimumBackEdgeDepth: Int = Int.MAX_VALUE)
         var visits = 0L
-        val acyclicHeights = HashMap<String, Int>()
-        val path = HashSet<String>()
-        fun visit(id: String, depth: Int): Pair<Int, Boolean> {
+        fun chargeVisit() {
             if (visits >= limits.maximumTypeTraversalSteps) {
                 throw FullTreeControlException("DWARF interface type graph exceeds its traversal-work bound")
             }
             visits++
-            if (id in path) return 0 to true
+        }
+        val componentBounds = componentDepthUpperBounds(::chargeVisit)
+        val acyclicHeights = HashMap<String, Int>()
+        val cyclicUpperBounds = HashMap<String, Int>()
+        val path = HashMap<String, Int>()
+        fun visit(id: String, depth: Int): DepthResult {
+            chargeVisit()
+            path[id]?.let { return DepthResult(0, true, it) }
             if (depth > limits.maximumTypeDepth) {
-                throw FullTreeControlException("DWARF interface type graph exceeds its depth bound")
+                throw FullTreeControlException("DWARF interface type graph exceeds its depth bound " +
+                    "(observed=$depth, maximum=${limits.maximumTypeDepth}, type=$id)")
+            }
+            componentBounds[id]?.let { height ->
+                // A simple path visits each condensation component at most once and each
+                // member at most once. An excessive bound is inconclusive, never a failure.
+                if (depth.toLong() + height - 1L <= limits.maximumTypeDepth) {
+                    return DepthResult(height, true)
+                }
             }
             acyclicHeights[id]?.let { height ->
                 if (depth.toLong() + height - 1L > limits.maximumTypeDepth) {
-                    throw FullTreeControlException("DWARF interface type graph exceeds its depth bound")
+                    throw FullTreeControlException("DWARF interface type graph exceeds its depth bound " +
+                        "(observed=${depth.toLong() + height - 1L}, maximum=${limits.maximumTypeDepth}, type=$id)")
                 }
-                return height to false
+                return DepthResult(height, false)
+            }
+            cyclicUpperBounds[id]?.let { height ->
+                // A bound on every continuation can prove that this incoming path fits. It
+                // cannot reject a path: its ancestors may shorten a cyclic continuation.
+                if (depth.toLong() + height - 1L <= limits.maximumTypeDepth) {
+                    return DepthResult(height, true)
+                }
             }
             if (id !in completed) throw FullTreeControlException("DWARF interface graph has an unresolved local type edge")
-            path += id
+            path[id] = depth
             var height = 1
             var cyclic = false
+            var minimumBackEdgeDepth = Int.MAX_VALUE
             for (target in edges[id].orEmpty()) {
-                val (childHeight, childCyclic) = visit(target, depth + 1)
-                height = maxOf(height, childHeight + 1)
-                cyclic = cyclic || childCyclic
+                val child = visit(target, depth + 1)
+                height = maxOf(height, child.height + 1)
+                cyclic = cyclic || child.cyclic
+                minimumBackEdgeDepth = minOf(minimumBackEdgeDepth, child.minimumBackEdgeDepth)
             }
-            path -= id
-            // A cyclic tail depends on the current path and must never be reused as an acyclic one.
-            if (!cyclic) acyclicHeights[id] = height
-            return height to cyclic
+            path.remove(id)
+            if (!cyclic) {
+                acyclicHeights[id] = height
+            } else if (minimumBackEdgeDepth >= depth) {
+                // No unexamined continuation was cut by an ancestor above this node. A
+                // reused cyclic bound also covers all continuations, so the resulting
+                // height is a context-independent upper bound, even if it is not exact.
+                cyclicUpperBounds[id] = minOf(cyclicUpperBounds[id] ?: height, height)
+            }
+            return DepthResult(height, cyclic, minimumBackEdgeDepth)
         }
         roots.forEach { visit(it, 1) }
+    }
+
+    /** Iterative Tarjan traversal emits components after every outgoing component is complete. */
+    private fun componentDepthUpperBounds(chargeWork: () -> Unit): Map<String, Int> {
+        data class Frame(val id: String, var nextEdge: Int = 0)
+        val indices = HashMap<String, Int>()
+        val lowLinks = HashMap<String, Int>()
+        val active = HashSet<String>()
+        val pending = ArrayDeque<String>()
+        val traversal = ArrayDeque<Frame>()
+        val bounds = HashMap<String, Int>()
+        fun discover(id: String) {
+            chargeWork()
+            if (id !in completed) throw FullTreeControlException("DWARF interface graph has an unresolved local type edge")
+            indices[id] = indices.size
+            lowLinks[id] = indices.getValue(id)
+            active += id
+            pending.addLast(id)
+            traversal.addLast(Frame(id))
+        }
+        for (root in roots) {
+            if (root in indices) continue
+            discover(root)
+            while (traversal.isNotEmpty()) {
+                val frame = traversal.last()
+                val targets = edges[frame.id].orEmpty()
+                if (frame.nextEdge < targets.size) {
+                    chargeWork()
+                    val target = targets[frame.nextEdge++]
+                    if (target !in indices) {
+                        discover(target)
+                    } else if (target in active) {
+                        lowLinks[frame.id] = minOf(lowLinks.getValue(frame.id), indices.getValue(target))
+                    }
+                    continue
+                }
+                traversal.removeLast()
+                if (traversal.isNotEmpty()) {
+                    val parent = traversal.last().id
+                    lowLinks[parent] = minOf(lowLinks.getValue(parent), lowLinks.getValue(frame.id))
+                }
+                if (lowLinks.getValue(frame.id) != indices.getValue(frame.id)) continue
+                val members = HashSet<String>()
+                do {
+                    chargeWork()
+                    val member = pending.removeLast()
+                    active.remove(member)
+                    members += member
+                } while (member != frame.id)
+                var suffix = 0
+                for (member in members) for (target in edges[member].orEmpty()) {
+                    chargeWork()
+                    if (target !in members) suffix = maxOf(suffix, bounds.getValue(target))
+                }
+                // The saturated value is an over-limit sentinel, never an acceptance proof.
+                val height = minOf(limits.maximumTypeDepth.toLong() + 1L,
+                    members.size.toLong() + suffix).toInt()
+                members.forEach { bounds[it] = height }
+            }
+        }
+        return bounds
     }
 
     private fun referenceFact(
@@ -187,13 +278,13 @@ internal class BoundedDwarfInterfaceTypeResolver(
             throw FullTreeControlException("DWARF interface type graph exceeds its type-count bound")
         }
         scheduled += id
-        budget.charge(512L + id.length.toLong() * 6L, "DWARF interface type node")
+        budget.charge(512L + id.length.toLong() * 2L, "DWARF interface type node")
         active += id
         val inheritance = InterfaceInheritance(repository, source, limits.maximumReferenceChainEntries)
         val attributes = attributes(source, depth, inheritance, setOf(TYPE_AT_NAME, TYPE_AT_BYTE_SIZE, TYPE_AT_ENCODING, TYPE_AT_TYPE))
         val children = directChildren(source).map { child ->
             val childId = dwarfInterfaceLocator(child)
-            budget.charge(384L + childId.length.toLong() * 6L, "DWARF interface type child")
+            budget.charge(384L + childId.length.toLong() * 2L, "DWARF interface type child")
             val childInheritance = InterfaceInheritance(repository, child, limits.maximumReferenceChainEntries)
             val childAttributes = attributes(child, depth, childInheritance, setOf(TYPE_AT_NAME, TYPE_AT_TYPE))
             val childReasons = buildList {
@@ -294,7 +385,7 @@ internal class BoundedDwarfInterfaceTypeResolver(
         // same retained strings repeatedly, especially through converging origin branches.
         var bytes = 192L
         for (text in resolved.values + resolved.evidence + resolved.reasons) {
-            bytes = Math.addExact(bytes, Math.addExact(32L, Math.multiplyExact(text.length.toLong(), 6L)))
+            bytes = Math.addExact(bytes, Math.addExact(32L, Math.multiplyExact(text.length.toLong(), 2L)))
         }
         budget.charge(bytes, "DWARF interface type fact")
         return resolved

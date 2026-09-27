@@ -44,8 +44,9 @@ offsets. Missing, unsupported, and ambiguous facts keep their evidence states.
 driver pair, manifest, function oracle, exclusions, source and build records,
 toolchain reproduction lock, and target descriptor. Candidate declarations
 join the reviewed physical function population by exact executable RVA.
-Names do not establish identity. Every reviewed oracle record remains in the
-denominator, including the compiler-generated and inline-only exclusions.
+Names do not establish identity. All 12,844 reviewed oracle records remain
+in the evidence population: 3,284 scored physical functions and 9,560
+explicitly excluded compiler-generated or inline-only records.
 
 The separate SysV AMD64 projection derives source ABI facts only when the
 raw observations and its versioned target rules provide enough evidence.
@@ -66,6 +67,23 @@ globals, and derived records are partitioned without dropping denominator
 entries. Each shard and the complete bundle have explicit resource limits;
 the general JSON parser limits remain unchanged. Qualification compares the
 whole bundle across repeated captures and checks tampered or missing parts.
+Raw `types` shards contain headers with ordered `childLocators`; separate
+`typeChildren` records bind each full child to its parent type. Joining those
+records in the declared order recovers the original type facts, including
+unsupported children and their evidence, without requiring one large type
+to fit in a single shard. The shard metadata declares attribute fallbacks
+for promoted name, size, encoding, and type facts: a promoted field is
+omitted only when its full value and evidence equal that attribute. An
+explicit promoted field takes precedence, preserving differing or missing
+attributes without loss.
+
+The driver profile separately bounds the retained fact model at 1 GiB using
+fixed record/container allowances and UTF-16 string payload sizes. This is
+a deterministic resource model, not an RSS measurement. Encoded publication
+still has independent limits of 512 MiB, 16 million JSON nodes, and 256
+shards; each shard is limited to 8 MiB and 100,000 nodes. The driver profile
+allows type graph depth 128 within the scanner's existing hard ceiling;
+the generic default remains 64. The traversal-work bound remains enforced.
 
 The **GCC oracle model** workflow has a separate **Retained GCC driver DWARF
 interfaces** job. It runs on manual dispatch or on ordinary PR events when

@@ -46,7 +46,7 @@ internal object GccDriverDwarfInterfaceEvidence {
     const val QUALIFICATION_NAME = "qualification.json"
     const val MAXIMUM_EVIDENCE_BYTES = 1024 * 1024
     internal val SHARD_LIMITS = BoundedDwarfShardLimits()
-    private val PART_KINDS = listOf("metadata", "functions", "types", "globals", "objectSymbols",
+    private val PART_KINDS = listOf("metadata", "functions", "types", "typeChildren", "globals", "objectSymbols",
         "strippedObjects", "projectedTypes", "projectedFunctions", "projectedGlobalTypes", "oracleFunctions", "unmatchedFunctions", "globalProjection")
     private const val PREFIX = "oracle/gcc/16.2.0/"
     private const val ORACLE_ID = "gcc-driver-16.2.0"
@@ -62,7 +62,11 @@ internal object GccDriverDwarfInterfaceEvidence {
         maximumInputBytes = MAXIMUM_EVIDENCE_BYTES, maximumCanonicalBytes = MAXIMUM_EVIDENCE_BYTES,
         maximumNodes = 100_000, maximumTotalStringBytes = MAXIMUM_EVIDENCE_BYTES,
     )
-    private val SCAN_LIMITS = BoundedDwarfInterfaceFactLimits(maximumArtifactBytes = 20_713_760)
+    private val SCAN_LIMITS = BoundedDwarfInterfaceFactLimits(
+        maximumArtifactBytes = 20_713_760,
+        maximumRetainedFactBytes = 1024L * 1024 * 1024,
+        maximumTypeDepth = 128,
+    )
     private val CONTROL_LIMITS = FullTreeControlLimits(
         maximumRichArtifactBytes = 20_713_760,
         maximumDwarfSectionBytes = 32L * 1024 * 1024,

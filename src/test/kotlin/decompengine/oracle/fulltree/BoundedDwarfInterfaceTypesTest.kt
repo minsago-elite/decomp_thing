@@ -330,7 +330,7 @@ class BoundedDwarfInterfaceTypesTest {
             val failure = assertFailsWith<FullTreeControlException> {
                 scan(root, distinct, BoundedDwarfInterfaceFactLimits(maximumOutputBytes = 128 * 1024))
             }
-            assertTrue(failure.message.orEmpty().contains("output bound"), failure.message)
+            assertTrue(failure.message.orEmpty().contains("retained fact bound"), failure.message)
         }
 
     @Test
@@ -351,7 +351,7 @@ class BoundedDwarfInterfaceTypesTest {
                 BoundedDwarfInterfaceFactLimits(maximumTypes = 1) to "type-count bound",
                 BoundedDwarfInterfaceFactLimits(maximumTypeDepth = 1) to "depth bound",
                 BoundedDwarfInterfaceFactLimits(maximumChildrenPerType = 1) to "child-count bound",
-                BoundedDwarfInterfaceFactLimits(maximumOutputBytes = 1000) to "output bound",
+                BoundedDwarfInterfaceFactLimits(maximumOutputBytes = 1000) to "retained fact bound",
                 BoundedDwarfInterfaceFactLimits(maximumTypeTraversalSteps = 1) to "traversal-work bound",
             )) {
                 val failure = assertFailsWith<FullTreeControlException> { scan(root, fixture, limits) }
@@ -390,6 +390,131 @@ class BoundedDwarfInterfaceTypesTest {
             assertEquals(locator, actual.locator("outer"))
             val facts = scan(root, actual, BoundedDwarfInterfaceFactLimits(maximumTypeDepth = 3))
             known(facts.types.getValue(actual.locator("named")).name, locator)
+        }
+
+    @Test
+    fun `dense cyclic component accepts within the traversal budget without enumerating paths`(): Unit =
+        inInterfaceFixtureDirectory { root ->
+            val count = 9
+            val types = (0 until count).map { owner ->
+                die("type$owner", 0x13, children = (0 until count).map { target ->
+                    die("member${owner}To$target", 0x0d, listOf(reference(0x49, "type$target")))
+                })
+            }
+            val fixture = typeElf(*(listOf(emitted("entry", "type0")) + types).toTypedArray())
+            val limits = BoundedDwarfInterfaceFactLimits(maximumTypeDepth = count,
+                maximumTypeTraversalSteps = 256)
+            val facts = scan(root, fixture, limits)
+            assertEquals(count, facts.types.size)
+            assertEquals(count * count, facts.types.values.sumOf { it.children.size })
+            val failure = assertFailsWith<FullTreeControlException> {
+                scan(root, fixture, limits.copy(maximumTypeTraversalSteps = 64))
+            }
+            assertTrue(failure.message.orEmpty().contains("traversal-work bound"), failure.message)
+        }
+
+    @Test
+    fun `large component bound falls back to the actual short simple paths from every root`(): Unit =
+        inInterfaceFixtureDirectory { root ->
+            val leaves = 6
+            val entries = listOf(emitted("hubEntry", "hub")) +
+                (0 until leaves).map { emitted("leafEntry$it", "leaf$it", it + 1) }
+            val types = listOf(die("hub", 0x13, children = (0 until leaves).map {
+                die("hubMember$it", 0x0d, listOf(reference(0x49, "leaf$it")))
+            })) + (0 until leaves).map { die("leaf$it", 0x0f, listOf(reference(0x49, "hub"))) }
+            val fixture = typeElf(*(entries + types).toTypedArray())
+            val limits = BoundedDwarfInterfaceFactLimits(maximumTypeDepth = 3,
+                maximumTypeTraversalSteps = 256)
+            assertEquals(leaves + 1, scan(root, fixture, limits).types.size)
+            val failure = assertFailsWith<FullTreeControlException> {
+                scan(root, fixture, limits.copy(maximumTypeDepth = 2))
+            }
+            assertTrue(failure.message.orEmpty().contains("depth bound"), failure.message)
+        }
+
+    @Test
+    fun `component successor bounds preserve depth checks when a suffix was discovered first`(): Unit =
+        inInterfaceFixtureDirectory { root ->
+            val fixture = typeElf(
+                emitted("suffixEntry", "c"), emitted("incomingEntry", "a", 1),
+                die("a", 0x0f, listOf(reference(0x49, "b"))),
+                die("b", 0x13, children = listOf(
+                    die("backToA", 0x0d, listOf(reference(0x49, "a"))),
+                    die("forwardToC", 0x0d, listOf(reference(0x49, "c"))),
+                )),
+                die("c", 0x0f, listOf(reference(0x49, "d"))),
+                die("d", 0x13, children = listOf(
+                    die("backToC", 0x0d, listOf(reference(0x49, "c"))),
+                    die("forwardToE", 0x0d, listOf(reference(0x49, "e"))),
+                )),
+                integerType("e"),
+            )
+            assertEquals(5, scan(root, fixture, BoundedDwarfInterfaceFactLimits(maximumTypeDepth = 5)).types.size)
+            val failure = assertFailsWith<FullTreeControlException> {
+                scan(root, fixture, BoundedDwarfInterfaceFactLimits(maximumTypeDepth = 4))
+            }
+            assertTrue(failure.message.orEmpty().contains("depth bound"), failure.message)
+        }
+
+    @Test
+    fun `shared cyclic tails fit the traversal bound without weakening incoming depth checks`(): Unit =
+        inInterfaceFixtureDirectory { root ->
+            val layers = 10
+            val branches = (0 until layers).flatMap { layer ->
+                listOf("left", "right").map { side ->
+                    die("$side$layer", 0x13, children = listOf("left", "right").map { target ->
+                        val next = if (layer + 1 == layers) "${target}Cycle" else "$target${layer + 1}"
+                        die("$side${layer}To$target", 0x0d, listOf(reference(0x49, next)))
+                    })
+                }
+            }
+            val fixture = typeElf(*(listOf(emitted("leftEntry", "left0"), emitted("rightEntry", "right0", 1)) +
+                branches + listOf(
+                    die("leftCycle", 0x0f, listOf(reference(0x49, "rightCycle"))),
+                    die("rightCycle", 0x0f, listOf(reference(0x49, "leftCycle"))),
+                )).toTypedArray())
+            val limits = BoundedDwarfInterfaceFactLimits(maximumTypeDepth = layers + 2,
+                maximumTypeTraversalSteps = 256)
+            val bounded = scan(root, fixture, limits)
+            assertEquals(layers * 2 + 2, bounded.types.size)
+            assertEquals(scan(root, fixture).types.mapValues { it.value.toJson() },
+                bounded.types.mapValues { it.value.toJson() })
+            val failure = assertFailsWith<FullTreeControlException> {
+                scan(root, fixture, limits.copy(maximumTypeDepth = layers + 1))
+            }
+            assertTrue(failure.message.orEmpty().contains("depth bound"), failure.message)
+        }
+
+    @Test
+    fun `cyclic upper bounds that do not fit are rechecked instead of rejecting a shorter path`(): Unit =
+        inInterfaceFixtureDirectory { root ->
+            val types = listOf(die("hub", 0x13, children = (0 until 3).map {
+                die("hubMember$it", 0x0d, listOf(reference(0x49, "leaf$it")))
+            })) + (0 until 3).map { die("leaf$it", 0x0f, listOf(reference(0x49, "hub"))) }
+            val fixture = typeElf(*(listOf(emitted("firstEntry", "leaf0"), emitted("secondEntry", "leaf1", 1)) +
+                types).toTypedArray())
+            // The four-node SCC bound cannot prove a depth of three. The first root's
+            // cyclic bound also cannot prove its suffix fits beneath the second root.
+            assertEquals(4, scan(root, fixture, BoundedDwarfInterfaceFactLimits(maximumTypeDepth = 3)).types.size)
+        }
+
+    @Test
+    fun `a cyclic tail cut by an external ancestor cannot become a global upper bound`(): Unit =
+        inInterfaceFixtureDirectory { root ->
+            val fixture = typeElf(
+                emitted("firstEntry", "root"), emitted("secondEntry", "cycle", 1),
+                die("root", 0x13, children = listOf(
+                    die("cycleMember", 0x0d, listOf(reference(0x49, "cycle"))),
+                    die("leafMember", 0x0d, listOf(reference(0x49, "leaf"))),
+                )),
+                die("cycle", 0x0f, listOf(reference(0x49, "root"))),
+                integerType("leaf"),
+            )
+            val failure = assertFailsWith<FullTreeControlException> {
+                scan(root, fixture, BoundedDwarfInterfaceFactLimits(maximumTypeDepth = 2))
+            }
+            assertTrue(failure.message.orEmpty().contains("depth bound"), failure.message)
+            assertEquals(3, scan(root, fixture, BoundedDwarfInterfaceFactLimits(maximumTypeDepth = 3)).types.size)
         }
 
     @Test

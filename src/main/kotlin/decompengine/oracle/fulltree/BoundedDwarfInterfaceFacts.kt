@@ -131,6 +131,7 @@ internal data class BoundedDwarfInterfaceFactLimits(
     val maximumRetainedUnitBytes: Long = 64L * 1024L * 1024L,
     val maximumRetainedWorkingSetBytes: Long = 512L * 1024L * 1024L,
     val maximumOutputBytes: Long = 512L * 1024L * 1024L,
+    val maximumRetainedFactBytes: Long = maximumOutputBytes,
     val shardLimits: BoundedDwarfShardLimits = BoundedDwarfShardLimits(),
 ) {
     init {
@@ -152,6 +153,7 @@ internal data class BoundedDwarfInterfaceFactLimits(
         require(maximumRetainedUnitBytes in 1..256L * 1024L * 1024L)
         require(maximumRetainedWorkingSetBytes in 1..1024L * 1024L * 1024L)
         require(maximumOutputBytes in 1..1024L * 1024L * 1024L)
+        require(maximumRetainedFactBytes in 1..1024L * 1024L * 1024L)
     }
     fun toJson(): JsonObject = JsonObject(linkedMapOf(
         "maximumArtifactBytes" to JsonPrimitive(maximumArtifactBytes),
@@ -172,6 +174,7 @@ internal data class BoundedDwarfInterfaceFactLimits(
         "maximumRetainedUnitBytes" to JsonPrimitive(maximumRetainedUnitBytes),
         "maximumRetainedWorkingSetBytes" to JsonPrimitive(maximumRetainedWorkingSetBytes),
         "maximumOutputBytes" to JsonPrimitive(maximumOutputBytes),
+        "maximumRetainedFactBytes" to JsonPrimitive(maximumRetainedFactBytes),
         "shardLimits" to shardLimits.toJson(),
     ))
 }
@@ -194,6 +197,7 @@ internal class BoundedDwarfInterfaceFacts internal constructor(
     val objectLayout: FullTreeElfObjectLayoutObservation? = null,
     val loadedUnitBytes: Long = 0L,
     val peakRetainedUnitBytes: Long = 0L,
+    val modeledRetainedFactBytes: Long = 0L,
 ) {
     val executableRanges: List<FullTreeElfExecutableRange> = interfaceList(executableRanges)
     val functions: List<DwarfInterfaceFunctionFacts> = interfaceList(functions)
@@ -228,6 +232,8 @@ internal class BoundedDwarfInterfaceFacts internal constructor(
         "objectLayout" to (objectLayout?.toJson() ?: JsonNull),
         "loadedUnitBytes" to JsonPrimitive(loadedUnitBytes),
         "peakRetainedUnitBytes" to JsonPrimitive(peakRetainedUnitBytes),
+        "modeledRetainedFactBytes" to JsonPrimitive(modeledRetainedFactBytes),
+        "retainedFactAccounting" to JsonPrimitive("fixed-record-and-container-allowances-plus-utf16-string-payload;not-rss"),
     ))
     /** Small-fixture convenience. Production publication uses visitCanonicalShards. */
     fun toJson(): JsonObject = JsonObject(metadataJson() + linkedMapOf(
@@ -237,13 +243,62 @@ internal class BoundedDwarfInterfaceFacts internal constructor(
         "objectSymbols" to JsonArray(objectSymbols.map { it.toJson() }),
     ))
     fun visitCanonicalShards(consumer: (String, Int, ByteArray, Int) -> Unit): BoundedDwarfShardSummary {
-        val writer = BoundedDwarfCanonicalShardWriter(limits.shardLimits, consumer)
-        writer.write("metadata", sequenceOf(metadataJson()))
+        val writer = BoundedDwarfCanonicalShardWriter(limits.shardLimits.copy(
+            maximumTotalBytes = minOf(limits.maximumOutputBytes, limits.shardLimits.maximumTotalBytes),
+        ), consumer)
+        val orderedTypes = types.values.sortedBy { it.id }
+        val metadata = metadataJson()
+        writer.write("metadata", sequenceOf(JsonObject(metadata + mapOf(
+            "typeChildEncoding" to JsonPrimitive("type-headers-with-ordered-child-locators-v2"),
+            "typePromotedFactFallbacks" to JsonObject(linkedMapOf(
+                "types" to JsonObject(TYPE_PROMOTED_FACT_ATTRIBUTES.mapValues { JsonPrimitive(it.value) }),
+                "typeChildren" to JsonObject(CHILD_PROMOTED_FACT_ATTRIBUTES.mapValues { JsonPrimitive(it.value) }),
+            )),
+            "typePromotedFactRule" to JsonPrimitive("only-exact-JSON-duplicates-omitted;" +
+                "absent-promoted-field-resolves-to-required-attribute;explicit-field-takes-precedence"),
+            "recordCounts" to JsonObject((metadata.getValue("recordCounts") as JsonObject) +
+                ("typeChildren" to JsonPrimitive(orderedTypes.sumOf { it.children.size.toLong() }))),
+            "ordering" to JsonPrimitive("functions-by-address-locator;types-by-locator;" +
+                "typeChildren-by-parent-locator-physical-child;globals-by-physical-DIE;objects-by-table-entry"),
+        ))))
         writer.write("functions", functions.asSequence().map { it.toJson() })
-        writer.write("types", types.values.asSequence().map { it.toJson() })
+        writer.write("types", orderedTypes.asSequence().map(::typeShardHeader))
+        writer.write("typeChildren", orderedTypes.asSequence().flatMap { parent ->
+            parent.children.asSequence().map { child -> JsonObject(linkedMapOf(
+                "parentTypeId" to JsonPrimitive(parent.id),
+                "child" to compactPromotedTypeFacts(child.toJson(), CHILD_PROMOTED_FACT_ATTRIBUTES),
+            )) }
+        })
         writer.write("globals", globals.asSequence().map { it.toJson() })
         writer.write("objectSymbols", objectSymbols.asSequence().map { it.toJson() })
         return writer.finish()
+    }
+
+    /** Project the header directly: inline child JSON can itself exceed a shard's node bound. */
+    private fun typeShardHeader(type: DwarfInterfaceTypeNode): JsonObject = compactPromotedTypeFacts(JsonObject(linkedMapOf(
+        "id" to JsonPrimitive(type.id), "tag" to JsonPrimitive("0x${type.tag.toString(16)}"),
+        "name" to type.name.toJson(::JsonPrimitive), "byteSize" to type.byteSize.toJson(::JsonPrimitive),
+        "encoding" to type.encoding.toJson(::JsonPrimitive), "type" to type.type.toJson(::JsonPrimitive),
+        "attributes" to JsonObject(type.attributes.toSortedMap().entries.associate { (name, fact) ->
+            "0x${name.toString(16)}" to fact.toJson(::JsonPrimitive)
+        }),
+        "childLocators" to interfaceStrings(type.children.map { it.id }),
+        "reasons" to interfaceStrings(type.reasons),
+    )), TYPE_PROMOTED_FACT_ATTRIBUTES)
+
+    /** Omission means an exact copy of the required attribute fact, including all provenance. */
+    private fun compactPromotedTypeFacts(record: JsonObject, promotedAttributes: Map<String, String>): JsonObject {
+        val attributes = record.getValue("attributes") as JsonObject
+        return JsonObject(record.filter { (field, value) ->
+            val attribute = promotedAttributes[field]
+            attribute == null || attributes[attribute] != value
+        })
+    }
+
+    private companion object {
+        val TYPE_PROMOTED_FACT_ATTRIBUTES = linkedMapOf("name" to "0x3", "byteSize" to "0xb",
+            "encoding" to "0x3e", "type" to "0x49")
+        val CHILD_PROMOTED_FACT_ATTRIBUTES = linkedMapOf("name" to "0x3", "type" to "0x49")
     }
     fun canonicalBytes(): ByteArray = OracleJson.canonicalBytes(toJson(), StrictJsonLimits(
         maximumInputBytes = minOf(limits.maximumOutputBytes, 64L * 1024L * 1024L).toInt(),
@@ -266,11 +321,11 @@ internal object BoundedDwarfInterfaceFactScanner {
     ): BoundedDwarfInterfaceFacts {
         if (artifact.size > limits.maximumArtifactBytes) throw FullTreeControlException("interface ELF exceeds artifact bound")
         val digest = artifact.sha256(checkpoint, "interface ELF")
-        val budget = DwarfInterfaceOutputBudget(limits.maximumOutputBytes)
+        val budget = DwarfInterfaceFactBudget(limits.maximumRetainedFactBytes)
         val objects = ArrayList<FullTreeElfObjectSymbol>()
         val layout = FullTreeElfLayout.scanObjects(artifact, "rich", FullTreeElfLayoutLimits(), checkpoint) { symbol ->
             if (objects.size >= limits.maximumObjects) throw FullTreeControlException("interface scan exceeds object symbol bound")
-            budget.charge(1024L + symbol.name.length.toLong() * 8L, "ELF object facts")
+            budget.charge(1024L + symbol.name.length.toLong() * 2L, "ELF object facts")
             objects += symbol
         }
         val executable = FullTreeElfExecutableMembership.fromSorted(layout.executableRanges)
@@ -336,18 +391,27 @@ internal object BoundedDwarfInterfaceFactScanner {
         return BoundedDwarfInterfaceFacts(digest, artifact.size, layout.elfType, layout.imageBase,
             layout.executableRanges, functions.sortedWith(compareBy<DwarfInterfaceFunctionFacts> { it.absoluteAddress }
                 .thenBy { it.locator }), types, scannedDies, compilationUnits, dwarfPresent, limits, controlLimits,
-            globals, objects, layout, loadedUnitBytes, peakRetainedUnitBytes).also {
+            globals, objects, layout, loadedUnitBytes, peakRetainedUnitBytes, budget.chargedBytes).also {
             // Enforce per-shard and aggregate bounds without materializing a monolithic document.
             it.visitCanonicalShards { _, _, _, _ -> }
         }
     }
 }
 
-internal class DwarfInterfaceOutputBudget(private val maximumBytes: Long) {
-    private var chargedBytes = 0L
+/** Modeled retained facts, separate from exact encoded shard bytes and the JVM heap limit. */
+internal class DwarfInterfaceFactBudget(private val maximumBytes: Long) {
+    var chargedBytes = 0L
+        private set
     fun charge(bytes: Long, label: String) {
-        if (bytes < 0 || bytes > maximumBytes - chargedBytes) throw FullTreeControlException("$label exceeds interface output bound")
+        if (bytes < 0 || bytes > maximumBytes - chargedBytes) throw FullTreeControlException("$label exceeds retained fact bound")
         chargedBytes += bytes
+    }
+    fun chargeStringFact(fact: DwarfInterfaceFact<String>, label: String) {
+        var bytes = 192L
+        for (text in fact.values + fact.evidence + fact.reasons) {
+            bytes = Math.addExact(bytes, Math.addExact(32L, Math.multiplyExact(text.length.toLong(), 2L)))
+        }
+        charge(bytes, label)
     }
 }
 
@@ -358,7 +422,7 @@ private class InterfaceFunctionReader(
     private val repository: FunctionDwarfUnitRepository,
     private val types: BoundedDwarfInterfaceTypeResolver,
     private val limits: BoundedDwarfInterfaceFactLimits,
-    private val budget: DwarfInterfaceOutputBudget,
+    private val budget: DwarfInterfaceFactBudget,
 ) {
     fun read(source: ResolvedFunctionDie, start: ULong, rva: ULong?, executable: Boolean): DwarfInterfaceFunctionFacts {
         budget.charge(4096, "DWARF interface function")
@@ -460,7 +524,7 @@ private class InterfaceFunctionReader(
 }
 
 internal fun interfaceStringFact(inheritance: InterfaceInheritance, name: Long,
-    limits: BoundedDwarfInterfaceFactLimits, budget: DwarfInterfaceOutputBudget): DwarfInterfaceFact<String> =
+    limits: BoundedDwarfInterfaceFactLimits, budget: DwarfInterfaceFactBudget): DwarfInterfaceFact<String> =
         inheritedFact(inheritance, name) { source, attribute ->
             val locator = "${dwarfInterfaceLocator(source)}:attribute=${canonicalHex(name)}"
             if (attribute.value == FullTreeDwarfUnsupportedExternalStringValue) {
@@ -469,10 +533,9 @@ internal fun interfaceStringFact(inheritance: InterfaceInheritance, name: Long,
                 val value = FullTreeDwarfForms.decodeString(attribute.value, source.unit.sections, source.unit.stringOffsetsBase,
                     source.unit.header.offsetSize, source.unit.controlLimits, locator,
                     maximumCharacters = limits.maximumNameCharacters, allowEmpty = true)
-                budget.charge(256 + value.length.toLong() * 8, "DWARF interface string")
                 DwarfInterfaceFact(DwarfInterfaceFactState.KNOWN, listOf(value), listOf(locator))
             }
-        }
+        }.also { budget.chargeStringFact(it, "DWARF interface string") }
 
 internal fun interfaceIntegralFact(inheritance: InterfaceInheritance, name: Long): DwarfInterfaceFact<String> =
         inheritedFact(inheritance, name) { source, attribute ->

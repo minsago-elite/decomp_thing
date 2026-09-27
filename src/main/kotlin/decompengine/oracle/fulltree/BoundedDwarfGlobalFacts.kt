@@ -81,7 +81,7 @@ internal class BoundedDwarfGlobalFactReader(
     private val repository: FunctionDwarfUnitRepository,
     private val types: BoundedDwarfInterfaceTypeResolver,
     private val limits: BoundedDwarfInterfaceFactLimits,
-    private val budget: DwarfInterfaceOutputBudget,
+    private val budget: DwarfInterfaceFactBudget,
     private val parseBudget: FullTreeDwarfParseBudget,
     private val layout: FullTreeElfObjectLayoutObservation,
 ) {
@@ -183,7 +183,7 @@ internal class BoundedDwarfGlobalFactReader(
         when (raw) {
             is FullTreeDwarfExpressionValue -> return raw.inspect { bytes ->
                 if (bytes.size > limits.maximumLocationExpressionBytes) throw FullTreeControlException("DWARF global location exceeds expression byte bound")
-                budget.charge(256L + bytes.size.toLong() * 12L, "DWARF global location bytes")
+                budget.charge(256L + bytes.size.toLong() * 4L, "DWARF global location bytes")
                 parseBudget.consume("DWARF global location atom")
                 val hex = bytes.joinToString("") { "%02x".format(it.toInt() and 255) }
                 val atom = FullTreeDwarfExpressions.locationAtomOrNull(bytes, source.unit.header.addressSize,
@@ -251,7 +251,6 @@ internal class BoundedDwarfGlobalFactReader(
                 is FullTreeDwarfSignedConstantValue -> "signed:${raw.rawValue}"
                 is FullTreeDwarfExpressionValue -> raw.inspect { bytes ->
                     if (bytes.size > limits.maximumLocationExpressionBytes) throw FullTreeControlException("DWARF global constant exceeds byte bound")
-                    budget.charge(bytes.size.toLong() * 12L, "DWARF global constant bytes")
                     "bytes:" + bytes.joinToString("") { "%02x".format(it.toInt() and 255) }
                 }
                 is FullTreeDwarfInlineStringValue, is FullTreeDwarfSectionStringValue, is FullTreeDwarfIndexedStringValue ->
@@ -261,8 +260,8 @@ internal class BoundedDwarfGlobalFactReader(
                 else -> null
             }
             if (value == null) unknown(listOf(evidence), "unsupported-global-constant-form")
-            else { budget.charge(256 + value.length.toLong() * 8L, "DWARF global constant"); known(value, listOf(evidence)) }
-        }
+            else known(value, listOf(evidence))
+        }.also { budget.chargeStringFact(it, "DWARF global constant") }
 
     private fun string(inheritance: InterfaceInheritance, name: Long) = interfaceStringFact(inheritance, name, limits, budget)
 }

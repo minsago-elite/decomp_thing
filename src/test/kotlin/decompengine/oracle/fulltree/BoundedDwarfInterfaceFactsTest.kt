@@ -13,6 +13,36 @@ import kotlin.test.assertTrue
 
 class BoundedDwarfInterfaceFactsTest {
     @Test
+    fun `converging function origins charge the retained name once without losing provenance`() =
+        inInterfaceFixtureDirectory { root ->
+            val longName = "F".repeat(4096)
+            val branches = (0 until 15).map { index ->
+                fun target(child: Int) = if (child < 15) "branch$child" else "leaf"
+                die("branch$index", DW_TAG_SUBPROGRAM, listOfNotNull(
+                    address(DW_AT_LOW_PC, 0x400100).takeIf { index == 0 },
+                    reference(0x31, target(index * 2 + 1)),
+                    reference(0x47, target(index * 2 + 2)),
+                ))
+            }
+            val fixture = typeElf(*(branches + die("leaf", DW_TAG_SUBPROGRAM,
+                listOf(text(DW_AT_NAME, longName)))).toTypedArray())
+            val artifact = writeElf(root.resolve("function-origin-diamond.elf"), fixture.bytes)
+            val generous = scanInterfaceFixture(artifact, root)
+            val bounded = scanInterfaceFixture(artifact, root, BoundedDwarfInterfaceFactLimits(
+                maximumOutputBytes = 128 * 1024, maximumRetainedFactBytes = 128 * 1024,
+            ))
+            val function = bounded.functions.single()
+            assertEquals(fixture.locator("branch0"), function.locator)
+            assertEquals(DwarfInterfaceFactState.KNOWN, function.sourceName.state)
+            assertEquals(listOf(longName), function.sourceName.values)
+            assertEquals(listOf("${fixture.locator("leaf")}:attribute=0x3"), function.sourceName.evidence)
+            assertEquals((branches.map { fixture.locator(it.label) } + fixture.locator("leaf")).toSet(),
+                function.origins.toSet())
+            assertEquals(16, function.origins.size)
+            assertEquals(generous.toJson() - "limits", bounded.toJson() - "limits")
+        }
+
+    @Test
     fun `compiled scalar pointer typedef aggregate and variadic interfaces preserve independent rich facts`() =
         inInterfaceFixtureDirectory { root ->
             val artifact = compileInterfaceFixture(root, "interfaces.c", """
@@ -106,9 +136,15 @@ class BoundedDwarfInterfaceFactsTest {
                 BoundedDwarfInterfaceFactLimits(maximumRetainedWorkingSetBytes = 1),
                 BoundedDwarfInterfaceFactLimits(maximumFunctions = 1),
                 BoundedDwarfInterfaceFactLimits(maximumParameters = 1),
-                BoundedDwarfInterfaceFactLimits(maximumOutputBytes = 1),
+                BoundedDwarfInterfaceFactLimits(maximumRetainedFactBytes = 1),
+                BoundedDwarfInterfaceFactLimits(maximumOutputBytes = 1, maximumRetainedFactBytes = 1024 * 1024),
             ).forEach { limits ->
-                assertFailsWith<FullTreeControlException> { scanInterfaceFixture(artifact, root, limits) }
+                val failure = assertFailsWith<FullTreeControlException> { scanInterfaceFixture(artifact, root, limits) }
+                if (limits.maximumRetainedFactBytes == 1L) {
+                    assertTrue(failure.message.orEmpty().contains("retained fact bound"))
+                } else if (limits.maximumOutputBytes == 1L) {
+                    assertTrue(failure.message.orEmpty().contains("aggregate shard budget exceeded"))
+                }
             }
             StableControlFile.open(artifact, Files.size(artifact), "mutable interface fixture").use { file ->
                 assertFailsWith<FullTreeControlException> {

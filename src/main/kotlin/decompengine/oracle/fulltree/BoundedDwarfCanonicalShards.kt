@@ -153,7 +153,10 @@ internal class BoundedDwarfCanonicalShardWriter(
                 if (totalShards >= limits.maximumShards ||
                     totalBytes > limits.maximumTotalBytes - expectedBytes ||
                     totalNodes > limits.maximumTotalNodes - nodes
-                ) shardFail("aggregate shard budget exceeded")
+                ) shardFail("aggregate shard budget exceeded: " +
+                    "bytes=${totalBytes + expectedBytes}/${limits.maximumTotalBytes}, " +
+                    "nodes=${totalNodes + nodes}/${limits.maximumTotalNodes}, " +
+                    "shards=${totalShards + 1}/${limits.maximumShards}")
                 val bytes = assemble(kind, ordinal, pending, expectedBytes.toInt())
                 val parsed = parseCanonicalDwarfShard(bytes, limits, kind, ordinal, pending.size)
                 if (bytes.size.toLong() != expectedBytes || parsed.nodeCount != nodes) {
