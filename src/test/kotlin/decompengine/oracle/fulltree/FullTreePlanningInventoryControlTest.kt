@@ -19,6 +19,40 @@ import kotlinx.serialization.json.JsonPrimitive
 
 class FullTreePlanningInventoryControlTest {
     @Test
+    fun `authenticated shard lookup accepts every registered schema-valid shard id`() {
+        val scope = JsonObject(
+            mapOf(
+                "sharding" to JsonObject(
+                    mapOf(
+                        "rules" to JsonArray(
+                            listOf(
+                                JsonObject(
+                                    mapOf(
+                                        "pathPrefix" to JsonPrimitive("source/"),
+                                        "componentDepth" to JsonPrimitive(1),
+                                        "shardPrefix" to JsonPrimitive("foo-"),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val shardId = FullTreeScopeControl.shardForSourcePath(scope, "source/lib/main.cpp")
+        val registeredSourceOnlyShard = emptyList<FullTreePlanningSourceModule>()
+
+        assertEquals("foo--lib", shardId)
+        assertEquals(
+            registeredSourceOnlyShard,
+            requireAuthenticatedPlanningShardModules(shardId, mapOf(shardId to registeredSourceOnlyShard)),
+        )
+        assertFailsWith<FullTreeControlException> {
+            requireAuthenticatedPlanningShardModules(shardId, emptyMap())
+        }
+    }
+
+    @Test
     fun `authenticated shard lookup binds current A14 planning owners without an emitted denominator`() {
         val profile = Path.of("oracle/llvm/22.1.6")
         val registry = FullTreePlanningInventoryControl.loadAndValidate(

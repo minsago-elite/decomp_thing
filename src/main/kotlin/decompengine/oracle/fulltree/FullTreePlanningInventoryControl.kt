@@ -497,13 +497,8 @@ object FullTreePlanningInventoryControl {
                 ?: throw FullTreeControlException("planning owner unit ID is outside the authenticated inventory")
         }
 
-        override fun requireOwnerModulesForShard(shardId: String): List<FullTreePlanningSourceModule> {
-            if (!shardId.matches(PLANNING_SHARD_ID)) {
-                throw FullTreeControlException("planning shard ID is invalid")
-            }
-            return modulesByShardId[shardId]
-                ?: throw FullTreeControlException("planning shard ID is outside the authenticated inventory")
-        }
+        override fun requireOwnerModulesForShard(shardId: String): List<FullTreePlanningSourceModule> =
+            requireAuthenticatedPlanningShardModules(shardId, modulesByShardId)
 
         companion object {
             fun generate(
@@ -597,6 +592,12 @@ private fun addExact(left: Long, right: Long, label: String): Long = try {
     throw FullTreeControlException("$label count overflows the supported range", failure)
 }
 
+internal fun requireAuthenticatedPlanningShardModules(
+    shardId: String,
+    modulesByShardId: Map<String, List<FullTreePlanningSourceModule>>,
+): List<FullTreePlanningSourceModule> = modulesByShardId[shardId]
+    ?: throw FullTreeControlException("planning shard ID is outside the authenticated inventory")
+
 private val SOURCE_MODULE_ORDER = Comparator<JsonObject> { left, right ->
     val path = FULL_TREE_CODE_POINT_ORDER.compare(
         left.controlString("sourcePath"),
@@ -611,7 +612,6 @@ private val SOURCE_ONLY_ORDER = Comparator<JsonObject> { left, right ->
     FULL_TREE_CODE_POINT_ORDER.compare(left.controlString("sourcePath"), right.controlString("sourcePath"))
 }
 private val COMPILATION_UNIT_ID = Regex("cu-[0-9a-f]{32}")
-private val PLANNING_SHARD_ID = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
 
 private const val PLANNING_SCHEMA = "full-tree-planning-inventory"
 private const val PLANNING_MAXIMUM_SOURCE_MODULES = 1_000_000
