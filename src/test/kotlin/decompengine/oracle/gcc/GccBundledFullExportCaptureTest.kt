@@ -381,17 +381,17 @@ class GccBundledFullExportCaptureTest {
     @Test
     fun `type path encoding preserves Unicode escapes and ambiguous comment characters losslessly`() {
         val paths = listOf(
-            "/scalar" to "\"\\/scalar\"",
-            "/a*/T" to "\"\\/a*\\/T\"",
-            "/a* /T" to "\"\\/a* \\/T\"",
-            "/a*/b* /界𐐀" to "\"\\/a*\\/b* \\/界𐐀\"",
-            "/quote\"/back\\slash\n\r\t\b\u000c" to
-                "\"\\/quote\\\"\\/back\\\\slash\\n\\r\\t\\u0008\\u000c\"",
+            Triple("/scalar", "\"\\/scalar\"", "scalar"),
+            Triple("/a*/T", "\"\\/a*\\/T\"", "T"),
+            Triple("/a* /T", "\"\\/a* \\/T\"", "T"),
+            Triple("/a*/b* /界𐐀", "\"\\/a*\\/b* \\/界𐐀\"", "__"),
+            Triple("/quote\"/back\\slash\n\r\t\b\u000c",
+                "\"\\/quote\\\"\\/back\\\\slash\\n\\r\\t\\u0008\\u000c\"", "back_slash_____"),
         )
-        for ((path, encoded) in paths) fixture { root, run, reports ->
+        for ((path, encoded, name) in paths) fixture { root, run, reports ->
             val id = typeId(path)
             writeNamedRecords(root, type = id to typeRecord(id = id,
-                declaration = JsonPrimitive("/* Ghidra type $encoded */ typedef int scalar;")))
+                declaration = JsonPrimitive("/* Ghidra type $encoded */ typedef int $name;")))
             val snapshot = GccBundledFullExportCapture.capture(run, reports, artifacts())
             assertEquals(5L, snapshot.outputFileCount)
             assertTrue(snapshot.sidecarManifest.decodeToString().contains("types/$id.json"))
@@ -400,14 +400,14 @@ class GccBundledFullExportCaptureTest {
 
     @Test
     fun `matching model bytes cannot authenticate a type path paired with another identity`() {
-        for ((identityPath, declarationPath) in listOf(
-            "/other" to "\"\\/scalar\"",
-            "/a*/T" to "\"\\/a* \\/T\"",
-            "/a* /T" to "\"\\/a*\\/T\"",
+        for ((identityPath, declarationPath, name) in listOf(
+            Triple("/other", "\"\\/scalar\"", "scalar"),
+            Triple("/a*/T", "\"\\/a* \\/T\"", "T"),
+            Triple("/a* /T", "\"\\/a*\\/T\"", "T"),
         )) fixture { root, run, reports ->
             val id = typeId(identityPath)
             writeNamedRecords(root, type = id to typeRecord(id = id,
-                declaration = JsonPrimitive("/* Ghidra type $declarationPath */ typedef int scalar;")))
+                declaration = JsonPrimitive("/* Ghidra type $declarationPath */ typedef int $name;")))
             val failure = assertFailsWith<IllegalArgumentException> {
                 GccBundledFullExportCapture.capture(run, reports, artifacts())
             }
@@ -438,9 +438,7 @@ class GccBundledFullExportCaptureTest {
     @Test
     fun `type declarations retain all three producer templates and positive Int length boundaries`() {
         val suffixes = listOf(
-            "typedef int _;",
             "typedef int A0_b;",
-            "typedef int recovered_${typeId()};",
         ) + listOf(1, Int.MAX_VALUE).flatMap { length ->
             listOf(
                 "typedef struct A0_b { unsigned char _data[$length]; } A0_b;",
@@ -448,19 +446,70 @@ class GccBundledFullExportCaptureTest {
             )
         }
         for (suffix in suffixes) fixture { root, run, reports ->
-            writeNamedRecords(root, type = typeId() to typeRecord(
-                declaration = JsonPrimitive("/* Ghidra type \"\\/scalar\" */ $suffix")))
+            val id = typeId("/A0_b")
+            writeNamedRecords(root, type = id to typeRecord(id = id,
+                declaration = typeDeclaration("/A0_b", suffix)))
             assertEquals(5L, GccBundledFullExportCapture.capture(run, reports, artifacts()).outputFileCount, suffix)
         }
     }
 
     @Test
-    fun `type declarations do not infer a C name from an ambiguous retained path`() {
-        for (name in listOf("a_b", "b")) fixture { root, run, reports ->
-            val id = typeId("/a/b")
+    fun `type declarations retain names from possible raw path and category boundaries`() {
+        for ((path, name) in listOf(
+            "/a/b" to "a_b", "/a/b" to "b",
+            "/a//b" to "a__b", "/a//b" to "_b",
+            "/a/ /b" to "a___b", "/a/ /b" to "__b",
+            "//b" to "_b", "///b" to "__b", "//" to "_",
+            "/a///b" to "a___b", "/a///b" to "__b",
+            // An escaped slash at the end of a category path already supplies the final slash;
+            // DataTypePath appends the raw name directly instead of inserting another separator.
+            "/a\\/b" to "b", "/a\\/b" to "a__b",
+            "/a\\//b" to "a___b", "/a\\//b" to "_b",
+            "/a\\/b/c" to "b_c", "/a\\/b/c" to "c",
+            "/back\\slash/T" to "T", "/a\\\\/b" to "b",
+        )) fixture { root, run, reports ->
+            val id = typeId(path)
             writeNamedRecords(root, type = id to typeRecord(id = id,
-                declaration = JsonPrimitive("/* Ghidra type \"\\/a\\/b\" */ typedef int $name;")))
-            assertEquals(5L, GccBundledFullExportCapture.capture(run, reports, artifacts()).outputFileCount)
+                declaration = typeDeclaration(path, "typedef int $name;")))
+            assertEquals(5L, GccBundledFullExportCapture.capture(run, reports, artifacts()).outputFileCount, "$path: $name")
+        }
+    }
+
+    @Test
+    fun `type declaration names retain ASCII sanitization Unicode code points and exact fallbacks`() {
+        val literalRecoveredName = "recovered_${typeId("/scalar")}"
+        for ((path, name) in listOf(
+            "/A0_b" to "A0_b", "/A-b.c" to "A_b_c", "/_" to "_",
+            "/界" to "_", "/𐐀" to "_", "/界𐐀" to "__", "/١scalar" to "_scalar",
+            "/0scalar" to "recovered_${typeId("/0scalar")}",
+            "/category/0scalar" to "recovered_${typeId("/category/0scalar")}",
+            "/category/0scalar" to "category_0scalar",
+            "/" to "recovered_${typeId("/")}",
+            "/$literalRecoveredName" to literalRecoveredName,
+        )) for (suffix in typeDeclarationSuffixes(name)) fixture { root, run, reports ->
+            val id = typeId(path)
+            writeNamedRecords(root, type = id to typeRecord(id = id, declaration = typeDeclaration(path, suffix)))
+            assertEquals(5L, GccBundledFullExportCapture.capture(run, reports, artifacts()).outputFileCount, "$path: $suffix")
+        }
+    }
+
+    @Test
+    fun `matching model bytes cannot authenticate forged type names or mismatched fallbacks`() {
+        for ((path, name) in listOf(
+            "/scalar" to "forged", "/scalar" to "recovered_${typeId("/scalar")}",
+            "/0scalar" to "scalar", "/0scalar" to "recovered_${typeId("/other")}",
+            "/0scalar" to "recovered_${typeId("/0scalar").removePrefix("type_")}",
+            "/١scalar" to "recovered_${typeId("/١scalar")}",
+            "/" to "_", "/𐐀" to "__", "/a/b" to "forged",
+            // These shorter names would require empty or blank category components.
+            "/a//b" to "b", "/a/ /b" to "b", "/a\\//b" to "b",
+        )) for (suffix in typeDeclarationSuffixes(name)) fixture { root, run, reports ->
+            val id = typeId(path)
+            writeNamedRecords(root, type = id to typeRecord(id = id, declaration = typeDeclaration(path, suffix)))
+            val failure = assertFailsWith<IllegalArgumentException>("$path: $suffix") {
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+            }
+            assertTrue(failure.message.orEmpty().contains("type declaration name differs from retained Ghidra path"), failure.message)
         }
     }
 
@@ -833,7 +882,7 @@ class GccBundledFullExportCaptureTest {
                 "function" -> functionRecord("fn_0000000000400010", "f/𐐀")
                 "global" -> globalRecord("global_0000000000400100", JsonPrimitive("0x400100"), name = JsonPrimitive("g/𐐀"))
                 "type" -> typeRecord(id = typeId("/scalar𐐀"),
-                    declaration = JsonPrimitive("/* Ghidra type \"\\/scalar𐐀\" */ typedef int scalar;"))
+                    declaration = JsonPrimitive("/* Ghidra type \"\\/scalar𐐀\" */ typedef int scalar_;"))
                 else -> failureRecord(JsonPrimitive("decompilation failed or timed out: auxiliary / 𐐀 recovery failed"))
             }
             val mutations = listOf<Pair<String, (String) -> String>>(
@@ -1107,6 +1156,15 @@ class GccBundledFullExportCaptureTest {
     )
 
     private fun typeId(path: String = "/scalar") = "type_" + OracleArtifacts.sha256(path.toByteArray())
+
+    private fun typeDeclaration(path: String, suffix: String) =
+        JsonPrimitive("/* Ghidra type ${exporterString(path).replace("/", "\\/")} */ $suffix")
+
+    private fun typeDeclarationSuffixes(name: String) = listOf(
+        "typedef int $name;",
+        "typedef struct $name { unsigned char _data[1]; } $name;",
+        "typedef unsigned char $name[1];",
+    )
 
     private fun typeRecord(
         status: String = "partial",
