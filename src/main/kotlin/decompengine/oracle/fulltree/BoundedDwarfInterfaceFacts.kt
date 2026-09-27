@@ -115,6 +115,10 @@ internal class DwarfInterfaceFunctionFacts(
 internal data class BoundedDwarfInterfaceFactLimits(
     val maximumArtifactBytes: Long = 512L * 1024L * 1024L,
     val maximumFunctions: Int = 20_000,
+    val maximumGlobals: Int = 100_000,
+    val maximumObjects: Int = 100_000,
+    val maximumLocationExpressionBytes: Int = 4096,
+    val maximumScopeDepth: Int = 128,
     val maximumScannedDies: Long = 5_000_000L,
     val maximumTypes: Int = 100_000,
     val maximumTypeDepth: Int = 64,
@@ -125,12 +129,17 @@ internal data class BoundedDwarfInterfaceFactLimits(
     val maximumReferenceChainEntries: Int = 32,
     val maximumCachedCompilationUnits: Int = 2,
     val maximumRetainedUnitBytes: Long = 64L * 1024L * 1024L,
-    val maximumAggregateLoadedUnitBytes: Long = 512L * 1024L * 1024L,
-    val maximumOutputBytes: Long = 64L * 1024L * 1024L,
+    val maximumRetainedWorkingSetBytes: Long = 512L * 1024L * 1024L,
+    val maximumOutputBytes: Long = 512L * 1024L * 1024L,
+    val shardLimits: BoundedDwarfShardLimits = BoundedDwarfShardLimits(),
 ) {
     init {
         require(maximumArtifactBytes in 1..1024L * 1024L * 1024L)
         require(maximumFunctions in 1..20_000)
+        require(maximumGlobals in 1..100_000)
+        require(maximumObjects in 1..100_000)
+        require(maximumLocationExpressionBytes in 1..64 * 1024)
+        require(maximumScopeDepth in 1..128)
         require(maximumScannedDies in 1L..5_000_000L)
         require(maximumTypes in 1..100_000)
         require(maximumTypeDepth in 1..128)
@@ -141,12 +150,16 @@ internal data class BoundedDwarfInterfaceFactLimits(
         require(maximumReferenceChainEntries in 1..32)
         require(maximumCachedCompilationUnits in 1..32)
         require(maximumRetainedUnitBytes in 1..256L * 1024L * 1024L)
-        require(maximumAggregateLoadedUnitBytes in 1..1024L * 1024L * 1024L)
-        require(maximumOutputBytes in 1..64L * 1024L * 1024L)
+        require(maximumRetainedWorkingSetBytes in 1..1024L * 1024L * 1024L)
+        require(maximumOutputBytes in 1..1024L * 1024L * 1024L)
     }
     fun toJson(): JsonObject = JsonObject(linkedMapOf(
         "maximumArtifactBytes" to JsonPrimitive(maximumArtifactBytes),
         "maximumFunctions" to JsonPrimitive(maximumFunctions),
+        "maximumGlobals" to JsonPrimitive(maximumGlobals),
+        "maximumObjects" to JsonPrimitive(maximumObjects),
+        "maximumLocationExpressionBytes" to JsonPrimitive(maximumLocationExpressionBytes),
+        "maximumScopeDepth" to JsonPrimitive(maximumScopeDepth),
         "maximumScannedDies" to JsonPrimitive(maximumScannedDies),
         "maximumTypes" to JsonPrimitive(maximumTypes),
         "maximumTypeDepth" to JsonPrimitive(maximumTypeDepth),
@@ -157,8 +170,9 @@ internal data class BoundedDwarfInterfaceFactLimits(
         "maximumReferenceChainEntries" to JsonPrimitive(maximumReferenceChainEntries),
         "maximumCachedCompilationUnits" to JsonPrimitive(maximumCachedCompilationUnits),
         "maximumRetainedUnitBytes" to JsonPrimitive(maximumRetainedUnitBytes),
-        "maximumAggregateLoadedUnitBytes" to JsonPrimitive(maximumAggregateLoadedUnitBytes),
+        "maximumRetainedWorkingSetBytes" to JsonPrimitive(maximumRetainedWorkingSetBytes),
         "maximumOutputBytes" to JsonPrimitive(maximumOutputBytes),
+        "shardLimits" to shardLimits.toJson(),
     ))
 }
 
@@ -175,11 +189,18 @@ internal class BoundedDwarfInterfaceFacts internal constructor(
     val dwarfPresent: Boolean,
     val limits: BoundedDwarfInterfaceFactLimits,
     private val controlLimits: FullTreeControlLimits = FullTreeControlLimits(),
+    globals: List<DwarfGlobalVariableFacts> = emptyList(),
+    objectSymbols: List<FullTreeElfObjectSymbol> = emptyList(),
+    val objectLayout: FullTreeElfObjectLayoutObservation? = null,
+    val loadedUnitBytes: Long = 0L,
+    val peakRetainedUnitBytes: Long = 0L,
 ) {
     val executableRanges: List<FullTreeElfExecutableRange> = interfaceList(executableRanges)
     val functions: List<DwarfInterfaceFunctionFacts> = interfaceList(functions)
     val types: Map<String, DwarfInterfaceTypeNode> = Collections.unmodifiableMap(LinkedHashMap(types))
-    fun toJson(): JsonObject = JsonObject(linkedMapOf(
+    val globals: List<DwarfGlobalVariableFacts> = interfaceList(globals)
+    val objectSymbols: List<FullTreeElfObjectSymbol> = interfaceList(objectSymbols)
+    fun metadataJson(): JsonObject = JsonObject(linkedMapOf(
         "schema" to JsonPrimitive(BoundedDwarfInterfaceFactScanner.PRODUCER),
         "inputSha256" to JsonPrimitive(inputSha256), "inputBytes" to JsonPrimitive(inputBytes),
         "elfType" to JsonPrimitive(elfType), "imageBase" to JsonPrimitive("0x${imageBase.toString(16)}"),
@@ -199,20 +220,42 @@ internal class BoundedDwarfInterfaceFacts internal constructor(
             "maximumAbbreviationDeclarationsPerUnit" to JsonPrimitive(controlLimits.maximumAbbreviationDeclarationsPerUnit),
             "maximumAbbreviationAttributesPerUnit" to JsonPrimitive(controlLimits.maximumAbbreviationAttributesPerUnit),
         )),
+        "recordCounts" to JsonObject(linkedMapOf(
+            "functions" to JsonPrimitive(functions.size), "types" to JsonPrimitive(types.size),
+            "globals" to JsonPrimitive(globals.size), "objectSymbols" to JsonPrimitive(objectSymbols.size),
+        )),
+        "ordering" to JsonPrimitive("functions-by-address-locator;types-by-locator;globals-by-physical-DIE;objects-by-table-entry"),
+        "objectLayout" to (objectLayout?.toJson() ?: JsonNull),
+        "loadedUnitBytes" to JsonPrimitive(loadedUnitBytes),
+        "peakRetainedUnitBytes" to JsonPrimitive(peakRetainedUnitBytes),
+    ))
+    /** Small-fixture convenience. Production publication uses visitCanonicalShards. */
+    fun toJson(): JsonObject = JsonObject(metadataJson() + linkedMapOf(
         "functions" to JsonArray(functions.map { it.toJson() }),
         "types" to JsonArray(types.values.map { it.toJson() }),
+        "globals" to JsonArray(globals.map { it.toJson() }),
+        "objectSymbols" to JsonArray(objectSymbols.map { it.toJson() }),
     ))
+    fun visitCanonicalShards(consumer: (String, Int, ByteArray, Int) -> Unit): BoundedDwarfShardSummary {
+        val writer = BoundedDwarfCanonicalShardWriter(limits.shardLimits, consumer)
+        writer.write("metadata", sequenceOf(metadataJson()))
+        writer.write("functions", functions.asSequence().map { it.toJson() })
+        writer.write("types", types.values.asSequence().map { it.toJson() })
+        writer.write("globals", globals.asSequence().map { it.toJson() })
+        writer.write("objectSymbols", objectSymbols.asSequence().map { it.toJson() })
+        return writer.finish()
+    }
     fun canonicalBytes(): ByteArray = OracleJson.canonicalBytes(toJson(), StrictJsonLimits(
-        maximumInputBytes = limits.maximumOutputBytes.toInt(),
-        maximumCanonicalBytes = limits.maximumOutputBytes.toInt(), maximumDepth = 64,
+        maximumInputBytes = minOf(limits.maximumOutputBytes, 64L * 1024L * 1024L).toInt(),
+        maximumCanonicalBytes = minOf(limits.maximumOutputBytes, 64L * 1024L * 1024L).toInt(), maximumDepth = 64,
         maximumNodes = 1_000_000, maximumStringBytes = 1024 * 1024,
-        maximumTotalStringBytes = limits.maximumOutputBytes.toInt(),
+        maximumTotalStringBytes = minOf(limits.maximumOutputBytes, 64L * 1024L * 1024L).toInt(),
     ))
 }
 
 /** Program-neutral source interface facts, independent of recovered models and ABI scoring. */
 internal object BoundedDwarfInterfaceFactScanner {
-    const val PRODUCER = "bounded-dwarf-interface-facts-v1"
+    const val PRODUCER = "bounded-dwarf-interface-facts-v2"
 
     fun scan(
         artifact: StableControlFile,
@@ -223,13 +266,21 @@ internal object BoundedDwarfInterfaceFactScanner {
     ): BoundedDwarfInterfaceFacts {
         if (artifact.size > limits.maximumArtifactBytes) throw FullTreeControlException("interface ELF exceeds artifact bound")
         val digest = artifact.sha256(checkpoint, "interface ELF")
-        val layout = FullTreeElfLayout.scanFunctions(artifact, "rich", FullTreeElfLayoutLimits(), checkpoint) { }
+        val budget = DwarfInterfaceOutputBudget(limits.maximumOutputBytes)
+        val objects = ArrayList<FullTreeElfObjectSymbol>()
+        val layout = FullTreeElfLayout.scanObjects(artifact, "rich", FullTreeElfLayoutLimits(), checkpoint) { symbol ->
+            if (objects.size >= limits.maximumObjects) throw FullTreeControlException("interface scan exceeds object symbol bound")
+            budget.charge(1024L + symbol.name.length.toLong() * 8L, "ELF object facts")
+            objects += symbol
+        }
         layout.executableRanges.zipWithNext().forEach { (left, right) ->
             if (right.start < left.endExclusive) throw FullTreeControlException("interface ELF executable ranges overlap")
         }
         val executable = FullTreeElfExecutableMembership.fromSorted(layout.executableRanges)
-        val budget = DwarfInterfaceOutputBudget(limits.maximumOutputBytes)
         val functions = ArrayList<DwarfInterfaceFunctionFacts>()
+        val globals = ArrayList<DwarfGlobalVariableFacts>()
+        var loadedUnitBytes = 0L
+        var peakRetainedUnitBytes = 0L
         var types: Map<String, DwarfInterfaceTypeNode> = emptyMap()
         var scannedDies = 0L
         var compilationUnits = 0
@@ -254,31 +305,43 @@ internal object BoundedDwarfInterfaceFactScanner {
                         maximumReferenceChainEntries = limits.maximumReferenceChainEntries,
                         maximumCachedCompilationUnits = limits.maximumCachedCompilationUnits,
                     ), parseBudget, contextForAttribute = ::interfaceAttributeContext, retainAllRecords = true,
-                    maximumAggregateUnitBytes = limits.maximumAggregateLoadedUnitBytes)
+                    maximumRetainedWorkingSetBytes = limits.maximumRetainedWorkingSetBytes)
                 val resolver = BoundedDwarfInterfaceTypeResolver(repository, limits, budget)
+                val globalReader = BoundedDwarfGlobalFactReader(repository, resolver, limits, budget, parseBudget, layout)
                 for (header in headers) {
                     checkpoint("DWARF interface unit ${canonicalHex(header.offset)}")
                     val owner = repository.load(header)
                     scannedDies = Math.addExact(scannedDies, owner.index.physicalRecordCount)
                     if (scannedDies > limits.maximumScannedDies) throw FullTreeControlException("interface scan exceeds DIE bound")
                     for (record in owner.index.recordsInPhysicalOrder) {
+                        if (record.tag == GLOBAL_VARIABLE_TAG) {
+                            if (globals.size >= limits.maximumGlobals) throw FullTreeControlException("interface scan exceeds global candidate bound")
+                            globals += repository.withRetainedUnits(owner) {
+                                globalReader.read(ResolvedFunctionDie(owner, record))
+                            }
+                        }
                         if (record.tag != DW_TAG_SUBPROGRAM) continue
                         val start = owner.functionStart(record) ?: continue
                         if (functions.size >= limits.maximumFunctions) throw FullTreeControlException("interface scan exceeds function bound")
                         val rva = if (start >= layout.imageBase) start - layout.imageBase else null
-                        functions += InterfaceFunctionReader(repository, resolver, limits, budget).read(
-                            ResolvedFunctionDie(owner, record), start, rva, rva != null && executable.contains(rva))
+                        functions += repository.withRetainedUnits(owner) {
+                            InterfaceFunctionReader(repository, resolver, limits, budget).read(
+                                ResolvedFunctionDie(owner, record), start, rva, rva != null && executable.contains(rva))
+                        }
                     }
                 }
                 types = resolver.nodes()
+                loadedUnitBytes = repository.loadedUnitBytes
+                peakRetainedUnitBytes = repository.peakRetainedUnitBytes
             }
         }
         artifact.verifyUnchanged("interface ELF after DWARF interface scanning")
         return BoundedDwarfInterfaceFacts(digest, artifact.size, layout.elfType, layout.imageBase,
             layout.executableRanges, functions.sortedWith(compareBy<DwarfInterfaceFunctionFacts> { it.absoluteAddress }
-                .thenBy { it.locator }), types, scannedDies, compilationUnits, dwarfPresent, limits, controlLimits).also {
-            // Enforce exact byte/node bounds before a result escapes, including all evidence strings.
-            it.canonicalBytes()
+                .thenBy { it.locator }), types, scannedDies, compilationUnits, dwarfPresent, limits, controlLimits,
+            globals, objects, layout, loadedUnitBytes, peakRetainedUnitBytes).also {
+            // Enforce per-shard and aggregate bounds without materializing a monolithic document.
+            it.visitCanonicalShards { _, _, _, _ -> }
         }
     }
 }
@@ -305,6 +368,16 @@ private class InterfaceFunctionReader(
         val inheritance = InterfaceInheritance(repository, source, limits.maximumReferenceChainEntries)
         val reasons = inheritance.reasons.toMutableList()
         if (!executable) reasons += "emitted-start-outside-executable-ranges"
+        // These attributes may affect the callable interface beyond an ordinary source prototype.
+        // Preserve their presence and source identity until a target projector supports their semantics.
+        for (candidate in inheritance.sources) {
+            for (attribute in candidate.record.attributes) {
+                if (attribute.name != 0x48L && attribute.name != 0x56L && attribute.name != 0x69L) continue
+                budget.charge(512, "unsupported DWARF function attribute")
+                reasons += "unsupported-function-attribute:${canonicalHex(attribute.name)}:" +
+                    "form=${canonicalHex(attribute.declaredForm)}:${dwarfInterfaceLocator(candidate)}"
+            }
+        }
         val candidates = inheritance.sources.mapNotNull { candidate ->
             val direct = children(candidate).filter { it.tag == INTERFACE_FORMAL_PARAMETER || it.tag == INTERFACE_UNSPECIFIED_PARAMETERS }
             if (direct.isEmpty() && candidate != source) return@mapNotNull null
@@ -382,6 +455,15 @@ private class InterfaceFunctionReader(
         inheritedFact(inheritance, INTERFACE_TYPE) { source, _ -> types.resolve(source) }
 
     private fun stringFact(inheritance: InterfaceInheritance, name: Long): DwarfInterfaceFact<String> =
+        interfaceStringFact(inheritance, name, limits, budget)
+
+    private fun integralFact(inheritance: InterfaceInheritance, name: Long): DwarfInterfaceFact<String> =
+        interfaceIntegralFact(inheritance, name)
+
+}
+
+internal fun interfaceStringFact(inheritance: InterfaceInheritance, name: Long,
+    limits: BoundedDwarfInterfaceFactLimits, budget: DwarfInterfaceOutputBudget): DwarfInterfaceFact<String> =
         inheritedFact(inheritance, name) { source, attribute ->
             val locator = "${dwarfInterfaceLocator(source)}:attribute=${canonicalHex(name)}"
             if (attribute.value == FullTreeDwarfUnsupportedExternalStringValue) {
@@ -395,7 +477,7 @@ private class InterfaceFunctionReader(
             }
         }
 
-    private fun integralFact(inheritance: InterfaceInheritance, name: Long): DwarfInterfaceFact<String> =
+internal fun interfaceIntegralFact(inheritance: InterfaceInheritance, name: Long): DwarfInterfaceFact<String> =
         inheritedFact(inheritance, name) { source, attribute ->
             val locator = "${dwarfInterfaceLocator(source)}:attribute=${canonicalHex(name)}"
             val value = when (val raw = attribute.value) {
@@ -408,7 +490,6 @@ private class InterfaceFunctionReader(
             if (value == null) DwarfInterfaceFact(DwarfInterfaceFactState.UNKNOWN, emptyList(), listOf(locator), listOf("unsupported-integral-form"))
             else DwarfInterfaceFact(DwarfInterfaceFactState.KNOWN, listOf(value), listOf(locator))
         }
-}
 
 /** Attribute override follows each origin/specification edge independently; conflicting branches remain explicit. */
 internal fun <T> inheritedFact(
@@ -487,7 +568,9 @@ internal class InterfaceInheritance(repository: FunctionDwarfUnitRepository, sou
 
 private fun interfaceAttributeContext(attribute: FullTreeDwarfAbbreviationAttribute): FullTreeDwarfFormContext =
     when (attribute.name) {
-        INTERFACE_LANGUAGE, INTERFACE_CALLING_CONVENTION, INTERFACE_PROTOTYPED, INTERFACE_ARTIFICIAL,
+        GLOBAL_LOCATION -> FullTreeDwarfFormContext.LOCATION
+        DW_AT_CONST_VALUE -> FullTreeDwarfFormContext.DATA_VALUE
+        GLOBAL_EXTERNAL, 0x17L, INTERFACE_LANGUAGE, INTERFACE_CALLING_CONVENTION, INTERFACE_PROTOTYPED, INTERFACE_ARTIFICIAL,
         in INTERFACE_TYPE_CONSTANT_ATTRIBUTES,
         -> FullTreeDwarfFormContext.CONSTANT
         else -> functionAttributeContext(attribute)

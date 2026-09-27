@@ -103,7 +103,7 @@ class BoundedDwarfInterfaceFactsTest {
             listOf(
                 BoundedDwarfInterfaceFactLimits(maximumArtifactBytes = 1),
                 BoundedDwarfInterfaceFactLimits(maximumScannedDies = 1),
-                BoundedDwarfInterfaceFactLimits(maximumAggregateLoadedUnitBytes = 1),
+                BoundedDwarfInterfaceFactLimits(maximumRetainedWorkingSetBytes = 1),
                 BoundedDwarfInterfaceFactLimits(maximumFunctions = 1),
                 BoundedDwarfInterfaceFactLimits(maximumParameters = 1),
                 BoundedDwarfInterfaceFactLimits(maximumOutputBytes = 1),

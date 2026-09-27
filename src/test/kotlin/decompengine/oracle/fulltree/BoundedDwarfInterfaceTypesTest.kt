@@ -11,6 +11,31 @@ import kotlin.test.assertTrue
 
 class BoundedDwarfInterfaceTypesTest {
     @Test
+    fun `unsupported function attributes preserve each physical and inherited occurrence`(): Unit =
+        inInterfaceFixtureDirectory { root ->
+            val staticLink = raw(0x48, FULL_TREE_DW_FORM_EXPRLOC,
+                uleb(2) + byteArrayOf(0x91.toByte(), 0x78))
+            val fixture = typeElf(
+                die("declaration", 0x2e, listOf(text(0x03, "unsupported_function"), staticLink,
+                    raw(0x69, FULL_TREE_DW_FORM_REF_SIG8, fixed(0x1122, 8)))),
+                die("definition", 0x2e, listOf(address(0x11, 0x400100),
+                    reference(0x47, "declaration"), staticLink, address(0x56, 0x400180))),
+            )
+            val function = scan(root, fixture).functions.single()
+            assertEquals(fixture.locator("definition"), function.locator)
+            known(function.sourceName, "unsupported_function")
+            val reasons = function.reasons.filter { it.startsWith("unsupported-function-attribute:") }
+            val expected = setOf(
+                "unsupported-function-attribute:0x48:form=0x18:${fixture.locator("definition")}",
+                "unsupported-function-attribute:0x56:form=0x1:${fixture.locator("definition")}",
+                "unsupported-function-attribute:0x48:form=0x18:${fixture.locator("declaration")}",
+                "unsupported-function-attribute:0x69:form=0x20:${fixture.locator("declaration")}",
+            )
+            assertEquals(expected.size, reasons.size)
+            assertEquals(expected, reasons.toSet())
+        }
+
+    @Test
     fun `recursive structure keeps member pointer and back edge with deterministic evidence`(): Unit =
         inInterfaceFixtureDirectory { root ->
             val fixture = typeElf(
@@ -410,83 +435,131 @@ class BoundedDwarfInterfaceTypesTest {
 }
 
 /** Independent byte-level fixture: no recovered model, symbol table, compiler, or DWARF parser helper. */
-private data class TypeGraphDie(
+internal data class TypeGraphDie(
     val label: String,
     val tag: Long,
     val attributes: List<TypeGraphAttribute>,
     val children: List<TypeGraphDie>,
 )
-private data class TypeGraphAttribute(
+internal data class TypeGraphAttribute(
     val name: Long,
     val form: Long,
     val bytes: ByteArray,
     val target: String? = null,
     val addend: Int = 0,
+    val implicitConstant: Long? = null,
 )
-private data class TypeGraphElf(val bytes: ByteArray, val offsets: Map<String, Int>) {
-    fun locator(label: String): String = ".debug_info:cu=0x0:die=0x${offsets.getValue(label).toString(16)}"
+internal data class TypeGraphElf(
+    val bytes: ByteArray,
+    val offsets: Map<String, Int>,
+    val unitOffsets: Map<String, Int> = emptyMap(),
+) {
+    fun locator(label: String): String =
+        ".debug_info:cu=0x${(unitOffsets[label] ?: 0).toString(16)}:die=0x${offsets.getValue(label).toString(16)}"
 }
 
-private fun die(label: String, tag: Long, attributes: List<TypeGraphAttribute> = emptyList(),
+internal data class TypeGraphCompilationUnit(
+    val label: String,
+    val declarations: List<TypeGraphDie>,
+    val rootAttributes: List<TypeGraphAttribute> = emptyList(),
+)
+
+internal fun die(label: String, tag: Long, attributes: List<TypeGraphAttribute> = emptyList(),
     children: List<TypeGraphDie> = emptyList()) = TypeGraphDie(label, tag, attributes, children)
-private fun text(name: Long, value: String) = raw(name, FULL_TREE_DW_FORM_STRING, value.toByteArray(Charsets.UTF_8) + byteArrayOf(0))
-private fun number(name: Long, value: Long) = raw(name, FULL_TREE_DW_FORM_DATA1, fixed(value, 1))
-private fun address(name: Long, value: Long) = raw(name, FULL_TREE_DW_FORM_ADDR, fixed(value, 8))
-private fun flag(name: Long) = raw(name, FULL_TREE_DW_FORM_FLAG_PRESENT, byteArrayOf())
-private fun raw(name: Long, form: Long, bytes: ByteArray) = TypeGraphAttribute(name, form, bytes)
-private fun reference(name: Long, target: String, addend: Int = 0) =
+internal fun text(name: Long, value: String) = raw(name, FULL_TREE_DW_FORM_STRING, value.toByteArray(Charsets.UTF_8) + byteArrayOf(0))
+internal fun number(name: Long, value: Long) = raw(name, FULL_TREE_DW_FORM_DATA1, fixed(value, 1))
+internal fun address(name: Long, value: Long) = raw(name, FULL_TREE_DW_FORM_ADDR, fixed(value, 8))
+internal fun flag(name: Long) = raw(name, FULL_TREE_DW_FORM_FLAG_PRESENT, byteArrayOf())
+internal fun raw(name: Long, form: Long, bytes: ByteArray) = TypeGraphAttribute(name, form, bytes)
+internal fun reference(name: Long, target: String, addend: Int = 0) =
     TypeGraphAttribute(name, FULL_TREE_DW_FORM_REF4, ByteArray(4), target, addend)
-private fun integerType(label: String = "int") = die(label, 0x24,
+internal fun integerType(label: String = "int") = die(label, 0x24,
     listOf(text(0x03, "int"), number(0x0b, 4), number(0x3e, 5)))
-private fun emitted(label: String, returnType: String?, ordinal: Int = 0) = die(label, 0x2e,
+internal fun emitted(label: String, returnType: String?, ordinal: Int = 0) = die(label, 0x2e,
     listOf(text(0x03, label), address(0x11, 0x400100L + ordinal * 8L)) +
         listOfNotNull(returnType?.let { reference(0x49, it) }))
 
-private fun typeElf(vararg declarations: TypeGraphDie, version: Int = 4): TypeGraphElf {
+internal fun typeElf(
+    vararg declarations: TypeGraphDie,
+    version: Int = 4,
+    rootAttributes: List<TypeGraphAttribute> = emptyList(),
+    additionalSections: Map<String, ByteArray> = emptyMap(),
+): TypeGraphElf = typeElfUnits(
+    listOf(TypeGraphCompilationUnit("unit", declarations.toList(), rootAttributes)), version, additionalSections,
+)
+
+internal fun typeElfUnits(
+    units: List<TypeGraphCompilationUnit>,
+    version: Int = 4,
+    additionalSections: Map<String, ByteArray> = emptyMap(),
+): TypeGraphElf {
     val headerBytes = if (version == 5) 12 else 11
-    val root = die("unit", 0x11, listOf(text(0x03, "types.c"), number(0x13, 0x0c)), declarations.toList())
+    val roots = units.map { unit -> die(unit.label, 0x11,
+        listOf(text(0x03, "types.c"), number(0x13, 0x0c)) + unit.rootAttributes, unit.declarations) }
     val flattened = ArrayList<TypeGraphDie>()
     fun collect(node: TypeGraphDie) {
         require(flattened.none { it.label == node.label })
         flattened += node
         node.children.forEach(::collect)
     }
-    collect(root)
+    roots.forEach(::collect)
     val codes = flattened.mapIndexed { index, node -> node.label to (index + 1).toLong() }.toMap()
     val abbrev = ByteArrayOutputStream()
     flattened.forEach { node ->
         abbrev.write(uleb(codes.getValue(node.label)))
         abbrev.write(uleb(node.tag))
         abbrev.write(if (node.children.isEmpty()) 0 else 1)
-        node.attributes.forEach { attribute -> abbrev.write(uleb(attribute.name)); abbrev.write(uleb(attribute.form)) }
+        node.attributes.forEach { attribute ->
+            abbrev.write(uleb(attribute.name))
+            abbrev.write(uleb(attribute.form))
+            if (attribute.form == FULL_TREE_DW_FORM_IMPLICIT_CONST) {
+                abbrev.write(sleb(requireNotNull(attribute.implicitConstant)))
+            }
+        }
         abbrev.write(0)
         abbrev.write(0)
     }
     abbrev.write(0)
-    val dies = ByteArrayOutputStream()
+    val infoBytes = ByteArrayOutputStream()
     val offsets = LinkedHashMap<String, Int>()
-    val patches = ArrayList<Pair<Int, TypeGraphAttribute>>()
-    fun encode(node: TypeGraphDie) {
-        offsets[node.label] = headerBytes + dies.size()
-        dies.write(uleb(codes.getValue(node.label)))
-        node.attributes.forEach { attribute ->
-            if (attribute.target != null) patches += dies.size() to attribute
-            dies.write(attribute.bytes)
+    val unitOffsets = LinkedHashMap<String, Int>()
+    val patches = ArrayList<Triple<Int, Int, TypeGraphAttribute>>()
+    for (root in roots) {
+        val unitOffset = infoBytes.size()
+        val dies = ByteArrayOutputStream()
+        fun encode(node: TypeGraphDie) {
+            offsets[node.label] = unitOffset + headerBytes + dies.size()
+            unitOffsets[node.label] = unitOffset
+            dies.write(uleb(codes.getValue(node.label)))
+            node.attributes.forEach { attribute ->
+                if (attribute.target != null) patches += Triple(unitOffset + headerBytes + dies.size(), unitOffset, attribute)
+                dies.write(attribute.bytes)
+            }
+            node.children.forEach(::encode)
+            if (node.children.isNotEmpty()) dies.write(0)
         }
-        node.children.forEach(::encode)
-        if (node.children.isNotEmpty()) dies.write(0)
+        encode(root)
+        val header = if (version == 5) fixed(5, 2) + byteArrayOf(1, 8) + fixed(0, 4)
+            else fixed(version.toLong(), 2) + fixed(0, 4) + byteArrayOf(8)
+        val unit = header + dies.toByteArray()
+        infoBytes.write(fixed(unit.size.toLong(), 4))
+        infoBytes.write(unit)
     }
-    encode(root)
-    val dieBytes = dies.toByteArray()
-    patches.forEach { (offset, attribute) ->
-        fixed((offsets.getValue(requireNotNull(attribute.target)) + attribute.addend).toLong(), 4).copyInto(dieBytes, offset)
+    val info = infoBytes.toByteArray()
+    patches.forEach { (offset, unitOffset, attribute) ->
+        val target = requireNotNull(attribute.target)
+        val value = if (attribute.form == FULL_TREE_DW_FORM_REF_ADDR) {
+            offsets.getValue(target)
+        } else {
+            require(unitOffsets.getValue(target) == unitOffset) { "local reference crosses a fixture compilation unit" }
+            offsets.getValue(target) - unitOffset
+        }
+        fixed((value + attribute.addend).toLong(), 4).copyInto(info, offset)
     }
-    val header = if (version == 5) fixed(5, 2) + byteArrayOf(1, 8) + fixed(0, 4)
-        else fixed(version.toLong(), 2) + fixed(0, 4) + byteArrayOf(8)
-    val unit = header + dieBytes
-    val info = fixed(unit.size.toLong(), 4) + unit
     val sections = linkedMapOf(".text" to ByteArray(0x100) { 0x90.toByte() },
         ".debug_info" to info, ".debug_abbrev" to abbrev.toByteArray())
+    require(additionalSections.keys.none { it in sections || it == ".shstrtab" })
+    sections.putAll(additionalSections.toSortedMap())
     val names = ByteArrayOutputStream().apply { write(0) }
     val nameOffsets = (sections.keys + ".shstrtab").associateWith { name ->
         names.size().also { names.write(name.toByteArray(Charsets.US_ASCII)); names.write(0) }
@@ -530,11 +603,11 @@ private fun typeElf(vararg declarations: TypeGraphDie, version: Int = 4): TypeGr
         put(header + 32, content.size.toLong(), 8)
         put(header + 48, if (name == ".text") 16 else 1, 8)
     }
-    return TypeGraphElf(bytes, offsets)
+    return TypeGraphElf(bytes, offsets, unitOffsets)
 }
 
-private fun fixed(value: Long, width: Int): ByteArray = ByteArray(width) { index -> (value ushr (index * 8)).toByte() }
-private fun uleb(value: Long): ByteArray {
+internal fun fixed(value: Long, width: Int): ByteArray = ByteArray(width) { index -> (value ushr (index * 8)).toByte() }
+internal fun uleb(value: Long): ByteArray {
     require(value >= 0)
     var remaining = value
     val bytes = ByteArrayOutputStream()
@@ -543,5 +616,17 @@ private fun uleb(value: Long): ByteArray {
         remaining = remaining ushr 7
         bytes.write(part or if (remaining == 0L) 0 else 0x80)
     } while (remaining != 0L)
+    return bytes.toByteArray()
+}
+
+private fun sleb(value: Long): ByteArray {
+    var remaining = value
+    val bytes = ByteArrayOutputStream()
+    do {
+        val part = (remaining and 0x7f).toInt()
+        remaining = remaining shr 7
+        val more = !((remaining == 0L && (part and 0x40) == 0) || (remaining == -1L && (part and 0x40) != 0))
+        bytes.write(part or if (more) 0x80 else 0)
+    } while (more)
     return bytes.toByteArray()
 }

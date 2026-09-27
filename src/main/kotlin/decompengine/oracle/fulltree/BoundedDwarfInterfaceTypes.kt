@@ -84,6 +84,13 @@ internal class BoundedDwarfInterfaceTypeResolver(
     fun resolve(source: ResolvedFunctionDie, attributeName: Long = TYPE_AT_TYPE): DwarfInterfaceFact<String> =
         referenceFact(source, attributeName, 0).also { fact -> roots += fact.values }
 
+    /** Retain an automatic local's raw type reference without expanding a non-global graph. */
+    fun referenceOnly(source: ResolvedFunctionDie): DwarfInterfaceFact<String> =
+        referenceFact(source, TYPE_AT_TYPE, 0, expand = false).let {
+            DwarfInterfaceFact(it.state, it.values, it.evidence,
+                it.reasons + "type-graph-not-expanded-for-automatic-local")
+        }
+
     fun nodes(): Map<String, DwarfInterfaceTypeNode> {
         validateGraphDepth()
         return Collections.unmodifiableMap(LinkedHashMap(completed.toSortedMap()))
@@ -131,6 +138,7 @@ internal class BoundedDwarfInterfaceTypeResolver(
         attributeName: Long,
         depth: Int,
         inheritance: InterfaceInheritance? = null,
+        expand: Boolean = true,
     ): DwarfInterfaceFact<String> {
         val targets = LinkedHashMap<String, ResolvedFunctionDie>()
         val resolved = attributeFact(source, attributeName, inheritance) { owner, attribute ->
@@ -162,7 +170,7 @@ internal class BoundedDwarfInterfaceTypeResolver(
         }
         // Complete inheritance before following type edges. Otherwise an origin chain at every
         // graph level multiplies the JVM stack depth by the inheritance-chain ceiling.
-        targets.forEach { (id, target) -> if (id !in active) materialize(target, depth + 1) }
+        if (expand) targets.forEach { (id, target) -> if (id !in active) materialize(target, depth + 1) }
         return resolved
     }
 
