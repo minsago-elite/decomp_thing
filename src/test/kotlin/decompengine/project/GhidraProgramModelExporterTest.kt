@@ -241,8 +241,8 @@ class GhidraProgramModelExporterTest {
         assertTrue(progress.contains("\"reused\":${first.functions.size}"), progress)
         val statePath = modelPath.resolveSibling("program_model.json.export/state.json")
         val priorState = statePath.readText()
-        assertTrue("\"exporterVersion\":11" in priorState)
-        val historicalState = priorState.replace("\"exporterVersion\":11", "\"exporterVersion\":10")
+        assertTrue("\"exporterVersion\":12" in priorState)
+        val historicalState = priorState.replace("\"exporterVersion\":12", "\"exporterVersion\":11")
         statePath.writeText(historicalState)
         assertFailsWith<IllegalArgumentException> { analyzer.analyze(binary, work) }
         assertEquals(historicalState, statePath.readText())

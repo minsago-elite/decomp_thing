@@ -431,7 +431,7 @@ class GccRetainedDriverTargetTest {
         const val O_WRONLY = 0x1
         const val O_NONBLOCK = 0x800
         const val EWOULDBLOCK = 11
-        const val PROFILE_SHA256 = "9c3187dedb789d547a9c455d7403ca42168c1789ff439412f6e9bea48390f925"
+        const val PROFILE_SHA256 = "59ce90603f7176dcf8d6f899bd20d178b98aba7cb42dc51b7638d7a2713095fc"
         const val BUILD_SHA256 = "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
         const val MANIFEST_SHA256 = "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9"
         const val FULL_SHA256 = "8009c7cfc4f66017aa932d86a6d4ec7f374e6ab7a01b3ef5ab3d2fcc78c2378b"

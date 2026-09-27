@@ -372,7 +372,7 @@ internal object GccBundledFullExportCapture {
             "schemaVersion", "exporterVersion", "exporterSha256", "analysisToolSha256", "recoveryMode",
             "inputSha256", "language", "compilerSpec", "semanticStateBinding",
         )) { "GCC full exporter state fields are invalid" }
-        require(number(root, "schemaVersion") == 2L && number(root, "exporterVersion") == 11L &&
+        require(number(root, "schemaVersion") == 2L && number(root, "exporterVersion") == 12L &&
             string(root, "recoveryMode") == "full" && root.getValue("semanticStateBinding") == JsonNull &&
             string(root, "inputSha256") == expectedInput && string(root, "exporterSha256") == expectedExporter &&
             string(root, "analysisToolSha256") == expectedAnalysisTool
@@ -471,6 +471,44 @@ internal object GccBundledFullExportCapture {
         require(canonicalAddress(address) && address in sourceAddresses) {
             "GCC full type sourceAddress is not a captured function or global address"
         }
+        val declaration = string(root, "declaration")
+        val prefix = "/* Ghidra type "
+        val pathEnd = declaration.indexOf(" */ ", prefix.length)
+        require(declaration.startsWith(prefix) && pathEnd > prefix.length) {
+            "GCC full type declaration does not retain its encoded Ghidra type path"
+        }
+        val encodedPath = declaration.substring(prefix.length, pathEnd)
+        val path = OracleJson.parse(encodedPath.toByteArray(StandardCharsets.UTF_8), StrictJsonLimits(
+            maximumInputBytes = MAXIMUM_FULL_EVIDENCE_RECORD_BYTES,
+            maximumCanonicalBytes = MAXIMUM_FULL_EVIDENCE_RECORD_BYTES,
+            maximumDepth = 1,
+            maximumNodes = 1,
+            maximumStringBytes = MAXIMUM_FULL_EVIDENCE_RECORD_BYTES,
+            maximumTotalStringBytes = MAXIMUM_FULL_EVIDENCE_RECORD_BYTES,
+        ))
+        require(path is JsonPrimitive && path.isString && encodedPath == fullTypePathJson(path.content)) {
+            "GCC full type path does not use the exporter's canonical comment-safe encoding"
+        }
+        require(expectedId == "type_" + OracleArtifacts.sha256(path.content.toByteArray(StandardCharsets.UTF_8))) {
+            "GCC full type identity does not match its retained Ghidra type path"
+        }
+    }
+
+    /** Matches ExportProgramModel.json(path), with every slash escaped for a C comment. */
+    private fun fullTypePathJson(path: String): String = buildString {
+        append('"')
+        for (character in path) when (character) {
+            '\\' -> append("\\\\")
+            '"' -> append("\\\"")
+            '/' -> append("\\/")
+            '\n' -> append("\\n")
+            '\r' -> append("\\r")
+            '\t' -> append("\\t")
+            else -> if (character.code < 0x20) {
+                append("\\u").append(character.code.toString(16).padStart(4, '0'))
+            } else append(character)
+        }
+        append('"')
     }
 
     private fun canonicalAddress(address: String): Boolean =

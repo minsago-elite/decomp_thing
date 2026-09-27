@@ -212,7 +212,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
         private const val SOURCE_PROFILE_ID = "gcc-driver-16.2.0"
         private const val PROFILE_VERSION = "16.2.0"
         private const val SOURCE_REVISION = "78d4ac73dd391005b895a6148cd9831e28e1208b"
-        private const val COMPILER_ENGINE_PROFILE_SHA256 = "9c3187dedb789d547a9c455d7403ca42168c1789ff439412f6e9bea48390f925"
+        private const val COMPILER_ENGINE_PROFILE_SHA256 = "59ce90603f7176dcf8d6f899bd20d178b98aba7cb42dc51b7638d7a2713095fc"
         private const val CC1_MANIFEST_SHA256 = "dbef520c025d268f5126229ace8ad5b08a15722573d45b5e1ab934611905abb4"
         private const val DRIVER_MANIFEST_SHA256 = "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9"
         private const val CC1_BUILD_RECORD_SHA256 = "f6b2711d4f82562195acebe7250d7dc62eb9425af4f736736e0ea69b65103e8e"
@@ -220,7 +220,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
         private const val BUILD_RECORD_SHA256 = "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
         private const val TOOLCHAIN_REPRODUCTION_SHA256 = "5c2c159d7287305159a220a1260f6ff6bffe9ec78bb1cbe2fb24f85b68a7d4de"
         private const val TARGET_ABI_SHA256 = "d251d5e6a0edc17655c355fb8fd757d557f064a6e67095ad53c8ca1e7569a343"
-        private const val FULL_EXPORT_PROFILE_SHA256 = "bbab2fbd88ddea358401b609c20524034ee1720ede5b04b00b84a01551b00bc1"
+        private const val FULL_EXPORT_PROFILE_SHA256 = "13a06679600970d93b5226f9774ef5d610675a9ab018e6d5fc777b88e546a370"
         private const val MAXIMUM_CONTROL_BYTES = 4 * 1024 * 1024
         private const val MAXIMUM_MANIFEST_BYTES = 64 * 1024 * 1024
         private val JSON_LIMITS = StrictJsonLimits(
@@ -420,7 +420,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
                 authority.stringField("compilerEngineProfileSha256", "GCC structural full-export profile") ==
                     COMPILER_ENGINE_PROFILE_SHA256 &&
                 authority.stringField("exporterSha256", "GCC structural full-export profile") == exporterSha256 &&
-                authority.longField("exporterVersion", "GCC structural full-export profile") == 11L &&
+                authority.longField("exporterVersion", "GCC structural full-export profile") == 12L &&
                 authority.stringField("recoveryMode", "GCC structural full-export profile") == "full" &&
                 authority.stringField("ghidraArchiveSha256", "GCC structural full-export profile") ==
                     ghidraArchiveSha256
