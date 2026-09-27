@@ -12,6 +12,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFails
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -29,6 +30,11 @@ class GccBundledCliCommandTest {
         assertEquals(1024L, resumed.resumeAfterCheckpoint)
         assertEquals(2097152L, resumed.diskPolicy.maximumFilesystemBytes)
         assertEquals(256L, resumed.diskPolicy.maximumFilesystemInodes)
+        val fullExport = GccBundledCliOptions.parse(args, fullRecoveryExport = true)
+        assertTrue(fullExport.fullRecoveryExport)
+        assertEquals(null, fullExport.resumeAfterCheckpoint)
+        assertFails { GccBundledCliOptions.parse(args.mapIndexed { index, value -> if (index == 0) "lto1" else value }, fullRecoveryExport = true) }
+        assertFails { GccBundledCliOptions.parse(args + listOf("--resume-after-checkpoint", "1024"), fullRecoveryExport = true) }
     }
 
     @Test
@@ -58,6 +64,20 @@ class GccBundledCliCommandTest {
         Files.move(options.output.resolve("inputs"), options.output.resolve("old-inputs"))
         privateDirectory(options.output.resolve("inputs"))
         assertFails { invocation.requireCurrent() }
+    }
+
+    @Test
+    fun `full recovery mode is fixed by the distinct invocation command`() = fixture { root ->
+        val args = arguments(root)
+        val options = GccBundledCliOptions.parse(args, fullRecoveryExport = true)
+        val children = listOf(options.output, privateDirectory(options.output.resolve("inputs")), privateDirectory(options.output.resolve("journal")))
+        val identities = children.associateWith { path -> LinuxFilesystemSyscalls.openRoot(path).use { it.identity } }
+        val invocation = GccBundledCliInvocation(options, args, identities)
+        val document = OracleJson.parseCanonical(invocation.canonicalBytes).jsonObject
+        assertEquals("gcc-engine-full-export", document.getValue("argv").jsonArray.first().jsonPrimitive.content)
+        val planning = GccBundledCliInvocation(GccBundledCliOptions.parse(args), args, identities)
+        val planningDocument = OracleJson.parseCanonical(planning.canonicalBytes).jsonObject
+        assertEquals("gcc-engine-plan", planningDocument.getValue("argv").jsonArray.first().jsonPrimitive.content)
     }
 
     @Test
@@ -105,6 +125,22 @@ class GccBundledCliCommandTest {
             Files.list(path).use { assertEquals(0L, it.count()) }
         }
         assertFalse(Files.exists(options.output.resolve("result.json")))
+    }
+
+    @Test
+    fun `full export CLI records its mode before rejecting an untrusted binary`() = fixture { root ->
+        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines.json").toRealPath()
+        val args = arguments(root).map { if (it == root.resolve("profile").toString()) profile.toString() else it }
+        val options = GccBundledCliOptions.parse(args, fullRecoveryExport = true)
+        val failure = assertFails { GccBundledCliCommand.run(options, args) }
+        assertTrue(failure.message.orEmpty().contains("binary differs from selected profile engine"), failure.toString())
+        val invocation = OracleJson.parseCanonical(Files.readAllBytes(options.output.resolve("invocation.json"))).jsonObject
+        assertEquals("gcc-engine-full-export", invocation.getValue("argv").jsonArray.first().jsonPrimitive.content)
+        assertFalse(Files.exists(options.output.resolve("structural-full-export-binding.json")))
+        assertFalse(Files.exists(options.output.resolve("result.json")))
+        for (path in listOf(options.output.resolve("inputs"), options.output.resolve("journal"), options.scratch)) {
+            Files.list(path).use { assertEquals(0L, it.count()) }
+        }
     }
 
     @Test

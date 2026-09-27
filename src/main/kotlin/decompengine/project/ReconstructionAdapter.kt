@@ -1,5 +1,6 @@
 package decompengine.project
 
+import decompengine.repair.RepairIndexProfile
 import java.nio.file.Path
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -16,6 +17,7 @@ internal interface ReconstructionAdapter {
         throw IllegalArgumentException("adapter does not support evidence-only reconstruction: ${profile.id}")
     fun evidenceOnlyReconstructor(profile: ReconstructionProfile): ModuleReconstructor =
         throw IllegalArgumentException("adapter does not support evidence-only reconstruction: ${profile.id}")
+    fun repairIndexProfile(profile: ReconstructionProfile): RepairIndexProfile
     fun build(
         projectDir: Path,
         profile: ReconstructionProfile,

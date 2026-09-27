@@ -57,6 +57,9 @@ sealed interface AuthenticatedFullTreePlanningRegistry {
 
     /** Resolves an authenticated A13 owner unit exactly; there is no nullable or catch-all fallback. */
     fun requireOwnerModule(ownerUnitId: String): FullTreePlanningSourceModule
+
+    /** Returns the exact authenticated planning owners for one known shard, without acceptance authority. */
+    fun requireOwnerModulesForShard(shardId: String): List<FullTreePlanningSourceModule>
 }
 
 data class FullTreePlanningInventoryGeneration(
@@ -477,6 +480,14 @@ object FullTreePlanningInventoryControl {
                 }
             },
         )
+        private val modulesByShardId: Map<String, List<FullTreePlanningSourceModule>> = Collections.unmodifiableMap(
+            LinkedHashMap<String, List<FullTreePlanningSourceModule>>().apply {
+                sourceModules.groupBy { it.shardId }.forEach { (shardId, modules) ->
+                    put(shardId, Collections.unmodifiableList(ArrayList(modules)))
+                }
+                sourceOnlyUnits.forEach { unit -> putIfAbsent(unit.shardId, emptyList()) }
+            },
+        )
 
         override fun requireOwnerModule(ownerUnitId: String): FullTreePlanningSourceModule {
             if (!ownerUnitId.matches(COMPILATION_UNIT_ID)) {
@@ -485,6 +496,9 @@ object FullTreePlanningInventoryControl {
             return modulesByOwnerUnitId[ownerUnitId]
                 ?: throw FullTreeControlException("planning owner unit ID is outside the authenticated inventory")
         }
+
+        override fun requireOwnerModulesForShard(shardId: String): List<FullTreePlanningSourceModule> =
+            requireAuthenticatedPlanningShardModules(shardId, modulesByShardId)
 
         companion object {
             fun generate(
@@ -577,6 +591,12 @@ private fun addExact(left: Long, right: Long, label: String): Long = try {
 } catch (failure: ArithmeticException) {
     throw FullTreeControlException("$label count overflows the supported range", failure)
 }
+
+internal fun requireAuthenticatedPlanningShardModules(
+    shardId: String,
+    modulesByShardId: Map<String, List<FullTreePlanningSourceModule>>,
+): List<FullTreePlanningSourceModule> = modulesByShardId[shardId]
+    ?: throw FullTreeControlException("planning shard ID is outside the authenticated inventory")
 
 private val SOURCE_MODULE_ORDER = Comparator<JsonObject> { left, right ->
     val path = FULL_TREE_CODE_POINT_ORDER.compare(

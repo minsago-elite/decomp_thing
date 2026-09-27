@@ -197,6 +197,53 @@ class ArchivalAuditProvenanceTest {
     }
 
     @Test
+    fun `ordinary unresolved modules preserve diagnostic handling of accepted compiler defects`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val project = Files.createTempDirectory(scratch, "mixed-nonagent-audit-")
+        try {
+            val model = RecoveredProgramModel(inputSha256 = "a".repeat(64), functions = listOf(
+                RecoveredFunction("fn_10", "parse_one", 0x1000UL, "int parse_one(void)", "int parse_one(void) { return 1; }"),
+                RecoveredFunction("fn_100", "render_two", 0x2000UL, "int render_two(void)", "int render_two(void) { return 2; }"),
+            ))
+            val reconstructor = object : ModuleReconstructor {
+                override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule =
+                    EvidenceModuleReconstructor("fn_10" in request.module.functionIds).reconstruct(request)
+            }
+            val manifest = SourceTreeGenerator.generate(model, project, reconstructor = reconstructor)
+            val accepted = manifest.files.single {
+                ProjectFileRole.MODULE_IMPLEMENTATION in it.roles && it.acceptedImplementation == true
+            }
+            val unresolved = manifest.files.single {
+                ProjectFileRole.MODULE_IMPLEMENTATION in it.roles && it.acceptedImplementation == false
+            }
+            assertEquals(listOf("fn_100"), unresolved.entityIds)
+            assertEquals(listOf("fn_100"), ArchivalProjectAuditor.audit(project).unresolvedEntityIds)
+            val profile = GeneratedCMakeReconstructionProfile.descriptor
+            val acceptedId = profile.layout.declaration("module-implementation").moduleIdForPath(accepted.path)
+            val path = profile.layout.declaration("module-evidence").materialize(mapOf("module" to acceptedId))
+            val checkpoint = Json.parseToJsonElement(project.resolve(path).readText()).jsonObject
+            for (change in listOf("missing-compilation", "future-schema", "agent-identity-diagnostic")) {
+                val changed = when (change) {
+                    "future-schema" -> checkpoint.withField("schemaVersion", JsonPrimitive(99))
+                    "agent-identity-diagnostic" -> checkpoint.withField("reconstructorIdentity", JsonPrimitive("agent:local-audit-fixture"))
+                        .withField("promptCharacters", JsonNull)
+                    else -> JsonObject(checkpoint.filterKeys { it != "compilation" })
+                }
+                writeBoundFile(project, path, changed.toString())
+                val audit = ArchivalProjectAuditor.audit(project)
+                assertEquals(setOf(acceptedId), audit.moduleCompilationEvidenceProblems.keys, change)
+                assertEquals(listOf("fn_10", "fn_100"), audit.unresolvedEntityIds, change)
+                assertTrue(Files.exists(project.resolve("reports/archival_audit.json")), change)
+            }
+        } finally {
+            Files.walk(project).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
     fun `accepted flags cannot hide missing or mismatched compiler evidence`() {
         for (change in listOf("missing", "foreign-source", "failed", "foreign-command", "old-schema", "future-schema", "unbound-schema", "foreign-binary", "foreign-model-schema", "foreign-profile",
             "diagnostic-hash", "diagnostic-count", "diagnostic-type", "compiler-extra", "foreign-entity", "missing-entity", "duplicate-entity", "unresolved-entity", "unresolved-issue")) {
@@ -248,7 +295,24 @@ class ArchivalAuditProvenanceTest {
     @Test
     fun `recovered model cannot hide evidence-only implementations even when unresolved list is omitted`() {
         val project = fixture()
-        rewriteManifest(project) { it.withField("unresolvedImplementationIds", JsonArray(emptyList())) }
+        assertEquals(listOf("fn_10", "fn_100"), ArchivalProjectAuditor.audit(project).unresolvedEntityIds)
+        rewriteManifest(project) {
+            it.withField("unresolvedImplementationIds", JsonArray(emptyList()))
+                .withField("unresolvedEntityIds", JsonArray(emptyList()))
+        }
+
+        val mismatch = assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(project) }
+        assertTrue(mismatch.message.orEmpty().contains("confidence unresolvedImplementationIds differs"))
+        // Even mutually consistent report claims cannot promote evidence-only source to accepted code.
+        val confidencePath = "reports/confidence.json"
+        val confidence = Json.parseToJsonElement(project.resolve(confidencePath).readText()).jsonObject
+        val modules = confidence.getValue("modules").jsonArray.map { element ->
+            element.jsonObject.withField("unresolvedImplementationIds", JsonArray(emptyList()))
+        }
+        writeBoundFile(project, confidencePath, confidence
+            .withField("unresolvedImplementationIds", JsonArray(emptyList()))
+            .withField("unresolvedEntityIds", confidence.getValue("unresolvedRecoveryEntityIds"))
+            .withField("modules", JsonArray(modules)).toString())
 
         val audit = ArchivalProjectAuditor.audit(project)
 
@@ -271,6 +335,7 @@ class ArchivalAuditProvenanceTest {
     @Test
     fun `free text containing an entity ID cannot replace parsed module ownership`() {
         val project = fixture()
+        assertTrue(ArchivalProjectAuditor.audit(project).missingModelProvenance.isEmpty())
         val relative = "reports/module_plan.json"
         val plan = Json.parseToJsonElement(project.resolve(relative).readText()).jsonObject
         val modules = plan.getValue("modules").jsonArray.map { it.jsonObject }
@@ -279,6 +344,17 @@ class ArchivalAuditProvenanceTest {
         }.map { it.withField("boundaryEvidence", JsonArray(listOf(JsonPrimitive("fn_10")))) }
         assertTrue(retained.isNotEmpty())
         writeBoundFile(project, relative, plan.withField("modules", JsonArray(retained)).toString())
+
+        val mismatch = assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(project) }
+        assertTrue(mismatch.message.orEmpty().contains("confidence module inventory differs"))
+        val retainedIds = retained.map { it.getValue("id").jsonPrimitive.content }.toSet()
+        val confidencePath = "reports/confidence.json"
+        val confidence = Json.parseToJsonElement(project.resolve(confidencePath).readText()).jsonObject
+        val confidenceModules = confidence.getValue("modules").jsonArray.filter {
+            it.jsonObject.getValue("id").jsonPrimitive.content in retainedIds
+        }
+        writeBoundFile(project, confidencePath,
+            confidence.withField("modules", JsonArray(confidenceModules)).toString())
 
         val audit = ArchivalProjectAuditor.audit(project)
 
