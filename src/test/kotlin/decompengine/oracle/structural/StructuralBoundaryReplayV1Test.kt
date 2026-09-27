@@ -552,6 +552,41 @@ class StructuralBoundaryReplayV1Test {
         }
 
     @Test
+    fun `selected full export parser admits large source without widening historical replay`() = withReplayFixture { fixture ->
+        val source = "x".repeat(16 * 1024 * 1024 + 1)
+        val changed = fixture.mutateModel { functions -> functions.map { function ->
+            if (function.id == ALPHA_RECOVERED_ID) function.copy(decompiledC = source) else function
+        } }
+        val modelLimits = CanonicalProgramModelStreamingLimits(maximumTextCodePoints = 64 * 1024 * 1024)
+        assertFailsWith<StructuralRecoveryV1Exception> { fixture.observeSelected(changed) }
+        assertFailsWith<StructuralRecoveryV1Exception> { fixture.replay(replayModel = changed) }
+        val observed = StructuralBoundaryReplayV1.observeSelected(
+            fixture.oracle, "rich", changed.bytes, 0x400000UL, modelLimits = modelLimits,
+        )
+        val document = observed.canonicalBytes.observationDocument()
+        assertEquals(fixture.observeSelected().canonicalBytes.observationDocument()["result"], document["result"])
+        assertEquals(JsonPrimitive(64 * 1024 * 1024), document.objectField("programModelParserLimits")["maximumTextCodePoints"])
+        assertEquals(JsonPrimitive(64 * 1024 * 1024), document.objectField("policy").objectField("limits")["maxTextCharacters"])
+        assertEquals(JsonPrimitive(20_000), document.objectField("policy").objectField("limits")["maxFunctionRecords"])
+        assertEquals(JsonPrimitive(20_000_000), document.objectField("policy").objectField("limits")["maxMatchingCells"])
+        assertContentEquals(observed.canonicalBytes, StructuralBoundaryReplayV1.verifySelected(
+            fixture.oracle, "rich", changed.bytes, 0x400000UL, observed.canonicalBytes, modelLimits = modelLimits,
+        ).canonicalBytes)
+        assertFailsWith<StructuralRecoveryV1Exception> {
+            StructuralBoundaryReplayV1.observeSelected(
+                fixture.oracle, "rich", changed.bytes, 0x400000UL,
+                modelLimits = modelLimits.copy(maximumFunctions = 20_001),
+            )
+        }
+        assertFailsWith<StructuralRecoveryV1Exception> {
+            StructuralBoundaryReplayV1.verifySelected(
+                fixture.oracle, "rich", changed.bytes, 0x400000UL, observed.canonicalBytes,
+                modelLimits = modelLimits.copy(maximumTextCodePoints = 32 * 1024 * 1024),
+            )
+        }
+    }
+
+    @Test
     fun `selected observation enforces canonical input address and resource bounds`() = withReplayFixture { fixture ->
         val invalidInputs = listOf(
             fixture.baseModel.copy(bytes = fixture.modelBytes + '\n'.code.toByte()),

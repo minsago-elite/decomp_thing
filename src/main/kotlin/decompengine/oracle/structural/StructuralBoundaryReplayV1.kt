@@ -77,22 +77,19 @@ object StructuralBoundaryReplayV1 {
         recoveredProgramModelBytes: ByteArray,
         selectedModelImageBase: ULong,
         limits: StructuralBoundaryReplayV1Limits = StructuralBoundaryReplayV1Limits(),
+        modelLimits: CanonicalProgramModelStreamingLimits = selectedModelLimits(limits),
     ): StructuralSelectedBoundaryObservationV1 {
         if (twin !in setOf("rich", "stripped")) boundaryReplayFail("selected boundary twin is invalid")
+        if (modelLimits.maximumFunctions > limits.maximumFunctionRecords ||
+            modelLimits.maximumInputBytes > limits.maximumProgramModelBytes
+        ) boundaryReplayFail("selected model parser exceeds the boundary population or byte limit")
         val artifact = functionOracle.artifacts.getValue(twin)
         if (functionOracle.scope == "production" && selectedModelImageBase != artifact.elfImageBase) {
             boundaryReplayFail("production model image base is not the manifest-bound ELF image base")
         }
         val canonicalModel = CanonicalProgramModelStreaming.readCanonical(
             recoveredProgramModelBytes,
-            CanonicalProgramModelStreamingLimits(
-                maximumInputBytes = limits.maximumProgramModelBytes,
-                maximumFunctions = limits.maximumFunctionRecords,
-                maximumGlobals = limits.maximumModelGlobalsOrTypes,
-                maximumTypes = limits.maximumModelGlobalsOrTypes,
-                maximumReferencesPerFunction = limits.maximumReferencesPerFunction,
-                maximumTextCodePoints = limits.maximumTextCharacters,
-            ),
+            modelLimits,
         )
         if (canonicalModel.model.inputSha256 != artifact.inputSha256) {
             boundaryReplayFail("program model input SHA-256 does not match the selected artifact")
@@ -146,7 +143,8 @@ object StructuralBoundaryReplayV1 {
                 JsonObject(mapOf("start" to address(start), "endExclusive" to address(end)))
             }),
             "nearMissBytes" to JsonPrimitive(functionOracle.nearMissBytes),
-            "policy" to historicalBoundaryPolicy(functionOracle.nearMissBytes),
+            "policy" to selectedBoundaryPolicy(functionOracle.nearMissBytes, limits, modelLimits),
+            "programModelParserLimits" to selectedParserPolicy(modelLimits),
             "excludedFunctions" to functionOracle.expectedExcludedFunctions,
             "recoveredOutcomeCounts" to JsonObject(listOf("recovered", "partial", "failed", "synthetic").associateWith { status ->
                 JsonPrimitive(recovered.count { it.status == status })
@@ -169,11 +167,12 @@ object StructuralBoundaryReplayV1 {
         selectedModelImageBase: ULong,
         observationBytes: ByteArray,
         limits: StructuralBoundaryReplayV1Limits = StructuralBoundaryReplayV1Limits(),
+        modelLimits: CanonicalProgramModelStreamingLimits = selectedModelLimits(limits),
     ): StructuralSelectedBoundaryObservationV1 {
         if (observationBytes.size > StructuralBoundaryReplayV1Limits.HARD_MAXIMUM_REPORT_BYTES) {
             boundaryReplayFail("selected boundary observation exceeds its byte bound")
         }
-        val observed = observeSelected(functionOracle, twin, recoveredProgramModelBytes, selectedModelImageBase, limits)
+        val observed = observeSelected(functionOracle, twin, recoveredProgramModelBytes, selectedModelImageBase, limits, modelLimits)
         if (!MessageDigest.isEqual(observed.canonicalBytes, observationBytes)) {
             boundaryReplayFail("selected boundary observation differs from independent replay")
         }
@@ -401,6 +400,48 @@ private fun validateUpstreamBinding(
         boundaryReplayFail("candidate artifact detail does not reproduce the selected input binding")
     }
 }
+
+private fun selectedModelLimits(limits: StructuralBoundaryReplayV1Limits) = CanonicalProgramModelStreamingLimits(
+    maximumInputBytes = limits.maximumProgramModelBytes,
+    maximumFunctions = limits.maximumFunctionRecords,
+    maximumGlobals = limits.maximumModelGlobalsOrTypes,
+    maximumTypes = limits.maximumModelGlobalsOrTypes,
+    maximumReferencesPerFunction = limits.maximumReferencesPerFunction,
+    maximumTextCodePoints = limits.maximumTextCharacters,
+)
+
+private fun selectedBoundaryPolicy(
+    nearMissBytes: Int,
+    limits: StructuralBoundaryReplayV1Limits,
+    modelLimits: CanonicalProgramModelStreamingLimits,
+): JsonObject {
+    val historical = historicalBoundaryPolicy(nearMissBytes)
+    val selectedLimits = (historical.getValue("limits") as JsonObject).toMutableMap().apply {
+        put("maxJsonInputBytes", JsonPrimitive(modelLimits.maximumInputBytes))
+        put("maxFunctionRecords", JsonPrimitive(limits.maximumFunctionRecords))
+        put("maxModelReferencesPerFunction", JsonPrimitive(modelLimits.maximumReferencesPerFunction))
+        put("maxModelGlobalsOrTypes", JsonPrimitive(maxOf(modelLimits.maximumGlobals, modelLimits.maximumTypes)))
+        put("maxTextCharacters", JsonPrimitive(modelLimits.maximumTextCodePoints))
+        put("maxMatchingCells", JsonPrimitive(limits.maximumMatchingCells))
+        put("maxAmbiguityEdges", JsonPrimitive(limits.maximumAmbiguityEdges))
+    }
+    return JsonObject(historical + ("limits" to JsonObject(selectedLimits)))
+}
+
+private fun selectedParserPolicy(limits: CanonicalProgramModelStreamingLimits) = JsonObject(mapOf(
+    "maximumInputBytes" to JsonPrimitive(limits.maximumInputBytes),
+    "maximumFunctions" to JsonPrimitive(limits.maximumFunctions),
+    "maximumGlobals" to JsonPrimitive(limits.maximumGlobals),
+    "maximumTypes" to JsonPrimitive(limits.maximumTypes),
+    "maximumReferencesPerFunction" to JsonPrimitive(limits.maximumReferencesPerFunction),
+    "maximumIdentifierCodePoints" to JsonPrimitive(limits.maximumIdentifierCodePoints),
+    "maximumPrototypeCodePoints" to JsonPrimitive(limits.maximumPrototypeCodePoints),
+    "maximumTextCodePoints" to JsonPrimitive(limits.maximumTextCodePoints),
+    "maximumTotalStringBytes" to JsonPrimitive(limits.maximumTotalStringBytes),
+    "maximumNodes" to JsonPrimitive(limits.maximumNodes),
+    "maximumTokens" to JsonPrimitive(limits.maximumTokens),
+    "maximumDepth" to JsonPrimitive(limits.maximumDepth),
+))
 
 private fun historicalBoundaryPolicy(nearMissBytes: Int): JsonObject = JsonObject(
     mapOf(

@@ -6,6 +6,7 @@ import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.oracle.structural.CanonicalProgramModelStreaming
 import decompengine.oracle.structural.StructuralBoundaryReplayV1
+import decompengine.oracle.structural.StructuralBoundaryReplayV1Limits
 import decompengine.oracle.structural.StructuralFunctionOracleV1
 import decompengine.oracle.structural.StructuralRecoveryV1Inputs
 import decompengine.oracle.structural.StructuralRecoveryV1Limits
@@ -31,6 +32,9 @@ internal class GccDriverStructuralBoundaryEvidenceV1 private constructor(observa
         const val EXCLUSIONS_SHA256 = "71039d9d5462c54b920d3ebe2cd2aff855faf211389a4e86bab3158bca742031"
         private const val MANIFEST_SHA256 = "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9"
         private const val TARGET_SHA256 = "d251d5e6a0edc17655c355fb8fd757d557f064a6e67095ad53c8ca1e7569a343"
+        private val MODEL_LIMITS = GccDriverStructuralInputsV1.FULL_EXPORT_MODEL_LIMITS.copy(
+            maximumFunctions = StructuralBoundaryReplayV1Limits.HARD_MAXIMUM_FUNCTION_RECORDS,
+        )
 
         fun capture(
             profile: GccDriverStructuralInputsV1,
@@ -77,7 +81,7 @@ internal class GccDriverStructuralBoundaryEvidenceV1 private constructor(observa
             programModelBytes: ByteArray,
         ): GccDriverStructuralBoundaryEvidenceV1 {
             val oracle = loadOracle(profile)
-            val model = CanonicalProgramModelStreaming.readCanonical(programModelBytes)
+            val model = CanonicalProgramModelStreaming.readCanonical(programModelBytes, MODEL_LIMITS)
             require(model.model.inputSha256 == profile.strippedBinary.sha256) {
                 "driver boundary model does not identify the selected stripped artifact"
             }
@@ -110,9 +114,12 @@ internal class GccDriverStructuralBoundaryEvidenceV1 private constructor(observa
                 require(it.isString && it.content.matches(Regex("[a-f0-9]{64}")))
                 it.content
             }
-            val observed = StructuralBoundaryReplayV1.observeSelected(oracle, "stripped", programModelBytes, profile.imageBase)
+            val observed = StructuralBoundaryReplayV1.observeSelected(
+                oracle, "stripped", programModelBytes, profile.imageBase, modelLimits = MODEL_LIMITS,
+            )
             val verified = StructuralBoundaryReplayV1.verifySelected(
                 oracle, "stripped", programModelBytes, profile.imageBase, observed.canonicalBytes,
+                modelLimits = MODEL_LIMITS,
             )
             val binding = OracleJson.canonicalBytes(JsonObject(mapOf(
                 "provider" to JsonPrimitive("gcc-driver-boundary-evidence-binding-v1"),
