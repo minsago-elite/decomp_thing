@@ -418,6 +418,70 @@ class GeneratedCDeclarationsTest {
     }
 
     @Test
+    fun `unreferenced private static functions remain buildable in evidence and recovered modes`() {
+        for (includeRecovered in listOf(false, true)) {
+            val project = project()
+            val prototype = "static int helper(int value)"
+            val model = model(
+                function("helper", prototype, "$prototype { return value + 3; }"),
+                function("main", "int main(void)", "int main(void) { return 17; }"),
+            )
+            val before = model.toJson()
+            val reconstructor = if (includeRecovered) RecoveredCModuleReconstructor() else EvidenceModuleReconstructor()
+            val manifest = SourceTreeGenerator.generate(model, project, reconstructor = reconstructor,
+                overrides = mapOf("fn_helper" to "utility", "fn_main" to "entry"))
+            if (includeRecovered) {
+                assertTrue(manifest.unresolvedImplementationIds.isEmpty(), manifest.unresolvedImplementationIds.toString())
+            } else {
+                assertTrue("fn_helper" in manifest.unresolvedImplementationIds)
+            }
+            assertEquals(before, model.toJson())
+            assertTrue(project.resolve("src/modules/utility_internal.h").readText().contains("__attribute__((unused))\n$prototype;"))
+            assertTrue(project.resolve("src/modules/utility.c").readText().contains("$prototype {"))
+            assertFalse(project.resolve("include/modules/utility.h").readText().contains("helper("))
+            assertEquals(0, MakeProjectBuilder.build(project).returnCode, "includeRecovered=$includeRecovered")
+        }
+    }
+
+    @Test
+    fun `private static address references remain usable without recorded call edges`() {
+        val project = project()
+        val prototype = "static int helper(int value)"
+        val model = model(
+            function("helper", prototype, "$prototype { return value + 3; }"),
+            function("main", "int main(void)", "int main(void) { int (*callback)(int) = helper; return callback(14); }"),
+        )
+        assertTrue(model.functions.all { it.calls.isEmpty() })
+        val manifest = SourceTreeGenerator.generate(model, project, reconstructor = RecoveredCModuleReconstructor(),
+            overrides = mapOf("fn_helper" to "core", "fn_main" to "core"))
+        assertTrue(manifest.unresolvedImplementationIds.isEmpty(), manifest.unresolvedImplementationIds.toString())
+        assertTrue(project.resolve("src/modules/core_internal.h").readText().contains("__attribute__((unused))\n$prototype;"))
+        assertTrue(project.resolve("src/modules/core.c").readText().contains("$prototype {"))
+        assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+        assertEquals(17, ProcessBuilder(project.resolve("build/reconstructed").toAbsolutePath().toString()).start().waitFor())
+    }
+
+    @Test
+    fun `private static unused suppression leaves warnings inside the recovered body enforced`() {
+        val project = project()
+        val model = model(
+            function("helper", "static int helper(int value)",
+                "static int helper(int value) { int ignored_local = 17; return value + 3; }"),
+            function("main", "int main(void)", "int main(void) { return 0; }"),
+        )
+        val manifest = SourceTreeGenerator.generate(model, project, reconstructor = RecoveredCModuleReconstructor(),
+            overrides = mapOf("fn_helper" to "utility", "fn_main" to "entry"))
+        assertTrue("fn_helper" in manifest.unresolvedImplementationIds)
+        val report = project.resolve("reports/modules/utility.json").readText()
+        assertTrue(report.contains("module-compilation-failed"), report)
+        assertFailsWith<BuildException> { MakeProjectBuilder.build(project) }
+        val diagnostics = Files.walk(project.resolve("reports/build/modules")).use { paths ->
+            paths.filter { it.toString().endsWith(".log") }.toList().joinToString("\n") { it.readText() }
+        }
+        assertTrue(diagnostics.contains("ignored_local"), diagnostics)
+    }
+
+    @Test
     fun `private extern inline implementation retains an external definition for an indirect same module call`() {
         val project = project()
         val prototype = "extern inline int helper(int value)"

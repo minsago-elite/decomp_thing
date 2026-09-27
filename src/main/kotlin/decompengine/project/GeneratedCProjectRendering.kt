@@ -81,7 +81,13 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
         append("#ifndef $guard\n#define $guard\n\n#include \"${module.headerPath.removePrefix("include/")}\"\n\n")
         module.functionIds.map { id -> functions.getValue(id) }
             .filterNot { it.id in externallyCalled || safeCName(it.name) in setOf("main", "decomp_engine_main") }
-            .forEach { function -> append(normalizedPrototype(function)).append("; /* private ${function.id} @ 0x${function.address.toString(16)} */\n") }
+            .forEach { function ->
+                val declaration = recoveredDeclaration(function, declarationContext)
+                // A recovered inventory can retain functions with no callers. Keep their exact
+                // declaration and linkage while suppressing only this function's unused warning.
+                if (declaration.hasInternalLinkage) append("__attribute__((unused))\n")
+                append(declaration.prototype).append("; /* private ${function.id} @ 0x${function.address.toString(16)} */\n")
+            }
         append("\n#endif\n")
     }
 

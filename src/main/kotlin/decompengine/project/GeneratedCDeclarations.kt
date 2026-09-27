@@ -60,7 +60,7 @@ internal fun recoveredDeclaration(
     val source = declaration.source
     val prototype = source.replaceRange(identifier.start, identifier.end, safeCName(function.name))
     val soleVoidParameter = parameters.explicitVoid || (parameters.parameters.singleOrNull()?.let {
-        it.name == null && context.classify(it.specifiers, it.derived) == GeneratedCTypeKind.VOID
+        it.name == null && context.classify(it.specifiers, it.derived, it.atomicType) == GeneratedCTypeKind.VOID
     } == true)
     GeneratedCFunctionDeclaration(
         entityId = function.id,
@@ -72,7 +72,7 @@ internal fun recoveredDeclaration(
         hasInlineSpecifier = "inline" in declaration.specifiers,
         hasExternSpecifier = "extern" in declaration.specifiers,
         noReturn = "_Noreturn" in declaration.specifiers,
-        returnKind = context.classify(declaration.specifiers, declaration.derived.drop(1)),
+        returnKind = context.classify(declaration.specifiers, declaration.derived.drop(1), declaration.atomicType),
         resultDeclaration = { name ->
             // Removing only the outer function suffix preserves even a pointer-to-function return.
             val edits = declaration.storageSpecifiers.map { Triple(it.start, it.end, "") } +
@@ -91,7 +91,7 @@ internal fun globalDeclaration(
 ): String = declarationFor(global.id) {
     val type = CDeclarationParser(global.type.trim()).parse(allowAbstract = true)
     require(type.name == null) { "global type must be an abstract declarator without an object name" }
-    val kind = context.classify(type.specifiers, type.derived)
+    val kind = context.classify(type.specifiers, type.derived, type.atomicType)
     require(kind != GeneratedCTypeKind.FUNCTION) { "global type denotes a function, not an object" }
     require(external || global.initializer != null || kind != GeneratedCTypeKind.INCOMPLETE_ARRAY) {
         "an unsized array requires retained initializer evidence; a zero placeholder would invent its extent"
@@ -112,7 +112,7 @@ internal enum class GeneratedCTypeKind { VOID, INTEGER, POINTER, ARRAY, INCOMPLE
 /** Resolves only declaration shapes needed by generated code; the compiler still validates C types. */
 internal class GeneratedCDeclarationContext(types: List<RecoveredType>) {
     private val aliases = linkedMapOf<String, CDeclaration>()
-    private data class ResolvedType(val kind: GeneratedCTypeKind, val aliasDepth: Int = 0)
+    private data class ResolvedType(val kind: GeneratedCTypeKind, val resolutionDepth: Int = 0)
     private val resolved = hashMapOf<String, ResolvedType>()
 
     init {
@@ -151,10 +151,19 @@ internal class GeneratedCDeclarationContext(types: List<RecoveredType>) {
     }
 
     @Synchronized
-    internal fun classify(specifiers: List<String>, derived: List<CDerived>): GeneratedCTypeKind =
-        resolve(specifiers, derived, linkedSetOf()).kind
+    internal fun classify(
+        specifiers: List<String>,
+        derived: List<CDerived>,
+        atomicType: CDeclaration? = null,
+    ): GeneratedCTypeKind = resolve(specifiers, derived, atomicType, linkedSetOf(), 0).kind
 
-    private fun resolve(specifiers: List<String>, derived: List<CDerived>, visiting: MutableSet<String>): ResolvedType {
+    private fun resolve(
+        specifiers: List<String>,
+        derived: List<CDerived>,
+        atomicType: CDeclaration?,
+        visiting: MutableSet<String>,
+        depth: Int,
+    ): ResolvedType {
         // Use-site operators precede alias operators: an A* stays a pointer even if A is int[].
         when (val outer = derived.firstOrNull()) {
             CDerived.Pointer -> return ResolvedType(GeneratedCTypeKind.POINTER)
@@ -163,7 +172,18 @@ internal class GeneratedCDeclarationContext(types: List<RecoveredType>) {
             null -> Unit
         }
         val base = specifiers.filterNot { it in cStorageSpecifiers || it in setOf("const", "volatile", "restrict", "_Atomic") }
-        if (base == listOf("void")) return ResolvedType(GeneratedCTypeKind.VOID)
+        if (atomicType != null) {
+            // The complete atomic specifier is one base type; any additional base type is
+            // invalid C and must not acquire the shape of just one of its specifiers.
+            if (base.size != 1) return ResolvedType(GeneratedCTypeKind.UNKNOWN)
+            require(depth < 64) { "typedef or atomic type resolution exceeds depth 64" }
+            val inner = resolve(atomicType.specifiers, atomicType.derived, atomicType.atomicType, visiting, depth + 1)
+            // Invalid atomic void must not be interpreted as an explicit no-parameter list.
+            // Keep array shape information to avoid inventing an alias-hidden array extent.
+            val kind = if (inner.kind == GeneratedCTypeKind.VOID) GeneratedCTypeKind.OTHER else inner.kind
+            return ResolvedType(kind, inner.resolutionDepth + 1)
+        }
+        if (base == listOf("void")) return ResolvedType(GeneratedCTypeKind.VOID).withAtomicQualifier(specifiers)
         if (base.isNotEmpty() && base.all { it in integerSpecifiers }) return ResolvedType(GeneratedCTypeKind.INTEGER)
         if (base.firstOrNull() == "enum") return ResolvedType(GeneratedCTypeKind.INTEGER)
         if (base.firstOrNull() in setOf("struct", "union") || base.any { it in setOf("float", "double", "_Complex") }) {
@@ -172,15 +192,20 @@ internal class GeneratedCDeclarationContext(types: List<RecoveredType>) {
         val name = base.singleOrNull() ?: return ResolvedType(GeneratedCTypeKind.UNKNOWN)
         val alias = aliases[name] ?: return ResolvedType(if (name in standardIntegerAliases) GeneratedCTypeKind.INTEGER else GeneratedCTypeKind.UNKNOWN)
         resolved[name]?.let {
-            require(visiting.size + it.aliasDepth <= 64) { "typedef resolution exceeds depth 64 at $name" }
-            return it
+            require(depth + it.resolutionDepth <= 64) { "typedef resolution exceeds depth 64 at $name" }
+            return it.withAtomicQualifier(specifiers)
         }
-        require(visiting.size < 64 && visiting.add(name)) { "cyclic typedef or typedef resolution exceeds depth 64 at $name" }
-        val result = resolve(alias.specifiers, alias.derived, visiting).let { ResolvedType(it.kind, it.aliasDepth + 1) }
+        require(depth < 64 && visiting.add(name)) { "cyclic typedef or typedef resolution exceeds depth 64 at $name" }
+        val result = resolve(alias.specifiers, alias.derived, alias.atomicType, visiting, depth + 1)
+            .let { ResolvedType(it.kind, it.resolutionDepth + 1) }
         visiting.remove(name)
         resolved[name] = result
-        return result
+        return result.withAtomicQualifier(specifiers)
     }
+
+    // A use-site qualifier changes this result, never the cached unqualified alias shape.
+    private fun ResolvedType.withAtomicQualifier(specifiers: List<String>): ResolvedType =
+        if (kind == GeneratedCTypeKind.VOID && "_Atomic" in specifiers) copy(kind = GeneratedCTypeKind.OTHER) else this
 
     companion object {
         val EMPTY = GeneratedCDeclarationContext(emptyList())
@@ -445,6 +470,8 @@ internal data class CDeclaration(
     val nameOffset: Int,
     /** Declarator operations ordered from the identifier outward. */
     val derived: List<CDerived>,
+    /** Parsed type-name of an atomic specifier, distinct from the `_Atomic` qualifier. */
+    val atomicType: CDeclaration? = null,
 )
 
 /**
@@ -463,10 +490,24 @@ private class CDeclarationParser(raw: String, private val symbolicName: String? 
         require(tokens.isNotEmpty()) { "empty declaration" }
         val specifiers = mutableListOf<String>()
         val storageSpecifiers = mutableListOf<CToken>()
+        var atomicType: CDeclaration? = null
         var hasType = false
         while (cursor < tokens.size) {
             val token = tokens[cursor].text
             when {
+                token == "_Atomic" && tokens.getOrNull(cursor + 1)?.text == "(" -> {
+                    require(atomicType == null) { "multiple atomic type specifiers are unsupported" }
+                    val start = tokens[cursor].start
+                    val end = matchingCToken(tokens, cursor + 1)
+                    atomicType = CDeclarationParser(raw.substring(tokens[cursor + 1].end, tokens[end].start), depth = depth + 1)
+                        .parse(allowAbstract = true, allowSemicolon = false)
+                    require(atomicType.name == null && atomicType.storageSpecifiers.isEmpty()) {
+                        "an atomic type-name must be abstract and have no storage specifiers"
+                    }
+                    specifiers += raw.substring(start, tokens[end].end)
+                    hasType = true
+                    cursor = end + 1
+                }
                 token in qualifiers -> { specifiers += token; cursor++ }
                 token in cStorageSpecifiers -> {
                     storageSpecifiers += tokens[cursor]
@@ -493,7 +534,7 @@ private class CDeclarationParser(raw: String, private val symbolicName: String? 
         if (semicolon != null) cursor++
         require(cursor == tokens.size) { "unexpected token ${tokens[cursor].text}" }
         val source = if (semicolon == null) raw else raw.removeRange(semicolon.start, semicolon.end)
-        return CDeclaration(source, specifiers, storageSpecifiers, declaratorOffset, declarator.name, declarator.nameOffset, declarator.derived)
+        return CDeclaration(source, specifiers, storageSpecifiers, declaratorOffset, declarator.name, declarator.nameOffset, declarator.derived, atomicType)
     }
 
     private data class Declarator(val name: CToken?, val nameOffset: Int, val derived: List<CDerived>)
@@ -600,8 +641,16 @@ private fun cDeclarationTokens(
             skipDirectives && source[cursor] == '#' && source.substring(source.lastIndexOf('\n', cursor) + 1, cursor).isBlank() -> {
                 cursor = source.indexOf('\n', cursor).let { if (it < 0) source.length else it }
             }
-            source.startsWith("//", cursor) -> cursor = source.indexOf('\n', cursor).let {
-                if (it < 0) { onTrailingLineComment(); source.length } else it
+            source.startsWith("//", cursor) -> {
+                val newline = source.indexOfAny(charArrayOf('\r', '\n'), cursor)
+                val end = if (newline < 0) source.length else newline
+                var last = end - 1
+                while (last > cursor && source[last].isWhitespace()) last--
+                // Translation splices escaped physical newlines before removing comments.
+                // Even a blank following line triggers -Wcomment under the strict profile.
+                val escaped = source[last] == '\\' || (last >= 2 && source.regionMatches(last - 2, "??/", 0, 3))
+                require(!escaped) { "a line comment ending in backslash cannot safely precede generated C syntax" }
+                cursor = if (newline < 0) { onTrailingLineComment(); source.length } else newline
             }
             source.startsWith("/*", cursor) -> {
                 val end = source.indexOf("*/", cursor + 2)
