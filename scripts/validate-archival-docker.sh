@@ -3,7 +3,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-validation_root=$(mktemp -d /tmp/decomp-archival-ci.XXXXXX)
+validation_parent="$PWD/build"
+mkdir -p "$validation_parent"
+validation_root=$(mktemp -d "$validation_parent/decomp-archival-ci.XXXXXX")
 cleanup() {
   local status=$?
   if ((status != 0)) && [[ -d "$validation_root/output" ]]; then
@@ -23,7 +25,7 @@ cleanup() {
     )
   fi
   case "$validation_root" in
-    /tmp/decomp-archival-ci.*) rm -rf -- "$validation_root" ;;
+    "$validation_parent"/decomp-archival-ci.*) rm -rf -- "$validation_root" ;;
     *) echo "refusing to remove unexpected validation path: $validation_root" >&2 ;;
   esac
 }
