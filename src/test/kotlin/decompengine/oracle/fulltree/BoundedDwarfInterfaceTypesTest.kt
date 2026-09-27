@@ -17,6 +17,84 @@ import kotlin.test.assertTrue
 
 class BoundedDwarfInterfaceTypesTest {
     @Test
+    fun `imported declarations retain member and subprogram references without expanding their targets`(): Unit =
+        inInterfaceFixtureDirectory { root ->
+            val fixture = typeElf(
+                emitted("entry", "record"),
+                die("record", 0x13, children = listOf(
+                    die("importMember", 0x08, listOf(reference(0x18, "member"))),
+                    die("importMethod", 0x08, listOf(reference(0x18, "method"))),
+                )),
+                die("owner", 0x13, children = listOf(
+                    die("member", 0x0d, listOf(reference(0x49, "int"), number(0x38, 0))),
+                    die("method", 0x2e, listOf(reference(0x49, "int"))),
+                )),
+                integerType(),
+            )
+            for (scope in listOf(BoundedDwarfTypeGraphScope.FULL_REFERENCES, BoundedDwarfTypeGraphScope.ABI_LAYOUT)) {
+                val facts = scan(root, fixture, BoundedDwarfInterfaceFactLimits(maximumTypes = 1,
+                    maximumTypeDepth = 1, typeGraphScope = scope))
+                assertEquals(setOf(fixture.locator("record")), facts.types.keys)
+                assertEquals(listOf(fixture.locator("entry")), facts.functions.map { it.locator })
+                val children = facts.types.getValue(fixture.locator("record")).children
+                assertEquals(listOf("importMember", "importMethod").map(fixture::locator), children.map { it.id })
+                for ((child, target) in children.zip(listOf("member", "method"))) {
+                    val imported = child.attributes.getValue(0x18)
+                    known(imported, fixture.locator(target))
+                    assertEquals(listOf("${child.id}:attribute=0x18"), imported.evidence)
+                    assertTrue(imported.reasons.isEmpty())
+                    assertEquals(DwarfInterfaceFactState.ABSENT, child.type.state)
+                }
+            }
+        }
+
+    @Test
+    fun `imported declarations reject nonboundary dangling and nonreference local imports`(): Unit =
+        inInterfaceFixtureDirectory { root ->
+            val imports = listOf(
+                reference(0x18, "member", addend = 1),
+                raw(0x18, FULL_TREE_DW_FORM_REF4, fixed(0xffffff, 4)),
+                number(0x18, 7),
+            )
+            for (imported in imports) {
+                val fixture = typeElf(
+                    emitted("entry", "record"),
+                    die("record", 0x13, children = listOf(die("import", 0x08, listOf(imported)))),
+                    die("owner", 0x13, children = listOf(
+                        die("member", 0x0d, listOf(text(0x03, "member"))),
+                    )),
+                )
+                assertFailsWith<FullTreeControlException> { scan(root, fixture) }
+            }
+        }
+
+    @Test
+    fun `supplementary imported declarations stay unknown without inventing targets`(): Unit =
+        inInterfaceFixtureDirectory { root ->
+            val fixture = typeElf(
+                emitted("entry", "record"),
+                die("record", 0x13, children = listOf(
+                    die("sup4", 0x08, listOf(raw(0x18, FULL_TREE_DW_FORM_REF_SUP4, fixed(7, 4)))),
+                    die("sup8", 0x08, listOf(raw(0x18, FULL_TREE_DW_FORM_REF_SUP8, fixed(9, 8)))),
+                    die("indirect", 0x08, listOf(raw(0x18, FULL_TREE_DW_FORM_INDIRECT,
+                        uleb(FULL_TREE_DW_FORM_REF_SUP4) + fixed(11, 4)))),
+                )),
+                version = 5,
+            )
+            val facts = scan(root, fixture, BoundedDwarfInterfaceFactLimits(maximumTypes = 1, maximumTypeDepth = 1))
+            assertEquals(setOf(fixture.locator("record")), facts.types.keys)
+            val children = facts.types.getValue(fixture.locator("record")).children
+            assertEquals(listOf("sup4", "sup8", "indirect").map(fixture::locator), children.map { it.id })
+            for ((child, formAndOperand) in children.zip(listOf("0x1c:operand=7", "0x24:operand=9", "0x1c:operand=11"))) {
+                val imported = child.attributes.getValue(0x18)
+                assertEquals(DwarfInterfaceFactState.UNKNOWN, imported.state)
+                assertTrue(imported.values.isEmpty())
+                assertEquals(listOf("${child.id}:attribute=0x18"), imported.evidence)
+                assertEquals(listOf("unsupported-declaration-reference-form:$formAndOperand"), imported.reasons)
+            }
+        }
+
+    @Test
     fun `ABI layout scope retains terminal pointer references without expanding unrelated pointees`(): Unit =
         inInterfaceFixtureDirectory { root ->
             val tags = listOf(0x0fL, 0x10L, 0x42L)

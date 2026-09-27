@@ -361,7 +361,9 @@ internal class BoundedDwarfInterfaceTypeResolver(
                     referenceFact(source, name, depth, inheritance, expand = reason == null,
                         unexpandedReason = reason).also { if (reason == null) expandedReferenceNames += name }
                 }
-                TYPE_AT_ABSTRACT_ORIGIN, TYPE_AT_SPECIFICATION -> attributeFact(source, name, inheritance) { owner, attribute ->
+                // Imports name declarations, including members and subprograms. Validate the
+                // reference without interpreting its target as a type or adding a layout edge.
+                TYPE_AT_IMPORT, TYPE_AT_ABSTRACT_ORIGIN, TYPE_AT_SPECIFICATION -> attributeFact(source, name, inheritance) { owner, attribute ->
                     declarationReferenceFact(owner, attribute)
                 }
                 TYPE_AT_NAME, TYPE_AT_LINKAGE_NAME -> attributeFact(source, name, inheritance) { owner, attribute ->
@@ -526,6 +528,7 @@ private fun typeAttributesJson(attributes: Map<Long, DwarfInterfaceFact<String>>
 
 private const val TYPE_AT_NAME = 0x03L
 private const val TYPE_AT_BYTE_SIZE = 0x0bL
+private const val TYPE_AT_IMPORT = 0x18L
 private const val TYPE_AT_CONTAINING_TYPE = 0x1dL
 private const val TYPE_AT_ABSTRACT_ORIGIN = 0x31L
 private const val TYPE_AT_ENCODING = 0x3eL

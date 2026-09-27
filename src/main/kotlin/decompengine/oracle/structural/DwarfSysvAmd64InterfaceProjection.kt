@@ -63,7 +63,7 @@ internal class DwarfSysvAmd64Projection internal constructor(
  * Unsupported forms/layouts preserve unknown; absent defaults apply only to valid C/C++ evidence.
  */
 internal object DwarfSysvAmd64InterfaceProjection {
-    const val VERSION = "dwarf-sysv-amd64-lp64-projection-v1"
+    const val VERSION = "dwarf-sysv-amd64-lp64-projection-v2"
     private const val TARGET_SHA = "362e5b8fb1b068d932e35c7bf92d2206cceb9edb5b2991b66e3b12673f608c4b"
     private const val MAX_DEPTH = 64
     private const val MAX_TYPES = 200_000
@@ -101,6 +101,7 @@ internal object DwarfSysvAmd64InterfaceProjection {
         put("scalarRules", "integer-encodings:1,2,5,6,7,8;integer-bytes:1,2,4,8,16;boolean=1;pointer-reference=8;float-bytes:2,4,8;16-byte-float-only-long-double-or-__float128-or-_Float128;complex=two-components")
         put("scalarAlignment", "natural-size;complex-component-alignment;explicit-alignment-must-equal-natural")
         put("aggregateRules", "complete-known-size-and-explicit-alignment;all-instance-members-proved;ordinary-C;C++-only-explicit-pass-by-value-or-reference;union-offset=0")
+        put("nonInstanceChildRules", "DWARF5-static-variable-and-const-volatile-restrict-atomic-declarations-require-validated-type-reference;imported-declaration-requires-validated-import-reference;no-instance-location-or-bit-layout;only-exact-unsupported-child-capture-warning-permitted;raw-facts-retained")
         put("arrayRules", "C-C++-row-major;constant-count-or-inclusive-bounds;absent-lower-bound=0;contiguous-stride;checked-size-product")
         put("bitfieldRules", "integer-storage;explicit-storage-offset-required-for-nonzero-width;data-bit-offset-or-little-endian-legacy-bit-offset;misaligned-storage-unknown")
         put("classMergeRules", "equal;NO_CLASS-neutral;MEMORY-dominates;INTEGER-dominates;x87-mixtures-memory;otherwise-SSE")
@@ -360,6 +361,7 @@ internal object DwarfSysvAmd64InterfaceProjection {
             for (child in n.children) {
                 if (child.tag !in setOf(0x0dL, 0x1cL)) {
                     if (child.tag in setOf(0x2eL, 0x02L, 0x13L, 0x17L, 0x16L, 0x04L, 0x2fL, 0x30L, 0x3aL)) continue
+                    if (validatedNonInstanceDeclaration(child)) continue
                     unknown("unsupported-aggregate-child:${child.tag}")
                 }
                 if (child.reasons.isNotEmpty()) unknown("member-has-unresolved-evidence")
@@ -392,6 +394,46 @@ internal object DwarfSysvAmd64InterfaceProjection {
                 }
             }
             return DwarfAbiTypeShape(id, bytes, alignment, fields = fields, aggregate = true, union = n.tag == 0x17L)
+        }
+
+        /**
+         * DWARF 5 sections 5.7.7 and 5.3 distinguish class variables and type modifiers
+         * from instance members. An imported declaration (section 3.2.3) names an
+         * existing declaration; it does not add another instance of the imported entity.
+         * Validate this narrow distinction without claiming to know the declaration's
+         * type layout, storage location, constant value or source identity.
+         */
+        private fun validatedNonInstanceDeclaration(child: DwarfInterfaceTypeChild): Boolean {
+            if (child.tag !in setOf(0x34L, 0x26L, 0x35L, 0x37L, 0x47L, 0x08L)) return false
+            val captureWarning = "unsupported-type-child-tag:0x${child.tag.toString(16)}"
+            if (child.reasons.any { it != captureWarning }) unknown("non-instance-child-has-unresolved-evidence")
+            // Even a zero/unknown offset or width contradicts the non-instance interpretation.
+            for (attribute in listOf(0x38L, 0x0cL, 0x0dL, 0x6bL)) {
+                child.attributes[attribute]?.let {
+                    if (!absent(it)) unknown("non-instance-child-has-instance-layout:$attribute")
+                }
+            }
+            child.attributes[0x3cL]?.let {
+                if (!absent(it) && single(it) !in setOf("0", "1")) unknown("non-instance-child-has-unresolved-declaration-status")
+            }
+            if (child.tag == 0x08L) {
+                if (single(child.attributes[0x18L]) == null) unknown("non-instance-child-has-unresolved-import")
+                if (!absent(child.type) || child.attributes[0x49L]?.let { !absent(it) } == true) {
+                    unknown("imported-declaration-has-type-attribute")
+                }
+            } else {
+                val reference = child.type
+                val target = reference.values.singleOrNull()
+                if (reference.state != DwarfInterfaceFactState.KNOWN || target == null || reference.reasons.any {
+                    it != "type-reference-not-expanded:abi-layout-non-layout-child" && it != "type-reference-cycle:$target"
+                }) unknown("non-instance-child-has-unresolved-type-reference")
+                child.attributes[0x49L]?.let {
+                    if (it !== reference && it.toJson(::JsonPrimitive) != reference.toJson(::JsonPrimitive)) {
+                        unknown("non-instance-child-type-reference-conflict")
+                    }
+                }
+            }
+            return true
         }
     }
 

@@ -174,6 +174,80 @@ class DwarfSysvAmd64InterfaceProjectionTest {
     }
 
     @Test
+    fun `validated static qualifier and imported children preserve instance ABI and every raw fact`() {
+        val deferred = DwarfInterfaceFact(DwarfInterfaceFactState.KNOWN, listOf("unexpanded-static-type"),
+            listOf("static:attribute=0x49"), listOf("type-reference-not-expanded:abi-layout-non-layout-child"))
+        val children = listOf(
+            member("field", "int", 0),
+            nonInstance("static-declaration", 0x34, deferred, mapOf(0x3cL to known("1"))),
+            // A static definition need not have declaration/external=true or a known location.
+            nonInstance("static-definition", 0x34, deferred, mapOf(0x02L to unknown("uninterpreted-static-location"))),
+            nonInstance("using-declaration", 0x08, absent(), mapOf(0x18L to known("unexpanded-base-member"))),
+        ) + listOf(0x26L, 0x35L, 0x37L, 0x47L).map { tag ->
+            nonInstance("qualifier-$tag", tag, DwarfInterfaceFact(DwarfInterfaceFactState.KNOWN,
+                listOf("record"), listOf("qualifier-$tag:attribute=0x49"), listOf("type-reference-cycle:record")))
+        }
+        val record = aggregate("record", 4, 4, children, extra = mapOf(0x36L to known("5")))
+        val original = record.toJson()
+        val projected = project(function(returned = known(record.id), parameters = listOf(parameter(record.id)),
+            language = known("33")), record, intType)
+        val function = projected.functions.single()
+        assertTrue(function.fullyObservable, function.reasons.toString())
+        assertEquals(listOf(DwarfAbiClass.INTEGER), function.returnType?.classification?.classes)
+        assertEquals(1, function.returnType?.shape?.fields?.size)
+        assertEquals(original, record.toJson())
+        assertEquals(children.map { it.toJson() }, record.children.map { it.toJson() })
+        assertTrue(projected.types.none { it.rawTypeId in setOf("unexpanded-static-type", "unexpanded-base-member") })
+        assertTrue(projected.ruleProfile.getValue("nonInstanceChildRules").toString().contains("validated-import-reference"))
+    }
+
+    @Test
+    fun `noninstance declarations reject malformed references inheritance and instance layout evidence`() {
+        val unsupported = listOf(
+            nonInstance("missing-type", 0x34, absent()),
+            nonInstance("unknown-type", 0x26, unknown()),
+            nonInstance("ambiguous-type", 0x35, ambiguous("int", "other")),
+            nonInstance("unrelated-cycle", 0x26, DwarfInterfaceFact(DwarfInterfaceFactState.KNOWN,
+                listOf("int"), reasons = listOf("type-reference-cycle:other"))),
+            nonInstance("conflicting-type", 0x34, known("int"), mapOf(0x49L to known("other"))),
+            nonInstance("unknown-declaration", 0x34, known("int"), mapOf(0x3cL to unknown())),
+            nonInstance("origin-cycle", 0x34, known("int"), reasons = listOf("origin-specification-cycle")),
+            nonInstance("nested-child", 0x26, known("int"), reasons = listOf("nested-type-child-children-unrepresented:nested-child")),
+            nonInstance("wrong-capture-warning", 0x34, known("int"), reasons = listOf("unsupported-type-child-tag:0x26")),
+            nonInstance("missing-import", 0x08, absent()),
+            nonInstance("unknown-import", 0x08, absent(), mapOf(0x18L to unknown())),
+            nonInstance("ambiguous-import", 0x08, absent(), mapOf(0x18L to ambiguous("one", "two"))),
+            nonInstance("import-with-type", 0x08, known("int"), mapOf(0x18L to known("target"))),
+            nonInstance("import-with-raw-type", 0x08, absent(), mapOf(0x18L to known("target"), 0x49L to known("int"))),
+            nonInstance("unknown-tag", 0x777, known("int")),
+        ) + listOf(0x38L, 0x0cL, 0x0dL, 0x6bL).flatMap { attribute ->
+            listOf(known("0"), unknown<String>()).mapIndexed { index, value ->
+                nonInstance("instance-layout-$attribute-$index", 0x34, known("int"), mapOf(attribute to value))
+            }
+        }
+        unsupported.forEach { child ->
+            assertUnknownType(aggregate("record-${child.id}", 4, 4, listOf(member("field", "int", 0), child)), intType)
+        }
+    }
+
+    @Test
+    fun `neutral declarations cannot hide unknown member base or atomic instance layout`() {
+        val static = nonInstance("static", 0x34, known("int"))
+        val atomic = node("atomic", 0x47, referenced = known("int"))
+        val uncertain = listOf(
+            child("missing-offset", 0x0d, "int", emptyMap()),
+            child("missing-member-type", 0x0d, "missing", mapOf(0x38L to known("0"))),
+            child("unknown-offset", 0x0d, "int", mapOf(0x38L to unknown())),
+            child("base-without-offset", 0x1c, "int", emptyMap()),
+            child("virtual-base", 0x1c, "int", mapOf(0x38L to known("0"), 0x4cL to known("1"))),
+            member("atomic-instance", "atomic", 0),
+        )
+        uncertain.forEach { field ->
+            assertUnknownType(aggregate("record-${field.id}", 4, 4, listOf(field, static)), intType, atomic)
+        }
+    }
+
+    @Test
     fun `array counts strides dimensions and vector markers cannot change proved representation`() {
         val array = node("array", 0x01, referenced = known("int"), children = listOf(dimension("dimension", upper = "1")))
         val result = project(function(returned = known("array")), array, intType).functions.single().returnType!!
@@ -385,6 +459,11 @@ class DwarfSysvAmd64InterfaceProjectionTest {
 
     private fun child(id: String, tag: Long, type: String, attributes: Map<Long, DwarfInterfaceFact<String>>) =
         DwarfInterfaceTypeChild(id, tag, absent(), known(type), attributes, emptyList())
+
+    private fun nonInstance(id: String, tag: Long, type: DwarfInterfaceFact<String>,
+                            attributes: Map<Long, DwarfInterfaceFact<String>> = emptyMap(),
+                            reasons: List<String> = listOf("unsupported-type-child-tag:0x${tag.toString(16)}")) =
+        DwarfInterfaceTypeChild(id, tag, known(id), type, attributes, reasons)
 
     private fun member(id: String, type: String, bytes: Long) = child(id, 0x0d, type, mapOf(0x38L to known(bytes.toString())))
 
