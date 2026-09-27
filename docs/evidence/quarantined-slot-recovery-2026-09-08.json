@@ -9,6 +9,7 @@
       "path": "src/main/kotlin/decompengine/oracle/fulltree/FullTreeDiskScratchAuthority.kt",
       "sha256": "eadc6c791d6848bf87999814e5b2af71b963277609351eba6df86c74cae18cde",
       "anchors": [
+        "FullTreeDiskScratchBorrowedRunRoot.withPinnedDescriptor:132-144",
         "FullTreeDiskScratchLease.requireCurrent.boundedLeaseRootInspection:630-633",
         "FullTreeDiskScratchLease.requireCleanAndRelease:939-984",
         "FullTreeDiskScratchLease.abandonForRecovery:988-993",
@@ -47,7 +48,7 @@
         "FullTreeDiskScratchCrashProbe.main:9-43"
       ],
       "fixtureContract": "A separate JVM acquires a lease, optionally creates the operation run directory, emits canonical evidence, and exits with Runtime.halt(0), leaving record-only or active-run residue for cold observation.",
-      "limitation": "This fixture proves only that cold observation can inspect residue without mutation. It does not exercise a trusted reset, quarantined-slot recovery, worker/cgroup absence, or arbitrary nested residue."
+      "limitation": "This unexecuted fixture is intended to exercise cold observation of residue without mutation; source inspection alone does not establish that behavior. It does not exercise a trusted reset, quarantined-slot recovery, worker/cgroup absence, or arbitrary nested residue."
     }
   ],
   "boundedEvidence": {
