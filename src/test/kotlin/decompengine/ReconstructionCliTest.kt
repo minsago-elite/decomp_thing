@@ -1,12 +1,13 @@
 package decompengine
 
 import decompengine.project.BoundedLlmModuleReconstructor
-import decompengine.project.EvidenceModuleReconstructor
+import decompengine.project.GeneratedCEvidenceCarrier
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class ReconstructionCliTest {
@@ -27,7 +28,7 @@ class ReconstructionCliTest {
             environment = inaccessibleEnvironment,
         )
 
-        assertIs<EvidenceModuleReconstructor>(strategy.reconstructor)
+        assertSame(GeneratedCEvidenceCarrier.reconstructor, strategy.reconstructor)
         assertNull(strategy.harnessProvenance)
     }
 

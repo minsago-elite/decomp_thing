@@ -4,7 +4,9 @@ import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.project.GeneratedCMakeReconstructionProfile
+import decompengine.project.GeneratedCEvidenceCarrier
 import decompengine.project.BehaviorBuildLayout
+import decompengine.project.ProjectFileRole
 import decompengine.project.ReconstructionAdapters
 import decompengine.project.ReconstructionProfile
 import decompengine.project.SourceTreeManifestReader
@@ -101,7 +103,7 @@ internal class BehaviorEvidenceCapture {
         return retained
     }
 
-    fun file(path: Path, includeInBounds: Boolean = true): JsonObject {
+    fun file(path: Path, includeInBounds: Boolean = true, implementationInput: Boolean = false): JsonObject {
         val absolute = path.toAbsolutePath().normalize()
         val snapshot = readStableRegularFile(absolute.parent, absolute.fileName.toString(), MAXIMUM_FILE_BYTES)
         val document = JsonObject(mapOf(
@@ -118,6 +120,9 @@ internal class BehaviorEvidenceCapture {
                 "behavior evidence inputs exceed their aggregate bound"
             }
         }
+        if (implementationInput) {
+            GeneratedCEvidenceCarrier.rejectCarrierContent(snapshot.bytes, "behavior source input $path")
+        }
         return document
     }
 
@@ -130,6 +135,7 @@ internal class BehaviorEvidenceCapture {
     }
 
     fun project(context: BehaviorProjectContext, original: JsonObject, rebuilt: Path): JsonObject {
+        GeneratedCEvidenceCarrier.requireImplementationPurpose(context.profile, "behavior capture")
         val buildPolicy = ReconstructionAdapters.resolve(context.profile).behaviorBuild
         val layout = buildPolicy.layout(context.profile)
         (listOf(layout.contractPath, layout.artifactPath) + layout.standaloneInputs + layout.sourceRoots).forEach {
@@ -145,7 +151,7 @@ internal class BehaviorEvidenceCapture {
         require(manifest.inputSha256 == original.string("sha256")) { "behavior original differs from the project input" }
         require(manifest.files.size <= MAXIMUM_FILES) { "behavior project exceeds its file-count bound" }
         val files = manifest.files.sortedBy { it.path }.map { entry ->
-            val identity = file(root.resolve(entry.path))
+            val identity = file(root.resolve(entry.path), implementationInput = ProjectFileRole.BUILD_INPUT in entry.roles)
             require(identity.string("sha256") == entry.sha256) { "behavior project manifest differs from ${entry.path}" }
             JsonObject(identity + ("path" to JsonPrimitive(entry.path)))
         }
@@ -205,7 +211,7 @@ internal class BehaviorEvidenceCapture {
             }
         }
         return JsonArray(paths.sortedBy { root.relativize(it).toString() }.map { path ->
-            JsonObject(file(path) + ("path" to JsonPrimitive(root.relativize(path).toString())))
+            JsonObject(file(path, implementationInput = true) + ("path" to JsonPrimitive(root.relativize(path).toString())))
         })
     }
 

@@ -88,7 +88,11 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
         append("\n#endif\n")
     }
 
-    override fun buildDefinition(sources: List<String>, profile: ReconstructionProfile): String {
+    override fun buildDefinition(sources: List<String>, profile: ReconstructionProfile): String =
+        generatedCMakeBuildDefinition(sources, profile)
+}
+
+internal fun generatedCMakeBuildDefinition(sources: List<String>, profile: ReconstructionProfile): String {
         val cflags = profile.adapterConfiguration["compiler-flags"]?.joinToString(" ")
             ?: "-std=c11 -g -Wall -Wextra -Werror -Iinclude"
         val cc = profile.adapterConfiguration["compiler-driver"]?.firstOrNull() ?: "gcc"
@@ -123,5 +127,3 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
         ".PHONY: all clean",
     ).joinToString("\n", postfix = "\n")
     }
-
-}

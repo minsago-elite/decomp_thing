@@ -604,11 +604,13 @@ object SourceTreeGenerator {
         val adapter = ReconstructionAdapters.resolve(profile)
         requireWorkflowOwnedPathsAreReserved(profile)
         val selectedReconstructor = reconstructor ?: adapter.defaultReconstructor()
+        adapter.admitGeneration(projectDir, profile, selectedReconstructor)
+        val unresolvedOutput = adapter.requiresUnresolvedOutput(profile)
         val compilationPolicy = adapter.compilation
         val selectedPlanner = planner?.withProfileBounds(profile) ?: DeterministicModulePlanner.forProfile(profile)
         val planning = selectedPlanner.planWithComplexity(model, overrides)
         val plan = planning.plan
-        val rendering = adapter.rendering(model, plan)
+        val rendering = adapter.rendering(model, plan, profile)
         requireProjectedArchiveEntryBudget(profile, plan.modules.size, rendering.entrypoint() != null)
         val typesHeader = rendering.sharedInterface()
         val typesHeaderPath = profile.layout.declaration("shared-interface").materialize()
@@ -712,7 +714,7 @@ object SourceTreeGenerator {
                     sourcePath.readText()).isEmpty()
             }
             fun ModuleCheckpoint.hasCurrentModuleAcceptance(): Boolean =
-                schemaVersion == 6 && inputBinarySha256 == model.inputSha256 &&
+                !unresolvedOutput && schemaVersion == 6 && inputBinarySha256 == model.inputSha256 &&
                     modelSchemaVersion == model.schemaVersion && profileSha256 == profile.sha256 &&
                     accepted && issues.isEmpty() &&
                     modulePromptAttributionIsValid(
@@ -799,10 +801,13 @@ object SourceTreeGenerator {
                     restoreAcceptedRevision()
                     throw failure
                 } catch (failure: Exception) {
+                    if (failure is InterruptedException || Thread.currentThread().isInterrupted) throw failure
+                    if (unresolvedOutput) throw failure
                     if (generateSequence<Throwable>(failure) { it.cause }.any { it is AgentSessionRecoveryException }) throw failure
                     unresolvedFallback(request, cacheIdentity, failure)
                 }
                 val normalizedSource = attempted.source.trimEnd() + "\n"
+                adapter.validateSourceContent(profile, normalizedSource.toByteArray(), module.sourcePath)
                 val executionEvidence = attempted.agentExecutionEvidence?.let(::persistExecutionEvidence)
                     ?: persistedExecutionEvidence
                 progress.phase(AgentWorkflowPhase.POLICY_CHECKING, module.id)
@@ -839,7 +844,7 @@ object SourceTreeGenerator {
                         )
                     }
                 } else null
-                val accepted = issues.isEmpty()
+                val accepted = !unresolvedOutput && issues.isEmpty()
                 val normalizedSourceSha256 = sha256(normalizedSource.toByteArray())
                 val candidateCheckpoint = ModuleCheckpoint(
                     inputBinarySha256 = model.inputSha256,
@@ -1038,7 +1043,7 @@ object SourceTreeGenerator {
         val toolchain = adapter.toolchainEvidence(profile)
         projectDir.resolve(toolchainPath).also { it.parent.createDirectories() }.writeText(toolchain)
         generated += evidence(profile, toolchainPath, toolchain, "environment", emptyList())
-        val unresolvedMarkdown = renderUnresolvedMarkdown(model, plan, unresolvedImplementations)
+        val unresolvedMarkdown = renderUnresolvedMarkdown(model, plan, unresolvedImplementations, unresolvedOutput)
         projectDir.resolve(unresolvedPath).also { it.parent.createDirectories() }.writeText(unresolvedMarkdown)
         generated += evidence(profile, unresolvedPath, unresolvedMarkdown, "evidence", unresolvedImplementations.toList())
         val manifest = SourceTreeManifest(
@@ -1046,9 +1051,9 @@ object SourceTreeGenerator {
             profileSha256 = profile.sha256,
             inputSha256 = model.inputSha256,
             files = generated,
-            unresolvedEntityIds = model.functions.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
-                model.globals.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
-                model.types.filter { model.isRecoveryUnresolved(it.status) }.map { it.id },
+            unresolvedEntityIds = model.functions.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.map { it.id } +
+                model.globals.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.map { it.id } +
+                model.types.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.map { it.id },
             unresolvedImplementationIds = unresolvedImplementations.toList(),
         )
         projectDir.resolve("source_tree_manifest.json").writeText(manifest.toJson())
@@ -1501,7 +1506,7 @@ object SourceTreeGenerator {
                 }
             }
         }
-        issues += adapter.assess(module, model, reconstructed.generator, source)
+        issues += adapter.assess(module, model, reconstructed.generator, source, profile)
         return issues.distinctBy { Triple(it.code, it.message, it.entityIds.sorted()) }
     }
 
@@ -1584,9 +1589,10 @@ object SourceTreeGenerator {
         }
         val allStatuses = model.functions.map { it.status } + model.globals.map { it.status } + model.types.map { it.status }
         val projectScore = if (allStatuses.isEmpty()) 0.0 else allStatuses.map(::score).average()
-        val unresolvedRecovery = model.functions.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
-            model.globals.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
-            model.types.filter { model.isRecoveryUnresolved(it.status) }.map { it.id }
+        val unresolvedOutput = ReconstructionAdapters.resolve(profile).requiresUnresolvedOutput(profile)
+        val unresolvedRecovery = model.functions.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.map { it.id } +
+            model.globals.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.map { it.id } +
+            model.types.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.map { it.id }
         fun idsJson(ids: Collection<String>) = ids.distinct().sorted().joinToString(prefix = "[", postfix = "]", separator = ",") {
             "\"${it.jsonEscape()}\""
         }
@@ -1673,11 +1679,12 @@ object SourceTreeGenerator {
         model: RecoveredProgramModel,
         plan: ModulePlan,
         unresolvedImplementationIds: Set<String>,
+        unresolvedOutput: Boolean = false,
     ): String {
         val rows = buildList {
-            model.functions.filter { model.isRecoveryUnresolved(it.status) }.forEach { add("function" to Triple(it.id, it.status, "0x${it.address.toString(16)}")) }
-            model.globals.filter { model.isRecoveryUnresolved(it.status) }.forEach { add("global" to Triple(it.id, it.status, "0x${it.address.toString(16)}")) }
-            model.types.filter { model.isRecoveryUnresolved(it.status) }.forEach { add("type" to Triple(it.id, it.status, it.sourceAddress?.let { address -> "0x${address.toString(16)}" } ?: "no address")) }
+            model.functions.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.forEach { add("function" to Triple(it.id, it.status, "0x${it.address.toString(16)}")) }
+            model.globals.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.forEach { add("global" to Triple(it.id, it.status, "0x${it.address.toString(16)}")) }
+            model.types.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.forEach { add("type" to Triple(it.id, it.status, it.sourceAddress?.let { address -> "0x${address.toString(16)}" } ?: "no address")) }
         }
         return buildString {
             append("# Unresolved reconstruction evidence\n\n")
@@ -1692,13 +1699,14 @@ object SourceTreeGenerator {
                 append("| Kind | Stable ID | Status | Provenance |\n|---|---|---|---|\n")
                 rows.sortedBy { it.second.first }.forEach { (kind, details) ->
                     val status = details.second.name.lowercase()
-                    val assessment = if (model.schemaVersion == 2) "unassessed (extraction: $status)" else status
+                    val assessment = if (unresolvedOutput || model.schemaVersion == 2) "unassessed (extraction: $status)" else status
                     append("| $kind | `${details.first}` | $assessment | ${details.third} |\n")
                 }
             }
             append("\n## Implementation generation\n\n")
+            if (unresolvedOutput) append("Evidence-only diagnostic inventory; no implementation acceptance or recovered behavior is claimed.\n\n")
             if (unresolvedImplementationIds.isEmpty()) {
-                append("Every planner-owned implementation passed the acceptance checks.\n")
+                if (!unresolvedOutput) append("Every planner-owned implementation passed the acceptance checks.\n")
             } else {
                 val owner = plan.modules.flatMap { module ->
                     (module.functionIds + module.globalIds).map { id -> id to module.id }

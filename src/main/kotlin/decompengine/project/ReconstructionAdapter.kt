@@ -16,10 +16,14 @@ internal interface ReconstructionAdapter {
         profile: ReconstructionProfile,
         hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
     ): BuildReport
-    fun rendering(model: RecoveredProgramModel, plan: ModulePlan): ProjectRendering
+    fun rendering(model: RecoveredProgramModel, plan: ModulePlan, profile: ReconstructionProfile): ProjectRendering
+    fun admitGeneration(projectDir: Path, profile: ReconstructionProfile, reconstructor: ModuleReconstructor) = Unit
+    fun requiresUnresolvedOutput(profile: ReconstructionProfile): Boolean = false
+    fun validateSourceContent(profile: ReconstructionProfile, bytes: ByteArray, label: String) = Unit
     fun modulePrompt(request: ModuleReconstructionRequest): ModulePromptContent
     fun defaultReconstructor(): ModuleReconstructor
     fun assess(module: PlannedModule, model: RecoveredProgramModel, generator: String, source: String): List<ModuleReconstructionIssue>
+    fun assess(module: PlannedModule, model: RecoveredProgramModel, generator: String, source: String, profile: ReconstructionProfile): List<ModuleReconstructionIssue> = assess(module, model, generator, source)
     fun toolchainEvidence(profile: ReconstructionProfile): String
 }
 
@@ -37,10 +41,13 @@ internal data class RenderedEntrypoint(val source: String, val entityIds: List<S
 
 /** Application-owned dispatch; profile data cannot register executable implementations. */
 internal object ReconstructionAdapters {
-    fun resolve(profile: ReconstructionProfile): ReconstructionAdapter = when (profile.id) {
+    fun resolve(profile: ReconstructionProfile): ReconstructionAdapter {
+        GeneratedCEvidenceCarrier.isSelected(profile)
+        return when (profile.id) {
         GeneratedCMakeReconstructionProfile.PROFILE_ID -> GeneratedCReconstructionAdapter
         GeneratedCNinjaReconstructionProfile.PROFILE_ID -> GeneratedCNinjaReconstructionAdapter
         else -> throw IllegalArgumentException("no reconstruction adapter registered for profile: ${profile.id}")
+        }
     }
 }
 

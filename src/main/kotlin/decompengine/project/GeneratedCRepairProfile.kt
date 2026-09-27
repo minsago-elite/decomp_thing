@@ -59,6 +59,10 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
     private val modelRelative = profile.layout.declaration("program-model-evidence").materialize()
 
     override fun profileId(): String = profile.id
+    override fun validateSourceContent(path: String, bytes: ByteArray) {
+        GeneratedCEvidenceCarrier.rejectCarrierContent(bytes, "generated-C repair input $path")
+    }
+
     override fun configurationSha256(): String = configurationSha256(RepairResourceBudget())
     override fun configurationSha256(budget: RepairResourceBudget): String = sha256(
         ("generated-c-repair-index-v5\n" + profile.sha256 + "\n" + budget.canonicalJson() + "\n")
@@ -739,10 +743,9 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
         val result = TreeMap<String, List<String>>()
         var count = 0L
         sourcePaths.filter { it.endsWith(".c") || it.endsWith(".h") }.sorted().forEach { relative ->
-            val text = decodeGeneratedCText(
-                readStableRegularFile(root, relative, budget.maximumSourceFileBytes).bytes,
-                relative,
-            )
+            val bytes = readStableRegularFile(root, relative, budget.maximumSourceFileBytes).bytes
+            validateSourceContent(relative, bytes)
+            val text = decodeGeneratedCText(bytes, relative)
             val dependencies = INCLUDE_DIRECTIVE.findAll(text).mapNotNull { match ->
                 resolveInclude(relative, match.groupValues[2], match.groupValues[1] == "\"", sourcePaths)
             }.distinct().sorted().toList()

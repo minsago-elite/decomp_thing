@@ -6,8 +6,9 @@ import java.nio.file.Path
 internal object GeneratedCNinjaReconstructionAdapter : ReconstructionAdapter by GeneratedCReconstructionAdapter {
     override val diagnostics: ToolchainDiagnosticPolicy = GeneratedCToolchainDiagnostics("ninja", "Ninja")
     override val archiveBuild: ArchiveBuildPolicy = GeneratedCNinjaArchiveBuildPolicy
-    override fun rendering(model: RecoveredProgramModel, plan: ModulePlan): ProjectRendering =
-        GeneratedCNinjaProjectRendering(model, plan)
+    override fun rendering(model: RecoveredProgramModel, plan: ModulePlan, profile: ReconstructionProfile): ProjectRendering =
+        if (GeneratedCEvidenceCarrier.isSelected(profile)) GeneratedCEvidenceCarrier.rendering(model, plan, profile)
+        else GeneratedCNinjaProjectRendering(model, plan)
     private fun configuration(profile: ReconstructionProfile, parallelism: Int) = ProjectBuildConfiguration(
         makeExecutable = profile.adapterConfiguration.getValue("build-executable").single(),
         parallelism = parallelism,

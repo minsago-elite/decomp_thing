@@ -115,13 +115,18 @@ object ArchivalPackager {
         require(requiredCorpora.isEmpty() || audit.behaviorMatched == true) {
             "archive project does not satisfy the required behavior corpora"
         }
+        val diagnosticOnly = ReconstructionAdapters.resolve(profile).requiresUnresolvedOutput(profile)
+        val archiveTitle = if (diagnosticOnly) "Evidence-only diagnostic archival source tree" else "Reconstructed archival source tree"
+        val archiveMeaning = if (diagnosticOnly)
+            "This tree compiles a diagnostic inventory. The complete recovered model remains evidence; no recovered ABI, implementation or behavior is supplied. Declaration purpose: evidence-carrier-v1. Profile SHA-256: ${profile.sha256}. Rebuilds do not execute a recovered entrypoint."
+        else "This project was reconstructed from a binary using evidence-backed analysis and may not be universally equivalent to the original."
         val readme = projectDir.resolve("ARCHIVE_README.md")
         writeProjectEvidenceAtomically(
             readme,
             """
-            # Reconstructed archival source tree
+            # $archiveTitle
 
-            This project was reconstructed from a binary using evidence-backed analysis and may not be universally equivalent to the original.
+            $archiveMeaning
 
             ${archiveBuild.rebuildInstructions}
             Verify payload hashes with `ARCHIVE_MANIFEST.sha256` before use.

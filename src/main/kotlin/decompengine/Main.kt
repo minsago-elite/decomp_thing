@@ -14,7 +14,7 @@ import decompengine.project.GeneratedCMakeReconstructionProfile
 import decompengine.project.ReconstructionProfiles
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
-import decompengine.project.EvidenceModuleReconstructor
+import decompengine.project.GeneratedCEvidenceCarrier
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.project.ModuleReconstructor
 import decompengine.agent.AgentHarness
@@ -125,7 +125,8 @@ private fun runReconstruct(args: List<String>) {
         )
         val result = try {
             ArchivalReconstructionService(
-                GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor, profile = profile, progress = progress,
+                GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor,
+                profile = if (evidenceOnly) GeneratedCEvidenceCarrier.profile(profile) else profile, progress = progress,
             ).reconstruct(binary, output)
         } catch (failure: Exception) {
             progress.phase(AgentWorkflowPhase.FAILED)
@@ -154,7 +155,7 @@ internal fun selectReconstructionStrategy(
         "--harness cannot be used with --evidence-only"
     }
     if (evidenceOnly) {
-        return ReconstructionStrategy(EvidenceModuleReconstructor(), null)
+        return ReconstructionStrategy(GeneratedCEvidenceCarrier.reconstructor, null)
     }
 
     val effectiveEnvironment = withHarnessOverride(environment, harnessOverride)

@@ -18,6 +18,7 @@ internal object GeneratedCBehaviorBuildPolicy : BehaviorBuildPolicy {
     )
 
     override fun parseContract(contract: JsonObject, profile: ReconstructionProfile): BehaviorBuildContract {
+        GeneratedCEvidenceCarrier.requireImplementationPurpose(profile, "behavior build-contract attribution")
         require(contract.keys == setOf("schemaVersion", "profileId", "profileSha256", "profileBudgets", "hostSafetyLimits",
             "configuration", "command", "parallelism", "wallClockTimeoutMillis",
             "maximumOutputBytes", "warningsAsErrors", "reproduciblePathMapping", "declaredDependencies",

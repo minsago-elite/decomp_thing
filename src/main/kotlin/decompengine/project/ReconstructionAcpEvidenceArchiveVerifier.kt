@@ -101,6 +101,24 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         profile: ReconstructionProfile,
         repairLineage: ArchivedRepairReleaseLineage = ArchivedRepairReleaseLineage.NONE,
     ): List<VerifiedCandidateAcpContribution> {
+        val carrier = GeneratedCEvidenceCarrier.isSelected(profile)
+        if (carrier) {
+            GeneratedCEvidenceCarrier.verifyProject(projectDir, profile, manifest)
+            require(manifest.files.none { it.generator == "repair-revision" } &&
+                payloadSha256.keys.none { it.startsWith("reports/repair-revisions/") }) {
+                "evidence-carrier output cannot retain accepted repair lineage"
+            }
+        } else {
+            var sourceBytes = 0L
+            for (file in manifest.files.filter { ProjectFileRole.BUILD_INPUT in it.roles }) {
+                val bytes = readBoundedRegularFile(projectDir, file.path,
+                    minOf(profile.budgets.archiveMaximumFileBytes, Int.MAX_VALUE.toLong() - 1L).toInt())
+                sourceBytes = Math.addExact(sourceBytes, bytes.size.toLong())
+                require(sourceBytes <= profile.budgets.archiveMaximumTotalBytes) { "archive source inspection exceeds its byte bound" }
+                requirePayloadIdentity(file.path, bytes, payloadSha256, payloadSizes)
+                GeneratedCEvidenceCarrier.rejectCarrierContent(bytes, file.path)
+            }
+        }
         val sourceDeclaration = profile.layout.declaration("module-implementation")
         val checkpointDeclaration = profile.layout.declaration("module-evidence")
         val executionDeclaration = profile.layout.declarations
@@ -115,7 +133,8 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         require(sha256(modelBytes) == manifestByPath.getValue(modelPath).sha256) {
             "program model differs from its source manifest"
         }
-        val model = ProgramModelJson.read(modelBytes.decodeToString(throwOnInvalidSequence = true))
+        val model = if (carrier) ProgramModelJson.readCanonical(modelBytes) { cancellationCheck() }
+            else ProgramModelJson.read(modelBytes.decodeToString(throwOnInvalidSequence = true))
         require(model.inputSha256 == manifest.inputSha256) { "program model input differs from its source manifest" }
         val expectedExecutionPaths = linkedSetOf<String>()
         val acceptedContributions = mutableListOf<VerifiedCandidateAcpContribution>()
@@ -139,6 +158,22 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                     "agent evidence checkpoint differs from its source manifest: $checkpointPath"
                 }
                 val checkpoint = parseCheckpoint(checkpointBytes, moduleId, source, repairedSource, profile, model.inputSha256, model.schemaVersion)
+                if (carrier) {
+                    require(repairedSource == null && checkpoint.schemaVersion == 6L &&
+                        source.acceptedImplementation == false && !checkpoint.accepted &&
+                        source.generator == GeneratedCEvidenceCarrier.IDENTITY &&
+                        checkpoint.generator == GeneratedCEvidenceCarrier.IDENTITY &&
+                        checkpoint.reconstructorIdentity == GeneratedCEvidenceCarrier.IDENTITY &&
+                        !checkpoint.compilationPresent && checkpoint.hasNoExecutionEvidence()) {
+                        "evidence-carrier checkpoint cannot claim implementation, compiler, ACP or repair authority: $moduleId"
+                    }
+                } else {
+                    require(source.generator != GeneratedCEvidenceCarrier.IDENTITY &&
+                        checkpoint.generator != GeneratedCEvidenceCarrier.IDENTITY &&
+                        checkpoint.reconstructorIdentity != GeneratedCEvidenceCarrier.IDENTITY) {
+                        "evidence-carrier identity cannot authorize an implementation checkpoint: $moduleId"
+                    }
+                }
                 val receiptSource = repairedSource?.let { lineage ->
                     GeneratedFileEvidence(
                         path = source.path,
@@ -447,6 +482,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             executionTerminalOutcome,
             executionReleaseComplete,
             accepted,
+            root["compilation"]?.let { it !is JsonNull } == true,
         )
     }
 
@@ -1356,7 +1392,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                     "archive evidence exceeds its $maximumBytes-byte limit: $normalized"
                 }
                 val bytes = LinuxFilesystemSyscalls.openReadableFrom(pinned).use { readable ->
-                    LinuxFilesystemSyscalls.read(readable, maximumBytes, cancellationCheck = {})
+                    LinuxFilesystemSyscalls.read(readable, maximumBytes, cancellationCheck = ::cancellationCheck)
                 }
                 require(bytes.size.toLong() == size) { "archive evidence changed while being read: $normalized" }
                 return bytes
@@ -1364,6 +1400,10 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         } finally {
             directories.asReversed().forEach(LinuxDescriptor::close)
         }
+    }
+
+    private fun cancellationCheck() {
+        if (Thread.currentThread().isInterrupted) throw InterruptedException("archive evidence verification cancelled")
     }
 
     private fun requirePayloadIdentity(
@@ -1402,6 +1442,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         val executionTerminalOutcome: String?,
         val executionReleaseComplete: Boolean?,
         val accepted: Boolean,
+        val compilationPresent: Boolean,
     ) {
         fun hasNoExecutionEvidence(): Boolean = listOf(
             executionEvidencePath,

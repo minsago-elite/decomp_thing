@@ -138,6 +138,26 @@ justify dropping arguments. A synthetic entry accepts void or resolved integer
 returns, preserving the integer process status; unsupported return shapes fail
 before entry artifacts are written.
 An existing `main` keeps its recovered declaration.
+
+The explicit `--evidence-only` path selects the closed
+`declaration-purpose=evidence-carrier-v1` profile option and the fixed
+`evidence-carrier:v1` reconstructor. This changes the profile digest and cache
+identity. Its C sources contain a diagnostic inventory with support symbols
+derived from digests; raw names, declarations, and initializer displays remain
+in the unchanged program-model evidence. Its diagnostic entry point does not
+call a recovered function. The full model, plan, and entity ownership remain in
+the archive, and every entity remains unresolved. Even an empty inventory does
+not claim a completed implementation.
+
+Carrier builds retain the strict compiler flags and archive rebuild checks.
+Their module checkpoints cannot become accepted implementations. Archive
+admission checks the fixed strategy, deterministic source bytes, and unresolved
+state; changing a generator label is insufficient. Project-bound behavior
+evidence and repair promotion reject this purpose. Ordinary generated-C
+reconstruction continues to require the recovered declarations described above.
+These project checks do not classify arbitrary executables supplied without
+their project provenance.
+
 `GeneratedCCandidateValidation`
 owns the C function/global definition and placeholder checks and their lexical
 helpers. Orchestration retains invocation release, prompt budgets, prior issues,
