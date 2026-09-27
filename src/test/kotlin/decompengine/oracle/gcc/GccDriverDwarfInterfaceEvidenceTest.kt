@@ -13,6 +13,7 @@ import decompengine.oracle.fulltree.BoundedDwarfInterfaceTypeResolver
 import decompengine.oracle.fulltree.DwarfInterfaceFact
 import decompengine.oracle.fulltree.DwarfInterfaceFactState
 import decompengine.oracle.fulltree.DwarfInterfaceFunctionFacts
+import decompengine.oracle.fulltree.FullTreeControlException
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
@@ -248,7 +249,7 @@ class GccDriverDwarfInterfaceEvidenceTest {
             assertTrue(wrongBytes.message.orEmpty().contains("rich differs from its checked identity"))
             flipLastByte(full)
             var replaced = false
-            val replacedControl = assertFailsWith<Exception> {
+            val replacedControl = assertFailsWith<FullTreeControlException> {
                 GccDriverDwarfInterfaceEvidence.capture(fixture, scratch) { stage ->
                     if (stage == "before scanning checked GCC driver interfaces") {
                         val target = fixture.resolve("oracle/targets/sysv-amd64-v1.json")
@@ -260,7 +261,7 @@ class GccDriverDwarfInterfaceEvidenceTest {
                 }
             }
             assertTrue(replaced, "retained identity attack did not execute")
-            assertTrue(replacedControl.message.orEmpty().contains("changed") || replacedControl.message.orEmpty().contains("mutation"),
+            assertTrue(replacedControl.message.orEmpty().startsWith("before GCC driver interface scan: targetAbi "),
                 "wrong rejection: ${replacedControl.message}")
             return listOf("same-size-rich-byte-tamper-rejected", "same-content-control-path-replacement-rejected")
         } finally { deleteTree(fixture) }
