@@ -64,6 +64,8 @@ import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import org.junit.jupiter.api.Timeout
 
 @Timeout(value = 60, unit = TimeUnit.SECONDS)
@@ -118,9 +120,33 @@ class AcpAgentHarnessTest {
                     profile = profile,
                 ).reconstruct(binary, output)
             } catch (failure: Exception) {
+                val sourceRoot = output.resolve("source-tree")
+                val retainedDiagnostics = listOf(
+                    "checkpoint" to "module-evidence",
+                    "execution" to "module-agent-execution-evidence",
+                ).joinToString("; ") { (label, role) ->
+                    val path = sourceRoot.resolve(
+                        profile.layout.declaration(role).materialize(mapOf("module" to "decomp")),
+                    )
+                    val diagnostic = runCatching {
+                        if (!Files.isRegularFile(path)) "<missing>" else {
+                            val maximumBytes = 64 * 1024
+                            val bytes = Files.newInputStream(path).use { it.readNBytes(maximumBytes + 1) }
+                            if (bytes.size > maximumBytes) "<exceeds $maximumBytes bytes>" else {
+                                val document = Json.parseToJsonElement(bytes.toString(Charsets.UTF_8)) as JsonObject
+                                val selected = if (label == "execution") {
+                                    JsonObject(document.filterKeys { it == "outcome" || it == "lifecycle" })
+                                } else document
+                                val rendered = selected.toString()
+                                rendered.take(16 * 1024) + if (rendered.length > 16 * 1024) "<truncated>" else ""
+                            }
+                        }
+                    }.getOrElse { "<unreadable: ${it.javaClass.simpleName}>" }
+                    "$label=$diagnostic"
+                }
                 throw AssertionError(
                     "public ${base.id} ACP reconstruction failed; diagnostics=${harness.latestDiagnostics()}; " +
-                        "sandbox=${harness.latestSandboxEvidence()}",
+                        "sandbox=${harness.latestSandboxEvidence()}; $retainedDiagnostics",
                     failure,
                 )
             }
@@ -128,6 +154,12 @@ class AcpAgentHarnessTest {
             assertEquals(0, result.build.returnCode)
             assertTrue(requireNotNull(result.bundle.audit).unresolvedEntityIds.isEmpty())
             assertTrue(requireNotNull(harness.latestAcpExecutionEvidence()).sandboxEvidence.networkIsolated)
+            val diagnostics = assertNotNull(harness.latestDiagnostics())
+            assertEquals(0, diagnostics.exitCode)
+            assertFalse(diagnostics.rootTerminationRequested)
+            assertFalse(diagnostics.forcedTermination)
+            assertTrue(diagnostics.sandboxCleanupVerified)
+            assertTrue(diagnostics.remainingProcessIds.isEmpty())
             val extracted = temp.resolve("${base.id}-extracted")
             ArchivalBundleVerifier.extractAndVerify(result.bundle.archivePath, extracted, profile = profile)
             val rebuilt = ReconstructionAdapters.resolve(profile).build(extracted, profile)

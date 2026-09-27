@@ -1169,6 +1169,14 @@ if MODE != "missing-usage":
     }
 respond(prompt, prompt_result)
 
+if MODE in RECONSTRUCTION_MODES:
+    # Keep this archival-workflow peer alive until the host accepts the final response and
+    # closes stdin. Otherwise natural exit/EOF can overtake queued SDK response dispatch.
+    # Immediate EOF and process-crash modes below retain their independent transport tests.
+    while read_message() is not None:
+        pass
+    raise SystemExit(0)
+
 if MODE == "response-then-crash":
     raise SystemExit(31)
 
