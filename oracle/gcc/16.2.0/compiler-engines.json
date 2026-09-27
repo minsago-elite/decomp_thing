@@ -3,8 +3,8 @@
     "exporter": {
       "id": "decompengine-ghidra-program-model",
       "recoveryMode": "planning",
-      "sha256": "ae0e2ddcb7473737eaacba4715a1a1b6b0e8ce431d07d8dc0806117c25c5ff19",
-      "version": 10
+      "sha256": "7803e8fa01ae8404d54f81b131c01e89f0eab9ee324339580c0fd84cba8d0a7f",
+      "version": 11
     },
     "ghidra": {
       "archiveBytes": 569445154,
@@ -26,7 +26,7 @@
   "budgets": {
     "exportMaximumResidentBytes": 17179869184,
     "exportWallClockSeconds": 1800,
-    "fullRecoveryCc1ExportWallClockSeconds": 7200,
+    "fullRecoveryCc1ExportWallClockSeconds": 9000,
     "plannerMaximumDependencyEdges": 8000000,
     "plannerMaximumEntities": 500000,
     "plannerMaximumWorkUnits": 200000000
