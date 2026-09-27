@@ -106,10 +106,11 @@ internal object DwarfSysvAmd64InterfaceProjection {
         put("classMergeRules", "equal;NO_CLASS-neutral;MEMORY-dominates;INTEGER-dominates;x87-mixtures-memory;otherwise-SSE")
         put("postMergeRules", "any-MEMORY=MEMORY;orphan-X87UP=MEMORY;over-two-eightbytes-only-SSE-followed-by-SSEUP;orphan-SSEUP=SSE;aggregate-over64bytes-or-ordinary-unaligned-field=MEMORY")
         put("transportRules", "x87-arguments-memory;x87-returns-registers;explicit-nontrivial-C++-invisible-reference;no-whole-call-register-allocation")
+        put("originSequenceRules", "raw-ambiguous-sequences-reconcile-only-when-every-prototyped-list-has-identical-arity-varargs-and-exact-type-roots-after-validated-typedef-top-level-qualifier-closure;raw-ambiguity-retained;equal-ABI-classes-alone-insufficient")
         put("globalTypeRules", "same-language-type-closure;positive-automatic-locals-unexpanded;declared-type-observability-separate-from-storage-and-source-identity")
-        put("unsupported", "unknown-language,nonstandard-convention,unprototyped-C,ambiguous-inheritance,unspecified-C++-class-call-semantics,unproved-alignment,expressions,vectors,vendor-types,cycles,oversized-layout")
+        put("unsupported", "unknown-language,nonstandard-convention,unprototyped-C,ambiguous-inheritance,unspecified-C++-class-call-semantics,unproved-alignment,atomic-types,expressions,vectors,vendor-types,cycles,oversized-layout")
         put("limits", buildJsonObject {
-            put("maximumFunctions", 100_000); put("maximumGlobals", 100_000); put("maximumParameters", 1024)
+            put("maximumFunctions", 100_000); put("maximumGlobals", 100_000); put("maximumParameters", 1024); put("maximumOriginSequences", 32)
             put("maximumDepth", MAX_DEPTH); put("maximumTypes", MAX_TYPES); put("maximumVisits", MAX_VISITS)
             put("maximumTypeBytes", MAX_SIZE); put("maximumNumericCharacters", 20); put("maximumDimensions", 16)
             put("maximumFields", 4096); put("maximumArrayElements", 1_000_000); put("maximumClassifierSteps", 100_000)
@@ -139,11 +140,14 @@ internal object DwarfSysvAmd64InterfaceProjection {
                 language in cppLanguages -> absent(f.prototyped) || single(f.prototyped) == "1"
                 else -> single(f.prototyped) == "1"
             }
-            val sequence = f.parameterList.state == DwarfInterfaceFactState.KNOWN && f.parameterList.values.size == 1 &&
-                f.parameters.map { it.ordinal } == f.parameters.indices.toList() && f.parameters.size <= 1024
+            val reconciled = if (prototype) reconcileSequences(f, language) else null
+            if (reconciled != null) evidence += "exact-alias-qualifier-root-equivalence-of-all-origin-parameter-sequences"
+            val sequence = ((f.parameterList.state == DwarfInterfaceFactState.KNOWN && f.parameterList.values.size == 1) ||
+                reconciled != null) && f.parameters.map { it.ordinal } == f.parameters.indices.toList() && f.parameters.size <= 1024
             val arity = if (prototype && sequence) f.parameters.size else null
             if (arity == null) reasons += "unproved-prototype-or-parameter-sequence"
             val variadic = if (arity != null) when {
+                reconciled != null -> reconciled
                 f.variadic.state == DwarfInterfaceFactState.KNOWN && f.variadic.values.size == 1 -> f.variadic.values.single()
                 (f.variadic.state == DwarfInterfaceFactState.ABSENT && f.variadic.values.isEmpty() &&
                     f.variadic.reasons.all { it == "unspecified-parameter-marker-absent" }) -> { evidence += "DWARF5-3.3.4-prototyped-list-without-unspecified-parameters"; false }
@@ -167,6 +171,54 @@ internal object DwarfSysvAmd64InterfaceProjection {
             if (!f.executable || f.rva == null) reasons += "not-an-executable-physical-function"
             return DwarfProjectedFunction(f.locator, f.rva, language, convention, arity, variadic, returned, parameters,
                 reasons.isEmpty(), reasons, evidence + f.parameterList.evidence + f.callingConvention.evidence + f.returnType.evidence)
+        }
+
+        /** Resolve raw identity differences only through proven no-representation-change wrappers. */
+        private fun reconcileSequences(f: DwarfInterfaceFunctionFacts, language: String): Boolean? {
+            if (f.parameterList.state != DwarfInterfaceFactState.AMBIGUOUS ||
+                f.variadic.state != DwarfInterfaceFactState.AMBIGUOUS ||
+                f.variadic.reasons.any { it !in setOf("concrete-and-inherited-parameter-sequences-differ", "parameter-sequence-inherited") } ||
+                f.parameterLists.size !in 2..32 ||
+                f.parameterList.values.size != 1 ||
+                "concrete-and-inherited-parameter-sequences-differ" !in f.parameterList.reasons ||
+                f.parameterList.reasons.any { it !in setOf("concrete-and-inherited-parameter-sequences-differ", "parameter-sequence-inherited") }) return null
+            fun roots(parameters: List<DwarfInterfaceParameterFacts>): List<String>? {
+                if (parameters.size > 1024 || parameters.map { it.ordinal } != parameters.indices.toList()) return null
+                val ids = arrayListOf<String>()
+                for (parameter in parameters) {
+                    if (parameter.reasons.isNotEmpty()) return null
+                    var id = single(parameter.type) ?: return null
+                    if (!type(id, language, 1).observable) return null
+                    val seen = hashSetOf<String>()
+                    while (true) {
+                        require(++visits <= MAX_VISITS) { "DWARF origin reconciliation work bound exceeded" }
+                        if (!seen.add(id) || seen.size > MAX_DEPTH) return null
+                        val node = raw[id] ?: return null
+                        if (node.tag !in setOf(0x16L, 0x26L, 0x35L, 0x37L)) break
+                        id = single(node.type) ?: return null
+                    }
+                    ids += id
+                }
+                return ids
+            }
+            var expectedRoots: List<String>? = null
+            var expectedVariadic: Boolean? = null
+            var selectedFound = false
+            for (candidate in f.parameterLists) {
+                val currentRoots = roots(candidate.parameters) ?: return null
+                val marker = candidate.variadic
+                val currentVariadic = when {
+                    marker.state == DwarfInterfaceFactState.KNOWN && marker.values.size == 1 && marker.reasons.isEmpty() -> marker.values.single()
+                    marker.state == DwarfInterfaceFactState.ABSENT && marker.values.isEmpty() &&
+                        marker.reasons.all { it == "unspecified-parameter-marker-absent" } -> false
+                    else -> return null
+                }
+                if (expectedRoots != null && (expectedRoots != currentRoots || expectedVariadic != currentVariadic)) return null
+                expectedRoots = currentRoots; expectedVariadic = currentVariadic
+                if (candidate.locator == f.parameterList.values.single()) selectedFound = true
+            }
+            if (!selectedFound || roots(f.parameters) != expectedRoots) return null
+            return expectedVariadic
         }
 
         fun globalType(global: DwarfGlobalVariableFacts): JsonObject {
@@ -219,7 +271,7 @@ internal object DwarfSysvAmd64InterfaceProjection {
                 return DwarfAbiTypeShape(id, bytes, alignment, kind)
             }
             return when (n.tag) {
-                0x16L, 0x26L, 0x35L, 0x37L, 0x47L -> {
+                0x16L, 0x26L, 0x35L, 0x37L -> {
                     val s = referred()
                     if (!absent(n.byteSize) && number(n.byteSize) != s.byteSize) unknown("alias-size-conflict")
                     n.attributes[0x88]?.let { if (!absent(it) && number(it) != s.alignmentBytes) unknown("alias-alignment-conflict") }

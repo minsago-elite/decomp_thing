@@ -77,7 +77,43 @@ class DwarfSysvAmd64InterfaceProjectionTest {
     }
 
     @Test
+    fun `origin sequence reconciliation requires exact proved qualifier roots and matching varargs`() {
+        val qualified = node("qualified", 0x26, referenced = known("int"))
+        val alias = node("alias", 0x16, referenced = known("qualified"))
+        val unrelated = node("other-int", 0x24, size = known("4"), encoding = known("5"))
+        val atomic = node("atomic", 0x47, referenced = known("int"))
+        val conflict = node("conflict", 0x26, size = known("8"), referenced = known("int"))
+        val cycle = node("cycle", 0x16, referenced = known("cycle"))
+        fun candidate(first: String, second: String, secondVariadic: DwarfInterfaceFact<Boolean> = absent()): DwarfInterfaceFunctionFacts {
+            val selected = listOf(parameter(first))
+            val reason = listOf("concrete-and-inherited-parameter-sequences-differ")
+            return function(parameters = selected,
+                sequence = DwarfInterfaceFact(DwarfInterfaceFactState.AMBIGUOUS, listOf("function"),
+                    listOf("function", "declaration"), reason),
+                variadic = DwarfInterfaceFact(DwarfInterfaceFactState.AMBIGUOUS, reasons = reason),
+                lists = listOf(DwarfInterfaceParameterList("function", selected, absent()),
+                    DwarfInterfaceParameterList("declaration", listOf(parameter(second)), secondVariadic)))
+        }
+        val types = arrayOf(intType, qualified, alias, unrelated, atomic, conflict, cycle)
+        val positiveRaw = candidate("alias", "int")
+        val positive = project(positiveRaw, *types).functions.single()
+        assertEquals(DwarfInterfaceFactState.AMBIGUOUS, positiveRaw.parameterList.state)
+        assertTrue(positive.fullyObservable, positive.reasons.toString())
+        assertEquals(1, positive.arity)
+        assertEquals(false, positive.variadic)
+        assertTrue(positive.evidence.any { it.contains("exact-alias-qualifier-root-equivalence") })
+        listOf(candidate("alias", "other-int"), candidate("alias", "int", known(true)),
+            candidate("atomic", "int"), candidate("conflict", "int"), candidate("cycle", "int")).forEach { raw ->
+            val projected = project(raw, *types).functions.single()
+            assertFalse(projected.fullyObservable)
+            assertNull(projected.arity)
+            assertNull(projected.variadic)
+        }
+    }
+
+    @Test
     fun `scalar representations aliases and pointer defaults preserve known and unknown distinctions`() {
+        assertUnknownType(node("atomic", 0x47, referenced = known("int")), intType)
         val pointer = node("pointer", 0x0f)
         val alias = node("alias", 0x16, referenced = known("int"))
         val precise = listOf(
@@ -253,7 +289,7 @@ class DwarfSysvAmd64InterfaceProjectionTest {
         }
 
     @Test
-    fun `compiled C++ retains method origin ambiguity and optimized C preserves ABI facts`() =
+    fun `compiled C++ proves qualifier equivalence while retaining raw ambiguity and optimized C preserves ABI facts`() =
         inInterfaceFixtureDirectory { root ->
             val cpp = compile(root, "method.cpp", """
                 typedef unsigned long Counter;
@@ -270,16 +306,12 @@ class DwarfSysvAmd64InterfaceProjectionTest {
             val method = projectedFunction(cppFacts, cppProjection, "calculate")
             val rawMethod = cppFacts.functions.single { it.locator == method.locator }
             assertTrue(rawMethod.origins.size > 1)
-            // GCC can emit distinct qualified-this type IDs in the definition and specification.
-            // Keep that raw sequence ambiguity instead of silently choosing either signature.
+            // Raw declaration/definition IDs stay ambiguous; only exact qualified-root equality reconciles them.
+            assertTrue(method.fullyObservable, method.reasons.toString())
+            assertEquals(2, method.arity)
             if (rawMethod.parameterList.state == DwarfInterfaceFactState.AMBIGUOUS) {
-                assertFalse(method.fullyObservable)
-                assertNull(method.arity)
-                assertNull(method.variadic)
+                assertTrue(method.evidence.any { it.contains("exact-alias-qualifier-root-equivalence") })
                 assertTrue(rawMethod.parameterLists.size > 1)
-            } else {
-                assertTrue(method.fullyObservable, method.reasons.toString())
-                assertEquals(2, method.arity)
             }
             assertEquals(DwarfAbiScalarKind.POINTER, method.parameters.first()?.shape?.scalar)
             assertEquals(listOf(DwarfAbiClass.INTEGER), method.returnType?.classification?.classes)
@@ -316,10 +348,11 @@ class DwarfSysvAmd64InterfaceProjectionTest {
         variadic: DwarfInterfaceFact<Boolean> = DwarfInterfaceFact(DwarfInterfaceFactState.ABSENT,
             evidence = listOf("function"), reasons = listOf("unspecified-parameter-marker-absent")),
         reasons: List<String> = emptyList(),
+        lists: List<DwarfInterfaceParameterList>? = null,
     ) = DwarfInterfaceFunctionFacts(
         0x1000UL, 0x401000UL, true, "function", known("fixture"), absent(), language, convention,
         prototyped, absent(), declaration, returned, parameters, sequence,
-        listOf(DwarfInterfaceParameterList(sequence.values.firstOrNull() ?: "function", parameters, variadic)),
+        lists ?: listOf(DwarfInterfaceParameterList(sequence.values.firstOrNull() ?: "function", parameters, variadic)),
         variadic, (listOf("function") + sequence.values).distinct(), reasons,
     )
 
