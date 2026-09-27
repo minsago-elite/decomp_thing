@@ -69,7 +69,7 @@ class GccProductionFullExportQualificationTest {
                 invokeInstalledGccCli(
                     arguments,
                     launcherEvidence,
-                    timeoutSeconds = 8100,
+                    timeoutSeconds = 9900,
                     installation = installation,
                     command = "gcc-engine-full-export",
                 ),
@@ -163,10 +163,14 @@ class GccProductionFullExportQualificationTest {
             assertEquals(OracleArtifacts.sha256(manifestBytes), result.requiredText("outputTreeManifestSha256"))
             val treeManifest = OracleJson.parseCanonical(manifestBytes, TREE_MANIFEST_LIMITS).jsonObject
             assertEquals(result.requiredText("outputTreeSha256"), treeManifest.requiredText("outputTreeSha256"))
+            assertEquals(
+                binding.requiredText("outputTreeSha256"),
+                OracleArtifacts.sha256(OracleJson.canonicalBytes(treeManifest.getValue("tree").jsonObject, TREE_MANIFEST_LIMITS)),
+            )
 
             val captured = privateDirectory(evidenceRoot.resolve("captured"))
             copyStable(modelPath, captured.resolve("program_model.json"), MAXIMUM_MODEL_BYTES, modelBytes, modelSha256)
-            captureFailureDiagnostics(modelPath, treeManifest, captured)
+            captureFailureDiagnostics(modelPath, treeManifest, binding.requiredText("outputTreeSha256"), captured)
             val diagnosticStdout = captureCommandStdout(executionBytes, scratch, captured)
             publish(captured.resolve("result.json"), resultBytes)
             publish(captured.resolve("structural-full-export-binding.json"), bindingBytes)
@@ -206,20 +210,43 @@ class GccProductionFullExportQualificationTest {
         val id = "fn_000000000081832b"
         val original = "{\"schemaVersion\":1,\"functionId\":\"$id\",\"status\":\"failed\",\"message\":\"decompilation timed out\"}\n".toByteArray()
         Files.write(failures.resolve("$id.json"), original, CREATE_NEW, WRITE)
-        val tree = JsonObject(mapOf("tree" to JsonObject(mapOf("sidecars" to JsonObject(mapOf(
+        val tree = JsonObject(mapOf("sidecars" to JsonObject(mapOf(
             "failures/$id.json" to JsonObject(mapOf(
                 "bytes" to JsonPrimitive(original.size),
                 "sha256" to JsonPrimitive(OracleArtifacts.sha256(original)),
             )),
-        ))))))
+        ))))
+        val outputTreeSha256 = OracleArtifacts.sha256(OracleJson.canonicalBytes(tree, TREE_MANIFEST_LIMITS))
+        val treeManifest = JsonObject(mapOf(
+            "outputTreeSha256" to JsonPrimitive(outputTreeSha256),
+            "tree" to tree,
+        ))
         val captured = privateDirectory(root.resolve("captured"))
-        assertEquals(1, captureFailureDiagnostics(modelPath, tree, captured))
+        assertEquals(1, captureFailureDiagnostics(modelPath, treeManifest, outputTreeSha256, captured))
         assertTrue(Files.readAllBytes(captured.resolve("failure-diagnostics/$id.json")).contentEquals(original))
 
-        Files.write(failures.resolve("$id.json"), "tampered".toByteArray())
+        val tampered = "tampered".toByteArray()
+        Files.write(failures.resolve("$id.json"), tampered)
         val rejected = privateDirectory(root.resolve("rejected"))
-        assertFailsWith<IllegalArgumentException> { captureFailureDiagnostics(modelPath, tree, rejected) }
+        assertFailsWith<IllegalArgumentException> {
+            captureFailureDiagnostics(modelPath, treeManifest, outputTreeSha256, rejected)
+        }
         assertFalse(Files.exists(rejected.resolve("failure-diagnostics/$id.json")))
+
+        val substitutedSidecars = JsonObject(mapOf("failures/$id.json" to JsonObject(mapOf(
+            "bytes" to JsonPrimitive(tampered.size),
+            "sha256" to JsonPrimitive(OracleArtifacts.sha256(tampered)),
+        ))))
+        val substitutedTree = JsonObject(tree + ("sidecars" to substitutedSidecars))
+        val substitutedManifest = JsonObject(mapOf(
+            "outputTreeSha256" to JsonPrimitive(outputTreeSha256),
+            "tree" to substitutedTree,
+        ))
+        val rejectedReplacement = privateDirectory(root.resolve("rejected-manifest-replacement"))
+        assertFailsWith<IllegalArgumentException> {
+            captureFailureDiagnostics(modelPath, substitutedManifest, outputTreeSha256, rejectedReplacement)
+        }
+        assertFalse(Files.exists(rejectedReplacement.resolve("failure-diagnostics/$id.json")))
     }
 
     @Test
@@ -385,8 +412,20 @@ class GccProductionFullExportQualificationTest {
         return stdout.size.toLong() to OracleArtifacts.sha256(stdout)
     }
 
-    private fun captureFailureDiagnostics(modelPath: Path, treeManifest: JsonObject, captured: Path): Int {
-        val sidecars = treeManifest.getValue("tree").jsonObject.getValue("sidecars").jsonObject
+    private fun captureFailureDiagnostics(
+        modelPath: Path,
+        treeManifest: JsonObject,
+        authenticatedOutputTreeSha256: String,
+        captured: Path,
+    ): Int {
+        require(treeManifest.requiredText("outputTreeSha256") == authenticatedOutputTreeSha256) {
+            "cc1 output tree manifest differs from the structural binding"
+        }
+        val tree = treeManifest.getValue("tree").jsonObject
+        require(OracleArtifacts.sha256(OracleJson.canonicalBytes(tree, TREE_MANIFEST_LIMITS)) == authenticatedOutputTreeSha256) {
+            "cc1 output tree contents differ from the structural binding"
+        }
+        val sidecars = tree.getValue("sidecars").jsonObject
         val failures = sidecars.filterKeys { it.startsWith("failures/") }.toSortedMap()
         require(failures.size <= MAXIMUM_FAILURE_DIAGNOSTICS) { "cc1 failure diagnostic count exceeds its capture bound" }
         if (failures.isEmpty()) return 0

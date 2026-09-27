@@ -42,7 +42,7 @@ internal class GccBundledOperationIntent(
             "full-recovery export requires a fresh uninterrupted operation"
         }
         require(bundledRuntime.invocationVersion != 5 || engineId == "cc1") {
-            "full-recovery export is restricted to cc1"
+            "full-recovery structural export is currently supported only for cc1"
         }
         require(budgets.wallClockMillis % 1_000L == 0L) { "GCC bundled wall budget must use whole seconds" }
         require(diskPolicy.maximumFilesystemBytes <= 1024L * 1024 * 1024 * 1024 &&

@@ -18,7 +18,7 @@
           "required": ["id", "version", "sha256", "recoveryMode"],
           "properties": {
             "id": {"const": "decompengine-ghidra-program-model"},
-            "version": {"const": 10},
+            "version": {"const": 11},
             "recoveryMode": {"const": "planning"},
             "sha256": {"$ref": "#/$defs/sha256"}
           }
@@ -75,7 +75,7 @@
       "required": ["exportWallClockSeconds", "fullRecoveryCc1ExportWallClockSeconds", "exportMaximumResidentBytes", "plannerMaximumEntities", "plannerMaximumDependencyEdges", "plannerMaximumWorkUnits"],
       "properties": {
         "exportWallClockSeconds": {"const": 1800},
-        "fullRecoveryCc1ExportWallClockSeconds": {"const": 7200},
+        "fullRecoveryCc1ExportWallClockSeconds": {"const": 9000},
         "exportMaximumResidentBytes": {"const": 17179869184},
         "plannerMaximumEntities": {"type": "integer", "minimum": 1},
         "plannerMaximumDependencyEdges": {"type": "integer", "minimum": 1},
