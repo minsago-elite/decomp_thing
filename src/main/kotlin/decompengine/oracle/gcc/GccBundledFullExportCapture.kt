@@ -8,6 +8,7 @@ import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import java.nio.charset.StandardCharsets
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -116,6 +117,7 @@ private fun fullAssessmentBytes(
 /** Captures full-mode sidecars after the caller has established worker absence and retained the run lease. */
 internal object GccBundledFullExportCapture {
     private const val MAXIMUM_FULL_FUNCTION_RECORD_BYTES = 64 * 1024 * 1024
+    private const val MAXIMUM_FULL_EVIDENCE_RECORD_BYTES = 1024 * 1024
     internal const val MAXIMUM_FULL_FUNCTIONS = 512L * 256L
     private const val MAXIMUM_MODEL_BYTES = 512 * 1024 * 1024
     private const val MAXIMUM_SIDECAR_FILES = 300_000
@@ -211,20 +213,22 @@ internal object GccBundledFullExportCapture {
         require(functionNames.size.toLong() == progress.total &&
             functionNames.all { it.matches(Regex("fn_[0-9a-f]{16}\\.json")) }
         ) { "GCC full export function records differ from the completed progress inventory" }
-        val globalNames = captureDirectoryFiles(globals, MAXIMUM_FULL_FUNCTIONS, 1024 * 1024)
+        val globalNames = captureDirectoryFiles(globals, MAXIMUM_FULL_FUNCTIONS, MAXIMUM_FULL_EVIDENCE_RECORD_BYTES)
         require(globalNames.all { it.matches(Regex("global_[0-9a-f]{16}\\.json")) }) {
             "GCC full export global record names are invalid"
         }
-        val typeNames = captureDirectoryFiles(types, MAXIMUM_FULL_FUNCTIONS, 1024 * 1024)
+        val typeNames = captureDirectoryFiles(types, MAXIMUM_FULL_FUNCTIONS, MAXIMUM_FULL_EVIDENCE_RECORD_BYTES)
         require(typeNames.all { it.matches(Regex("type_[0-9a-f]{64}\\.json")) }) {
             "GCC full export type record names are invalid"
         }
-        val failureNames = captureDirectoryFiles(failures, progress.total, 1024 * 1024)
+        val failureNames = captureDirectoryFiles(failures, progress.total, MAXIMUM_FULL_EVIDENCE_RECORD_BYTES)
         require(failureNames.all { it.matches(Regex("fn_[0-9a-f]{16}\\.json")) && it in functionNames }) {
             "GCC full export failure records do not identify exported functions"
         }
         val entries = linkedMapOf<String, JsonObject>()
         val functionStatuses = linkedMapOf<String, String>()
+        val globalIds = globalNames.mapTo(hashSetOf()) { it.removeSuffix(".json") }
+        val sourceAddresses = hashSetOf<String>()
         fun addFiles(prefix: String, directory: LinuxDescriptor, names: List<String>, maximum: Int,
             includedInModel: Boolean = false) {
             require(entries.size + names.size <= MAXIMUM_SIDECAR_FILES) {
@@ -234,13 +238,9 @@ internal object GccBundledFullExportCapture {
                 val bytes = capture.read(directory, name, maximum)
                 when (prefix) {
                     "functions" -> functionStatuses[name.removeSuffix(".json")] =
-                        requireFullFunctionRecord(bytes, name.removeSuffix(".json"))
-                    "globals" -> requireFullNamedRecord(bytes, name.removeSuffix(".json"), setOf(
-                        "id", "name", "address", "type", "initializer", "extractionStatus", "recoveryAssessment",
-                    ))
-                    "types" -> requireFullNamedRecord(bytes, name.removeSuffix(".json"), setOf(
-                        "id", "declaration", "sourceAddress", "extractionStatus", "recoveryAssessment",
-                    ))
+                        requireFullFunctionRecord(bytes, name.removeSuffix(".json"), globalIds, sourceAddresses)
+                    "globals" -> sourceAddresses += requireFullGlobalRecord(bytes, name.removeSuffix(".json"))
+                    "types" -> requireFullTypeRecord(bytes, name.removeSuffix(".json"), sourceAddresses)
                     "failures" -> requireFullFailureRecord(
                         bytes, name.removeSuffix(".json"), functionStatuses[name.removeSuffix(".json")],
                     )
@@ -255,12 +255,12 @@ internal object GccBundledFullExportCapture {
             functionStatuses.values.count { it == "partial" }.toLong() == progress.partial &&
             functionStatuses.values.count { it == "failed" }.toLong() == progress.failed
         ) { "GCC full function outcomes differ from completed progress counts" }
-        addFiles("globals", globals, globalNames, 1024 * 1024, includedInModel = true)
+        addFiles("globals", globals, globalNames, MAXIMUM_FULL_EVIDENCE_RECORD_BYTES, includedInModel = true)
         modelVerifier.accept("  ],\n  \"types\": [\n")
-        addFiles("types", types, typeNames, 1024 * 1024, includedInModel = true)
+        addFiles("types", types, typeNames, MAXIMUM_FULL_EVIDENCE_RECORD_BYTES, includedInModel = true)
         modelVerifier.accept("  ]\n}\n")
         modelVerifier.finish()
-        addFiles("failures", failures, failureNames, 1024 * 1024)
+        addFiles("failures", failures, failureNames, MAXIMUM_FULL_EVIDENCE_RECORD_BYTES)
         require(failureNames.map { it.removeSuffix(".json") }.toSet() ==
             functionStatuses.filterValues { it != "recovered" }.keys
         ) { "GCC full failure records differ from partial and failed function outcomes" }
@@ -407,7 +407,12 @@ internal object GccBundledFullExportCapture {
         ) { "GCC full program model does not have the exporter-bound input envelope" }
     }
 
-    private fun requireFullFunctionRecord(bytes: ByteArray, expectedId: String): String {
+    private fun requireFullFunctionRecord(
+        bytes: ByteArray,
+        expectedId: String,
+        globalIds: Set<String>,
+        sourceAddresses: MutableSet<String>,
+    ): String {
         val root = strictRecordObject(bytes, MAXIMUM_FULL_FUNCTION_RECORD_BYTES, "function record")
         val status = string(root, "extractionStatus")
         require(root.keys == setOf(
@@ -417,23 +422,73 @@ internal object GccBundledFullExportCapture {
             status in setOf("recovered", "partial", "failed") &&
             string(root, "recoveryAssessment") == "unassessed"
         ) { "GCC full function record is malformed or is bound to another identity" }
+        val source = root.getValue("decompiledC")
+        require(if (status == "failed") source == JsonNull else source is JsonPrimitive && source.isString) {
+            "GCC full function decompiledC contradicts its extraction status"
+        }
+        val references = root["referencedGlobals"] as? JsonArray
+            ?: throw IllegalArgumentException("GCC full function referencedGlobals must be an array")
+        require(references.all { it is JsonPrimitive && it.isString && it.content in globalIds }) {
+            "GCC full function referencedGlobals contains an absent or invalid global identity"
+        }
+        val address = string(root, "address")
+        require(canonicalAddress(address) && expectedId == "fn_" + address.removePrefix("0x").padStart(16, '0')) {
+            "GCC full function record identity does not match its canonical 64-bit address"
+        }
+        sourceAddresses += address
         return status
     }
 
-    private fun requireFullNamedRecord(bytes: ByteArray, expectedId: String, expectedKeys: Set<String>) {
-        val root = strictRecordObject(bytes, 1024 * 1024, "evidence record")
+    private fun requireFullGlobalRecord(bytes: ByteArray, expectedId: String): String {
+        val root = requireFullNamedRecord(bytes, expectedId, "recovered", setOf(
+            "id", "name", "address", "type", "initializer", "extractionStatus", "recoveryAssessment",
+        ))
+        val address = string(root, "address")
+        require(canonicalAddress(address) && expectedId == "global_" + address.removePrefix("0x").padStart(16, '0')) {
+            "GCC full global record identity does not match its canonical 64-bit address"
+        }
+        return address
+    }
+
+    private fun requireFullTypeRecord(bytes: ByteArray, expectedId: String, sourceAddresses: Set<String>) {
+        val root = requireFullNamedRecord(bytes, expectedId, "partial", setOf(
+            "id", "declaration", "sourceAddress", "extractionStatus", "recoveryAssessment",
+        ))
+        val address = string(root, "sourceAddress")
+        require(canonicalAddress(address) && address in sourceAddresses) {
+            "GCC full type sourceAddress is not a captured function or global address"
+        }
+    }
+
+    private fun canonicalAddress(address: String): Boolean =
+        address.length in 3..18 && address.matches(Regex("0x(?:0|[1-9a-f][0-9a-f]*)"))
+
+    private fun requireFullNamedRecord(
+        bytes: ByteArray,
+        expectedId: String,
+        expectedStatus: String,
+        expectedKeys: Set<String>,
+    ): JsonObject {
+        val root = strictRecordObject(bytes, MAXIMUM_FULL_EVIDENCE_RECORD_BYTES, "evidence record")
         require(root.keys == expectedKeys && string(root, "id") == expectedId &&
-            string(root, "extractionStatus") in setOf("recovered", "partial") &&
+            string(root, "extractionStatus") == expectedStatus &&
             string(root, "recoveryAssessment") == "unassessed"
         ) { "GCC full evidence record is malformed or is bound to another identity" }
+        return root
     }
 
     private fun requireFullFailureRecord(bytes: ByteArray, expectedId: String, expectedStatus: String?) {
-        val root = strictRecordObject(bytes, 1024 * 1024, "failure record")
+        val root = strictRecordObject(bytes, MAXIMUM_FULL_EVIDENCE_RECORD_BYTES, "failure record")
         require(root.keys == setOf("schemaVersion", "functionId", "status", "message") &&
             number(root, "schemaVersion") == 1L && string(root, "functionId") == expectedId &&
             string(root, "status") in setOf("partial", "failed") && string(root, "status") == expectedStatus
         ) { "GCC full failure record is malformed or is bound to another function" }
+        // The exporter joins multiple individually truncated failure phases. Keep the existing
+        // evidence-record UTF-8 bound, rather than treating one phase's character limit as a
+        // whole-message limit. strictRecordObject also bounds decoded JSON strings before this.
+        require(string(root, "message").toByteArray(StandardCharsets.UTF_8).size <= MAXIMUM_FULL_EVIDENCE_RECORD_BYTES) {
+            "GCC full failure message exceeds its byte bound"
+        }
     }
 
     private fun strictRecordObject(bytes: ByteArray, maximumBytes: Int, label: String): JsonObject {
