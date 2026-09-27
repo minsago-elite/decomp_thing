@@ -118,9 +118,20 @@ class AcpAgentHarnessTest {
                     profile = profile,
                 ).reconstruct(binary, output)
             } catch (failure: Exception) {
+                val checkpoint = output.resolve("source-tree").resolve(
+                    profile.layout.declaration("module-evidence").materialize(mapOf("module" to "decomp")),
+                )
+                val checkpointDiagnostics = runCatching {
+                    if (!Files.isRegularFile(checkpoint)) "<missing>" else {
+                        val maximumBytes = 16 * 1024
+                        val bytes = Files.newInputStream(checkpoint).use { it.readNBytes(maximumBytes + 1) }
+                        bytes.take(maximumBytes).toByteArray().toString(Charsets.UTF_8) +
+                            if (bytes.size > maximumBytes) "\n<truncated>" else ""
+                    }
+                }.getOrElse { "<unreadable: ${it.javaClass.simpleName}>" }
                 throw AssertionError(
                     "public ${base.id} ACP reconstruction failed; diagnostics=${harness.latestDiagnostics()}; " +
-                        "sandbox=${harness.latestSandboxEvidence()}",
+                        "sandbox=${harness.latestSandboxEvidence()}; checkpoint=$checkpointDiagnostics",
                     failure,
                 )
             }
