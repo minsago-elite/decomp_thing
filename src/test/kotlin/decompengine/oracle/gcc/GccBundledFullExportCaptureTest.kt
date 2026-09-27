@@ -11,8 +11,14 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFails
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -94,8 +100,238 @@ class GccBundledFullExportCaptureTest {
         }
     }
 
+    @Test
+    fun `global and type records retain exporter statuses and unsigned address identities`() {
+        for ((id, address) in listOf(
+            "global_0000000000000000" to "0x0",
+            "global_0000000000400100" to "0x400100",
+            "global_ffffffffffffffff" to "0xffffffffffffffff",
+        )) fixture { root, run, reports ->
+            val global = globalRecord(id, JsonPrimitive(address))
+            val type = typeRecord(sourceAddress = JsonPrimitive(address))
+            writeFunction(root, functionRecord("fn_0000000000400010", "f",
+                references = JsonArray(listOf(JsonPrimitive(id)))))
+            writeNamedRecords(root, id to global, typeId() to type)
+            val snapshot = GccBundledFullExportCapture.capture(run, reports, artifacts())
+            assertEquals(6L, snapshot.outputFileCount)
+            assertTrue(snapshot.sidecarManifest.decodeToString().contains("globals/$id.json"))
+            assertTrue(snapshot.sidecarManifest.decodeToString().contains("types/${typeId()}.json"))
+            assertContentEquals(Files.readAllBytes(root.resolve("reports/program_model.json")), snapshot.programModel)
+        }
+    }
+
+    @Test
+    fun `matching model bytes cannot authenticate global IDs contradicting their addresses`() {
+        val id = "global_0000000000400100"
+        for (address in listOf(
+            JsonPrimitive("0x400200"),
+            JsonPrimitive("0x0400100"),
+            JsonPrimitive("0x40010A"),
+            JsonPrimitive("0x10000000000400100"),
+            JsonPrimitive("400100"),
+            JsonPrimitive(0x400100),
+            JsonNull,
+        )) fixture { root, run, reports ->
+            writeNamedRecords(root, id to globalRecord(id, address))
+            val failure = assertFailsWith<IllegalArgumentException>(address.toString()) {
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+            }
+            assertTrue(failure.message.orEmpty().contains("address"), failure.message)
+        }
+    }
+
+    @Test
+    fun `matching model bytes cannot authenticate statuses impossible for the exporter record kind`() {
+        for (kind in listOf("global", "type")) fixture { root, run, reports ->
+            if (kind == "global") {
+                val id = "global_0000000000400100"
+                writeNamedRecords(root, id to globalRecord(id, JsonPrimitive("0x400100"), status = "partial"))
+            } else {
+                writeNamedRecords(root, type = typeId() to typeRecord(status = "recovered"))
+            }
+            val failure = assertFailsWith<IllegalArgumentException>(kind) {
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+            }
+            assertTrue(failure.message.orEmpty().contains("evidence record"), failure.message)
+        }
+    }
+
+    @Test
+    fun `full function source presence follows recovered partial and failed exporter outcomes`() {
+        for (status in listOf("recovered", "partial", "failed")) fixture { root, run, reports ->
+            if (status != "recovered") writeFailure(root, JsonPrimitive("auxiliary evidence failed"), status)
+            val snapshot = GccBundledFullExportCapture.capture(run, reports, artifacts())
+            assertEquals(if (status == "recovered") 1L else 0L, snapshot.recovered)
+            assertEquals(if (status == "partial") 1L else 0L, snapshot.partial)
+            assertEquals(if (status == "failed") 1L else 0L, snapshot.failed)
+        }
+    }
+
+    @Test
+    fun `matching model bytes cannot authenticate source fields inconsistent with function outcomes`() {
+        val invalid = listOf(
+            "recovered" to JsonNull,
+            "partial" to JsonNull,
+            "failed" to JsonPrimitive("int f(void) { return 1; }"),
+        ) + listOf<JsonElement>(JsonPrimitive(17), JsonPrimitive(true), JsonObject(emptyMap()), JsonArray(emptyList()))
+            .map { "recovered" to it }
+        for ((status, source) in invalid) fixture { root, run, reports ->
+            if (status != "recovered") writeFailure(root, JsonPrimitive("auxiliary evidence failed"), status)
+            writeFunction(root, functionRecord("fn_0000000000400010", "f", status, source))
+            val failure = assertFailsWith<IllegalArgumentException>("$status: $source") {
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+            }
+            assertTrue(failure.message.orEmpty().contains("decompiledC"), failure.message)
+        }
+    }
+
+    @Test
+    fun `function global references resolve to the captured global inventory`() = fixture { root, run, reports ->
+        val id = "global_0000000000400100"
+        writeFunction(root, functionRecord("fn_0000000000400010", "f",
+            references = JsonArray(listOf(JsonPrimitive(id)))))
+        writeNamedRecords(root, global = id to globalRecord(id, JsonPrimitive("0x400100")))
+        val snapshot = GccBundledFullExportCapture.capture(run, reports, artifacts())
+        assertEquals(5L, snapshot.outputFileCount)
+    }
+
+    @Test
+    fun `matching model bytes cannot authenticate absent or malformed global references`() {
+        for (references in listOf<JsonElement>(
+            JsonArray(listOf(JsonPrimitive("global_0000000000400200"))),
+            JsonArray(listOf(JsonPrimitive("global_400100"))),
+            JsonArray(listOf(JsonPrimitive(17))),
+            JsonArray(listOf(JsonNull)),
+            JsonPrimitive("global_0000000000400100"),
+            JsonNull,
+        )) fixture { root, run, reports ->
+            writeFunction(root, functionRecord("fn_0000000000400010", "f", references = references))
+            val id = "global_0000000000400100"
+            writeNamedRecords(root, global = id to globalRecord(id, JsonPrimitive("0x400100")))
+            val failure = assertFailsWith<IllegalArgumentException>(references.toString()) {
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+            }
+            assertTrue(failure.message.orEmpty().contains("referencedGlobals"), failure.message)
+        }
+    }
+
+    @Test
+    fun `matching model bytes cannot authenticate orphaned global sidecars`() = fixture { root, run, reports ->
+        val id = "global_0000000000400100"
+        writeNamedRecords(root, global = id to globalRecord(id, JsonPrimitive("0x400100")))
+        val failure = assertFailsWith<IllegalArgumentException> {
+            GccBundledFullExportCapture.capture(run, reports, artifacts())
+        }
+        assertTrue(failure.message.orEmpty().contains("orphaned global"), failure.message)
+    }
+
+    @Test
+    fun `matching model bytes cannot authenticate malformed call identities`() {
+        for (calls in listOf<JsonElement>(
+            JsonArray(listOf(JsonPrimitive(""))),
+            JsonArray(listOf(JsonPrimitive("attacker"))),
+            JsonArray(listOf(JsonPrimitive("fn_00000000004000AF"))),
+            JsonArray(listOf(JsonPrimitive("fn_400010"))),
+            JsonArray(listOf(JsonPrimitive("fn_00000000000400010"))),
+            JsonArray(listOf(JsonPrimitive(17))),
+            JsonArray(listOf(JsonNull)),
+            JsonPrimitive("fn_0000000000400010"),
+            JsonNull,
+        )) fixture { root, run, reports ->
+            writeFunction(root, functionRecord("fn_0000000000400010", "f", calls = calls))
+            val failure = assertFailsWith<IllegalArgumentException>(calls.toString()) {
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+            }
+            assertTrue(failure.message.orEmpty().contains("calls"), failure.message)
+        }
+    }
+
+    @Test
+    fun `call identities retain canonical unsigned function addresses`() = fixture { root, run, reports ->
+        writeFunction(root, functionRecord("fn_0000000000400010", "f", calls = JsonArray(listOf(
+            JsonPrimitive("fn_0000000000000000"), JsonPrimitive("fn_ffffffffffffffff"),
+        ))))
+        assertEquals(1L, GccBundledFullExportCapture.capture(run, reports, artifacts()).functionCount)
+    }
+
+    @Test
+    fun `type evidence can retain its first function source address`() = fixture { root, run, reports ->
+        writeNamedRecords(root, type = typeId() to typeRecord())
+        assertEquals(5L, GccBundledFullExportCapture.capture(run, reports, artifacts()).outputFileCount)
+    }
+
+    @Test
+    fun `matching model bytes cannot authenticate absent or noncanonical type source addresses`() {
+        for (address in listOf<JsonElement>(
+            JsonNull, JsonPrimitive(0x400010), JsonPrimitive("0x400200"), JsonPrimitive("0x0400010"),
+            JsonPrimitive("0x40001A"), JsonPrimitive("0x10000000000400010"), JsonPrimitive("400010"),
+        )) fixture { root, run, reports ->
+            writeNamedRecords(root, type = typeId() to typeRecord(sourceAddress = address))
+            val failure = assertFailsWith<IllegalArgumentException>(address.toString()) {
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+            }
+            assertTrue(failure.message.orEmpty().contains("sourceAddress"), failure.message)
+        }
+    }
+
+    @Test
+    fun `type sources cannot be authenticated by a function address contradicting its identity`() = fixture { root, run, reports ->
+        val original = functionRecord("fn_0000000000400010", "f")
+        writeFunction(root, original.replace("\"address\":\"0x400010\"", "\"address\":\"0x400020\""))
+        writeNamedRecords(root, type = typeId() to typeRecord(sourceAddress = JsonPrimitive("0x400020")))
+        val failure = assertFailsWith<IllegalArgumentException> {
+            GccBundledFullExportCapture.capture(run, reports, artifacts())
+        }
+        assertTrue(failure.message.orEmpty().contains("function record identity"), failure.message)
+    }
+
+    @Test
+    fun `failure sidecars require a JSON string message before output tree authentication`() {
+        for (message in listOf<JsonElement>(
+            JsonPrimitive(17), JsonPrimitive(true), JsonNull, JsonObject(emptyMap()), JsonArray(emptyList()),
+        )) fixture { root, run, reports ->
+            writeFailure(root, message)
+            val failure = assertFailsWith<IllegalArgumentException>(message.toString()) {
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+            }
+            assertTrue(failure.message.orEmpty().contains("message"), failure.message)
+        }
+    }
+
+    @Test
+    fun `failure sidecars cannot authenticate blank failure messages`() {
+        for (message in listOf("", " ", "\t\r\n ", "\u00a0")) fixture { root, run, reports ->
+            writeFailure(root, JsonPrimitive(message))
+            val failure = assertFailsWith<IllegalArgumentException> {
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+            }
+            assertTrue(failure.message.orEmpty().contains("failure message must not be blank"), failure.message)
+        }
+    }
+
+    @Test
+    fun `multi phase failure strings retain Unicode and existing UTF8 record bounds`() = fixture { root, run, reports ->
+        val message = "call recovery failed: " + "界".repeat(1900) + "; type recovery failed: " + "𐐀".repeat(900)
+        writeFailure(root, JsonPrimitive(message))
+        val snapshot = GccBundledFullExportCapture.capture(run, reports, artifacts())
+        assertEquals(1L, snapshot.failed)
+        assertEquals(0L, snapshot.recovered)
+        assertTrue(snapshot.sidecarManifest.decodeToString().contains("failures/fn_0000000000400010.json"))
+        assertEquals("false", OracleJson.parseCanonical(snapshot.assessmentBytes).jsonObject.getValue("complete").jsonPrimitive.content)
+
+        val maximumRecordBytes = 1024 * 1024
+        val messageBytes = maximumRecordBytes - failureRecord(JsonPrimitive("")).toByteArray().size
+        val boundaryMessage = "界".repeat(messageBytes / 3) + "x".repeat(messageBytes % 3)
+        writeFailure(root, JsonPrimitive(boundaryMessage))
+        assertEquals(maximumRecordBytes.toLong(), Files.size(root.resolve("reports/program_model.json.export/failures/fn_0000000000400010.json")))
+        GccBundledFullExportCapture.capture(run, reports, artifacts())
+        writeFailure(root, JsonPrimitive(boundaryMessage + "x"))
+        assertFails { GccBundledFullExportCapture.capture(run, reports, artifacts()) }
+    }
+
     private fun fixture(action: (Path, LinuxDescriptor, decompengine.acp.LinuxFileIdentity) -> Unit) {
-        val root = Files.createTempDirectory("gcc-full-export-capture-").toRealPath()
+        val temporaryRoot = Files.createDirectories(Path.of("build", "gcc-full-export-capture-tests"))
+        val root = Files.createTempDirectory(temporaryRoot, "gcc-full-export-capture-").toRealPath()
         Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("rwx------"))
         try {
             val reports = Files.createDirectory(root.resolve("reports"))
@@ -142,16 +378,57 @@ class GccBundledFullExportCaptureTest {
         Files.writeString(root.resolve("reports/program_model.json.export/state.json"), state)
     }
 
-    private fun writeProgress(root: Path, completed: Int = 1, phase: String = "complete") {
-        val progress = """{"schemaVersion":1,"phase":"$phase","completed":$completed,"total":1,"recovered":1,"partial":0,"failed":0,"reused":0,"currentFunction":null}
+    private fun writeProgress(root: Path, completed: Int = 1, phase: String = "complete", recovered: Int = 1, failed: Int = 0, partial: Int = 0) {
+        val progress = """{"schemaVersion":1,"phase":"$phase","completed":$completed,"total":1,"recovered":$recovered,"partial":$partial,"failed":$failed,"reused":0,"currentFunction":null}
 """
         Files.writeString(root.resolve("reports/program_model.json.progress.json"), progress)
     }
 
-    private fun functionRecord(id: String, name: String) =
-        """{"id":"$id","name":"$name","address":"0x400010","prototype":"int f(void)","extractionStatus":"recovered","recoveryAssessment":"unassessed","calls":[],"referencedGlobals":[],"strings":[],"decompiledC":"int f(void) { return 1; }"}"""
+    private fun functionRecord(
+        id: String,
+        name: String,
+        status: String = "recovered",
+        source: JsonElement = if (status == "failed") JsonNull else JsonPrimitive("int f(void) { return 1; }"),
+        references: JsonElement = JsonArray(emptyList()),
+        calls: JsonElement = JsonArray(emptyList()),
+    ) =
+        """{"id":"$id","name":"$name","address":"0x400010","prototype":"int f(void)","extractionStatus":"$status","recoveryAssessment":"unassessed","calls":$calls,"referencedGlobals":$references,"strings":[],"decompiledC":$source}"""
 
-    private fun modelText(record: String) =
+    private fun writeFunction(root: Path, record: String) {
+        Files.writeString(root.resolve("reports/program_model.json.export/functions/fn_0000000000400010.json"), record)
+        Files.writeString(root.resolve("reports/program_model.json"), modelText(record))
+    }
+
+    private fun globalRecord(id: String, address: JsonElement, status: String = "recovered") =
+        """{"id":"$id","name":"g","address":$address,"type":"int","initializer":null,"extractionStatus":"$status","recoveryAssessment":"unassessed"}"""
+
+    private fun typeId() = "type_" + OracleArtifacts.sha256("int".toByteArray())
+
+    private fun typeRecord(status: String = "partial", sourceAddress: JsonElement = JsonPrimitive("0x400010")) =
+        """{"id":"${typeId()}","declaration":"typedef int scalar;","sourceAddress":$sourceAddress,"extractionStatus":"$status","recoveryAssessment":"unassessed"}"""
+
+    private fun writeNamedRecords(root: Path, global: Pair<String, String>? = null, type: Pair<String, String>? = null) {
+        val export = root.resolve("reports/program_model.json.export")
+        global?.let { (id, record) -> Files.writeString(export.resolve("globals/$id.json"), record) }
+        type?.let { (id, record) -> Files.writeString(export.resolve("types/$id.json"), record) }
+        // Keep sidecars and assembled model identical so semantic validation is exercised.
+        val function = Files.readString(export.resolve("functions/fn_0000000000400010.json"))
+        Files.writeString(root.resolve("reports/program_model.json"), modelText(function, global?.second, type?.second))
+    }
+
+    private fun failureRecord(message: JsonElement, status: String = "failed") =
+        """{"schemaVersion":1,"functionId":"fn_0000000000400010","status":"$status","message":$message}
+"""
+
+    private fun writeFailure(root: Path, message: JsonElement, status: String = "failed") {
+        val record = functionRecord("fn_0000000000400010", "f", status = status)
+        writeFunction(root, record)
+        writeProgress(root, recovered = 0, failed = if (status == "failed") 1 else 0, partial = if (status == "partial") 1 else 0)
+        Files.writeString(root.resolve("reports/program_model.json.export/failures/fn_0000000000400010.json"), failureRecord(message, status))
+    }
+
+    private fun modelText(record: String, global: String? = null, type: String? = null) =
         "{\n  \"schemaVersion\": 2,\n  \"inputSha256\": \"${inputSha()}\",\n  \"functions\": [\n" +
-            "$record\n  ],\n  \"globals\": [\n  ],\n  \"types\": [\n  ]\n}\n"
+            "$record\n  ],\n  \"globals\": [\n${global?.let { "$it\n" } ?: ""}  ],\n" +
+            "  \"types\": [\n${type?.let { "$it\n" } ?: ""}  ]\n}\n"
 }

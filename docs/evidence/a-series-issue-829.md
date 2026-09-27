@@ -1,50 +1,50 @@
-# A-series issue #829 — Qualify declared-role authority through Make and Ninja ACP workflows — evidence boundary
+# A-series issue #829 — declared-role reconstruction slice
 
 - Milestone: A8: Reconstruct a Buildable GCC Driver Source Tree
-- Worktree: `/home/june/a-series-wt/issue-829` (branch `a-series-issue-829`, based on `origin/master`)
-- Status: NOT YET QUALIFIED — this file records the current evidence boundary only; it does not claim production qualification.
+- Status: focused implementation and unit evidence only; #829 remains open and is not production-qualified.
+- Scope: `BoundedLlmModuleReconstructor` in the Make/Ninja generated-C adapters.
 
-## Outcome (from issue)
-Qualify declared-role authority through Make and Ninja ACP workflows
+## Implemented and verified
 
-## Acceptance criteria (from issue)
-See `gh issue view 829` for the authoritative checklist. This PR does not close #829; it retains the gap for follow-up qualification.
+- Reconstruction now checks that the planned editable implementation matches the profile declaration.
+- Every workspace context path must match a declared viewable UTF-8 interface with its expected public or private interface role. Module headers must match the profile's module-interface path, and dependencies must resolve to declared module interfaces.
+- The request path policy gives read access to declared interface inputs. The planned implementation gets write/create access from its editable role and read access only when the profile also declares it viewable. A durable session inventories the implementation only if that read access exists; accepted revision identity is recorded separately.
+- The Make-profile test verifies the exact request rules. One alternate Ninja-profile test removes `viewable` from the private interface, verifies the harness is never called, and verifies the implementation remains unresolved. Another removes `viewable` from the implementation, supplies a harness provenance descriptor to exercise the durable continuation, verifies that the agent can write it without receiving read access or inventorying it, and verifies that generation proceeds.
+- The public archival service test exercises those rules through Make and Ninja builds. A fixture harness without invocation-bound ACP evidence is refused by the archive release gate after its build succeeds. With an alternate Ninja layout that hides the private interface, the harness is not called and archive publication is also refused.
+- A scripted ACP v1 fixture now runs the archival service through `AcpAgentHarness`, its sandbox, and filesystem broker for both built-in profiles. It reads the three declared interfaces, confirms a confidence-report read and an unauthorized Makefile write are denied, writes only the declared module implementation, then builds, packages, extracts, verifies, and rebuilds the archive. This exercises the scripted fixture provider through the ACP transport; it is not evidence from a production ACP provider.
 
-## Method
-- Read issue #829 outcome, acceptance criteria, dependencies and parent checkpoints.
-- Inspected the `origin/master` worktree for existing implementation, tests and retained checkpoints.
-- Recorded only what is currently evidenced; unresolved behavior remains explicitly unclaimed.
+## Verification
 
-## Current boundary (truthful, no fabrication)
-- No new production behavior is claimed by this file.
-- Qualification evidence (contained runs, deterministic repetitions, independent archive verification, authority boundaries) is still required before #829 can close.
-- Parent checkpoints and dependency contracts referenced by the issue retain their own scope and verification requirements.
+Command:
 
-## Source excerpt (authoritative issue body, truncated)
-```markdown
-## Outcome
-
-Qualify declared-role authority through Make and Ninja ACP workflows.
-
-Focused child of #84; owns source acceptance criterion 8.
-
-## Acceptance criteria
-
-- [ ] Prove #63/#64/#65 derive permissions and ownership from declared roles, including the alternate profile.
-
-## Dependencies and evidence
-
-Existing dependency contracts: #43, #46, #47, #49, #54, #63, #67, #118. See the parent for capability-specific sequencing; this split does not move their ownership.
-
-Exercise #63 mutation, #64 reconstruction and #65 repair public paths using declared ownership; #414 local indexing proof alone cannot qualify ACP workflow authority.
-
-Reuse the implementation and retained checkpoints in #84; complete or verify only the remaining gap in this slice. The parent retains the original scope, verification requirements and evidence limitations. Attach focused evidence for this outcome and distinguish draft implementation, merged behavior and production qualification.
-
-<!-- backlog-sizing-v1 parent=84 slice=7 -->
-
+```sh
+TMPDIR=/home/june/decomp-thing-issue-829-role-policy/.tmp \
+JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/home/june/decomp-thing-issue-829-role-policy/.tmp \
+./gradlew -PfrontendNodeHome=/home/june/.cache/decomp-toolchains/node-v24.20.0 \
+  --offline test --tests decompengine.project.SourceTreeTest --console=plain
 ```
 
-## Limitations / next steps
-- Attach focused execution evidence (exact commands, commits, artifacts, budgets) in a follow-up before claiming #829.
-- Keep implementation slices minimal and file-scoped (`docs/evidence/a-series-issue-829.md` only) so parallel A-series PRs do not conflict.
-- Distinguish draft implementation, merged behavior and production qualification per the issue's evidence requirements.
+Result: passed; all 47 `SourceTreeTest` tests completed successfully, including the durable-session nonviewable implementation case. The default `/tmp` mount was full during an earlier local rerun, so the successful run used a dedicated temporary directory on the worktree filesystem. `git diff --check` also passed.
+
+Command:
+
+```sh
+./gradlew -PfrontendNodeHome=/home/june/.cache/decomp-toolchains/node-v24.20.0 --offline test --tests decompengine.project.ArchivalReconstructionTest --console=plain
+```
+
+Result: passed; all 6 `ArchivalReconstructionTest` tests completed successfully, including the Make/Ninja role and archive-gate workflow.
+
+Command:
+
+```sh
+./gradlew -PfrontendNodeHome=/home/june/.cache/decomp-toolchains/node-v24.20.0 --offline test \
+  --tests 'decompengine.project.ArchivalReconstructionTest.archival Make and Ninja workflows enforce role policy and reject unauthenticated agent archives' \
+  --tests 'decompengine.acp.AcpAgentHarnessTest.public Make and Ninja archival reconstruction follows ACP file roles through verified rebuild' \
+  --console=plain
+```
+
+Result: passed; both focused tests completed successfully after using the built-in Make/Ninja executable names instead of assuming `/usr/bin/ninja` exists.
+
+## Remaining qualification
+
+The new integration test uses a fixture harness; it does not exercise the public #63 mutation workflow, #64 reconstruction workflow, or #65 repair workflow through authenticated ACP runs. It proves the public service carries role-limited requests into Make/Ninja builds and rejects archive publication without invocation-bound ACP evidence. It does not establish contained production qualification or retained public workflow evidence. Keep #829 open until the full acceptance criterion and the issue's evidence requirements are met.

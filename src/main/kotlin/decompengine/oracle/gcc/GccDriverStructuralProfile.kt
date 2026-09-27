@@ -95,9 +95,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
         }
         val model = CanonicalProgramModelStreaming.readCanonical(
             snapshot.programModel,
-            CanonicalProgramModelStreamingLimits(
-                maximumFunctions = GccBundledFullExportCapture.MAXIMUM_FULL_FUNCTIONS.toInt(),
-            ),
+            FULL_EXPORT_MODEL_LIMITS,
         )
         require(model.model.inputSha256 == strippedBinary.sha256 &&
             model.model.functions.size.toLong() == snapshot.functionCount
@@ -187,6 +185,27 @@ internal class GccDriverStructuralInputsV1 private constructor(
         GccDriverStructuralAuthenticatedFullExportV1.capture(this, operation)
 
     companion object {
+        /**
+         * Parse only after full-export capture has enforced its per-record byte and node bounds.
+         * A scalar cannot contain more code points than its 64 MiB function record has bytes;
+         * each collection entry consumes one of that record's at most one million JSON nodes.
+         * Globals/types retain the capture's stricter 1 MiB evidence-record bounds. Aggregate
+         * nodes/tokens cannot outnumber source bytes. Historical scoring limits are unchanged.
+         */
+        internal val FULL_EXPORT_MODEL_LIMITS = CanonicalProgramModelStreamingLimits(
+            maximumInputBytes = GccBundledFullExportCapture.MAXIMUM_MODEL_BYTES,
+            maximumFunctions = GccBundledFullExportCapture.MAXIMUM_FULL_FUNCTIONS.toInt(),
+            maximumGlobals = GccBundledFullExportCapture.MAXIMUM_FULL_FUNCTIONS.toInt(),
+            maximumTypes = GccBundledFullExportCapture.MAXIMUM_FULL_FUNCTIONS.toInt(),
+            maximumReferencesPerFunction = GccBundledFullExportCapture.MAXIMUM_FULL_RECORD_JSON_NODES,
+            maximumIdentifierCodePoints = GccBundledFullExportCapture.MAXIMUM_FULL_FUNCTION_RECORD_BYTES,
+            maximumPrototypeCodePoints = GccBundledFullExportCapture.MAXIMUM_FULL_FUNCTION_RECORD_BYTES,
+            maximumTextCodePoints = GccBundledFullExportCapture.MAXIMUM_FULL_FUNCTION_RECORD_BYTES,
+            maximumTotalStringBytes = GccBundledFullExportCapture.MAXIMUM_MODEL_BYTES.toLong(),
+            maximumNodes = GccBundledFullExportCapture.MAXIMUM_MODEL_BYTES.toLong(),
+            maximumTokens = GccBundledFullExportCapture.MAXIMUM_MODEL_BYTES.toLong(),
+        )
+
         private const val PROFILE_ID = "gcc-cc1-16.2.0"
         private const val SOURCE_PROFILE_ID = "gcc-driver-16.2.0"
         private const val PROFILE_VERSION = "16.2.0"
