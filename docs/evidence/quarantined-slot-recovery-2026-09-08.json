@@ -10,7 +10,7 @@
       "sha256": "eadc6c791d6848bf87999814e5b2af71b963277609351eba6df86c74cae18cde",
       "anchors": [
         "FullTreeDiskScratchLease.requireCleanAndRelease:939-984",
-        "FullTreeDiskScratchLease.abandonForRecovery:988-990",
+        "FullTreeDiskScratchLease.abandonForRecovery:988-993",
         "FullTreeDiskScratchColdLease:1072-1347",
         "FullTreeDiskScratchAuthority.openExistingReadOnly:1349-1400",
         "quarantineAndRemoveLeaseRoot:1591-1662",
@@ -19,7 +19,8 @@
       "facts": [
         "The release path selects the exact source descriptor, rejects a pre-existing quarantine name, uses renameNoReplace, rechecks the pinned identity, synchronizes the mount parent before unlinking lease.json, synchronizes the quarantined root, rejects any remaining member, removes the empty quarantine directory, synchronizes the parent again, and verifies the dedicated mount is empty.",
         "Lease-root inspection is capped by MAXIMUM_LEASE_ROOT_ENTRIES plus one and the release helper only accepts the canonical lease.json or empty quarantine shape; it does not recursively walk arbitrary content.",
-        "abandonForRecovery and close only close descriptors and release the cooperative flock. The cold lease is observation-only and exposes no reset, rename, unlink, cleanup, release, or synchronization operation."
+        "abandonForRecovery and close only close descriptors and release the cooperative flock.",
+        "The cold lease has no direct reset, rename, unlink, cleanup, release, or synchronization method. Its withCurrentOperationRunRoot callback exposes a borrowed LinuxDescriptor through withPinnedDescriptor, so read-only behavior is a trusted-caller contract rather than an OS-enforced capability; the borrow must not cross into ACP or other untrusted code."
       ]
     }
   ],
