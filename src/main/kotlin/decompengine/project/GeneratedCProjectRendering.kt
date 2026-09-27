@@ -4,6 +4,7 @@ package decompengine.project
 internal class GeneratedCProjectRendering(private val model: RecoveredProgramModel, plan: ModulePlan) : ProjectRendering {
     private val functions = model.functions.associateBy { it.id }
     private val globals = model.globals.associateBy { it.id }
+    private val declarationContext = GeneratedCDeclarationContext(model.types)
     private val externallyCalled: Set<String>
 
     init {
@@ -11,6 +12,8 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
         externallyCalled = model.functions.flatMap { caller ->
             caller.calls.filter { called -> owners[called] != owners[caller.id] }
         }.toSet()
+        model.functions.filter { it.id in externallyCalled || safeCName(it.name) in setOf("main", "decomp_engine_main") }
+            .forEach { recoveredDeclaration(it, declarationContext).requireExternalDeclaration("a public module interface") }
     }
 
     override fun entrypoint(): RenderedEntrypoint? {
@@ -19,13 +22,10 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
             ?: model.functions.firstOrNull { safeCName(it.name) in setOf("entry", "recovered__start") }
             ?: model.functions.minByOrNull { it.address }
         val entryBody = entry?.let {
-            val declaration = recoveredDeclaration(it)
+            val declaration = recoveredDeclaration(it, declarationContext)
             require(declaration.explicitNoParameters) {
                 "unsupported generated-C entry call for ${it.id}: an explicit (void) parameter list is required; " +
                     "entry arguments and ABI have not been recovered"
-            }
-            require(!declaration.hasInternalLinkage) {
-                "unsupported generated-C entry call for ${it.id}: an internal-linkage function cannot be called from the entry module"
             }
             declaration.entryCall(safeCName(it.name))
         } ?: "return 0;"
@@ -56,7 +56,7 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
         val guard = "DECOMP_MODULE_${module.id.uppercase()}_H"
         append("#ifndef $guard\n#define $guard\n\n#include \"decomp_types.h\"\n\n")
         module.globalIds.map { id -> globals.getValue(id) }.forEach { global ->
-            append(globalDeclaration(global, external = true)).append(" /* ${global.id} @ 0x${global.address.toString(16)} */\n")
+            append(globalDeclaration(global, external = true, context = declarationContext)).append(" /* ${global.id} @ 0x${global.address.toString(16)} */\n")
         }
         if (module.globalIds.isNotEmpty()) append('\n')
         module.functionIds.map { id -> functions.getValue(id) }

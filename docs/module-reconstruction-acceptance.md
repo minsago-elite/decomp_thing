@@ -114,6 +114,13 @@ It does not replace the model's return type with a guess from the decompiled bod
 or manufacture a zero-argument prototype. Global types likewise retain their
 declared spelling and pointer/array structure.
 
+Model-supplied typedef chains are resolved within bounded declaration context to
+identify void, integer and array shapes while retaining their emitted spelling.
+An incomplete array, including one hidden behind a typedef, requires initializer
+evidence before a definition can be generated. `_Noreturn` placeholders and
+static or inline declarations exposed across module boundaries fail with the
+affected entity's identity.
+
 Names such as `undefined8`, `byte` and `pointer` are not converted into guessed C
 types. The strict compiler resolves named types against the supplied declarations;
 missing types fail the existing module gate and remain in its diagnostics and
@@ -125,8 +132,11 @@ qualification remain separate requirements.
 
 The generated-C renderer also selects and renders the synthetic entrypoint and
 returns its entity attribution to orchestration. A synthesized zero-argument call
-requires an explicit `(void)` parameter list; an unspecified `()` declaration,
-named parameters or a variadic signature cannot justify dropping arguments.
+requires an explicit `(void)` parameter list or a model-resolved void alias;
+an unspecified `()` declaration, named parameters or a variadic signature cannot
+justify dropping arguments. A synthetic entry accepts void or resolved integer
+returns, preserving the integer process status; unsupported return shapes fail
+before entry artifacts are written.
 An existing `main` keeps its recovered declaration.
 `GeneratedCCandidateValidation`
 owns the C function/global definition and placeholder checks and their lexical

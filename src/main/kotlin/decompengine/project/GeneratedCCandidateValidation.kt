@@ -2,6 +2,7 @@ package decompengine.project
 
 /** Generated-C source checks. Invocation and release acceptance remain in orchestration. */
 internal object GeneratedCCandidateValidation {
+    private val declarationContexts = GeneratedCDeclarationContextCache()
     fun assess(
         module: PlannedModule,
         model: RecoveredProgramModel,
@@ -9,6 +10,7 @@ internal object GeneratedCCandidateValidation {
         source: String,
     ): List<ModuleReconstructionIssue> {
         val issues = mutableListOf<ModuleReconstructionIssue>()
+        val declarationContext = declarationContexts.forTypes(model.types)
         val codeOnly = codeWithoutCommentsOrLiterals(source)
         // The compiler gate resolves type names; spelling-only checks reject valid
         // identifiers and explicitly defined typedefs.
@@ -30,8 +32,8 @@ internal object GeneratedCCandidateValidation {
                 )
             } else if (
                 generator != "recovered-c" &&
-                (genericReturnBody(body) || isGeneratedCPlaceholderBody(function, body)) &&
-                !recoveredEvidenceIsTrivial(function)
+                (genericReturnBody(body) || isGeneratedCPlaceholderBody(function, body, declarationContext)) &&
+                !recoveredEvidenceIsTrivial(function, declarationContext)
             ) {
                 issues += ModuleReconstructionIssue(
                     "generic-return-placeholder",
@@ -123,9 +125,9 @@ internal object GeneratedCCandidateValidation {
         return withoutComments == "return0;" || withoutComments == "return;"
     }
 
-    private fun recoveredEvidenceIsTrivial(function: RecoveredFunction): Boolean =
+    private fun recoveredEvidenceIsTrivial(function: RecoveredFunction, context: GeneratedCDeclarationContext): Boolean =
         function.decompiledC?.let { recovered ->
-            findFunctionBody(recovered, function.name)?.let { genericReturnBody(it) || isGeneratedCPlaceholderBody(function, it) }
+            findFunctionBody(recovered, function.name)?.let { genericReturnBody(it) || isGeneratedCPlaceholderBody(function, it, context) }
                 ?: Regex("\\{\\s*return(?:\\s+0)?\\s*;\\s*}", RegexOption.DOT_MATCHES_ALL).containsMatchIn(recovered)
         } == true
 

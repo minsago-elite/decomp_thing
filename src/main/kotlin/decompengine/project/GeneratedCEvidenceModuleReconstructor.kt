@@ -2,9 +2,11 @@ package decompengine.project
 
 /** Emits buildable evidence stubs by default; raw recovered C remains in the program model for later refinement. */
 class EvidenceModuleReconstructor(private val includeRecoveredC: Boolean = false) : ModuleReconstructor {
-    override fun cacheIdentity(): String = if (includeRecoveredC) "recovered-c:v3" else "evidence-only:v2"
+    private val declarationContexts = GeneratedCDeclarationContextCache()
+    override fun cacheIdentity(): String = if (includeRecoveredC) "recovered-c:v4" else "evidence-only:v3"
 
     override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule {
+        val declarationContext = declarationContexts.forTypes(request.model.types)
         val functions = request.module.functionIds.map { id -> request.model.functions.single { it.id == id } }
         val globals = request.module.globalIds.map { id -> request.model.globals.single { it.id == id } }
         val source = buildString {
@@ -13,14 +15,14 @@ class EvidenceModuleReconstructor(private val includeRecoveredC: Boolean = false
             append('\n')
             globals.forEach { global ->
                 append("/* ${global.id}; recovered global @ 0x${global.address.toString(16)} */\n")
-                append(globalDeclaration(global, external = false)).append("\n\n")
+                append(globalDeclaration(global, external = false, context = declarationContext)).append("\n\n")
             }
             functions.forEach { function ->
                 append("/* ${function.id} @ 0x${function.address.toString(16)}; status=${function.status.name.lowercase()} */\n")
                 val recovered = function.decompiledC?.trim()?.takeIf(String::isNotEmpty)?.takeIf { includeRecoveredC }
                     ?.let { markRecoveredParametersUsed(it, function) }
                 if (recovered != null) append(recovered).append("\n\n")
-                else append(stub(function)).append("\n\n")
+                else append(stub(function, declarationContext)).append("\n\n")
             }
         }
         val unresolved = if (includeRecoveredC) {
@@ -49,8 +51,8 @@ class EvidenceModuleReconstructor(private val includeRecoveredC: Boolean = false
         )
     }
 
-    private fun stub(function: RecoveredFunction): String {
-        val declaration = recoveredDeclaration(function)
+    private fun stub(function: RecoveredFunction, context: GeneratedCDeclarationContext): String {
+        val declaration = recoveredDeclaration(function, context)
         require(!declaration.hasUnnamedParameters) {
             "unsupported generated-C placeholder for ${function.id}: parameter names are unavailable"
         }

@@ -261,6 +261,271 @@ class GeneratedCDeclarationsTest {
         })
     }
 
+    @Test
+    fun `noreturn evidence placeholders are rejected with their function identity`() {
+        for (prototype in listOf("_Noreturn void stop(void)", "_Noreturn Void stop(int value)")) {
+            val model = model(function("stop", prototype), function("main", "int main(void)"))
+                .copy(types = listOf(RecoveredType("void_type", "typedef void Void;")))
+            val failure = assertFailsWith<IllegalArgumentException>(prototype) {
+                SourceTreeGenerator.generate(model, project(), reconstructor = EvidenceModuleReconstructor())
+            }
+            assertTrue(failure.message.orEmpty().contains("fn_stop"), failure.message)
+            assertTrue(failure.message.orEmpty().contains("_Noreturn"), failure.message)
+        }
+    }
+
+    @Test
+    fun `genuine noreturn implementation compiles with the compiler library declaration`() {
+        val project = project()
+        val prototype = "_Noreturn Void stop(void)"
+        val model = model(
+            function("stop", prototype, "$prototype { abort(); }"),
+            function("main", "int main(void)", "int main(void) { return 0; }"),
+        ).copy(types = listOf(RecoveredType("void_type", "typedef void Void;")))
+        val manifest = SourceTreeGenerator.generate(model, project, reconstructor = ModuleReconstructor { request ->
+            val recovered = RecoveredCModuleReconstructor().reconstruct(request)
+            recovered.copy(source = "#include <stdlib.h>\n" + recovered.source)
+        })
+        assertTrue(manifest.unresolvedImplementationIds.isEmpty(), manifest.unresolvedImplementationIds.toString())
+        assertTrue(sourceFiles(project).any {
+            it.contains("$prototype {") && Regex("\\{\\s*abort\\(\\);\\s*}").containsMatchIn(it)
+        })
+        assertFalse(sourceFiles(project).any { Regex("\\bvoid\\s+abort\\s*\\(").containsMatchIn(it) })
+        assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+    }
+
+    @Test
+    fun `entrypoint rejects nonstatus return types before creating artifacts`() {
+        val declarations = "typedef int *Pointer; typedef int (*Callback)(void); " +
+            "typedef struct { int value; } Result; typedef double Real; typedef Unavailable Unknown;"
+        for (prototype in listOf(
+            "int *entry(void)", "int (*entry(void))(int)", "struct result entry(void)",
+            "double entry(void)", "Unavailable entry(void)", "Pointer entry(void)",
+            "Callback entry(void)", "Result entry(void)", "Real entry(void)", "Unknown entry(void)",
+        )) {
+            val project = project()
+            val model = model(function("entry", prototype)).copy(types = listOf(
+                RecoveredType("entry_types", "struct result { int value; }; $declarations"),
+            ))
+            val failure = assertFailsWith<IllegalArgumentException>(prototype) {
+                SourceTreeGenerator.generate(model, project, reconstructor = EvidenceModuleReconstructor())
+            }
+            assertTrue(failure.message.orEmpty().contains("fn_entry"), failure.message)
+            assertTrue(Files.list(project).use { !it.findAny().isPresent }, "generation wrote artifacts for $prototype")
+        }
+    }
+
+    @Test
+    fun `known integer entry return types retain the program exit status`() {
+        for (returnType in listOf("int", "unsigned long", "size_t", "Status")) {
+            val project = project()
+            val prototype = "$returnType entry(void)"
+            val model = model(function("entry", prototype, "$prototype { return 17; }"))
+                .copy(types = listOf(RecoveredType("status_type", "typedef unsigned int ExitCode; typedef ExitCode Status;")))
+            val manifest = SourceTreeGenerator.generate(model, project, reconstructor = RecoveredCModuleReconstructor())
+            assertTrue(manifest.unresolvedImplementationIds.isEmpty(), "$returnType: ${manifest.unresolvedImplementationIds}")
+            assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+            assertEquals(17, ProcessBuilder(project.resolve("build/reconstructed").toAbsolutePath().toString()).start().waitFor(), returnType)
+        }
+    }
+
+    @Test
+    fun `void typedef chains preserve named declarations for parameters and returns`() {
+        val project = project()
+        val model = model(
+            function("clear", "VoidAlias clear(int value)"),
+            function("main", "int main(VoidAlias)"),
+        ).copy(types = listOf(RecoveredType("void_types", "typedef void Void; typedef Void VoidAlias;")))
+        val manifest = SourceTreeGenerator.generate(model, project, reconstructor = EvidenceModuleReconstructor())
+        assertEquals(setOf("fn_clear", "fn_main"), manifest.unresolvedImplementationIds.toSet())
+        val sources = sourceFiles(project)
+        assertTrue(sources.any { it.contains("VoidAlias clear(int value)") })
+        assertTrue(sources.any { it.contains("int main(VoidAlias)") })
+        assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+    }
+
+    @Test
+    fun `sole void typedef parameter admits an entry call without rewriting its prototype`() {
+        val project = project()
+        val prototype = "int entry(Void)"
+        val model = model(function("entry", prototype, "$prototype { return 17; }"))
+            .copy(types = listOf(RecoveredType("void_type", "typedef void Void;")))
+        val manifest = SourceTreeGenerator.generate(model, project, reconstructor = RecoveredCModuleReconstructor())
+        assertTrue(manifest.unresolvedImplementationIds.isEmpty(), manifest.unresolvedImplementationIds.toString())
+        val sources = sourceFiles(project)
+        assertTrue(sources.any { it.contains("$prototype;") }, sources.toString())
+        assertTrue(sources.any { it.contains("$prototype {") }, sources.toString())
+        assertFalse(sources.any { it.contains("int entry(void)") }, sources.toString())
+        assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+        assertEquals(17, ProcessBuilder(project.resolve("build/reconstructed").toAbsolutePath().toString()).start().waitFor())
+    }
+
+    @Test
+    fun `cross module static and inline callees fail with the callee identity`() {
+        for (qualifier in listOf("static", "inline", "static inline", "extern inline")) {
+            val model = model(
+                function("helper", "$qualifier int helper(int value)", "$qualifier int helper(int value) { return value + 1; }"),
+                function("main", "int main(void)", "int main(void) { return helper(16); }").copy(calls = setOf("fn_helper")),
+            )
+            val failure = assertFailsWith<IllegalArgumentException>(qualifier) {
+                SourceTreeGenerator.generate(model, project(), reconstructor = RecoveredCModuleReconstructor(),
+                    overrides = mapOf("fn_helper" to "helper", "fn_main" to "entry"))
+            }
+            assertTrue(failure.message.orEmpty().contains("fn_helper"), failure.message)
+        }
+    }
+
+    @Test
+    fun `private static inline implementation remains valid within its planned module`() {
+        val project = project()
+        val prototype = "static inline int helper(int value)"
+        val model = model(
+            function("helper", prototype, "$prototype { return value + 3; }"),
+            function("main", "int main(void)", "int main(void) { return helper(14); }").copy(calls = setOf("fn_helper")),
+        )
+        val manifest = SourceTreeGenerator.generate(model, project, reconstructor = RecoveredCModuleReconstructor(),
+            overrides = mapOf("fn_helper" to "core", "fn_main" to "core"))
+        assertTrue(manifest.unresolvedImplementationIds.isEmpty(), manifest.unresolvedImplementationIds.toString())
+        assertTrue(sourceFiles(project).any { it.contains("$prototype {") })
+        assertTrue(project.resolve("src/modules/core_internal.h").readText().contains("$prototype;"))
+        assertFalse(project.resolve("include/modules/core.h").readText().contains("helper("))
+        assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+        assertEquals(17, ProcessBuilder(project.resolve("build/reconstructed").toAbsolutePath().toString()).start().waitFor())
+    }
+
+    @Test
+    fun `typedef hidden unsized global arrays cannot acquire an invented extent`() {
+        for (type in listOf("Values", "Alias", "const Alias")) {
+            val model = model(function("main", "int main(void)", "int main(void) { return 0; }"))
+                .copy(types = listOf(RecoveredType("array_types", "typedef int Values[]; typedef Values Alias;")),
+                    globals = listOf(global(type)))
+            val failure = assertFailsWith<IllegalArgumentException>(type) {
+                SourceTreeGenerator.generate(model, project(), reconstructor = RecoveredCModuleReconstructor())
+            }
+            assertTrue(failure.message.orEmpty().contains("global_item"), failure.message)
+            assertTrue(failure.message.orEmpty().contains("extent"), failure.message)
+        }
+    }
+
+    @Test
+    fun `typedef arrays keep supplied initializers and permit fixed extents and pointers`() {
+        val project = project()
+        val model = model(function("main", "int main(void)", "int main(void) { return values[0] + values[1]; }")
+            .copy(referencedGlobals = setOf("global_values")))
+            .copy(types = listOf(RecoveredType("array_types", "typedef int Values[]; typedef Values *Pointer; " +
+                "typedef int Fixed[2]; typedef int (*Callbacks[2])(int);")),
+                globals = listOf(
+                    RecoveredGlobal("global_values", "values", 300UL, "Values", initializer = "{8, 9}"),
+                    RecoveredGlobal("global_pointer", "pointer", 304UL, "Pointer"),
+                    RecoveredGlobal("global_pointer_array", "pointer_array", 308UL, "Values *"),
+                    RecoveredGlobal("global_fixed", "fixed", 312UL, "Fixed"),
+                    RecoveredGlobal("global_const_fixed", "const_fixed", 316UL, "const Fixed"),
+                    RecoveredGlobal("global_callbacks", "callbacks", 320UL, "Callbacks"),
+                ))
+        val manifest = SourceTreeGenerator.generate(model, project, reconstructor = RecoveredCModuleReconstructor())
+        assertTrue(manifest.unresolvedImplementationIds.isEmpty(), manifest.unresolvedImplementationIds.toString())
+        assertTrue(sourceFiles(project).any { it.contains("Values values = {8, 9};") })
+        assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+        assertEquals(17, ProcessBuilder(project.resolve("build/reconstructed").toAbsolutePath().toString()).start().waitFor())
+    }
+
+    @Test
+    fun `multiple typedef declarators and qualified alias chains compile unchanged`() {
+        val project = project()
+        val declarations = "typedef int Scalar, *Pointer, Vector[2]; " +
+            "typedef Scalar Status, OtherStatus; typedef const Scalar Qualified; typedef Qualified QualifiedAlias; " +
+            "typedef int Scalar; /* compatible repeated declaration */"
+        val model = model(function("entry", "OtherStatus entry(void)", "OtherStatus entry(void) { return item; }")
+            .copy(referencedGlobals = setOf("global_item")))
+            .copy(types = listOf(RecoveredType("chained_types", declarations)), globals = listOf(
+                global("QualifiedAlias").copy(initializer = "17"),
+                RecoveredGlobal("global_pointer", "pointer", 304UL, "Pointer"),
+                RecoveredGlobal("global_vector", "vector", 308UL, "Vector"),
+            ))
+        val manifest = SourceTreeGenerator.generate(model, project, reconstructor = RecoveredCModuleReconstructor())
+        assertTrue(manifest.unresolvedImplementationIds.isEmpty(), manifest.unresolvedImplementationIds.toString())
+        assertTrue(project.resolve("include/decomp_types.h").readText().contains(declarations))
+        assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+        assertEquals(17, ProcessBuilder(project.resolve("build/reconstructed").toAbsolutePath().toString()).start().waitFor())
+    }
+
+    @Test
+    fun `cyclic and excessively deep typedef chains reject the affected entity`() {
+        val longChain = "typedef int Alias0;\n" + (1..66).joinToString("\n") { "typedef Alias${it - 1} Alias$it;" }
+        for ((declarations, alias, reason) in listOf(
+            Triple("typedef Second First; typedef First Second;", "First", "cycl"),
+            Triple(longChain, "Alias66", "depth"),
+        )) {
+            val types = listOf(RecoveredType("alias_types", declarations))
+            for ((model, entityId) in listOf(
+                model(function("entry", "$alias entry(void)")).copy(types = types) to "fn_entry",
+                model(function("main", "int main(void)")).copy(types = types, globals = listOf(global(alias))) to "global_item",
+            )) {
+                val failure = assertFailsWith<IllegalArgumentException>("$entityId: $reason") {
+                    SourceTreeGenerator.generate(model, project(), reconstructor = EvidenceModuleReconstructor())
+                }
+                assertTrue(failure.message.orEmpty().contains(entityId), failure.message)
+                assertTrue(failure.message.orEmpty().contains(reason, ignoreCase = true), failure.message)
+            }
+        }
+    }
+
+    @Test
+    fun `typedef depth bound is independent of a previously cached alias`() {
+        val types = listOf(RecoveredType("aliases", "typedef int Alias0;\n" +
+            (1..64).joinToString("\n") { "typedef Alias${it - 1} Alias$it;" }))
+        for (warm in listOf(false, true)) {
+            val context = GeneratedCDeclarationContext(types)
+            if (warm) recoveredDeclaration(function("warm", "Alias63 warm(void)"), context)
+            val failure = assertFailsWith<IllegalArgumentException> {
+                recoveredDeclaration(function("entry", "Alias64 entry(void)"), context)
+            }
+            assertTrue(failure.message.orEmpty().contains("fn_entry"), failure.message)
+            assertTrue(failure.message.orEmpty().contains("depth 64"), failure.message)
+        }
+    }
+
+    @Test
+    fun `context cache observes changed typedef inventory contents`() {
+        val types = mutableListOf(RecoveredType("alias", "typedef int Value;"))
+        val cache = GeneratedCDeclarationContextCache()
+        assertEquals("Value item = {0};", globalDeclaration(global("Value"), false, cache.forTypes(types)))
+        types[0] = RecoveredType("alias", "typedef int Value[];")
+        val failure = assertFailsWith<IllegalArgumentException> {
+            globalDeclaration(global("Value"), false, cache.forTypes(types))
+        }
+        assertTrue(failure.message.orEmpty().contains("global_item"), failure.message)
+        assertTrue(failure.message.orEmpty().contains("extent"), failure.message)
+    }
+
+    @Test
+    fun `agent copies of typedef void placeholders remain unresolved including parameter bookkeeping`() {
+        for ((prototype, recovered) in listOf(
+            "Void convert(void)" to "Void convert(void) { abort(); }",
+            "VoidAlias convert(int value)" to "VoidAlias convert(int value) { if (value) abort(); }",
+        )) {
+            val project = project()
+            val model = model(function("convert", prototype, recovered), function("main", "int main(void)", "int main(void) { return 0; }"))
+                .copy(types = listOf(RecoveredType("void_types", "typedef void Void; typedef Void VoidAlias;")))
+            val manifest = SourceTreeGenerator.generate(model, project, reconstructor = ModuleReconstructor { request ->
+                EvidenceModuleReconstructor().reconstruct(request).copy(generator = "scripted-agent", issues = emptyList())
+            })
+            assertTrue("fn_convert" in manifest.unresolvedImplementationIds, prototype)
+            val reports = Files.walk(project.resolve("reports/modules")).use { paths ->
+                paths.filter { it.toString().endsWith(".json") }.toList().map { it.readText() }
+            }
+            assertTrue(reports.any { it.contains("generic-return-placeholder") && it.contains("fn_convert") }, reports.toString())
+            if (prototype.contains("int value")) {
+                assertTrue(sourceFiles(project).any { it.contains("if (0)") && it.contains("(void)value;") })
+            }
+            assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+        }
+    }
+
+    private fun sourceFiles(project: Path): List<String> = Files.walk(project.resolve("src")).use { paths ->
+        paths.filter { it.toString().endsWith(".c") }.toList().map { it.readText() }
+    }
+
     private fun function(name: String, prototype: String, recovered: String? = null) =
         RecoveredFunction("fn_$name", name, if (name == "main") 100UL else 200UL, prototype, recovered)
     private fun global(type: String) = RecoveredGlobal("global_item", "item", 300UL, type)

@@ -4,18 +4,25 @@ package decompengine.project
 internal fun normalizedPrototype(function: RecoveredFunction): String = recoveredDeclaration(function).prototype
 
 internal class GeneratedCFunctionDeclaration(
+    private val entityId: String,
     val prototype: String,
     val parameterNames: List<String>,
     val hasUnnamedParameters: Boolean,
     val explicitNoParameters: Boolean,
     val hasInternalLinkage: Boolean,
-    private val returnsVoid: Boolean,
+    val hasInlineSpecifier: Boolean,
+    private val noReturn: Boolean,
+    private val returnKind: GeneratedCTypeKind,
     private val resultDeclaration: (String) -> String,
 ) {
     fun placeholderBody(): String {
-        require(!hasUnnamedParameters) { "an evidence placeholder requires named parameters" }
+        require(!noReturn) { "unsupported generated-C placeholder for $entityId: _Noreturn requires a retained non-returning implementation" }
+        require(!hasInlineSpecifier || hasInternalLinkage) {
+            "unsupported generated-C placeholder for $entityId: an external inline definition requires retained linkage evidence"
+        }
+        require(!hasUnnamedParameters) { "unsupported generated-C placeholder for $entityId: parameter names are unavailable" }
         val used = unusedParameterReferences(parameterNames)
-        if (returnsVoid) return used + "    return;"
+        if (returnKind == GeneratedCTypeKind.VOID) return used + "    return;"
         // A declaration, rather than a guessed cast to int, also supports pointers, structs,
         // and explicitly declared typedefs. The compiler still decides whether the type is valid.
         val identifiers = cDeclarationTokens(prototype).mapTo(hashSetOf()) { it.text }
@@ -24,12 +31,25 @@ internal class GeneratedCFunctionDeclaration(
     }
 
     fun entryCall(name: String): String {
-        require(explicitNoParameters) { "a synthesized entry call requires an explicit (void) parameter list" }
-        return if (returnsVoid) "$name();\n    return 0;" else "return $name();"
+        require(explicitNoParameters) { "unsupported generated-C entry call for $entityId: an explicit void parameter list is required" }
+        requireExternalDeclaration("synthesized entry module")
+        require(returnKind == GeneratedCTypeKind.VOID || returnKind == GeneratedCTypeKind.INTEGER) {
+            "unsupported generated-C entry call for $entityId: the recovered return type has no supported integer process-status contract"
+        }
+        return if (returnKind == GeneratedCTypeKind.VOID) "$name();\n    return 0;" else "return $name();"
+    }
+
+    fun requireExternalDeclaration(boundary: String) {
+        require(!hasInternalLinkage && !hasInlineSpecifier) {
+            "unsupported generated-C module boundary for $entityId: static or inline declarations require a definition in $boundary"
+        }
     }
 }
 
-internal fun recoveredDeclaration(function: RecoveredFunction): GeneratedCFunctionDeclaration = declarationFor(function.id) {
+internal fun recoveredDeclaration(
+    function: RecoveredFunction,
+    context: GeneratedCDeclarationContext = GeneratedCDeclarationContext.EMPTY,
+): GeneratedCFunctionDeclaration = declarationFor(function.id) {
     val declaration = CDeclarationParser(function.prototype.trim(), function.name).parse()
     require("typedef" !in declaration.specifiers) { "prototype declares a typedef, not a function" }
     require(declaration.name?.text == function.name) { "prototype must declare ${function.name}" }
@@ -38,13 +58,19 @@ internal fun recoveredDeclaration(function: RecoveredFunction): GeneratedCFuncti
     val identifier = requireNotNull(declaration.name)
     val source = declaration.source
     val prototype = source.replaceRange(identifier.start, identifier.end, safeCName(function.name))
+    val soleVoidParameter = parameters.explicitVoid || (parameters.parameters.singleOrNull()?.let {
+        it.name == null && context.classify(it.specifiers, it.derived) == GeneratedCTypeKind.VOID
+    } == true)
     GeneratedCFunctionDeclaration(
+        entityId = function.id,
         prototype = prototype,
         parameterNames = parameters.parameters.mapNotNull { it.name?.text },
-        hasUnnamedParameters = parameters.parameters.any { it.name == null },
-        explicitNoParameters = parameters.explicitVoid,
+        hasUnnamedParameters = !soleVoidParameter && parameters.parameters.any { it.name == null },
+        explicitNoParameters = soleVoidParameter,
         hasInternalLinkage = "static" in declaration.specifiers,
-        returnsVoid = declaration.specifiers.filterNot { it in cStorageSpecifiers } == listOf("void") && declaration.derived.size == 1,
+        hasInlineSpecifier = "inline" in declaration.specifiers,
+        noReturn = "_Noreturn" in declaration.specifiers,
+        returnKind = context.classify(declaration.specifiers, declaration.derived.drop(1)),
         resultDeclaration = { name ->
             // Removing only the outer function suffix preserves even a pointer-to-function return.
             val edits = declaration.storageSpecifiers.map { Triple(it.start, it.end, "") } +
@@ -56,11 +82,16 @@ internal fun recoveredDeclaration(function: RecoveredFunction): GeneratedCFuncti
     )
 }
 
-internal fun globalDeclaration(global: RecoveredGlobal, external: Boolean): String = declarationFor(global.id) {
+internal fun globalDeclaration(
+    global: RecoveredGlobal,
+    external: Boolean,
+    context: GeneratedCDeclarationContext = GeneratedCDeclarationContext.EMPTY,
+): String = declarationFor(global.id) {
     val type = CDeclarationParser(global.type.trim()).parse(allowAbstract = true)
     require(type.name == null) { "global type must be an abstract declarator without an object name" }
-    require(type.derived.firstOrNull() !is CDerived.Function) { "global type denotes a function, not an object" }
-    require(external || global.initializer != null || (type.derived.firstOrNull() as? CDerived.Array)?.hasBound != false) {
+    val kind = context.classify(type.specifiers, type.derived)
+    require(kind != GeneratedCTypeKind.FUNCTION) { "global type denotes a function, not an object" }
+    require(external || global.initializer != null || kind != GeneratedCTypeKind.INCOMPLETE_ARRAY) {
         "an unsized array requires retained initializer evidence; a zero placeholder would invent its extent"
     }
     val declaration = type.source.substring(0, type.nameOffset).trimEnd() + " " + safeCName(global.name) +
@@ -72,6 +103,158 @@ internal fun globalDeclaration(global: RecoveredGlobal, external: Boolean): Stri
         val initializer = global.initializer?.let(::retainedInitializer) ?: "{0}"
         "$declaration = $initializer;"
     }
+}
+
+internal enum class GeneratedCTypeKind { VOID, INTEGER, POINTER, ARRAY, INCOMPLETE_ARRAY, FUNCTION, OTHER, UNKNOWN }
+
+/** Resolves only declaration shapes needed by generated code; the compiler still validates C types. */
+internal class GeneratedCDeclarationContext(types: List<RecoveredType>) {
+    private val aliases = linkedMapOf<String, CDeclaration>()
+    private data class ResolvedType(val kind: GeneratedCTypeKind, val aliasDepth: Int = 0)
+    private val resolved = hashMapOf<String, ResolvedType>()
+
+    init {
+        var characters = 0L
+        for (type in types) declarationFor(type.id) {
+            characters += type.declaration.length.toLong()
+            require(type.declaration.length <= 1024 * 1024 && characters <= 64L * 1024 * 1024) {
+                "typedef context exceeds its source bounds"
+            }
+            require(cDeclarationTokens(type.declaration).none { it.text == "#" }) {
+                "preprocessor-dependent type declarations cannot establish a typedef shape"
+            }
+            for (statement in splitCTypeSource(type.declaration, ";")) {
+                if (cDeclarationTokens(statement).none { it.text == "typedef" }) continue
+                // Aggregate member declarations do not affect the outer alias's object shape.
+                // This is a parsing view only: published type declarations retain the original bytes.
+                val parts = splitCTypeSource(aliasParsingView(statement), ",")
+                val first = CDeclarationParser(parts.first()).parse()
+                val prefix = first.source.substring(0, first.declaratorOffset)
+                val declarations = listOf(first) + parts.drop(1).map { CDeclarationParser(prefix + it).parse() }
+                for (declaration in declarations) {
+                    require("typedef" in declaration.specifiers) { "alias is missing its typedef specifier" }
+                    val name = requireNotNull(declaration.name) { "typedef has no alias name" }.text
+                    val previous = aliases[name]
+                    require(previous == null || cDeclarationTokens(previous.source).map { it.text } ==
+                        cDeclarationTokens(declaration.source).map { it.text }) {
+                        "conflicting or unsupported repeated typedef $name"
+                    }
+                    if (previous == null) {
+                        require(aliases.size < 131_072) { "typedef inventory exceeds its bound" }
+                        aliases[name] = declaration
+                    }
+                }
+            }
+        }
+    }
+
+    @Synchronized
+    internal fun classify(specifiers: List<String>, derived: List<CDerived>): GeneratedCTypeKind =
+        resolve(specifiers, derived, linkedSetOf()).kind
+
+    private fun resolve(specifiers: List<String>, derived: List<CDerived>, visiting: MutableSet<String>): ResolvedType {
+        // Use-site operators precede alias operators: an A* stays a pointer even if A is int[].
+        when (val outer = derived.firstOrNull()) {
+            CDerived.Pointer -> return ResolvedType(GeneratedCTypeKind.POINTER)
+            is CDerived.Array -> return ResolvedType(if (outer.hasBound) GeneratedCTypeKind.ARRAY else GeneratedCTypeKind.INCOMPLETE_ARRAY)
+            is CDerived.Function -> return ResolvedType(GeneratedCTypeKind.FUNCTION)
+            null -> Unit
+        }
+        val base = specifiers.filterNot { it in cStorageSpecifiers || it in setOf("const", "volatile", "restrict", "_Atomic") }
+        if (base == listOf("void")) return ResolvedType(GeneratedCTypeKind.VOID)
+        if (base.isNotEmpty() && base.all { it in integerSpecifiers }) return ResolvedType(GeneratedCTypeKind.INTEGER)
+        if (base.firstOrNull() == "enum") return ResolvedType(GeneratedCTypeKind.INTEGER)
+        if (base.firstOrNull() in setOf("struct", "union") || base.any { it in setOf("float", "double", "_Complex") }) {
+            return ResolvedType(GeneratedCTypeKind.OTHER)
+        }
+        val name = base.singleOrNull() ?: return ResolvedType(GeneratedCTypeKind.UNKNOWN)
+        val alias = aliases[name] ?: return ResolvedType(if (name in standardIntegerAliases) GeneratedCTypeKind.INTEGER else GeneratedCTypeKind.UNKNOWN)
+        resolved[name]?.let {
+            require(visiting.size + it.aliasDepth <= 64) { "typedef resolution exceeds depth 64 at $name" }
+            return it
+        }
+        require(visiting.size < 64 && visiting.add(name)) { "cyclic typedef or typedef resolution exceeds depth 64 at $name" }
+        val result = resolve(alias.specifiers, alias.derived, visiting).let { ResolvedType(it.kind, it.aliasDepth + 1) }
+        visiting.remove(name)
+        resolved[name] = result
+        return result
+    }
+
+    companion object {
+        val EMPTY = GeneratedCDeclarationContext(emptyList())
+        private val integerSpecifiers = setOf("char", "short", "int", "long", "signed", "unsigned", "_Bool")
+        // These typedefs come from the standard headers emitted by sharedInterface; no widths are guessed.
+        private val standardIntegerAliases = setOf("size_t", "ptrdiff_t", "wchar_t", "intptr_t", "uintptr_t", "intmax_t", "uintmax_t") +
+            listOf(8, 16, 32, 64).flatMap { bits -> listOf("int${bits}_t", "uint${bits}_t", "int_least${bits}_t", "uint_least${bits}_t", "int_fast${bits}_t", "uint_fast${bits}_t") }
+    }
+}
+
+/** One immutable context per currently processed type inventory, avoiding a scan per function. */
+internal class GeneratedCDeclarationContextCache {
+    private var previousTypes: List<RecoveredType>? = null
+    private var previousContext: GeneratedCDeclarationContext? = null
+
+    @Synchronized
+    fun forTypes(types: List<RecoveredType>): GeneratedCDeclarationContext {
+        if (previousTypes == types) return requireNotNull(previousContext)
+        val snapshot = types.toList()
+        return GeneratedCDeclarationContext(snapshot).also { previousTypes = snapshot; previousContext = it }
+    }
+}
+
+private fun splitCTypeSource(source: String, separator: String): List<String> {
+    val tokens = cDeclarationTokens(source)
+    val stack = mutableListOf<String>()
+    val parts = mutableListOf<String>()
+    var start = 0
+    for (token in tokens) {
+        when (token.text) {
+            "(", "[", "{" -> {
+                require(stack.size < 64) { "typedef declarator nesting exceeds 64" }
+                stack += token.text
+            }
+            ")", "]", "}" -> {
+                val expected = when (token.text) { ")" -> "("; "]" -> "["; else -> "{" }
+                require(stack.isNotEmpty() && stack.removeAt(stack.lastIndex) == expected) { "unbalanced type declaration" }
+            }
+            separator -> if (stack.isEmpty()) {
+                parts += source.substring(start, token.start)
+                start = token.end
+            }
+        }
+    }
+    require(stack.isEmpty()) { "unclosed type declaration" }
+    val tail = source.substring(start)
+    if (cDeclarationTokens(tail).isNotEmpty()) parts += tail
+    return parts.filter { cDeclarationTokens(it).isNotEmpty() }
+}
+
+private fun aliasParsingView(source: String): String {
+    val tokens = cDeclarationTokens(source)
+    val edits = mutableListOf<Triple<Int, Int, String>>()
+    var index = 0
+    while (index < tokens.size) {
+        if (tokens[index].text in setOf("struct", "union", "enum")) {
+            val aggregateStart = index
+            var body = index + 1
+            if (tokens.getOrNull(body)?.text != "{") body++
+            if (tokens.getOrNull(body)?.text == "{") {
+                var nesting = 1
+                var end = body + 1
+                while (end < tokens.size && nesting > 0) {
+                    if (tokens[end].text == "{") nesting++
+                    if (tokens[end].text == "}") nesting--
+                    end++
+                }
+                require(nesting == 0) { "unclosed typedef aggregate body" }
+                edits += Triple(tokens[aggregateStart].start, tokens[end - 1].end, "${tokens[aggregateStart].text} decomp_context_tag")
+                index = end
+                continue
+            }
+        }
+        index++
+    }
+    return edits.asReversed().fold(source) { text, (start, end, replacement) -> text.replaceRange(start, end, replacement) }
 }
 
 private fun retainedInitializer(raw: String): String {
@@ -112,9 +295,13 @@ internal fun generatedCFunctionBody(source: String, name: String): String? = run
 }.getOrNull()
 
 /** Match our own placeholder without treating a typed zero temporary as recovered behavior. */
-internal fun isGeneratedCPlaceholderBody(function: RecoveredFunction, body: String): Boolean = runCatching {
+internal fun isGeneratedCPlaceholderBody(
+    function: RecoveredFunction,
+    body: String,
+    context: GeneratedCDeclarationContext = GeneratedCDeclarationContext.EMPTY,
+): Boolean = runCatching {
     cDeclarationTokens(body).map { it.text } ==
-        cDeclarationTokens(recoveredDeclaration(function).placeholderBody()).map { it.text }
+        cDeclarationTokens(recoveredDeclaration(function, context).placeholderBody()).map { it.text }
 }.getOrDefault(false)
 
 /** Recognize retained object declarators that the legacy simple-name recognizer cannot parse. */
@@ -199,8 +386,8 @@ private inline fun <T> declarationFor(entityId: String, block: () -> T): T = try
     throw IllegalArgumentException("unsupported generated-C declaration for $entityId: ${failure.message}", failure)
 }
 
-private data class CToken(val text: String, val start: Int, val end: Int)
-private sealed interface CDerived {
+internal data class CToken(val text: String, val start: Int, val end: Int)
+internal sealed interface CDerived {
     data object Pointer : CDerived
     data class Array(val hasBound: Boolean) : CDerived
     data class Function(
@@ -210,10 +397,11 @@ private sealed interface CDerived {
         val explicitVoid: Boolean,
     ) : CDerived
 }
-private data class CDeclaration(
+internal data class CDeclaration(
     val source: String,
     val specifiers: List<String>,
     val storageSpecifiers: List<CToken>,
+    val declaratorOffset: Int,
     val name: CToken?,
     val nameOffset: Int,
     /** Declarator operations ordered from the identifier outward. */
@@ -259,13 +447,14 @@ private class CDeclarationParser(raw: String, private val symbolicName: String? 
             }
         }
         require(hasType) { "missing declared type" }
+        val declaratorOffset = tokens.getOrNull(cursor)?.start ?: this.raw.length
         val declarator = declarator(allowAbstract, 0)
         val semicolon = tokens.getOrNull(cursor)?.takeIf { it.text == ";" }
         require(allowSemicolon || semicolon == null) { "semicolon is not allowed in a parameter" }
         if (semicolon != null) cursor++
         require(cursor == tokens.size) { "unexpected token ${tokens[cursor].text}" }
         val source = if (semicolon == null) raw else raw.removeRange(semicolon.start, semicolon.end)
-        return CDeclaration(source, specifiers, storageSpecifiers, declarator.name, declarator.nameOffset, declarator.derived)
+        return CDeclaration(source, specifiers, storageSpecifiers, declaratorOffset, declarator.name, declarator.nameOffset, declarator.derived)
     }
 
     private data class Declarator(val name: CToken?, val nameOffset: Int, val derived: List<CDerived>)
@@ -354,7 +543,7 @@ private class CDeclarationParser(raw: String, private val symbolicName: String? 
     }
 }
 
-private val cStorageSpecifiers = setOf("extern", "static", "register", "auto", "inline", "_Noreturn", "_Thread_local")
+private val cStorageSpecifiers = setOf("extern", "static", "register", "auto", "inline", "_Noreturn", "_Thread_local", "typedef")
 
 /** Lexical offsets let rendering retain original whitespace, qualifiers, and comments. */
 private fun cDeclarationTokens(
