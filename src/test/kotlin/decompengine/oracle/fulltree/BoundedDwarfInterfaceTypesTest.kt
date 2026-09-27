@@ -299,6 +299,41 @@ class BoundedDwarfInterfaceTypesTest {
         }
 
     @Test
+    fun `converging inheritance charges retained type facts and still bounds distinct output`(): Unit =
+        inInterfaceFixtureDirectory { root ->
+            val longName = "T".repeat(4096)
+            val branches = (0 until 15).map { index ->
+                fun target(child: Int) = if (child < 15) "branch$child" else "leaf"
+                die("branch$index", 0x24, listOf(
+                    reference(0x31, target(index * 2 + 1)),
+                    reference(0x47, target(index * 2 + 2)),
+                ))
+            }
+            val fixture = typeElf(*(listOf(emitted("entry", "branch0")) + branches +
+                die("leaf", 0x24, listOf(text(0x03, longName), number(0x0b, 4), number(0x3e, 5))))
+                .toTypedArray())
+            val generous = scan(root, fixture)
+            val bounded = scan(root, fixture, BoundedDwarfInterfaceFactLimits(maximumOutputBytes = 128 * 1024))
+            assertEquals(generous.functions.map { it.toJson() }, bounded.functions.map { it.toJson() })
+            assertEquals(generous.types.mapValues { it.value.toJson() }, bounded.types.mapValues { it.value.toJson() })
+            val retained = bounded.types.getValue(fixture.locator("branch0"))
+            known(retained.name, longName)
+            assertEquals(listOf("${fixture.locator("leaf")}:attribute=0x3"), retained.name.evidence)
+            known(retained.attributes.getValue(0x31), fixture.locator("branch1"))
+            known(retained.attributes.getValue(0x47), fixture.locator("branch2"))
+
+            val distinct = typeElf(*(0 until 16).flatMap { index -> listOf(
+                emitted("entry$index", "type$index", index),
+                die("type$index", 0x24, listOf(text(0x03, "$index$longName".take(4096)),
+                    number(0x0b, 4), number(0x3e, 5))),
+            ) }.toTypedArray())
+            val failure = assertFailsWith<FullTreeControlException> {
+                scan(root, distinct, BoundedDwarfInterfaceFactLimits(maximumOutputBytes = 128 * 1024))
+            }
+            assertTrue(failure.message.orEmpty().contains("output bound"), failure.message)
+        }
+
+    @Test
     fun `type count depth direct children and output budgets fail closed`(): Unit =
         inInterfaceFixtureDirectory { root ->
             val fixture = typeElf(

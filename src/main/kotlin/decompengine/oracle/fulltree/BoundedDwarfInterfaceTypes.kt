@@ -87,8 +87,10 @@ internal class BoundedDwarfInterfaceTypeResolver(
     /** Retain an automatic local's raw type reference without expanding a non-global graph. */
     fun referenceOnly(source: ResolvedFunctionDie): DwarfInterfaceFact<String> =
         referenceFact(source, TYPE_AT_TYPE, 0, expand = false).let {
+            val reason = "type-graph-not-expanded-for-automatic-local"
+            budget.charge(32L + reason.length.toLong() * 6L, "DWARF local type reason")
             DwarfInterfaceFact(it.state, it.values, it.evidence,
-                it.reasons + "type-graph-not-expanded-for-automatic-local")
+                it.reasons + reason)
         }
 
     fun nodes(): Map<String, DwarfInterfaceTypeNode> {
@@ -277,16 +279,25 @@ internal class BoundedDwarfInterfaceTypeResolver(
         inheritance: InterfaceInheritance? = null,
         decode: (ResolvedFunctionDie, FullTreeDwarfDieAttribute) -> DwarfInterfaceFact<String>,
     ): DwarfInterfaceFact<String> {
-        if (name in TYPE_NON_INHERITED_ATTRIBUTES) {
+        val resolved = if (name in TYPE_NON_INHERITED_ATTRIBUTES) {
             val own = source.record.optionalUniqueAttribute(name, "DWARF interface attribute ${typeHex(name)}")
-            return if (own == null) absent() else decode(source, own)
+            if (own == null) absent() else decode(source, own)
+        } else {
+            inheritedFact(
+                inheritance ?: InterfaceInheritance(repository, source, limits.maximumReferenceChainEntries),
+                name,
+                decode,
+            )
         }
-        val resolved = inheritedFact(
-            inheritance ?: InterfaceInheritance(repository, source, limits.maximumReferenceChainEntries),
-            name,
-            decode,
-        )
-        return fact(resolved.state, resolved.values, resolved.evidence, resolved.reasons)
+        // The output retains this resolved fact once. Decoder results used while walking
+        // inheritance are temporary; charging both them and the merged result charges the
+        // same retained strings repeatedly, especially through converging origin branches.
+        var bytes = 192L
+        for (text in resolved.values + resolved.evidence + resolved.reasons) {
+            bytes = Math.addExact(bytes, Math.addExact(32L, Math.multiplyExact(text.length.toLong(), 6L)))
+        }
+        budget.charge(bytes, "DWARF interface type fact")
+        return resolved
     }
 
     private fun declarationReferenceFact(
@@ -388,14 +399,7 @@ internal class BoundedDwarfInterfaceTypeResolver(
         values: List<String>,
         evidence: List<String>,
         reasons: List<String>,
-    ): DwarfInterfaceFact<String> {
-        var bytes = 192L
-        for (text in values + evidence + reasons) {
-            bytes = Math.addExact(bytes, Math.addExact(32L, Math.multiplyExact(text.length.toLong(), 6L)))
-        }
-        budget.charge(bytes, "DWARF interface type fact")
-        return DwarfInterfaceFact(state, values, evidence, reasons)
-    }
+    ): DwarfInterfaceFact<String> = DwarfInterfaceFact(state, values, evidence, reasons)
 }
 
 private fun attributeEvidence(source: ResolvedFunctionDie, name: Long): String =
