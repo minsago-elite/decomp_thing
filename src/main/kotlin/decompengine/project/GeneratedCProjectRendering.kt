@@ -19,12 +19,19 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
             ?: model.functions.firstOrNull { safeCName(it.name) in setOf("entry", "recovered__start") }
             ?: model.functions.minByOrNull { it.address }
         val entryBody = entry?.let {
-            if (normalizedPrototype(it).startsWith("void ")) "${safeCName(it.name)}();\n    return 0;"
-            else "return ${safeCName(it.name)}();"
+            val declaration = recoveredDeclaration(it)
+            require(declaration.explicitNoParameters) {
+                "unsupported generated-C entry call for ${it.id}: an explicit (void) parameter list is required; " +
+                    "entry arguments and ABI have not been recovered"
+            }
+            require(!declaration.hasInternalLinkage) {
+                "unsupported generated-C entry call for ${it.id}: an internal-linkage function cannot be called from the entry module"
+            }
+            declaration.entryCall(safeCName(it.name))
         } ?: "return 0;"
         val mainSource = """
                 #include "decomp_types.h"
-                ${entry?.let { "extern ${normalizedPrototype(it)};" } ?: ""}
+                ${entry?.let { "${normalizedPrototype(it)};" } ?: ""}
 
                 int main(int argc, char **argv) {
                     (void)argc;

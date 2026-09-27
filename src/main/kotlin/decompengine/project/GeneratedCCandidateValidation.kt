@@ -30,7 +30,7 @@ internal object GeneratedCCandidateValidation {
                 )
             } else if (
                 generator != "recovered-c" &&
-                genericReturnBody(body) &&
+                (genericReturnBody(body) || isGeneratedCPlaceholderBody(function, body)) &&
                 !recoveredEvidenceIsTrivial(function)
             ) {
                 issues += ModuleReconstructionIssue(
@@ -49,7 +49,7 @@ internal object GeneratedCCandidateValidation {
                     listOf(id),
                 )
             }
-            if (!hasGlobalDefinition(codeOnly, safeCName(global.name))) {
+            if (!hasGlobalDefinition(codeOnly, safeCName(global.name)) && !generatedCGlobalDefinition(source, safeCName(global.name))) {
                 issues += ModuleReconstructionIssue(
                     "missing-global-definition",
                     "candidate source does not define ${safeCName(global.name)} for $id",
@@ -71,7 +71,7 @@ internal object GeneratedCCandidateValidation {
             val bodyEnd = matchingDelimiter(source, bodyStart, '{', '}') ?: return@forEach
             return source.substring(bodyStart + 1, bodyEnd)
         }
-        return null
+        return generatedCFunctionBody(source, functionName)
     }
 
     private fun matchingDelimiter(source: String, start: Int, open: Char, close: Char): Int? {
@@ -125,7 +125,7 @@ internal object GeneratedCCandidateValidation {
 
     private fun recoveredEvidenceIsTrivial(function: RecoveredFunction): Boolean =
         function.decompiledC?.let { recovered ->
-            findFunctionBody(recovered, function.name)?.let(::genericReturnBody)
+            findFunctionBody(recovered, function.name)?.let { genericReturnBody(it) || isGeneratedCPlaceholderBody(function, it) }
                 ?: Regex("\\{\\s*return(?:\\s+0)?\\s*;\\s*}", RegexOption.DOT_MATCHES_ALL).containsMatchIn(recovered)
         } == true
 
@@ -205,7 +205,7 @@ internal object GeneratedCCandidateValidation {
                         parenthesisDepth == 1 && declaratorPrefix.trimEnd().endsWith("(*")
                     val declarationPrefix = parenthesisDepth == 0 || functionPointerDeclarator
                     val hasType = Regex("[A-Za-z_]\\w*").containsMatchIn(prefix)
-                    val isExternal = Regex("\\bextern\\b").containsMatchIn(prefix)
+                    val isExternalOrTypedef = Regex("\\b(extern|typedef)\\b").containsMatchIn(prefix)
                     val suffix = code.substring(occurrence.range.last + 1).trimStart()
                     val declaratorSuffix = when {
                         functionPointerDeclarator -> suffix.startsWith(')')
@@ -216,7 +216,7 @@ internal object GeneratedCCandidateValidation {
                     if (
                         declarationPrefix &&
                         hasType &&
-                        !isExternal &&
+                        !isExternalOrTypedef &&
                         '=' !in declaratorPrefix &&
                         declaratorSuffix
                     ) {

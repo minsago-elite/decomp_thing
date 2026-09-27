@@ -107,13 +107,28 @@ field. These local version strings do not authenticate executable identity.
 `GeneratedCProjectRendering` owns shared, public and private C interfaces and the
 GNU Make build definition. It indexes model functions/globals and computes
 cross-module call visibility once per plan, then renders each module's declared
-entities in plan order. `GeneratedCDeclarations` holds the existing C declaration
-normalization policy. This extraction preserves current generated-C semantics;
-full alternate-profile routing remains separate migration work under #84. Declaration normalization does not
-establish recovered ABI accuracy.
+entities in plan order. `GeneratedCDeclarations` preserves the recovered function
+declarator, including its return type, parameters, qualifiers and variadic marker,
+and changes only the emitted function identifier under the existing naming policy.
+It does not replace the model's return type with a guess from the decompiled body
+or manufacture a zero-argument prototype. Global types likewise retain their
+declared spelling and pointer/array structure.
+
+Names such as `undefined8`, `byte` and `pointer` are not converted into guessed C
+types. The strict compiler resolves named types against the supplied declarations;
+missing types fail the existing module gate and remain in its diagnostics and
+unresolved-entity inventory. Explicit typedefs and ordinary identifiers with those
+spellings remain valid. Malformed or unsupported declarators fail with the model
+entity's identity instead of a fallback declaration. Rendering and compilation do
+not establish recovered ABI accuracy; authenticated ABI facts and production
+qualification remain separate requirements.
 
 The generated-C renderer also selects and renders the synthetic entrypoint and
-returns its entity attribution to orchestration. `GeneratedCCandidateValidation`
+returns its entity attribution to orchestration. A synthesized zero-argument call
+requires an explicit `(void)` parameter list; an unspecified `()` declaration,
+named parameters or a variadic signature cannot justify dropping arguments.
+An existing `main` keeps its recovered declaration.
+`GeneratedCCandidateValidation`
 owns the C function/global definition and placeholder checks and their lexical
 helpers. Orchestration retains invocation release, prompt budgets, prior issues,
 checkpoint acceptance and rollback. These checks remain the existing local
