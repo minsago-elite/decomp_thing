@@ -26,6 +26,6 @@
 
 ## Repository Sanity Checks
 
-- Milestone sanity checks cover all milestone series; do not restrict them to A-series milestones.
+- Milestone sanity checks cover every repository milestone.
 - Before continuing planned work, verify the relevant milestone and issue status, dependencies, acceptance criteria, and current evidence.
 - Check that closed issues have evidence matching their full acceptance criteria and intended scope; reopen or correct closure metadata when they were closed improperly.
