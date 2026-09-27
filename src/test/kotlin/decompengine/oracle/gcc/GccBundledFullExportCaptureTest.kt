@@ -88,6 +88,60 @@ class GccBundledFullExportCaptureTest {
     }
 
     @Test
+    fun `exact exporter state retains the parsed target identity`() = fixture { root, run, reports ->
+        writeState(root, language = "AARCH64:LE:64:v8A", compilerSpec = "gcc_1.2+-")
+        val snapshot = GccBundledFullExportCapture.capture(run, reports, artifacts())
+        assertEquals("AARCH64:LE:64:v8A", snapshot.language)
+        assertEquals("gcc_1.2+-", snapshot.compilerSpec)
+    }
+
+    @Test
+    fun `full export state and progress reject equivalent JSON with bytes the exporter cannot emit`() {
+        val mutations = listOf<Pair<String, (String) -> String>>(
+            "reordered fields" to { text ->
+                JsonObject(OracleJson.parse(text.toByteArray()).jsonObject.entries.reversed()
+                    .associate { it.key to it.value }).toString() + "\n"
+            },
+            "field whitespace" to { text -> text.replace("\":", "\": ") },
+            "leading whitespace" to { text -> " " + text },
+            "extra terminal LF" to { text -> text + "\n" },
+            "escaped field name" to { text -> text.replace("\"schemaVersion\"", "\"\\u0073chemaVersion\"") },
+            "escaped string value" to { text -> text.replace("\"full\"", "\"\\u0066ull\"")
+                .replace("\"complete\"", "\"\\u0063omplete\"") },
+        )
+        for ((label, relativePath) in listOf(
+            "state" to "reports/program_model.json.export/state.json",
+            "progress" to "reports/program_model.json.progress.json",
+        )) for ((mutation, mutate) in mutations) fixture { root, run, reports ->
+            val path = root.resolve(relativePath)
+            val original = Files.readString(path)
+            val changed = mutate(original)
+            assertNotEquals(original, changed, "$label: $mutation")
+            assertEquals(OracleJson.parse(original.toByteArray()), OracleJson.parse(changed.toByteArray()),
+                "$label: $mutation must preserve the parsed record")
+            Files.writeString(path, changed)
+            val failure = assertFailsWith<IllegalArgumentException>("$label: $mutation") {
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+            }
+            assertTrue(failure.message.orEmpty().contains("$label is not in the exact exporter-defined compact byte form"),
+                failure.message)
+        }
+    }
+
+    @Test
+    fun `full export progress rejects a negative zero count absent from exporter output`() = fixture { root, run, reports ->
+        val path = root.resolve("reports/program_model.json.progress.json")
+        val changed = Files.readString(path).replace("\"reused\":0", "\"reused\":-0")
+        assertEquals(0L, OracleJson.parse(changed.toByteArray()).jsonObject.getValue("reused").jsonPrimitive.long)
+        Files.writeString(path, changed)
+        val failure = assertFailsWith<IllegalArgumentException> {
+            GccBundledFullExportCapture.capture(run, reports, artifacts())
+        }
+        assertTrue(failure.message.orEmpty().contains("progress is not in the exact exporter-defined compact byte form"),
+            failure.message)
+    }
+
+    @Test
     fun `full export sidecar capture rejects links and unexpected records`() {
         for (mutation in listOf<(Path) -> Unit>(
             { path -> Files.createSymbolicLink(path.resolve("reports/program_model.json.export/functions/linked.json"), path.resolve("outside")) },
@@ -431,8 +485,15 @@ class GccBundledFullExportCaptureTest {
     private fun exporterSha() = OracleArtifacts.sha256("exporter".toByteArray())
     private fun analysisToolSha() = OracleArtifacts.sha256("ghidra-archive".toByteArray())
 
-    private fun writeState(root: Path, recoveryMode: String = "full", inputSha256: String = inputSha(), exporterVersion: Int = 12) {
-        val state = """{"schemaVersion":2,"exporterVersion":$exporterVersion,"exporterSha256":"${exporterSha()}","analysisToolSha256":"${analysisToolSha()}","recoveryMode":"$recoveryMode","inputSha256":"$inputSha256","language":"x86:LE:64:default","compilerSpec":"gcc","semanticStateBinding":null}
+    private fun writeState(
+        root: Path,
+        recoveryMode: String = "full",
+        inputSha256: String = inputSha(),
+        exporterVersion: Int = 12,
+        language: String = "x86:LE:64:default",
+        compilerSpec: String = "gcc",
+    ) {
+        val state = """{"schemaVersion":2,"exporterVersion":$exporterVersion,"exporterSha256":"${exporterSha()}","analysisToolSha256":"${analysisToolSha()}","recoveryMode":"$recoveryMode","inputSha256":"$inputSha256","language":"$language","compilerSpec":"$compilerSpec","semanticStateBinding":null}
 """
         Files.writeString(root.resolve("reports/program_model.json.export/state.json"), state)
     }

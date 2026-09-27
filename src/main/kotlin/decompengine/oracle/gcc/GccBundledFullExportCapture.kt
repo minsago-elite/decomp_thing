@@ -381,7 +381,19 @@ internal object GccBundledFullExportCapture {
             string(root, "compilerSpec").matches(Regex("[A-Za-z0-9_.:+-]{1,256}"))) {
             "GCC full exporter target identity is invalid"
         }
-        return GccBundledFullExportTarget(string(root, "language"), string(root, "compilerSpec"))
+        val target = GccBundledFullExportTarget(string(root, "language"), string(root, "compilerSpec"))
+        // The validated hashes and target identities need no JSON escaping. Match the pinned
+        // exporter's field order and compact encoding before committing the original bytes.
+        requireExactExporterRecord(bytes, buildString {
+            append("{\"schemaVersion\":2,\"exporterVersion\":").append(number(root, "exporterVersion"))
+            append(",\"exporterSha256\":\"").append(expectedExporter)
+            append("\",\"analysisToolSha256\":\"").append(expectedAnalysisTool)
+            append("\",\"recoveryMode\":\"full\",\"inputSha256\":\"").append(expectedInput)
+            append("\",\"language\":\"").append(target.language)
+            append("\",\"compilerSpec\":\"").append(target.compilerSpec)
+            append("\",\"semanticStateBinding\":null}\n")
+        }, "state")
+        return target
     }
 
     private fun requireFullProgress(bytes: ByteArray): FullProgress {
@@ -402,7 +414,22 @@ internal object GccBundledFullExportCapture {
             root.getValue("currentFunction") == JsonNull && total in 1..MAXIMUM_FULL_FUNCTIONS &&
             completed == total && recovered + partial + failed == total && reused in 0..total
         ) { "GCC full exporter progress is incomplete or is not bound to its state" }
+        requireExactExporterRecord(bytes, buildString {
+            append("{\"schemaVersion\":1,\"phase\":\"complete\",\"completed\":").append(completed)
+            append(",\"total\":").append(total)
+            append(",\"recovered\":").append(recovered)
+            append(",\"partial\":").append(partial)
+            append(",\"failed\":").append(failed)
+            append(",\"reused\":").append(reused)
+            append(",\"currentFunction\":null}\n")
+        }, "progress")
         return FullProgress(total, recovered, partial, failed, reused)
+    }
+
+    private fun requireExactExporterRecord(bytes: ByteArray, rendered: String, label: String) {
+        require(bytes.contentEquals(rendered.toByteArray(StandardCharsets.UTF_8))) {
+            "GCC full exporter $label is not in the exact exporter-defined compact byte form"
+        }
     }
 
     private fun requireFullModelHeader(model: ByteArray, inputSha256: String) {
