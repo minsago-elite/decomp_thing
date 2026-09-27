@@ -565,7 +565,7 @@ internal object FullTreeDwarfForms {
                 FullTreeDwarfIndexedStringValue(cursor.readUleb128())
             FULL_TREE_DW_FORM_STRP_SUP, FULL_TREE_DW_FORM_GNU_STRP_ALT ->
                 FullTreeDwarfUnsupportedExternalStringValue.also { cursor.skip(offsetSize.toLong()) }
-            FULL_TREE_DW_FORM_DATA16 -> if (context == FullTreeDwarfFormContext.CONSTANT) {
+            FULL_TREE_DW_FORM_DATA16 -> if (context == FullTreeDwarfFormContext.CONSTANT || context == FullTreeDwarfFormContext.DATA_VALUE) {
                 FullTreeDwarfUnsignedConstantValue(form, cursor.readData16(), indirectDepth)
             } else {
                 cursor.skip(16L).let { FullTreeDwarfIgnoredValue }

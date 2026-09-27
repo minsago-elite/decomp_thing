@@ -354,6 +354,28 @@ class BoundedDwarfGlobalSyntheticFactsTest {
         }
 
     @Test
+    fun `direct and indirect data16 global constants retain the supported unsigned value`(): Unit =
+        inInterfaceFixtureDirectory { root ->
+            val maximum = fixed(-1, 8) + ByteArray(8)
+            val fixture = typeElf(
+                variable("direct", listOf(raw(0x1c, FULL_TREE_DW_FORM_DATA16, maximum))),
+                variable("indirect", listOf(raw(0x1c, FULL_TREE_DW_FORM_INDIRECT,
+                    uleb(FULL_TREE_DW_FORM_DATA16) + maximum))),
+                variable("zero", listOf(raw(0x1c, FULL_TREE_DW_FORM_DATA16, ByteArray(16)))),
+                version = 5,
+            )
+            val facts = scan(root, fixture)
+            assertEquals(3, facts.globals.size)
+            for (label in listOf("direct", "indirect")) {
+                val constant = facts.global(fixture, label).constant
+                known(constant, "unsigned:18446744073709551615")
+                assertEquals(listOf("${fixture.locator(label)}:attribute=0x1c"), constant.evidence)
+                assertTrue(constant.reasons.isEmpty())
+            }
+            known(facts.global(fixture, "zero").constant, "unsigned:0")
+        }
+
+    @Test
     fun `explicit variable attributes are retained as source facts`(): Unit =
         inInterfaceFixtureDirectory { root ->
             val fixture = typeElf(variable("object", listOf(text(0x6e, "object_symbol"), flag(0x3f), flag(0x34),

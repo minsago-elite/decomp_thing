@@ -16,6 +16,30 @@ import kotlin.test.assertTrue
 
 class FullTreeElfObjectLayoutTest {
     @Test
+    fun `retained object budget charges cumulative overlapping segment memberships`() =
+        inInterfaceFixtureDirectory { directory ->
+            val small = BoundedDwarfInterfaceFactLimits(maximumRetainedFactBytes = 128 * 1024)
+            val names = (0 until 64).map { "object_$it" }
+            objectElfVariants().forEachIndexed { index, variant ->
+                val original = objectBytes(variant, names.map { TestElfSymbol(it, 0x110UL, type = 1) })
+                val ordinary = scanInterfaceFixture(writeElf(directory.resolve("ordinary-budget-$index.elf"), original),
+                    directory, small)
+                assertEquals(names, ordinary.objectSymbols.map { it.name })
+                val one = repeatedLoadPrograms(objectBytes(variant, listOf(TestElfSymbol("one", 0x110UL, type = 1))), 256)
+                val single = scanInterfaceFixture(writeElf(directory.resolve("single-overlap-$index.elf"), one), directory, small)
+                assertEquals((0 until 256).toList(), single.objectSymbols.single().segmentIndices)
+                val overlapping = writeElf(directory.resolve("cumulative-overlap-$index.elf"), repeatedLoadPrograms(original, 256))
+                val failure = assertFailsWith<FullTreeControlException> { scanInterfaceFixture(overlapping, directory, small) }
+                assertTrue(failure.message.orEmpty().contains("retained fact bound"), failure.message)
+                val complete = scanInterfaceFixture(overlapping, directory,
+                    small.copy(maximumRetainedFactBytes = 2 * 1024 * 1024))
+                assertEquals(names, complete.objectSymbols.map { it.name })
+                assertTrue(complete.modeledRetainedFactBytes > small.maximumRetainedFactBytes)
+                complete.objectSymbols.forEach { assertEquals((0 until 256).toList(), it.segmentIndices) }
+            }
+        }
+
+    @Test
     fun `interface scan retains overlapping executable loads and every object segment identity`() =
         inInterfaceFixtureDirectory { directory ->
             objectElfVariants().forEachIndexed { index, variant ->
@@ -701,6 +725,19 @@ private fun addOverlappingExecutableProgram(bytes: ByteArray) {
     FullTreeElfTestBytes.put32(bytes, offset, 1, littleEndian) // PT_LOAD, overlapping the first executable load.
     FullTreeElfTestBytes.put32(bytes, offset + if (is64) 4 else 24, 5, littleEndian)
     putWord(bytes, offset + if (is64) 32 else 16, 0x80UL)
+}
+
+/** Relocate the table so many overlapping loads cannot overwrite fixture sections or symbols. */
+private fun repeatedLoadPrograms(original: ByteArray, count: Int): ByteArray {
+    val is64 = original[4].toInt() == 2
+    val littleEndian = original[5].toInt() == 1
+    val stride = if (is64) 56 else 32
+    val source = FullTreeElfTestBytes.programHeaderOffset(original)
+    val bytes = original.copyOf(original.size + count * stride)
+    for (index in 0 until count) original.copyInto(bytes, original.size + index * stride, source, source + stride)
+    putWord(bytes, if (is64) 32 else 28, original.size.toULong())
+    FullTreeElfTestBytes.put16(bytes, if (is64) 56 else 44, count, littleEndian)
+    return bytes
 }
 
 private fun appendTlsBssSection(original: ByteArray): ByteArray {

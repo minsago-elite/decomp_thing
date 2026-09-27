@@ -333,7 +333,10 @@ internal object BoundedDwarfInterfaceFactScanner {
         val objects = ArrayList<FullTreeElfObjectSymbol>()
         val layout = FullTreeElfLayout.scanObjects(artifact, "rich", FullTreeElfLayoutLimits(), checkpoint) { symbol ->
             if (objects.size >= limits.maximumObjects) throw FullTreeControlException("interface scan exceeds object symbol bound")
-            budget.charge(1024L + symbol.name.length.toLong() * 2L, "ELF object facts")
+            // Charge boxed indices and retained list slots before keeping the symbol. The
+            // temporary single-symbol builder remains bounded by maximumProgramHeaders.
+            budget.charge(1024L + symbol.name.length.toLong() * 2L +
+                symbol.segmentIndices.size.toLong() * 32L, "ELF object facts")
             objects += symbol
         }
         val executable = FullTreeElfExecutableMembership.fromSorted(layout.executableRanges)
