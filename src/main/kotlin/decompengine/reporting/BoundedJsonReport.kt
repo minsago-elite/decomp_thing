@@ -29,6 +29,13 @@ internal data class JsonReportLimits(
 
 internal class JsonReportLimitException(message: String) : IllegalArgumentException(message)
 
+internal fun openStagedJsonReportOutput(staged: Path): OutputStream = Files.newOutputStream(
+    staged,
+    StandardOpenOption.WRITE,
+    StandardOpenOption.TRUNCATE_EXISTING,
+    LinkOption.NOFOLLOW_LINKS,
+)
+
 /**
  * Publishes one complete report with an atomic replacement. The existing parent directory is used
  * as supplied; this is not an oracle path-authority boundary. Staged and published files have POSIX
@@ -40,6 +47,7 @@ internal object JsonReportPublisher {
         path: Path,
         limits: JsonReportLimits = JsonReportLimits(),
         checkpoint: (String) -> Unit = {},
+        outputStreamFactory: (Path) -> OutputStream = ::openStagedJsonReportOutput,
         render: BoundedJsonReportWriter.() -> Unit,
     ) {
         val budget = JsonReportBudget(limits, checkpoint)
@@ -57,12 +65,7 @@ internal object JsonReportPublisher {
                 PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")),
             )
             temporary = staged
-            Files.newOutputStream(
-                staged,
-                StandardOpenOption.WRITE,
-                StandardOpenOption.TRUNCATE_EXISTING,
-                LinkOption.NOFOLLOW_LINKS,
-            ).use { output ->
+            outputStreamFactory(staged).use { output ->
                 val writer = BoundedJsonReportWriter(BufferedOutputStream(output, 8 * 1024), limits, budget)
                 budget.checkpoint("before rendering JSON report")
                 writer.render()
