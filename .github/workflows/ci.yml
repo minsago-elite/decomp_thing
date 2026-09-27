@@ -237,8 +237,10 @@ jobs:
       - name: Prepare executable root-owned application-bundled Ghidra
         run: bash scripts/ci-prepare-bundled-ghidra-runtime.sh
       - name: Qualify pinned credential-free third-party ACP initialize
+        if: matrix.shard == 'live'
         run: scripts/ci-qualify-goose-acp.sh
       - name: Qualify pinned credential-free codex-acp authentication boundary
+        if: matrix.shard == 'live'
         run: scripts/ci-qualify-codex-acp.sh
       - name: Run JVM and Kotlin checks
         env:
@@ -287,12 +289,12 @@ jobs:
           name: kotlin-${{ matrix.shard }}-bundled-ghidra-contained-fixture-evidence
           path: build/contained-ghidra-evidence
       - uses: actions/upload-artifact@v7
-        if: always()
+        if: always() && matrix.shard == 'live'
         with:
           name: kotlin-${{ matrix.shard }}-acp-goose-compatibility-evidence
           path: build/acp-compatibility/results
       - uses: actions/upload-artifact@v7
-        if: always()
+        if: always() && matrix.shard == 'live'
         with:
           name: kotlin-${{ matrix.shard }}-acp-codex-authentication-evidence
           path: build/acp-codex-compatibility/results

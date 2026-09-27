@@ -68,7 +68,26 @@ class GccBundledGhidraRuntimeTest {
             GccCompilerEngineContainmentContract.assessDefinition(request(historical)).bindingSha256,
             GccCompilerEngineContainmentContract.assessDefinition(request(current)).bindingSha256,
         )
-        assertFailsWith<IllegalArgumentException> { GccBundledGhidraRuntime(ROOT, classPath(), invocationVersion = 5) }
+        assertFailsWith<IllegalArgumentException> { GccBundledGhidraRuntime(ROOT, classPath(), invocationVersion = 6) }
+    }
+
+    @Test
+    fun `version five selects full recovery and survives exact runtime parsing`() {
+        val full = GccBundledGhidraRuntime(ROOT, classPath(), invocationVersion = 5)
+        val artifacts = artifacts(full)
+        val command = full.command(artifacts, state(), lease())
+        assertEquals("full", command[command.indexOf("ExportProgramModel.java") + 4])
+        assertEquals("bundled-ghidra-java-api-runtime-v5", full.toJson().getValue("provider").jsonPrimitive.content)
+        assertEquals(command, request(
+            full, artifacts, command = command,
+            runKind = GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
+        ).command)
+        val parsed = GccBundledGhidraRuntime.parse(full.toJson())
+        assertEquals("full", parsed.recoveryMode)
+        assertEquals(command, parsed.command(artifacts(parsed), state(), lease()))
+        assertFailsWith<IllegalArgumentException> {
+            full.command(artifacts, state(), lease(), GccCompilerEngineContainmentRunKind.INTERRUPTED)
+        }
     }
 
     @Test
@@ -512,11 +531,12 @@ class GccBundledGhidraRuntimeTest {
         command: List<String> = requireNotNull(runtime).command(
             artifacts, state(), lease(), GccCompilerEngineContainmentRunKind.INTERRUPTED,
         ),
+        runKind: GccCompilerEngineContainmentRunKind = GccCompilerEngineContainmentRunKind.INTERRUPTED,
         environment: Map<String, String> = ENVIRONMENT,
         outputLease: GccCompilerEngineOutputLeaseIdentity = lease(),
     ) = GccCompilerEngineContainmentRequest(
         engineId = "cc1",
-        runKind = GccCompilerEngineContainmentRunKind.INTERRUPTED,
+        runKind = runKind,
         artifacts = artifacts,
         analysisState = state(),
         command = command,

@@ -4,6 +4,7 @@ import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.permissions
 import decompengine.oracle.fulltree.ContainedCommandOperationDeadline
+import decompengine.oracle.core.DescriptorBoundAtomicStateFile
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import kotlinx.serialization.json.JsonObject
@@ -25,6 +26,32 @@ import decompengine.oracle.fulltree.calculateFullTreeObservationRuntimeManifestS
 import java.nio.file.Path
 
 private object GCC_BUNDLED_PREPARED_OPERATION_PERMIT
+
+internal fun requireGccFullExportBindingMatchesOperation(
+    binding: GccDriverStructuralFullExportBindingV2,
+    exported: GccBundledFullExportOperation,
+    operationId: String,
+) {
+    val snapshot = exported.snapshot
+    val bindingBytes = binding.canonicalBytes
+    require(OracleArtifacts.sha256(bindingBytes) == binding.sha256) {
+        "structural full-export binding bytes differ from their digest"
+    }
+    val bound = OracleJson.parseCanonical(bindingBytes) as JsonObject
+    val boundModel = bound.getValue("programModel") as JsonObject
+    val boundLineage = bound.getValue("receiptLineage") as JsonObject
+    require(boundModel["sha256"] == JsonPrimitive(snapshot.programModelSha256) &&
+        boundModel["bytes"] == JsonPrimitive(snapshot.programModelBytes) &&
+        boundModel["functionCount"] == JsonPrimitive(snapshot.functionCount) &&
+        bound["outputTreeSha256"] == JsonPrimitive(snapshot.outputTreeSha256) &&
+        boundLineage["operationId"] == JsonPrimitive(operationId) &&
+        boundLineage["intentSha256"] == JsonPrimitive(OracleArtifacts.sha256(exported.intentBytes)) &&
+        boundLineage["executionReceiptSha256"] ==
+            JsonPrimitive(OracleArtifacts.sha256(exported.executionReceiptBytes)) &&
+        boundLineage["exportAssessmentReceiptSha256"] ==
+            JsonPrimitive(OracleArtifacts.sha256(exported.exportAssessmentReceiptBytes))
+    ) { "structural full-export binding belongs to a different contained operation" }
+}
 
 internal class GccBundledPlannedOperation(executionReceipt: ByteArray, assessmentReceipt: ByteArray,
     captured: GccBundledCapturedPlannerOutput) {
@@ -52,6 +79,29 @@ internal class GccBundledExecutedOperation(
     private val exportAssessment = exportAssessmentReceiptBytes.copyOf()
     val executionReceiptBytes: ByteArray get() = execution.copyOf()
     val exportAssessmentReceiptBytes: ByteArray get() = exportAssessment.copyOf()
+}
+
+internal class GccBundledFullExportOperation(
+    intentBytes: ByteArray,
+    executionReceiptBytes: ByteArray,
+    exportAssessmentReceiptBytes: ByteArray,
+    val snapshot: GccBundledFullExportSnapshot,
+    constructionPermit: Any,
+) {
+    val complete: Boolean = false
+    val releaseEligible: Boolean = false
+    private val intent = intentBytes.copyOf()
+    private val execution = executionReceiptBytes.copyOf()
+    private val exportAssessment = exportAssessmentReceiptBytes.copyOf()
+    val intentBytes: ByteArray get() = intent.copyOf()
+    val executionReceiptBytes: ByteArray get() = execution.copyOf()
+    val exportAssessmentReceiptBytes: ByteArray get() = exportAssessment.copyOf()
+
+    init {
+        check(constructionPermit === GCC_BUNDLED_PREPARED_OPERATION_PERMIT) {
+            "GCC full export requires retained coordinator ownership"
+        }
+    }
 }
 
 internal class GccBundledInterruptedOperation(
@@ -99,6 +149,7 @@ internal class GccBundledPreparedOperation internal constructor(
     private var retainedTrigger: GccBundledCheckpointTrigger? = null
     private var pendingCleanup: KotlinSystemdCgroupCommandCleanup? = null
     private var completedExport: GccBundledExecutedOperation? = null
+    private var completedFullExport: GccBundledFullExportOperation? = null
     private val completedControls = linkedMapOf<String, LinuxFileIdentity>()
     private var plannerAttempted = false
     private var completedPlan: GccBundledPlannedOperation? = null
@@ -133,16 +184,38 @@ internal class GccBundledPreparedOperation internal constructor(
     }
 
     @Synchronized
-    fun execute(): GccBundledExecutedOperation = executeRun(GccCompilerEngineContainmentRunKind.FRESH_CONTROL, null) { borrowed, execution ->
-        val receipt = journal.recordExecution(execution.canonicalBytes)
-        val captured = borrowed.withPinnedDescriptor { descriptor ->
-            GccBundledExportCapture.capture(descriptor, directories.getValue("reports"), intent.artifacts)
-        }
-        inputs.verify("after GCC export capture")
-        lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
-        val exportReceipt = journal.recordExportAssessment(bindWallTime(captured.canonicalBytes))
-        GccBundledExecutedOperation(receipt, exportReceipt, captured)
-    }.also { completedExport = it }
+    fun execute(): GccBundledExecutedOperation {
+        check(intent.bundledRuntime.recoveryMode == "planning") { "planning execution cannot consume a full-recovery runtime" }
+        return executeRun(GccCompilerEngineContainmentRunKind.FRESH_CONTROL, null) { borrowed, execution ->
+            val receipt = journal.recordExecution(execution.canonicalBytes)
+            val captured = borrowed.withPinnedDescriptor { descriptor ->
+                GccBundledExportCapture.capture(descriptor, directories.getValue("reports"), intent.artifacts)
+            }
+            inputs.verify("after GCC export capture")
+            lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+            val exportReceipt = journal.recordExportAssessment(bindWallTime(captured.canonicalBytes))
+            GccBundledExecutedOperation(receipt, exportReceipt, captured)
+        }.also { completedExport = it }
+    }
+
+    /** Executes the versioned full-recovery exporter and snapshots its output after worker absence. */
+    @Synchronized
+    fun executeFullExport(): GccBundledFullExportOperation {
+        check(intent.bundledRuntime.recoveryMode == "full") { "full export execution requires the full-recovery runtime" }
+        return executeRun(GccCompilerEngineContainmentRunKind.FRESH_CONTROL, null) { borrowed, execution ->
+            val receipt = journal.recordExecution(execution.canonicalBytes)
+            val captured = borrowed.withPinnedDescriptor { descriptor ->
+                GccBundledFullExportCapture.capture(descriptor, directories.getValue("reports"), intent.artifacts)
+            }
+            inputs.verify("after GCC full export snapshot")
+            lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+            val exportReceipt = journal.recordExportAssessment(bindWallTime(captured.assessmentBytes))
+            GccBundledFullExportOperation(
+                intent.canonicalBytes, receipt, exportReceipt, captured,
+                GCC_BUNDLED_PREPARED_OPERATION_PERMIT,
+            )
+        }.also { completedFullExport = it }
+    }
 
     @Synchronized
     fun executeUntilCheckpoint(minimumCompletedFunctions: Long): GccBundledInterruptedOperation {
@@ -440,6 +513,77 @@ internal class GccBundledPreparedOperation internal constructor(
         }
     }
 
+    /** Publishes the descriptor-captured full model and its authenticated profile binding, never a score. */
+    @Synchronized
+    fun publishFullExportCliResult(binding: GccDriverStructuralFullExportBindingV2): Path {
+        check(!closed && !poisoned && !cliPublicationAttempted)
+        check(intent.bundledRuntime.recoveryMode == "full") {
+            "structural binding publication requires a full-recovery operation"
+        }
+        val cli = checkNotNull(intent.cliInvocation) { "operation has no bound CLI output" }
+        val exported = checkNotNull(completedFullExport) { "operation has no captured full export" }
+        cliPublicationAttempted = true
+        try {
+            val deadline = checkNotNull(operationDeadline)
+            deadline.requireCurrent()
+            inputs.verify("before full-export binding publication")
+            journal.verify("before full-export binding publication")
+            lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+            val original = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(definition)
+            val snapshot = exported.snapshot
+            requireGccFullExportBindingMatchesOperation(binding, exported, intent.operationId)
+            val bindingBytes = binding.canonicalBytes
+            val bindingName = "structural-full-export-binding.json"
+            val manifestName = GccBundledFullExportCliResultV2.TREE_MANIFEST_NAME
+            val manifestBytes = snapshot.sidecarManifest
+            val modelPath = original.outputLease.path.resolve("reports/program_model.json")
+            val bindingPath = cli.options.output.resolve(bindingName)
+            val manifestPath = cli.options.output.resolve(manifestName)
+            val resultBytes = GccBundledFullExportCliResultV2.create(
+                operationId = intent.operationId,
+                requestSha256 = intent.requestSha256,
+                journalPath = journal.path,
+                programModelPath = modelPath,
+                programModelSha256 = snapshot.programModelSha256,
+                programModelBytes = snapshot.programModelBytes,
+                functionCount = snapshot.functionCount,
+                exportAssessmentReceiptSha256 = OracleArtifacts.sha256(exported.exportAssessmentReceiptBytes),
+                executionReceiptSha256 = OracleArtifacts.sha256(exported.executionReceiptBytes),
+                structuralBindingPath = bindingPath,
+                structuralBindingBytes = bindingBytes,
+                treeManifestPath = manifestPath,
+                treeManifestBytes = manifestBytes,
+                outputTreeSha256 = snapshot.outputTreeSha256,
+                operationWallTime = deadline.snapshot(),
+            )
+            LinuxFilesystemSyscalls.openRoot(cli.options.output).use { output ->
+                cli.requireCurrent()
+                DescriptorBoundAtomicStateFile.publishManifestNoReplace(
+                    output,
+                    manifestName,
+                    manifestBytes,
+                    GccBundledFullExportCliResultV2.MAXIMUM_TREE_MANIFEST_BYTES,
+                )
+                cli.requireCurrent()
+                DescriptorBoundAtomicStateFile.publishNoReplace(output, bindingName, bindingBytes, 256 * 1024)
+                inputs.verify("after full-export binding publication")
+                journal.verify("after full-export binding publication")
+                lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+                deadline.requireCurrent()
+                DescriptorBoundAtomicStateFile.publishNoReplace(output, "result.json", resultBytes, 256 * 1024)
+                cli.requireCurrent()
+            }
+            inputs.verify("after full-export result publication")
+            journal.verify("after full-export result publication")
+            lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+            deadline.requireCurrent()
+            return cli.options.output.resolve("result.json")
+        } catch (failure: Throwable) {
+            poisoned = true
+            throw failure
+        }
+    }
+
     private fun bindWallTime(assessmentBytes: ByteArray): ByteArray {
         val assessment = OracleJson.parseCanonical(assessmentBytes) as JsonObject
         val fields = assessment - "assessmentSha256" + ("operationWallTime" to checkNotNull(operationDeadline).snapshot())
@@ -460,7 +604,9 @@ internal class GccBundledPreparedOperation internal constructor(
     ): T {
         requireCurrent()
         require(intent.runKind == kind) { "GCC bundled execution kind differs from the prepared intent" }
-        require(intent.bundledRuntime.invocationVersion in 2..3) { "GCC contained execution requires explicitly bound JVM home and temporary paths" }
+        require(intent.bundledRuntime.invocationVersion in 2..3 || intent.bundledRuntime.invocationVersion == 5) {
+            "GCC contained execution requires an explicitly bound fresh JVM runtime"
+        }
         executionAttempted = true
         operationDeadline = ContainedCommandOperationDeadline(intent.budgets.wallClockMillis)
         try {

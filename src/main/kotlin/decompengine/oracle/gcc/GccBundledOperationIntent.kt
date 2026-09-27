@@ -34,8 +34,16 @@ internal class GccBundledOperationIntent(
     init {
         require(operationId.matches(Regex("[0-9a-f]{64}"))) { "GCC bundled operation ID is invalid" }
         require(engineId in setOf("cc1", "lto1")) { "GCC bundled engine ID is invalid" }
-        require(bundledRuntime.invocationVersion in 1..3) { "fresh operation intent cannot select the resume-only runtime" }
+        require(bundledRuntime.invocationVersion in 1..3 || bundledRuntime.invocationVersion == 5) {
+            "fresh operation intent cannot select the resume-only runtime"
+        }
         require(runKind != GccCompilerEngineContainmentRunKind.RESUMED) { "GCC bundled prepared operations require fresh analysis" }
+        require(bundledRuntime.invocationVersion != 5 || runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL) {
+            "full-recovery export requires a fresh uninterrupted operation"
+        }
+        require(bundledRuntime.invocationVersion != 5 || engineId == "cc1") {
+            "full-recovery structural export is currently supported only for cc1"
+        }
         require(budgets.wallClockMillis % 1_000L == 0L) { "GCC bundled wall budget must use whole seconds" }
         require(diskPolicy.maximumFilesystemBytes <= 1024L * 1024 * 1024 * 1024 &&
             diskPolicy.maximumFilesystemInodes <= 2_000_000L && diskPolicy.requiredAvailableInodes >= 128L
@@ -60,6 +68,7 @@ internal class GccBundledOperationIntent(
                 selected.binary == byRole.getValue(GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY).path &&
                 selected.profile == byRole.getValue(GccCompilerEngineContainmentArtifactRole.BENCHMARK_PROFILE).path &&
                 selected.archive == byRole.getValue(GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE).path &&
+                selected.fullRecoveryExport == (bundledRuntime.invocationVersion == 5) &&
                 (selected.resumeAfterCheckpoint != null) == (runKind == GccCompilerEngineContainmentRunKind.INTERRUPTED)) {
                 "CLI selection differs from operation intent"
             }

@@ -610,11 +610,12 @@ class AcpAgentHarnessTest {
 
     @Test
     fun `overlapping receipts retain their own request prompt and provider evidence`() {
-        val firstFixture = fixture()
-        val secondFixture = fixture()
+        // This case checks receipt isolation while both callbacks overlap, not timeout policy.
+        val firstFixture = fixture(idleMillis = 30_000, wallMillis = 60_000)
+        val secondFixture = fixture(idleMillis = 30_000, wallMillis = 60_000)
         val firstRequest = firstFixture.request.withContextMarker("first-turn-marker")
         val secondRequest = secondFixture.request.withContextMarker("second-turn-marker")
-        val harness = harness("success")
+        val harness = harness("success", timeouts = timeouts(startup = 15_000, request = 45_000, shutdown = 3_000))
         val callbacksEntered = CountDownLatch(2)
         val executor = Executors.newFixedThreadPool(2)
 
@@ -623,7 +624,7 @@ class AcpAgentHarnessTest {
             harness.executeReceipt(request) {
                 if (firstCallback.compareAndSet(true, false)) {
                     callbacksEntered.countDown()
-                    check(callbacksEntered.await(10, TimeUnit.SECONDS)) {
+                    check(callbacksEntered.await(20, TimeUnit.SECONDS)) {
                         "overlapping ACP invocation did not reach its event callback"
                     }
                 }
@@ -633,8 +634,8 @@ class AcpAgentHarnessTest {
         try {
             val firstFuture = submit(firstRequest)
             val secondFuture = submit(secondRequest)
-            val first = firstFuture.get(20, TimeUnit.SECONDS)
-            val second = secondFuture.get(20, TimeUnit.SECONDS)
+            val first = firstFuture.get(75, TimeUnit.SECONDS)
+            val second = secondFuture.get(75, TimeUnit.SECONDS)
             val firstEvidence = assertIs<AcpInvocationEvidenceSnapshot>(first.providerEvidence)
             val secondEvidence = assertIs<AcpInvocationEvidenceSnapshot>(second.providerEvidence)
             val outcomes = listOf("first" to first, "second" to second).joinToString("; ") { (label, receipt) ->
