@@ -3,11 +3,14 @@ package decompengine.project
 import decompengine.analysis.GhidraAnalysisException
 import decompengine.analysis.GhidraInvocation
 import decompengine.analysis.fakeGhidraCommand
+import decompengine.oracle.fulltree.inControlTemporaryDirectory
 import java.nio.file.Path
 import java.time.Duration
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.deleteExisting
+import kotlin.io.path.exists
 import kotlin.io.path.listDirectoryEntries
 import kotlin.io.path.pathString
 import kotlin.io.path.readBytes
@@ -16,6 +19,7 @@ import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class GhidraProgramModelExporterTest {
@@ -106,8 +110,7 @@ class GhidraProgramModelExporterTest {
     }
 
     @Test
-    fun `headless adapter terminates an over-budget export with resumable guidance`() {
-        val temp = createTempDirectory("program-model-timeout-")
+    fun `headless adapter terminates an over-budget export with resumable guidance`() = inControlTemporaryDirectory { temp ->
         val home = fakeGhidraHome(temp, complete = false)
         val binary = temp.resolve("input/program").also {
             it.parent.createDirectories()
@@ -119,10 +122,29 @@ class GhidraProgramModelExporterTest {
             GhidraProgramModelExportLimits(Duration.ofSeconds(5), Duration.ofMillis(100)),
         )
 
-        val failure = assertFailsWith<GhidraAnalysisException> { analyzer.analyze(binary, work) }
+        val pidFile = work.resolve("worker.pid")
+        try {
+            val failure = assertFailsWith<GhidraAnalysisException> { analyzer.analyze(binary, work) }
 
-        assertTrue(failure.message.orEmpty().contains("rerun with the same output directory"), failure.message)
-        assertTrue(work.resolve("reports/ghidra_stdout.log").readText().contains("fake export started"))
+            assertTrue(failure.message.orEmpty().contains("exceeded 5000 milliseconds"), failure.message)
+            assertTrue(failure.message.orEmpty().contains("rerun with the same output directory"), failure.message)
+            assertTrue(pidFile.exists(), "owned worker should have started before the timeout: ${failure.message}")
+            val pid = pidFile.readText().trim().toLong()
+            assertFalse(ProcessHandle.of(pid).map { it.isAlive }.orElse(false), "owned export worker survived timeout")
+            assertFalse(work.resolve("reports/program_model.json").exists())
+            assertTrue(work.resolve("reports/ghidra_stdout.log").readText().contains("fake export started"))
+            assertTrue(work.resolve("reports/ghidra_stderr.log").readText().contains("fake export diagnostic"))
+            assertFalse(Thread.currentThread().isInterrupted, "deadline watchdog interrupt leaked to caller")
+        } finally {
+            if (pidFile.exists()) {
+                pidFile.readText().trim().toLongOrNull()?.let { ProcessHandle.of(it).orElse(null) }?.let { process ->
+                    if (process.isAlive) {
+                        process.destroyForcibly()
+                        process.onExit().get(2, TimeUnit.SECONDS)
+                    }
+                }
+            }
+        }
     }
 
     @Test
@@ -275,7 +297,9 @@ class GhidraProgramModelExporterTest {
             } else {
                 """
                 #!/bin/sh
+                printf '%s\n' "${'$'}${'$'}" > "${'$'}PWD/worker.pid"
                 printf 'fake export started\n'
+                printf 'fake export diagnostic\n' >&2
                 while :; do :; done
                 """.trimIndent() + "\n"
             },
