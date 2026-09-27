@@ -129,6 +129,95 @@ class ModulePromptCompatibilityTest {
     }
 
     @Test
+    fun `oversized retained observations preserve accepted projects and prior failure evidence`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "oversized-observation-preservation-")
+        try {
+            for (profile in ReconstructionProfiles.builtIn) {
+                val project = temp.resolve(profile.id)
+                val accepted = SourceTreeGenerator.generate(model(), project, profile = profile,
+                    reconstructor = EvidenceModuleReconstructor(true))
+                assertTrue(accepted.unresolvedImplementationIds.isEmpty())
+                val rejected = ModuleReconstructor { request ->
+                    EvidenceModuleReconstructor(true).reconstruct(request).let { candidate ->
+                        candidate.copy(source = candidate.source.replace("return 7;", "return missing_value;"))
+                    }
+                }
+                assertFailsWith<ModuleReconstructionRevisionRejectedException> {
+                    SourceTreeGenerator.generate(model(), project, profile = profile, reconstructor = rejected,
+                        observedBehavior = "previous failed revision")
+                }
+                val attempt = project.resolve("reports/modules/alpha.attempt.json")
+                assertTrue(attempt.readText().contains("\"status\":\"rejected\""))
+                fun snapshot(): Map<String, String> = Files.walk(project).use { paths ->
+                    paths.filter { Files.isRegularFile(it) }.toList()
+                        .associate { project.relativize(it).toString() to sha256(it.readBytes()) }
+                }
+                val before = snapshot()
+                var dispatches = 0
+                val reconstructor = BoundedLlmModuleReconstructor(AgentHarness { _, _ ->
+                    dispatches++
+                    error("oversized observation must not dispatch")
+                }, maximumContextCharacters = 4_096)
+                val observations = listOf(
+                    "x".repeat(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES + 1),
+                    "é".repeat(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES / 2 + 1),
+                )
+                for ((index, observed) in observations.withIndex()) {
+                    for (target in listOf(project, temp.resolve("${profile.id}-fresh-$index"))) {
+                        val existed = Files.exists(target)
+                        val failure = assertFailsWith<IllegalArgumentException> {
+                            SourceTreeGenerator.generate(model(), target, profile = profile,
+                                reconstructor = reconstructor, observedBehavior = observed)
+                        }
+                        assertTrue(failure.message.orEmpty().contains("retained prompt input bound"))
+                        assertEquals(existed, Files.exists(target))
+                        assertEquals(before, snapshot())
+                    }
+                }
+                assertEquals(0, dispatches)
+            }
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
+    fun `observation retention bound accepts exact UTF8 bytes and does not limit custom inputs`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "observation-retention-boundary-")
+        try {
+            val observation = "é".repeat(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES / 2)
+            assertEquals(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES, observation.toByteArray(Charsets.UTF_8).size)
+            for (profile in ReconstructionProfiles.builtIn) {
+                val project = temp.resolve(profile.id)
+                val manifest = SourceTreeGenerator.generate(model(), project, profile = profile,
+                    reconstructor = BoundedLlmModuleReconstructor(
+                        AgentHarness { _, _ -> error("must not dispatch") }, maximumContextCharacters = 4_096),
+                    observedBehavior = observation)
+                assertEquals(listOf("fn_alpha"), manifest.unresolvedImplementationIds)
+                val checkpointPath = project.resolve(profile.layout.declaration("module-evidence")
+                    .materialize(mapOf("module" to "alpha")))
+                val checkpoint = Json.parseToJsonElement(checkpointPath.readText()).jsonObject
+                assertEquals(JsonPrimitive(observation), checkpoint.getValue("preDispatchObservedBehavior"))
+                assertEquals(listOf("fn_alpha"), ArchivalProjectAuditor.audit(project, profile).unresolvedEntityIds)
+                val accepted = SourceTreeGenerator.generate(model(), project, profile = profile,
+                    reconstructor = EvidenceModuleReconstructor(true), observedBehavior = observation + "é")
+                assertTrue(accepted.unresolvedImplementationIds.isEmpty())
+                assertFalse("preDispatchObservedBehavior" in Json.parseToJsonElement(checkpointPath.readText()).jsonObject)
+            }
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
     fun `workflow archives undispatched agent modules as unresolved for both profiles`() {
         for (base in ReconstructionProfiles.builtIn) {
             val profile = base

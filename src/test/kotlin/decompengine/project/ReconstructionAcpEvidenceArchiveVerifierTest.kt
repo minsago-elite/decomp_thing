@@ -61,6 +61,46 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class ReconstructionAcpEvidenceArchiveVerifierTest {
     @Test
+    fun `authorized large observations dispatch successfully without retained fallback input`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "large-authorized-observation-")
+        try {
+            val base = GeneratedCMakeReconstructionProfile.descriptor
+            val profile = ReconstructionProfile(base.schemaVersion, base.id, base.layout,
+                base.budgets.copy(reconstructionMaximumContextCharacters = 600_000), base.adapterConfiguration)
+            val project = temp.resolve("project")
+            val harness = ArchiveEvidenceHarness(accepted = true)
+            val observation = "x".repeat(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES + 1)
+            val manifest = SourceTreeGenerator.generate(
+                model = RecoveredProgramModel(inputSha256 = "a".repeat(64), functions = listOf(
+                    RecoveredFunction("fn_0000000000401000", "parse_input", 0x401000UL, "int parse_input(void)"))),
+                projectDir = project,
+                hostSafetyLimits = ReconstructionHostSafetyLimits(profile.budgets),
+                reconstructor = BoundedLlmModuleReconstructor(harness, maximumContextCharacters = 600_000,
+                    harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor),
+                observedBehavior = observation,
+                profile = profile,
+            )
+            assertTrue(manifest.unresolvedImplementationIds.isEmpty())
+            val checkpoint = Json.parseToJsonElement(project.resolve(CHECKPOINT_PATH).readText()).jsonObject
+            assertEquals(JsonPrimitive(true), checkpoint.getValue("accepted"))
+            assertEquals(JsonPrimitive("reconstructor-return"), checkpoint.getValue("workflowOrigin"))
+            assertEquals(JsonPrimitive(600_000), checkpoint.getValue("promptBudgetCharacters"))
+            assertFalse("preDispatchObservedBehavior" in checkpoint)
+            assertTrue(project.resolve(EVIDENCE_PATH).exists())
+            val contributions = ReconstructionAcpEvidenceArchiveVerifier.verify(project,
+                manifest.files.associate { it.path to sha256(project.resolve(it.path).readBytes()) },
+                manifest.files.associate { it.path to Files.size(project.resolve(it.path)) }, manifest, profile)
+            assertEquals(1, contributions.size)
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
     fun `archive gate rejects closed-schema and semantic ACP evidence tampering`() {
         val temp = createTempDirectory("acp-archive-tampering-")
         val baseline = createAgentProject(temp.resolve("baseline"), accepted = true)

@@ -129,6 +129,19 @@ class BoundedLlmModuleReconstructor(
     private fun contextBudget(profile: ReconstructionProfile): Int =
         minOf(maximumContextCharacters, profile.budgets.reconstructionMaximumContextCharacters)
 
+    private fun promptBudgetFailure(request: ModuleReconstructionRequest, prompt: String): ModuleContextBudgetExceededException? {
+        val budget = contextBudget(request.profile)
+        return if (prompt.length <= budget) null else ModuleContextBudgetExceededException(
+            request.module.id, prompt.length, budget, sha256(prompt.toByteArray()), PRE_DISPATCH_BUDGET_PERMIT,
+        )
+    }
+
+    internal fun requireRetainableFallbackObservation(request: ModuleReconstructionRequest) {
+        if (promptBudgetFailure(request, modulePromptEvidence(request).text) != null) {
+            requireRetainableModuleObservation(request.observedBehavior)
+        }
+    }
+
     override fun requiresExecutionEvidenceForCheckpointReuse(): Boolean = true
 
     private fun sessionContinuation(
@@ -199,15 +212,7 @@ class BoundedLlmModuleReconstructor(
         val promptEvidence = prompt.text
         val contextSize = promptEvidence.length
         val contextBudget = contextBudget(request.profile)
-        if (contextSize > contextBudget) {
-            throw ModuleContextBudgetExceededException(
-                request.module.id,
-                contextSize,
-                contextBudget,
-                sha256(promptEvidence.toByteArray()),
-                PRE_DISPATCH_BUDGET_PERMIT,
-            )
-        }
+        promptBudgetFailure(request, promptEvidence)?.let { throw it }
         val promptSha256 = sha256(promptEvidence.toByteArray())
         val workspaceRoot = request.workspaceRoot.toAbsolutePath().normalize()
         val root = AgentWorkspaceRoot("project", workspaceRoot)
@@ -571,14 +576,28 @@ object SourceTreeGenerator {
         val typesHeader = rendering.sharedInterface()
         val typesHeaderPath = profile.layout.declaration("shared-interface").materialize()
         val typesHeaderFile = projectDir.resolve(typesHeaderPath)
-        typesHeaderFile.parent.createDirectories()
-        typesHeaderFile.writeText(typesHeader)
         val headers = plan.modules.associate { module -> module.id to rendering.moduleInterface(module) }
         val moduleById = plan.modules.associateBy { it.id }
         val dependenciesByModule = moduleDependencies(model, plan)
         val headerHashes = headers.mapValues { sha256(it.value.toByteArray()) }
         val interfaceFingerprints = moduleInterfaceFingerprints(dependenciesByModule, headerHashes)
         val privateHeaders = plan.modules.associate { module -> module.id to rendering.privateInterface(module) }
+        if (selectedReconstructor is BoundedLlmModuleReconstructor && observedBehavior != null &&
+            observedBehavior.toByteArray(Charsets.UTF_8).size > MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES) {
+            // Validate actual fallback inputs before writing any project state. Larger
+            // observations that fit an authorized prompt budget need no retained copy.
+            plan.modules.forEach { module ->
+                val dependencyHeaders = dependenciesByModule.getValue(module.id).associate { dependency ->
+                    moduleById.getValue(dependency).headerPath to headers.getValue(dependency)
+                }
+                selectedReconstructor.requireRetainableFallbackObservation(ModuleReconstructionRequest(
+                    module, model, typesHeader, headers.getValue(module.id), privateHeaders.getValue(module.id),
+                    dependencyHeaders, projectDir, observedBehavior, profile = profile,
+                ))
+            }
+        }
+        typesHeaderFile.parent.createDirectories()
+        typesHeaderFile.writeText(typesHeader)
         headers.forEach { (id, content) ->
             val path = profile.layout.declaration("module-interface").materialize(mapOf("module" to id))
             val file = projectDir.resolve(path)
