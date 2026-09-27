@@ -602,7 +602,7 @@ internal object GccBundledFullExportCapture {
         }
         val maximumUnits = if (expectedStatus == "failed") MAXIMUM_FAILED_FAILURE_UNITS else MAXIMUM_PARTIAL_FAILURE_UNITS
         require(message.length <= maximumUnits) { "GCC full failure message exceeds its producer UTF-16 bound" }
-        require(hasProducerFailurePhases(message, if (expectedStatus == "failed") 4 else 3)) {
+        require(hasProducerFailurePhases(message, expectedStatus == "failed")) {
             "GCC full failure message contradicts producer phase bounds"
         }
         require(message.toByteArray(StandardCharsets.UTF_8).size <= MAXIMUM_FULL_EVIDENCE_RECORD_BYTES) {
@@ -620,18 +620,45 @@ internal object GccBundledFullExportCapture {
     }
 
     /**
-     * Exception details may themselves contain "; ", so validate that some producer partition exists.
-     * Each pass adds one phase. A sliding window finds untruncated phases; the single 2,051-unit
-     * candidate must end in the producer's truncation marker. Work is O(maximumPhases * message.length)
-     * after the aggregate bound, without allocating or enumerating every possible partition.
+     * Exception details may contain delimiters and even phase labels. Accept any bounded partition
+     * whose actual phases occur once in producer order, allowing successful evidence phases to be
+     * absent. The pinned Ghidra PrettyPrinter supplies non-null C on successful decompilation, so a
+     * full failed record must end with decompilation; a partial record has only evidence failures.
+     * Each phase scans the text once using a sliding window: O(4 * message.length), after its bound.
      */
-    private fun hasProducerFailurePhases(message: String, maximumPhases: Int): Boolean {
-        var starts = BooleanArray(message.length).also { it[0] = true }
-        repeat(maximumPhases) {
+    private fun hasProducerFailurePhases(message: String, failed: Boolean): Boolean {
+        val exceptionLabels = listOf(
+            "call recovery failed:", "data-reference recovery failed:",
+            "type recovery failed:", "decompilation failed:",
+        )
+        val reachable = BooleanArray(message.length).also { it[0] = true }
+        for (phase in 0..(if (failed) 3 else 2)) {
+            val starts = BooleanArray(message.length)
+            val minimumEnds = IntArray(message.length + 1)
+            val exactEnds = BooleanArray(message.length + 1)
+            // getSimpleName may be empty (anonymous exceptions). After Java trim, that gives the
+            // exact exception label. Named exceptions/details follow one space; class names and
+            // exception details are not inferred from the retained diagnostic.
+            fun recognize(start: Int, label: String, separator: String) {
+                if (!message.startsWith(label, start)) return
+                val labelEnd = start + label.length
+                exactEnds[labelEnd] = true
+                if (message.startsWith(separator, labelEnd)) {
+                    val minimumEnd = labelEnd + separator.length + 1
+                    if (minimumEnd <= message.length) {
+                        starts[start] = true
+                        minimumEnds[minimumEnd]++
+                    }
+                }
+            }
+            for (start in message.indices) if (reachable[start]) {
+                recognize(start, exceptionLabels[phase], " ")
+                if (phase == 3) recognize(start, "decompilation failed or timed out", ": ")
+            }
             val nextStarts = BooleanArray(message.length)
             var shortStartCount = 0
             for (end in 1..message.length) {
-                if (starts[end - 1]) shortStartCount++
+                shortStartCount += minimumEnds[end]
                 val expired = end - MAXIMUM_FAILURE_PHASE_UNITS - 1
                 if (expired >= 0 && starts[expired]) shortStartCount--
                 if (message[end - 1] <= ' ') continue
@@ -640,13 +667,15 @@ internal object GccBundledFullExportCapture {
                 val truncatedStart = end - TRUNCATED_FAILURE_PHASE_UNITS
                 val truncated = truncatedStart >= 0 && starts[truncatedStart] &&
                     message[end - 3] == '.' && message[end - 2] == '.' && message[end - 1] == '.'
-                if (shortStartCount > 0 || truncated) {
-                    if (finalPhase) return true
+                if (exactEnds[end] || shortStartCount > 0 || truncated) {
+                    if (finalPhase && (phase == 3) == failed) return true
                     val next = end + 2
-                    if (next < message.length && message[next] > ' ') nextStarts[next] = true
+                    if (next < message.length) nextStarts[next] = true
                 }
             }
-            starts = nextStarts
+            // Retain earlier starts to permit skipped successful phases, but add new starts only
+            // after scanning this phase so it cannot contribute twice to the same partition.
+            for (start in message.indices) if (nextStarts[start]) reachable[start] = true
         }
         return false
     }
