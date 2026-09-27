@@ -10,8 +10,10 @@ import decompengine.project.RecoveredProgramModel
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonArray
@@ -115,6 +117,29 @@ class GccDriverStructuralProfileTest {
     }
 
     @Test
+    fun `authenticated full export keeps the exact captured model paired with its provenance`() {
+        val profile = profile()
+        val modelBytes = modelBytes(profile, executableAddress(profile))
+        val snapshot = fullSnapshot(profile, modelBytes)
+        val authenticated = profile.captureFullExport(fullOperation(profile, snapshot))
+
+        assertContentEquals(modelBytes, authenticated.canonicalProgramModelBytes)
+        assertEquals(OracleArtifacts.sha256(modelBytes), authenticated.programModelSha256)
+        assertEquals(snapshot.programModelBytes, authenticated.programModelBytes)
+        assertEquals(snapshot.outputTreeSha256, authenticated.outputTreeSha256)
+        assertFalse(authenticated.scored)
+        assertFalse(authenticated.releaseEligible)
+        authenticated.requireSameSnapshot(snapshot)
+
+        val mutatedCopy = authenticated.canonicalProgramModelBytes
+        mutatedCopy[0] = (mutatedCopy[0].toInt() xor 1).toByte()
+        assertContentEquals(modelBytes, authenticated.canonicalProgramModelBytes)
+        assertFailsWith<GccDriverStructuralProfileException> {
+            authenticated.requireSameSnapshot(fullSnapshot(profile, modelBytes))
+        }
+    }
+
+    @Test
     fun `full export binding accepts source beyond historical text limit without truncation`() {
         val profile = profile()
         val address = executableAddress(profile)
@@ -194,6 +219,10 @@ class GccDriverStructuralProfileTest {
 
         assertFailsWith<GccDriverStructuralProfileException> {
             profile.bindFullExport(fullOperation(profile,
+                fullSnapshot(profile, "{\"inputSha256\":\"${profile.strippedBinary.sha256}\"}".toByteArray())))
+        }
+        assertFailsWith<GccDriverStructuralProfileException> {
+            profile.captureFullExport(fullOperation(profile,
                 fullSnapshot(profile, "{\"inputSha256\":\"${profile.strippedBinary.sha256}\"}".toByteArray())))
         }
         assertFailsWith<GccDriverStructuralProfileException> {
