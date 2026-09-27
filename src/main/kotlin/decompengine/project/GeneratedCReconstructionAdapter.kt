@@ -1,12 +1,15 @@
 package decompengine.project
 
 import decompengine.repair.readStableRegularFile
+import decompengine.repair.RepairIndexProfile
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 
 /** Generated-C/Make implementations selected together for the registered profile. */
 internal object GeneratedCReconstructionAdapter : ReconstructionAdapter {
+    override fun repairIndexProfile(profile: ReconstructionProfile): RepairIndexProfile =
+        GeneratedCRepairIndexProfile.forProfile(profile)
     override val diagnostics: ToolchainDiagnosticPolicy = GeneratedCToolchainDiagnostics("gnu-make", "Make")
     override val compilation: ModuleCompilationPolicy = GeneratedCModuleValidation
     override val archiveBuild: ArchiveBuildPolicy = GeneratedCArchiveBuildPolicy

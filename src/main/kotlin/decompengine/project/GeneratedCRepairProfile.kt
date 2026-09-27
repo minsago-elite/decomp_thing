@@ -52,6 +52,7 @@ object GeneratedCRepairIndexProfile : RepairIndexProfile by DescriptorGeneratedC
 }
 
 private class DescriptorGeneratedCRepairIndexProfile(private val profile: ReconstructionProfile) : RepairIndexProfile {
+    override fun reconstructionProfile(): ReconstructionProfile = profile
     private val sourcePolicy = GeneratedCRepairSourcePolicy(profile)
     private val buildDefinition = sourcePolicy.buildDefinition
     private val sharedInterface = profile.layout.declaration("shared-interface").materialize()
