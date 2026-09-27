@@ -241,6 +241,68 @@ class GccBundledFullExportCaptureTest {
     }
 
     @Test
+    fun `matching model bytes cannot authenticate a prototype naming another function`() = fixture { root, run, reports ->
+        val original = functionRecord("fn_0000000000400010", "f")
+        val changed = recordWithField(original, "name", JsonPrimitive("changed"))
+        // Both captured records agree on the changed name, but retain the original int f(void).
+        writeFunction(root, changed)
+        val failure = assertFailsWith<IllegalArgumentException> {
+            GccBundledFullExportCapture.capture(run, reports, artifacts())
+        }
+        assertTrue(failure.message.orEmpty().contains("prototype"), failure.message)
+    }
+
+    @Test
+    fun `function prototypes reject impossible producer name and outer delimiters`() {
+        for (prototype in listOf(
+            "intwanted(void)", "int\twanted(void)", "int unwanted(void)", "int wanted_extra(void)",
+            "int Wanted(void)", "int wanted (void)", "int wanted", "int wanted(void",
+            "int wanted(void);", "int wanted(void) extra", "int wanted(void)\n",
+            "wanted(void)", " wanted(void)",
+        )) fixture { root, run, reports ->
+            writeFunction(root, functionRecord("fn_0000000000400010", "wanted", prototype = JsonPrimitive(prototype)))
+            val failure = assertFailsWith<IllegalArgumentException>(prototype) {
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+            }
+            assertTrue(failure.message.orEmpty().contains("prototype"), failure.message)
+        }
+    }
+
+    @Test
+    fun `function prototypes retain Ghidra display names and argument forms`() {
+        for ((name, prototype) in listOf(
+            "wanted" to "int wanted()",
+            "wanted" to "unsigned long long wanted(void)",
+            "wanted" to "int wanted(char * format, ...)",
+            "ns::wanted" to "struct ns::Result ns::wanted(ns::Value value)",
+            "wanted.isra.0" to "int wanted.isra.0(void)",
+            "operator()" to "undefined operator()(int this)",
+            "operator<<" to "std::ostream & operator<<(int value)",
+            "界𐐀" to "構造体 * 界𐐀(整数 値)",
+            "thunk_FUN_00400010" to "undefined thunk_FUN_00400010(void)",
+            "__x86.get_pc_thunk.bx" to "undefined __x86.get_pc_thunk.bx(void)",
+            "wanted" to "int wanted(int (*callback)(int), char bytes[4])",
+        )) fixture { root, run, reports ->
+            writeFunction(root, functionRecord("fn_0000000000400010", name, prototype = JsonPrimitive(prototype)))
+            assertEquals(1L, GccBundledFullExportCapture.capture(run, reports, artifacts()).recovered, prototype)
+        }
+    }
+
+    @Test
+    fun `function prototype binding permits delimiters inside raw datatype and parameter names`() {
+        for (prototype in listOf(
+            // Return datatype display name "int other(int", function name "wanted", parameter
+            // datatype "int", and raw parameter name "x)" produce this exact display string.
+            "int other(int wanted(int x))",
+            // The raw parameter name "x)more" does not form a balanced C declarator.
+            "int wanted(int x)more)",
+        )) fixture { root, run, reports ->
+            writeFunction(root, functionRecord("fn_0000000000400010", "wanted", prototype = JsonPrimitive(prototype)))
+            assertEquals(1L, GccBundledFullExportCapture.capture(run, reports, artifacts()).recovered, prototype)
+        }
+    }
+
+    @Test
     fun `function global references resolve to the captured global inventory`() = fixture { root, run, reports ->
         val id = "global_0000000000400100"
         writeFunction(root, functionRecord("fn_0000000000400010", "f",
@@ -813,10 +875,11 @@ class GccBundledFullExportCaptureTest {
         // The supplementary character straddles the verifier's nominal chunk size.
         val controls = "𐐀 quote\" slash/ back\\ tab\t backspace\b formfeed\u000c zero\u0000 unit\u001f 界𐐀"
         val value = "x".repeat(4095) + controls
+        val displayType = "x".repeat(4095) + "𐐀"
         for (kind in listOf("function", "global", "failure")) fixture { root, run, reports ->
             val original = when (kind) {
-                "function" -> functionRecord("fn_0000000000400010", value,
-                    source = JsonPrimitive(value + "\n\r"), prototype = JsonPrimitive(value),
+                "function" -> functionRecord("fn_0000000000400010", "f",
+                    source = JsonPrimitive(value + "\n\r"), prototype = JsonPrimitive("$displayType f(void)"),
                     strings = JsonArray(listOf(JsonPrimitive(value))))
                 "global" -> globalRecord("global_0000000000400100", JsonPrimitive("0x400100"),
                     name = JsonPrimitive(value), type = JsonPrimitive(value), initializer = JsonPrimitive(value + "\n\r"))
@@ -989,7 +1052,7 @@ class GccBundledFullExportCaptureTest {
         references: JsonElement = JsonArray(emptyList()),
         calls: JsonElement = JsonArray(emptyList()),
         strings: JsonElement = JsonArray(emptyList()),
-        prototype: JsonElement = JsonPrimitive("int f(void)"),
+        prototype: JsonElement = JsonPrimitive("int $name(void)"),
     ) = prettyRecord(
         "id" to JsonPrimitive(id), "name" to JsonPrimitive(name), "address" to JsonPrimitive("0x400010"),
         "prototype" to prototype, "extractionStatus" to JsonPrimitive(status),
