@@ -38,16 +38,13 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
             }
             declaration.entryCall(safeCName(it.name))
         } ?: "return 0;"
-        val mainSource = """
-                #include "decomp_types.h"
-                ${entry?.let { "${normalizedPrototype(it)};" } ?: ""}
-
-                int main(int argc, char **argv) {
-                    (void)argc;
-                    (void)argv;
-                    $entryBody
-                }
-        """.trimIndent() + "\n"
+        val mainSource = buildString {
+            append("#include \"decomp_types.h\"\n")
+            entry?.let { append(normalizedPrototype(it)).append(";\n") }
+            append("\nint main(int argc, char **argv) {\n")
+            append("    (void)argc;\n    (void)argv;\n")
+            append("    ").append(entryBody).append("\n}\n")
+        }
         return RenderedEntrypoint(mainSource, listOfNotNull(entry?.id))
     }
 
