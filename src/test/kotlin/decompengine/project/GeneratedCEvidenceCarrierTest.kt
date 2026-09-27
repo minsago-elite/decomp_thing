@@ -308,7 +308,7 @@ class GeneratedCEvidenceCarrierTest {
                     val checkpoint = json(project.resolve(path))
                     writeBoundFile(project, path, JsonObject(checkpoint + mapOf(
                         "accepted" to JsonPrimitive(true), "generator" to JsonPrimitive("recovered-c"),
-                        "reconstructorIdentity" to JsonPrimitive("recovered-c:v5"), "issues" to JsonArray(emptyList()),
+                        "reconstructorIdentity" to JsonPrimitive(RecoveredCModuleReconstructor().cacheIdentity()), "issues" to JsonArray(emptyList()),
                     )).toString())
                 }
                 "header-acceptance", "entry-acceptance" -> {

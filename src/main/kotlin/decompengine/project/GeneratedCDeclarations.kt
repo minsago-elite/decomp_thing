@@ -16,7 +16,13 @@ internal class GeneratedCFunctionDeclaration(
     private val returnKind: GeneratedCTypeKind,
     private val resultDeclaration: (String) -> String,
     private val zeroInitializer: String,
+    private val requireSyntheticDefinition: () -> Unit,
 ) {
+    fun placeholderDefinition(): String {
+        requireSyntheticDefinition()
+        return "$prototype {\n${placeholderBody()}\n}"
+    }
+
     fun placeholderBody(): String {
         require(!noReturn) { "unsupported generated-C placeholder for $entityId: _Noreturn requires a retained non-returning implementation" }
         require(!hasInlineSpecifier || hasInternalLinkage) {
@@ -75,6 +81,18 @@ internal fun recoveredDeclaration(
         noReturn = "_Noreturn" in declaration.specifiers,
         returnKind = context.classify(declaration.specifiers, declaration.derived.drop(1), declaration.atomicType),
         zeroInitializer = context.zeroInitializer(declaration.specifiers, declaration.derived.drop(1), declaration.atomicType),
+        requireSyntheticDefinition = {
+            require(context.supportsZeroInitializer(declaration.specifiers, declaration.derived.drop(1), declaration.atomicType)) {
+                "unsupported generated-C placeholder for ${function.id}: atomic aggregate zero initialization requires retained implementation evidence"
+            }
+            // Nested callback/returned-function parameter lists remain prototype scope. Only
+            // the actual definition's parameter object declarators lose that scope here.
+            require(parameters.parameters.none { parameter ->
+                parameter.derived.takeWhile { it !is CDerived.Function }.any { it is CDerived.Array && it.prototypeOnlyStar }
+            }) {
+                "unsupported generated-C placeholder for ${function.id}: prototype-only [*] parameters require a retained definition; adjusting the bound conflicts with strict compiler declaration checks"
+            }
+        },
         resultDeclaration = { name ->
             // Removing only the outer function suffix preserves even a pointer-to-function return.
             val edits = declaration.storageSpecifiers.map { Triple(it.start, it.end, "") } +
@@ -105,8 +123,12 @@ internal fun globalDeclaration(
     else {
         // Null or blank text supplies no initializer evidence. Nonblank expressions are
         // compiler checked; an unfamiliar value must not silently become zero.
-        val initializer = retained?.let(::retainedInitializer)
-            ?: context.zeroInitializer(type.specifiers, type.derived, type.atomicType)
+        val initializer = retained?.let(::retainedInitializer) ?: run {
+            require(context.supportsZeroInitializer(type.specifiers, type.derived, type.atomicType)) {
+                "atomic aggregate zero initialization requires retained initializer evidence"
+            }
+            context.zeroInitializer(type.specifiers, type.derived, type.atomicType)
+        }
         "$declaration = $initializer;"
     }
 }
@@ -121,6 +143,7 @@ internal class GeneratedCDeclarationContext(types: List<RecoveredType>) {
         val resolutionDepth: Int = 0,
         val atomic: Boolean = false,
         val scalar: Boolean = false,
+        val unsupportedZeroInitializer: Boolean = false,
     )
     private val resolved = hashMapOf<String, ResolvedType>()
 
@@ -172,6 +195,11 @@ internal class GeneratedCDeclarationContext(types: List<RecoveredType>) {
         return if (type.atomic && type.scalar) "0" else "{0}"
     }
 
+    /** Emission-only policy: header rendering and typed-placeholder recognition must remain usable. */
+    @Synchronized
+    internal fun supportsZeroInitializer(specifiers: List<String>, derived: List<CDerived>, atomicType: CDeclaration? = null): Boolean =
+        !resolve(specifiers, derived, atomicType, linkedSetOf(), 0).unsupportedZeroInitializer
+
     private fun resolve(
         specifiers: List<String>,
         derived: List<CDerived>,
@@ -182,7 +210,12 @@ internal class GeneratedCDeclarationContext(types: List<RecoveredType>) {
         // Use-site operators precede alias operators: an A* stays a pointer even if A is int[].
         when (val outer = derived.firstOrNull()) {
             is CDerived.Pointer -> return ResolvedType(GeneratedCTypeKind.POINTER, atomic = outer.atomic, scalar = true)
-            is CDerived.Array -> return ResolvedType(if (outer.hasBound) GeneratedCTypeKind.ARRAY else GeneratedCTypeKind.INCOMPLETE_ARRAY)
+            is CDerived.Array -> {
+                // Skip consecutive dimensions iteratively; aliases still use the bounded resolver.
+                val element = resolve(specifiers, derived.dropWhile { it is CDerived.Array }, atomicType, visiting, depth)
+                return ResolvedType(if (outer.hasBound) GeneratedCTypeKind.ARRAY else GeneratedCTypeKind.INCOMPLETE_ARRAY,
+                    resolutionDepth = element.resolutionDepth, unsupportedZeroInitializer = element.unsupportedZeroInitializer)
+            }
             is CDerived.Function -> return ResolvedType(GeneratedCTypeKind.FUNCTION)
             null -> Unit
         }
@@ -196,7 +229,8 @@ internal class GeneratedCDeclarationContext(types: List<RecoveredType>) {
             // Invalid atomic void must not be interpreted as an explicit no-parameter list.
             // Keep array shape information to avoid inventing an alias-hidden array extent.
             val kind = if (inner.kind == GeneratedCTypeKind.VOID) GeneratedCTypeKind.OTHER else inner.kind
-            return inner.copy(kind = kind, resolutionDepth = inner.resolutionDepth + 1, atomic = true)
+            return inner.copy(kind = kind, resolutionDepth = inner.resolutionDepth + 1, atomic = true,
+                unsupportedZeroInitializer = !inner.scalar || inner.unsupportedZeroInitializer)
         }
         if (base == listOf("void")) return ResolvedType(GeneratedCTypeKind.VOID).withAtomicQualifier(specifiers)
         if (base.isNotEmpty() && base.all { it in integerSpecifiers }) {
@@ -226,7 +260,8 @@ internal class GeneratedCDeclarationContext(types: List<RecoveredType>) {
 
     // A use-site qualifier changes this result, never the cached unqualified alias shape.
     private fun ResolvedType.withAtomicQualifier(specifiers: List<String>): ResolvedType =
-        if ("_Atomic" in specifiers) copy(kind = if (kind == GeneratedCTypeKind.VOID) GeneratedCTypeKind.OTHER else kind, atomic = true) else this
+        if ("_Atomic" in specifiers) copy(kind = if (kind == GeneratedCTypeKind.VOID) GeneratedCTypeKind.OTHER else kind,
+            atomic = true, unsupportedZeroInitializer = !scalar || unsupportedZeroInitializer) else this
 
     companion object {
         val EMPTY = GeneratedCDeclarationContext(emptyList())
@@ -573,7 +608,7 @@ private inline fun <T> declarationFor(entityId: String, block: () -> T): T = try
 internal data class CToken(val text: String, val start: Int, val end: Int)
 internal sealed interface CDerived {
     data class Pointer(val atomic: Boolean = false) : CDerived
-    data class Array(val hasBound: Boolean) : CDerived
+    data class Array(val hasBound: Boolean, val prototypeOnlyStar: Boolean = false) : CDerived
     data class Function(
         val start: Int,
         val end: Int,
@@ -702,7 +737,8 @@ private class CDeclarationParser(raw: String, private val symbolicName: String? 
                 }
                 "[" -> {
                     val end = matchingCToken(tokens, cursor)
-                    derived += CDerived.Array(hasBound = end > cursor + 1)
+                    val bound = tokens.subList(cursor + 1, end).map { it.text }.filterNot { it in qualifiers }
+                    derived += CDerived.Array(hasBound = end > cursor + 1, prototypeOnlyStar = bound == listOf("*"))
                     cursor = end + 1
                 }
                 else -> break

@@ -3,7 +3,7 @@ package decompengine.project
 /** Emits buildable evidence stubs by default; raw recovered C remains in the program model for later refinement. */
 class EvidenceModuleReconstructor(private val includeRecoveredC: Boolean = false) : ModuleReconstructor {
     private val declarationContexts = GeneratedCDeclarationContextCache()
-    override fun cacheIdentity(): String = if (includeRecoveredC) "recovered-c:v5" else "evidence-only:v4"
+    override fun cacheIdentity(): String = if (includeRecoveredC) "recovered-c:v6" else "evidence-only:v5"
 
     override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule {
         val declarationContext = declarationContexts.forTypes(request.model.types)
@@ -62,7 +62,7 @@ class EvidenceModuleReconstructor(private val includeRecoveredC: Boolean = false
         require(!declaration.hasUnnamedParameters) {
             "unsupported generated-C placeholder for ${function.id}: parameter names are unavailable"
         }
-        return "${declaration.prototype} {\n${declaration.placeholderBody()}\n}"
+        return declaration.placeholderDefinition()
     }
 }
 
