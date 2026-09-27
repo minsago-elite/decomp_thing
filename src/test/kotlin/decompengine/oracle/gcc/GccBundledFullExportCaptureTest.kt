@@ -109,6 +109,8 @@ class GccBundledFullExportCaptureTest {
         )) fixture { root, run, reports ->
             val global = globalRecord(id, JsonPrimitive(address))
             val type = typeRecord(sourceAddress = JsonPrimitive(address))
+            writeFunction(root, functionRecord("fn_0000000000400010", "f",
+                references = JsonArray(listOf(JsonPrimitive(id)))))
             writeNamedRecords(root, id to global, typeId() to type)
             val snapshot = GccBundledFullExportCapture.capture(run, reports, artifacts())
             assertEquals(6L, snapshot.outputFileCount)
@@ -214,6 +216,45 @@ class GccBundledFullExportCaptureTest {
     }
 
     @Test
+    fun `matching model bytes cannot authenticate orphaned global sidecars`() = fixture { root, run, reports ->
+        val id = "global_0000000000400100"
+        writeNamedRecords(root, global = id to globalRecord(id, JsonPrimitive("0x400100")))
+        val failure = assertFailsWith<IllegalArgumentException> {
+            GccBundledFullExportCapture.capture(run, reports, artifacts())
+        }
+        assertTrue(failure.message.orEmpty().contains("orphaned global"), failure.message)
+    }
+
+    @Test
+    fun `matching model bytes cannot authenticate malformed call identities`() {
+        for (calls in listOf<JsonElement>(
+            JsonArray(listOf(JsonPrimitive(""))),
+            JsonArray(listOf(JsonPrimitive("attacker"))),
+            JsonArray(listOf(JsonPrimitive("fn_00000000004000AF"))),
+            JsonArray(listOf(JsonPrimitive("fn_400010"))),
+            JsonArray(listOf(JsonPrimitive("fn_00000000000400010"))),
+            JsonArray(listOf(JsonPrimitive(17))),
+            JsonArray(listOf(JsonNull)),
+            JsonPrimitive("fn_0000000000400010"),
+            JsonNull,
+        )) fixture { root, run, reports ->
+            writeFunction(root, functionRecord("fn_0000000000400010", "f", calls = calls))
+            val failure = assertFailsWith<IllegalArgumentException>(calls.toString()) {
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+            }
+            assertTrue(failure.message.orEmpty().contains("calls"), failure.message)
+        }
+    }
+
+    @Test
+    fun `call identities retain canonical unsigned function addresses`() = fixture { root, run, reports ->
+        writeFunction(root, functionRecord("fn_0000000000400010", "f", calls = JsonArray(listOf(
+            JsonPrimitive("fn_0000000000000000"), JsonPrimitive("fn_ffffffffffffffff"),
+        ))))
+        assertEquals(1L, GccBundledFullExportCapture.capture(run, reports, artifacts()).functionCount)
+    }
+
+    @Test
     fun `type evidence can retain its first function source address`() = fixture { root, run, reports ->
         writeNamedRecords(root, type = typeId() to typeRecord())
         assertEquals(5L, GccBundledFullExportCapture.capture(run, reports, artifacts()).outputFileCount)
@@ -254,6 +295,17 @@ class GccBundledFullExportCaptureTest {
                 GccBundledFullExportCapture.capture(run, reports, artifacts())
             }
             assertTrue(failure.message.orEmpty().contains("message"), failure.message)
+        }
+    }
+
+    @Test
+    fun `failure sidecars cannot authenticate blank failure messages`() {
+        for (message in listOf("", " ", "\t\r\n ", "\u00a0")) fixture { root, run, reports ->
+            writeFailure(root, JsonPrimitive(message))
+            val failure = assertFailsWith<IllegalArgumentException> {
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+            }
+            assertTrue(failure.message.orEmpty().contains("failure message must not be blank"), failure.message)
         }
     }
 
@@ -338,8 +390,9 @@ class GccBundledFullExportCaptureTest {
         status: String = "recovered",
         source: JsonElement = if (status == "failed") JsonNull else JsonPrimitive("int f(void) { return 1; }"),
         references: JsonElement = JsonArray(emptyList()),
+        calls: JsonElement = JsonArray(emptyList()),
     ) =
-        """{"id":"$id","name":"$name","address":"0x400010","prototype":"int f(void)","extractionStatus":"$status","recoveryAssessment":"unassessed","calls":[],"referencedGlobals":$references,"strings":[],"decompiledC":$source}"""
+        """{"id":"$id","name":"$name","address":"0x400010","prototype":"int f(void)","extractionStatus":"$status","recoveryAssessment":"unassessed","calls":$calls,"referencedGlobals":$references,"strings":[],"decompiledC":$source}"""
 
     private fun writeFunction(root: Path, record: String) {
         Files.writeString(root.resolve("reports/program_model.json.export/functions/fn_0000000000400010.json"), record)

@@ -61,12 +61,15 @@ internal data class CanonicalProgramModelStreamingLimits(
         const val HARD_MAXIMUM_INPUT_BYTES = 512 * 1024 * 1024
         const val HARD_MAXIMUM_FUNCTIONS = 131_072
         const val HARD_MAXIMUM_GLOBALS_OR_TYPES = 1_000_000
-        const val HARD_MAXIMUM_REFERENCES_PER_FUNCTION = 100_000
-        const val HARD_MAXIMUM_IDENTIFIER_CODE_POINTS = 4_096
-        const val HARD_MAXIMUM_PROTOTYPE_CODE_POINTS = 1_048_576
-        const val HARD_MAXIMUM_TEXT_CODE_POINTS = 16 * 1024 * 1024
-        const val HARD_MAXIMUM_NODES = 64_000_000L
-        const val HARD_MAXIMUM_TOKENS = 128_000_000L
+        // Full-export capture has a 64 MiB function-record / one-million-node envelope.
+        // Larger limits require an explicit caller profile; historical defaults above stay fixed.
+        const val HARD_MAXIMUM_REFERENCES_PER_FUNCTION = 1_000_000
+        const val HARD_MAXIMUM_IDENTIFIER_CODE_POINTS = 64 * 1024 * 1024
+        const val HARD_MAXIMUM_PROTOTYPE_CODE_POINTS = 64 * 1024 * 1024
+        const val HARD_MAXIMUM_TEXT_CODE_POINTS = 64 * 1024 * 1024
+        // Every counted JSON node/token consumes at least one byte of bounded model input.
+        const val HARD_MAXIMUM_NODES = HARD_MAXIMUM_INPUT_BYTES * 1L
+        const val HARD_MAXIMUM_TOKENS = HARD_MAXIMUM_INPUT_BYTES * 1L
         const val HARD_MAXIMUM_DEPTH = 32
     }
 }
