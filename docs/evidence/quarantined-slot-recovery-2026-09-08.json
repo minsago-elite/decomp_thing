@@ -9,11 +9,13 @@
       "path": "src/main/kotlin/decompengine/oracle/fulltree/FullTreeDiskScratchAuthority.kt",
       "sha256": "eadc6c791d6848bf87999814e5b2af71b963277609351eba6df86c74cae18cde",
       "anchors": [
+        "FullTreeDiskScratchLease.requireCurrent.boundedLeaseRootInspection:630-633",
         "FullTreeDiskScratchLease.requireCleanAndRelease:939-984",
         "FullTreeDiskScratchLease.abandonForRecovery:988-993",
         "FullTreeDiskScratchColdLease:1072-1347",
-        "FullTreeDiskScratchAuthority.openExistingReadOnly:1349-1400",
+        "FullTreeDiskScratchAuthority.openExistingReadOnly:1349-1443",
         "quarantineAndRemoveLeaseRoot:1591-1662",
+        "requireColdPopulation.boundedLeaseRootInspections:1875-1893",
         "MAXIMUM_LEASE_ROOT_ENTRIES=2:2132"
       ],
       "facts": [
