@@ -35,8 +35,9 @@ external `analyzeHeadless` installation are not accepted as substitutes.
 
 `BoundedDwarfInterfaceFactScanner` reads source interface facts from the rich
 ELF through the bounded DWARF reader. It retains declaration and origin
-locators, parameter order, variadic observations, the reachable raw type
-graph, and variable candidates with their scope and storage observations.
+locators, parameter order, variadic observations, the raw type graph within
+its declared traversal scope, and variable candidates with their scope and
+storage observations.
 Raw location expressions remain distinct from interpreted addresses or TLS
 offsets. Missing, unsupported, and ambiguous facts keep their evidence states.
 
@@ -47,6 +48,17 @@ join the reviewed physical function population by exact executable RVA.
 Names do not establish identity. All 12,844 reviewed oracle records remain
 in the evidence population: 3,284 scored physical functions and 9,560
 explicitly excluded compiler-generated or inline-only records.
+
+The driver selects the scanner's `abi-layout` type graph scope. It expands
+function return and parameter types, global types, and the references needed
+for by-value layouts, including aliases, array elements, members, and bases.
+Pointer and reference pointees and non-layout child references retain their
+validated target IDs, evidence, and explicit reasons for deferred expansion.
+All raw child records remain present. A deferred target expands if it is
+also an independently required by-value root. Depth checks follow only the
+edges selected for expansion. Pointer representation may be known while
+pointee layout remains unresolved; missing required by-value layout remains
+unresolved. The scanner's default scope remains `full-references`.
 
 The separate SysV AMD64 projection derives source ABI facts only when the
 raw observations and its versioned target rules provide enough evidence.
@@ -81,9 +93,8 @@ The driver profile separately bounds the retained fact model at 1 GiB using
 fixed record/container allowances and UTF-16 string payload sizes. This is
 a deterministic resource model, not an RSS measurement. Encoded publication
 still has independent limits of 512 MiB, 16 million JSON nodes, and 256
-shards; each shard is limited to 8 MiB and 100,000 nodes. The driver profile
-allows type graph depth 128 within the scanner's existing hard ceiling;
-the generic default remains 64. The traversal-work bound remains enforced.
+shards; each shard is limited to 8 MiB and 100,000 nodes. Type graph depth is
+limited to the scanner's default 64. The traversal-work bound remains enforced.
 
 The **GCC oracle model** workflow has a separate **Retained GCC driver DWARF
 interfaces** job. It runs on manual dispatch or on ordinary PR events when

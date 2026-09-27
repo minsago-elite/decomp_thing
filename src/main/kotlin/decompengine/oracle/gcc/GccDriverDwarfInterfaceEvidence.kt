@@ -65,7 +65,7 @@ internal object GccDriverDwarfInterfaceEvidence {
     private val SCAN_LIMITS = BoundedDwarfInterfaceFactLimits(
         maximumArtifactBytes = 20_713_760,
         maximumRetainedFactBytes = 1024L * 1024 * 1024,
-        maximumTypeDepth = 128,
+        typeGraphScope = BoundedDwarfTypeGraphScope.ABI_LAYOUT,
     )
     private val CONTROL_LIMITS = FullTreeControlLimits(
         maximumRichArtifactBytes = 20_713_760,

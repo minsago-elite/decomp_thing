@@ -112,6 +112,12 @@ internal class DwarfInterfaceFunctionFacts(
     ))
 }
 
+/** Which validated raw type references also require materializing their target declarations. */
+internal enum class BoundedDwarfTypeGraphScope(val wireName: String) {
+    FULL_REFERENCES("full-references"),
+    ABI_LAYOUT("abi-layout"),
+}
+
 internal data class BoundedDwarfInterfaceFactLimits(
     val maximumArtifactBytes: Long = 512L * 1024L * 1024L,
     val maximumFunctions: Int = 20_000,
@@ -133,6 +139,7 @@ internal data class BoundedDwarfInterfaceFactLimits(
     val maximumOutputBytes: Long = 512L * 1024L * 1024L,
     val maximumRetainedFactBytes: Long = maximumOutputBytes,
     val shardLimits: BoundedDwarfShardLimits = BoundedDwarfShardLimits(),
+    val typeGraphScope: BoundedDwarfTypeGraphScope = BoundedDwarfTypeGraphScope.FULL_REFERENCES,
 ) {
     init {
         require(maximumArtifactBytes in 1..1024L * 1024L * 1024L)
@@ -176,6 +183,7 @@ internal data class BoundedDwarfInterfaceFactLimits(
         "maximumOutputBytes" to JsonPrimitive(maximumOutputBytes),
         "maximumRetainedFactBytes" to JsonPrimitive(maximumRetainedFactBytes),
         "shardLimits" to shardLimits.toJson(),
+        "typeGraphScope" to JsonPrimitive(typeGraphScope.wireName),
     ))
 }
 

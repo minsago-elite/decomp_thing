@@ -1,7 +1,13 @@
 package decompengine.oracle.fulltree
 
+import decompengine.oracle.core.OracleJson
+import decompengine.oracle.structural.DwarfAbiScalarKind
+import decompengine.oracle.structural.DwarfSysvAmd64InterfaceProjection
 import java.io.ByteArrayOutputStream
+import java.nio.file.Files
 import java.nio.file.Path
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -10,6 +16,154 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class BoundedDwarfInterfaceTypesTest {
+    @Test
+    fun `ABI layout scope retains terminal pointer references without expanding unrelated pointees`(): Unit =
+        inInterfaceFixtureDirectory { root ->
+            val tags = listOf(0x0fL, 0x10L, 0x42L)
+            val entries = tags.indices.map { emitted("entry$it", "pointer$it", it) }
+            val pointers = tags.mapIndexed { index, tag ->
+                die("pointer$index", tag, listOf(number(0x0b, 8), reference(0x49, "tail0")))
+            }
+            val tail = (0 until 20).map { die("tail$it", 0x16,
+                listOf(reference(0x49, if (it == 19) "int" else "tail${it + 1}"))) } + integerType()
+            val fixture = typeElf(*(entries + pointers + tail).toTypedArray())
+            val limits = BoundedDwarfInterfaceFactLimits(maximumTypeDepth = 1, maximumTypes = 3,
+                typeGraphScope = BoundedDwarfTypeGraphScope.ABI_LAYOUT)
+            val facts = scan(root, fixture, limits)
+            assertEquals(3, facts.types.size)
+            assertEquals(JsonPrimitive("abi-layout"), facts.limits.toJson()["typeGraphScope"])
+            facts.types.values.forEach { node ->
+                known(node.type, fixture.locator("tail0"))
+                assertEquals(listOf("${node.id}:attribute=0x49"), node.type.evidence)
+                assertTrue("type-reference-not-expanded:abi-layout-pointee" in node.type.reasons)
+            }
+            val projection = DwarfSysvAmd64InterfaceProjection.project(facts, target())
+            assertTrue(projection.functions.all { it.returnType?.observable == true })
+            assertTrue(projection.functions.all { it.returnType?.shape?.scalar == DwarfAbiScalarKind.POINTER })
+            assertFalse(fixture.locator("tail0") in facts.types)
+            assertEquals(BoundedDwarfTypeGraphScope.FULL_REFERENCES, BoundedDwarfInterfaceFactLimits().typeGraphScope)
+            assertFailsWith<FullTreeControlException> {
+                scan(root, fixture, limits.copy(typeGraphScope = BoundedDwarfTypeGraphScope.FULL_REFERENCES))
+            }
+        }
+
+    @Test
+    fun `ABI layout keeps every nonlayout child fact while expanding actual aggregate members`(): Unit =
+        inInterfaceFixtureDirectory { root ->
+            fun fixture(unknownChild: Boolean): TypeGraphElf {
+                val children = listOf(die("field", 0x0d, listOf(reference(0x49, "int"), number(0x38, 0)))) +
+                    listOf(0x2eL, 0x2fL, 0x13L).mapIndexed { index, tag -> die("metadata$index", tag,
+                        listOf(reference(0x49, "tail0"), reference(0x1d, "tail0"))) } +
+                    if (unknownChild) listOf(die("unknown", 0x777, listOf(reference(0x49, "int")))) else emptyList()
+                val tail = (0 until 20).map { die("tail$it", 0x16,
+                    listOf(reference(0x49, if (it == 19) "int" else "tail${it + 1}"))) }
+                return typeElf(*(listOf(emitted("entry", "record"), die("record", 0x13,
+                    listOf(number(0x0b, 4), number(0x88, 4)), children), integerType()) + tail).toTypedArray())
+            }
+            val limits = BoundedDwarfInterfaceFactLimits(maximumTypeDepth = 2,
+                typeGraphScope = BoundedDwarfTypeGraphScope.ABI_LAYOUT)
+            val input = fixture(false)
+            val facts = scan(root, input, limits)
+            assertEquals(setOf(input.locator("record"), input.locator("int")), facts.types.keys)
+            val children = facts.types.getValue(input.locator("record")).children
+            assertEquals(listOf("field", "metadata0", "metadata1", "metadata2").map(input::locator), children.map { it.id })
+            assertTrue(children.first().type.reasons.isEmpty())
+            children.drop(1).forEach { child ->
+                listOf(0x49L, 0x1dL).forEach { attribute ->
+                    val reference = child.attributes.getValue(attribute)
+                    known(reference, input.locator("tail0"))
+                    assertTrue("type-reference-not-expanded:abi-layout-non-layout-child" in reference.reasons)
+                    assertEquals(listOf("${child.id}:attribute=0x${attribute.toString(16)}"), reference.evidence)
+                }
+            }
+            val projected = DwarfSysvAmd64InterfaceProjection.project(facts, target()).functions.single().returnType
+            assertEquals(true, projected?.observable)
+            assertEquals(1, projected?.shape?.fields?.size)
+            val missingMember = DwarfSysvAmd64InterfaceProjection.project(facts.functions,
+                facts.types - input.locator("int"), target()).functions.single().returnType
+            assertEquals(false, missingMember?.observable)
+            val unsupported = DwarfSysvAmd64InterfaceProjection.project(scan(root, fixture(true), limits), target())
+            assertEquals(false, unsupported.functions.single().returnType?.observable)
+            assertFailsWith<FullTreeControlException> {
+                scan(root, input, limits.copy(typeGraphScope = BoundedDwarfTypeGraphScope.FULL_REFERENCES))
+            }
+        }
+
+    @Test
+    fun `deferred pointee expands independently for function and global by value roots in either order`(): Unit =
+        inInterfaceFixtureDirectory { root ->
+            for (global in listOf(false, true)) for (pointerFirst in listOf(false, true)) {
+                val pointerEntry = emitted("pointerEntry", "pointer")
+                val valueEntry = if (global) die("valueEntry", 0x34, listOf(reference(0x49, "record")))
+                    else emitted("valueEntry", "record", 1)
+                val entries = if (pointerFirst) listOf(pointerEntry, valueEntry) else listOf(valueEntry, pointerEntry)
+                val fixture = typeElf(*(entries + listOf(
+                    die("pointer", 0x0f, listOf(number(0x0b, 8), reference(0x49, "record"))),
+                    die("record", 0x13, listOf(number(0x0b, 4), number(0x88, 4)), listOf(
+                        die("field", 0x0d, listOf(reference(0x49, "int"), number(0x38, 0))),
+                    )), integerType(),
+                )).toTypedArray())
+                val facts = scan(root, fixture, BoundedDwarfInterfaceFactLimits(maximumTypeDepth = 2,
+                    typeGraphScope = BoundedDwarfTypeGraphScope.ABI_LAYOUT))
+                assertEquals(3, facts.types.size)
+                val deferred = facts.types.getValue(fixture.locator("pointer")).type
+                known(deferred, fixture.locator("record"))
+                assertTrue("type-reference-not-expanded:abi-layout-pointee" in deferred.reasons)
+                val projection = DwarfSysvAmd64InterfaceProjection.project(facts, target())
+                val record = projection.types.single { it.rawTypeId == fixture.locator("record") }
+                assertTrue(record.observable, record.reasons.toString())
+                assertEquals(1, record.shape?.fields?.size)
+                assertEquals(DwarfAbiScalarKind.INTEGER, record.shape?.fields?.single()?.type?.scalar)
+            }
+        }
+
+    @Test
+    fun `ABI layout expands aliases enums arrays bases and subroutine formal parameter types`(): Unit =
+        inInterfaceFixtureDirectory { root ->
+            val fixture = typeElf(
+                emitted("entry", "subroutine"),
+                die("subroutine", 0x15, listOf(reference(0x49, "alias")), listOf(
+                    die("parameter", 0x05, listOf(reference(0x49, "derived"))),
+                )),
+                die("derived", 0x13, children = listOf(
+                    die("base", 0x1c, listOf(reference(0x49, "baseType"))),
+                    die("field", 0x0d, listOf(reference(0x49, "array"))),
+                )),
+                die("baseType", 0x13, children = listOf(die("baseField", 0x0d, listOf(reference(0x49, "int"))))),
+                die("array", 0x01, listOf(reference(0x49, "enum")), listOf(
+                    die("dimension", 0x21, listOf(reference(0x49, "int"), number(0x37, 2))),
+                )),
+                die("enum", 0x04, listOf(reference(0x49, "alias"))),
+                die("alias", 0x16, listOf(reference(0x49, "const"))),
+                die("const", 0x26, listOf(reference(0x49, "int"))), integerType(),
+            )
+            val full = scan(root, fixture)
+            val layout = scan(root, fixture, BoundedDwarfInterfaceFactLimits(typeGraphScope = BoundedDwarfTypeGraphScope.ABI_LAYOUT))
+            assertEquals(8, layout.types.size)
+            assertEquals(full.types.mapValues { it.value.toJson() }, layout.types.mapValues { it.value.toJson() })
+        }
+
+    @Test
+    fun `deferred references still reject nonboundary targets and retain unsupported target tags`(): Unit =
+        inInterfaceFixtureDirectory { root ->
+            val limits = BoundedDwarfInterfaceFactLimits(typeGraphScope = BoundedDwarfTypeGraphScope.ABI_LAYOUT)
+            val pointer = typeElf(emitted("entry", "pointer"),
+                die("pointer", 0x0f, listOf(reference(0x49, "int", addend = 1))), integerType())
+            val method = typeElf(emitted("entry", "record"), die("record", 0x13, children = listOf(
+                die("method", 0x2e, listOf(reference(0x49, "int", addend = 1))),
+            )), integerType())
+            listOf(pointer, method).forEach { assertFailsWith<FullTreeControlException> { scan(root, it, limits) } }
+            val unsupported = typeElf(emitted("entry", "pointer"),
+                die("pointer", 0x0f, listOf(reference(0x49, "declaration"))), die("declaration", 0x2e))
+            val facts = scan(root, unsupported, limits)
+            val reference = facts.types.getValue(unsupported.locator("pointer")).type
+            assertEquals(DwarfInterfaceFactState.UNKNOWN, reference.state)
+            assertEquals(listOf(unsupported.locator("declaration")), reference.values)
+            assertTrue("unsupported-type-tag:0x2e" in reference.reasons)
+            assertTrue("type-reference-not-expanded:abi-layout-pointee" in reference.reasons)
+            assertEquals(1, facts.types.size)
+        }
+
     @Test
     fun `unsupported function attributes preserve each physical and inherited occurrence`(): Unit =
         inInterfaceFixtureDirectory { root ->
@@ -584,6 +738,8 @@ class BoundedDwarfInterfaceTypesTest {
         assertEquals(DwarfInterfaceFactState.KNOWN, fact.state)
         assertEquals(listOf(value), fact.values)
     }
+
+    private fun target() = OracleJson.parse(Files.readAllBytes(Path.of("oracle/targets/sysv-amd64-v1.json"))) as JsonObject
 
     private fun scan(root: Path, fixture: TypeGraphElf,
         limits: BoundedDwarfInterfaceFactLimits = BoundedDwarfInterfaceFactLimits()): BoundedDwarfInterfaceFacts {

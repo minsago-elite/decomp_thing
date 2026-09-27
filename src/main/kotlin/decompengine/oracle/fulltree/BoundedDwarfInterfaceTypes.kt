@@ -232,6 +232,7 @@ internal class BoundedDwarfInterfaceTypeResolver(
         depth: Int,
         inheritance: InterfaceInheritance? = null,
         expand: Boolean = true,
+        unexpandedReason: String? = null,
     ): DwarfInterfaceFact<String> {
         val targets = LinkedHashMap<String, ResolvedFunctionDie>()
         val resolved = attributeFact(source, attributeName, inheritance) { owner, attribute ->
@@ -249,6 +250,7 @@ internal class BoundedDwarfInterfaceTypeResolver(
                         buildList {
                             if (id in active) add("type-reference-cycle:$id")
                             if (!supported) add("unsupported-type-tag:${typeHex(target.record.tag)}")
+                            unexpandedReason?.let(::add)
                         },
                     )
                 }
@@ -256,7 +258,8 @@ internal class BoundedDwarfInterfaceTypeResolver(
                     DwarfInterfaceFactState.UNKNOWN,
                     emptyList(),
                     listOf(evidence),
-                    listOf("unsupported-type-reference-form:${typeHex(value.resolvedForm)}:operand=${value.rawValue}"),
+                    listOfNotNull("unsupported-type-reference-form:${typeHex(value.resolvedForm)}:operand=${value.rawValue}",
+                        unexpandedReason),
                 )
                 else -> throw FullTreeControlException("$evidence is not encoded as a DWARF type reference")
             }
@@ -281,12 +284,15 @@ internal class BoundedDwarfInterfaceTypeResolver(
         budget.charge(512L + id.length.toLong() * 2L, "DWARF interface type node")
         active += id
         val inheritance = InterfaceInheritance(repository, source, limits.maximumReferenceChainEntries)
-        val attributes = attributes(source, depth, inheritance, setOf(TYPE_AT_NAME, TYPE_AT_BYTE_SIZE, TYPE_AT_ENCODING, TYPE_AT_TYPE))
+        val expandedEdges = LinkedHashSet<String>()
+        val attributes = attributes(source, depth, inheritance,
+            setOf(TYPE_AT_NAME, TYPE_AT_BYTE_SIZE, TYPE_AT_ENCODING, TYPE_AT_TYPE), expandedEdges)
         val children = directChildren(source).map { child ->
             val childId = dwarfInterfaceLocator(child)
             budget.charge(384L + childId.length.toLong() * 2L, "DWARF interface type child")
             val childInheritance = InterfaceInheritance(repository, child, limits.maximumReferenceChainEntries)
-            val childAttributes = attributes(child, depth, childInheritance, setOf(TYPE_AT_NAME, TYPE_AT_TYPE))
+            val childAttributes = attributes(child, depth, childInheritance, setOf(TYPE_AT_NAME, TYPE_AT_TYPE),
+                expandedEdges, nonLayoutChild = child.record.tag !in ABI_LAYOUT_TYPE_CHILD_TAGS)
             val childReasons = buildList {
                 addAll(childInheritance.reasons)
                 if (child.record.tag !in INTERFACE_TYPE_CHILD_TAGS) {
@@ -322,9 +328,8 @@ internal class BoundedDwarfInterfaceTypeResolver(
             children,
             reasons,
         )
-        edges[id] = (listOf(attributes) + children.map { it.attributes })
-            .flatMap { entry -> listOfNotNull(entry[TYPE_AT_TYPE], entry[TYPE_AT_CONTAINING_TYPE]) }
-            .flatMap { it.values }.distinct()
+        // Deferred raw references remain deferred even if another root materializes their target.
+        edges[id] = expandedEdges.toList()
         active -= id
     }
 
@@ -333,16 +338,29 @@ internal class BoundedDwarfInterfaceTypeResolver(
         depth: Int,
         inheritance: InterfaceInheritance,
         mandatory: Set<Long>,
+        expandedEdges: MutableSet<String>,
+        nonLayoutChild: Boolean = false,
     ): Map<Long, DwarfInterfaceFact<String>> {
         val names = (inheritance.sources.flatMap { owner ->
             owner.record.attributes.map(FullTreeDwarfDieAttribute::name).filter {
                 owner.record.offset == source.record.offset || it !in TYPE_NON_INHERITED_ATTRIBUTES
             }
         } + mandatory).distinct().sorted()
+        val expandedReferenceNames = HashSet<Long>()
         return names.associateWith { name ->
             budget.charge(64L, "DWARF interface type attribute entry")
             when (name) {
-                TYPE_AT_TYPE, TYPE_AT_CONTAINING_TYPE -> referenceFact(source, name, depth, inheritance)
+                TYPE_AT_TYPE, TYPE_AT_CONTAINING_TYPE -> {
+                    val reason = when {
+                        limits.typeGraphScope != BoundedDwarfTypeGraphScope.ABI_LAYOUT -> null
+                        nonLayoutChild -> "type-reference-not-expanded:abi-layout-non-layout-child"
+                        name == TYPE_AT_TYPE && source.record.tag in ABI_LAYOUT_POINTER_TAGS ->
+                            "type-reference-not-expanded:abi-layout-pointee"
+                        else -> null
+                    }
+                    referenceFact(source, name, depth, inheritance, expand = reason == null,
+                        unexpandedReason = reason).also { if (reason == null) expandedReferenceNames += name }
+                }
                 TYPE_AT_ABSTRACT_ORIGIN, TYPE_AT_SPECIFICATION -> attributeFact(source, name, inheritance) { owner, attribute ->
                     declarationReferenceFact(owner, attribute)
                 }
@@ -360,6 +378,11 @@ internal class BoundedDwarfInterfaceTypeResolver(
                         listOf("uninterpreted-type-attribute:${typeHex(name)}:form=${typeHex(attribute.declaredForm)}"),
                     )
                 }
+            }
+        }.also { attributes ->
+            // Preserve the established traversal order independently of attribute decode order.
+            for (name in listOf(TYPE_AT_TYPE, TYPE_AT_CONTAINING_TYPE)) {
+                if (name in expandedReferenceNames) expandedEdges += attributes.getValue(name).values
             }
         }
     }
@@ -527,6 +550,9 @@ private val TYPE_NUMERIC_CONSTANT_FORMS = setOf(
 )
 
 private val INTERFACE_TYPE_CHILD_TAGS = setOf(0x05L, 0x0dL, 0x18L, 0x1cL, 0x21L, 0x28L)
+
+private val ABI_LAYOUT_POINTER_TAGS = setOf(0x0fL, 0x10L, 0x42L)
+private val ABI_LAYOUT_TYPE_CHILD_TAGS = setOf(0x05L, 0x0dL, 0x1cL, 0x21L)
 
 /** Attribute-specific constant semantics; never interpret an arbitrary numeric form as a layout. */
 internal val INTERFACE_TYPE_CONSTANT_ATTRIBUTES: Set<Long> = setOf(
