@@ -78,6 +78,7 @@ class GccBundledFullExportCaptureTest {
         for (mutate in listOf<(Path) -> Unit>(
             { path -> writeState(path, recoveryMode = "planning") },
             { path -> writeState(path, inputSha256 = "f".repeat(64)) },
+            { path -> writeState(path, exporterVersion = 10) },
             { path -> writeProgress(path, completed = 0, phase = "decompiling") },
             { path -> Files.writeString(path.resolve("reports/program_model.json.export/planning-batches/stray"), "x") },
         )) fixture { root, run, reports ->
@@ -247,7 +248,8 @@ class GccBundledFullExportCaptureTest {
     }
 
     @Test
-    fun `call identities retain canonical unsigned function addresses`() = fixture { root, run, reports ->
+    fun `call identity syntax does not claim authenticated target provenance`() = fixture { root, run, reports ->
+        // Non-external thunks may be absent from the function inventory and file-backed ELF ranges.
         writeFunction(root, functionRecord("fn_0000000000400010", "f", calls = JsonArray(listOf(
             JsonPrimitive("fn_0000000000000000"), JsonPrimitive("fn_ffffffffffffffff"),
         ))))
@@ -258,6 +260,63 @@ class GccBundledFullExportCaptureTest {
     fun `type evidence can retain its first function source address`() = fixture { root, run, reports ->
         writeNamedRecords(root, type = typeId() to typeRecord())
         assertEquals(5L, GccBundledFullExportCapture.capture(run, reports, artifacts()).outputFileCount)
+    }
+
+    @Test
+    fun `type path encoding preserves Unicode escapes and ambiguous comment characters losslessly`() {
+        val paths = listOf(
+            "/scalar" to "\"\\/scalar\"",
+            "/a*/T" to "\"\\/a*\\/T\"",
+            "/a* /T" to "\"\\/a* \\/T\"",
+            "/a*/b* /界𐐀" to "\"\\/a*\\/b* \\/界𐐀\"",
+            "/quote\"/back\\slash\n\r\t\b\u000c" to
+                "\"\\/quote\\\"\\/back\\\\slash\\n\\r\\t\\u0008\\u000c\"",
+        )
+        for ((path, encoded) in paths) fixture { root, run, reports ->
+            val id = typeId(path)
+            writeNamedRecords(root, type = id to typeRecord(id = id,
+                declaration = JsonPrimitive("/* Ghidra type $encoded */ typedef int scalar;")))
+            val snapshot = GccBundledFullExportCapture.capture(run, reports, artifacts())
+            assertEquals(5L, snapshot.outputFileCount)
+            assertTrue(snapshot.sidecarManifest.decodeToString().contains("types/$id.json"))
+        }
+    }
+
+    @Test
+    fun `matching model bytes cannot authenticate a type path paired with another identity`() {
+        for ((identityPath, declarationPath) in listOf(
+            "/other" to "\"\\/scalar\"",
+            "/a*/T" to "\"\\/a* \\/T\"",
+            "/a* /T" to "\"\\/a*\\/T\"",
+        )) fixture { root, run, reports ->
+            val id = typeId(identityPath)
+            writeNamedRecords(root, type = id to typeRecord(id = id,
+                declaration = JsonPrimitive("/* Ghidra type $declarationPath */ typedef int scalar;")))
+            val failure = assertFailsWith<IllegalArgumentException> {
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+            }
+            assertTrue(failure.message.orEmpty().contains("identity does not match"), failure.message)
+        }
+    }
+
+    @Test
+    fun `type path metadata rejects legacy lossy missing and noncanonical encodings`() {
+        for (declaration in listOf<JsonElement>(
+            JsonPrimitive("typedef int scalar;"),
+            JsonPrimitive("/* Ghidra type /scalar */ typedef int scalar;"),
+            JsonPrimitive("/* Ghidra type \"/scalar\" */ typedef int scalar;"),
+            JsonPrimitive("/* Ghidra type \"\\/sc\\u0061lar\" */ typedef int scalar;"),
+            JsonPrimitive("/* Ghidra type null */ typedef int scalar;"),
+            JsonPrimitive("/* Ghidra type [] */ typedef int scalar;"),
+            JsonPrimitive("/* Ghidra type \"\\/scalar\" */typedef int scalar;"),
+            JsonPrimitive("/* Ghidra type \"\\/a*/T\" */ typedef int scalar;"),
+            JsonNull,
+        )) fixture { root, run, reports ->
+            writeNamedRecords(root, type = typeId() to typeRecord(declaration = declaration))
+            assertFailsWith<IllegalArgumentException>(declaration.toString()) {
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+            }
+        }
     }
 
     @Test
@@ -372,8 +431,8 @@ class GccBundledFullExportCaptureTest {
     private fun exporterSha() = OracleArtifacts.sha256("exporter".toByteArray())
     private fun analysisToolSha() = OracleArtifacts.sha256("ghidra-archive".toByteArray())
 
-    private fun writeState(root: Path, recoveryMode: String = "full", inputSha256: String = inputSha()) {
-        val state = """{"schemaVersion":2,"exporterVersion":10,"exporterSha256":"${exporterSha()}","analysisToolSha256":"${analysisToolSha()}","recoveryMode":"$recoveryMode","inputSha256":"$inputSha256","language":"x86:LE:64:default","compilerSpec":"gcc","semanticStateBinding":null}
+    private fun writeState(root: Path, recoveryMode: String = "full", inputSha256: String = inputSha(), exporterVersion: Int = 11) {
+        val state = """{"schemaVersion":2,"exporterVersion":$exporterVersion,"exporterSha256":"${exporterSha()}","analysisToolSha256":"${analysisToolSha()}","recoveryMode":"$recoveryMode","inputSha256":"$inputSha256","language":"x86:LE:64:default","compilerSpec":"gcc","semanticStateBinding":null}
 """
         Files.writeString(root.resolve("reports/program_model.json.export/state.json"), state)
     }
@@ -402,10 +461,15 @@ class GccBundledFullExportCaptureTest {
     private fun globalRecord(id: String, address: JsonElement, status: String = "recovered") =
         """{"id":"$id","name":"g","address":$address,"type":"int","initializer":null,"extractionStatus":"$status","recoveryAssessment":"unassessed"}"""
 
-    private fun typeId() = "type_" + OracleArtifacts.sha256("int".toByteArray())
+    private fun typeId(path: String = "/scalar") = "type_" + OracleArtifacts.sha256(path.toByteArray())
 
-    private fun typeRecord(status: String = "partial", sourceAddress: JsonElement = JsonPrimitive("0x400010")) =
-        """{"id":"${typeId()}","declaration":"typedef int scalar;","sourceAddress":$sourceAddress,"extractionStatus":"$status","recoveryAssessment":"unassessed"}"""
+    private fun typeRecord(
+        status: String = "partial",
+        sourceAddress: JsonElement = JsonPrimitive("0x400010"),
+        id: String = typeId(),
+        declaration: JsonElement = JsonPrimitive("/* Ghidra type \"\\/scalar\" */ typedef int scalar;"),
+    ) =
+        """{"id":"$id","declaration":$declaration,"sourceAddress":$sourceAddress,"extractionStatus":"$status","recoveryAssessment":"unassessed"}"""
 
     private fun writeNamedRecords(root: Path, global: Pair<String, String>? = null, type: Pair<String, String>? = null) {
         val export = root.resolve("reports/program_model.json.export")
