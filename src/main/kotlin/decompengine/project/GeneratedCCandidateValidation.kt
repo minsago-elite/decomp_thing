@@ -1,14 +1,29 @@
 package decompengine.project
 
+/** Attribution reads retained C syntax, so preprocessing must not hide or rename its definitions. */
+internal fun generatedCAttributionPreprocessorIssue(source: String): String? =
+    GeneratedCCandidateValidation.preprocessorAttributionIssue(source)
+
 /** Generated-C source checks. Invocation and release acceptance remain in orchestration. */
 internal object GeneratedCCandidateValidation {
     private val declarationContexts = GeneratedCDeclarationContextCache()
+    private val escapedPhysicalLine = Regex("""(?:\\|\?\?/)[ \t\u000b\f]*(?:\r\n?|\n)""")
+    private val literalSystemInclude = Regex("<[^<>\\r\\n]+>")
     fun assess(
         module: PlannedModule,
         model: RecoveredProgramModel,
         generator: String,
         source: String,
     ): List<ModuleReconstructionIssue> {
+        generatedCAttributionPreprocessorIssue(source)?.let { reason ->
+            return (module.functionIds + module.globalIds).map { id ->
+                ModuleReconstructionIssue(
+                    "unsupported-preprocessor-attribution",
+                    "candidate definition attribution for $id requires unconditional retained syntax: $reason",
+                    listOf(id),
+                )
+            }
+        }
         val issues = mutableListOf<ModuleReconstructionIssue>()
         val declarationContext = declarationContexts.forTypes(model.types)
         val codeOnly = codeWithoutCommentsOrLiterals(source)
@@ -121,9 +136,39 @@ internal object GeneratedCCandidateValidation {
 
     private fun recoveredEvidenceIsTrivial(function: RecoveredFunction, context: GeneratedCDeclarationContext): Boolean =
         function.decompiledC?.let { recovered ->
+            if (generatedCAttributionPreprocessorIssue(recovered) != null) return@let false
             findFunctionBody(recovered, function.name)?.let { genericReturnBody(it) || isGeneratedCPlaceholderBody(function, it, context) }
                 ?: Regex("\\{\\s*return(?:\\s+0)?\\s*;\\s*}", RegexOption.DOT_MATCHES_ALL).containsMatchIn(recovered)
         } == true
+
+    /** A linear lexical guard, not a preprocessor: even a known-looking #if condition is rejected. */
+    internal fun preprocessorAttributionIssue(source: String): String? {
+        // C splices physical lines before recognizing comments or directives. The attribution
+        // scanners do not perform that translation, so never let a splice conceal source syntax.
+        if (escapedPhysicalLine.containsMatchIn(source)) {
+            return "escaped physical lines require preprocessing before definition attribution"
+        }
+        for (line in codeWithoutCommentsOrLiterals(source).lineSequence()) {
+            val text = line.trimStart()
+            val markerLength = when {
+                text.startsWith('#') -> 1
+                text.startsWith("%:") -> 2
+                text.startsWith("??=") -> 3
+                else -> continue
+            }
+            val directive = text.drop(markerLength).trimStart()
+            if (directive.isEmpty()) continue // A null directive cannot alter a definition.
+            val name = directive.takeWhile { it.isLetterOrDigit() || it == '_' }
+            if (name != "include") return "preprocessing directive #${name.ifEmpty { "<unknown>" }} is unsupported"
+            // Quoted header names are masked with the other literals. System header names stay
+            // visible between angle brackets; a remaining identifier is a macro include operand.
+            val operand = directive.drop(name.length).trim()
+            if (operand.isNotEmpty() && !literalSystemInclude.matches(operand)) {
+                return "macro-dependent include operands are unsupported"
+            }
+        }
+        return null
+    }
 
     /**
      * Preserve code layout while hiding tokens that occur only in comments and literals. This keeps
@@ -140,11 +185,11 @@ internal object GeneratedCCandidateValidation {
             val next = source.getOrNull(index + 1)
             when {
                 lineComment -> {
-                    append(if (character == '\n') '\n' else ' ')
-                    if (character == '\n') lineComment = false
+                    append(if (character == '\n' || character == '\r') character else ' ')
+                    if (character == '\n' || character == '\r') lineComment = false
                 }
                 blockComment -> {
-                    append(if (character == '\n') '\n' else ' ')
+                    append(if (character == '\n' || character == '\r') character else ' ')
                     if (character == '*' && next == '/') {
                         append(' ')
                         index++
@@ -152,7 +197,7 @@ internal object GeneratedCCandidateValidation {
                     }
                 }
                 quoted != null -> {
-                    append(if (character == '\n') '\n' else ' ')
+                    append(if (character == '\n' || character == '\r') character else ' ')
                     when {
                         escaped -> escaped = false
                         character == '\\' -> escaped = true

@@ -46,6 +46,64 @@ class GeneratedCPlaceholderValidationTest {
     }
 
     @Test
+    fun `equivalent pure zero initializers remain placeholders while meaningful expressions survive`() {
+        val context = GeneratedCDeclarationContext(TYPES)
+        for (prototype in listOf("int convert(void)", "const char *convert(void)",
+            "struct result convert(void)", "int (*convert(void))(int)")) {
+            val function = function(prototype)
+            val declaration = when (prototype) {
+                "int convert(void)" -> "int candidate"
+                "const char *convert(void)" -> "const char *candidate"
+                "struct result convert(void)" -> "struct result candidate"
+                else -> "int (*candidate)(int)"
+            }
+            for (initializer in listOf("{0,}", "{ 0U, }", "{{0},}", "{0, 0}", "{(+00),}", "0", "(0x0ULL)")) {
+                assertTrue(isGeneratedCPlaceholderBody(function, "$declaration = $initializer; return ((candidate));", context),
+                    "$prototype: $initializer")
+            }
+            for (initializer in listOf("{1,}", "{0,1}", "{observe(),0}", "{0 * observe()}", "{value}",
+                "{0 + value}", "{0 / value}", "{}", "{0,,}", "{0;}", "(int)0")) {
+                assertFalse(isGeneratedCPlaceholderBody(function, "$declaration = $initializer; return candidate;", context),
+                    "$prototype: $initializer")
+            }
+        }
+        for (zero in listOf("0U", "0x00UL", "(00)", "+(0)", "-0")) {
+            assertTrue(isGeneratedCSimpleReturnBody("if (0) { (void)value; } return $zero;"), zero)
+        }
+        assertFalse(isGeneratedCSimpleReturnBody("return 0 * observe();"))
+        val nestedZero = "(".repeat(256) + "0" + ")".repeat(256)
+        val nestedName = "(".repeat(256) + "candidate" + ")".repeat(256)
+        assertTrue(isGeneratedCSimpleReturnBody("return $nestedZero;"))
+        assertTrue(isGeneratedCPlaceholderBody(function("int convert(void)"), "int candidate = $nestedZero; return $nestedName;"))
+        assertTrue(isGeneratedCPlaceholderBody(function("struct result convert(void)"),
+            "struct result candidate = " + "{".repeat(256) + "0" + "}".repeat(256) + "; return candidate;", context))
+        assertFalse(isGeneratedCSimpleReturnBody("return " + "(".repeat(256) + "1" + ")".repeat(256) + ";"))
+    }
+
+    @Test
+    fun `trailing comma zero candidates compile but cannot become accepted implementations`() {
+        for ((prototype, recovered) in listOf(
+            "int convert(int value)" to "int convert(int value) { return value + 1; }",
+            "const char *convert(int value)" to "const char *convert(int value) { return value ? \"yes\" : \"no\"; }",
+            "struct result convert(int value)" to "struct result convert(int value) { struct result answer = {value}; return answer; }",
+        )) {
+            val project = project()
+            val input = model(function(prototype, recovered), main()).copy(types = TYPES)
+            val manifest = SourceTreeGenerator.generate(input, project, reconstructor = ModuleReconstructor { request ->
+                val evidence = EvidenceModuleReconstructor().reconstruct(request)
+                evidence.copy(source = evidence.source.replace("= {0};", "= {0,};"),
+                    generator = "scripted-agent", issues = emptyList())
+            })
+            assertTrue("fn_convert" in manifest.unresolvedImplementationIds, prototype)
+            assertTrue(project.resolve("UNRESOLVED.md").readText().contains("fn_convert"), prototype)
+            assertTrue(Files.walk(project.resolve("reports/modules")).use { paths ->
+                paths.filter { it.toString().endsWith(".json") }.toList().any { it.readText().contains("generic-return-placeholder") }
+            }, prototype)
+            assertEquals(0, MakeProjectBuilder.build(project).returnCode, prototype)
+        }
+    }
+
+    @Test
     fun `placeholder normalization changes only the declared and returned name`() {
         val context = GeneratedCDeclarationContext(TYPES)
         for ((prototype, body) in listOf(
@@ -227,7 +285,7 @@ class GeneratedCPlaceholderValidationTest {
             // digest agree, but the source is now rejected by the current adapter policy.
             val staleSource = EvidenceModuleReconstructor().reconstruct(requireNotNull(initialRequest)).source
                 .replace("decomp_placeholder_result", "formerly_accepted_result")
-                .replace("= {0};", "= {0}; ; ;").trimEnd() + "\n"
+                .replace("= {0};", "= {0,}; ; ;").trimEnd() + "\n"
             val staleSha256 = sha256(staleSource.toByteArray())
             sourcePath.writeText(staleSource)
             checkpointPath.writeText(JsonObject(checkpoint + mapOf(

@@ -3,7 +3,7 @@ package decompengine.project
 /** Emits buildable evidence stubs by default; raw recovered C remains in the program model for later refinement. */
 class EvidenceModuleReconstructor(private val includeRecoveredC: Boolean = false) : ModuleReconstructor {
     private val declarationContexts = GeneratedCDeclarationContextCache()
-    override fun cacheIdentity(): String = if (includeRecoveredC) "recovered-c:v4" else "evidence-only:v3"
+    override fun cacheIdentity(): String = if (includeRecoveredC) "recovered-c:v5" else "evidence-only:v4"
 
     override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule {
         val declarationContext = declarationContexts.forTypes(request.model.types)
@@ -31,6 +31,12 @@ class EvidenceModuleReconstructor(private val includeRecoveredC: Boolean = false
                     "recovered-c-unavailable",
                     "normalized recovered C is unavailable for ${function.id}",
                     listOf(function.id),
+                )
+            } + globals.filter { it.initializer != null && it.initializer.isBlank() }.map { global ->
+                ModuleReconstructionIssue(
+                    "global-initializer-unavailable",
+                    "blank recovered initializer supplies no value evidence for ${global.id}",
+                    listOf(global.id),
                 )
             }
         } else {

@@ -15,6 +15,7 @@ internal class GeneratedCFunctionDeclaration(
     private val noReturn: Boolean,
     private val returnKind: GeneratedCTypeKind,
     private val resultDeclaration: (String) -> String,
+    private val zeroInitializer: String,
 ) {
     fun placeholderBody(): String {
         require(!noReturn) { "unsupported generated-C placeholder for $entityId: _Noreturn requires a retained non-returning implementation" }
@@ -28,7 +29,7 @@ internal class GeneratedCFunctionDeclaration(
         // and explicitly declared typedefs. The compiler still decides whether the type is valid.
         val identifiers = cDeclarationTokens(prototype).mapTo(hashSetOf()) { it.text }
         val name = generateSequence("decomp_placeholder_result") { "${it}_" }.first { it !in identifiers }
-        return used + "    ${resultDeclaration(name)} = {0};\n    return $name;"
+        return used + "    ${resultDeclaration(name)} = $zeroInitializer;\n    return $name;"
     }
 
     fun entryCall(name: String): String {
@@ -73,6 +74,7 @@ internal fun recoveredDeclaration(
         hasExternSpecifier = "extern" in declaration.specifiers,
         noReturn = "_Noreturn" in declaration.specifiers,
         returnKind = context.classify(declaration.specifiers, declaration.derived.drop(1), declaration.atomicType),
+        zeroInitializer = context.zeroInitializer(declaration.specifiers, declaration.derived.drop(1), declaration.atomicType),
         resultDeclaration = { name ->
             // Removing only the outer function suffix preserves even a pointer-to-function return.
             val edits = declaration.storageSpecifiers.map { Triple(it.start, it.end, "") } +
@@ -92,17 +94,19 @@ internal fun globalDeclaration(
     val type = CDeclarationParser(global.type.trim()).parse(allowAbstract = true)
     require(type.name == null) { "global type must be an abstract declarator without an object name" }
     val kind = context.classify(type.specifiers, type.derived, type.atomicType)
+    val retained = global.initializer?.takeUnless(String::isBlank)
     require(kind != GeneratedCTypeKind.FUNCTION) { "global type denotes a function, not an object" }
-    require(external || global.initializer != null || kind != GeneratedCTypeKind.INCOMPLETE_ARRAY) {
+    require(external || retained != null || kind != GeneratedCTypeKind.INCOMPLETE_ARRAY) {
         "an unsized array requires retained initializer evidence; a zero placeholder would invent its extent"
     }
     val declaration = type.source.substring(0, type.nameOffset).trimEnd() + " " + safeCName(global.name) +
         type.source.substring(type.nameOffset)
     if (external) "extern $declaration;"
     else {
-        // Only absent evidence gets a zero placeholder. Retained initializer expressions are
+        // Null or blank text supplies no initializer evidence. Nonblank expressions are
         // compiler checked; an unfamiliar value must not silently become zero.
-        val initializer = global.initializer?.let(::retainedInitializer) ?: "{0}"
+        val initializer = retained?.let(::retainedInitializer)
+            ?: context.zeroInitializer(type.specifiers, type.derived, type.atomicType)
         "$declaration = $initializer;"
     }
 }
@@ -112,7 +116,12 @@ internal enum class GeneratedCTypeKind { VOID, INTEGER, POINTER, ARRAY, INCOMPLE
 /** Resolves only declaration shapes needed by generated code; the compiler still validates C types. */
 internal class GeneratedCDeclarationContext(types: List<RecoveredType>) {
     private val aliases = linkedMapOf<String, CDeclaration>()
-    private data class ResolvedType(val kind: GeneratedCTypeKind, val resolutionDepth: Int = 0)
+    private data class ResolvedType(
+        val kind: GeneratedCTypeKind,
+        val resolutionDepth: Int = 0,
+        val atomic: Boolean = false,
+        val scalar: Boolean = false,
+    )
     private val resolved = hashMapOf<String, ResolvedType>()
 
     init {
@@ -157,6 +166,12 @@ internal class GeneratedCDeclarationContext(types: List<RecoveredType>) {
         atomicType: CDeclaration? = null,
     ): GeneratedCTypeKind = resolve(specifiers, derived, atomicType, linkedSetOf(), 0).kind
 
+    @Synchronized
+    internal fun zeroInitializer(specifiers: List<String>, derived: List<CDerived>, atomicType: CDeclaration? = null): String {
+        val type = resolve(specifiers, derived, atomicType, linkedSetOf(), 0)
+        return if (type.atomic && type.scalar) "0" else "{0}"
+    }
+
     private fun resolve(
         specifiers: List<String>,
         derived: List<CDerived>,
@@ -166,7 +181,7 @@ internal class GeneratedCDeclarationContext(types: List<RecoveredType>) {
     ): ResolvedType {
         // Use-site operators precede alias operators: an A* stays a pointer even if A is int[].
         when (val outer = derived.firstOrNull()) {
-            CDerived.Pointer -> return ResolvedType(GeneratedCTypeKind.POINTER)
+            is CDerived.Pointer -> return ResolvedType(GeneratedCTypeKind.POINTER, atomic = outer.atomic, scalar = true)
             is CDerived.Array -> return ResolvedType(if (outer.hasBound) GeneratedCTypeKind.ARRAY else GeneratedCTypeKind.INCOMPLETE_ARRAY)
             is CDerived.Function -> return ResolvedType(GeneratedCTypeKind.FUNCTION)
             null -> Unit
@@ -181,23 +196,29 @@ internal class GeneratedCDeclarationContext(types: List<RecoveredType>) {
             // Invalid atomic void must not be interpreted as an explicit no-parameter list.
             // Keep array shape information to avoid inventing an alias-hidden array extent.
             val kind = if (inner.kind == GeneratedCTypeKind.VOID) GeneratedCTypeKind.OTHER else inner.kind
-            return ResolvedType(kind, inner.resolutionDepth + 1)
+            return inner.copy(kind = kind, resolutionDepth = inner.resolutionDepth + 1, atomic = true)
         }
         if (base == listOf("void")) return ResolvedType(GeneratedCTypeKind.VOID).withAtomicQualifier(specifiers)
-        if (base.isNotEmpty() && base.all { it in integerSpecifiers }) return ResolvedType(GeneratedCTypeKind.INTEGER)
-        if (base.firstOrNull() == "enum") return ResolvedType(GeneratedCTypeKind.INTEGER)
-        if (base.firstOrNull() in setOf("struct", "union") || base.any { it in setOf("float", "double", "_Complex") }) {
-            return ResolvedType(GeneratedCTypeKind.OTHER)
+        if (base.isNotEmpty() && base.all { it in integerSpecifiers }) {
+            return ResolvedType(GeneratedCTypeKind.INTEGER, scalar = true).withAtomicQualifier(specifiers)
+        }
+        if (base.firstOrNull() == "enum") return ResolvedType(GeneratedCTypeKind.INTEGER, scalar = true).withAtomicQualifier(specifiers)
+        if (base.firstOrNull() in setOf("struct", "union")) return ResolvedType(GeneratedCTypeKind.OTHER).withAtomicQualifier(specifiers)
+        if (base.any { it in setOf("float", "double", "_Complex") }) {
+            return ResolvedType(GeneratedCTypeKind.OTHER, scalar = true).withAtomicQualifier(specifiers)
         }
         val name = base.singleOrNull() ?: return ResolvedType(GeneratedCTypeKind.UNKNOWN)
-        val alias = aliases[name] ?: return ResolvedType(if (name in standardIntegerAliases) GeneratedCTypeKind.INTEGER else GeneratedCTypeKind.UNKNOWN)
+        val alias = aliases[name] ?: return ResolvedType(
+            if (name in standardIntegerAliases) GeneratedCTypeKind.INTEGER else GeneratedCTypeKind.UNKNOWN,
+            scalar = name in standardIntegerAliases,
+        ).withAtomicQualifier(specifiers)
         resolved[name]?.let {
             require(depth + it.resolutionDepth <= 64) { "typedef resolution exceeds depth 64 at $name" }
             return it.withAtomicQualifier(specifiers)
         }
         require(depth < 64 && visiting.add(name)) { "cyclic typedef or typedef resolution exceeds depth 64 at $name" }
         val result = resolve(alias.specifiers, alias.derived, alias.atomicType, visiting, depth + 1)
-            .let { ResolvedType(it.kind, it.resolutionDepth + 1) }
+            .let { it.copy(resolutionDepth = it.resolutionDepth + 1) }
         visiting.remove(name)
         resolved[name] = result
         return result.withAtomicQualifier(specifiers)
@@ -205,7 +226,7 @@ internal class GeneratedCDeclarationContext(types: List<RecoveredType>) {
 
     // A use-site qualifier changes this result, never the cached unqualified alias shape.
     private fun ResolvedType.withAtomicQualifier(specifiers: List<String>): ResolvedType =
-        if (kind == GeneratedCTypeKind.VOID && "_Atomic" in specifiers) copy(kind = GeneratedCTypeKind.OTHER) else this
+        if ("_Atomic" in specifiers) copy(kind = if (kind == GeneratedCTypeKind.VOID) GeneratedCTypeKind.OTHER else kind, atomic = true) else this
 
     companion object {
         val EMPTY = GeneratedCDeclarationContext(emptyList())
@@ -318,6 +339,7 @@ internal fun markRecoveredParametersUsed(source: String, function: RecoveredFunc
 
 /** Supports full declarators (including function-pointer returns) in candidate body checks. */
 internal fun generatedCFunctionBody(source: String, name: String): String? = runCatching {
+    if (generatedCAttributionPreprocessorIssue(source) != null) return@runCatching null
     findCFunctionDefinition(source, setOf(name))?.let { source.substring(it.bodyStart, it.bodyEnd) }
 }.getOrNull()
 
@@ -334,17 +356,43 @@ internal fun isGeneratedCPlaceholderBody(
 /** Match the legacy simple return stubs without treating control-flow semicolons as no-ops. */
 internal fun isGeneratedCSimpleReturnBody(body: String): Boolean = runCatching {
     val tokens = cDeclarationTokens(body)
-    val start = skipEmptyCStatements(tokens, 0)
-    val size = when {
-        hasCTokens(tokens, start, listOf("return", ";")) -> 2
-        hasCTokens(tokens, start, listOf("return", "0", ";")) -> 3
-        else -> return@runCatching false
-    }
-    skipEmptyCStatements(tokens, start + size) == tokens.size
+    val start = placeholderBodyStart(tokens) ?: return@runCatching false
+    if (tokens.getOrNull(start)?.text != "return") return@runCatching false
+    val end = if (tokens.getOrNull(start + 1)?.text == ";") start + 1
+        else zeroExpressionEnd(tokens, start + 1) ?: return@runCatching false
+    tokens.getOrNull(end)?.text == ";" && skipEmptyCStatements(tokens, end + 1) == tokens.size
 }.getOrDefault(false)
 
 private fun normalizedPlaceholderBody(body: String): List<String>? {
     val tokens = cDeclarationTokens(body)
+    val start = placeholderBodyStart(tokens) ?: return null
+    if (hasCTokens(tokens, start, listOf("return", ";")) &&
+        skipEmptyCStatements(tokens, start + 2) == tokens.size) return listOf("return", ";")
+    var initializer = start
+    while (initializer < tokens.size && tokens[initializer].text != "=") {
+        when (tokens[initializer].text) {
+            "(", "[" -> initializer = matchingCToken(tokens, initializer)
+            ";", "{", "}" -> return null
+        }
+        initializer++
+    }
+    if (initializer == start || initializer >= tokens.size) return null
+    val declaration = CDeclarationParser(body.substring(tokens[start].start, tokens[initializer].start)).parse()
+    val name = declaration.name ?: return null
+    val initializerEnd = zeroInitializerEnd(tokens, initializer + 1) ?: return null
+    if (tokens.getOrNull(initializerEnd)?.text != ";") return null
+    val returnStart = skipEmptyCStatements(tokens, initializerEnd + 1)
+    if (tokens.getOrNull(returnStart)?.text != "return") return null
+    val returnEnd = parenthesizedIdentifierEnd(tokens, returnStart + 1, name.text) ?: return null
+    if (tokens.getOrNull(returnEnd)?.text != ";" || skipEmptyCStatements(tokens, returnEnd + 1) != tokens.size) return null
+    // Replace only the declared identifier: the same spelling may also be a struct tag,
+    // typedef name, or a parameter inside a function-pointer declarator.
+    return cDeclarationTokens(declaration.source).map {
+        if (it.start == name.start && it.end == name.end) "<result>" else it.text
+    }
+}
+
+private fun placeholderBodyStart(tokens: List<CToken>): Int? {
     var start = skipEmptyCStatements(tokens, 0)
     // The generated dead branch has no runtime effects. Omitting it, or using different
     // parameter names inside it, cannot turn the remaining zero return into an implementation.
@@ -360,28 +408,72 @@ private fun normalizedPlaceholderBody(body: String): List<String>? {
         if (tokens.getOrNull(cursor)?.text != "}") return null
         start = skipEmptyCStatements(tokens, cursor + 1)
     }
-    if (hasCTokens(tokens, start, listOf("return", ";")) &&
-        skipEmptyCStatements(tokens, start + 2) == tokens.size) return listOf("return", ";")
-    var initializer = start
-    while (initializer < tokens.size && tokens[initializer].text != "=") {
-        when (tokens[initializer].text) {
-            "(", "[" -> initializer = matchingCToken(tokens, initializer)
-            ";", "{", "}" -> return null
+    return start
+}
+
+/** A closed zero grammar; expressions with names, casts, binary operators or nonzero elements survive.
+ * Iteration uses constant space and at most one visit per consumed token, regardless of nesting.
+ */
+private fun zeroInitializerEnd(tokens: List<CToken>, start: Int): Int? {
+    var cursor = start
+    var braces = 0
+    var needsValue = true
+    while (true) {
+        if (needsValue) {
+            if (tokens.getOrNull(cursor)?.text == "{") {
+                braces++
+                cursor++
+                continue
+            }
+            cursor = zeroExpressionEnd(tokens, cursor) ?: return null
+            needsValue = false
+        } else {
+            if (braces == 0) return cursor
+            when (tokens.getOrNull(cursor)?.text) {
+                "}" -> { braces--; cursor++ }
+                "," -> {
+                    cursor++
+                    if (tokens.getOrNull(cursor)?.text == "}") { braces--; cursor++ }
+                    else needsValue = true
+                }
+                else -> return null
+            }
         }
-        initializer++
     }
-    if (initializer == start || initializer >= tokens.size) return null
-    val declaration = CDeclarationParser(body.substring(tokens[start].start, tokens[initializer].start)).parse()
-    val name = declaration.name ?: return null
-    if (!hasCTokens(tokens, initializer, listOf("=", "{", "0", "}", ";"))) return null
-    val returnStart = skipEmptyCStatements(tokens, initializer + 5)
-    if (!hasCTokens(tokens, returnStart, listOf("return", name.text, ";")) ||
-        skipEmptyCStatements(tokens, returnStart + 3) != tokens.size) return null
-    // Replace only the declared identifier: the same spelling may also be a struct tag,
-    // typedef name, or a parameter inside a function-pointer declarator.
-    return cDeclarationTokens(declaration.source).map {
-        if (it.start == name.start && it.end == name.end) "<result>" else it.text
+}
+
+private fun zeroExpressionEnd(tokens: List<CToken>, start: Int): Int? {
+    var cursor = start
+    var parentheses = 0
+    while (true) {
+        when (tokens.getOrNull(cursor)?.text) {
+            "(" -> { parentheses++; cursor++ }
+            "+", "-" -> cursor++
+            else -> break
+        }
     }
+    if (tokens.getOrNull(cursor)?.text?.matches(cIntegerZeroLiteral) != true) return null
+    cursor++
+    repeat(parentheses) {
+        if (tokens.getOrNull(cursor)?.text != ")") return null
+        cursor++
+    }
+    return cursor
+}
+
+private val cIntegerZeroLiteral = Regex("(?i)(?:0+|0x0+)(?:u(?:l{1,2})?|l{1,2}u?)?")
+
+private fun parenthesizedIdentifierEnd(tokens: List<CToken>, start: Int, name: String): Int? {
+    var cursor = start
+    while (tokens.getOrNull(cursor)?.text == "(") cursor++
+    val parentheses = cursor - start
+    if (tokens.getOrNull(cursor)?.text != name) return null
+    cursor++
+    repeat(parentheses) {
+        if (tokens.getOrNull(cursor)?.text != ")") return null
+        cursor++
+    }
+    return cursor
 }
 
 /** Call only at a recognized statement boundary, never inside a declaration or control flow. */
@@ -396,6 +488,7 @@ private fun hasCTokens(tokens: List<CToken>, start: Int, expected: List<String>)
 
 /** Recognize retained object declarators that the legacy simple-name recognizer cannot parse. */
 internal fun generatedCGlobalDefinition(source: String, name: String): Boolean = runCatching {
+    if (generatedCAttributionPreprocessorIssue(source) != null) return@runCatching false
     val tokens = cDeclarationTokens(source, skipDirectives = true)
     var start = 0
     var initializer: Int? = null
@@ -433,6 +526,7 @@ internal fun generatedCGlobalDefinition(source: String, name: String): Boolean =
 private data class CFunctionDefinition(val declaration: CDeclaration, val bodyStart: Int, val bodyEnd: Int)
 
 private fun findCFunctionDefinition(source: String, names: Set<String>): CFunctionDefinition? {
+    if (generatedCAttributionPreprocessorIssue(source) != null) return null
     val tokens = cDeclarationTokens(source, skipDirectives = true)
     var statementStart = 0
     var index = 0
@@ -478,7 +572,7 @@ private inline fun <T> declarationFor(entityId: String, block: () -> T): T = try
 
 internal data class CToken(val text: String, val start: Int, val end: Int)
 internal sealed interface CDerived {
-    data object Pointer : CDerived
+    data class Pointer(val atomic: Boolean = false) : CDerived
     data class Array(val hasBound: Boolean) : CDerived
     data class Function(
         val start: Int,
@@ -567,11 +661,15 @@ private class CDeclarationParser(raw: String, private val symbolicName: String? 
 
     private fun declarator(allowAbstract: Boolean, nesting: Int): Declarator {
         require(nesting < 64) { "declarator nesting exceeds 64" }
-        var pointers = 0
+        val pointers = mutableListOf<CDerived.Pointer>()
         while (tokens.getOrNull(cursor)?.text == "*") {
-            pointers++
             cursor++
-            while (tokens.getOrNull(cursor)?.text in qualifiers) cursor++
+            var atomic = false
+            while (tokens.getOrNull(cursor)?.text in qualifiers) {
+                atomic = atomic || tokens[cursor].text == "_Atomic"
+                cursor++
+            }
+            pointers += CDerived.Pointer(atomic)
         }
         var name: CToken? = null
         var nameOffset = tokens.getOrNull(cursor)?.start ?: tokens.last().end
@@ -610,7 +708,7 @@ private class CDeclarationParser(raw: String, private val symbolicName: String? 
                 else -> break
             }
         }
-        repeat(pointers) { derived += CDerived.Pointer }
+        derived += pointers.asReversed()
         return Declarator(name, nameOffset, derived)
     }
 
