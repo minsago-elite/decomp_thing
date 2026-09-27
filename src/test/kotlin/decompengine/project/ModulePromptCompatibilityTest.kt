@@ -191,6 +191,93 @@ class ModulePromptCompatibilityTest {
     }
 
     @Test
+    fun `archive evidence gate rejects rehashed fallback budgets outside the profile or identity`() {
+        val profile = withBudget(GeneratedCMakeReconstructionProfile.descriptor, 8_192)
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val project = Files.createTempDirectory(scratch, "fallback-budget-binding-")
+        try {
+            val reconstructor = BoundedLlmModuleReconstructor(
+                AgentHarness { _, _ -> error("must not execute") },
+                maximumContextCharacters = 4_096,
+                harnessProvenanceDescriptor = "archive-fallback-budget-fixture",
+            )
+            val manifest = SourceTreeGenerator.generate(
+                model(), project, profile = profile, reconstructor = reconstructor,
+                observedBehavior = "x".repeat(8_192),
+            )
+            val source = manifest.files.single { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }
+            val module = DeterministicModulePlanner(layout = profile.layout).plan(model()).modules.single()
+            val checkpointPath = profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id))
+            val checkpoint = Json.parseToJsonElement(project.resolve(checkpointPath).readText()).jsonObject
+            val manifestJson = Json.parseToJsonElement(manifest.toJson()).jsonObject
+            val promptCharacters = checkpoint.getValue("promptCharacters").jsonPrimitive.content.toLong()
+            val originalIdentity = reconstructor.cacheIdentity(profile)
+            assertEquals(JsonPrimitive("pre-dispatch-context-budget-fallback"), checkpoint.getValue("workflowOrigin"))
+            assertTrue(promptCharacters > 8_193)
+
+            fun verifyCurrentProject(): List<VerifiedCandidateAcpContribution> {
+                val current = SourceTreeManifestReader.read(project, profile)
+                return ReconstructionAcpEvidenceArchiveVerifier.verify(
+                    project,
+                    current.files.associate { it.path to sha256(project.resolve(it.path).readBytes()) },
+                    current.files.associate { it.path to Files.size(project.resolve(it.path)) },
+                    current,
+                    profile,
+                )
+            }
+            assertTrue(verifyCurrentProject().isEmpty())
+
+            val mutations = listOf(
+                Triple("zero-budget", 0, originalIdentity.replace(":context-4096:", ":context-0:")),
+                Triple("below-configured-minimum", 4_095, originalIdentity.replace(":context-4096:", ":context-4095:")),
+                Triple("above-profile", 8_193, originalIdentity.replace(":context-4096:", ":context-8193:")),
+                Triple("budget-above-identity", 4_097, originalIdentity),
+                Triple("identity-above-budget", 4_096, originalIdentity.replace(":context-4096:", ":context-4097:")),
+                Triple("missing-context", 4_096, originalIdentity.replace(":context-4096:", ":")),
+                Triple("decoy-context", 4_096, originalIdentity.replace(":context-4096:", ":context-4096:context-4095:")),
+                Triple("malformed-factory", 4_096, originalIdentity.replace(Regex("factory-[0-9a-f]{64}"), "factory-invalid")),
+                Triple("trailing-identity-text", 4_096, "$originalIdentity:extra"),
+            )
+            for ((name, budget, identity) in mutations) {
+                val changedCheckpoint = JsonObject(LinkedHashMap(checkpoint).apply {
+                    put("promptBudgetCharacters", JsonPrimitive(budget))
+                    put("reconstructorIdentity", JsonPrimitive(identity))
+                    put("generator", JsonPrimitive("unresolved:$identity"))
+                    put("issues", JsonArray(checkpoint.getValue("issues").jsonArray.map { item ->
+                        JsonObject(LinkedHashMap(item.jsonObject).apply {
+                            if (getValue("code").jsonPrimitive.content == "context-budget-exceeded") {
+                                put("message", JsonPrimitive("module context required $promptCharacters characters; limit=$budget"))
+                            }
+                        })
+                    }))
+                })
+                val changedBytes = (changedCheckpoint.toString() + "\n").toByteArray()
+                Files.write(project.resolve(checkpointPath), changedBytes)
+                val changedManifest = JsonObject(LinkedHashMap(manifestJson).apply {
+                    put("files", JsonArray(manifestJson.getValue("files").jsonArray.map { item ->
+                        JsonObject(LinkedHashMap(item.jsonObject).apply {
+                            when (getValue("path").jsonPrimitive.content) {
+                                checkpointPath -> put("sha256", JsonPrimitive(sha256(changedBytes)))
+                                source.path -> put("generator", JsonPrimitive("unresolved:$identity"))
+                            }
+                        })
+                    }))
+                })
+                project.resolve("source_tree_manifest.json").writeText(changedManifest.toString() + "\n")
+
+                val failure = assertFailsWith<IllegalArgumentException>(name) { verifyCurrentProject() }
+                assertTrue(failure.message.orEmpty().contains("pre-dispatch fallback prompt budget differs"),
+                    "$name failed at the wrong gate: ${failure.message}")
+            }
+        } finally {
+            Files.walk(project).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
     fun `audit validates confidence evidence when every implementation is an undispatched fallback`() {
         val profile = GeneratedCMakeReconstructionProfile.descriptor
         val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()

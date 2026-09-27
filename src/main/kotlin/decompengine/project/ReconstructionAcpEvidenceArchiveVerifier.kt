@@ -169,6 +169,20 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                     checkpoint.promptCharacters > checkpoint.promptBudgetCharacters &&
                     checkpoint.preDispatchBudgetFailure
                 ) {
+                    // The built-in boundary uses the smaller of its configured limit and the
+                    // selected profile limit, and records that exact value in cacheIdentity.
+                    // Its configured limit is at least 4096; only a smaller profile can lower it.
+                    // Match the trailing identity fields so an implementation ID cannot supply
+                    // a decoy context segment while retaining a different effective budget.
+                    val profileBudget = profile.budgets.reconstructionMaximumContextCharacters.toLong()
+                    require(checkpoint.promptBudgetCharacters in minOf(4_096L, profileBudget)..profileBudget &&
+                        checkpoint.reconstructorIdentity.matches(Regex(
+                            "agent:.*:context-${checkpoint.promptBudgetCharacters}:factory-(?:[0-9a-f]{64}|unbound):v3",
+                            RegexOption.DOT_MATCHES_ALL,
+                        ))
+                    ) {
+                        "pre-dispatch fallback prompt budget differs from the reconstruction profile or reconstructor identity: $moduleId"
+                    }
                     require(checkpoint.hasNoExecutionEvidence()) {
                         "unresolved agent fallback retains ACP execution evidence: $moduleId"
                     }
