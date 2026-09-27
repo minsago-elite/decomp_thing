@@ -38,8 +38,9 @@ bounded ACP invocation receipt, per-module validation receipt, ABI/call/global/
 name reconciliation, behavioral receipt, or retained accepted checkpoint is
 present for these three owners. All three linked modules therefore remain
 unresolved and release-blocking under the requested outcome. The five
-source-only paths also require an explicit disposition before any claim of
-complete shard coverage.
+source-only paths already have the explicit
+`not-selected-by-authenticated-build-graph` disposition; they are recorded
+exclusions and do not add implementation owners or blockers.
 
 Acceptance still requires every required emitted entity to be reconciled and
 generated through the qualified bounded ACP workflow, with per-module source
