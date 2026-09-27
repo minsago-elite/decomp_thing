@@ -22,10 +22,10 @@ the extracted model; rejecting an assessment claim in this input format does not
 authorize dropping a discrepancy from the oracle. No calibrated probability can
 be derived from the extraction status.
 
-Exporter version 10 emits schema 2 in full and planning modes. Its function/global/type
+Exporter version 11 emits schema 2 in full and planning modes. Its function/global/type
 fragments explicitly retain unassessed recovery, and fragment validation requires
-those fields. Resume state and GCC profile admission pin exporter version 10;
-version-9 state is rejected without rewriting it or replacing the previous model.
+those fields. Resume state and GCC profile admission pin exporter version 11;
+version-10 and earlier state is rejected without rewriting it or replacing the previous model.
 The Kotlin resume verifier reconstructs schema-2 bytes from the retained fragments.
 Existing byte commitments cover the new fields, while the exporter version and
 script digest distinguish the producer contract. Typed
