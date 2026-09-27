@@ -12,7 +12,9 @@ import decompengine.project.RecoveredProgramModel
 import decompengine.project.ReconstructionBudgets
 import decompengine.reporting.JsonReportLimits
 import decompengine.reporting.JsonReportPublisher
+import decompengine.reporting.openStagedJsonReportOutput
 import decompengine.reporting.publicationLimitFields
+import java.io.OutputStream
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.createDirectories
@@ -37,6 +39,7 @@ class GhidraJvmAnalyzer internal constructor(
     private val analyzer: ProgramModelAnalyzer,
     private val metadataLimits: BoundedElfMetadataLimits,
     private val metadataInspectionProcess: BoundedElfMetadataInspectionProcess,
+    private val reportOutputStreamFactory: (Path) -> OutputStream = ::openStagedJsonReportOutput,
 ) {
     constructor() : this(
         GhidraHeadlessProgramModelAnalyzer(),
@@ -55,7 +58,12 @@ class GhidraJvmAnalyzer internal constructor(
             maximumWallClockMillis = minOf(metadataLimits.maximumWallClockMillis, budgets.exportWallClockMillis),
             maximumModeledMetadataBytes = minOf(metadataLimits.maximumModeledMetadataBytes, budgets.exportMaximumResidentBytes),
         )
-        return GhidraJvmAnalyzer(bounded.withExportBudgets(budgets), selectedMetadataLimits, metadataInspectionProcess)
+        return GhidraJvmAnalyzer(
+            bounded.withExportBudgets(budgets),
+            selectedMetadataLimits,
+            metadataInspectionProcess,
+            reportOutputStreamFactory,
+        )
     }
 
     fun analyze(binaryPath: Path, outputDir: Path): GhidraAnalysis {
@@ -99,7 +107,7 @@ class GhidraJvmAnalyzer internal constructor(
                 returnCode = 0,
             )
             checkpoint("before analysis report")
-            analysis.writeReport(inspection, metadataLimits, ::checkpoint)
+            analysis.writeReport(inspection, metadataLimits, ::checkpoint, reportOutputStreamFactory)
             analysis
         }
     }
@@ -109,9 +117,10 @@ private fun GhidraAnalysis.writeReport(
     inspection: BoundedElfMetadataInspection,
     limits: BoundedElfMetadataLimits,
     checkpoint: (String) -> Unit,
+    outputStreamFactory: (Path) -> OutputStream,
 ) {
     val publication = JsonReportLimits(maximumBytes = 1024 * 1024L)
-    JsonReportPublisher.write(reportPath, publication, checkpoint) {
+    JsonReportPublisher.write(reportPath, publication, checkpoint, outputStreamFactory) {
         objectValue {
             field("tool", "ghidra-jvm")
             field("mainClass", mainClass)

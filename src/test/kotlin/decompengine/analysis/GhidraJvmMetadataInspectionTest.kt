@@ -10,10 +10,18 @@ import decompengine.project.ProgramModelAnalyzer
 import decompengine.project.ReconstructionBudgets
 import decompengine.project.RecoveredProgramModel
 import decompengine.project.sha256
+import java.io.InterruptedIOException
+import java.io.OutputStream
+import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.StandardOpenOption
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.io.path.exists
 import kotlin.io.path.createDirectories
+import kotlin.io.path.listDirectoryEntries
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.Test
@@ -126,6 +134,65 @@ class GhidraJvmMetadataInspectionTest {
         assertTrue(failure.message.orEmpty().contains("analysis and metadata exceeded 2000 milliseconds"))
         assertFalse(assertNotNull(process.get()).isAlive, "deadline cleanup must stop the blocked metadata worker")
         assertEquals("prior report", report.readText())
+    }
+
+    @Test
+    fun `shared analysis deadline interrupts in-flight report staging and preserves prior report`() = inControlTemporaryDirectory { root ->
+        val bytes = elfFixture()
+        val input = writeElf(root.resolve("authored.elf"), bytes)
+        val output = root.resolve("analysis")
+        val report = output.resolve("reports/ghidra_analysis.json")
+        report.parent.createDirectories()
+        report.writeText("prior report")
+        val blockedWriteEntered = AtomicBoolean(false)
+        val analyzer = GhidraJvmAnalyzer(
+            budgetCapable { _, _ -> model(sha256(bytes)) },
+            BoundedElfMetadataLimits(),
+            BoundedElfMetadataInspectionProcess(),
+            reportOutputStreamFactory = { staged ->
+                val destination = Files.newOutputStream(
+                    staged,
+                    StandardOpenOption.WRITE,
+                    StandardOpenOption.TRUNCATE_EXISTING,
+                    LinkOption.NOFOLLOW_LINKS,
+                )
+                object : OutputStream() {
+                    private val firstWrite = AtomicBoolean(true)
+
+                    override fun write(value: Int) {
+                        blockFirstWrite()
+                        destination.write(value)
+                    }
+
+                    override fun write(bytes: ByteArray, offset: Int, length: Int) {
+                        blockFirstWrite()
+                        destination.write(bytes, offset, length)
+                    }
+
+                    override fun flush() = destination.flush()
+                    override fun close() = destination.close()
+
+                    private fun blockFirstWrite() {
+                        if (!firstWrite.compareAndSet(true, false)) return
+                        blockedWriteEntered.set(true)
+                        try {
+                            CountDownLatch(1).await()
+                        } catch (interrupted: InterruptedException) {
+                            throw InterruptedIOException("staged report write interrupted").also { it.initCause(interrupted) }
+                        }
+                    }
+                }
+            },
+        ).withExportBudgets(GeneratedCMakeReconstructionProfile.descriptor.budgets.copy(
+            exportWallClockMillis = 2_000,
+        ))
+
+        val failure = assertFailsWith<GhidraAnalysisException> { analyzer.analyze(input, output) }
+
+        assertTrue(blockedWriteEntered.get(), "fixture must block inside staged report output")
+        assertTrue(failure.message.orEmpty().contains("analysis and metadata exceeded 2000 milliseconds during analysis and metadata"))
+        assertEquals("prior report", report.readText())
+        assertEquals(listOf(report), report.parent.listDirectoryEntries())
     }
 
     @Test
