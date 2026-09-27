@@ -24,7 +24,7 @@ import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowPhase
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
-import decompengine.project.EvidenceModuleReconstructor
+import decompengine.project.ReconstructionAdapters
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.project.ModuleReconstructor
 import decompengine.project.ReconstructionProfiles
@@ -79,6 +79,7 @@ class SourceTreeJobReconstructor(
                 ArchivalReconstructionService(
                     analyzer,
                     strategy.reconstructor,
+                    profile = strategy.profile,
                     progress = progress,
                 ).reconstruct(job.binaryPath, reportsDir)
             } catch (failure: Exception) {
@@ -98,12 +99,14 @@ internal data class WebReconstructionStrategy(
     val mode: WebReconstructionMode,
     val reconstructor: ModuleReconstructor,
     val harnessProvenance: AcpHarnessProvenance?,
+    val profile: ReconstructionProfile,
 )
 
 /** Resolves exactly one web reconstruction mode without credential-based fallbacks. */
 internal fun selectWebReconstructionStrategy(
     environment: Map<String, String>,
     progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
+    profile: ReconstructionProfile = ReconstructionProfiles.default,
 ): WebReconstructionStrategy {
     val configuredMode = environment[WEB_RECONSTRUCTION_MODE_ENVIRONMENT] ?: WebReconstructionMode.AGENT.configurationValue
     return when (configuredMode) {
@@ -117,13 +120,18 @@ internal fun selectWebReconstructionStrategy(
                     progress = progress,
                 ),
                 selection.provenance,
+                profile,
             )
         }
-        WebReconstructionMode.EVIDENCE_ONLY.configurationValue -> WebReconstructionStrategy(
-            WebReconstructionMode.EVIDENCE_ONLY,
-            EvidenceModuleReconstructor(),
-            null,
-        )
+        WebReconstructionMode.EVIDENCE_ONLY.configurationValue -> {
+            val selectedProfile = ReconstructionAdapters.resolve(profile).evidenceOnlyProfile(profile)
+            WebReconstructionStrategy(
+                WebReconstructionMode.EVIDENCE_ONLY,
+                ReconstructionAdapters.resolve(selectedProfile).evidenceOnlyReconstructor(selectedProfile),
+                null,
+                selectedProfile,
+            )
+        }
         else -> throw IllegalArgumentException(
             "$WEB_RECONSTRUCTION_MODE_ENVIRONMENT must be exactly " +
                 "${WebReconstructionMode.AGENT.configurationValue} or " +
@@ -175,7 +183,7 @@ class UploadServer(
     uiMode: WebUiMode = WebUiMode.LEGACY,
     basePath: String = "/",
     devFrontendOrigin: String? = null,
-    sourceProfiles: List<ReconstructionProfile> = ReconstructionProfiles.builtIn,
+    sourceProfiles: List<ReconstructionProfile> = defaultWebSourceProfiles(),
     sensitiveValues: Collection<String> = System.getenv().values,
     private val listenBacklog: Int = 64,
     private val authenticationInspector: (decompengine.agent.AgentCancellation) -> decompengine.acp.AcpAuthenticationInventory = defaultWebAuthenticationInspector(),

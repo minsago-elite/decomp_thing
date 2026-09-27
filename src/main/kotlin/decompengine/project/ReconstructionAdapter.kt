@@ -78,6 +78,8 @@ internal object ReconstructionAdapters {
 
 /** Build-system-specific evidence requirements inside the shared archive transport. */
 internal interface ArchiveBuildPolicy {
+    fun contractPaths(profile: ReconstructionProfile): ArchiveBuildContractPaths
+    fun parseContract(contract: JsonObject, profile: ReconstructionProfile): BuildContractEvidence
     fun requiredPaths(profile: ReconstructionProfile): Set<String>
     fun transportLayout(profile: ReconstructionProfile): ArchiveTransportLayout
     val rebuildInstructions: String
@@ -85,6 +87,8 @@ internal interface ArchiveBuildPolicy {
     fun sourceRevision(projectDir: Path, profile: ReconstructionProfile): BuildSourceRevision
     fun isBuildInput(profile: ReconstructionProfile, relativePath: String): Boolean
 }
+
+internal data class ArchiveBuildContractPaths(val contractPath: String, val artifactPath: String)
 
 /** Validate application-owned transport policy before preparing archive paths. */
 internal fun ArchiveBuildPolicy.checkedTransportLayout(profile: ReconstructionProfile): ArchiveTransportLayout =
@@ -111,8 +115,11 @@ internal data class BehaviorBuildLayout(
     val sourceRoots: List<String>,
 )
 
-internal data class BehaviorBuildContract(
+/** Source/artifact attribution alone grants no behavior qualification. */
+internal data class BuildContractEvidence(
     val sourceRevisionSha256: String,
     val sourceInputs: JsonArray,
     val artifact: JsonObject,
 )
+
+internal typealias BehaviorBuildContract = BuildContractEvidence
