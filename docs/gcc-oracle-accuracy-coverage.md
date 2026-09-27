@@ -31,13 +31,14 @@ same stripped artifact and function mapping, plus oracle-derived internal,
 external, indirect, unknown, and unobservable call facts. `GHIDRA_HOME` and an
 external `analyzeHeadless` installation are not accepted as substitutes.
 
-## Raw driver interface observations
+## Driver interface observations and ABI coverage
 
 `BoundedDwarfInterfaceFactScanner` reads source interface facts from the rich
 ELF through the bounded DWARF reader. It retains declaration and origin
-locators, parameter order, variadic observations, and the reachable raw type
-graph. Missing, unsupported, and ambiguous facts keep their evidence states;
-the scanner does not synthesize prototypes or infer ABI classes.
+locators, parameter order, variadic observations, the reachable raw type
+graph, and variable candidates with their scope and storage observations.
+Raw location expressions remain distinct from interpreted addresses or TLS
+offsets. Missing, unsupported, and ambiguous facts keep their evidence states.
 
 `GccDriverDwarfInterfaceEvidence` binds these observations to the checked
 driver pair, manifest, function oracle, exclusions, source and build records,
@@ -46,27 +47,51 @@ join the reviewed physical function population by exact executable RVA.
 Names do not establish identity. Every reviewed oracle record remains in the
 denominator, including the compiler-generated and inline-only exclusions.
 
+The separate SysV AMD64 projection derives source ABI facts only when the
+raw observations and its versioned target rules provide enough evidence.
+It records the rule profile and its hash alongside the typed projection.
+Unknown aggregate layout, alignment, or C++ passing behavior remains
+unresolved. The rules follow the
+[x86-64 psABI](https://gitlab.com/x86-psABIs/x86-64-ABI/-/raw/master/x86-64-ABI/low-level-sys-info.tex)
+and [DWARF 5](https://dwarfstd.org/doc/DWARF5.pdf).
+
+Global candidates join retained ELF object observations using proved storage
+addresses or TLS offsets, sizes, and storage domains. Symbol names alone do
+not establish a match. Unmatched symbols, local variables, and unresolved
+candidates remain visible in the coverage record.
+
+Evidence is a bounded bundle: `evidence.json` binds ordered canonical shards
+by path, kind, record count, byte length, and SHA-256. Raw functions, types,
+globals, and derived records are partitioned without dropping denominator
+entries. Each shard and the complete bundle have explicit resource limits;
+the general JSON parser limits remain unchanged. Qualification compares the
+whole bundle across repeated captures and checks tampered or missing parts.
+
 The **GCC oracle model** workflow has a separate **Retained GCC driver DWARF
 interfaces** job. It runs on manual dispatch or on ordinary PR events when
 the PR has the `qualify:driver-dwarf-interfaces` label. Adding the label alone
 does not start a run; a subsequent commit or manual dispatch does. This job
 uses the checked driver artifacts without rebuilding GCC. Manual dispatch
 runs only this job. It retains evidence and test reports in the
-`gcc-driver-dwarf-interfaces` Actions artifact.
+`gcc-driver-dwarf-interfaces` Actions artifact. The opt-in qualification always
+executes instead of reusing cached test results and gives the test JVM an
+8 GiB heap for repeated captures. That heap limit is not an aggregate RSS
+qualification.
 
 For an equivalent local qualification with the pinned frontend toolchain
 available:
 
 ```bash
 DECOMP_REQUIRE_GCC_DWARF_INTERFACES=true ./gradlew --no-daemon test \
-  --tests 'decompengine.oracle.fulltree.BoundedDwarfInterface*Test' \
-  --tests 'decompengine.oracle.gcc.GccDriverDwarfInterfaceEvidenceTest'
+  --tests 'decompengine.oracle.fulltree.BoundedDwarf*Test' \
+  --tests 'decompengine.oracle.fulltree.FullTreeElfObjectLayoutTest' \
+  --tests 'decompengine.oracle.structural.DwarfSysvAmd64*Test' \
+  --tests 'decompengine.oracle.gcc.GccDriverDwarf*Test'
 ```
 
 Generated files stay under `build/gcc-driver-dwarf-interfaces/` by default.
-This is a raw observation and denominator capture. Normalized ABI signature
-coverage remains zero, and `complete`, `scored`, `productionVerified`, and
-`releaseEligible` remain false. Global facts, target-specific ABI
-classification, recovered-model identity joins, and production scoring still
-require their own authenticated evidence. A successful raw capture alone
-does not complete #692 or #680.
+The resulting coverage measures observable oracle facts. Recovered-model
+accuracy still requires authenticated candidate types, identity joins, and
+production scoring. `complete`, `scored`, `productionVerified`, and
+`releaseEligible` remain false. Qualification success alone does not establish
+90% function or global recovery and does not complete #692 or #680.

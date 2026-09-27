@@ -257,6 +257,7 @@ jobs:
           cache-read-only: ${{ github.ref != 'refs/heads/master' }}
       - name: Install pinned build-only frontend toolchain
         run: |
+          mkdir -p "$GITHUB_WORKSPACE/build"
           bash scripts/install-frontend-node.sh "$GITHUB_WORKSPACE/build/frontend-node"
           echo "$GITHUB_WORKSPACE/build/frontend-node/bin" >> "$GITHUB_PATH"
       - name: Capture and replay retained driver interface facts
@@ -264,8 +265,10 @@ jobs:
           mkdir -p build/gcc-driver-dwarf-interfaces
           git rev-parse HEAD > build/gcc-driver-dwarf-interfaces/source-revision.txt
           ./gradlew --no-daemon test \
-            --tests 'decompengine.oracle.fulltree.BoundedDwarfInterface*Test' \
-            --tests 'decompengine.oracle.gcc.GccDriverDwarfInterfaceEvidenceTest'
+            --tests 'decompengine.oracle.fulltree.BoundedDwarf*Test' \
+            --tests 'decompengine.oracle.fulltree.FullTreeElfObjectLayoutTest' \
+            --tests 'decompengine.oracle.structural.DwarfSysvAmd64*Test' \
+            --tests 'decompengine.oracle.gcc.GccDriverDwarf*Test'
       - name: Retain interface facts and verification reports
         if: always()
         uses: actions/upload-artifact@v7

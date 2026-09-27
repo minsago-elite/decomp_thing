@@ -1329,6 +1329,12 @@ tasks.test {
         outputs.upToDateWhen { false }
         outputs.cacheIf("live GCC CLI qualification must execute") { false }
     }
+    if (providers.environmentVariable("DECOMP_REQUIRE_GCC_DWARF_INTERFACES").orNull == "true") {
+        // Repeated bounded captures retain both bundles; modeled record limits are not JVM RSS.
+        maxHeapSize = "8g"
+        outputs.upToDateWhen { false }
+        outputs.cacheIf("retained GCC DWARF qualification must execute") { false }
+    }
     // The installed CLI smoke test exercises the packaged launcher.
     dependsOn("installDist")
     dependsOn(stageOracleNativeLibraries)
