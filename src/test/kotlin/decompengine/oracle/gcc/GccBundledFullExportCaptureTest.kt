@@ -374,6 +374,66 @@ class GccBundledFullExportCaptureTest {
     }
 
     @Test
+    fun `type declarations retain all three producer templates and positive Int length boundaries`() {
+        val suffixes = listOf(
+            "typedef int _;",
+            "typedef int A0_b;",
+            "typedef int recovered_${typeId()};",
+        ) + listOf(1, Int.MAX_VALUE).flatMap { length ->
+            listOf(
+                "typedef struct A0_b { unsigned char _data[$length]; } A0_b;",
+                "typedef unsigned char A0_b[$length];",
+            )
+        }
+        for (suffix in suffixes) fixture { root, run, reports ->
+            writeNamedRecords(root, type = typeId() to typeRecord(
+                declaration = JsonPrimitive("/* Ghidra type \"\\/scalar\" */ $suffix")))
+            assertEquals(5L, GccBundledFullExportCapture.capture(run, reports, artifacts()).outputFileCount, suffix)
+        }
+    }
+
+    @Test
+    fun `type declarations do not infer a C name from an ambiguous retained path`() {
+        for (name in listOf("a_b", "b")) fixture { root, run, reports ->
+            val id = typeId("/a/b")
+            writeNamedRecords(root, type = id to typeRecord(id = id,
+                declaration = JsonPrimitive("/* Ghidra type \"\\/a\\/b\" */ typedef int $name;")))
+            assertEquals(5L, GccBundledFullExportCapture.capture(run, reports, artifacts()).outputFileCount)
+        }
+    }
+
+    @Test
+    fun `matching model bytes cannot authenticate type suffixes outside producer templates`() {
+        val suffixes = listOf(
+            "typedef int 0scalar;",
+            "typedef int scal-ar;",
+            "typedef int 界;",
+            "typedef int scalar\$;",
+            "typedef int ;",
+            "typedef  int scalar;",
+            "typedef int scalar; ",
+            "typedef int scalar;\n",
+            "typedef int scalar; int injected;",
+            "typedef struct scalar { unsigned char _data[1]; } other;",
+            "typedef struct scalar { unsigned char data[1]; } scalar;",
+            "typedef unsigned int scalar[1];",
+        ) + listOf("0", "-1", "+1", "01", "2147483648", "999999999999999999999999999999").flatMap { length ->
+            listOf(
+                "typedef struct scalar { unsigned char _data[$length]; } scalar;",
+                "typedef unsigned char scalar[$length];",
+            )
+        }
+        for (suffix in suffixes) fixture { root, run, reports ->
+            writeNamedRecords(root, type = typeId() to typeRecord(
+                declaration = JsonPrimitive("/* Ghidra type \"\\/scalar\" */ $suffix")))
+            val failure = assertFailsWith<IllegalArgumentException>(suffix) {
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+            }
+            assertTrue(failure.message.orEmpty().contains("type declaration suffix"), failure.message)
+        }
+    }
+
+    @Test
     fun `matching model bytes cannot authenticate absent or noncanonical type source addresses`() {
         for (address in listOf<JsonElement>(
             JsonNull, JsonPrimitive(0x400010), JsonPrimitive("0x400200"), JsonPrimitive("0x0400010"),
@@ -390,7 +450,7 @@ class GccBundledFullExportCaptureTest {
     @Test
     fun `type sources cannot be authenticated by a function address contradicting its identity`() = fixture { root, run, reports ->
         val original = functionRecord("fn_0000000000400010", "f")
-        writeFunction(root, original.replace("\"address\":\"0x400010\"", "\"address\":\"0x400020\""))
+        writeFunction(root, original.replace("\"address\": \"0x400010\"", "\"address\": \"0x400020\""))
         writeNamedRecords(root, type = typeId() to typeRecord(sourceAddress = JsonPrimitive("0x400020")))
         val failure = assertFailsWith<IllegalArgumentException> {
             GccBundledFullExportCapture.capture(run, reports, artifacts())
@@ -423,7 +483,7 @@ class GccBundledFullExportCaptureTest {
     }
 
     @Test
-    fun `multi phase failure strings retain Unicode and existing UTF8 record bounds`() = fixture { root, run, reports ->
+    fun `multi phase failure strings retain Unicode without interpreting embedded separators`() = fixture { root, run, reports ->
         val message = "call recovery failed: " + "界".repeat(1900) + "; type recovery failed: " + "𐐀".repeat(900)
         writeFailure(root, JsonPrimitive(message))
         val snapshot = GccBundledFullExportCapture.capture(run, reports, artifacts())
@@ -432,14 +492,187 @@ class GccBundledFullExportCaptureTest {
         assertTrue(snapshot.sidecarManifest.decodeToString().contains("failures/fn_0000000000400010.json"))
         assertEquals("false", OracleJson.parseCanonical(snapshot.assessmentBytes).jsonObject.getValue("complete").jsonPrimitive.content)
 
-        val maximumRecordBytes = 1024 * 1024
-        val messageBytes = maximumRecordBytes - failureRecord(JsonPrimitive("")).toByteArray().size
-        val boundaryMessage = "界".repeat(messageBytes / 3) + "x".repeat(messageBytes % 3)
-        writeFailure(root, JsonPrimitive(boundaryMessage))
-        assertEquals(maximumRecordBytes.toLong(), Files.size(root.resolve("reports/program_model.json.export/failures/fn_0000000000400010.json")))
-        GccBundledFullExportCapture.capture(run, reports, artifacts())
-        writeFailure(root, JsonPrimitive(boundaryMessage + "x"))
+        writeFailure(root, JsonPrimitive("diagnostic contains; embedded; separators; ".repeat(100)), "partial")
+        assertEquals(1L, GccBundledFullExportCapture.capture(run, reports, artifacts()).partial)
+    }
+
+    @Test
+    fun `failure messages respect status specific producer UTF16 boundaries`() {
+        for ((status, phases, maximum) in listOf(Triple("failed", 4, 8210), Triple("partial", 3, 6157))) {
+            fixture { root, run, reports ->
+                val boundary = List(phases) { "𐐀".repeat(1024) + "..." }.joinToString("; ")
+                assertEquals(maximum, boundary.length)
+                assertTrue(boundary.toByteArray().size > maximum)
+                writeFailure(root, JsonPrimitive(boundary), status)
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+                writeFailure(root, JsonPrimitive(boundary + "x"), status)
+                val failure = assertFailsWith<IllegalArgumentException>(status) {
+                    GccBundledFullExportCapture.capture(run, reports, artifacts())
+                }
+                assertTrue(failure.message.orEmpty().contains("producer UTF-16 bound"), failure.message)
+            }
+        }
+    }
+
+    @Test
+    fun `failure sidecars retain their byte bound independently of character limits`() = fixture { root, run, reports ->
+        writeFailure(root, JsonPrimitive("x".repeat(1024 * 1024)))
+        assertTrue(Files.size(root.resolve("reports/program_model.json.export/failures/fn_0000000000400010.json")) > 1024 * 1024)
         assertFails { GccBundledFullExportCapture.capture(run, reports, artifacts()) }
+    }
+
+    @Test
+    fun `all sidecars reject equivalent JSON that differs from exporter serialization`() {
+        for (kind in listOf("function", "global", "type", "failure")) {
+            val original = when (kind) {
+                "function" -> functionRecord("fn_0000000000400010", "f/𐐀")
+                "global" -> globalRecord("global_0000000000400100", JsonPrimitive("0x400100"), name = JsonPrimitive("g/𐐀"))
+                "type" -> typeRecord(id = typeId("/scalar𐐀"),
+                    declaration = JsonPrimitive("/* Ghidra type \"\\/scalar𐐀\" */ typedef int scalar;"))
+                else -> failureRecord(JsonPrimitive("auxiliary / 𐐀 recovery failed"))
+            }
+            val mutations = listOf<Pair<String, (String) -> String>>(
+                "reordered fields" to { text ->
+                    val fields = OracleJson.parse(text.toByteArray()).jsonObject.entries.reversed().map { it.key to it.value }
+                    if (kind == "failure") fields.joinToString(",", "{", "}\n") { (key, value) ->
+                        "\"$key\":${exporterValue(value)}"
+                    } else prettyRecord(*fields.toTypedArray())
+                },
+                "field whitespace" to { text -> text.replace("\":", "\": ") },
+                "leading whitespace" to { text -> " " + text },
+                "wrong terminal LF" to { text -> if (kind == "failure") text.removeSuffix("\n") else text + "\n" },
+                "escaped field name" to { text ->
+                    if (kind == "failure") text.replace("\"functionId\"", "\"\\u0066unctionId\"")
+                    else text.replace("\"id\"", "\"\\u0069d\"")
+                },
+                "escaped slash" to { text -> text.replace("/", "\\/") },
+                "escaped surrogate pair" to { text -> text.replace("𐐀", "\\ud801\\udc00") },
+            )
+            for ((mutation, mutate) in mutations) fixture { root, run, reports ->
+                installSidecar(root, kind, original)
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+                val changed = mutate(original)
+                assertNotEquals(original, changed, "$kind: $mutation")
+                assertEquals(OracleJson.parse(original.toByteArray()), OracleJson.parse(changed.toByteArray()),
+                    "$kind: $mutation must preserve the parsed record")
+                // Included records are replaced in the assembled model as well as their sidecar.
+                installSidecar(root, kind, changed)
+                val failure = assertFailsWith<IllegalArgumentException>("$kind: $mutation") {
+                    GccBundledFullExportCapture.capture(run, reports, artifacts())
+                }
+                assertTrue(failure.message.orEmpty().contains("exporter serialization"), failure.message)
+            }
+        }
+    }
+
+    @Test
+    fun `exporter string encoding retains controls and rejects short backspace and formfeed escapes`() {
+        // The supplementary character straddles the verifier's nominal chunk size.
+        val value = "x".repeat(4095) + "𐐀 quote\" slash/ back\\ tab\t backspace\b formfeed\u000c zero\u0000 unit\u001f 界𐐀"
+        for (kind in listOf("function", "global", "failure")) fixture { root, run, reports ->
+            val original = when (kind) {
+                "function" -> functionRecord("fn_0000000000400010", value,
+                    source = JsonPrimitive(value + "\n\r"), prototype = JsonPrimitive(value),
+                    strings = JsonArray(listOf(JsonPrimitive(value))))
+                "global" -> globalRecord("global_0000000000400100", JsonPrimitive("0x400100"),
+                    name = JsonPrimitive(value), type = JsonPrimitive(value), initializer = JsonPrimitive(value + "\n\r"))
+                else -> failureRecord(JsonPrimitive(value))
+            }
+            installSidecar(root, kind, original)
+            GccBundledFullExportCapture.capture(run, reports, artifacts())
+            for ((from, to) in listOf("\\u0008" to "\\b", "\\u000c" to "\\f", "\\u001f" to "\\u001F")) {
+                val changed = original.replace(from, to)
+                assertNotEquals(original, changed)
+                assertEquals(OracleJson.parse(original.toByteArray()), OracleJson.parse(changed.toByteArray()))
+                installSidecar(root, kind, changed)
+                val failure = assertFailsWith<IllegalArgumentException>("$kind: $from") {
+                    GccBundledFullExportCapture.capture(run, reports, artifacts())
+                }
+                assertTrue(failure.message.orEmpty().contains("exporter serialization"), failure.message)
+            }
+        }
+    }
+
+    @Test
+    fun `function arrays retain TreeSet ordering including UTF16 supplementary characters`() = fixture { root, run, reports ->
+        val globalIds = listOf("global_0000000000400100", "global_0000000000400200")
+        val record = functionRecord("fn_0000000000400010", "f",
+            calls = JsonArray(listOf(JsonPrimitive("fn_0000000000000000"), JsonPrimitive("fn_ffffffffffffffff"))),
+            references = JsonArray(globalIds.map(::JsonPrimitive)),
+            strings = JsonArray(listOf("", "ASCII", "\uD800\uDC00", "\uE000").map(::JsonPrimitive)))
+        assertTrue("\uD800\uDC00" < "\uE000")
+        writeFunction(root, record)
+        val globals = globalIds.mapIndexed { index, id -> globalRecord(id, JsonPrimitive(if (index == 0) "0x400100" else "0x400200")) }
+        globalIds.zip(globals).forEach { (id, global) ->
+            Files.writeString(root.resolve("reports/program_model.json.export/globals/$id.json"), global)
+        }
+        Files.writeString(root.resolve("reports/program_model.json"), modelText(record, globals.joinToString(",\n")))
+        assertEquals(6L, GccBundledFullExportCapture.capture(run, reports, artifacts()).outputFileCount)
+    }
+
+    @Test
+    fun `function arrays reject duplicates reversed order and nonstring values`() {
+        val values = mapOf(
+            "calls" to listOf("fn_0000000000000000", "fn_ffffffffffffffff"),
+            "referencedGlobals" to listOf("global_0000000000400100", "global_0000000000400200"),
+            "strings" to listOf("\uD800\uDC00", "\uE000"),
+        )
+        for ((field, entries) in values) for (invalid in listOf<JsonElement>(
+            JsonArray(listOf(JsonPrimitive(entries[0]), JsonPrimitive(entries[0]))),
+            JsonArray(entries.reversed().map(::JsonPrimitive)),
+            JsonArray(listOf(JsonPrimitive(17))), JsonArray(listOf(JsonNull)),
+            JsonArray(listOf(JsonObject(emptyMap()))), JsonPrimitive(entries[0]), JsonNull,
+        )) fixture { root, run, reports ->
+            val record = recordWithField(functionRecord("fn_0000000000400010", "f"), field, invalid)
+            writeFunction(root, record)
+            if (field == "referencedGlobals") {
+                val globals = entries.mapIndexed { index, id ->
+                    globalRecord(id, JsonPrimitive(if (index == 0) "0x400100" else "0x400200"))
+                }
+                entries.zip(globals).forEach { (id, global) ->
+                    Files.writeString(root.resolve("reports/program_model.json.export/globals/$id.json"), global)
+                }
+                Files.writeString(root.resolve("reports/program_model.json"), modelText(record, globals.joinToString(",\n")))
+            }
+            val failure = assertFailsWith<IllegalArgumentException>("$field: $invalid") {
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+            }
+            assertTrue(failure.message.orEmpty().contains(field), failure.message)
+        }
+    }
+
+    @Test
+    fun `scalar sidecar fields reject null and nonstring values`() {
+        for ((kind, fields) in listOf("function" to listOf("name", "prototype"), "global" to listOf("name", "type"))) {
+            for (field in fields) for (invalid in listOf<JsonElement>(
+                JsonNull, JsonPrimitive(17), JsonPrimitive(true), JsonArray(emptyList()), JsonObject(emptyMap()),
+            )) fixture { root, run, reports ->
+                val original = if (kind == "function") functionRecord("fn_0000000000400010", "f")
+                    else globalRecord("global_0000000000400100", JsonPrimitive("0x400100"))
+                installSidecar(root, kind, recordWithField(original, field, invalid))
+                val failure = assertFailsWith<IllegalArgumentException>("$kind $field: $invalid") {
+                    GccBundledFullExportCapture.capture(run, reports, artifacts())
+                }
+                assertTrue(failure.message.orEmpty().contains(field), failure.message)
+            }
+        }
+    }
+
+    @Test
+    fun `global initializer accepts strings and null but rejects other JSON types`() {
+        for (initializer in listOf<JsonElement>(JsonNull, JsonPrimitive(""), JsonPrimitive("{ 1, 2 }"))) fixture { root, run, reports ->
+            installSidecar(root, "global", globalRecord("global_0000000000400100", JsonPrimitive("0x400100"), initializer = initializer))
+            assertEquals(5L, GccBundledFullExportCapture.capture(run, reports, artifacts()).outputFileCount)
+        }
+        for (initializer in listOf<JsonElement>(JsonPrimitive(17), JsonPrimitive(true), JsonArray(emptyList()), JsonObject(emptyMap()))) {
+            fixture { root, run, reports ->
+                installSidecar(root, "global", globalRecord("global_0000000000400100", JsonPrimitive("0x400100"), initializer = initializer))
+                val failure = assertFailsWith<IllegalArgumentException> {
+                    GccBundledFullExportCapture.capture(run, reports, artifacts())
+                }
+                assertTrue(failure.message.orEmpty().contains("initializer"), failure.message)
+            }
+        }
     }
 
     private fun fixture(action: (Path, LinuxDescriptor, decompengine.acp.LinuxFileIdentity) -> Unit) {
@@ -511,16 +744,60 @@ class GccBundledFullExportCaptureTest {
         source: JsonElement = if (status == "failed") JsonNull else JsonPrimitive("int f(void) { return 1; }"),
         references: JsonElement = JsonArray(emptyList()),
         calls: JsonElement = JsonArray(emptyList()),
-    ) =
-        """{"id":"$id","name":"$name","address":"0x400010","prototype":"int f(void)","extractionStatus":"$status","recoveryAssessment":"unassessed","calls":$calls,"referencedGlobals":$references,"strings":[],"decompiledC":$source}"""
+        strings: JsonElement = JsonArray(emptyList()),
+        prototype: JsonElement = JsonPrimitive("int f(void)"),
+    ) = prettyRecord(
+        "id" to JsonPrimitive(id), "name" to JsonPrimitive(name), "address" to JsonPrimitive("0x400010"),
+        "prototype" to prototype, "extractionStatus" to JsonPrimitive(status),
+        "recoveryAssessment" to JsonPrimitive("unassessed"), "calls" to calls,
+        "referencedGlobals" to references, "strings" to strings, "decompiledC" to source,
+    )
 
     private fun writeFunction(root: Path, record: String) {
         Files.writeString(root.resolve("reports/program_model.json.export/functions/fn_0000000000400010.json"), record)
         Files.writeString(root.resolve("reports/program_model.json"), modelText(record))
     }
 
-    private fun globalRecord(id: String, address: JsonElement, status: String = "recovered") =
-        """{"id":"$id","name":"g","address":$address,"type":"int","initializer":null,"extractionStatus":"$status","recoveryAssessment":"unassessed"}"""
+    private fun recordWithField(record: String, field: String, value: JsonElement): String {
+        val fields = OracleJson.parse(record.toByteArray()).jsonObject.map { (name, original) ->
+            name to if (name == field) value else original
+        }
+        return prettyRecord(*fields.toTypedArray())
+    }
+
+    private fun installSidecar(root: Path, kind: String, record: String) {
+        when (kind) {
+            "function" -> writeFunction(root, record)
+            "global" -> {
+                val id = OracleJson.parse(record.toByteArray()).jsonObject.getValue("id").jsonPrimitive.content
+                writeFunction(root, functionRecord("fn_0000000000400010", "f",
+                    references = JsonArray(listOf(JsonPrimitive(id)))))
+                writeNamedRecords(root, global = id to record)
+            }
+            "type" -> {
+                val id = OracleJson.parse(record.toByteArray()).jsonObject.getValue("id").jsonPrimitive.content
+                writeNamedRecords(root, type = id to record)
+            }
+            "failure" -> {
+                writeFailure(root, JsonPrimitive("auxiliary recovery failed"))
+                Files.writeString(root.resolve("reports/program_model.json.export/failures/fn_0000000000400010.json"), record)
+            }
+            else -> error("unsupported sidecar fixture: $kind")
+        }
+    }
+
+    private fun globalRecord(
+        id: String,
+        address: JsonElement,
+        status: String = "recovered",
+        name: JsonElement = JsonPrimitive("g"),
+        type: JsonElement = JsonPrimitive("int"),
+        initializer: JsonElement = JsonNull,
+    ) = prettyRecord(
+        "id" to JsonPrimitive(id), "name" to name, "address" to address, "type" to type,
+        "initializer" to initializer, "extractionStatus" to JsonPrimitive(status),
+        "recoveryAssessment" to JsonPrimitive("unassessed"),
+    )
 
     private fun typeId(path: String = "/scalar") = "type_" + OracleArtifacts.sha256(path.toByteArray())
 
@@ -529,8 +806,10 @@ class GccBundledFullExportCaptureTest {
         sourceAddress: JsonElement = JsonPrimitive("0x400010"),
         id: String = typeId(),
         declaration: JsonElement = JsonPrimitive("/* Ghidra type \"\\/scalar\" */ typedef int scalar;"),
-    ) =
-        """{"id":"$id","declaration":$declaration,"sourceAddress":$sourceAddress,"extractionStatus":"$status","recoveryAssessment":"unassessed"}"""
+    ) = prettyRecord(
+        "id" to JsonPrimitive(id), "declaration" to declaration, "sourceAddress" to sourceAddress,
+        "extractionStatus" to JsonPrimitive(status), "recoveryAssessment" to JsonPrimitive("unassessed"),
+    )
 
     private fun writeNamedRecords(root: Path, global: Pair<String, String>? = null, type: Pair<String, String>? = null) {
         val export = root.resolve("reports/program_model.json.export")
@@ -542,8 +821,34 @@ class GccBundledFullExportCaptureTest {
     }
 
     private fun failureRecord(message: JsonElement, status: String = "failed") =
-        """{"schemaVersion":1,"functionId":"fn_0000000000400010","status":"$status","message":$message}
+        """{"schemaVersion":1,"functionId":"fn_0000000000400010","status":"$status","message":${exporterValue(message)}}
 """
+
+    private fun prettyRecord(vararg fields: Pair<String, JsonElement>): String = fields.joinToString(
+        separator = ",\n", prefix = "    {\n", postfix = "\n    }",
+    ) { (name, value) -> "      \"$name\": ${exporterValue(value)}" }
+
+    // Fixture encoding follows the independent Java producer, including its non-default control escapes.
+    private fun exporterValue(value: JsonElement): String = when (value) {
+        is JsonArray -> value.joinToString(", ", "[", "]", transform = ::exporterValue)
+        is JsonPrimitive -> if (value.isString) exporterString(value.content) else value.toString()
+        else -> value.toString()
+    }
+
+    private fun exporterString(value: String): String = buildString {
+        append('"')
+        for (character in value) when (character) {
+            '\\' -> append("\\\\")
+            '"' -> append("\\\"")
+            '\n' -> append("\\n")
+            '\r' -> append("\\r")
+            '\t' -> append("\\t")
+            else -> if (character.code < 0x20) {
+                append("\\u").append(character.code.toString(16).padStart(4, '0'))
+            } else append(character)
+        }
+        append('"')
+    }
 
     private fun writeFailure(root: Path, message: JsonElement, status: String = "failed") {
         val record = functionRecord("fn_0000000000400010", "f", status = status)
