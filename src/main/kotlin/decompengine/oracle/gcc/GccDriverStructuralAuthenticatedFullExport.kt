@@ -13,6 +13,7 @@ import kotlinx.serialization.json.jsonPrimitive
 internal class GccDriverStructuralAuthenticatedFullExportV1 private constructor(
     val binding: GccDriverStructuralFullExportBindingV2,
     private val snapshot: GccBundledFullExportSnapshot,
+    val engineId: String,
 ) {
     val programModelSha256: String = snapshot.programModelSha256
     val programModelBytes: Long = snapshot.programModelBytes
@@ -49,6 +50,13 @@ internal class GccDriverStructuralAuthenticatedFullExportV1 private constructor(
                 )
             }
             val bindingDocument = OracleJson.parseCanonical(binding.canonicalBytes) as JsonObject
+            val engineId = bindingDocument.getValue("receiptLineage").jsonObject
+                .getValue("engineId").jsonPrimitive.content
+            if (engineId != profile.engineId) {
+                throw GccDriverStructuralProfileException(
+                    "authenticated GCC structural binding differs from its selected target",
+                )
+            }
             val boundModel = bindingDocument.getValue("programModel").jsonObject
             if (boundModel.getValue("sha256").jsonPrimitive.content != snapshot.programModelSha256 ||
                 boundModel.getValue("bytes").jsonPrimitive.content.toLongOrNull() != snapshot.programModelBytes ||
@@ -58,7 +66,7 @@ internal class GccDriverStructuralAuthenticatedFullExportV1 private constructor(
                     "authenticated GCC structural binding does not cover the captured model and output tree",
                 )
             }
-            return GccDriverStructuralAuthenticatedFullExportV1(binding, snapshot)
+            return GccDriverStructuralAuthenticatedFullExportV1(binding, snapshot, engineId)
         }
     }
 }

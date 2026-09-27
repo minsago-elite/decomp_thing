@@ -27,6 +27,7 @@ internal class GccBundledOperationInputs private constructor(
     @Synchronized
     fun plannerRequest(intent: GccBundledOperationIntent, exported: GccBundledExecutedOperation,
         modelPath: Path, outputDirectory: Path): GccBundledPlannerRequest {
+        require(intent.engineId != "driver") { "GCC driver export does not authorize compiler-engine planning" }
         verify("before planner request derivation")
         val profile = checkNotNull(plannerProfile) { "GCC planning requires a retained planner profile" }
         return GccBundledPlannerRequest.fromProfile(profile, intent.engineId, exported, intent.requestSha256,

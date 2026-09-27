@@ -413,7 +413,7 @@ final class ExporterSemanticFingerprintV1 {
 // SEMANTIC_FINGERPRINT_TEST_END
 
 public class ExportProgramModel extends GhidraScript {
-    private static final int EXPORTER_VERSION = 11;
+    private static final int EXPORTER_VERSION = 13;
     private static final int DECOMPILE_TIMEOUT_SECONDS = 60;
     private static final int DECOMPILE_RETRY_TIMEOUT_SECONDS = 180;
     private static final int MAXIMUM_DECOMPILE_INSTRUCTIONS = 500_000;
@@ -856,7 +856,8 @@ public class ExportProgramModel extends GhidraScript {
         int length = Math.max(type.getLength(), 1);
         String cName = type.getName().replaceAll("[^A-Za-z0-9_]", "_");
         if (cName.isEmpty() || Character.isDigit(cName.charAt(0))) cName = "recovered_" + id;
-        String prefix = "/* Ghidra type " + key.replace("*/", "* /") + " */ ";
+        // Retain the exact path used for the identity without allowing a comment terminator.
+        String prefix = "/* Ghidra type " + json(key).replace("/", "\\/") + " */ ";
         String declaration;
         if (type instanceof Composite) {
             declaration = prefix + "typedef struct " + cName + " { unsigned char _data[" + length + "]; } " + cName + ";";

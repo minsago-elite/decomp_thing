@@ -18,7 +18,7 @@
           "required": ["id", "version", "sha256", "recoveryMode"],
           "properties": {
             "id": {"const": "decompengine-ghidra-program-model"},
-            "version": {"const": 11},
+            "version": {"const": 13},
             "recoveryMode": {"const": "planning"},
             "sha256": {"$ref": "#/$defs/sha256"}
           }

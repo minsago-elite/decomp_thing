@@ -678,6 +678,22 @@ class GccCompilerEngineResumeEvidenceValidationTest {
     }
 
     @Test
+    fun `previous exporter state is rejected without mutating its retained bytes`() {
+        val fixture = oneBatchFixture()
+        val current = GccCompilerEngineResumeByteValidator.assessExporterState(fixture.state)
+        assertEquals(sha(fixture.state), current.artifactSha256)
+        assertTrue("\"exporterVersion\":13" in fixture.state.decodeToString())
+        val historical = fixture.state.decodeToString()
+            .replace("\"exporterVersion\":13", "\"exporterVersion\":12").toByteArray()
+        val retained = historical.copyOf()
+        val failure = assertFailsWith<GccCompilerEngineResumeEvidenceException> {
+            GccCompilerEngineResumeByteValidator.assessExporterState(historical)
+        }
+        assertTrue(failure.message.orEmpty().contains("unsupported exporter version"))
+        assertContentEquals(retained, historical)
+    }
+
+    @Test
     fun `state-bound progress retains raw digest and rejects impossible prefix positions`() {
         val fixture = oneBatchFixture()
         val state = GccCompilerEngineResumeByteValidator.assessExporterState(fixture.state)
@@ -1502,7 +1518,7 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         val partial = spec.functions.count { it.status == "partial" }
         val failed = spec.functions.count { it.status == "failed" }
         append("schemaVersion=1\n")
-        append("exporterVersion=11\n")
+        append("exporterVersion=13\n")
         append("recoveryMode=planning\n")
         append("stateSha256=$stateSha\n")
         append("inventorySha256=$inventorySha\n")
@@ -1531,7 +1547,7 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         semanticSha256: String,
         batchCommitmentSha256: String,
     ): ByteArray = (
-        "{\"schemaVersion\":2,\"exporterVersion\":11,\"exporterSha256\":\"$SHA_B\"," +
+        "{\"schemaVersion\":2,\"exporterVersion\":13,\"exporterSha256\":\"$SHA_B\"," +
             "\"analysisToolSha256\":\"$SHA_C\",\"recoveryMode\":\"planning\"," +
             "\"inputSha256\":\"$SHA_A\",\"language\":\"x86:LE:64:default\",\"compilerSpec\":\"gcc\"," +
             "\"semanticStateBinding\":{\"schemaVersion\":1,\"scope\":\"planning-exporter-visible-program\"," +

@@ -22,20 +22,39 @@ the extracted model; rejecting an assessment claim in this input format does not
 authorize dropping a discrepancy from the oracle. No calibrated probability can
 be derived from the extraction status.
 
-Exporter version 10 emits schema 2 in full and planning modes. Its function/global/type
+Exporter version 13 emits schema 2 in full and planning modes. Its function/global/type
 fragments explicitly retain unassessed recovery, and fragment validation requires
-those fields. Resume state and GCC profile admission pin exporter version 10;
-version-9 state is rejected without rewriting it or replacing the previous model.
+those fields. Resume state and GCC profile admission pin exporter version 13;
+version-12 and earlier state is rejected without rewriting it or replacing the previous model.
 The Kotlin resume verifier reconstructs schema-2 bytes from the retained fragments.
 Existing byte commitments cover the new fields, while the exporter version and
 script digest distinguish the producer contract. Typed
 entity `status` properties remain historical extraction labels for compatibility.
+Since version 12, the exporter retains the original Ghidra type path as a JSON string
+with escaped forward slashes in the declaration comment. This preserves paths containing quotes,
+backslashes, line breaks or comment delimiters, and permits exact UTF-8 path hashing
+against the type ID. The program-model schema remains version 2.
 For schema 2, the source manifest, project/module confidence report, human unresolved
 report and archival audit include every extracted entity in the unresolved recovery
 population. Successful compilation can accept an implementation without changing
 that population. Human reports retain the extraction label alongside `unassessed`.
 The authored regression covers functions, globals and types, including packaging,
 extraction and consumer re-audit.
+
+## Call-target evidence boundary
+
+Canonical `fn_` call IDs encode a Ghidra function entry-point offset; their format
+alone does not authenticate a target, its address space, or a scored call edge.
+The exporter retains non-external call targets, including thunks, while omitting
+thunks from the exported function inventory. A valid call can therefore lack a
+matching function record. Bundled Ghidra 12.1.3 can also create ordinary thunks in
+an artificial, uninitialized RAM block named `EXTERNAL`, outside file-backed
+executable segments. That block differs from Ghidra's external address space,
+whose function targets the exporter excludes. Neither inventory membership nor
+file-backed executable-range membership is implied by a canonical call ID.
+Independent call-target qualification requires retained target and thunk
+provenance; the current model and profile binding do not supply that evidence or
+grant scoring authority.
 
 Historical schema-1 reports retain their extraction-based unresolved accounting for
 compatibility; their labels still contain no independently scored assessment. A

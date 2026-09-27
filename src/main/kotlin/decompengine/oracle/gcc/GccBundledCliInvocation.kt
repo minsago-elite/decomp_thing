@@ -33,9 +33,14 @@ internal data class GccBundledCliOptions(
                     values[argument] = value
                 } else positionals += argument
             }
-            require(positionals.size == 2 && positionals[0] in setOf("cc1", "lto1")) { "expected cc1 or lto1 and its stripped binary" }
-            require(!fullRecoveryExport || positionals[0] == "cc1") {
-                "full-recovery structural export is currently supported only for cc1"
+            require(positionals.size == 2 && positionals[0] in setOf("cc1", "lto1", "driver")) {
+                "expected cc1, lto1 or driver and its stripped binary"
+            }
+            require(!fullRecoveryExport || positionals[0] in setOf("cc1", "driver")) {
+                "full-recovery structural export requires cc1 or driver"
+            }
+            require(positionals[0] != "driver" || fullRecoveryExport) {
+                "driver admission requires a fresh full-recovery export"
             }
             fun path(value: String) = Path.of(value).toAbsolutePath().normalize()
             fun required(name: String) = path(requireNotNull(values[name]) { "$name is required" })

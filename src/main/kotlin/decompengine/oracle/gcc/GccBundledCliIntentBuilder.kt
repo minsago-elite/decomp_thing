@@ -15,13 +15,16 @@ internal object GccBundledCliIntentBuilder {
         diskPolicy: FullTreeDiskScratchPolicy, cliInvocation: GccBundledCliInvocation? = null,
         fullRecoveryExport: Boolean = false): GccBundledOperationIntent {
         require(operationId.matches(Regex("[a-f0-9]{64}")))
-        require(engineId in setOf("cc1", "lto1") && runKind in setOf(
+        require(engineId in setOf("cc1", "lto1", "driver") && runKind in setOf(
             GccCompilerEngineContainmentRunKind.FRESH_CONTROL, GccCompilerEngineContainmentRunKind.INTERRUPTED))
         require(!fullRecoveryExport || runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL) {
             "full-recovery export requires a fresh uninterrupted operation"
         }
-        require(!fullRecoveryExport || engineId == "cc1") {
-            "full-recovery structural export is currently supported only for cc1"
+        require(!fullRecoveryExport || engineId in setOf("cc1", "driver")) {
+            "full-recovery structural export requires cc1 or driver"
+        }
+        require(engineId != "driver" || fullRecoveryExport) {
+            "driver admission requires a fresh full-recovery export"
         }
         require(cliInvocation == null || cliInvocation.options.fullRecoveryExport == fullRecoveryExport) {
             "CLI invocation command differs from requested recovery mode"
@@ -43,10 +46,10 @@ internal object GccBundledCliIntentBuilder {
                 }
             }
             require(LinuxFilesystemSyscalls.directoryEntryNames(directory, 1).isEmpty()) { "CLI control directory must be empty" }
-            GccRetainedCompilerEngineProfile.open(profilePath).use { profile ->
+            GccRetainedCompilerEngineProfile.open(profilePath, engineId).use { profile ->
                 profile.requireDisjoint(roots)
                 val suite = profile.suite
-                val engine = suite.engine(engineId)
+                val engine = profile.target(engineId)
                 cliInvocation?.options?.resumeAfterCheckpoint?.let { threshold ->
                     require(threshold < suite.budgets.plannerMaximumEntities.toLong()) {
                         "CLI checkpoint threshold cannot be reached within the profile planner entity bound"
@@ -107,7 +110,7 @@ internal object GccBundledCliIntentBuilder {
                             artifacts += staged(GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE, "ExportProgramModel.java", exporter)
                             val intent = GccBundledOperationIntent(operationId, engineId, runKind, artifacts, runtime,
                                 GccCompilerEngineContainmentBudgets(
-                                    if (fullRecoveryExport) suite.budgets.fullRecoveryCc1ExportWallClockMillis else suite.budgets.exportWallClockMillis,
+                                    profile.exportWallClockMillis(engineId, fullRecoveryExport),
                                     suite.budgets.exportMaximumResidentBytes, 128),
                                 diskPolicy, profile, cliInvocation)
                             requireDirectory()
