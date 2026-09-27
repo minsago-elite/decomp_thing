@@ -3,6 +3,10 @@ package decompengine.oracle.gcc
 import decompengine.oracle.core.OracleArtifactLimits
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
+import decompengine.oracle.fulltree.BoundedDwarfCanonicalShardWriter
+import decompengine.oracle.fulltree.parseCanonicalDwarfShard
+import decompengine.oracle.structural.DwarfSysvAmd64InterfaceProjection
+import decompengine.oracle.structural.DwarfSysvAmd64Classification
 import decompengine.oracle.fulltree.BoundedDwarfInterfaceFactScanner
 import decompengine.oracle.fulltree.BoundedDwarfInterfaceFacts
 import decompengine.oracle.fulltree.BoundedDwarfInterfaceTypeResolver
@@ -55,13 +59,14 @@ class GccDriverDwarfInterfaceEvidenceTest {
         count("addressMatchedDwarfFunctions", 2)
         count("uniqueWithKnownRawReturnType", 1)
         count("uniqueWithKnownRawCallingConvention", 0)
-        count("fullyNormalizedAbiSignatures", 0)
+        count("observableNeutralAbiFunctions", 0)
+        count("unresolvedAbiFunctions", 3)
         val mapped = projection.getValue("functions").jsonArray.map { it.jsonObject }
         assertEquals(JsonArray(listOf(JsonPrimitive("die-1"))), mapped[0].getValue("candidateDieLocators"))
         assertEquals(JsonArray(listOf(JsonPrimitive("die-2"), JsonPrimitive("die-3"))), mapped[1].getValue("candidateDieLocators"))
         assertEquals(JsonArray(emptyList()), mapped[2].getValue("candidateDieLocators"))
         assertEquals(JsonPrimitive("no-physical-rva"), mapped[4].getValue("dwarfMatch"))
-        assertTrue(mapped.all { it.getValue("normalizedAbiSignature") == JsonNull })
+        assertTrue(mapped.all { it.getValue("projectedAbiLocator") == JsonNull })
         assertEquals(records[3].jsonObject.getValue("exclusion"), mapped[3].getValue("exclusion"))
         assertEquals(JsonArray(listOf(JsonPrimitive("die-4"), JsonPrimitive("die-6"))),
             projection.getValue("unmatchedRawCandidateDieLocators"))
@@ -113,6 +118,16 @@ class GccDriverDwarfInterfaceEvidenceTest {
         assertEquals(originalFirstByte, first.canonicalBytes()[0], "publication must return defensive byte copies")
         val second = GccDriverDwarfInterfaceEvidence.capture(root, scratch)
         assertContentEquals(first.canonicalBytes(), second.canonicalBytes())
+        assertEquals(first.partNames, second.partNames)
+        first.partNames.forEach { name -> assertContentEquals(first.partBytes(name), second.partBytes(name), name) }
+        val parts = first.partNames.map { it to first.partBytes(it) }
+        GccDriverDwarfInterfaceEvidence.verifyBundle(first.canonicalBytes(), parts)
+        assertFailsWith<IllegalArgumentException> { GccDriverDwarfInterfaceEvidence.verifyBundle(first.canonicalBytes(), parts.dropLast(1)) }
+        assertFailsWith<IllegalArgumentException> { GccDriverDwarfInterfaceEvidence.verifyBundle(first.canonicalBytes(), parts.reversed()) }
+        val changedPart = parts.first().second.copyOf().also { it[it.lastIndex] = 0 }
+        assertFailsWith<IllegalArgumentException> {
+            GccDriverDwarfInterfaceEvidence.verifyBundle(first.canonicalBytes(), listOf(parts.first().first to changedPart) + parts.drop(1))
+        }
         val document = OracleJson.parseCanonical(first.canonicalBytes(), GccDriverDwarfInterfaceEvidence.EVIDENCE_JSON_LIMITS).jsonObject
         listOf("complete", "scored", "productionVerified", "releaseEligible").forEach {
             assertEquals(JsonPrimitive(false), document.getValue(it), it)
@@ -121,23 +136,36 @@ class GccDriverDwarfInterfaceEvidenceTest {
         assertEquals(JsonPrimitive(12_844), coverage.getValue("oracleRecords"))
         assertEquals(JsonPrimitive(3_284), coverage.getValue("scoredPhysicalFunctions"))
         assertEquals(JsonPrimitive(9_560), coverage.getValue("excludedRecords"))
-        assertEquals(JsonPrimitive(0), coverage.getValue("fullyNormalizedAbiSignatures"))
+        val observable = coverage.getValue("observableNeutralAbiFunctions").jsonPrimitive.content.toInt()
+        assertTrue(observable > 0 && observable <= 3_284, "actual neutral projection must produce measured observability")
+        assertEquals(3_284 - observable, coverage.getValue("unresolvedAbiFunctions").jsonPrimitive.content.toInt())
         assertTrue(coverage.getValue("uniqueRawDwarfFunctions").jsonPrimitive.content.toInt() > 0)
-        val raw = document.getValue("rawDwarfFacts").jsonObject
-        assertEquals(JsonPrimitive(BoundedDwarfInterfaceFactScanner.PRODUCER), raw.getValue("schema"))
-        assertTrue(raw.getValue("functions").jsonArray.isNotEmpty())
-        assertTrue(raw.getValue("types").jsonArray.isNotEmpty())
-        val candidateIds = raw.getValue("functions").jsonArray.map { it.jsonObject.getValue("locator").jsonPrimitive.content }.toSet()
-        document.getValue("functions").jsonArray.forEach { record ->
-            record.jsonObject.getValue("candidateDieLocators").jsonArray.forEach { assertTrue(it.jsonPrimitive.content in candidateIds) }
+        fun records(kind: String) = parts.filter { it.first.contains("-$kind-") }.flatMap {
+            parseCanonicalDwarfShard(it.second).records
         }
-        val tamperResults = exerciseCheckedInputTampering(root, destination, document)
+        val metadata = records("metadata").single()
+        assertEquals(JsonPrimitive(BoundedDwarfInterfaceFactScanner.PRODUCER), metadata.getValue("schema"))
+        assertTrue(records("functions").isNotEmpty())
+        assertTrue(records("types").isNotEmpty())
+        assertTrue(records("globals").isNotEmpty())
+        assertTrue(records("globalProjection").isNotEmpty())
+        val candidateIds = records("functions").map { it.getValue("locator").jsonPrimitive.content }.toSet()
+        records("oracleFunctions").forEach { record ->
+            record.getValue("candidateDieLocators").jsonArray.forEach { assertTrue(it.jsonPrimitive.content in candidateIds) }
+        }
+        val tamperResults = exerciseCheckedInputTampering(root, destination, document) +
+            listOf("missing-shard-rejected", "altered-shard-rejected", "reordered-shards-rejected")
+        first.visitParts { relative, bytes ->
+            val path = destination.resolve(relative)
+            Files.createDirectories(path.parent, PRIVATE_DIRECTORY)
+            OracleArtifacts.publishAtomically(path, bytes, OracleArtifactLimits(GccDriverDwarfInterfaceEvidence.SHARD_LIMITS.maximumShardBytes))
+        }
         OracleArtifacts.publishAtomically(destination.resolve(GccDriverDwarfInterfaceEvidence.EVIDENCE_NAME), first.canonicalBytes(),
             OracleArtifactLimits(GccDriverDwarfInterfaceEvidence.MAXIMUM_EVIDENCE_BYTES))
         val qualification = JsonObject(mapOf(
-            "provider" to JsonPrimitive("gcc-driver-dwarf-interface-qualification-v1"),
+            "provider" to JsonPrimitive("gcc-driver-dwarf-interface-qualification-v2"),
             "evidenceSha256" to JsonPrimitive(first.sha256), "evidenceBytes" to JsonPrimitive(first.canonicalBytes().size),
-            "deterministicRepeat" to JsonPrimitive(true), "tamperChecks" to JsonArray(tamperResults.map(::JsonPrimitive)),
+            "deterministicRepeat" to JsonPrimitive(true), "deterministicBundleParts" to JsonPrimitive(first.partNames.size), "tamperChecks" to JsonArray(tamperResults.map(::JsonPrimitive)),
             "elapsedMillis" to JsonPrimitive((System.nanoTime() - started) / 1_000_000),
             "producerSourceRevision" to (System.getenv("GITHUB_SHA")?.let(::JsonPrimitive) ?: JsonNull),
             "javaRuntimeVersion" to JsonPrimitive(System.getProperty("java.runtime.version")),
@@ -146,6 +174,8 @@ class GccDriverDwarfInterfaceEvidenceTest {
             "compiledClassResources" to JsonArray(listOf(
                 BoundedDwarfInterfaceFactScanner::class.java, BoundedDwarfInterfaceTypeResolver::class.java,
                 BoundedDwarfInterfaceFacts::class.java, GccDriverDwarfInterfaceEvidence::class.java,
+                DwarfSysvAmd64InterfaceProjection::class.java, DwarfSysvAmd64Classification::class.java,
+                GccDriverDwarfGlobalProjection::class.java, BoundedDwarfCanonicalShardWriter::class.java,
             ).map(::compiledClassIdentity)),
             "identityScope" to JsonPrimitive("bounded classpath resource bytes read during qualification; not a signed or complete runtime closure"),
             "complete" to JsonPrimitive(false), "scored" to JsonPrimitive(false),
@@ -154,6 +184,45 @@ class GccDriverDwarfInterfaceEvidenceTest {
         OracleArtifacts.publishAtomically(destination.resolve(GccDriverDwarfInterfaceEvidence.QUALIFICATION_NAME),
             OracleJson.canonicalBytes(qualification))
         println("GCC raw DWARF interface evidence retained at $destination; ${first.sha256}")
+    }
+
+    @Test
+    fun `small v2 bundle rejects missing altered reordered and rehashed reordered parts`() {
+        val base = JsonObject(mapOf("schemaVersion" to JsonPrimitive(2),
+            "provider" to JsonPrimitive("gcc-driver-dwarf-interface-evidence-v2"),
+            "complete" to JsonPrimitive(false), "scored" to JsonPrimitive(false),
+            "productionVerified" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false)))
+        val kinds = listOf("metadata", "functions", "types", "globals", "objectSymbols", "strippedObjects",
+            "projectedTypes", "projectedFunctions", "projectedGlobalTypes", "oracleFunctions", "unmatchedFunctions", "globalProjection")
+        fun bundle() = GccDriverDwarfInterfaceEvidence.pack(base) { consume ->
+            val writer = BoundedDwarfCanonicalShardWriter(GccDriverDwarfInterfaceEvidence.SHARD_LIMITS, consume)
+            kinds.forEach { writer.write(it, sequenceOf(JsonObject(mapOf("identity" to JsonPrimitive(it))))) }
+            writer.finish()
+        }
+        val first = bundle(); val second = bundle()
+        assertContentEquals(first.canonicalBytes(), second.canonicalBytes())
+        val parts = first.partNames.map { it to first.partBytes(it) }
+        parts.forEach { (name, bytes) -> assertContentEquals(bytes, second.partBytes(name)) }
+        GccDriverDwarfInterfaceEvidence.verifyBundle(first.canonicalBytes(), parts)
+        assertFailsWith<IllegalArgumentException> { GccDriverDwarfInterfaceEvidence.verifyBundle(first.canonicalBytes(), parts.dropLast(1)) }
+        assertFailsWith<IllegalArgumentException> { GccDriverDwarfInterfaceEvidence.verifyBundle(first.canonicalBytes(), parts.reversed()) }
+        val altered = parts.first().second.copyOf().also { it[it.lastIndex] = 0 }
+        assertFailsWith<IllegalArgumentException> {
+            GccDriverDwarfInterfaceEvidence.verifyBundle(first.canonicalBytes(), listOf(parts.first().first to altered) + parts.drop(1))
+        }
+        val manifest = OracleJson.parseCanonical(first.canonicalBytes()).jsonObject
+        val descriptors = manifest.getValue("parts").jsonArray
+        val changedManifest = OracleJson.canonicalBytes(JsonObject(manifest + ("parts" to JsonArray(descriptors.reversed()))))
+        assertFailsWith<IllegalArgumentException> { GccDriverDwarfInterfaceEvidence.verifyBundle(changedManifest, parts.reversed()) }
+        for (numeric in listOf("ordinal", "recordCount")) {
+            val changed = JsonObject(descriptors.first().jsonObject +
+                (numeric to JsonPrimitive(descriptors.first().jsonObject.getValue(numeric).jsonPrimitive.content)))
+            val typedManifest = OracleJson.canonicalBytes(JsonObject(manifest +
+                ("parts" to JsonArray(listOf(changed) + descriptors.drop(1)))))
+            assertFailsWith<IllegalArgumentException> { GccDriverDwarfInterfaceEvidence.verifyBundle(typedManifest, parts) }
+        }
+        val copy = first.partBytes(first.partNames.first()); copy[0] = 0
+        assertNotEquals(0, first.partBytes(first.partNames.first())[0].toInt())
     }
 
     private fun exerciseCheckedInputTampering(root: Path, destination: Path, document: JsonObject): List<String> {

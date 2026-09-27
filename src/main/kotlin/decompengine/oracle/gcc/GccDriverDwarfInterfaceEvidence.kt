@@ -2,6 +2,10 @@ package decompengine.oracle.gcc
 
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
+import decompengine.oracle.fulltree.*
+import decompengine.oracle.structural.DwarfSysvAmd64InterfaceProjection
+import decompengine.oracle.structural.DwarfSysvAmd64Projection
+import decompengine.oracle.structural.DwarfProjectedFunction
 import decompengine.oracle.fulltree.BoundedDwarfInterfaceFactLimits
 import decompengine.oracle.fulltree.BoundedDwarfInterfaceFactScanner
 import decompengine.oracle.fulltree.BoundedDwarfInterfaceFacts
@@ -21,19 +25,29 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import java.util.Collections
 
-/** A bounded evidence publication, not an ABI oracle, scored model, or release capability. */
-internal class GccDriverDwarfInterfaceArtifact internal constructor(bytes: ByteArray) {
+/** Bounded defensive parts; the manifest binds integrity, without minting oracle authority. */
+internal class GccDriverDwarfInterfaceArtifact internal constructor(bytes: ByteArray, parts: List<Pair<String, ByteArray>>) {
     private val encoded = bytes.copyOf()
+    private val retained = parts.map { it.first to it.second.copyOf() }
     val sha256: String = gccInterfaceSha256(encoded)
+    val partNames: List<String> = Collections.unmodifiableList(retained.map { it.first })
     fun canonicalBytes(): ByteArray = encoded.copyOf()
+    fun partBytes(name: String): ByteArray = retained.single { it.first == name }.second.copyOf()
+    fun visitParts(consumer: (String, ByteArray) -> Unit) = retained.forEach { (name, bytes) -> consumer(name, bytes.copyOf()) }
 }
 
 /** Checked driver truth inputs are deliberately independent of compiler-engine runtime profiles. */
 internal object GccDriverDwarfInterfaceEvidence {
     const val EVIDENCE_NAME = "evidence.json"
     const val QUALIFICATION_NAME = "qualification.json"
-    const val MAXIMUM_EVIDENCE_BYTES = 64 * 1024 * 1024
+    const val MAXIMUM_EVIDENCE_BYTES = 1024 * 1024
+    internal val SHARD_LIMITS = BoundedDwarfShardLimits()
+    private val PART_KINDS = listOf("metadata", "functions", "types", "globals", "objectSymbols",
+        "strippedObjects", "projectedTypes", "projectedFunctions", "projectedGlobalTypes", "oracleFunctions", "unmatchedFunctions", "globalProjection")
     private const val PREFIX = "oracle/gcc/16.2.0/"
     private const val ORACLE_ID = "gcc-driver-16.2.0"
     private const val SOURCE_REVISION = "78d4ac73dd391005b895a6148cd9831e28e1208b"
@@ -46,7 +60,7 @@ internal object GccDriverDwarfInterfaceEvidence {
     )
     internal val EVIDENCE_JSON_LIMITS = StrictJsonLimits(
         maximumInputBytes = MAXIMUM_EVIDENCE_BYTES, maximumCanonicalBytes = MAXIMUM_EVIDENCE_BYTES,
-        maximumNodes = 1_000_000, maximumTotalStringBytes = MAXIMUM_EVIDENCE_BYTES,
+        maximumNodes = 100_000, maximumTotalStringBytes = MAXIMUM_EVIDENCE_BYTES,
     )
     private val SCAN_LIMITS = BoundedDwarfInterfaceFactLimits(maximumArtifactBytes = 20_713_760)
     private val CONTROL_LIMITS = FullTreeControlLimits(
@@ -132,11 +146,39 @@ internal object GccDriverDwarfInterfaceEvidence {
                 facts.executableRanges == EXECUTABLE_RANGES && facts.dwarfPresent && facts.functions.isNotEmpty()) {
                 "GCC driver interface facts differ from the retained rich artifact"
             }
-            val document = publication(documents, facts)
-            val bytes = OracleJson.canonicalBytes(document, EVIDENCE_JSON_LIMITS)
+            val strippedObjects = arrayListOf<FullTreeElfObjectSymbol>()
+            val strippedLayout = FullTreeElfLayout.scanObjects(guards.getValue("stripped"), "checked GCC driver stripped objects",
+                checkpoint = checkpoint) {
+                require(strippedObjects.size < SCAN_LIMITS.maximumObjects) { "stripped GCC object inventory exceeds object-count bound" }
+                strippedObjects += it
+            }
+            require(strippedLayout.imageBase == facts.imageBase && strippedLayout.executableRanges == facts.executableRanges &&
+                strippedLayout.elfClass == 2 && strippedLayout.byteOrder == 1 && strippedLayout.machine == 62 &&
+                strippedLayout.elfType == "ET_EXEC" && strippedLayout.osAbi == 3 && strippedLayout.abiVersion == 0) {
+                "stripped GCC object inventory differs from the checked ELF target"
+            }
+            val projection = DwarfSysvAmd64InterfaceProjection.project(facts, documents.getValue("targetAbi"))
+            val globalProjection = GccDriverDwarfGlobalProjection.project(facts, strippedObjects, strippedLayout)
+            val mapping = mapFunctions(documents.getValue("functionOracle").getValue("functions").jsonArray,
+                facts.functions, projection.functions)
+            val document = publication(documents, mapping, projection, globalProjection.summary,
+                globalProjection.configuration, strippedLayout)
+            val artifact = pack(document) { consume ->
+                facts.visitCanonicalShards(consume)
+                val writer = BoundedDwarfCanonicalShardWriter(SHARD_LIMITS, consume)
+                writer.write("strippedObjects", strippedObjects.asSequence().map { it.toJson() })
+                writer.write("projectedTypes", projection.types.asSequence().map { it.toJson() })
+                writer.write("projectedFunctions", projection.functions.asSequence().map { it.toJson() })
+                writer.write("projectedGlobalTypes", projection.globals.asSequence())
+                writer.write("oracleFunctions", mapping.getValue("functions").jsonArray.asSequence().map { it.jsonObject })
+                writer.write("unmatchedFunctions", mapping.getValue("unmatchedRawCandidateDieLocators").jsonArray.asSequence()
+                    .map { JsonObject(mapOf("locator" to it)) })
+                writer.write("globalProjection", globalProjection.records.asSequence())
+                writer.finish()
+            }
             checkpoint("before publishing checked GCC driver interfaces")
             guards.forEach { (role, guard) -> guard.verifyUnchanged("after GCC driver interface publication: $role") }
-            return GccDriverDwarfInterfaceArtifact(bytes)
+            return artifact
         } catch (caught: Throwable) {
             failure = caught
             throw caught
@@ -220,55 +262,131 @@ internal object GccDriverDwarfInterfaceEvidence {
             reviewed.associate { it.text("rva") to it.text("reason") }) { "GCC driver reviewed exclusions drifted" }
     }
 
-    private fun publication(documents: Map<String, JsonObject>, facts: BoundedDwarfInterfaceFacts): JsonObject {
-        val mapping = mapFunctions(documents.getValue("functionOracle").getValue("functions").jsonArray, facts.functions)
-        return JsonObject(linkedMapOf(
-            "schemaVersion" to JsonPrimitive(1),
-            "provider" to JsonPrimitive("gcc-driver-dwarf-interface-evidence-v1"),
-            "oracleId" to JsonPrimitive(ORACLE_ID),
-            "sourceRevision" to JsonPrimitive(SOURCE_REVISION),
-            "complete" to JsonPrimitive(false), "scored" to JsonPrimitive(false),
-            "productionVerified" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
-            "configuration" to JsonObject(mapOf(
-                "mapping" to JsonPrimitive("exact-executable-rich-rva-only"),
-                "nameMatching" to JsonPrimitive(false),
-                "abiNormalization" to JsonPrimitive("not-implemented"),
-                "globalFacts" to JsonPrimitive("not-produced"),
-                "maximumEvidenceBytes" to JsonPrimitive(MAXIMUM_EVIDENCE_BYTES),
-                "scanner" to JsonPrimitive(BoundedDwarfInterfaceFactScanner.PRODUCER),
-                "scannerLimits" to SCAN_LIMITS.toJson(),
-                "controlLimits" to JsonObject(mapOf(
-                    "maximumRichArtifactBytes" to JsonPrimitive(CONTROL_LIMITS.maximumRichArtifactBytes),
-                    "maximumDwarfSectionBytes" to JsonPrimitive(CONTROL_LIMITS.maximumDwarfSectionBytes),
-                    "maximumDwarfScratchBytes" to JsonPrimitive(CONTROL_LIMITS.maximumDwarfScratchBytes),
-                    "maximumDwarfMetadataBytes" to JsonPrimitive(CONTROL_LIMITS.maximumDwarfMetadataBytes),
-                    "maximumDwarfAttributeBytes" to JsonPrimitive(CONTROL_LIMITS.maximumDwarfAttributeBytes),
-                    "maximumDwarfParseSteps" to JsonPrimitive(CONTROL_LIMITS.maximumDwarfParseSteps),
-                    "maximumCompilationUnits" to JsonPrimitive(CONTROL_LIMITS.maximumCompilationUnits),
-                    "maximumAbbreviationDeclarationsPerUnit" to JsonPrimitive(CONTROL_LIMITS.maximumAbbreviationDeclarationsPerUnit),
-                    "maximumAbbreviationAttributesPerUnit" to JsonPrimitive(CONTROL_LIMITS.maximumAbbreviationAttributesPerUnit),
-                )),
+    private fun publication(documents: Map<String, JsonObject>, mapping: JsonObject, projection: DwarfSysvAmd64Projection,
+                            globals: JsonObject, globalConfiguration: JsonObject,
+                            strippedLayout: FullTreeElfObjectLayoutObservation): JsonObject = JsonObject(linkedMapOf(
+        "schemaVersion" to JsonPrimitive(2), "provider" to JsonPrimitive("gcc-driver-dwarf-interface-evidence-v2"),
+        "oracleId" to JsonPrimitive(ORACLE_ID), "sourceRevision" to JsonPrimitive(SOURCE_REVISION),
+        "complete" to JsonPrimitive(false), "scored" to JsonPrimitive(false),
+        "productionVerified" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
+        "configuration" to JsonObject(mapOf(
+            "mapping" to JsonPrimitive("exact-executable-rich-rva-only"), "nameMatching" to JsonPrimitive(false),
+            "abiProjection" to JsonPrimitive(DwarfSysvAmd64InterfaceProjection.VERSION),
+            "globals" to globalConfiguration,
+            "maximumManifestBytes" to JsonPrimitive(MAXIMUM_EVIDENCE_BYTES),
+            "maximumManifestNodes" to JsonPrimitive(100_000),
+            "bundleLimits" to SHARD_LIMITS.toJson(),
+            "manifestBudgetReservedFromBundle" to JsonPrimitive(true),
+            "scanner" to JsonPrimitive(BoundedDwarfInterfaceFactScanner.PRODUCER), "scannerLimits" to SCAN_LIMITS.toJson(),
+            "controlLimits" to JsonObject(mapOf(
+                "maximumRichArtifactBytes" to JsonPrimitive(CONTROL_LIMITS.maximumRichArtifactBytes),
+                "maximumDwarfSectionBytes" to JsonPrimitive(CONTROL_LIMITS.maximumDwarfSectionBytes),
+                "maximumDwarfScratchBytes" to JsonPrimitive(CONTROL_LIMITS.maximumDwarfScratchBytes),
+                "maximumDwarfMetadataBytes" to JsonPrimitive(CONTROL_LIMITS.maximumDwarfMetadataBytes),
+                "maximumDwarfAttributeBytes" to JsonPrimitive(CONTROL_LIMITS.maximumDwarfAttributeBytes),
+                "maximumDwarfParseSteps" to JsonPrimitive(CONTROL_LIMITS.maximumDwarfParseSteps),
+                "maximumCompilationUnits" to JsonPrimitive(CONTROL_LIMITS.maximumCompilationUnits),
+                "maximumAbbreviationDeclarationsPerUnit" to JsonPrimitive(CONTROL_LIMITS.maximumAbbreviationDeclarationsPerUnit),
+                "maximumAbbreviationAttributesPerUnit" to JsonPrimitive(CONTROL_LIMITS.maximumAbbreviationAttributesPerUnit),
             )),
-            "inputs" to JsonObject((controls + artifacts).mapValues { (_, pin) -> JsonObject(mapOf(
-                "path" to JsonPrimitive(pin.path), "bytes" to JsonPrimitive(pin.bytes), "sha256" to JsonPrimitive(pin.sha256),
-            )) }),
-            "targetAbi" to documents.getValue("targetAbi"),
-            "coverage" to mapping.getValue("coverage"),
-            "functions" to mapping.getValue("functions"),
-            "unmatchedRawCandidateDieLocators" to mapping.getValue("unmatchedRawCandidateDieLocators"),
-            "reviewedExclusions" to documents.getValue("reviewedExclusions"),
-            "rawDwarfFacts" to facts.toJson(),
-            "unresolved" to JsonArray(listOf(
-                "raw-DWARF-source-facts-are-not-normalized-ABI-signatures",
-                "absent-attributes-do-not-establish-void-types-or-default-calling-conventions",
-                "global-ABI-denominator-and-scoring-remain-outstanding",
-                "no-candidate-comparison-or-release-qualification",
-            ).map(::JsonPrimitive)),
-        ))
+        )),
+        "inputs" to JsonObject((controls + artifacts).mapValues { (_, pin) -> JsonObject(mapOf(
+            "path" to JsonPrimitive(pin.path), "bytes" to JsonPrimitive(pin.bytes), "sha256" to JsonPrimitive(pin.sha256),
+        )) }),
+        "targetAbi" to documents.getValue("targetAbi"), "ruleProfile" to projection.ruleProfile,
+        "ruleProfileSha256" to JsonPrimitive(projection.ruleProfileSha256),
+        "coverage" to mapping.getValue("coverage"), "globalCoverage" to globals,
+        "globalDeclaredTypeCoverage" to JsonObject(mapOf(
+            "rawVariableRecords" to JsonPrimitive(projection.globals.size),
+            "observableDeclaredTypeAbi" to JsonPrimitive(projection.globals.count { it["observableDeclaredTypeAbi"] == JsonPrimitive(true) }),
+            "meaning" to JsonPrimitive("declared-type-ABI-observability-only-not-storage-identity-or-recovered-accuracy"),
+        )),
+        "strippedObjectLayout" to strippedLayout.toJson(),
+        "reviewedExclusions" to documents.getValue("reviewedExclusions"),
+        "unresolved" to JsonArray(listOf(
+            "oracle-observability-is-not-recovered-accuracy",
+            "unknown-and-ambiguous-functions-remain-in-the-scored-physical-denominator",
+            "neutral-typed-ABI-projection-is-not-structural-v1-normalization",
+            "storage-binding-does-not-prove-source-variable-identity",
+            "whole-call-register-allocation-and-recovered-candidate-scoring-remain-outstanding",
+            "no-production-or-release-qualification",
+        ).map(::JsonPrimitive)),
+    ))
+
+    /** Pure integrity packer. Only capture authenticates checked input controls. */
+    internal fun pack(document: JsonObject,
+                      emit: ((String, Int, ByteArray, Int) -> Unit) -> Unit): GccDriverDwarfInterfaceArtifact {
+        val parts = arrayListOf<Pair<String, ByteArray>>()
+        val descriptors = arrayListOf<JsonObject>()
+        var totalBytes = 0L; var totalNodes = 0L
+        emit { kind, ordinal, bytes, records ->
+            val parsed = parseCanonicalDwarfShard(bytes, SHARD_LIMITS, kind, ordinal, records)
+            totalBytes += bytes.size; totalNodes += parsed.nodeCount
+            require(parts.size < SHARD_LIMITS.maximumShards &&
+                totalBytes <= SHARD_LIMITS.maximumTotalBytes - MAXIMUM_EVIDENCE_BYTES &&
+                totalNodes <= SHARD_LIMITS.maximumTotalNodes - 100_000) { "GCC interface bundle exceeds aggregate bounds" }
+            val path = "parts/${parts.size.toString().padStart(4, '0')}-$kind-${ordinal.toString().padStart(4, '0')}.json"
+            descriptors += buildJsonObject {
+                put("path", path); put("kind", kind); put("ordinal", ordinal); put("recordCount", records)
+                put("bytes", bytes.size); put("nodes", parsed.nodeCount); put("sha256", gccInterfaceSha256(bytes))
+            }
+            parts += path to bytes
+        }
+        val manifest = JsonObject(document + mapOf("parts" to JsonArray(descriptors)))
+        val encoded = OracleJson.canonicalBytes(manifest, EVIDENCE_JSON_LIMITS)
+        verifyBundle(encoded, parts)
+        return GccDriverDwarfInterfaceArtifact(encoded, parts)
+    }
+
+    /** Validates exact canonical part order/completeness and all hashes; it grants no provenance. */
+    internal fun verifyBundle(manifestBytes: ByteArray, parts: List<Pair<String, ByteArray>>) {
+        val manifest = OracleJson.parseCanonical(manifestBytes, EVIDENCE_JSON_LIMITS).jsonObject
+        require(manifest["schemaVersion"] == JsonPrimitive(2) &&
+            manifest["provider"] == JsonPrimitive("gcc-driver-dwarf-interface-evidence-v2")) { "unsupported GCC interface bundle" }
+        for (flag in listOf("complete", "scored", "productionVerified", "releaseEligible")) {
+            require(manifest[flag] == JsonPrimitive(false)) { "interface bundle claims unsupported authority" }
+        }
+        val descriptors = manifest.getValue("parts").jsonArray
+        require(descriptors.size == parts.size && parts.size <= SHARD_LIMITS.maximumShards) { "missing or unexpected interface parts" }
+        var totalBytes = 0L; var totalNodes = 0L; var kindIndex = -1; var nextOrdinal = 0
+        for ((index, entry) in descriptors.withIndex()) {
+            val descriptor = entry.jsonObject
+            require(descriptor.keys == setOf("path", "kind", "ordinal", "recordCount", "bytes", "nodes", "sha256")) { "invalid interface part descriptor" }
+            val kind = descriptor.text("kind")
+            val selected = PART_KINDS.indexOf(kind)
+            require(selected >= 0 && (selected == kindIndex || selected == kindIndex + 1)) { "interface part kinds reordered or missing" }
+            if (selected != kindIndex) { kindIndex = selected; nextOrdinal = 0 }
+            val ordinal = descriptor.getValue("ordinal").jsonPrimitive.content.toInt()
+            require(descriptor["ordinal"] == JsonPrimitive(ordinal)) { "interface shard ordinal must be numeric" }
+            val recordCount = descriptor.getValue("recordCount").jsonPrimitive.content.toInt()
+            require(descriptor["recordCount"] == JsonPrimitive(recordCount) && recordCount >= 0) { "interface shard record count must be numeric" }
+            require(ordinal == nextOrdinal++) { "interface shard ordinals reordered or missing" }
+            val path = "parts/${index.toString().padStart(4, '0')}-$kind-${ordinal.toString().padStart(4, '0')}.json"
+            val (actualPath, bytes) = parts[index]
+            require(descriptor.text("path") == path && actualPath == path &&
+                descriptor["bytes"] == JsonPrimitive(bytes.size) && descriptor.text("sha256") == gccInterfaceSha256(bytes)) {
+                "interface part path, bytes or digest differs from its manifest"
+            }
+            val parsed = parseCanonicalDwarfShard(bytes, SHARD_LIMITS, kind, ordinal,
+                recordCount)
+            require(descriptor["nodes"] == JsonPrimitive(parsed.nodeCount)) { "interface shard node accounting differs" }
+            totalBytes += bytes.size; totalNodes += parsed.nodeCount
+            require(totalBytes <= SHARD_LIMITS.maximumTotalBytes - MAXIMUM_EVIDENCE_BYTES &&
+                totalNodes <= SHARD_LIMITS.maximumTotalNodes - 100_000) { "interface bundle exceeds total bounds" }
+        }
+        require(kindIndex == PART_KINDS.lastIndex) { "interface bundle omits record kinds" }
     }
 
     /** Pure projection for fixture checks; this cannot mint an authenticated publication. */
-    internal fun mapFunctions(oracleFunctions: JsonArray, facts: List<DwarfInterfaceFunctionFacts>): JsonObject {
+    internal fun mapFunctions(oracleFunctions: JsonArray, facts: List<DwarfInterfaceFunctionFacts>,
+                              projected: List<DwarfProjectedFunction> = emptyList()): JsonObject {
+        val abiByLocator = projected.associateBy { it.locator }
+        require(abiByLocator.size == projected.size) { "duplicate projected function locator" }
+        val rawByLocator = facts.associateBy { it.locator }
+        require(rawByLocator.size == facts.size && projected.all {
+            rawByLocator[it.locator]?.let { raw -> raw.rva == it.rva } == true
+        }) { "projected ABI candidate does not bind its raw physical function" }
+        var observableAbi = 0
         val byRva = facts.filter { it.executable && it.rva != null }.groupBy { requireNotNull(it.rva) }
         val matched = hashSetOf<String>()
         var scored = 0
@@ -280,7 +398,7 @@ internal object GccDriverDwarfInterfaceEvidence {
         var knownParameters = 0
         var knownConvention = 0
         var knownVariadic = 0
-        val records = oracleFunctions.map { item ->
+        val records = oracleFunctions.mapIndexed { oracleIndex, item ->
             val function = item.jsonObject
             val rva = function.getValue("rva").takeUnless { it == JsonNull }?.jsonPrimitive?.content
                 ?.removePrefix("0x")?.toULong(16)
@@ -305,7 +423,12 @@ internal object GccDriverDwarfInterfaceEvidence {
                     else -> ambiguous++
                 }
             }
-            JsonObject(function + mapOf(
+            val abi = candidates.singleOrNull()?.let { abiByLocator[it.locator] }
+            if (!isExcluded && abi?.fullyObservable == true) observableAbi++
+            JsonObject(mapOf(
+                "oracleRecordIndex" to JsonPrimitive(oracleIndex),
+                "id" to function.getValue("id"), "rva" to function.getValue("rva"),
+                "exclusion" to function.getValue("exclusion"),
                 "candidateDieLocators" to JsonArray(ids.map(::JsonPrimitive)),
                 "dwarfMatch" to JsonPrimitive(when {
                     rva == null -> "no-physical-rva"
@@ -313,8 +436,8 @@ internal object GccDriverDwarfInterfaceEvidence {
                     candidates.size > 1 -> "ambiguous-dwarf-candidates"
                     else -> "unique-raw-dwarf-candidate"
                 }),
-                "normalizedAbiSignature" to JsonNull,
-                "abiStatus" to JsonPrimitive(if (isExcluded) "excluded" else "unresolved"),
+                "projectedAbiLocator" to (abi?.locator?.let(::JsonPrimitive) ?: JsonNull),
+                "abiStatus" to JsonPrimitive(if (isExcluded) "excluded" else if (abi?.fullyObservable == true) "observable-neutral-ABI" else "unresolved"),
             ))
         }
         require(scored == missing + ambiguous + unique) { "GCC interface coverage lost a scored function" }
@@ -328,7 +451,9 @@ internal object GccDriverDwarfInterfaceEvidence {
                 "uniqueWithKnownRawParameterList" to JsonPrimitive(knownParameters),
                 "uniqueWithKnownRawCallingConvention" to JsonPrimitive(knownConvention),
                 "uniqueWithKnownRawVariadicFact" to JsonPrimitive(knownVariadic),
-                "fullyNormalizedAbiSignatures" to JsonPrimitive(0),
+                "observableNeutralAbiFunctions" to JsonPrimitive(observableAbi),
+                "unresolvedAbiFunctions" to JsonPrimitive(scored - observableAbi),
+                "abiDenominatorKind" to JsonPrimitive("oracle-observability-not-recovered-accuracy"),
             )),
             "functions" to JsonArray(records),
             "unmatchedRawCandidateDieLocators" to JsonArray(facts.map { it.locator }.distinct().filterNot(matched::contains)

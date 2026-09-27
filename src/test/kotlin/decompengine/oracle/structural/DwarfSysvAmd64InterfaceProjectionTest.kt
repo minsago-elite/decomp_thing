@@ -1,0 +1,398 @@
+package decompengine.oracle.structural
+
+import decompengine.oracle.core.OracleJson
+import decompengine.oracle.fulltree.BoundedDwarfInterfaceFacts
+import decompengine.oracle.fulltree.DwarfGlobalVariableFacts
+import decompengine.oracle.fulltree.DwarfInterfaceFact
+import decompengine.oracle.fulltree.DwarfInterfaceFactState
+import decompengine.oracle.fulltree.DwarfInterfaceFunctionFacts
+import decompengine.oracle.fulltree.DwarfInterfaceParameterFacts
+import decompengine.oracle.fulltree.DwarfInterfaceParameterList
+import decompengine.oracle.fulltree.DwarfInterfaceTypeChild
+import decompengine.oracle.fulltree.DwarfInterfaceTypeNode
+import decompengine.oracle.fulltree.inInterfaceFixtureDirectory
+import decompengine.oracle.fulltree.scanInterfaceFixture
+import java.nio.file.Files
+import java.nio.file.Path
+import java.util.concurrent.TimeUnit
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonNull
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+class DwarfSysvAmd64InterfaceProjectionTest {
+    @Test
+    fun `proved C prototype applies documented void convention and nonvariadic defaults`() {
+        val function = function(returned = absent(), parameters = emptyList())
+        val projected = project(function).functions.single()
+        assertTrue(projected.fullyObservable, projected.reasons.toString())
+        assertEquals("sysv-amd64", projected.callingConvention)
+        assertEquals(0, projected.arity)
+        assertEquals(false, projected.variadic)
+        assertEquals(DwarfAbiScalarKind.VOID, projected.returnType?.shape?.scalar)
+        assertEquals(DwarfAbiPassing.NONE, projected.returnType?.classification?.returnPassing)
+        assertTrue(projected.evidence.any { it.contains("no-return-type-void") })
+
+        val scalar = project(function(parameters = listOf(parameter("int"))), intType).functions.single()
+        assertTrue(scalar.fullyObservable, scalar.reasons.toString())
+        assertEquals(listOf(DwarfAbiClass.INTEGER), scalar.parameters.single()?.classification?.classes)
+        assertEquals(listOf(DwarfAbiClass.INTEGER), scalar.returnType?.classification?.classes)
+    }
+
+    @Test
+    fun `unsupported prototype language convention and inheritance never manufacture complete signatures`() {
+        val unprototyped = project(function(prototyped = absent()), intType).functions.single()
+        assertFalse(unprototyped.fullyObservable)
+        assertNull(unprototyped.arity)
+        assertNull(unprototyped.variadic)
+        val cpp = project(function(language = known("33"), prototyped = absent()), intType).functions.single()
+        assertTrue(cpp.fullyObservable, cpp.reasons.toString())
+        listOf(
+            function(language = absent()),
+            function(language = known("8")),
+            function(convention = known("2")),
+            function(convention = unknown()),
+            function(declaration = known("1")),
+            function(declaration = unknown()),
+            function(reasons = listOf("origin-specification-cycle")),
+            function(reasons = listOf("unsupported-function-ABI-attribute:static-link")),
+            function(returned = ambiguous("int", "other")),
+            function(variadic = unknown()),
+            function(sequence = ambiguous("function", "other-function")),
+            function(parameters = listOf(parameter("int", ordinal = 1))),
+        ).forEach { input ->
+            assertFalse(project(input, intType).functions.single().fullyObservable, input.locator)
+        }
+        val inherited = project(function(sequence = DwarfInterfaceFact(
+            DwarfInterfaceFactState.KNOWN, listOf("declaration"), listOf("definition", "declaration"),
+            listOf("parameter-sequence-inherited"),
+        )), intType).functions.single()
+        assertTrue(inherited.fullyObservable, inherited.reasons.toString())
+    }
+
+    @Test
+    fun `scalar representations aliases and pointer defaults preserve known and unknown distinctions`() {
+        val pointer = node("pointer", 0x0f)
+        val alias = node("alias", 0x16, referenced = known("int"))
+        val precise = listOf(
+            pointer to DwarfAbiScalarKind.POINTER,
+            alias to DwarfAbiScalarKind.INTEGER,
+            node("half", 0x24, size = known("2"), encoding = known("4")) to DwarfAbiScalarKind.FLOAT16,
+            node("extended", 0x24, name = known("long double"), size = known("16"), encoding = known("4")) to DwarfAbiScalarKind.X87,
+            node("quad", 0x24, name = known("__float128"), size = known("16"), encoding = known("4")) to DwarfAbiScalarKind.FLOAT128,
+        )
+        precise.forEach { (type, kind) ->
+            val result = assertNotNull(project(function(returned = known(type.id)), intType, type).functions.single().returnType)
+            assertTrue(result.observable, result.reasons.toString())
+            assertEquals(kind, result.shape?.scalar)
+        }
+        listOf(
+            node("bad-pointer", 0x0f, size = known("4")),
+            node("ambiguous-float", 0x24, size = known("16"), encoding = known("4")),
+            node("bad-boolean", 0x24, size = known("4"), encoding = known("2")),
+            node("missing-encoding", 0x24, size = known("4")),
+            node("bad-integer", 0x24, size = known("18446744073709551615"), encoding = known("5")),
+            node("negative-integer", 0x24, size = known("-1"), encoding = known("5")),
+            node("padded-integer", 0x24, size = known("04"), encoding = known("5")),
+            node("alias-conflict", 0x16, size = known("8"), referenced = known("int")),
+            node("alignment-conflict", 0x24, size = known("4"), encoding = known("5"), attributes = mapOf(0x88L to known("8"))),
+        ).forEach { assertUnknownType(it, intType) }
+        val recursive = node("recursive", 0x16, referenced = known("recursive"))
+        assertUnknownType(recursive)
+        // A pointer is terminal: lack of a pointee definition does not erase its proved LP64 width.
+        val terminal = node("terminal", 0x0f, referenced = known("missing-pointee"))
+        assertTrue(project(function(returned = known(terminal.id)), terminal).functions.single().returnType!!.observable)
+    }
+
+    @Test
+    fun `proved aggregate members classify but unknown declaration and virtuality stay unknown`() {
+        val pair = aggregate("pair", 16, 8, listOf(member("tag", "int", 0), member("value", "double", 8)))
+        val result = project(function(returned = known("pair")), pair, intType, doubleType).functions.single().returnType!!
+        assertTrue(result.observable, result.reasons.toString())
+        assertEquals(listOf(DwarfAbiClass.INTEGER, DwarfAbiClass.SSE), result.classification?.classes)
+        assertUnknownType(node("unproved-alignment", 0x13, size = known("8")))
+        assertUnknownType(aggregate("unknown-declaration", 4, 4, listOf(member("field", "int", 0)),
+            extra = mapOf(0x3cL to unknown())), intType)
+        assertUnknownType(aggregate("declaration", 4, 4, listOf(member("field", "int", 0)),
+            extra = mapOf(0x3cL to known("1"))), intType)
+        val baseType = aggregate("base-type", 4, 4, listOf(member("value", "int", 0)), extra = mapOf(0x36L to known("5")))
+        val base = child("base", 0x1c, "base-type", mapOf(0x38L to known("0"), 0x4cL to unknown()))
+        val derived = aggregate("derived", 4, 4, listOf(base), extra = mapOf(0x36L to known("5")))
+        val cpp = project(function(returned = known("derived"), language = known("33")), derived, baseType, intType)
+        assertFalse(cpp.functions.single().returnType!!.observable)
+        assertUnknownType(aggregate("unknown-member-storage", 4, 4, listOf(child("field", 0x0d, "int",
+            mapOf(0x38L to known("0"), 0x3fL to unknown())))), intType)
+        val nontrivial = aggregate("nontrivial", 128, 8, emptyList(), extra = mapOf(0x36L to known("4")))
+        val indirect = project(function(returned = known("nontrivial"), language = known("33")), nontrivial)
+            .functions.single().returnType!!
+        assertTrue(indirect.observable)
+        assertEquals(DwarfAbiPassing.INVISIBLE_REFERENCE, indirect.classification?.returnPassing)
+        val unprovedCpp = project(function(returned = known("pair"), language = known("33")), pair, intType, doubleType)
+        assertFalse(unprovedCpp.functions.single().returnType!!.observable)
+    }
+
+    @Test
+    fun `array counts strides dimensions and vector markers cannot change proved representation`() {
+        val array = node("array", 0x01, referenced = known("int"), children = listOf(dimension("dimension", upper = "1")))
+        val result = project(function(returned = known("array")), array, intType).functions.single().returnType!!
+        assertTrue(result.observable)
+        assertEquals(8L, result.shape?.byteSize)
+        assertEquals(listOf(DwarfAbiClass.INTEGER), result.classification?.classes)
+        listOf(
+            node("conflicting-count", 0x01, referenced = known("int"), children = listOf(dimension("dimension", upper = "1", count = "3"))),
+            node("negative-count", 0x01, referenced = known("int"), children = listOf(dimension("dimension", count = "-1"))),
+            node("oversized-count", 0x01, referenced = known("int"), children = listOf(dimension("dimension", count = "1000001"))),
+            node("oversized-product", 0x01, referenced = known("int"), children = listOf(dimension("x", count = "1000"), dimension("y", count = "1001"))),
+            node("stride", 0x01, referenced = known("int"), attributes = mapOf(0x51L to known("8")), children = listOf(dimension("dimension", count = "2"))),
+            node("bad-size", 0x01, size = known("16"), referenced = known("int"), children = listOf(dimension("dimension", count = "2"))),
+            node("gnu-vector", 0x01, referenced = known("float"), attributes = mapOf(0x2107L to unknown("uninterpreted-type-attribute:0x2107")),
+                children = listOf(dimension("dimension", count = "4"))),
+        ).forEach { assertUnknownType(it, intType, floatType) }
+    }
+
+    @Test
+    fun `bitfields check storage proof bounds and legacy container size before claiming classes`() {
+        val valid = aggregate("bitfield", 4, 4, listOf(child("bits", 0x0d, "int", mapOf(
+            0x38L to known("0"), 0x0dL to known("4"), 0x6bL to known("3"),
+        ))))
+        val projected = project(function(returned = known(valid.id)), valid, intType).functions.single().returnType!!
+        assertTrue(projected.observable, projected.reasons.toString())
+        assertEquals(listOf(DwarfAbiClass.INTEGER), projected.classification?.classes)
+        val invalidFields = listOf(
+            mapOf(0x0dL to known("4"), 0x6bL to known("3")),
+            mapOf(0x38L to known("0"), 0x0dL to known("33"), 0x6bL to known("0")),
+            mapOf(0x38L to known("0"), 0x0dL to known("4"), 0x6bL to known("0"), 0x0cL to known("0")),
+            mapOf(0x38L to known("0"), 0x0dL to known("4"), 0x0cL to known("4"), 0x0bL to known("1")),
+            mapOf(0x38L to known("0"), 0x0dL to known("4"), 0x0cL to known("4"), 0x0bL to unknown()),
+        )
+        invalidFields.forEachIndexed { index, attributes ->
+            assertUnknownType(aggregate("bad-bitfield-$index", 8, 4, listOf(child("bits", 0x0d, "int", attributes))), intType)
+        }
+    }
+
+    @Test
+    fun `closed target mutation and duplicate identities fail while projection snapshots stay immutable`() {
+        val target = target()
+        val changed = JsonObject(target + ("scalarWidthsBits" to JsonObject(
+            (target.getValue("scalarWidthsBits") as JsonObject) + ("pointer" to JsonPrimitive(32)),
+        )))
+        assertFailsWith<IllegalArgumentException> { DwarfSysvAmd64InterfaceProjection.project(listOf(function()), mapOf("int" to intType), changed) }
+        assertFailsWith<IllegalArgumentException> { DwarfSysvAmd64InterfaceProjection.project(listOf(function(), function()), mapOf("int" to intType), target) }
+        val projected = project(function(), intType)
+        assertEquals(64, projected.ruleProfileSha256.length)
+        assertFailsWith<UnsupportedOperationException> { (projected.functions as MutableList<*>).clear() }
+        assertFailsWith<UnsupportedOperationException> { (projected.types as MutableList<*>).clear() }
+        assertEquals(projected.ruleProfileSha256, project(function(), intType).ruleProfileSha256)
+    }
+
+    @Test
+    fun `global-only declared types expand without inventing automatic or unknown-language types`() {
+        val globals = listOf(
+            global("global-only", "int"),
+            global("automatic", "unexpanded", storage = known("automatic")),
+            global("unknown-language", "int", language = unknown()),
+        )
+        val projected = DwarfSysvAmd64InterfaceProjection.project(emptyList(), mapOf("int" to intType), target(), globals)
+        assertTrue(projected.functions.isEmpty())
+        val declared = projected.types.single()
+        assertEquals("29:int", declared.id)
+        assertTrue(declared.observable)
+        val rows = projected.globals.associateBy { it.getValue("locator") }
+        val positive = rows.getValue(JsonPrimitive("global-only"))
+        assertEquals(JsonPrimitive("29:int"), positive["projectedTypeId"])
+        assertEquals(JsonPrimitive(true), positive["observableDeclaredTypeAbi"])
+        listOf("automatic", "unknown-language").forEach { name ->
+            val row = rows.getValue(JsonPrimitive(name))
+            assertEquals(JsonNull, row["projectedTypeId"])
+            assertEquals(JsonPrimitive(false), row["observableDeclaredTypeAbi"])
+        }
+        assertTrue(rows.getValue(JsonPrimitive("automatic")).getValue("reasons").toString().contains("unexpanded"))
+        assertFailsWith<UnsupportedOperationException> { (projected.globals as MutableList<*>).clear() }
+    }
+
+    @Test
+    fun `compiled C projects scalar void variadic and aligned aggregate while retaining vector uncertainty`() =
+        inInterfaceFixtureDirectory { root ->
+            val artifact = compile(root, "interfaces.c", """
+                #include <stdarg.h>
+                typedef struct __attribute__((aligned(8))) Pair { long key; double value; } Pair;
+                typedef float FloatVector __attribute__((vector_size(16)));
+                unsigned short global_only = 7;
+                __attribute__((noinline,used)) long scalar(long value, int count) { return value + count; }
+                __attribute__((noinline,used)) Pair pair(Pair value) { value.key++; return value; }
+                __attribute__((noinline,used)) FloatVector vector(FloatVector value) { return value; }
+                __attribute__((noinline,used)) void no_return(void) {}
+                __attribute__((noinline,used)) double variadic(int count, ...) {
+                    va_list args; va_start(args, count);
+                    double value = count ? va_arg(args, double) : 0.0; va_end(args); return value;
+                }
+                int main(void) { no_return(); return (int)scalar(1, 2); }
+            """.trimIndent())
+            val facts = scanInterfaceFixture(artifact, root)
+            val projected = DwarfSysvAmd64InterfaceProjection.project(facts, target())
+            listOf("scalar", "no_return", "variadic", "pair").forEach { name ->
+                val function = projectedFunction(facts, projected, name)
+                assertTrue(function.fullyObservable, "$name: ${function.reasons}; return=${function.returnType?.reasons}")
+            }
+            assertEquals(false, projectedFunction(facts, projected, "scalar").variadic)
+            assertEquals(true, projectedFunction(facts, projected, "variadic").variadic)
+            assertEquals(DwarfAbiScalarKind.VOID, projectedFunction(facts, projected, "no_return").returnType?.shape?.scalar)
+            assertEquals(listOf(DwarfAbiClass.INTEGER, DwarfAbiClass.SSE), projectedFunction(facts, projected, "pair").returnType?.classification?.classes)
+            val vector = projectedFunction(facts, projected, "vector")
+            assertFalse(vector.fullyObservable)
+            assertFalse(vector.returnType?.observable ?: false)
+            val global = facts.globals.single { "global_only" in it.sourceName.values }
+            val globalRow = projected.globals.single { it["locator"] == JsonPrimitive(global.locator) }
+            assertEquals(JsonPrimitive(true), globalRow["observableDeclaredTypeAbi"])
+        }
+
+    @Test
+    fun `compiled C++ retains method origin ambiguity and optimized C preserves ABI facts`() =
+        inInterfaceFixtureDirectory { root ->
+            val cpp = compile(root, "method.cpp", """
+                typedef unsigned long Counter;
+                struct Calculator { __attribute__((noinline)) Counter calculate(Counter amount) const; };
+                Counter Calculator::calculate(Counter amount) const { return amount + 2; }
+                __attribute__((noinline,used)) Counter cpp_scalar(Counter amount) { return amount + 4; }
+                int main() { Calculator calculator; return (int)calculator.calculate(3); }
+            """.trimIndent(), compiler = "c++")
+            val cppFacts = scanInterfaceFixture(cpp, root)
+            val cppProjection = DwarfSysvAmd64InterfaceProjection.project(cppFacts, target())
+            val scalar = projectedFunction(cppFacts, cppProjection, "cpp_scalar")
+            assertTrue(scalar.fullyObservable, scalar.reasons.toString())
+            assertEquals(1, scalar.arity)
+            val method = projectedFunction(cppFacts, cppProjection, "calculate")
+            val rawMethod = cppFacts.functions.single { it.locator == method.locator }
+            assertTrue(rawMethod.origins.size > 1)
+            // GCC can emit distinct qualified-this type IDs in the definition and specification.
+            // Keep that raw sequence ambiguity instead of silently choosing either signature.
+            if (rawMethod.parameterList.state == DwarfInterfaceFactState.AMBIGUOUS) {
+                assertFalse(method.fullyObservable)
+                assertNull(method.arity)
+                assertNull(method.variadic)
+                assertTrue(rawMethod.parameterLists.size > 1)
+            } else {
+                assertTrue(method.fullyObservable, method.reasons.toString())
+                assertEquals(2, method.arity)
+            }
+            assertEquals(DwarfAbiScalarKind.POINTER, method.parameters.first()?.shape?.scalar)
+            assertEquals(listOf(DwarfAbiClass.INTEGER), method.returnType?.classification?.classes)
+            val optimized = compile(root, "optimized.c", """
+                __attribute__((noinline,used)) long optimized(long left, int right) { return left + right; }
+                int main(void) { return (int)optimized(1, 2); }
+            """.trimIndent(), optimization = "-O2")
+            val facts = scanInterfaceFixture(optimized, root)
+            val function = projectedFunction(facts, DwarfSysvAmd64InterfaceProjection.project(facts, target()), "optimized")
+            assertTrue(function.fullyObservable, "optimized ${function.reasons}; raw=${facts.functions.single { it.locator == function.locator }.toJson()}")
+            assertEquals(2, function.arity)
+            assertEquals(false, function.variadic)
+        }
+
+    private fun project(function: DwarfInterfaceFunctionFacts, vararg types: DwarfInterfaceTypeNode) =
+        DwarfSysvAmd64InterfaceProjection.project(listOf(function), types.associateBy { it.id }, target())
+
+    private fun assertUnknownType(type: DwarfInterfaceTypeNode, vararg other: DwarfInterfaceTypeNode) {
+        val result = assertNotNull(project(function(returned = known(type.id)), type, *other).functions.single().returnType)
+        assertFalse(result.observable, "${type.id} acquired a known ABI: ${result.toJson()}")
+        assertTrue(result.reasons.isNotEmpty())
+    }
+
+    private fun target() = OracleJson.parse(Files.readAllBytes(Path.of("oracle/targets/sysv-amd64-v1.json"))) as JsonObject
+
+    private fun function(
+        returned: DwarfInterfaceFact<String> = known("int"),
+        parameters: List<DwarfInterfaceParameterFacts> = emptyList(),
+        language: DwarfInterfaceFact<String> = known("29"),
+        prototyped: DwarfInterfaceFact<String> = known("1"),
+        convention: DwarfInterfaceFact<String> = absent(),
+        declaration: DwarfInterfaceFact<String> = absent(),
+        sequence: DwarfInterfaceFact<String> = known("function"),
+        variadic: DwarfInterfaceFact<Boolean> = DwarfInterfaceFact(DwarfInterfaceFactState.ABSENT,
+            evidence = listOf("function"), reasons = listOf("unspecified-parameter-marker-absent")),
+        reasons: List<String> = emptyList(),
+    ) = DwarfInterfaceFunctionFacts(
+        0x1000UL, 0x401000UL, true, "function", known("fixture"), absent(), language, convention,
+        prototyped, absent(), declaration, returned, parameters, sequence,
+        listOf(DwarfInterfaceParameterList(sequence.values.firstOrNull() ?: "function", parameters, variadic)),
+        variadic, (listOf("function") + sequence.values).distinct(), reasons,
+    )
+
+    private fun global(id: String, type: String, storage: DwarfInterfaceFact<String> = known("static"),
+                       language: DwarfInterfaceFact<String> = known("29")) = DwarfGlobalVariableFacts(
+        locator = id, sourceName = known(id), linkageName = absent(), language = language, type = known(type),
+        external = absent(), declaration = absent(), artificial = absent(), visibility = absent(),
+        byteSize = absent(), alignment = absent(), constant = absent(), scope = known("compilation-unit"),
+        location = absent(), address = absent(), rva = absent(), tlsOffset = absent(), storage = storage,
+        scopes = emptyList(), origins = listOf(id), reasons = emptyList(),
+    )
+
+    private fun parameter(type: String, ordinal: Int = 0) = DwarfInterfaceParameterFacts(
+        ordinal, "parameter-$ordinal", absent(), known(type), absent(), listOf("parameter-$ordinal"), emptyList(),
+    )
+
+    private fun node(
+        id: String, tag: Long,
+        name: DwarfInterfaceFact<String> = absent(),
+        size: DwarfInterfaceFact<String> = absent(),
+        encoding: DwarfInterfaceFact<String> = absent(),
+        referenced: DwarfInterfaceFact<String> = absent(),
+        attributes: Map<Long, DwarfInterfaceFact<String>> = emptyMap(),
+        children: List<DwarfInterfaceTypeChild> = emptyList(),
+    ) = DwarfInterfaceTypeNode(id, tag, name, size, encoding, referenced, attributes, children, emptyList())
+
+    private fun aggregate(id: String, bytes: Long, alignment: Long, children: List<DwarfInterfaceTypeChild>,
+                          extra: Map<Long, DwarfInterfaceFact<String>> = emptyMap()) =
+        node(id, 0x13, size = known(bytes.toString()), attributes = mapOf(0x88L to known(alignment.toString())) + extra, children = children)
+
+    private fun child(id: String, tag: Long, type: String, attributes: Map<Long, DwarfInterfaceFact<String>>) =
+        DwarfInterfaceTypeChild(id, tag, absent(), known(type), attributes, emptyList())
+
+    private fun member(id: String, type: String, bytes: Long) = child(id, 0x0d, type, mapOf(0x38L to known(bytes.toString())))
+
+    private fun dimension(id: String, upper: String? = null, count: String? = null) =
+        DwarfInterfaceTypeChild(id, 0x21, absent(), absent(), buildMap {
+            upper?.let { put(0x2fL, known(it)) }; count?.let { put(0x37L, known(it)) }
+        }, emptyList())
+
+    private fun <T> known(value: T) = DwarfInterfaceFact(DwarfInterfaceFactState.KNOWN, listOf(value), listOf("fixture-evidence"))
+    private fun <T> absent() = DwarfInterfaceFact<T>(DwarfInterfaceFactState.ABSENT)
+    private fun <T> unknown(reason: String = "unresolved-fixture-fact") =
+        DwarfInterfaceFact<T>(DwarfInterfaceFactState.UNKNOWN, reasons = listOf(reason))
+    private fun <T> ambiguous(vararg values: T) =
+        DwarfInterfaceFact(DwarfInterfaceFactState.AMBIGUOUS, values.toList(), reasons = listOf("conflicting-fixture-facts"))
+
+    private val intType = node("int", 0x24, size = known("4"), encoding = known("5"))
+    private val floatType = node("float", 0x24, size = known("4"), encoding = known("4"))
+    private val doubleType = node("double", 0x24, size = known("8"), encoding = known("4"))
+
+    private fun projectedFunction(facts: BoundedDwarfInterfaceFacts, projected: DwarfSysvAmd64Projection, name: String): DwarfProjectedFunction {
+        val raw = facts.functions.single { name in it.sourceName.values }
+        return projected.functions.single { it.locator == raw.locator }
+    }
+
+    private fun compile(root: Path, name: String, source: String, compiler: String = "cc", optimization: String = "-O0"): Path {
+        val sourcePath = root.resolve(name)
+        val artifact = root.resolve("${name.substringBeforeLast('.')}.elf")
+        val diagnostics = root.resolve("${name.substringBeforeLast('.')}.log")
+        Files.writeString(sourcePath, source)
+        val dialect = if (name.endsWith(".cpp")) "-std=c++14" else "-std=c11"
+        val process = ProcessBuilder(compiler, dialect, optimization, "-g", "-gdwarf-5", "-fno-eliminate-unused-debug-types",
+            "-fno-pie", "-no-pie", sourcePath.toString(), "-o", artifact.toString())
+            .directory(root.toFile()).redirectErrorStream(true).redirectOutput(diagnostics.toFile()).apply {
+                environment()["TMPDIR"] = root.toString(); environment()["TMP"] = root.toString(); environment()["TEMP"] = root.toString()
+            }.start()
+        try {
+            assertTrue(process.waitFor(30, TimeUnit.SECONDS), "fixture compiler exceeded bounded runtime")
+            assertEquals(0, process.exitValue(), Files.readString(diagnostics).take(16_384))
+        } finally {
+            if (process.isAlive) process.destroyForcibly().waitFor(5, TimeUnit.SECONDS)
+        }
+        return artifact
+    }
+}
