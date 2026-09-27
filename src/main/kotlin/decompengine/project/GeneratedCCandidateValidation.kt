@@ -117,13 +117,7 @@ internal object GeneratedCCandidateValidation {
         return null
     }
 
-    private fun genericReturnBody(body: String): Boolean {
-        val withoutComments = body
-            .replace(Regex("/\\*.*?\\*/", setOf(RegexOption.DOT_MATCHES_ALL)), "")
-            .replace(Regex("//[^\\r\\n]*"), "")
-            .replace(Regex("\\s+"), "")
-        return withoutComments == "return0;" || withoutComments == "return;"
-    }
+    private fun genericReturnBody(body: String): Boolean = isGeneratedCSimpleReturnBody(body)
 
     private fun recoveredEvidenceIsTrivial(function: RecoveredFunction, context: GeneratedCDeclarationContext): Boolean =
         function.decompiledC?.let { recovered ->

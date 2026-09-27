@@ -331,24 +331,37 @@ internal fun isGeneratedCPlaceholderBody(
     expected != null && normalizedPlaceholderBody(body) == expected
 }.getOrDefault(false)
 
+/** Match the legacy simple return stubs without treating control-flow semicolons as no-ops. */
+internal fun isGeneratedCSimpleReturnBody(body: String): Boolean = runCatching {
+    val tokens = cDeclarationTokens(body)
+    val start = skipEmptyCStatements(tokens, 0)
+    val size = when {
+        hasCTokens(tokens, start, listOf("return", ";")) -> 2
+        hasCTokens(tokens, start, listOf("return", "0", ";")) -> 3
+        else -> return@runCatching false
+    }
+    skipEmptyCStatements(tokens, start + size) == tokens.size
+}.getOrDefault(false)
+
 private fun normalizedPlaceholderBody(body: String): List<String>? {
     val tokens = cDeclarationTokens(body)
-    var start = 0
+    var start = skipEmptyCStatements(tokens, 0)
     // The generated dead branch has no runtime effects. Omitting it, or using different
     // parameter names inside it, cannot turn the remaining zero return into an implementation.
-    if (tokens.take(5).map { it.text } == listOf("if", "(", "0", ")", "{")) {
-        var cursor = 5
+    if (hasCTokens(tokens, start, listOf("if", "(", "0", ")", "{"))) {
+        var cursor = skipEmptyCStatements(tokens, start + 5)
         val identifier = Regex("[A-Za-z_][A-Za-z0-9_]*")
         while (tokens.getOrNull(cursor)?.text == "(") {
             if (tokens.getOrNull(cursor + 1)?.text != "void" || tokens.getOrNull(cursor + 2)?.text != ")" ||
                 tokens.getOrNull(cursor + 3)?.text?.matches(identifier) != true ||
                 tokens.getOrNull(cursor + 4)?.text != ";") return null
-            cursor += 5
+            cursor = skipEmptyCStatements(tokens, cursor + 5)
         }
         if (tokens.getOrNull(cursor)?.text != "}") return null
-        start = cursor + 1
+        start = skipEmptyCStatements(tokens, cursor + 1)
     }
-    if (tokens.drop(start).map { it.text } == listOf("return", ";")) return listOf("return", ";")
+    if (hasCTokens(tokens, start, listOf("return", ";")) &&
+        skipEmptyCStatements(tokens, start + 2) == tokens.size) return listOf("return", ";")
     var initializer = start
     while (initializer < tokens.size && tokens[initializer].text != "=") {
         when (tokens[initializer].text) {
@@ -360,13 +373,26 @@ private fun normalizedPlaceholderBody(body: String): List<String>? {
     if (initializer == start || initializer >= tokens.size) return null
     val declaration = CDeclarationParser(body.substring(tokens[start].start, tokens[initializer].start)).parse()
     val name = declaration.name ?: return null
-    if (tokens.drop(initializer).map { it.text } != listOf("=", "{", "0", "}", ";", "return", name.text, ";")) return null
+    if (!hasCTokens(tokens, initializer, listOf("=", "{", "0", "}", ";"))) return null
+    val returnStart = skipEmptyCStatements(tokens, initializer + 5)
+    if (!hasCTokens(tokens, returnStart, listOf("return", name.text, ";")) ||
+        skipEmptyCStatements(tokens, returnStart + 3) != tokens.size) return null
     // Replace only the declared identifier: the same spelling may also be a struct tag,
     // typedef name, or a parameter inside a function-pointer declarator.
     return cDeclarationTokens(declaration.source).map {
         if (it.start == name.start && it.end == name.end) "<result>" else it.text
     }
 }
+
+/** Call only at a recognized statement boundary, never inside a declaration or control flow. */
+private fun skipEmptyCStatements(tokens: List<CToken>, start: Int): Int {
+    var cursor = start
+    while (tokens.getOrNull(cursor)?.text == ";") cursor++
+    return cursor
+}
+
+private fun hasCTokens(tokens: List<CToken>, start: Int, expected: List<String>): Boolean =
+    expected.indices.all { tokens.getOrNull(start + it)?.text == expected[it] }
 
 /** Recognize retained object declarators that the legacy simple-name recognizer cannot parse. */
 internal fun generatedCGlobalDefinition(source: String, name: String): Boolean = runCatching {

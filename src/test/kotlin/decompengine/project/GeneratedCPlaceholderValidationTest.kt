@@ -81,6 +81,66 @@ class GeneratedCPlaceholderValidationTest {
     }
 
     @Test
+    fun `empty statements cannot disguise typed void or direct zero return stubs`() {
+        val context = GeneratedCDeclarationContext(TYPES)
+        for ((prototype, body) in listOf(
+            "int convert(int value)" to ";; if (0) { ;; (void)value; ;; }; ; int candidate = {0}; ;; return candidate; ;;",
+            "const char *convert(void)" to "; const char *candidate = {0}; ; return candidate; ;",
+            "struct result convert(void)" to "; struct result candidate = {0}; ; return candidate; ;",
+            "int (*convert(void))(int)" to "; int (*candidate)(int) = {0}; ; return candidate; ;",
+            "void convert(int value)" to "; if (0) { ; (void)value; ; }; return; ;",
+            "void convert(void)" to "; return; ;",
+        )) {
+            assertTrue(isGeneratedCPlaceholderBody(function(prototype), body, context), "$prototype: $body")
+        }
+        for ((prototype, body) in listOf(
+            "int convert(void)" to "; return 0; ;",
+            "void convert(void)" to "; return; ;",
+        )) {
+            assertTrue(isGeneratedCSimpleReturnBody(body), body)
+            assertTrue(assess(function(prototype, "$prototype { observe(); }"), body)
+                .any { it.code == "generic-return-placeholder" && it.entityIds == listOf("fn_convert") }, body)
+            // Empty statements in retained trivial evidence do not turn it into nontrivial evidence.
+            assertTrue(assess(function(prototype, "$prototype { $body }"), body)
+                .none { it.code == "generic-return-placeholder" }, body)
+        }
+    }
+
+    @Test
+    fun `empty-statement evidence stubs compile but remain unresolved through candidate admission`() {
+        for ((prototype, recovered) in listOf(
+            "int convert(int value)" to "int convert(int value) { return value + 1; }",
+            "void convert(int *value)" to "void convert(int *value) { *value += 1; }",
+        )) {
+            val project = project()
+            val manifest = SourceTreeGenerator.generate(model(function(prototype, recovered), main()), project,
+                reconstructor = ModuleReconstructor { request ->
+                    val evidence = EvidenceModuleReconstructor().reconstruct(request)
+                    evidence.copy(source = evidence.source
+                        .replace("if (0) {", "; ; if (0) { ; ;")
+                        .replace("(void)value;", "(void)value; ; ;")
+                        .replace("= {0};", "= {0}; ; ;")
+                        .replace("return decomp_placeholder_result;", "return decomp_placeholder_result; ; ;")
+                        .replace("return;", "return; ; ;")
+                        .replace("decomp_placeholder_result", "candidate_result"),
+                        generator = "scripted-agent", issues = emptyList())
+                })
+            assertTrue("fn_convert" in manifest.unresolvedImplementationIds, prototype)
+            val reports = Files.walk(project.resolve("reports/modules")).use { paths ->
+                paths.filter { it.toString().endsWith(".json") }.toList().map { Json.parseToJsonElement(it.readText()).jsonObject }
+            }
+            assertTrue(reports.any { report ->
+                report.getValue("accepted").jsonPrimitive.content == "false" &&
+                    report.getValue("issues").jsonArray.any { issue ->
+                        issue.jsonObject.getValue("code").jsonPrimitive.content == "generic-return-placeholder" &&
+                            issue.jsonObject.getValue("entityIds").jsonArray.any { it.jsonPrimitive.content == "fn_convert" }
+                    }
+            }, "$prototype: $reports")
+            assertEquals(0, MakeProjectBuilder.build(project).returnCode, prototype)
+        }
+    }
+
+    @Test
     fun `additional behavior and different initializers are not erased by placeholder matching`() {
         val function = function("int convert(volatile int value)", "int convert(volatile int value) { return value + 1; }")
         for (body in listOf(
@@ -91,8 +151,24 @@ class GeneratedCPlaceholderValidationTest {
             "if (value) { observe(value); } int candidate = {0}; return candidate;",
             "(void)value; int candidate = {0}; return candidate;", // An observable volatile read.
             "if (0) { (void)observe(value); } int candidate = {0}; return candidate;",
+            "if (0); { (void)value; } int candidate = {0}; return candidate;", // The volatile read executes.
+            "int candidate = {0}; if (value); return candidate;",
+            "int candidate = {0}; while (value); return candidate;",
+            "int candidate = {0}; for (; value;); return candidate;",
+            "int candidate = {0}; do ; while (value); return candidate;",
+            "int candidate = {0}; label: ; return candidate;",
+            "int candidate = {0}; return; candidate;",
+            "int candidate = {0}; return candidate; ; observe(value);",
+            "int candidate = {0;}; return candidate;", // Never remove tokens inside an initializer.
+            "int candidate = {0} return candidate;", // The declaration terminator remains required.
+            "if (0) { (void); value; } int candidate = {0}; return candidate;",
         )) {
             assertFalse(isGeneratedCPlaceholderBody(function, body), body)
+            assertTrue(assess(function, body).none { it.code == "generic-return-placeholder" }, body)
+        }
+        for (body in listOf("if (value); return 0;", "while (value); return 0;", "for (;;); return 0;",
+            "label: ; return 0;", "return; value;", "return 0; ; observe(value);", "return ; 0;", "return 0")) {
+            assertFalse(isGeneratedCSimpleReturnBody(body), body)
             assertTrue(assess(function, body).none { it.code == "generic-return-placeholder" }, body)
         }
         val aggregate = function("struct result convert(void)")
@@ -116,7 +192,7 @@ class GeneratedCPlaceholderValidationTest {
     }
 
     @Test
-    fun `formerly accepted renamed placeholders cannot be reused or restored as accepted revisions`() {
+    fun `formerly accepted empty-statement placeholders cannot be reused or restored as accepted revisions`() {
         for (changeFingerprint in listOf(false, true)) {
             val project = project()
             val model = model(function("int convert(int value)", "int convert(int value) { return value + 1; }"), main())
@@ -150,7 +226,8 @@ class GeneratedCPlaceholderValidationTest {
             // Simulate a checkpoint accepted by the older matcher: its metadata and exact source
             // digest agree, but the source is now rejected by the current adapter policy.
             val staleSource = EvidenceModuleReconstructor().reconstruct(requireNotNull(initialRequest)).source
-                .replace("decomp_placeholder_result", "formerly_accepted_result").trimEnd() + "\n"
+                .replace("decomp_placeholder_result", "formerly_accepted_result")
+                .replace("= {0};", "= {0}; ; ;").trimEnd() + "\n"
             val staleSha256 = sha256(staleSource.toByteArray())
             sourcePath.writeText(staleSource)
             checkpointPath.writeText(JsonObject(checkpoint + mapOf(
