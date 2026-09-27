@@ -31,8 +31,24 @@ jobs:
             slirp4netns=1.2.1-1build2 uidmap
       - name: Verify source provenance metadata
         run: python3 scripts/verify-gcc-oracle-source.py --metadata-only
+      - name: Restore locked GCC source artifacts
+        id: gcc-source-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ runner.temp }}/gcc-oracle-source/gcc-16.2.0.tar.xz
+            ${{ runner.temp }}/gcc-oracle-source/gcc-16.2.0.tar.xz.sig
+          key: gcc-source-v1-${{ runner.os }}-${{ hashFiles('oracle/gcc/16.2.0/source-lock.json') }}
       - name: Fetch and fully verify the pinned source release
         run: python3 scripts/fetch-gcc-oracle-source.py "$RUNNER_TEMP/gcc-oracle-source"
+      - name: Save authenticated GCC source artifacts
+        if: steps.gcc-source-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ runner.temp }}/gcc-oracle-source/gcc-16.2.0.tar.xz
+            ${{ runner.temp }}/gcc-oracle-source/gcc-16.2.0.tar.xz.sig
+          key: ${{ steps.gcc-source-cache.outputs.cache-primary-key }}
       - name: Reproduce and verify the recorded toolchain image
         run: |
           echo '8b0af79ba3426f49ba599eb0c7eea433c62ac5bb6ab5e7797f7d09d978f43543  oracle/gcc/16.2.0/build-toolchain.Dockerfile' \
