@@ -5,6 +5,7 @@ on:
     branches: [master]
     tags: ['**']
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event.pull_request.number || github.sha }}
@@ -12,6 +13,7 @@ concurrency:
 
 jobs:
   provenance-and-elf-verifier:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -227,3 +229,51 @@ jobs:
           if test -f "$RUNNER_TEMP/rootless-wrapper.pid"; then
             kill "$(cat "$RUNNER_TEMP/rootless-wrapper.pid")" 2>/dev/null || true
           fi
+
+  driver-dwarf-interfaces:
+    name: Retained GCC driver DWARF interfaces
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'qualify:driver-dwarf-interfaces')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      DECOMP_REQUIRE_GCC_DWARF_INTERFACES: 'true'
+      DECOMP_GCC_DWARF_EVIDENCE_ROOT: ${{ github.workspace }}/build/gcc-driver-dwarf-interfaces
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+          cache-read-only: ${{ github.ref != 'refs/heads/master' }}
+      - name: Install pinned build-only frontend toolchain
+        run: |
+          bash scripts/install-frontend-node.sh "$GITHUB_WORKSPACE/build/frontend-node"
+          echo "$GITHUB_WORKSPACE/build/frontend-node/bin" >> "$GITHUB_PATH"
+      - name: Capture and replay retained driver interface facts
+        run: |
+          mkdir -p build/gcc-driver-dwarf-interfaces
+          git rev-parse HEAD > build/gcc-driver-dwarf-interfaces/source-revision.txt
+          ./gradlew --no-daemon test \
+            --tests 'decompengine.oracle.fulltree.BoundedDwarfInterface*Test' \
+            --tests 'decompengine.oracle.gcc.GccDriverDwarfInterfaceEvidenceTest'
+      - name: Retain interface facts and verification reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gcc-driver-dwarf-interfaces
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            build/gcc-driver-dwarf-interfaces
+            build/reports/tests/test
+            build/test-results/test
