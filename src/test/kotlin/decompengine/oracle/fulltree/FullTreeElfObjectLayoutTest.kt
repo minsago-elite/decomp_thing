@@ -16,6 +16,55 @@ import kotlin.test.assertTrue
 
 class FullTreeElfObjectLayoutTest {
     @Test
+    fun `interface scan retains overlapping executable loads and every object segment identity`() =
+        inInterfaceFixtureDirectory { directory ->
+            objectElfVariants().forEachIndexed { index, variant ->
+                val bytes = objectBytes(variant, listOf(TestElfSymbol("shared_object", 0x110UL, type = 1)))
+                setSymbolSize(bytes, 1, 8UL)
+                addOverlappingExecutableProgram(bytes)
+                val path = writeElf(directory.resolve("overlapping-loads-$index.elf"), bytes)
+                val facts = scanInterfaceFixture(path, directory)
+                assertFalse(facts.dwarfPresent)
+                assertEquals(listOf(
+                    FullTreeElfExecutableRange(0UL, bytes.size.toULong()),
+                    FullTreeElfExecutableRange(0x100UL, 0x180UL),
+                ), facts.executableRanges)
+                val layout = assertNotNull(facts.objectLayout)
+                assertEquals(listOf(0, 1), layout.loadedMemory.map { it.index })
+                assertEquals(facts.executableRanges, layout.executableRanges)
+                val symbol = facts.objectSymbols.single()
+                assertEquals(FullTreeElfObjectStorage.MAPPED_LOAD, symbol.storage)
+                assertEquals(listOf(0, 1), symbol.segmentIndices)
+                assertEquals(0x110UL, symbol.rva)
+            }
+        }
+
+    @Test
+    fun `DWARF function membership uses executable overlap union and exclusive end`() =
+        inInterfaceFixtureDirectory { directory ->
+            val starts = listOf(0x100L, 0x13fL, 0x140L, 0x17fL, 0x180L)
+            val fixture = typeElf(*starts.map { rva ->
+                die("entry-$rva", DW_TAG_SUBPROGRAM, listOf(address(DW_AT_LOW_PC, 0x400000L + rva)))
+            }.toTypedArray())
+            val bytes = fixture.bytes.copyOf()
+            addOverlappingExecutableProgram(bytes)
+            val program = FullTreeElfTestBytes.programHeaderOffset(bytes)
+            putWord(bytes, program + 32, 0x140UL)
+            putWord(bytes, program + 40, 0x140UL)
+            val facts = scanInterfaceFixture(writeElf(directory.resolve("overlapping-dwarf.elf"), bytes), directory)
+            assertEquals(listOf(FullTreeElfExecutableRange(0UL, 0x140UL),
+                FullTreeElfExecutableRange(0x100UL, 0x180UL)), facts.executableRanges)
+            assertEquals(starts.map(Long::toULong), facts.functions.map { it.rva })
+            assertEquals(listOf(true, true, true, true, false), facts.functions.map { it.executable })
+            assertTrue(facts.functions.last().reasons.contains("emitted-start-outside-executable-ranges"))
+
+            // Supporting overlaps does not relax individual segment bounds.
+            putWord(bytes, program + 56 + 40, 0x7fUL)
+            val malformed = writeElf(directory.resolve("overlapping-malformed.elf"), bytes)
+            assertFailsWith<FullTreeControlException> { scanInterfaceFixture(malformed, directory) }
+        }
+
+    @Test
     fun `object scan covers both ELF classes byte orders and extended section indexes`() =
         inInterfaceFixtureDirectory { directory ->
             val variants = listOf(
@@ -642,6 +691,16 @@ private fun addTlsProgram(bytes: ByteArray) {
     putWord(bytes, offset + if (is64) 32 else 16, 0x40UL)
     putWord(bytes, offset + if (is64) 40 else 20, 0x80UL)
     putWord(bytes, offset + if (is64) 48 else 28, 4UL)
+}
+
+private fun addOverlappingExecutableProgram(bytes: ByteArray) {
+    addTlsProgram(bytes)
+    val is64 = bytes[4].toInt() == 2
+    val littleEndian = bytes[5].toInt() == 1
+    val offset = FullTreeElfTestBytes.programHeaderOffset(bytes) + if (is64) 56 else 32
+    FullTreeElfTestBytes.put32(bytes, offset, 1, littleEndian) // PT_LOAD, overlapping the first executable load.
+    FullTreeElfTestBytes.put32(bytes, offset + if (is64) 4 else 24, 5, littleEndian)
+    putWord(bytes, offset + if (is64) 32 else 16, 0x80UL)
 }
 
 private fun appendTlsBssSection(original: ByteArray): ByteArray {

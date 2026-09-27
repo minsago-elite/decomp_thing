@@ -273,9 +273,6 @@ internal object BoundedDwarfInterfaceFactScanner {
             budget.charge(1024L + symbol.name.length.toLong() * 8L, "ELF object facts")
             objects += symbol
         }
-        layout.executableRanges.zipWithNext().forEach { (left, right) ->
-            if (right.start < left.endExclusive) throw FullTreeControlException("interface ELF executable ranges overlap")
-        }
         val executable = FullTreeElfExecutableMembership.fromSorted(layout.executableRanges)
         val functions = ArrayList<DwarfInterfaceFunctionFacts>()
         val globals = ArrayList<DwarfGlobalVariableFacts>()
