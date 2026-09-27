@@ -5,12 +5,13 @@ on:
     types: [opened, synchronize, reopened, labeled]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Unrelated label events must not cancel a qualification before its job guard runs.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{ github.event.action == 'labeled' && !contains(fromJSON('["qualify:cc1-full-export","qualify:driver-full-export"]'), github.event.label.name) && '-ignored-label' || '' }}
   cancel-in-progress: true
 
 jobs:
   cc1-live-full-export:
-    if: github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'qualify:cc1-full-export') || contains(github.event.pull_request.labels.*.name, 'qualify:driver-full-export'))
+    if: github.event_name == 'pull_request' && (github.event.action != 'labeled' || contains(fromJSON('["qualify:cc1-full-export","qualify:driver-full-export"]'), github.event.label.name)) && (contains(github.event.pull_request.labels.*.name, 'qualify:cc1-full-export') || contains(github.event.pull_request.labels.*.name, 'qualify:driver-full-export'))
     name: ${{ matrix.target }} live full export
     strategy:
       fail-fast: false
