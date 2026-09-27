@@ -357,6 +357,21 @@ object ArchivalProjectAuditor {
         val planPath = profile.layout.declaration("module-plan-evidence").materialize()
         val confidencePath = profile.layout.declaration("confidence-evidence").materialize()
         val files = manifest.files.associateBy { it.path }
+        val agentFallbackPaths = linkedSetOf<String>()
+        val fallbackCheckpointSources = linkedMapOf<String, String>()
+        for (source in manifest.files.filter {
+            ProjectFileRole.MODULE_IMPLEMENTATION in it.roles && it.acceptedImplementation != true
+        }) {
+            val moduleId = profile.layout.declaration("module-implementation").moduleIdForPath(source.path)
+            val checkpointPath = profile.layout.declaration("module-evidence").materialize(mapOf("module" to moduleId))
+            require(checkpointPath in files) {
+                "agent evidence checkpoint is absent from the source manifest: $checkpointPath"
+            }
+            require(fallbackCheckpointSources.put(checkpointPath, source.path) == null) {
+                "audit module checkpoint ownership is duplicated: $checkpointPath"
+            }
+            if (moduleClaimsAgentExecution(source.generator, "")) agentFallbackPaths += source.path
+        }
         val hashes = linkedMapOf<String, String>()
         val manifestSizes = linkedMapOf<String, Long>()
         var totalBytes = manifestSnapshot.bytes.size.toLong()
@@ -373,6 +388,14 @@ object ArchivalProjectAuditor {
             require(snapshot.sha256 == file.sha256) { "audit manifest hash differs from current file: ${file.path}" }
             hashes[file.path] = snapshot.sha256
             manifestSizes[file.path] = snapshot.bytes.size.toLong()
+            // Inspect the same bounded, hash-checked bytes used by the audit. A mutable
+            // manifest label cannot erase checkpoint provenance, including unplanned sources.
+            fallbackCheckpointSources[file.path]?.let { sourcePath ->
+                if (sourcePath !in agentFallbackPaths &&
+                    ReconstructionAcpEvidenceArchiveVerifier.checkpointClaimsAgentExecution(snapshot.bytes)) {
+                    agentFallbackPaths += sourcePath
+                }
+            }
             if (file.path == modelPath) modelText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
             if (file.path == planPath) planText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
             if (file.path == confidencePath) confidenceText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
@@ -453,7 +476,7 @@ object ArchivalProjectAuditor {
             require(ProjectFileRole.PUBLIC_INTERFACE in header.roles) { "audit module header has no declared interface role" }
             require(moduleRevisions.put(identifier, hashes.getValue(source)) == null) { "audit module IDs are duplicated" }
             plannedModuleEntityIds[identifier] = owned + types
-            if (file.acceptedImplementation == false && file.generator.startsWith("unresolved:agent:")) {
+            if (source in agentFallbackPaths) {
                 fallbackSourcePaths[identifier] = source
             }
             if (file.acceptedImplementation == true) {
@@ -553,8 +576,7 @@ object ArchivalProjectAuditor {
                 }
             }
         }
-        if (manifest.files.any { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles &&
-                it.acceptedImplementation == false && it.generator.startsWith("unresolved:agent:") }) {
+        if (agentFallbackPaths.isNotEmpty()) {
             repairState.value
         }
         val confidenceMustBeValid = acceptedOwners.isEmpty() || repairedOwners.isNotEmpty() ||

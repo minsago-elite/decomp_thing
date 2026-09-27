@@ -197,6 +197,53 @@ class ArchivalAuditProvenanceTest {
     }
 
     @Test
+    fun `ordinary unresolved modules preserve diagnostic handling of accepted compiler defects`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val project = Files.createTempDirectory(scratch, "mixed-nonagent-audit-")
+        try {
+            val model = RecoveredProgramModel(inputSha256 = "a".repeat(64), functions = listOf(
+                RecoveredFunction("fn_10", "parse_one", 0x1000UL, "int parse_one(void)", "int parse_one(void) { return 1; }"),
+                RecoveredFunction("fn_100", "render_two", 0x2000UL, "int render_two(void)", "int render_two(void) { return 2; }"),
+            ))
+            val reconstructor = object : ModuleReconstructor {
+                override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule =
+                    EvidenceModuleReconstructor("fn_10" in request.module.functionIds).reconstruct(request)
+            }
+            val manifest = SourceTreeGenerator.generate(model, project, reconstructor = reconstructor)
+            val accepted = manifest.files.single {
+                ProjectFileRole.MODULE_IMPLEMENTATION in it.roles && it.acceptedImplementation == true
+            }
+            val unresolved = manifest.files.single {
+                ProjectFileRole.MODULE_IMPLEMENTATION in it.roles && it.acceptedImplementation == false
+            }
+            assertEquals(listOf("fn_100"), unresolved.entityIds)
+            assertEquals(listOf("fn_100"), ArchivalProjectAuditor.audit(project).unresolvedEntityIds)
+            val profile = GeneratedCMakeReconstructionProfile.descriptor
+            val acceptedId = profile.layout.declaration("module-implementation").moduleIdForPath(accepted.path)
+            val path = profile.layout.declaration("module-evidence").materialize(mapOf("module" to acceptedId))
+            val checkpoint = Json.parseToJsonElement(project.resolve(path).readText()).jsonObject
+            for (change in listOf("missing-compilation", "future-schema", "agent-identity-diagnostic")) {
+                val changed = when (change) {
+                    "future-schema" -> checkpoint.withField("schemaVersion", JsonPrimitive(99))
+                    "agent-identity-diagnostic" -> checkpoint.withField("reconstructorIdentity", JsonPrimitive("agent:local-audit-fixture"))
+                        .withField("promptCharacters", JsonNull)
+                    else -> JsonObject(checkpoint.filterKeys { it != "compilation" })
+                }
+                writeBoundFile(project, path, changed.toString())
+                val audit = ArchivalProjectAuditor.audit(project)
+                assertEquals(setOf(acceptedId), audit.moduleCompilationEvidenceProblems.keys, change)
+                assertEquals(listOf("fn_10", "fn_100"), audit.unresolvedEntityIds, change)
+                assertTrue(Files.exists(project.resolve("reports/archival_audit.json")), change)
+            }
+        } finally {
+            Files.walk(project).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
     fun `accepted flags cannot hide missing or mismatched compiler evidence`() {
         for (change in listOf("missing", "foreign-source", "failed", "foreign-command", "old-schema", "future-schema", "unbound-schema", "foreign-binary", "foreign-model-schema", "foreign-profile",
             "diagnostic-hash", "diagnostic-count", "diagnostic-type", "compiler-extra", "foreign-entity", "missing-entity", "duplicate-entity", "unresolved-entity", "unresolved-issue")) {

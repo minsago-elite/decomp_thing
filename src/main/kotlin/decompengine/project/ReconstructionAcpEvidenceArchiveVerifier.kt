@@ -93,6 +93,15 @@ internal fun expectedAcpTextCommitment(value: String): VerifiedAcpTextCommitment
 }
 
 internal object ReconstructionAcpEvidenceArchiveVerifier {
+    /** Discovery only: an agent claim still requires the complete verifier below. */
+    fun checkpointClaimsAgentExecution(bytes: ByteArray): Boolean {
+        val root = strictObject(bytes, CHECKPOINT_JSON_LIMITS, "module checkpoint provenance")
+        return moduleClaimsAgentExecution(
+            root.requiredString("generator", "module checkpoint provenance"),
+            root.requiredString("reconstructorIdentity", "module checkpoint provenance"),
+        )
+    }
+
     fun verify(
         projectDir: Path,
         payloadSha256: Map<String, String>,
