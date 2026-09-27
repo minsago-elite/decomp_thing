@@ -81,6 +81,7 @@
     {"issue": 49, "state": "OPEN", "role": "validated repair and revision evidence", "url": "https://github.com/minsago-elite/decomp_thing/issues/49"},
     {"issue": 50, "state": "OPEN", "role": "deterministic independently rebuildable archive", "url": "https://github.com/minsago-elite/decomp_thing/issues/50"},
     {"issue": 54, "state": "OPEN", "role": "end-to-end GCC fidelity release gate", "url": "https://github.com/minsago-elite/decomp_thing/issues/54"},
+    {"issue": 64, "state": "OPEN", "role": "accepted source manifest, unresolved inventory, and per-module reconstruction receipts", "url": "https://github.com/minsago-elite/decomp_thing/issues/64"},
     {"issue": 84, "state": "OPEN", "role": "generated-C and build-policy isolation", "url": "https://github.com/minsago-elite/decomp_thing/issues/84"},
     {"issue": 86, "state": "CLOSED", "role": "archival Ghidra regression lane; does not replace the production source build", "url": "https://github.com/minsago-elite/decomp_thing/issues/86"},
     {"issue": 88, "state": "CLOSED", "role": "LLVM/Clang regression lane; does not replace the GCC production source build", "url": "https://github.com/minsago-elite/decomp_thing/issues/88"}
