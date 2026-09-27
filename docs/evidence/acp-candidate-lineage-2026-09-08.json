@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "issue": 938,
+  "recordedAtUtc": "2026-09-08",
+  "scope": "Static evidence inventory for the canonical ACP candidate-lineage checkpoint; this record does not claim merged behavior or production qualification.",
+  "sourceCommit": "bf2501568f39ab52b23492dfc37839bb81895587",
+  "evidenceMode": "current-source-and-fixture-inspection",
+  "sourceFiles": {
+    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorCandidateAcpLineageIndexV2.kt": "74790d34eff4176b1cb7b230b2a6788b6bbdf11bcd446f88cd04c11b394465f6",
+    "src/main/kotlin/decompengine/oracle/behavior/LlvmBehaviorCandidateFourWayBindingV2Verifier.kt": "dc70a121acafbb105541b626382da0e1b8b6eb27c7accabc68a0fc743202233c",
+    "src/test/kotlin/decompengine/oracle/behavior/LlvmBehaviorCandidateFourWayBindingV2VerifierTest.kt": "1f360f020dc05c7ff3cfdc376bbfc5c5854dbfc5a18d0c1e864760854bd2cbe3",
+    "src/test/kotlin/decompengine/oracle/behavior/LlvmBehaviorLegacyEvidenceMarkerTest.kt": "929ea91da37d9ab0906ca6bdfda078f3f7b9ca0d14b8e68b863bdcef3df3e701",
+    "docs/llvm-behavior-candidate-acp-lineage-index-v2.md": "5829d623158320e3b4f07bc069a5f936e53091c55417462c2215a66806a65891"
+  },
+  "currentCodeEvidence": {
+    "lineageContract": "LlvmBehaviorCandidateAcpLineageIndexV2Publisher and LlvmBehaviorCandidateAcpLineageIndexV2Verifier accept the archive and exact candidate-acp-lineage-index-v2.json paths and commit accepted ACP receipt, session, change, and lineage aggregates.",
+    "fourWayContract": "LlvmBehaviorCandidateFourWayBindingV2Verifier accepts exactly four raw paths: archive, lineage index, hosted clean-build receipt, and hosted candidate executable; it derives one candidateStructuralIdentitySha256 after descriptor and parent pinning.",
+    "authorityBoundary": "The verified result sets ACP oracle, reference-authoring, policy-authoring, validation, observation-authoring, START, containment, terminal-absence, scoring, certification, and release authority to false; it also sets hostedBuildExecutionAuthenticated, admittedArtifactBound, prepared, startAuthorized, candidateStarted, scoringAuthority, certificationAuthority, and releaseEligible to false."
+  },
+  "fixtureEvidence": {
+    "construction": "LlvmBehaviorCandidateFourWayBindingV2VerifierTest.createFixture generates one recovered C function through FourWayEvidenceHarness, builds it with MakeProjectBuilder, archives it with ArchivalPackager, publishes the v2 lineage index, and creates a canonical unsigned hosted receipt around executable bytes read from /bin/true or /bin/false.",
+    "positiveCase": "four raw paths derive one defensive first-class ACP structural identity with no authority",
+    "negativeCases": [
+      "archive, lineage, hosted receipt, and executable cross-pairing",
+      "sessionSetSha256, changeSetSha256, and lineageSetSha256 drift",
+      "noncanonical and oversized receipt, aliases, terminal source replacement, and descriptor-pinned parent/file replacement",
+      "public verifier surface accepting legacy admission artifacts"
+    ],
+    "legacyCase": "LlvmBehaviorLegacyEvidenceMarkerTest covers v1 identities, Python, behavior-preexec-v1, oci-container-v1, and legacy direct-HTTP markers."
+  },
+  "unverifiedCriteria": [
+    "Acceptance 1: no focused test execution was performed, and no release-complete ACP receipt/session was authenticated in this evidence run.",
+    "Acceptance 2: the four-way structural checkpoint is present, but a final canonical immutable admission record and independent hosted-build/artifact provenance remain unverified.",
+    "Acceptance 3: false authority fields are present in the current result boundary, but runtime behavior and downstream consumers were not exercised.",
+    "Acceptance 4: rejection cases are represented by current fixtures, but fail-closed execution was not rerun; production reports/build_contract.json, caller digests, legacy direct HTTP, v1 receipts, Python evidence, and partial receipts remain unqualified.",
+    "Acceptance 5: this checkpoint grants no authority by its declared fields and documentation, but no PREPARED, START, containment, scoring, certification, or release workflow was executed."
+  ],
+  "validation": {
+    "testsRun": false,
+    "reason": "Skipped at user request.",
+    "productionQualification": false,
+    "mergedBehavior": false
+  }
+}
