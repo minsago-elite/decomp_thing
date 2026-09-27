@@ -12,8 +12,17 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
         externallyCalled = model.functions.flatMap { caller ->
             caller.calls.filter { called -> owners[called] != owners[caller.id] }
         }.toSet()
-        model.functions.filter { it.id in externallyCalled || safeCName(it.name) in setOf("main", "decomp_engine_main") }
-            .forEach { recoveredDeclaration(it, declarationContext).requireExternalDeclaration("a public module interface") }
+        model.functions.forEach { function ->
+            val declaration = recoveredDeclaration(function, declarationContext)
+            // Plain C11 inline does not supply an external definition, even for callers in this
+            // module. The per-module compile gate cannot detect its missing link-time symbol.
+            require(!declaration.hasInlineSpecifier || declaration.hasInternalLinkage || declaration.hasExternSpecifier) {
+                "unsupported generated-C inline definition for ${function.id}: external inline requires an explicit extern declaration"
+            }
+            if (function.id in externallyCalled || safeCName(function.name) in setOf("main", "decomp_engine_main")) {
+                declaration.requireExternalDeclaration("a public module interface")
+            }
+        }
     }
 
     override fun entrypoint(): RenderedEntrypoint? {

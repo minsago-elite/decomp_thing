@@ -376,12 +376,55 @@ class GeneratedCDeclarationsTest {
     }
 
     @Test
+    fun `plain inline definitions reject before reconstruction even when callers share their module`() {
+        for (called in listOf(true, false)) {
+            val project = project()
+            val prototype = "inline int helper(int value)"
+            val model = model(
+                function("helper", prototype, "$prototype { return value + 3; }"),
+                function("main", "int main(void)", if (called) "int main(void) { return helper(14); }" else "int main(void) { return 0; }")
+                    .copy(calls = if (called) setOf("fn_helper") else emptySet()),
+            )
+            var reconstructions = 0
+            val failure = assertFailsWith<IllegalArgumentException>("called=$called") {
+                SourceTreeGenerator.generate(model, project, reconstructor = ModuleReconstructor { request ->
+                    reconstructions++
+                    RecoveredCModuleReconstructor().reconstruct(request)
+                }, overrides = mapOf("fn_helper" to "core", "fn_main" to "core"))
+            }
+            assertTrue(failure.message.orEmpty().contains("fn_helper"), failure.message)
+            assertTrue(failure.message.orEmpty().contains("external inline"), failure.message)
+            assertEquals(0, reconstructions)
+            assertTrue(Files.list(project).use { !it.findAny().isPresent }, "unsupported inline generated artifacts")
+        }
+    }
+
+    @Test
     fun `private static inline implementation remains valid within its planned module`() {
         val project = project()
         val prototype = "static inline int helper(int value)"
         val model = model(
             function("helper", prototype, "$prototype { return value + 3; }"),
             function("main", "int main(void)", "int main(void) { return helper(14); }").copy(calls = setOf("fn_helper")),
+        )
+        val manifest = SourceTreeGenerator.generate(model, project, reconstructor = RecoveredCModuleReconstructor(),
+            overrides = mapOf("fn_helper" to "core", "fn_main" to "core"))
+        assertTrue(manifest.unresolvedImplementationIds.isEmpty(), manifest.unresolvedImplementationIds.toString())
+        assertTrue(sourceFiles(project).any { it.contains("$prototype {") })
+        assertTrue(project.resolve("src/modules/core_internal.h").readText().contains("$prototype;"))
+        assertFalse(project.resolve("include/modules/core.h").readText().contains("helper("))
+        assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+        assertEquals(17, ProcessBuilder(project.resolve("build/reconstructed").toAbsolutePath().toString()).start().waitFor())
+    }
+
+    @Test
+    fun `private extern inline implementation retains an external definition for an indirect same module call`() {
+        val project = project()
+        val prototype = "extern inline int helper(int value)"
+        val model = model(
+            function("helper", prototype, "$prototype { return value + 3; }"),
+            function("main", "int main(void)", "int main(void) { int (*callback)(int) = helper; return callback(14); }")
+                .copy(calls = setOf("fn_helper")),
         )
         val manifest = SourceTreeGenerator.generate(model, project, reconstructor = RecoveredCModuleReconstructor(),
             overrides = mapOf("fn_helper" to "core", "fn_main" to "core"))

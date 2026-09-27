@@ -705,6 +705,12 @@ object SourceTreeGenerator {
                 throw ModuleReconstructionEvidencePersistenceException(failure)
             }
             val recordedCheckpoint = readCheckpoint(checkpointPath)
+            // Acceptance rules may tighten without changing model or profile bytes. A previous
+            // compiler pass cannot authorize either cache reuse or rollback past the current gate.
+            val currentSourcePassesAdapter by lazy {
+                sourcePath.exists() && adapter.assess(module, model, recordedCheckpoint?.generator.orEmpty(),
+                    sourcePath.readText()).isEmpty()
+            }
             fun ModuleCheckpoint.hasCurrentModuleAcceptance(): Boolean =
                 schemaVersion == 6 && inputBinarySha256 == model.inputSha256 &&
                     modelSchemaVersion == model.schemaVersion && profileSha256 == profile.sha256 &&
@@ -718,7 +724,8 @@ object SourceTreeGenerator {
                     entityIds.size == entityIds.toSet().size &&
                     entityIds.toSet() == (module.functionIds + module.globalIds).toSet() &&
                     compilation?.passed == true &&
-                    compilation.command == compilationPolicy.command(profile, module.sourcePath)
+                    compilation.command == compilationPolicy.command(profile, module.sourcePath) &&
+                    currentSourcePassesAdapter
             val verifiedPreviousAcceptance = recordedCheckpoint?.takeIf {
                 it.hasCurrentModuleAcceptance() && sourcePath.exists() && sha256(sourcePath.readBytes()) == it.sourceSha256 &&
                     it.hasCurrentExecutionEvidence(projectDir, configuredExecutionEvidencePath, false)

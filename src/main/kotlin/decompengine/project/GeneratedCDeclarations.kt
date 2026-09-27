@@ -11,6 +11,7 @@ internal class GeneratedCFunctionDeclaration(
     val explicitNoParameters: Boolean,
     val hasInternalLinkage: Boolean,
     val hasInlineSpecifier: Boolean,
+    val hasExternSpecifier: Boolean,
     private val noReturn: Boolean,
     private val returnKind: GeneratedCTypeKind,
     private val resultDeclaration: (String) -> String,
@@ -69,6 +70,7 @@ internal fun recoveredDeclaration(
         explicitNoParameters = soleVoidParameter,
         hasInternalLinkage = "static" in declaration.specifiers,
         hasInlineSpecifier = "inline" in declaration.specifiers,
+        hasExternSpecifier = "extern" in declaration.specifiers,
         noReturn = "_Noreturn" in declaration.specifiers,
         returnKind = context.classify(declaration.specifiers, declaration.derived.drop(1)),
         resultDeclaration = { name ->
@@ -294,15 +296,52 @@ internal fun generatedCFunctionBody(source: String, name: String): String? = run
     findCFunctionDefinition(source, setOf(name))?.let { source.substring(it.bodyStart, it.bodyEnd) }
 }.getOrNull()
 
-/** Match our own placeholder without treating a typed zero temporary as recovered behavior. */
+/** Match typed zero-return stubs independently of their local result names. */
 internal fun isGeneratedCPlaceholderBody(
     function: RecoveredFunction,
     body: String,
     context: GeneratedCDeclarationContext = GeneratedCDeclarationContext.EMPTY,
 ): Boolean = runCatching {
-    cDeclarationTokens(body).map { it.text } ==
-        cDeclarationTokens(recoveredDeclaration(function, context).placeholderBody()).map { it.text }
+    val expected = normalizedPlaceholderBody(recoveredDeclaration(function, context).placeholderBody())
+    expected != null && normalizedPlaceholderBody(body) == expected
 }.getOrDefault(false)
+
+private fun normalizedPlaceholderBody(body: String): List<String>? {
+    val tokens = cDeclarationTokens(body)
+    var start = 0
+    // The generated dead branch has no runtime effects. Omitting it, or using different
+    // parameter names inside it, cannot turn the remaining zero return into an implementation.
+    if (tokens.take(5).map { it.text } == listOf("if", "(", "0", ")", "{")) {
+        var cursor = 5
+        val identifier = Regex("[A-Za-z_][A-Za-z0-9_]*")
+        while (tokens.getOrNull(cursor)?.text == "(") {
+            if (tokens.getOrNull(cursor + 1)?.text != "void" || tokens.getOrNull(cursor + 2)?.text != ")" ||
+                tokens.getOrNull(cursor + 3)?.text?.matches(identifier) != true ||
+                tokens.getOrNull(cursor + 4)?.text != ";") return null
+            cursor += 5
+        }
+        if (tokens.getOrNull(cursor)?.text != "}") return null
+        start = cursor + 1
+    }
+    if (tokens.drop(start).map { it.text } == listOf("return", ";")) return listOf("return", ";")
+    var initializer = start
+    while (initializer < tokens.size && tokens[initializer].text != "=") {
+        when (tokens[initializer].text) {
+            "(", "[" -> initializer = matchingCToken(tokens, initializer)
+            ";", "{", "}" -> return null
+        }
+        initializer++
+    }
+    if (initializer == start || initializer >= tokens.size) return null
+    val declaration = CDeclarationParser(body.substring(tokens[start].start, tokens[initializer].start)).parse()
+    val name = declaration.name ?: return null
+    if (tokens.drop(initializer).map { it.text } != listOf("=", "{", "0", "}", ";", "return", name.text, ";")) return null
+    // Replace only the declared identifier: the same spelling may also be a struct tag,
+    // typedef name, or a parameter inside a function-pointer declarator.
+    return cDeclarationTokens(declaration.source).map {
+        if (it.start == name.start && it.end == name.end) "<result>" else it.text
+    }
+}
 
 /** Recognize retained object declarators that the legacy simple-name recognizer cannot parse. */
 internal fun generatedCGlobalDefinition(source: String, name: String): Boolean = runCatching {
