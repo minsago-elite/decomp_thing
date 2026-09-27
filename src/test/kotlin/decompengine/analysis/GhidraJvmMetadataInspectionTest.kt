@@ -11,12 +11,16 @@ import decompengine.project.ReconstructionBudgets
 import decompengine.project.RecoveredProgramModel
 import decompengine.project.sha256
 import java.nio.file.Path
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.io.path.exists
+import kotlin.io.path.createDirectories
 import kotlin.io.path.readText
+import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
@@ -92,6 +96,36 @@ class GhidraJvmMetadataInspectionTest {
         assertFalse(exported, "shared deadline should interrupt the injected exporter in flight")
         assertTrue(failure.message.orEmpty().contains("analysis and metadata exceeded 250 milliseconds during analysis and metadata"))
         assertFalse(output.resolve("reports/ghidra_analysis.json").exists())
+    }
+
+    @Test
+    fun `shared analysis deadline kills in-flight native metadata worker and preserves prior report`() = inControlTemporaryDirectory { root ->
+        val bytes = elfFixture()
+        val input = writeElf(root.resolve("authored.elf"), bytes)
+        val output = root.resolve("analysis")
+        val report = output.resolve("reports/ghidra_analysis.json")
+        report.parent.createDirectories()
+        report.writeText("prior report")
+        val process = AtomicReference<Process?>()
+        val blockedMetadata = BoundedElfMetadataInspectionProcess(
+            commandFactory = { _, _ -> listOf("/bin/sleep", "30") },
+            processStarter = { command, directory ->
+                ProcessBuilder(command).directory(directory.toFile()).start().also(process::set)
+            },
+        )
+        val analyzer = GhidraJvmAnalyzer(
+            budgetCapable { _, _ -> model(sha256(bytes)) },
+            BoundedElfMetadataLimits(),
+            blockedMetadata,
+        ).withExportBudgets(GeneratedCMakeReconstructionProfile.descriptor.budgets.copy(
+            exportWallClockMillis = 2_000,
+        ))
+
+        val failure = assertFailsWith<GhidraAnalysisException> { analyzer.analyze(input, output) }
+
+        assertTrue(failure.message.orEmpty().contains("analysis and metadata exceeded 2000 milliseconds"))
+        assertFalse(assertNotNull(process.get()).isAlive, "deadline cleanup must stop the blocked metadata worker")
+        assertEquals("prior report", report.readText())
     }
 
     @Test
