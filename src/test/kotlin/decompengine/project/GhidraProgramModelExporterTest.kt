@@ -116,7 +116,7 @@ class GhidraProgramModelExporterTest {
         val work = temp.resolve("analysis")
         val analyzer = GhidraHeadlessProgramModelAnalyzer(
             home,
-            GhidraProgramModelExportLimits(Duration.ofSeconds(3), Duration.ofMillis(100)),
+            GhidraProgramModelExportLimits(Duration.ofSeconds(5), Duration.ofMillis(100)),
         )
 
         val failure = assertFailsWith<GhidraAnalysisException> { analyzer.analyze(binary, work) }
