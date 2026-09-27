@@ -483,6 +483,37 @@ class GccBundledFullExportCaptureTest {
     }
 
     @Test
+    fun `failure messages reject line breaks and edge controls normalized by the producer`() {
+        for (status in listOf("failed", "partial")) for (message in listOf(
+            "call recovery failed: first\nsecond", "call recovery failed: first\rsecond",
+            "call recovery failed: first\r\nsecond", " call recovery failed", "call recovery failed ",
+            "\tcall recovery failed", "call recovery failed\t", "\u0000call recovery failed",
+            "call recovery failed\u001f",
+        )) fixture { root, run, reports ->
+            // Keep the exact producer JSON format and matching function/model status. The decoded
+            // diagnostic is the sole invalid input, even when JSON re-escaping preserves its bytes.
+            writeFailure(root, JsonPrimitive(message), status)
+            val failure = assertFailsWith<IllegalArgumentException>("$status: $message") {
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+            }
+            assertTrue(failure.message.orEmpty().contains("producer normalization"), failure.message)
+        }
+    }
+
+    @Test
+    fun `failure normalization preserves inner controls and Unicode whitespace from the producer`() {
+        for (status in listOf("failed", "partial")) for (message in listOf(
+            "call recovery failed: first second", "call recovery failed: first  second",
+            "call recovery failed: first\t\u0000second", "call recovery failed: first\u0085\u2028\u2029second\u00a0",
+        )) fixture { root, run, reports ->
+            writeFailure(root, JsonPrimitive(message), status)
+            val snapshot = GccBundledFullExportCapture.capture(run, reports, artifacts())
+            assertEquals(if (status == "failed") 1L else 0L, snapshot.failed)
+            assertEquals(if (status == "partial") 1L else 0L, snapshot.partial)
+        }
+    }
+
+    @Test
     fun `multi phase failure strings retain Unicode without interpreting embedded separators`() = fixture { root, run, reports ->
         val message = "call recovery failed: " + "界".repeat(1900) + "; type recovery failed: " + "𐐀".repeat(900)
         writeFailure(root, JsonPrimitive(message))
@@ -492,7 +523,7 @@ class GccBundledFullExportCaptureTest {
         assertTrue(snapshot.sidecarManifest.decodeToString().contains("failures/fn_0000000000400010.json"))
         assertEquals("false", OracleJson.parseCanonical(snapshot.assessmentBytes).jsonObject.getValue("complete").jsonPrimitive.content)
 
-        writeFailure(root, JsonPrimitive("diagnostic contains; embedded; separators; ".repeat(100)), "partial")
+        writeFailure(root, JsonPrimitive("diagnostic contains; embedded; separators; ".repeat(100).trimEnd()), "partial")
         assertEquals(1L, GccBundledFullExportCapture.capture(run, reports, artifacts()).partial)
     }
 

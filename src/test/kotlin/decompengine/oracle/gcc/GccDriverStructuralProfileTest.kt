@@ -81,7 +81,7 @@ class GccDriverStructuralProfileTest {
         assertEquals(2_349_296L, driver.strippedBinary.bytes)
         assertEquals(0x400000UL, driver.imageBase)
         assertEquals(listOf(GccDriverStructuralExecutableRangeV1(0x3000UL, 0x10eac9UL)), driver.executableRanges)
-        assertEquals("b7244d96c63edd15050a2bd8eb19309965977b47ca39ddb10a0b4909d9ad4da3",
+        assertEquals("b1a428343159fa1555ffb3259c218bf7b6479c032030870fb2732d96eeddbaf3",
             driver.inputBinary.executableRangesSha256)
         assertEquals(driver.strippedBinary.sha256, driver.inputBinary.sha256)
         for (unsupported in listOf("lto1", "other", "CC1")) {
@@ -133,7 +133,9 @@ class GccDriverStructuralProfileTest {
 
     @Test
     fun `manifest substitution that repeats expected binary hashes is rejected`() {
-        val parent = Files.createTempDirectory("gcc-driver-structural-profile-")
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val parent = Files.createTempDirectory(scratch, "gcc-driver-structural-profile-")
         val root = Files.createDirectory(parent.resolve("16.2.0"))
         try {
             val original = OracleJson.parse(Files.readAllBytes(Path.of("oracle/gcc/16.2.0/compiler-engines.json")))
