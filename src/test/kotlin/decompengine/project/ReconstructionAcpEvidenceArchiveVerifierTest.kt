@@ -418,6 +418,68 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     }
 
     @Test
+    fun `undispatched fallback rejects rehashed compiler claims for every supported outcome`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "fallback-compiler-claims-")
+        try {
+            val baseline = temp.resolve("baseline")
+            val profile = GeneratedCMakeReconstructionProfile.descriptor
+            val manifest = SourceTreeGenerator.generate(
+                RecoveredProgramModel(inputSha256 = "a".repeat(64), functions = listOf(
+                    RecoveredFunction("fn_0000000000401000", "parse_input", 0x401000UL,
+                        "int parse_input(void)", "/* ${"context".repeat(2_000)} */"))),
+                baseline,
+                reconstructor = BoundedLlmModuleReconstructor(
+                    AgentHarness { _, _ -> error("oversized prompt must not dispatch") },
+                    maximumContextCharacters = 4_096,
+                ),
+            )
+            val checkpoint = Json.parseToJsonElement(baseline.resolve(CHECKPOINT_PATH).readText()).jsonObject
+            assertEquals(JsonPrimitive("pre-dispatch-context-budget-fallback"), checkpoint.getValue("workflowOrigin"))
+            assertEquals(JsonNull, checkpoint.getValue("compilation"))
+            assertTrue(ReconstructionAcpEvidenceArchiveVerifier.verify(baseline,
+                manifest.files.associate { it.path to sha256(baseline.resolve(it.path).readBytes()) },
+                manifest.files.associate { it.path to Files.size(baseline.resolve(it.path)) }, manifest, profile).isEmpty())
+            assertEquals(0, MakeProjectBuilder.build(baseline).returnCode)
+            ArchivalPackager.create(baseline, temp.resolve("baseline.zip"))
+            for (outcome in listOf("passed", "failed", "failed-to-start", "timed-out", "source-changed", "output-limit-exceeded")) {
+                val project = temp.resolve(outcome)
+                copyTree(baseline, project)
+                Files.deleteIfExists(project.resolve("reports/archival_audit.json"))
+                val compilation = JsonObject(mapOf(
+                    "sourceSha256" to checkpoint.getValue("sourceSha256"),
+                    "command" to JsonArray(ReconstructionCompilationPolicies.resolve(profile)
+                        .command(profile, SOURCE_PATH).map(::JsonPrimitive)),
+                    "outcome" to JsonPrimitive(outcome),
+                    "returnCode" to when (outcome) {
+                        "passed" -> JsonPrimitive(0)
+                        "failed" -> JsonPrimitive(1)
+                        else -> JsonNull
+                    },
+                    "diagnosticsSha256" to JsonPrimitive(sha256(byteArrayOf())),
+                    "diagnosticsBytes" to JsonPrimitive(0),
+                ))
+                rewriteCheckpointConfidenceAndManifest(project, JsonObject(checkpoint + ("compilation" to compilation)))
+                val confidence = Json.parseToJsonElement(project.resolve("reports/confidence.json").readText()).jsonObject
+                assertEquals(compilation, confidence.getValue("modules").jsonArray.single().jsonObject
+                    .getValue("revisionEvidence").jsonObject.getValue("compilation"))
+                val auditFailure = assertFailsWith<IllegalArgumentException>(outcome) { ArchivalProjectAuditor.audit(project) }
+                assertTrue(auditFailure.message.orEmpty().contains("pre-dispatch fallback retains compiler evidence"), auditFailure.message)
+                assertFalse(project.resolve("reports/archival_audit.json").exists())
+                val archive = temp.resolve("$outcome.zip")
+                val archiveFailure = assertFailsWith<IllegalArgumentException>(outcome) { ArchivalPackager.create(project, archive) }
+                assertTrue(archiveFailure.message.orEmpty().contains("pre-dispatch fallback retains compiler evidence"), archiveFailure.message)
+                assertFalse(archive.exists())
+            }
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
     fun `legacy null observation fallback passes independently replayed model overflow`() {
         val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
         Files.createDirectories(scratch)

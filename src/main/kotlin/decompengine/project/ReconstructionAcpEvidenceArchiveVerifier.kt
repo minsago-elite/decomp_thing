@@ -451,6 +451,11 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         root.requiredBoolean("retryable", "module checkpoint")
         if (schemaVersion >= 5L) {
             val compilationElement = root.getValue("compilation")
+            // Context-budget rejection precedes the producer's module compiler gate. Rehashing
+            // a checkpoint and matching confidence report cannot manufacture that later stage.
+            require(workflowOrigin != "pre-dispatch-context-budget-fallback" || compilationElement is JsonNull) {
+                "pre-dispatch fallback retains compiler evidence: $moduleId"
+            }
             val compilation = compilationElement.takeUnless { it is JsonNull }
                 ?.requiredObject("module compilation")
             require(!accepted || compilation != null) { "accepted module lacks compiler evidence: $moduleId" }
