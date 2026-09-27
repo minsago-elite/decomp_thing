@@ -295,7 +295,24 @@ class ArchivalAuditProvenanceTest {
     @Test
     fun `recovered model cannot hide evidence-only implementations even when unresolved list is omitted`() {
         val project = fixture()
-        rewriteManifest(project) { it.withField("unresolvedImplementationIds", JsonArray(emptyList())) }
+        assertEquals(listOf("fn_10", "fn_100"), ArchivalProjectAuditor.audit(project).unresolvedEntityIds)
+        rewriteManifest(project) {
+            it.withField("unresolvedImplementationIds", JsonArray(emptyList()))
+                .withField("unresolvedEntityIds", JsonArray(emptyList()))
+        }
+
+        val mismatch = assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(project) }
+        assertTrue(mismatch.message.orEmpty().contains("confidence unresolvedImplementationIds differs"))
+        // Even mutually consistent report claims cannot promote evidence-only source to accepted code.
+        val confidencePath = "reports/confidence.json"
+        val confidence = Json.parseToJsonElement(project.resolve(confidencePath).readText()).jsonObject
+        val modules = confidence.getValue("modules").jsonArray.map { element ->
+            element.jsonObject.withField("unresolvedImplementationIds", JsonArray(emptyList()))
+        }
+        writeBoundFile(project, confidencePath, confidence
+            .withField("unresolvedImplementationIds", JsonArray(emptyList()))
+            .withField("unresolvedEntityIds", confidence.getValue("unresolvedRecoveryEntityIds"))
+            .withField("modules", JsonArray(modules)).toString())
 
         val audit = ArchivalProjectAuditor.audit(project)
 
@@ -318,6 +335,7 @@ class ArchivalAuditProvenanceTest {
     @Test
     fun `free text containing an entity ID cannot replace parsed module ownership`() {
         val project = fixture()
+        assertTrue(ArchivalProjectAuditor.audit(project).missingModelProvenance.isEmpty())
         val relative = "reports/module_plan.json"
         val plan = Json.parseToJsonElement(project.resolve(relative).readText()).jsonObject
         val modules = plan.getValue("modules").jsonArray.map { it.jsonObject }
@@ -326,6 +344,17 @@ class ArchivalAuditProvenanceTest {
         }.map { it.withField("boundaryEvidence", JsonArray(listOf(JsonPrimitive("fn_10")))) }
         assertTrue(retained.isNotEmpty())
         writeBoundFile(project, relative, plan.withField("modules", JsonArray(retained)).toString())
+
+        val mismatch = assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(project) }
+        assertTrue(mismatch.message.orEmpty().contains("confidence module inventory differs"))
+        val retainedIds = retained.map { it.getValue("id").jsonPrimitive.content }.toSet()
+        val confidencePath = "reports/confidence.json"
+        val confidence = Json.parseToJsonElement(project.resolve(confidencePath).readText()).jsonObject
+        val confidenceModules = confidence.getValue("modules").jsonArray.filter {
+            it.jsonObject.getValue("id").jsonPrimitive.content in retainedIds
+        }
+        writeBoundFile(project, confidencePath,
+            confidence.withField("modules", JsonArray(confidenceModules)).toString())
 
         val audit = ArchivalProjectAuditor.audit(project)
 

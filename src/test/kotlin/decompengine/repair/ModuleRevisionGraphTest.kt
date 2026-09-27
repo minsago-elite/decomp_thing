@@ -2447,10 +2447,19 @@ class ModuleRevisionGraphTest {
 
     @Test
     fun `repair audit charges only new payload files while scanning manifest-bound reports`() {
-        val fixture = releaseRepairFixture(undispatchedFallback = true)
-        val original = SourceTreeManifestReader.read(fixture.project, GeneratedCMakeReconstructionProfile.descriptor)
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val reportDeclaration = ProjectFileDeclaration(
+            "ordinary-report", "reports/ordinary-{report}.validation.json",
+            setOf(ProjectFileRole.EVIDENCE), ProjectContentKind.UTF8_TEXT,
+        )
+        val profile = ReconstructionProfile(base.schemaVersion, base.id,
+            ProjectLayoutProfile(base.layout.schemaVersion, base.layout.declarations + reportDeclaration),
+            base.budgets, base.adapterConfiguration)
+        val fixture = releaseRepairFixture(undispatchedFallback = true, profile = profile)
+        assertFalse("fn_alpha" in ArchivalProjectAuditor.audit(fixture.project, profile).unresolvedEntityIds)
+        val original = SourceTreeManifestReader.read(fixture.project, profile)
         val manifestBoundReports = (0 until 10).map { index ->
-            val path = "reports/ordinary-$index.validation.json"
+            val path = reportDeclaration.materialize(mapOf("report" to index.toString()))
             val bytes = "manifest-bound report $index\n".toByteArray()
             fixture.project.resolve(path).writeBytes(bytes)
             GeneratedFileEvidence(
@@ -2484,11 +2493,16 @@ class ModuleRevisionGraphTest {
         assertTrue(additionalInventoryFiles.isNotEmpty())
 
         val audit = ArchivalProjectAuditor.audit(
-            fixture.project,
+            fixture.project, profile,
             limits = ArchivalBundleLimits(maximumEntries = manifest.files.size + 1 + additionalInventoryFiles.size),
         )
 
         assertFalse("fn_alpha" in audit.unresolvedEntityIds)
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ArchivalProjectAuditor.audit(fixture.project, profile,
+                limits = ArchivalBundleLimits(maximumEntries = manifest.files.size + additionalInventoryFiles.size))
+        }
+        assertTrue(failure.message.orEmpty().contains("remaining entry bound"))
     }
 
     @Test
@@ -2597,18 +2611,53 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
-    fun `repair audit rejects confidence evidence cross paired with an earlier source`() {
+    fun `repair audit rejects confidence evidence cross paired with the repaired source or another checkpoint`() {
         val fixture = releaseRepairFixture(undispatchedFallback = true)
+        assertFalse("fn_alpha" in ArchivalProjectAuditor.audit(fixture.project).unresolvedEntityIds)
+        val priorAudit = fixture.project.resolve("reports/archival_audit.json").readBytes()
         val confidencePath = fixture.project.resolve("reports/confidence.json")
         val before = confidencePath.readBytes()
-        val after = confidencePath.readText().replace(sha256(fixture.after), "0".repeat(64)).toByteArray()
-        assertFalse(before.contentEquals(after))
-        confidencePath.writeBytes(after)
+        val confidence = Json.parseToJsonElement(before.decodeToString()).jsonObject
+        val modules = confidence.getValue("modules").jsonArray
+        val alpha = modules.single { it.jsonObject.getValue("id").jsonPrimitive.content == "alpha" }.jsonObject
+        val historicalSourceSha256 = alpha.getValue("revisionEvidence").jsonObject.getValue("sourceSha256")
+        val checkpoint = Json.parseToJsonElement(fixture.project.resolve("reports/modules/alpha.json").readText()).jsonObject
+        assertEquals(checkpoint.getValue("sourceSha256"), historicalSourceSha256)
+        val repairedSourceSha256 = JsonPrimitive(sha256(fixture.after))
+        val otherSourceSha256 = modules.single { it.jsonObject.getValue("id").jsonPrimitive.content == "beta" }
+            .jsonObject.getValue("revisionEvidence").jsonObject.getValue("sourceSha256")
         val manifestPath = fixture.project.resolve("source_tree_manifest.json")
-        manifestPath.writeText(manifestPath.readText().replace(sha256(before), sha256(after)))
+        val manifest = Json.parseToJsonElement(manifestPath.readText()).jsonObject
+        for (wrongSourceSha256 in listOf(repairedSourceSha256, otherSourceSha256)) {
+            assertFalse(historicalSourceSha256 == wrongSourceSha256)
+            val changedModules = modules.map { element ->
+                val module = element.jsonObject
+                if (module.getValue("id").jsonPrimitive.content != "alpha") element else {
+                    JsonObject(LinkedHashMap(module).apply {
+                        put("revisionEvidence", JsonObject(LinkedHashMap(module.getValue("revisionEvidence").jsonObject).apply {
+                            put("sourceSha256", wrongSourceSha256)
+                        }))
+                    })
+                }
+            }
+            val after = JsonObject(LinkedHashMap(confidence).apply {
+                put("modules", JsonArray(changedModules))
+            }).toString().toByteArray()
+            assertFalse(before.contentEquals(after))
+            confidencePath.writeBytes(after)
+            manifestPath.writeText(JsonObject(LinkedHashMap(manifest).apply {
+                put("files", JsonArray(manifest.getValue("files").jsonArray.map { element ->
+                    val file = element.jsonObject
+                    if (file.getValue("path").jsonPrimitive.content != "reports/confidence.json") element else {
+                        JsonObject(LinkedHashMap(file).apply { put("sha256", JsonPrimitive(sha256(after))) })
+                    }
+                }))
+            }).toString())
 
-        val failure = assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(fixture.project) }
-        assertTrue(failure.message.orEmpty().contains("repaired module confidence evidence"))
+            val failure = assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(fixture.project) }
+            assertTrue(failure.message.orEmpty().contains("repaired module confidence evidence"))
+            assertContentEquals(priorAudit, fixture.project.resolve("reports/archival_audit.json").readBytes())
+        }
     }
 
     @Test
