@@ -2,7 +2,6 @@ package decompengine.analysis
 
 import decompengine.binary.BoundedElfMetadataInspection
 import decompengine.binary.BoundedElfMetadataLimits
-import decompengine.binary.BoundedElfMetadataReader
 import decompengine.binary.ElfMetadata
 import decompengine.binary.SymbolInventory
 import decompengine.oracle.fulltree.FullTreeControlException
@@ -34,14 +33,19 @@ data class GhidraAnalysis(
 
 class GhidraAnalysisException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
 
-class GhidraJvmAnalyzer private constructor(
+class GhidraJvmAnalyzer internal constructor(
     private val analyzer: ProgramModelAnalyzer,
     private val metadataLimits: BoundedElfMetadataLimits,
+    private val metadataInspectionProcess: BoundedElfMetadataInspectionProcess,
 ) {
-    constructor() : this(GhidraHeadlessProgramModelAnalyzer(), BoundedElfMetadataLimits())
+    constructor() : this(
+        GhidraHeadlessProgramModelAnalyzer(),
+        BoundedElfMetadataLimits(),
+        BoundedElfMetadataInspectionProcess(),
+    )
 
     constructor(analyzer: ProgramModelAnalyzer = GhidraHeadlessProgramModelAnalyzer()) :
-        this(analyzer, BoundedElfMetadataLimits())
+        this(analyzer, BoundedElfMetadataLimits(), BoundedElfMetadataInspectionProcess())
 
     /** Binds worker export limits; callers still admit the requested budgets against host policy. */
     fun withExportBudgets(budgets: ReconstructionBudgets): GhidraJvmAnalyzer {
@@ -51,7 +55,7 @@ class GhidraJvmAnalyzer private constructor(
             maximumWallClockMillis = minOf(metadataLimits.maximumWallClockMillis, budgets.exportWallClockMillis),
             maximumModeledMetadataBytes = minOf(metadataLimits.maximumModeledMetadataBytes, budgets.exportMaximumResidentBytes),
         )
-        return GhidraJvmAnalyzer(bounded.withExportBudgets(budgets), selectedMetadataLimits)
+        return GhidraJvmAnalyzer(bounded.withExportBudgets(budgets), selectedMetadataLimits, metadataInspectionProcess)
     }
 
     fun analyze(binaryPath: Path, outputDir: Path): GhidraAnalysis {
@@ -73,7 +77,7 @@ class GhidraJvmAnalyzer private constructor(
             }
             checkpoint("after export")
             val inspection = try {
-                BoundedElfMetadataReader.read(binaryPath, metadataLimits, ::checkpoint)
+                metadataInspectionProcess.inspect(binaryPath, metadataLimits, ::checkpoint)
             } catch (failure: FullTreeControlException) {
                 // Initial authentication preserves callback failures as causes after releasing its input.
                 val cause = failure.cause

@@ -16,9 +16,10 @@ interpretation. Missing descriptors in historical reports do not imply calibrati
 Existing numeric fields remain available for heuristic comparisons. Web and CLI
 views identify these scores as uncalibrated regardless of historical labels.
 
-Version 1 cannot represent a calibrated assessment. A future assessment contract
-must validate exact revision and oracle identities, sample support, empirical error
-rates, tolerance, distribution applicability and required behavior before exposing
-any calibrated value. This descriptor neither supplies those inputs nor grants
-structural, behavior, containment or release authority. It is a foundation for #42;
-the complete production calibration requirement remains open.
+Version 1 cannot represent a calibrated assessment. The separate draft
+[`confidence-calibration-artifact-v1.md`](confidence-calibration-artifact-v1.md)
+defines exact revision and oracle identities, sample support, empirical error rates,
+tolerance and distribution handling. No authenticated production calibration artifact
+currently exists, so this descriptor remains the only score interpretation used by
+reports. It neither supplies calibration inputs nor grants structural, behavior,
+containment or release authority; the production calibration requirement remains open.
