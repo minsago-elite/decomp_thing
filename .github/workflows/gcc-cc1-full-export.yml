@@ -1,4 +1,4 @@
-name: GCC cc1 live full export
+name: GCC live full export
 
 on:
   pull_request:
@@ -10,15 +10,24 @@ concurrency:
 
 jobs:
   cc1-live-full-export:
-    if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'qualify:cc1-full-export')
+    if: github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'qualify:cc1-full-export') || contains(github.event.pull_request.labels.*.name, 'qualify:driver-full-export'))
+    name: ${{ matrix.target }} live full export
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(contains(github.event.pull_request.labels.*.name, 'qualify:cc1-full-export') && contains(github.event.pull_request.labels.*.name, 'qualify:driver-full-export') && '["cc1","driver"]' || contains(github.event.pull_request.labels.*.name, 'qualify:driver-full-export') && '["driver"]' || '["cc1"]') }}
+    env:
+      DECOMP_GCC_CLI_FULL_EXPORT_ENGINE: ${{ matrix.target }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    timeout-minutes: ${{ matrix.target == 'driver' && 90 || 360 }}
     permissions:
       contents: read
     defaults:
       run:
         shell: bash
     steps:
+      - name: Select qualification evidence directory
+        run: echo "DECOMP_GCC_CLI_EVIDENCE_ROOT=$RUNNER_TEMP/${DECOMP_GCC_CLI_FULL_EXPORT_ENGINE}-full-export-evidence" >> "$GITHUB_ENV"
       - uses: actions/checkout@v7
         with:
           submodules: recursive
@@ -40,6 +49,7 @@ jobs:
         run: python3 -m pip install --requirement requirements/oracle-generation.txt
       - name: Restore the manifest-keyed cc1 artifact pair
         id: cc1-artifact-cache
+        if: matrix.target == 'cc1'
         uses: actions/cache/restore@v6
         with:
           path: ${{ runner.temp }}/gcc-cc1-engine/artifacts
@@ -48,7 +58,7 @@ jobs:
             gcc-cc1-artifacts-v2-${{ hashFiles('oracle/gcc/16.2.0/source-lock.json', 'oracle/gcc/16.2.0/build-record.json', 'oracle/gcc/16.2.0/toolchain-reproduction.json', 'oracle/gcc/16.2.0/build-toolchain.Dockerfile', 'oracle/gcc/16.2.0/cc1-build-record.json', 'oracle/gcc/16.2.0/cc1-oracle-manifest.json') }}-
       - name: Validate cached cc1 binaries before using them
         id: cached-cc1-verify
-        if: steps.cc1-artifact-cache.outputs.cache-matched-key != ''
+        if: matrix.target == 'cc1' && steps.cc1-artifact-cache.outputs.cache-matched-key != ''
         run: |
           workspace="$RUNNER_TEMP/gcc-cc1-engine"
           set +e
@@ -67,7 +77,7 @@ jobs:
             echo 'valid=false' >> "$GITHUB_OUTPUT"
           fi
       - name: Rebuild only cc1 from the authenticated GCC source
-        if: steps.cc1-artifact-cache.outputs.cache-matched-key == '' || steps.cached-cc1-verify.outputs.valid != 'true'
+        if: matrix.target == 'cc1' && (steps.cc1-artifact-cache.outputs.cache-matched-key == '' || steps.cached-cc1-verify.outputs.valid != 'true')
         run: |
           python3 scripts/fetch-gcc-oracle-source.py "$RUNNER_TEMP/gcc-oracle-source"
           echo '8b0af79ba3426f49ba599eb0c7eea433c62ac5bb6ab5e7797f7d09d978f43543  oracle/gcc/16.2.0/build-toolchain.Dockerfile' \
@@ -95,6 +105,7 @@ jobs:
             --profile oracle/gcc/16.2.0/compiler-engines.json \
             --engine cc1
       - name: Verify the cc1 pair against its checked manifest
+        if: matrix.target == 'cc1'
         run: |
           python3 scripts/rebuild-gcc-compiler-engines.py \
             --workspace "$RUNNER_TEMP/gcc-cc1-engine" \
@@ -102,16 +113,19 @@ jobs:
             --engine cc1 \
             --verify-artifacts
       - name: Cache the verified cc1 pair for later qualifications
-        if: steps.cached-cc1-verify.outputs.valid != 'true'
+        if: matrix.target == 'cc1' && steps.cached-cc1-verify.outputs.valid != 'true'
         uses: actions/cache/save@v6
         with:
           path: ${{ runner.temp }}/gcc-cc1-engine/artifacts
           key: gcc-cc1-artifacts-v2-${{ hashFiles('oracle/gcc/16.2.0/source-lock.json', 'oracle/gcc/16.2.0/build-record.json', 'oracle/gcc/16.2.0/toolchain-reproduction.json', 'oracle/gcc/16.2.0/build-toolchain.Dockerfile', 'oracle/gcc/16.2.0/cc1-build-record.json', 'oracle/gcc/16.2.0/cc1-oracle-manifest.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Reclaim build-only GCC toolchain storage
-        if: steps.cc1-artifact-cache.outputs.cache-matched-key == '' || steps.cached-cc1-verify.outputs.valid != 'true'
+        if: matrix.target == 'cc1' && (steps.cc1-artifact-cache.outputs.cache-matched-key == '' || steps.cached-cc1-verify.outputs.valid != 'true')
         run: |
           docker image rm decomp-gcc-oracle-toolchain:16.2.0
           docker buildx prune --all --force
+      - name: Verify the checked driver pair against its manifest
+        if: matrix.target == 'driver'
+        run: python3 scripts/verify-gcc-oracle-artifacts.py oracle/gcc/16.2.0/oracle-manifest.json
       - name: Install contained-execution host prerequisites
         run: |
           sudo apt-get update
@@ -133,7 +147,7 @@ jobs:
         run: bash scripts/ci-prepare-oracle-runtime.sh
       - name: Prepare the live contained-execution host
         run: scripts/ci-prepare-acp-sandbox.sh
-      - name: Prepare dedicated cc1 full-export scratch
+      - name: Prepare dedicated full-export scratch
         run: bash scripts/ci-prepare-oracle-ext4-scratch.sh --gcc-engine-cc1-fresh
       - name: Install the application-bundled Ghidra runtime
         run: bash scripts/ci-prepare-bundled-ghidra-runtime.sh --application
@@ -142,19 +156,18 @@ jobs:
           archive="$HOME/.gradle/caches/decomp-ghidra/ghidra_12.1.3_PUBLIC_20260817.zip"
           echo '93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54  '"$archive" \
             | sha256sum --check --strict
-          install -d -m 0700 "$RUNNER_TEMP/cc1-full-export-evidence"
+          install -d -m 0700 "$DECOMP_GCC_CLI_EVIDENCE_ROOT"
           echo "DECOMP_GCC_CLI_ARCHIVE=$archive" >> "$GITHUB_ENV"
-      - name: Record capacity before the live cc1 export
+      - name: Record capacity before the live export
         run: |
           df -h "$DECOMP_GCC_CLI_CC1_FRESH_SCRATCH" "$RUNNER_TEMP"
           df -i "$DECOMP_GCC_CLI_CC1_FRESH_SCRATCH" "$RUNNER_TEMP"
-      - name: Run the real contained cc1 full-export qualification
+      - name: Run the real contained full-export qualification
         env:
           DECOMP_GCC_CLI_PROFILE: ${{ github.workspace }}/oracle/gcc/16.2.0/compiler-engines.json
-          DECOMP_GCC_CLI_CC1_BINARY: ${{ runner.temp }}/gcc-cc1-engine/artifacts/gcc-cc1.stripped
-          DECOMP_GCC_CLI_EVIDENCE_ROOT: ${{ runner.temp }}/cc1-full-export-evidence
+          DECOMP_GCC_CLI_EXPORT_BINARY: ${{ matrix.target == 'driver' && format('{0}/oracle/gcc/16.2.0/artifacts/gcc-driver.stripped', github.workspace) || format('{0}/gcc-cc1-engine/artifacts/gcc-cc1.stripped', runner.temp) }}
         run: scripts/ci-qualify-gcc-cc1-full-export.sh
-      - name: Record capacity after the live cc1 export
+      - name: Record capacity after the live export
         if: always()
         run: |
           if [[ -n "${DECOMP_GCC_CLI_CC1_FRESH_SCRATCH:-}" && -d "$DECOMP_GCC_CLI_CC1_FRESH_SCRATCH" ]]; then
@@ -163,18 +176,18 @@ jobs:
           else
             echo 'cc1 scratch was not provisioned'
           fi
-      - name: Retain production cc1 model and receipt evidence
+      - name: Retain production model and receipt evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: gcc-cc1-live-full-export-${{ github.run_id }}-${{ github.run_attempt }}
+          name: gcc-${{ matrix.target }}-live-full-export-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 30
           if-no-files-found: warn
           path: |
-            ${{ runner.temp }}/cc1-full-export-evidence
+            ${{ env.DECOMP_GCC_CLI_EVIDENCE_ROOT }}
             build/reports/tests/test
             build/test-results/test
-      - name: Release dedicated cc1 full-export scratch
+      - name: Release dedicated full-export scratch
         if: always()
         run: bash scripts/ci-release-oracle-ext4-scratch.sh --gcc-engine-cc1-fresh
       - name: Release the root-owned application Ghidra runtime

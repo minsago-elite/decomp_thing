@@ -61,8 +61,125 @@ class StructuralBoundaryReplayBindingV1 internal constructor(
     val selectedModelImageBase: ULong,
 )
 
+/** Exact bounded evidence for one observed twin; it carries no production scoring capability. */
+internal class StructuralSelectedBoundaryObservationV1 internal constructor(bytes: ByteArray) {
+    private val stored = bytes.copyOf()
+    val canonicalBytes: ByteArray get() = stored.copyOf()
+    val sha256: String = OracleArtifacts.sha256(stored)
+}
+
 /** Independently replays the historical v1 function-boundary projection. */
 object StructuralBoundaryReplayV1 {
+    /** Computes one actual twin without inventing a projection for its uncaptured sibling. */
+    internal fun observeSelected(
+        functionOracle: StructuralFunctionOracleV1,
+        twin: String,
+        recoveredProgramModelBytes: ByteArray,
+        selectedModelImageBase: ULong,
+        limits: StructuralBoundaryReplayV1Limits = StructuralBoundaryReplayV1Limits(),
+    ): StructuralSelectedBoundaryObservationV1 {
+        if (twin !in setOf("rich", "stripped")) boundaryReplayFail("selected boundary twin is invalid")
+        val artifact = functionOracle.artifacts.getValue(twin)
+        if (functionOracle.scope == "production" && selectedModelImageBase != artifact.elfImageBase) {
+            boundaryReplayFail("production model image base is not the manifest-bound ELF image base")
+        }
+        val canonicalModel = CanonicalProgramModelStreaming.readCanonical(
+            recoveredProgramModelBytes,
+            CanonicalProgramModelStreamingLimits(
+                maximumInputBytes = limits.maximumProgramModelBytes,
+                maximumFunctions = limits.maximumFunctionRecords,
+                maximumGlobals = limits.maximumModelGlobalsOrTypes,
+                maximumTypes = limits.maximumModelGlobalsOrTypes,
+                maximumReferencesPerFunction = limits.maximumReferencesPerFunction,
+                maximumTextCodePoints = limits.maximumTextCharacters,
+            ),
+        )
+        if (canonicalModel.model.inputSha256 != artifact.inputSha256) {
+            boundaryReplayFail("program model input SHA-256 does not match the selected artifact")
+        }
+        val recovered = normalizeRecoveredFunctions(canonicalModel.model, selectedModelImageBase,
+            artifact.executableRvaRanges, limits)
+        val oracle = functionOracle.scoreableFunctionsByTwin.getValue(twin)
+            .map { (id, record) -> ReplayOracleFunction(id, record.rva, record.aliases) }.sortedWith(ORACLE_ORDER)
+        if (oracle.size > limits.maximumFunctionRecords ||
+            oracle.mapTo(hashSetOf()) { it.id } != functionOracle.scoredFunctionIds ||
+            oracle.map { it.rva }.distinct().size != oracle.size ||
+            oracle.any { function -> artifact.executableRvaRanges.none { (start, end) -> function.rva >= start && function.rva < end } }
+        ) boundaryReplayFail("selected boundary oracle universe is invalid or exceeds its bound")
+        val exclusions = parseCompilerGeneratedExclusions(functionOracle.expectedExcludedFunctions, artifact.executableRvaRanges)
+        val ignored = arrayListOf<ReplayIgnored>()
+        val scoredRecovered = arrayListOf<ReplayRecoveredFunction>()
+        recovered.forEach { function ->
+            val exclusion = exclusions[function.rva]
+            if (exclusion == null) scoredRecovered += function else ignored += ReplayIgnored(function, exclusion)
+        }
+        val oracleByRva = oracle.associateBy { it.rva }
+        if (exclusions.keys.any(oracleByRva::containsKey)) {
+            boundaryReplayFail("scoreable and compiler-generated oracle functions share an RVA")
+        }
+        val exact = scoredRecovered.mapNotNull { function -> oracleByRva[function.rva]?.let { ReplayPair(it, function) } }
+            .sortedWith(PAIR_ORDER)
+        val exactOracleIds = exact.mapTo(hashSetOf()) { it.oracle.id }
+        val exactRecoveredIds = exact.mapTo(hashSetOf()) { it.recovered.id }
+        val near = minimumCostNearAssignment(oracle.filterNot { it.id in exactOracleIds },
+            scoredRecovered.filterNot { it.id in exactRecoveredIds }, functionOracle.nearMissBytes, limits)
+        val result = JsonObject(mapOf(
+            "exactMatches" to JsonArray(exact.map { matchDetail(it, "exact") }),
+            "nearMisses" to JsonArray(near.matches.map { matchDetail(it, "near") }),
+            "falsePositives" to JsonArray(near.falsePositives.map(::recoveredDetail)),
+            "falseNegatives" to JsonArray(near.falseNegatives.map(::oracleDetail)),
+            "ignoredExcludedRecoveries" to JsonArray(ignored.map(::ignoredDetail)),
+            "nearMatchAssignment" to nearAssignmentDetail(near),
+            "boundaries" to boundaryMetrics(oracle.size, recovered.size, scoredRecovered.size, ignored.size, exact.size, near),
+            "nameRecovery" to nameMetrics(oracle, exact + near.matches),
+        ))
+        val document = JsonObject(mapOf(
+            "provider" to JsonPrimitive("selected-twin-boundary-observation-v1"),
+            "schemaVersion" to JsonPrimitive(1),
+            "functionOracleSha256" to JsonPrimitive(functionOracle.snapshot.sha256),
+            "twin" to JsonPrimitive(twin),
+            "inputSha256" to JsonPrimitive(artifact.inputSha256),
+            "programModelSha256" to JsonPrimitive(canonicalModel.sha256),
+            "programModelBytes" to JsonPrimitive(canonicalModel.sizeBytes),
+            "selectedModelImageBase" to address(selectedModelImageBase),
+            "executableRvaRanges" to JsonArray(artifact.executableRvaRanges.map { (start, end) ->
+                JsonObject(mapOf("start" to address(start), "endExclusive" to address(end)))
+            }),
+            "nearMissBytes" to JsonPrimitive(functionOracle.nearMissBytes),
+            "policy" to historicalBoundaryPolicy(functionOracle.nearMissBytes),
+            "excludedFunctions" to functionOracle.expectedExcludedFunctions,
+            "recoveredOutcomeCounts" to JsonObject(listOf("recovered", "partial", "failed", "synthetic").associateWith { status ->
+                JsonPrimitive(recovered.count { it.status == status })
+            }),
+            "result" to result,
+            "complete" to JsonPrimitive(false),
+            "scored" to JsonPrimitive(false),
+            "releaseEligible" to JsonPrimitive(false),
+        ))
+        return StructuralSelectedBoundaryObservationV1(StructuralJsonEncoder(
+            StructuralBoundaryReplayV1Limits.HARD_MAXIMUM_REPORT_BYTES, pretty = true, ensureAscii = true,
+        ).encode(document))
+    }
+
+    /** Recomputes the projection and compares the complete retained canonical bytes. */
+    internal fun verifySelected(
+        functionOracle: StructuralFunctionOracleV1,
+        twin: String,
+        recoveredProgramModelBytes: ByteArray,
+        selectedModelImageBase: ULong,
+        observationBytes: ByteArray,
+        limits: StructuralBoundaryReplayV1Limits = StructuralBoundaryReplayV1Limits(),
+    ): StructuralSelectedBoundaryObservationV1 {
+        if (observationBytes.size > StructuralBoundaryReplayV1Limits.HARD_MAXIMUM_REPORT_BYTES) {
+            boundaryReplayFail("selected boundary observation exceeds its byte bound")
+        }
+        val observed = observeSelected(functionOracle, twin, recoveredProgramModelBytes, selectedModelImageBase, limits)
+        if (!MessageDigest.isEqual(observed.canonicalBytes, observationBytes)) {
+            boundaryReplayFail("selected boundary observation differs from independent replay")
+        }
+        return observed
+    }
+
     fun replay(
         functionOracle: StructuralFunctionOracleV1,
         candidate: StructuralBoundaryMappingV1,
@@ -285,45 +402,46 @@ private fun validateUpstreamBinding(
     }
 }
 
-private fun validatePolicy(document: JsonObject, nearMissBytes: Int) {
-    val expected = JsonObject(
-        mapOf(
-            "addressNormalization" to JsonPrimitive(
-                "rva = model address - explicit program-model image base; " +
-                    "oracle RVA = ELF virtual address - recorded ELF image base " +
-                    "(manifest-validated for production)",
-            ),
-            "nearMissBytes" to JsonPrimitive(nearMissBytes),
-            "nearMissMatching" to JsonPrimitive(
-                "exact addresses first; then on sorted RVAs maximize order-preserving " +
-                    "one-to-one cardinality, minimize total absolute distance, and apply " +
-                    "the recorded stable tie break",
-            ),
-            "nameComparison" to JsonPrimitive("exact UTF-8 match against any oracle alias"),
-            "exclusionHandling" to JsonPrimitive(
-                "inlined records are never scored; exact starts of explicitly " +
-                    "compiler-generated records are ignored",
-            ),
-            "limits" to JsonObject(
-                mapOf(
-                    "maxJsonInputBytes" to JsonPrimitive(512 * 1024 * 1024),
-                    "maxManifestBytes" to JsonPrimitive(64 * 1024 * 1024),
-                    "maxSupportingInputBytes" to JsonPrimitive(64 * 1024 * 1024),
-                    "maxArtifactBytes" to JsonPrimitive(512 * 1024 * 1024),
-                    "maxReportBytes" to JsonPrimitive(64 * 1024 * 1024),
-                    "maxFunctionRecords" to JsonPrimitive(20_000),
-                    "maxAliasesPerFunction" to JsonPrimitive(256),
-                    "maxEvidencePerAlias" to JsonPrimitive(256),
-                    "maxModelReferencesPerFunction" to JsonPrimitive(100_000),
-                    "maxModelGlobalsOrTypes" to JsonPrimitive(1_000_000),
-                    "maxTextCharacters" to JsonPrimitive(16 * 1024 * 1024),
-                    "maxMatchingCells" to JsonPrimitive(20_000_000),
-                    "maxAmbiguityEdges" to JsonPrimitive(100_000),
-                ),
+private fun historicalBoundaryPolicy(nearMissBytes: Int): JsonObject = JsonObject(
+    mapOf(
+        "addressNormalization" to JsonPrimitive(
+            "rva = model address - explicit program-model image base; " +
+                "oracle RVA = ELF virtual address - recorded ELF image base " +
+                "(manifest-validated for production)",
+        ),
+        "nearMissBytes" to JsonPrimitive(nearMissBytes),
+        "nearMissMatching" to JsonPrimitive(
+            "exact addresses first; then on sorted RVAs maximize order-preserving " +
+                "one-to-one cardinality, minimize total absolute distance, and apply " +
+                "the recorded stable tie break",
+        ),
+        "nameComparison" to JsonPrimitive("exact UTF-8 match against any oracle alias"),
+        "exclusionHandling" to JsonPrimitive(
+            "inlined records are never scored; exact starts of explicitly " +
+                "compiler-generated records are ignored",
+        ),
+        "limits" to JsonObject(
+            mapOf(
+                "maxJsonInputBytes" to JsonPrimitive(512 * 1024 * 1024),
+                "maxManifestBytes" to JsonPrimitive(64 * 1024 * 1024),
+                "maxSupportingInputBytes" to JsonPrimitive(64 * 1024 * 1024),
+                "maxArtifactBytes" to JsonPrimitive(512 * 1024 * 1024),
+                "maxReportBytes" to JsonPrimitive(64 * 1024 * 1024),
+                "maxFunctionRecords" to JsonPrimitive(20_000),
+                "maxAliasesPerFunction" to JsonPrimitive(256),
+                "maxEvidencePerAlias" to JsonPrimitive(256),
+                "maxModelReferencesPerFunction" to JsonPrimitive(100_000),
+                "maxModelGlobalsOrTypes" to JsonPrimitive(1_000_000),
+                "maxTextCharacters" to JsonPrimitive(16 * 1024 * 1024),
+                "maxMatchingCells" to JsonPrimitive(20_000_000),
+                "maxAmbiguityEdges" to JsonPrimitive(100_000),
             ),
         ),
-    )
-    if (document.field("policy", "candidate boundary report") != expected) {
+    ),
+)
+
+private fun validatePolicy(document: JsonObject, nearMissBytes: Int) {
+    if (document.field("policy", "candidate boundary report") != historicalBoundaryPolicy(nearMissBytes)) {
         boundaryReplayFail("candidate boundary report does not state the exact historical v1 policy")
     }
 }

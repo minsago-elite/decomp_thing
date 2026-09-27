@@ -4,13 +4,16 @@ import decompengine.oracle.core.OracleArtifacts
 import decompengine.project.ProgramModelJson
 import decompengine.project.RecoveredFunction
 import decompengine.project.RecoveredProgramModel
+import decompengine.project.RecoveryStatus
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.util.Locale
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -338,6 +341,245 @@ class StructuralBoundaryReplayV1Test {
         assertTrue(computationLimit.message.orEmpty().contains("cell limit"))
     }
 
+    @Test
+    fun `selected observation reproduces every historical rich projection without scoring authority`() =
+        withReplayFixture { fixture ->
+            val observation = fixture.observeSelected()
+            val document = observation.canonicalBytes.observationDocument()
+            val expectedFields = setOf(
+                "exactMatches", "nearMisses", "falsePositives", "falseNegatives",
+                "ignoredExcludedRecoveries", "nearMatchAssignment", "boundaries", "nameRecovery",
+            )
+            val result = document.objectField("result")
+
+            assertEquals(expectedFields, result.keys)
+            expectedFields.forEach { field ->
+                assertEquals(fixture.richTwin().getValue(field), result.getValue(field), field)
+            }
+            assertEquals(JsonPrimitive("selected-twin-boundary-observation-v1"), document["provider"])
+            assertEquals(JsonPrimitive(1), document["schemaVersion"])
+            assertEquals(JsonPrimitive("rich"), document["twin"])
+            assertEquals(JsonPrimitive("1".repeat(64)), document["inputSha256"])
+            assertEquals(JsonPrimitive(RICH_MODEL_SHA256), document["programModelSha256"])
+            assertEquals(JsonPrimitive(fixture.modelBytes.size), document["programModelBytes"])
+            assertEquals(JsonPrimitive(FUNCTION_ORACLE_SHA256), document["functionOracleSha256"])
+            assertEquals(address(0x400000UL), document["selectedModelImageBase"])
+            assertEquals(
+                fixture.richTwin().objectField("artifact")["executableRvaRanges"],
+                document["executableRvaRanges"],
+            )
+            assertEquals(JsonPrimitive(4), document["nearMissBytes"])
+            assertEquals(fixture.boundary.document["policy"], document["policy"])
+            assertEquals(fixture.oracle.expectedExcludedFunctions, document["excludedFunctions"])
+            assertEquals(outcomeCounts(recovered = 4, partial = 1, synthetic = 1), document["recoveredOutcomeCounts"])
+            listOf("scored", "complete", "releaseEligible").forEach { flag ->
+                assertEquals(JsonPrimitive(false), document[flag], flag)
+            }
+            assertTrue("twins" !in document, "a selected observation must not invent an unobserved twin")
+            assertEquals(OracleArtifacts.sha256(observation.canonicalBytes), observation.sha256)
+        }
+
+    @Test
+    fun `selected observation bytes are deterministic and defensively owned`() = withReplayFixture { fixture ->
+        val input = fixture.modelBytes.copyOf()
+        val first = StructuralBoundaryReplayV1.observeSelected(fixture.oracle, "rich", input, 0x400000UL)
+        val expected = first.canonicalBytes
+        val second = fixture.observeSelected()
+        val verified = StructuralBoundaryReplayV1.verifySelected(
+            fixture.oracle, "rich", fixture.modelBytes, 0x400000UL, expected,
+        )
+
+        assertContentEquals(expected, second.canonicalBytes)
+        assertContentEquals(expected, verified.canonicalBytes)
+        assertEquals(first.sha256, second.sha256)
+        assertEquals(first.sha256, verified.sha256)
+        input.fill(0)
+        first.canonicalBytes.fill(0)
+        expected.fill(0)
+        assertContentEquals(second.canonicalBytes, first.canonicalBytes)
+        assertContentEquals(second.canonicalBytes, verified.canonicalBytes)
+        assertEquals(OracleArtifacts.sha256(first.canonicalBytes), first.sha256)
+    }
+
+    @Test
+    fun `selected verification rejects altered results metadata and canonical bytes`() = withReplayFixture { fixture ->
+        val observation = fixture.observeSelected()
+        val document = observation.canonicalBytes.observationDocument()
+        val mutations = listOf(
+            document.changed(
+                "result" to document.objectField("result").changed("falsePositives" to JsonArray(emptyList())),
+            ),
+            document.changed("excludedFunctions" to JsonArray(emptyList())),
+            document.changed("recoveredOutcomeCounts" to outcomeCounts(recovered = 6)),
+            document.changed("scored" to JsonPrimitive(true)),
+            document.changed("functionOracleSha256" to JsonPrimitive("0".repeat(64))),
+        )
+        mutations.forEach { mutated ->
+            val bytes = StructuralJsonEncoder(64 * 1024 * 1024, pretty = true, ensureAscii = true).encode(mutated)
+            assertFailsWith<StructuralRecoveryV1Exception> {
+                StructuralBoundaryReplayV1.verifySelected(
+                    fixture.oracle, "rich", fixture.modelBytes, 0x400000UL, bytes,
+                )
+            }
+        }
+        assertFailsWith<StructuralRecoveryV1Exception> {
+            StructuralBoundaryReplayV1.verifySelected(
+                fixture.oracle, "rich", fixture.modelBytes, 0x400000UL,
+                observation.canonicalBytes + '\n'.code.toByte(),
+            )
+        }
+    }
+
+    @Test
+    fun `selected verification cannot reuse an observation for another model twin base or oracle`() =
+        withReplayFixture { fixture ->
+            val original = fixture.observeSelected().canonicalBytes
+            val changedModel = fixture.mutateModel { functions ->
+                functions.map { function ->
+                    if (function.id == ALPHA_RECOVERED_ID) function.copy(prototype = "long alpha(void)") else function
+                }
+            }
+            val strippedModel = fixture.model.copy(inputSha256 = "2".repeat(64))
+                .toJson().toByteArray(StandardCharsets.UTF_8)
+            val oracle = fixture.loadOracle(
+                fixture.oracle.document.changed(
+                    "scoringPolicy" to fixture.oracle.document.objectField("scoringPolicy").changed(
+                        "nearMissBytes" to JsonPrimitive(3),
+                    ),
+                ),
+            )
+
+            assertEquals(
+                original.observationDocument()["result"],
+                fixture.observeSelected(changedModel).canonicalBytes.observationDocument()["result"],
+                "a non-boundary model change must still invalidate the exact model-byte binding",
+            )
+            assertFailsWith<StructuralRecoveryV1Exception> {
+                StructuralBoundaryReplayV1.verifySelected(fixture.oracle, "rich", changedModel.bytes, 0x400000UL, original)
+            }
+            assertFailsWith<StructuralRecoveryV1Exception> {
+                StructuralBoundaryReplayV1.verifySelected(fixture.oracle, "stripped", strippedModel, 0x400000UL, original)
+            }
+            assertFailsWith<StructuralRecoveryV1Exception> {
+                StructuralBoundaryReplayV1.verifySelected(fixture.oracle, "rich", fixture.modelBytes, 0x400001UL, original)
+            }
+            assertFailsWith<StructuralRecoveryV1Exception> {
+                StructuralBoundaryReplayV1.verifySelected(oracle, "rich", fixture.modelBytes, 0x400000UL, original)
+            }
+
+            val stripped = StructuralBoundaryReplayV1.observeSelected(
+                fixture.oracle, "stripped", strippedModel, 0x400000UL,
+            ).canonicalBytes.observationDocument()
+            assertEquals(JsonPrimitive("stripped"), stripped["twin"])
+            assertEquals(JsonPrimitive("2".repeat(64)), stripped["inputSha256"])
+            val alpha = stripped.objectField("result").array("exactMatches").map { it.objectValue() }
+                .single { it["recoveredId"] == JsonPrimitive(ALPHA_RECOVERED_ID) }
+            assertEquals(JsonPrimitive("removed"), alpha["matchedAliasAvailability"])
+            assertEquals(JsonPrimitive(false), stripped["scored"])
+            assertTrue("twins" !in stripped)
+        }
+
+    @Test
+    fun `selected observation preserves name-independent stable ties and exclusion accounting`() =
+        withReplayFixture { fixture ->
+            val model = fixture.mutateModel { functions ->
+                functions.map { function ->
+                    when (function.id) {
+                        BETA_RECOVERED_ID -> function.copy(address = 0x40001fUL, name = "wrong-lower")
+                        FALSE_POSITIVE_ID -> function.copy(address = 0x400021UL, name = "beta")
+                        else -> function
+                    }
+                }
+            }
+            val result = fixture.observeSelected(model).canonicalBytes.observationDocument().objectField("result")
+            val near = result.array("nearMisses").single().objectValue()
+            val assignment = result.objectField("nearMatchAssignment")
+            val upper = model.model.function(FALSE_POSITIVE_ID)
+
+            assertEquals(JsonPrimitive(BETA_RECOVERED_ID), near["recoveredId"])
+            assertEquals(JsonPrimitive(-1), near["deltaBytes"])
+            assertEquals(JsonPrimitive("incorrect"), near["nameResult"])
+            assertEquals(JsonArray(listOf(recoveredDetail(upper, 0x400000UL))), result["falsePositives"])
+            assertEquals(objective(1, 1), assignment["objective"])
+            assertEquals(JsonPrimitive(true), assignment["nameIndependent"])
+            assertEquals(JsonPrimitive(true), assignment["hasAlternativeOptimalMatching"])
+            assertEquals(JsonPrimitive(2), assignment["optimalCandidateEdgeCount"])
+            assertEquals(
+                JsonArray(
+                    listOf(assignmentEdge(fixture.richTwin().array("nearMisses").single().objectValue(), upper, 0x400000UL)),
+                ),
+                assignment["alternativeOptimalEdges"],
+            )
+            assertEquals(fixture.richTwin()["ignoredExcludedRecoveries"], result["ignoredExcludedRecoveries"])
+            assertEquals(fixture.richTwin()["falseNegatives"], result["falseNegatives"])
+            assertEquals(
+                fixture.richTwin().objectField("boundaries").changed("nearMissDistanceBytes" to JsonPrimitive(1)),
+                result["boundaries"],
+            )
+            assertFailsWith<StructuralRecoveryV1Exception> {
+                fixture.observeSelected(model, limits = StructuralBoundaryReplayV1Limits(maximumAmbiguityEdges = 1))
+            }
+        }
+
+    @Test
+    fun `selected observation retains failed extraction records in every recovered boundary partition`() =
+        withReplayFixture { fixture ->
+            val model = fixture.mutateModel { functions -> functions.map { it.copy(status = RecoveryStatus.FAILED) } }
+            val document = fixture.observeSelected(model).canonicalBytes.observationDocument()
+            val result = document.objectField("result")
+            val recoveredPartitions = listOf("exactMatches", "nearMisses", "falsePositives", "ignoredExcludedRecoveries")
+            val observedIds = mutableListOf<String>()
+
+            recoveredPartitions.forEach { field ->
+                val expected = JsonArray(
+                    fixture.richTwin().array(field).map {
+                        it.objectValue().changed("recoveredStatus" to JsonPrimitive("failed"))
+                    },
+                )
+                assertEquals(expected, result[field], "$field must not drop a failed extraction boundary")
+                result.array(field).forEach { raw ->
+                    observedIds += (raw.objectValue().getValue("recoveredId") as JsonPrimitive).content
+                }
+            }
+            assertEquals(model.model.functions.map { it.id }.sorted(), observedIds.sorted())
+            assertEquals(observedIds.size, observedIds.toSet().size, "partitions must be disjoint")
+            assertEquals(outcomeCounts(failed = 6), document["recoveredOutcomeCounts"])
+            assertEquals(fixture.richTwin()["boundaries"], result["boundaries"])
+            assertEquals(fixture.richTwin()["falseNegatives"], result["falseNegatives"])
+            assertEquals(fixture.richTwin()["nameRecovery"], result["nameRecovery"])
+            assertEquals(JsonPrimitive(false), document["scored"])
+            assertEquals(JsonPrimitive(false), document["releaseEligible"])
+        }
+
+    @Test
+    fun `selected observation enforces canonical input address and resource bounds`() = withReplayFixture { fixture ->
+        val invalidInputs = listOf(
+            fixture.baseModel.copy(bytes = fixture.modelBytes + '\n'.code.toByte()),
+            fixture.mutateModel { functions ->
+                functions + functions.first().copy(id = "duplicate-selected-start")
+            },
+            fixture.mutateModel { functions ->
+                functions.map { if (it.id == ALPHA_RECOVERED_ID) it.copy(address = 0x401000UL) else it }
+            },
+        )
+        invalidInputs.forEach { model ->
+            assertFailsWith<StructuralRecoveryV1Exception> { fixture.observeSelected(model) }
+        }
+        assertFailsWith<StructuralRecoveryV1Exception> { fixture.observeSelected(selectedBase = 0x400011UL) }
+        listOf(
+            StructuralBoundaryReplayV1Limits(maximumProgramModelBytes = fixture.modelBytes.size - 1),
+            StructuralBoundaryReplayV1Limits(maximumFunctionRecords = fixture.model.functions.size - 1),
+            StructuralBoundaryReplayV1Limits(maximumMatchingCells = 8),
+        ).forEach { limits ->
+            assertFailsWith<StructuralRecoveryV1Exception> { fixture.observeSelected(limits = limits) }
+        }
+        listOf("stripped", "unknown").forEach { twin ->
+            assertFailsWith<StructuralRecoveryV1Exception> {
+                StructuralBoundaryReplayV1.observeSelected(fixture.oracle, twin, fixture.modelBytes, 0x400000UL)
+            }
+        }
+    }
+
     private companion object {
         const val ALPHA_RECOVERED_ID = "fn_0000000000400010"
         const val BETA_RECOVERED_ID = "fn_0000000000400022"
@@ -400,6 +642,14 @@ private class BoundaryReplayFixture(
     )
 
     fun richTwin(): JsonObject = boundary.document.objectField("twins").objectField("rich")
+
+    fun observeSelected(
+        replayModel: ReplayModelFixture = baseModel,
+        selectedBase: ULong = 0x400000UL,
+        limits: StructuralBoundaryReplayV1Limits = StructuralBoundaryReplayV1Limits(),
+    ): StructuralSelectedBoundaryObservationV1 = StructuralBoundaryReplayV1.observeSelected(
+        oracle, "rich", replayModel.bytes, selectedBase, limits,
+    )
 
     fun mutateModel(transform: (List<RecoveredFunction>) -> List<RecoveredFunction>): ReplayModelFixture {
         val functions = transform(model.functions).sortedWith(
@@ -503,6 +753,23 @@ private fun JsonObject.changeRich(transform: (JsonObject) -> JsonObject): JsonOb
 private fun JsonObject.objectField(name: String): JsonObject = getValue(name).objectValue()
 private fun JsonObject.array(name: String): JsonArray = getValue(name) as JsonArray
 private fun JsonElement.objectValue(): JsonObject = this as JsonObject
+
+private fun ByteArray.observationDocument(): JsonObject =
+    Json.parseToJsonElement(toString(StandardCharsets.UTF_8)).objectValue()
+
+private fun outcomeCounts(
+    recovered: Int = 0,
+    partial: Int = 0,
+    failed: Int = 0,
+    synthetic: Int = 0,
+): JsonObject = JsonObject(
+    mapOf(
+        "recovered" to JsonPrimitive(recovered),
+        "partial" to JsonPrimitive(partial),
+        "failed" to JsonPrimitive(failed),
+        "synthetic" to JsonPrimitive(synthetic),
+    ),
+)
 
 private fun JsonObject.withRecovered(
     function: RecoveredFunction,

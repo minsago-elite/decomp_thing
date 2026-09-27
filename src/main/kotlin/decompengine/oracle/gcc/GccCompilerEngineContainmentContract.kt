@@ -187,7 +187,11 @@ internal class GccCompilerEngineContainmentRequest(
     val environment: Map<String, String> = boundedEnvironmentCopy(environment)
 
     init {
-        require(engineId == "cc1" || engineId == "lto1")
+        require(engineId in setOf("cc1", "lto1", "driver"))
+        require(engineId != "driver" || (bundledRuntime?.invocationVersion == 5 &&
+            runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL)) {
+            "GCC driver containment requires bundled full-recovery export with fresh control state"
+        }
         when (runKind) {
             GccCompilerEngineContainmentRunKind.INTERRUPTED,
             GccCompilerEngineContainmentRunKind.FRESH_CONTROL ->

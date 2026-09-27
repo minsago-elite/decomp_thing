@@ -81,10 +81,11 @@ internal class GccBundledPlannerRequest(
             outputDirectory: Path,
             maximumPlanBytes: Int = MAXIMUM_PLANNER_ARTIFACT_BYTES,
         ): GccBundledPlannerRequest {
+            val engine = profile.requirePlanningTarget(engineId)
             val policy = profile.policyBytes()
             val reconstruction = profile.suite.reconstructionProfile()
             return GccBundledPlannerRequest(modelPath, outputDirectory, exported.assessment.programModelBytes,
-                exported.assessment.programModelSha256, profile.suite.engine(engineId).strippedArtifact.sha256,
+                exported.assessment.programModelSha256, engine.strippedArtifact.sha256,
                 exported.assessment.functionCount, operationRequestSha256, OracleArtifacts.sha256(policy),
                 reconstruction.layout, reconstruction.budgets.maximumFunctionsPerModule,
                 reconstruction.budgets.plannerMaximumEntities, reconstruction.budgets.plannerMaximumDependencyEdges,

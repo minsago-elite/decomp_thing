@@ -16,6 +16,7 @@ import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonObject
@@ -27,25 +28,27 @@ import kotlinx.serialization.json.long
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Tag
 
-/** Opt-in evidence capture for a real contained cc1 full export; this does not score the model. */
+/** Opt-in evidence capture for a real contained GCC full export; this does not score the model. */
 @Tag("ci-live")
 class GccProductionFullExportQualificationTest {
     @Test
-    fun `live cc1 full export retains its profile-bound model and receipt evidence`() {
+    fun `live selected GCC full export retains its profile-bound model and receipt evidence`() {
         assumeTrue(
             System.getenv("DECOMP_REQUIRE_GCC_CLI_FULL_EXPORT") == "true",
-            "real cc1 full-export qualification is opt-in",
+            "real GCC full-export qualification is opt-in",
         )
+        val engine = System.getenv("DECOMP_GCC_CLI_FULL_EXPORT_ENGINE") ?: "cc1"
+        require(engine in setOf("cc1", "driver")) { "qualification requires cc1 or driver" }
         val installation = configured("DECOMP_GCC_CLI_INSTALLATION")
         val profilePath = configured("DECOMP_GCC_CLI_PROFILE")
         val archive = configured("DECOMP_GCC_CLI_ARCHIVE")
-        val binary = configured("DECOMP_GCC_CLI_CC1_BINARY")
-        val scratch = configured("DECOMP_GCC_CLI_CC1_FRESH_SCRATCH")
+        val binary = configured("DECOMP_GCC_CLI_EXPORT_BINARY", "DECOMP_GCC_CLI_CC1_BINARY")
+        val scratch = configured("DECOMP_GCC_CLI_EXPORT_SCRATCH", "DECOMP_GCC_CLI_CC1_FRESH_SCRATCH")
         val evidenceRoot = configured("DECOMP_GCC_CLI_EVIDENCE_ROOT")
         assertTrue(Files.isDirectory(scratch, LinkOption.NOFOLLOW_LINKS))
         assertEquals(PosixFilePermissions.fromString("rwx------"), Files.getPosixFilePermissions(evidenceRoot))
-        assertTrue(isEmptyDirectory(scratch), "cc1 fresh-export scratch must begin empty")
-        assertTrue(isEmptyDirectory(evidenceRoot), "cc1 export evidence root must begin empty")
+        assertTrue(isEmptyDirectory(scratch), "GCC fresh-export scratch must begin empty")
+        assertTrue(isEmptyDirectory(evidenceRoot), "GCC export evidence root must begin empty")
         for (input in listOf(installation, profilePath, archive, binary, evidenceRoot)) {
             assertFalse(input.startsWith(scratch) || scratch.startsWith(input), "inputs/evidence must be outside scratch")
         }
@@ -53,7 +56,7 @@ class GccProductionFullExportQualificationTest {
         val output = privateDirectory(evidenceRoot.resolve("cli-output"))
         val launcherEvidence = privateDirectory(evidenceRoot.resolve("launcher"))
         val arguments = listOf(
-            "cc1", binary.toString(),
+            engine, binary.toString(),
             "--profile", profilePath.toString(),
             "--ghidra-archive", archive.toString(),
             "--output", output.toString(),
@@ -64,11 +67,11 @@ class GccProductionFullExportQualificationTest {
             invokeInstalledGccCli(
                 arguments,
                 launcherEvidence,
-                timeoutSeconds = 9900,
+                timeoutSeconds = if (engine == "driver") 2100 else 9900,
                 installation = installation,
                 command = "gcc-engine-full-export",
             ),
-            "installed cc1 full-export CLI failed; inspect retained launcher evidence",
+            "installed GCC full-export CLI failed; inspect retained launcher evidence",
         )
         val launcherSummary = verifyInstalledCliEvidence(
             launcherEvidence, arguments, installation, expectedExit = 0, command = "gcc-engine-full-export",
@@ -113,14 +116,14 @@ class GccProductionFullExportQualificationTest {
         assertEquals(OracleArtifacts.sha256(bindingBytes), result.requiredText("structuralBindingSha256"))
         val binding = OracleJson.parseCanonical(bindingBytes).jsonObject
         assertEquals("gcc-compiler-engine-structural-full-export-binding-v2", binding.requiredText("provider"))
-        assertEquals("cc1", binding.getValue("receiptLineage").jsonObject.requiredText("engineId"))
+        assertEquals(engine, binding.getValue("receiptLineage").jsonObject.requiredText("engineId"))
         assertEquals(operationId, binding.getValue("receiptLineage").jsonObject.requiredText("operationId"))
         assertEquals(result.requiredText("requestSha256"), binding.getValue("receiptLineage").jsonObject.requiredText("intentSha256"))
         assertEquals(result.requiredText("executionReceiptSha256"), binding.getValue("receiptLineage").jsonObject.requiredText("executionReceiptSha256"))
         assertEquals(result.requiredText("exportAssessmentReceiptSha256"), binding.getValue("receiptLineage").jsonObject.requiredText("exportAssessmentReceiptSha256"))
         assertEquals(result.requiredText("outputTreeSha256"), binding.requiredText("outputTreeSha256"))
 
-        val structural = GccDriverStructuralInputsV1.load(profilePath.parent)
+        val structural = GccDriverStructuralInputsV1.load(profilePath.parent, engine)
         assertEquals(structural.profileId, binding.requiredText("profileId"))
         assertEquals(structural.version, binding.requiredText("profileVersion"))
         assertEquals(structural.sourceRevision, binding.requiredText("sourceRevision"))
@@ -168,9 +171,34 @@ class GccProductionFullExportQualificationTest {
         publish(captured.resolve("execution.json"), executionBytes)
         publish(captured.resolve("export-assessment.json"), assessmentBytes)
         publish(captured.resolve("launcher-summary.json"), OracleJson.canonicalBytes(launcherSummary))
+        val boundaryFields = if (engine == "driver") {
+            val observationName = GccDriverStructuralBoundaryEvidenceV1.OBSERVATION_NAME
+            val boundaryName = GccDriverStructuralBoundaryEvidenceV1.BINDING_NAME
+            val observationBytes = readStable(output.resolve(observationName),
+                GccDriverStructuralBoundaryEvidenceV1.MAXIMUM_OBSERVATION_BYTES)
+            val boundaryBytes = readStable(output.resolve(boundaryName),
+                GccDriverStructuralBoundaryEvidenceV1.MAXIMUM_BINDING_BYTES)
+            val capturedModel = readStable(captured.resolve("program_model.json"), MAXIMUM_MODEL_BYTES.toInt())
+            GccDriverStructuralBoundaryEvidenceV1.verifyRetained(
+                structural, bindingBytes, capturedModel, observationBytes, boundaryBytes,
+            )
+            val detachedBinding = OracleJson.canonicalBytes(JsonObject(binding +
+                ("outputTreeSha256" to JsonPrimitive("0".repeat(64)))))
+            assertFailsWith<IllegalArgumentException>("boundary evidence must reject a substituted full-export tree") {
+                GccDriverStructuralBoundaryEvidenceV1.verifyRetained(
+                    structural, detachedBinding, capturedModel, observationBytes, boundaryBytes,
+                )
+            }
+            publish(captured.resolve(observationName), observationBytes)
+            publish(captured.resolve(boundaryName), boundaryBytes)
+            mapOf(
+                "boundaryObservationSha256" to JsonPrimitive(OracleArtifacts.sha256(observationBytes)),
+                "boundaryBindingSha256" to JsonPrimitive(OracleArtifacts.sha256(boundaryBytes)),
+            )
+        } else emptyMap()
         val summary = JsonObject(mapOf(
-            "provider" to JsonPrimitive("gcc-live-full-export-capture-v1"),
-            "engine" to JsonPrimitive("cc1"),
+            "provider" to JsonPrimitive(if (engine == "driver") "gcc-driver-live-full-export-capture-v1" else "gcc-live-full-export-capture-v1"),
+            "engine" to JsonPrimitive(engine),
             "operationId" to JsonPrimitive(operationId),
             "requestSha256" to JsonPrimitive(result.requiredText("requestSha256")),
             "programModelSha256" to JsonPrimitive(modelSha256),
@@ -181,31 +209,33 @@ class GccProductionFullExportQualificationTest {
             "scored" to JsonPrimitive(false),
             "benchmarkAccepted" to JsonPrimitive(false),
             "releaseEligible" to JsonPrimitive(false),
-            "limitation" to JsonPrimitive("live contained export only; independent identity replay and production scoring remain open"),
-        ))
+            "limitation" to JsonPrimitive(if (engine == "driver")
+                "live contained driver export and selected function-boundary replay only; structural identity admission and production scoring remain open"
+                else "live contained export only; independent identity replay and production scoring remain open"),
+        ) + boundaryFields)
         publish(evidenceRoot.resolve("qualification.json"), OracleJson.canonicalBytes(summary))
-        println("Retained unscored live cc1 full-export evidence at $captured (${modelBytes} model bytes, $functionCount functions)")
+        println("Retained unscored live $engine full-export evidence at $captured (${modelBytes} model bytes, $functionCount functions)")
     }
 
-    private fun configured(name: String): Path {
-        val value = System.getenv(name)?.takeIf(String::isNotBlank)
-            ?: throw AssertionError("required live cc1 full-export input is missing: $name")
+    private fun configured(name: String, vararg alternatives: String): Path {
+        val value = (listOf(name) + alternatives).firstNotNullOfOrNull { System.getenv(it)?.takeIf(String::isNotBlank) }
+            ?: throw AssertionError("required live GCC full-export input is missing: $name")
         val path = Path.of(value)
         require(path.isAbsolute && path.normalize() == path && path.toRealPath() == path) { "$name must be canonical" }
         return path
     }
 
     private fun readStable(path: Path, maximumBytes: Int): ByteArray =
-        StableControlFile.open(path, maximumBytes.toLong(), "cc1 production evidence").use { guard ->
-            require(guard.size in 1..maximumBytes.toLong()) { "cc1 production evidence exceeds its bound: $path" }
-            guard.readExactly(0L, guard.size.toInt(), "cc1 production evidence").also {
-                guard.verifyUnchanged("after cc1 production evidence capture")
+        StableControlFile.open(path, maximumBytes.toLong(), "GCC production evidence").use { guard ->
+            require(guard.size in 1..maximumBytes.toLong()) { "GCC production evidence exceeds its bound: $path" }
+            guard.readExactly(0L, guard.size.toInt(), "GCC production evidence").also {
+                guard.verifyUnchanged("after GCC production evidence capture")
             }
         }
 
     private fun copyStable(source: Path, destination: Path, maximumBytes: Long, expectedBytes: Long, expectedSha256: String) {
-        StableControlFile.open(source, maximumBytes, "cc1 production model").use { guard ->
-            require(guard.size == expectedBytes && guard.size in 1..maximumBytes) { "captured cc1 model size differs" }
+        StableControlFile.open(source, maximumBytes, "GCC production model").use { guard ->
+            require(guard.size == expectedBytes && guard.size in 1..maximumBytes) { "captured GCC model size differs" }
             val digest = MessageDigest.getInstance("SHA-256")
             val buffer = ByteArray(COPY_BUFFER_BYTES)
             FileChannel.open(destination, CREATE_NEW, WRITE).use { output ->
@@ -213,7 +243,7 @@ class GccProductionFullExportQualificationTest {
                 while (offset < guard.size) {
                     val requested = minOf(buffer.size.toLong(), guard.size - offset).toInt()
                     val count = guard.readAt(offset, buffer, 0, requested)
-                    require(count > 0) { "captured cc1 model ended early" }
+                    require(count > 0) { "captured GCC model ended early" }
                     digest.update(buffer, 0, count)
                     val chunk = ByteBuffer.wrap(buffer, 0, count)
                     while (chunk.hasRemaining()) output.write(chunk)
