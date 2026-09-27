@@ -355,11 +355,14 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                 rewriteCheckpointConfidenceAndManifest(project, forged, removeExecutionEvidence = true)
                 assertEquals(sourceSha256, sha256(project.resolve(SOURCE_PATH).readBytes()))
                 assertFalse(project.resolve(EVIDENCE_PATH).exists())
-                assertTrue(ArchivalProjectAuditor.audit(project).moduleConfidenceEvidenceProblems.isEmpty())
-
                 // The padded case carries a valid prompt commitment and input fingerprint, but
                 // retains the rejected harness output instead of the profile's deterministic stub.
                 val expected = if (paddedObservation) "fallback source differs" else "fallback prompt differs"
+                val auditFailure = assertFailsWith<IllegalArgumentException>(name) {
+                    ArchivalProjectAuditor.audit(project)
+                }
+                assertTrue(auditFailure.message.orEmpty().contains(expected), "$name: ${auditFailure.message}")
+                assertFalse(project.resolve("reports/archival_audit.json").exists())
                 val archive = temp.resolve("$name.zip")
                 val failure = assertFailsWith<IllegalArgumentException>(name) {
                     ArchivalPackager.create(project, archive)

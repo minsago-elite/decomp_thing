@@ -161,6 +161,9 @@ class ModulePromptCompatibilityTest {
             assertTrue(moduleEvidence.getValue("promptCharacters").jsonPrimitive.content.toInt() > 4_096)
             assertEquals("4096", moduleEvidence.getValue("promptBudgetCharacters").jsonPrimitive.content)
             assertEquals("unresolved", moduleEvidence.getValue("outcome").jsonPrimitive.content)
+            assertFalse(Files.exists(project.resolve("reports/repair-revisions")))
+            assertEquals(listOf("fn_alpha"), ArchivalProjectAuditor.audit(project, profile,
+                limits = ArchivalBundleLimits(maximumEntries = manifest.files.size + 1)).unresolvedEntityIds)
             assertEquals(0, ReconstructionAdapters.resolve(profile).build(project, profile).returnCode)
             val archive = qualificationRoot.resolve("${project.fileName}.zip")
             val bundle = ArchivalPackager.create(project, archive, profile = profile)
@@ -186,6 +189,99 @@ class ModulePromptCompatibilityTest {
                     failure.message.orEmpty().contains("no accepted first-class ACP contribution"),
                     "unexpected candidate lineage rejection: ${failure.message}",
                 )
+            }
+        }
+    }
+
+    @Test
+    fun `direct audit authenticates unrepaired fallbacks with relocated evidence`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "relocated-fallback-audit-")
+        try {
+            for (base in ReconstructionProfiles.builtIn) {
+                val profile = ReconstructionProfile(base.schemaVersion, base.id,
+                    ProjectLayoutProfile(base.layout.schemaVersion, base.layout.declarations.map { declaration ->
+                        ProjectFileDeclaration(declaration.id,
+                            declaration.pathTemplate.replace(Regex("^reports/"), "evidence/"),
+                            declaration.roles, declaration.contentKind)
+                    }), base.budgets, base.adapterConfiguration)
+                val project = temp.resolve(profile.id)
+                Files.createDirectories(project)
+                val manifest = SourceTreeGenerator.generate(model(), project, profile = profile,
+                    reconstructor = BoundedLlmModuleReconstructor(
+                        AgentHarness { _, _ -> error("must not execute") }, maximumContextCharacters = 4_096),
+                    observedBehavior = "x".repeat(4_096))
+                assertFalse(Files.exists(project.resolve("reports")))
+                val limits = ArchivalBundleLimits(maximumEntries = manifest.files.size + 1)
+                assertEquals(listOf("fn_alpha"),
+                    ArchivalProjectAuditor.audit(project, profile, limits = limits, publish = false).unresolvedEntityIds)
+                assertFalse(Files.exists(project.resolve("reports")))
+                Files.createDirectory(project.resolve("reports"))
+                assertEquals(listOf("fn_alpha"),
+                    ArchivalProjectAuditor.audit(project, profile, limits = limits).unresolvedEntityIds)
+                assertTrue(Files.exists(project.resolve("reports/archival_audit.json")))
+            }
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
+    fun `direct audit rejects an unplanned agent fallback retained in the manifest`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val project = Files.createTempDirectory(scratch, "unplanned-fallback-audit-")
+        try {
+            val profile = GeneratedCMakeReconstructionProfile.descriptor
+            val manifest = SourceTreeGenerator.generate(model(), project, profile = profile,
+                reconstructor = EvidenceModuleReconstructor(false))
+            val source = manifest.files.single { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }
+            val extraPath = profile.layout.declaration("module-implementation")
+                .materialize(mapOf("module" to "zz_unplanned"))
+            Files.copy(project.resolve(source.path), project.resolve(extraPath))
+            val extra = GeneratedFileEvidence(extraPath, source.sha256, "unresolved:agent:unplanned",
+                acceptedImplementation = false, roles = source.roles, contentKind = source.contentKind)
+            project.resolve("source_tree_manifest.json").writeText(SourceTreeManifest(
+                profileId = manifest.profileId, profileSha256 = manifest.profileSha256,
+                inputSha256 = manifest.inputSha256, files = manifest.files + extra,
+                unresolvedEntityIds = manifest.unresolvedEntityIds,
+                unresolvedImplementationIds = manifest.unresolvedImplementationIds).toJson())
+            val failure = assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(project, profile) }
+            assertTrue(failure.message.orEmpty().contains("checkpoint is absent from the source manifest"))
+            assertFalse(Files.exists(project.resolve("reports/archival_audit.json")))
+        } finally {
+            Files.walk(project).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
+    fun `direct audit preserves unresolved non-agent modules without repair evidence`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "non-agent-unresolved-audit-")
+        try {
+            for (profile in ReconstructionProfiles.builtIn) {
+                val project = temp.resolve(profile.id)
+                Files.createDirectories(project)
+                val manifest = SourceTreeGenerator.generate(model(), project, profile = profile,
+                    reconstructor = EvidenceModuleReconstructor(false))
+                assertEquals(listOf("fn_alpha"), manifest.unresolvedImplementationIds)
+                assertTrue(manifest.files.filter { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }
+                    .none { it.generator.startsWith("unresolved:agent:") })
+                assertFalse(Files.exists(project.resolve("reports/repair-revisions")))
+                val audit = ArchivalProjectAuditor.audit(project, profile)
+                assertEquals(listOf("fn_alpha"), audit.unresolvedEntityIds)
+                assertTrue(audit.moduleConfidenceEvidenceProblems.isEmpty())
+                assertTrue(Files.exists(project.resolve("reports/archival_audit.json")))
+            }
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
             }
         }
     }
@@ -356,6 +452,7 @@ class ModulePromptCompatibilityTest {
             profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id)),
         ).readText()).jsonObject
         assertEquals(JsonPrimitive("reconstructor-return"), checkpoint.getValue("workflowOrigin"))
+        assertUnrepairedAgentAuditRejected(project, profile)
         assertFailsWith<Exception> {
             ArchivalPackager.create(project, project.parent.resolve("forged-budget-fallback.zip"), profile = profile)
         }
@@ -376,6 +473,7 @@ class ModulePromptCompatibilityTest {
             profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id)),
         ).readText()).jsonObject
         assertEquals(JsonPrimitive("exception-fallback"), checkpoint.getValue("workflowOrigin"))
+        assertUnrepairedAgentAuditRejected(project, profile)
         assertFailsWith<Exception> {
             ArchivalPackager.create(project, project.parent.resolve("forged-budget-exception.zip"), profile = profile)
         }
@@ -394,6 +492,7 @@ class ModulePromptCompatibilityTest {
             profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id)),
         ).readText()).jsonObject
         assertEquals(JsonPrimitive("exception-fallback"), checkpoint.getValue("workflowOrigin"))
+        assertUnrepairedAgentAuditRejected(project, profile)
         assertFailsWith<Exception> {
             ArchivalPackager.create(project, project.parent.resolve("forged-harness-budget.zip"), profile = profile)
         }
@@ -444,6 +543,18 @@ class ModulePromptCompatibilityTest {
         assertTrue(ReconstructionAcpEvidenceArchiveVerifier.verify(
             project, payloadSha256, payloadSizes, repairedManifest, profile, lineage,
         ).isEmpty())
+    }
+
+    private fun assertUnrepairedAgentAuditRejected(project: Path, profile: ReconstructionProfile) {
+        assertFalse(Files.exists(project.resolve("reports/repair-revisions")))
+        for (publish in listOf(false, true)) {
+            val failure = assertFailsWith<IllegalArgumentException> {
+                ArchivalProjectAuditor.audit(project, profile, publish = publish)
+            }
+            assertTrue(failure.message.orEmpty().contains("agent-generated module is not accepted"),
+                "unexpected direct audit rejection: ${failure.message}")
+            assertFalse(Files.exists(project.resolve("reports/archival_audit.json")))
+        }
     }
 
     private fun model() = RecoveredProgramModel(inputSha256 = "a".repeat(64), functions = listOf(

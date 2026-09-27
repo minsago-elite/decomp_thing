@@ -2442,7 +2442,7 @@ class ModuleRevisionGraphTest {
             )
         }
 
-        assertTrue(failure.message.orEmpty().contains("no remaining inventory entries"))
+        assertTrue(failure.message.orEmpty().contains("remaining entry bound"))
     }
 
     @Test

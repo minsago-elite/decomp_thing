@@ -60,12 +60,10 @@ private fun auditRepairInventory(
     maximumAdditionalEntries: Int,
     manifestPaths: Set<String>,
 ): List<Path> {
-    require(maximumAdditionalEntries > 0) { "repair audit has no remaining inventory entries" }
+    require(maximumAdditionalEntries >= 0) { "repair audit exceeds its inventory entry bound" }
     val reportsRoot = projectDir.resolve("reports")
+    if (!Files.exists(reportsRoot, LinkOption.NOFOLLOW_LINKS)) return emptyList()
     val repairRoot = reportsRoot.resolve("repair-revisions")
-    require(Files.isDirectory(repairRoot, LinkOption.NOFOLLOW_LINKS)) {
-        "accepted repair source has no authenticated repair state"
-    }
     val history = projectDir.resolve("reports/repair_history.json")
     val candidates = ArrayList<Path>()
     var scannedEntries = 0
@@ -114,6 +112,11 @@ private fun verifiedAuditRepairLineage(
     limits: ArchivalBundleLimits,
 ): VerifiedAuditRepairState {
     rejectProfileProjectionPreimages(projectDir, profile)
+    if (manifest.files.any { it.generator == "repair-revision" }) {
+        require(Files.isDirectory(projectDir.resolve("reports/repair-revisions"), LinkOption.NOFOLLOW_LINKS)) {
+            "accepted repair source has no authenticated repair state"
+        }
+    }
     val digests = manifest.files.associate { it.path to it.sha256 }.toMutableMap()
     val sizes = manifestSizes.toMutableMap()
     val additionalDigests = linkedMapOf<String, String>()
@@ -151,8 +154,8 @@ private fun verifiedAuditRepairLineage(
         projectDir, digests, sizes, manifest, profile,
         ReconstructionAdapters.resolve(profile).repairIndexProfile(profile),
     )
-    // A repair of an unresolved agent source is releasable only when its historical
-    // checkpoint is an authentic undispatched budget fallback.
+    // Unresolved agent sources and their repaired descendants require an authentic
+    // undispatched budget fallback, even when no repair has occurred.
     ReconstructionAcpEvidenceArchiveVerifier.verify(projectDir, digests, sizes, manifest, profile, lineage)
     return VerifiedAuditRepairState(
         lineage, retainedBytes, retainedEntries,
@@ -549,6 +552,10 @@ object ArchivalProjectAuditor {
                     compilationUnresolved += owned
                 }
             }
+        }
+        if (manifest.files.any { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles &&
+                it.acceptedImplementation == false && it.generator.startsWith("unresolved:agent:") }) {
+            repairState.value
         }
         val confidenceMustBeValid = acceptedOwners.isEmpty() || repairedOwners.isNotEmpty() ||
             fallbackSourcePaths.isNotEmpty()
