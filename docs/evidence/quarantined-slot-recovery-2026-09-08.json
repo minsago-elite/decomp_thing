@@ -36,7 +36,13 @@
         "failed acquisition quarantine cutoffs preserve safe same-kernel ordering:529-775",
         "closing a live ext4 lease preserves exact residue for cold recovery:778-879",
         "run-root faults preserve bounded immediately visible active residue:881-962",
-        "crashed ext4 lease can be cold opened without mutation or release:964-1159"
+        "crashed ext4 lease can be cold opened without mutation or release:964-1162"
+      ],
+      "anchors": [
+        "FullTreeDiskScratchAuthorityTest.leaveCrashedLease:1171-1202",
+        "FullTreeDiskScratchAuthorityTest.entryNames:1204-1206",
+        "FullTreeDiskScratchAuthorityTest.assertSameKernelPublishedLeaseState:1208-1218",
+        "FullTreeDiskScratchAuthorityTest.assertSameKernelQuarantineState:1220-1238"
       ],
       "fixtureContract": "All listed ext4 cases require DECOMP_TEST_ORACLE_EXT4_SCRATCH; the cutoff cases inject exceptions at rename, parent-sync, and record-unlink boundaries and assert only one lease/quarantine root with either the exact record or no record.",
       "limitation": "The test teardown removes known fixture residue directly with Files.deleteIfExists; it is not a production recovery authority. The cutoff injector is same-kernel exception injection, not power-loss or reboot."
