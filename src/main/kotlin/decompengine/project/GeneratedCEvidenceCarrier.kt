@@ -203,10 +203,53 @@ internal object GeneratedCEvidenceCarrier {
     fun verifyArchivePurpose(projectDir: Path, profile: ReconstructionProfile, manifest: SourceTreeManifest,
         payloadPaths: Set<String>) {
         if (!isSelected(profile)) return
+        requireNoRetainedAuthorityEvidence(projectDir, profile)
         verifyProject(projectDir, profile, manifest)
         require(manifest.files.none { it.generator == "repair-revision" } &&
-            payloadPaths.none { it.startsWith("reports/repair-revisions/") }) {
+            payloadPaths.none { it == "reports/repair_history.json" || it.startsWith("reports/repair-revisions/") }) {
             "evidence-carrier output cannot retain accepted repair lineage"
+        }
+    }
+
+    /** Inspect actual paths: unlisted authority evidence is forbidden without reading its contents. */
+    private fun requireNoRetainedAuthorityEvidence(projectDir: Path, profile: ReconstructionProfile) {
+        val execution = profile.layout.declarations.singleOrNull { it.id == "module-agent-execution-evidence" }
+        val root = Files.readAttributes(projectDir, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+        require(root.isDirectory && !root.isSymbolicLink) { "evidence-carrier workspace must be a regular directory" }
+        val directories = ArrayDeque<Pair<Path, Int>>()
+        directories.add(projectDir to 0)
+        var visited = 0L
+        while (directories.isNotEmpty()) {
+            checkpoint()
+            val (directory, depth) = directories.removeFirst()
+            Files.newDirectoryStream(directory).use { entries ->
+                for (entry in entries) {
+                    checkpoint()
+                    visited = Math.addExact(visited, 1L)
+                    require(visited <= profile.budgets.archiveMaximumEntries) {
+                        "evidence-carrier authority inventory exceeds its entry bound"
+                    }
+                    val relative = projectDir.relativize(entry).toString().replace('\\', '/')
+                    val repair = relative == "reports/repair_history.json" || relative.startsWith("reports/repair-revisions/")
+                    val receipt = execution?.matches(relative) == true
+                    val prefix = relative == "reports" || relative == "reports/repair-revisions" ||
+                        relative.startsWith("reports/repair-revisions/") || execution?.canMaterializeUnder(relative) == true
+                    if (!repair && !receipt && !prefix) continue
+                    val attributes = Files.readAttributes(entry, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+                    require(!attributes.isSymbolicLink) { "evidence-carrier authority inventory contains a symbolic link: $relative" }
+                    if (attributes.isDirectory) {
+                        require(!receipt && relative != "reports/repair_history.json") {
+                            "evidence-carrier authority evidence path is a directory: $relative"
+                        }
+                        require(depth + 1 < 32) { "evidence-carrier authority inventory exceeds its depth bound" }
+                        directories.add(entry to depth + 1)
+                    } else {
+                        require(!repair && !receipt && relative != "reports/repair-revisions") {
+                            "evidence-carrier output cannot retain execution or repair evidence: $relative"
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -338,7 +381,9 @@ internal object GeneratedCEvidenceCarrier {
         override fun sharedInterface(): String = buildString {
             append(prefix(profile)).append("model-sha256: ").append(modelHash).append("\n*/\n")
             append("#ifndef DECOMP_EVIDENCE_TYPES_H\n#define DECOMP_EVIDENCE_TYPES_H\n")
-            model.types.forEach { checkpoint(); append("/* type-id-sha256: ").append(token(it.id)).append(" */\n") }
+            model.types.sortedBy { checkpoint(); it.id }.forEach {
+                checkpoint(); append("/* type-id-sha256: ").append(token(it.id)).append(" */\n")
+            }
             append("#endif\n")
         }
         override fun moduleInterface(module: PlannedModule): String = buildString {

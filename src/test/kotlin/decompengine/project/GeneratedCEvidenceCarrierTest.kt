@@ -34,6 +34,86 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class GeneratedCEvidenceCarrierTest {
     @Test
+    fun `carrier type commitments follow canonical model order without mutating caller facts`() = fixture { root ->
+        val unsorted = rawModel().copy(types = listOf(
+            RecoveredType("type_z", "typedef struct last_raw { undefined8 member; } last_raw;"),
+            RecoveredType("type_a", "typedef struct first_raw { pointer member; } first_raw;"),
+        ))
+        val ordered = unsorted.copy(types = unsorted.types.sortedBy { it.id })
+        assertEquals(ordered.toJson(), unsorted.toJson())
+        for ((index, base) in BASE_PROFILES.withIndex()) {
+            val profile = GeneratedCEvidenceCarrier.profile(base)
+            val unorderedProject = root.resolve("unsorted-$index")
+            val orderedProject = root.resolve("ordered-$index")
+            val first = SourceTreeGenerator.generate(unsorted, unorderedProject, profile = profile,
+                reconstructor = GeneratedCEvidenceCarrier.reconstructor, overrides = OWNERS)
+            val second = SourceTreeGenerator.generate(ordered, orderedProject, profile = profile,
+                reconstructor = GeneratedCEvidenceCarrier.reconstructor, overrides = OWNERS)
+            assertEquals(listOf("type_z", "type_a"), unsorted.types.map { it.id })
+            assertEquals(first.toJson(), second.toJson())
+            first.files.forEach { file ->
+                assertContentEquals(orderedProject.resolve(file.path).readBytes(), unorderedProject.resolve(file.path).readBytes(), file.path)
+            }
+            val adapter = ReconstructionAdapters.resolve(profile)
+            assertEquals(0, adapter.build(unorderedProject, profile).returnCode)
+            assertEquals(0, adapter.build(orderedProject, profile).returnCode)
+            ArchivalProjectAuditor.audit(unorderedProject, profile)
+            ArchivalProjectAuditor.audit(orderedProject, profile)
+            // Independent parallel builds retain their actual scheduling/progress logs.
+            // Generated evidence is identical above; each retained payload must archive deterministically.
+            for ((label, project) in listOf("unsorted" to unorderedProject, "ordered" to orderedProject)) {
+                val firstArchive = ArchivalPackager.create(project, root.resolve("$label-$index.zip"), profile = profile)
+                val repeatedArchive = ArchivalPackager.create(project, root.resolve("$label-$index-repeat.zip"), profile = profile)
+                assertEquals(firstArchive.archiveSha256, repeatedArchive.archiveSha256)
+                val extracted = root.resolve("extracted-$label-$index")
+                ArchivalBundleVerifier.extractAndVerify(firstArchive.archivePath, extracted, profile = profile)
+                assertEquals(0, adapter.build(extracted, profile).returnCode)
+                assertAllUnresolved(extracted, unsorted, profile)
+            }
+        }
+    }
+
+    @Test
+    fun `direct carrier audits reject unmanifested authority evidence and preserve prior audit`() = fixture { root ->
+        val base = BASE_PROFILES.first()
+        val relocated = ReconstructionProfile(base.schemaVersion, base.id,
+            ProjectLayoutProfile(base.layout.schemaVersion, base.layout.declarations.map { declaration ->
+                if (declaration.id == "module-agent-execution-evidence") ProjectFileDeclaration(
+                    declaration.id, "retained/custom-receipts/{module}.json", declaration.roles, declaration.contentKind)
+                else declaration
+            }), base.budgets, base.adapterConfiguration)
+        for ((index, selected) in listOf(base, relocated).withIndex()) {
+            val profile = GeneratedCEvidenceCarrier.profile(selected)
+            val project = root.resolve("project-$index")
+            val manifest = SourceTreeGenerator.generate(rawModel(), project, profile = profile,
+                reconstructor = GeneratedCEvidenceCarrier.reconstructor, overrides = OWNERS)
+            assertEquals(0, ReconstructionAdapters.resolve(profile).build(project, profile).returnCode)
+            ArchivalProjectAuditor.audit(project, profile)
+            val auditPath = project.resolve("reports/archival_audit.json")
+            val previousAudit = auditPath.readBytes()
+            val manifestBytes = project.resolve("source_tree_manifest.json").readBytes()
+            val receipt = profile.layout.declaration("module-agent-execution-evidence")
+                .materialize(mapOf("module" to "unlisted"))
+            for ((case, relative) in listOf("reports/repair-revisions/graph.json", "reports/repair_history.json", receipt).withIndex()) {
+                assertTrue(manifest.files.none { it.path == relative })
+                val forbidden = project.resolve(relative)
+                forbidden.parent.createDirectories()
+                forbidden.writeText("{\"unmanifested\":true}\n")
+                val failure = assertFailsWith<IllegalArgumentException>(relative) { ArchivalProjectAuditor.audit(project, profile) }
+                assertTrue(failure.message.orEmpty().contains("execution or repair evidence"), failure.message)
+                assertContentEquals(previousAudit, auditPath.readBytes(), "a failed publishing audit must preserve its predecessor")
+                assertContentEquals(manifestBytes, project.resolve("source_tree_manifest.json").readBytes())
+                val rejectedArchive = root.resolve("rejected-$index-$case.zip")
+                assertFailsWith<IllegalArgumentException> { ArchivalPackager.create(project, rejectedArchive, profile = profile) }
+                assertFalse(rejectedArchive.exists())
+                Files.delete(forbidden)
+                ArchivalProjectAuditor.audit(project, profile)
+                assertContentEquals(previousAudit, auditPath.readBytes())
+            }
+        }
+    }
+
+    @Test
     fun `unsupported recovered evidence has deterministic strict Make and Ninja carrier archives without implementation acceptance`() = fixture { root ->
         val model = rawModel()
         val canonical = model.toJson().toByteArray()
