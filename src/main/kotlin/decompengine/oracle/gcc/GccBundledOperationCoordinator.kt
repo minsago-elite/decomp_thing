@@ -544,6 +544,12 @@ internal class GccBundledPreparedOperation internal constructor(
             val modelPath = original.outputLease.path.resolve("reports/program_model.json")
             val bindingPath = cli.options.output.resolve(bindingName)
             val manifestPath = cli.options.output.resolve(manifestName)
+            val boundaryEvidence = if (intent.engineId == "driver") {
+                GccDriverStructuralBoundaryEvidenceV1.capture(
+                    GccDriverStructuralInputsV1.load(cli.options.profile.parent, "driver"), authenticatedExport,
+                )
+            } else null
+            deadline.requireCurrent()
             val resultBytes = GccBundledFullExportCliResultV2.create(
                 operationId = intent.operationId,
                 requestSha256 = intent.requestSha256,
@@ -571,6 +577,19 @@ internal class GccBundledPreparedOperation internal constructor(
                 )
                 cli.requireCurrent()
                 DescriptorBoundAtomicStateFile.publishNoReplace(output, bindingName, bindingBytes, 256 * 1024)
+                boundaryEvidence?.let { evidence ->
+                    authenticatedExport.requireSameSnapshot(snapshot)
+                    cli.requireCurrent()
+                    DescriptorBoundAtomicStateFile.publishManifestNoReplace(
+                        output, GccDriverStructuralBoundaryEvidenceV1.OBSERVATION_NAME,
+                        evidence.observationBytes, GccDriverStructuralBoundaryEvidenceV1.MAXIMUM_OBSERVATION_BYTES,
+                    )
+                    cli.requireCurrent()
+                    DescriptorBoundAtomicStateFile.publishNoReplace(
+                        output, GccDriverStructuralBoundaryEvidenceV1.BINDING_NAME,
+                        evidence.bindingBytes, GccDriverStructuralBoundaryEvidenceV1.MAXIMUM_BINDING_BYTES,
+                    )
+                }
                 inputs.verify("after full-export binding publication")
                 journal.verify("after full-export binding publication")
                 lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)

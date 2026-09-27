@@ -60,6 +60,7 @@ GENERIC_CONTRACT_MODES = {
     "session-preferences-pipelined-update",
     "session-preferences-pipelined-work",
 }
+RECONSTRUCTION_MODES = {"reconstruction-role-policy"}
 MVP_VULNERABLE_SOURCE = """#include <stdio.h>
 int main(void) {
     char badge[8];
@@ -146,6 +147,36 @@ def write_workspace_file(path, content, request_id):
     response = read_message()
     if response is None or response.get("id") != request_id or "error" in response:
         raise SystemExit(120)
+
+
+def read_workspace_file(path, request_id):
+    send({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "fs/read_text_file",
+        "params": {"sessionId": "fixture-session", "path": path},
+    })
+    response = read_message()
+    if response is None or response.get("id") != request_id:
+        raise SystemExit(121)
+    return response
+
+
+def try_write_workspace_file(path, content, request_id):
+    send({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "fs/write_text_file",
+        "params": {
+            "sessionId": "fixture-session",
+            "path": path,
+            "content": content,
+        },
+    })
+    response = read_message()
+    if response is None or response.get("id") != request_id:
+        raise SystemExit(122)
+    return response
 
 
 def join_path(root, relative):
@@ -508,7 +539,9 @@ prompt = read_message()
 if prompt is None or prompt.get("method") != "session/prompt":
     raise SystemExit(94)
 prompt_text = prompt.get("params", {}).get("prompt", [{}])[0].get("text", "")
-if MODE in ("mvp-patch", "mvp-patch-bad-fix"):
+if MODE in RECONSTRUCTION_MODES:
+    prompt_valid = SENTINEL in prompt_text and "decomp_engine_main" in prompt_text
+elif MODE in ("mvp-patch", "mvp-patch-bad-fix"):
     prompt_valid = (
         "Convert the Ghidra decompiler output" in prompt_text
         or "Apply the smallest clear memory-safety fix" in prompt_text
@@ -1076,7 +1109,32 @@ update({
     "status": "in_progress",
 })
 
-if MODE in ("mvp-patch", "mvp-patch-bad-fix"):
+if MODE in RECONSTRUCTION_MODES:
+    module_id = SENTINEL.rsplit("/", 1)[-1].removesuffix(".c")
+    for ordinal, relative in enumerate((
+        "include/decomp_types.h",
+        f"include/modules/{module_id}.h",
+        f"src/modules/{module_id}_internal.h",
+    )):
+        response = read_workspace_file(join_path(cwd, relative), 810 + ordinal)
+        if "error" in response or not response.get("result", {}).get("content", "").strip():
+            raise SystemExit(123)
+
+    denied_read = read_workspace_file(join_path(cwd, "reports/confidence.json"), 814)
+    if denied_read.get("error", {}).get("code") != -32602:
+        raise SystemExit(124)
+    denied_write = try_write_workspace_file(join_path(cwd, "Makefile"), "unauthorized\n", 815)
+    if denied_write.get("error", {}).get("code") != -32602:
+        raise SystemExit(125)
+
+    source = join_path(cwd, SENTINEL)
+    content = (
+        f'#include "modules/{module_id}.h"\n'
+        "/* fn_0000000000001000 */\n"
+        "int decomp_engine_main(void) { return 0; }\n"
+    )
+    write_workspace_file(source, content, 816)
+elif MODE in ("mvp-patch", "mvp-patch-bad-fix"):
     reconstructing = "Convert the Ghidra decompiler output" in prompt_text
     source = join_path(cwd, "decompiled.c" if reconstructing else "patched.c")
     if reconstructing:
@@ -1091,7 +1149,7 @@ else:
         "contract/artifact.txt" if MODE in GENERIC_CONTRACT_MODES else "src/module.c",
     )
     content = "updated artifact\n" if MODE in GENERIC_CONTRACT_MODES else "new source\n"
-if MODE not in ("fs-read-write", "repair-quota-retry"):
+if MODE not in ("fs-read-write", "repair-quota-retry") and MODE not in RECONSTRUCTION_MODES:
     write_workspace_file(source, content, 803)
 
 update({

@@ -50,12 +50,13 @@ internal data class GccDriverStructuralBinaryV1(
 )
 
 /**
- * The fixed GCC cc1 input set, authenticated from its checked compiler-engine profile and artifact
+ * A fixed GCC cc1 or driver input set, authenticated from its checked compiler-engine profile and artifact
  * manifest. ELF layout values come from that SHA-pinned manifest, so normal tests do not need to
  * materialize the 380 MB DWARF-rich twin. It does not claim that a model has been exported.
  */
 internal class GccDriverStructuralInputsV1 private constructor(
     val root: Path,
+    val engineId: String,
     val profileId: String,
     val version: String,
     val sourceRevision: String,
@@ -77,31 +78,29 @@ internal class GccDriverStructuralInputsV1 private constructor(
 
     /**
      * Binds one descriptor-captured full export and its linked contained-operation receipts to the
-     * authenticated cc1 input, target and runtime profile. This is provenance evidence only; it does
+     * authenticated selected input, target and runtime profile. This is provenance evidence only; it does
      * not authorize structural scoring or independent replay admission.
      */
     fun bindFullExport(
         operation: GccBundledFullExportOperation,
     ): GccDriverStructuralFullExportBindingV2 = translateProfileFailure {
         val receiptLineage = GccDriverStructuralFullExportReceiptLineageV1.validate(
-            operation, compilerEngineProfileSha256,
+            operation, compilerEngineProfileSha256, engineId,
         )
         val snapshot = operation.snapshot
         require(snapshot.inputSha256 == strippedBinary.sha256 && snapshot.inputBytes == strippedBinary.bytes) {
-            "GCC full export input differs from the authenticated stripped cc1"
+            "GCC full export input differs from the authenticated stripped $engineId"
         }
         require(snapshot.language == targetAbi.ghidraLanguage && snapshot.compilerSpec == targetAbi.ghidraCompilerSpec) {
             "GCC full export loader identity differs from the authenticated target profile"
         }
         val model = CanonicalProgramModelStreaming.readCanonical(
             snapshot.programModel,
-            CanonicalProgramModelStreamingLimits(
-                maximumFunctions = GccBundledFullExportCapture.MAXIMUM_FULL_FUNCTIONS.toInt(),
-            ),
+            FULL_EXPORT_MODEL_LIMITS,
         )
         require(model.model.inputSha256 == strippedBinary.sha256 &&
             model.model.functions.size.toLong() == snapshot.functionCount
-        ) { "GCC full program model differs from the authenticated cc1 input or export inventory" }
+        ) { "GCC full program model differs from the authenticated $engineId input or export inventory" }
         for (function in model.model.functions) {
             require(function.address >= imageBase) { "GCC exported function precedes the authenticated image base" }
             val rva = function.address - imageBase
@@ -112,7 +111,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
                 "GCC exported function identity does not encode its loaded address"
             }
         }
-        GccRetainedCompilerEngineProfile.open(root.resolve("compiler-engines.json")).use { runtimeProfile ->
+        GccRetainedCompilerEngineProfile.open(root.resolve("compiler-engines.json"), engineId).use { runtimeProfile ->
             runtimeProfile.requireCurrent()
             require(loadFullExportAuthority(root, runtimeProfile.suite.analysis.exporterSha256,
                 runtimeProfile.suite.analysis.ghidraArchive.sha256) == fullExportProfileSha256
@@ -121,10 +120,12 @@ internal class GccDriverStructuralInputsV1 private constructor(
             require(intent["plannerProfile"] == OracleJson.parseCanonical(runtimeProfile.policyBytes())) {
                 "GCC full-export intent planner profile differs from the retained compiler-engine profile"
             }
+            val target = runtimeProfile.target(engineId)
             require(runtimeProfile.suite.profileSha256 == compilerEngineProfileSha256 &&
-                runtimeProfile.suite.engine("cc1").strippedArtifact.sha256 == strippedBinary.sha256 &&
-                runtimeProfile.suite.engine("cc1").strippedArtifact.bytes == strippedBinary.bytes
-            ) { "GCC full export operation profile differs from the authenticated cc1 structural input" }
+                target.profileId == profileId && target.oracleManifestSha256 == artifactManifestSha256 &&
+                target.strippedArtifact.sha256 == strippedBinary.sha256 &&
+                target.strippedArtifact.bytes == strippedBinary.bytes
+            ) { "GCC full export operation profile differs from the authenticated $engineId structural input" }
             val analysis = runtimeProfile.suite.analysis
             val exporterBytes = GccCompilerEngineProfiles::class.java
                 .getResourceAsStream("/ghidra_scripts/ExportProgramModel.java")?.use {
@@ -187,18 +188,39 @@ internal class GccDriverStructuralInputsV1 private constructor(
         GccDriverStructuralAuthenticatedFullExportV1.capture(this, operation)
 
     companion object {
-        private const val PROFILE_ID = "gcc-cc1-16.2.0"
+        /**
+         * Parse only after full-export capture has enforced its per-record byte and node bounds.
+         * A scalar cannot contain more code points than its 64 MiB function record has bytes;
+         * each collection entry consumes one of that record's at most one million JSON nodes.
+         * Globals/types retain the capture's stricter 1 MiB evidence-record bounds. Aggregate
+         * nodes/tokens cannot outnumber source bytes. Historical scoring limits are unchanged.
+         */
+        internal val FULL_EXPORT_MODEL_LIMITS = CanonicalProgramModelStreamingLimits(
+            maximumInputBytes = GccBundledFullExportCapture.MAXIMUM_MODEL_BYTES,
+            maximumFunctions = GccBundledFullExportCapture.MAXIMUM_FULL_FUNCTIONS.toInt(),
+            maximumGlobals = GccBundledFullExportCapture.MAXIMUM_FULL_FUNCTIONS.toInt(),
+            maximumTypes = GccBundledFullExportCapture.MAXIMUM_FULL_FUNCTIONS.toInt(),
+            maximumReferencesPerFunction = GccBundledFullExportCapture.MAXIMUM_FULL_RECORD_JSON_NODES,
+            maximumIdentifierCodePoints = GccBundledFullExportCapture.MAXIMUM_FULL_FUNCTION_RECORD_BYTES,
+            maximumPrototypeCodePoints = GccBundledFullExportCapture.MAXIMUM_FULL_FUNCTION_RECORD_BYTES,
+            maximumTextCodePoints = GccBundledFullExportCapture.MAXIMUM_FULL_FUNCTION_RECORD_BYTES,
+            maximumTotalStringBytes = GccBundledFullExportCapture.MAXIMUM_MODEL_BYTES.toLong(),
+            maximumNodes = GccBundledFullExportCapture.MAXIMUM_MODEL_BYTES.toLong(),
+            maximumTokens = GccBundledFullExportCapture.MAXIMUM_MODEL_BYTES.toLong(),
+        )
+
         private const val SOURCE_PROFILE_ID = "gcc-driver-16.2.0"
         private const val PROFILE_VERSION = "16.2.0"
         private const val SOURCE_REVISION = "78d4ac73dd391005b895a6148cd9831e28e1208b"
-        private const val COMPILER_ENGINE_PROFILE_SHA256 = "9c3187dedb789d547a9c455d7403ca42168c1789ff439412f6e9bea48390f925"
+        private const val COMPILER_ENGINE_PROFILE_SHA256 = "59ce90603f7176dcf8d6f899bd20d178b98aba7cb42dc51b7638d7a2713095fc"
         private const val CC1_MANIFEST_SHA256 = "dbef520c025d268f5126229ace8ad5b08a15722573d45b5e1ab934611905abb4"
+        private const val DRIVER_MANIFEST_SHA256 = "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9"
         private const val CC1_BUILD_RECORD_SHA256 = "f6b2711d4f82562195acebe7250d7dc62eb9425af4f736736e0ea69b65103e8e"
         private const val SOURCE_LOCK_SHA256 = "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc"
         private const val BUILD_RECORD_SHA256 = "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
         private const val TOOLCHAIN_REPRODUCTION_SHA256 = "5c2c159d7287305159a220a1260f6ff6bffe9ec78bb1cbe2fb24f85b68a7d4de"
         private const val TARGET_ABI_SHA256 = "d251d5e6a0edc17655c355fb8fd757d557f064a6e67095ad53c8ca1e7569a343"
-        private const val FULL_EXPORT_PROFILE_SHA256 = "bbab2fbd88ddea358401b609c20524034ee1720ede5b04b00b84a01551b00bc1"
+        private const val FULL_EXPORT_PROFILE_SHA256 = "13a06679600970d93b5226f9774ef5d610675a9ab018e6d5fc777b88e546a370"
         private const val MAXIMUM_CONTROL_BYTES = 4 * 1024 * 1024
         private const val MAXIMUM_MANIFEST_BYTES = 64 * 1024 * 1024
         private val JSON_LIMITS = StrictJsonLimits(
@@ -209,7 +231,16 @@ internal class GccDriverStructuralInputsV1 private constructor(
             maximumTotalStringBytes = 32 * 1024 * 1024,
         )
 
-        fun load(root: Path): GccDriverStructuralInputsV1 = translateProfileFailure {
+        fun load(root: Path): GccDriverStructuralInputsV1 = load(root, "cc1")
+
+        fun load(root: Path, engineId: String): GccDriverStructuralInputsV1 = translateProfileFailure {
+            require(engineId in setOf("cc1", "driver")) {
+                "GCC structural full-export target must be cc1 or driver"
+            }
+            val profileId = "gcc-$engineId-$PROFILE_VERSION"
+            val manifestName = if (engineId == "cc1") "cc1-oracle-manifest.json" else "oracle-manifest.json"
+            val manifestSha256 = if (engineId == "cc1") CC1_MANIFEST_SHA256 else DRIVER_MANIFEST_SHA256
+            val engineBuildRecordSha256 = if (engineId == "cc1") CC1_BUILD_RECORD_SHA256 else BUILD_RECORD_SHA256
             require(root.isAbsolute && root.normalize() == root && root.toRealPath() == root) {
                 "GCC structural profile root must be canonical and contain no links"
             }
@@ -223,14 +254,14 @@ internal class GccDriverStructuralInputsV1 private constructor(
             requireDigest(compilerEngineProfileSha256, COMPILER_ENGINE_PROFILE_SHA256, "GCC compiler-engine profile")
 
             val sourceLock = readJson(root.resolve("source-lock.json"), MAXIMUM_CONTROL_BYTES, "gcc/source-lock")
-            requireDigest(sourceLock.sha256, SOURCE_LOCK_SHA256, "GCC cc1 source lock")
+            requireDigest(sourceLock.sha256, SOURCE_LOCK_SHA256, "GCC source lock")
             val sourceOracle = sourceLock.document.objectField("oracle", "GCC source lock")
             val sourceRevision = sourceLock.document.objectField("revision", "GCC source lock")
                 .stringField("commit", "GCC source revision")
             require(sourceOracle.stringField("id", "GCC source lock oracle") == SOURCE_PROFILE_ID &&
                 sourceOracle.stringField("version", "GCC source lock oracle") == PROFILE_VERSION &&
                 sourceRevision == SOURCE_REVISION
-            ) { "GCC source lock differs from the pinned cc1 profile" }
+            ) { "GCC source lock differs from the pinned structural profile" }
 
             val buildRecord = readJson(root.resolve("build-record.json"), MAXIMUM_CONTROL_BYTES, "gcc/build-record")
             requireDigest(buildRecord.sha256, BUILD_RECORD_SHA256, "GCC base build record")
@@ -260,7 +291,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
             requireDigest(dockerfileSha256, recipe.stringField("dockerfileSha256", "GCC toolchain recipe"),
                 "GCC toolchain Dockerfile")
 
-            val (cc1, analysis) = GccRetainedCompilerEngineProfile.open(compilerEngineProfilePath).use { retained ->
+            val (engine, analysis) = GccRetainedCompilerEngineProfile.open(compilerEngineProfilePath, engineId).use { retained ->
                 retained.requireCurrent()
                 val suite = retained.suite
                 require(suite.id == "gcc-compiler-engines-$PROFILE_VERSION" && suite.version == PROFILE_VERSION &&
@@ -268,13 +299,15 @@ internal class GccDriverStructuralInputsV1 private constructor(
                     suite.baseBuildRecordSha256 == buildRecord.sha256 &&
                     suite.toolchainReproductionSha256 == toolchain.sha256 &&
                     suite.profileSha256 == compilerEngineProfileSha256
-                ) { "GCC cc1 compiler-engine profile differs from its authenticated source/build records" }
-                val engine = suite.engine("cc1").also { engine ->
-                    require(engine.buildRecordSha256 == CC1_BUILD_RECORD_SHA256 &&
-                        engine.oracleManifestSha256 == CC1_MANIFEST_SHA256 &&
-                        engine.fullArtifact.relativePath == "artifacts/gcc-cc1.full" &&
-                        engine.strippedArtifact.relativePath == "artifacts/gcc-cc1.stripped"
-                    ) { "GCC cc1 artifact records differ from the fixed structural profile" }
+                ) { "GCC compiler-engine profile differs from its authenticated source/build records" }
+                val engine = retained.target(engineId).also { engine ->
+                    require(engine.id == engineId && engine.profileId == profileId &&
+                        engine.buildRecordSha256 == engineBuildRecordSha256 &&
+                        engine.oracleManifestSha256 == manifestSha256 &&
+                        engine.oracleManifestPath == root.resolve(manifestName) &&
+                        engine.fullArtifact.relativePath == "artifacts/gcc-$engineId.full" &&
+                        engine.strippedArtifact.relativePath == "artifacts/gcc-$engineId.stripped"
+                    ) { "GCC $engineId artifact records differ from the fixed structural profile" }
                 }
                 engine to suite.analysis
             }
@@ -282,34 +315,44 @@ internal class GccDriverStructuralInputsV1 private constructor(
                 root, analysis.exporterSha256, analysis.ghidraArchive.sha256,
             )
             val manifest = readJson(
-                root.resolve("cc1-oracle-manifest.json"), MAXIMUM_MANIFEST_BYTES, "gcc/oracle-manifest",
+                root.resolve(manifestName), MAXIMUM_MANIFEST_BYTES, "gcc/oracle-manifest",
             )
-            requireDigest(manifest.sha256, cc1.oracleManifestSha256, "GCC cc1 oracle manifest")
+            requireDigest(manifest.sha256, engine.oracleManifestSha256, "GCC $engineId oracle manifest")
+            val oracle = manifest.document.objectField("oracle", "GCC oracle manifest")
+            val manifestInputs = manifest.document.objectField("inputs", "GCC oracle manifest")
+            require(oracle.stringField("id", "GCC oracle manifest") == SOURCE_PROFILE_ID &&
+                oracle.stringField("version", "GCC oracle manifest") == PROFILE_VERSION &&
+                oracle.stringField("sourceRevision", "GCC oracle manifest") == sourceRevision &&
+                manifestInputs.objectField("sourceLock", "GCC manifest inputs")
+                    .stringField("sha256", "GCC manifest source lock") == sourceLock.sha256 &&
+                manifestInputs.objectField("buildRecord", "GCC manifest inputs")
+                    .stringField("sha256", "GCC manifest build record") == engine.buildRecordSha256
+            ) { "GCC $engineId oracle manifest differs from its authenticated source and build identity" }
             fun requireArtifact(name: String, expected: GccCompilerEngineArtifactBinding): JsonObject {
-                val artifact = manifest.document.objectField("artifacts", "GCC cc1 oracle manifest")
-                    .objectField(name, "GCC cc1 artifacts")
-                require(artifact.stringField("path", "GCC cc1 $name artifact") == expected.relativePath &&
-                    artifact.longField("bytes", "GCC cc1 $name artifact") == expected.bytes &&
-                    artifact.stringField("sha256", "GCC cc1 $name artifact") == expected.sha256
-                ) { "GCC cc1 $name artifact differs from its authenticated compiler-engine profile" }
+                val artifact = manifest.document.objectField("artifacts", "GCC oracle manifest")
+                    .objectField(name, "GCC artifacts")
+                require(artifact.stringField("path", "GCC $name artifact") == expected.relativePath &&
+                    artifact.longField("bytes", "GCC $name artifact") == expected.bytes &&
+                    artifact.stringField("sha256", "GCC $name artifact") == expected.sha256
+                ) { "GCC $engineId $name artifact differs from its authenticated compiler-engine profile" }
                 return artifact
             }
-            val fullRecord = requireArtifact("full", cc1.fullArtifact)
-            val strippedRecord = requireArtifact("stripped", cc1.strippedArtifact)
-            val full = binary(fullRecord, cc1.fullArtifact)
-            val stripped = binary(strippedRecord, cc1.strippedArtifact)
-            val fullElf = fullRecord.objectField("elf", "GCC cc1 full artifact")
-            val strippedElf = strippedRecord.objectField("elf", "GCC cc1 stripped artifact")
+            val fullRecord = requireArtifact("full", engine.fullArtifact)
+            val strippedRecord = requireArtifact("stripped", engine.strippedArtifact)
+            val full = binary(fullRecord, engine.fullArtifact)
+            val stripped = binary(strippedRecord, engine.strippedArtifact)
+            val fullElf = fullRecord.objectField("elf", "GCC full artifact")
+            val strippedElf = strippedRecord.objectField("elf", "GCC stripped artifact")
             require(fullElf.getValue("identity") == strippedElf.getValue("identity")) {
-                "GCC cc1 full and stripped ELF identities differ in the authenticated manifest"
+                "GCC full and stripped ELF identities differ in the authenticated manifest"
             }
             val fullProgramHeaders = programHeaders(fullElf)
             val strippedProgramHeaders = programHeaders(strippedElf)
             require(fullProgramHeaders == strippedProgramHeaders) {
-                "GCC cc1 full and stripped program headers differ in the authenticated manifest"
+                "GCC full and stripped program headers differ in the authenticated manifest"
             }
-            val fullHeader = fullElf.objectField("header", "GCC cc1 full ELF")
-            val header = strippedElf.objectField("header", "GCC cc1 stripped ELF")
+            val fullHeader = fullElf.objectField("header", "GCC full ELF")
+            val header = strippedElf.objectField("header", "GCC stripped ELF")
             val targetDescriptor = readJson(
                 root.parent.parent.resolve("targets/sysv-amd64-v1.json"), MAXIMUM_CONTROL_BYTES, "target-abi",
             )
@@ -326,11 +369,11 @@ internal class GccDriverStructuralInputsV1 private constructor(
             require(target(fullHeader, target.id, target.descriptorSha256) == target &&
                 full.elfType == stripped.elfType
             ) {
-                "GCC cc1 full and stripped ELF target records differ in the authenticated manifest"
+                "GCC full and stripped ELF target records differ in the authenticated manifest"
             }
             val imageBase = strippedProgramHeaders.filter { it.typeName == "PT_LOAD" && it.memorySize > 0UL }
                 .minOfOrNull(StructuralProgramHeaderV1::virtualAddress)
-                ?: profileFail("GCC cc1 has no nonempty loadable ELF segment")
+                ?: profileFail("GCC has no nonempty loadable ELF segment")
             val ranges = executableRanges(strippedProgramHeaders, imageBase)
             val rangesSha256 = executableRangesSha256(imageBase, ranges)
             val input = StructuralReplayInputBinaryV1(
@@ -342,12 +385,13 @@ internal class GccDriverStructuralInputsV1 private constructor(
             )
             GccDriverStructuralInputsV1(
                 root = root,
-                profileId = PROFILE_ID,
+                engineId = engineId,
+                profileId = profileId,
                 version = PROFILE_VERSION,
                 compilerEngineProfileSha256 = compilerEngineProfileSha256,
                 fullExportProfileSha256 = fullExportProfileSha256,
                 sourceRevision = sourceRevision,
-                artifactManifestSha256 = cc1.oracleManifestSha256,
+                artifactManifestSha256 = engine.oracleManifestSha256,
                 sourceLockSha256 = sourceLock.sha256,
                 buildRecordSha256 = buildRecord.sha256,
                 toolchainReproductionSha256 = toolchain.sha256,
@@ -376,7 +420,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
                 authority.stringField("compilerEngineProfileSha256", "GCC structural full-export profile") ==
                     COMPILER_ENGINE_PROFILE_SHA256 &&
                 authority.stringField("exporterSha256", "GCC structural full-export profile") == exporterSha256 &&
-                authority.longField("exporterVersion", "GCC structural full-export profile") == 11L &&
+                authority.longField("exporterVersion", "GCC structural full-export profile") == 12L &&
                 authority.stringField("recoveryMode", "GCC structural full-export profile") == "full" &&
                 authority.stringField("ghidraArchiveSha256", "GCC structural full-export profile") ==
                     ghidraArchiveSha256
@@ -396,7 +440,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
             require(elfClass == "ELF64" && dataEncoding == "little-endian" && machine == 62 && osAbi == 3 &&
                 elfType == "ET_EXEC"
             ) {
-                "GCC cc1 ELF differs from its fixed x86-64 SysV target profile"
+                "GCC ELF differs from its fixed x86-64 SysV target profile"
             }
             return GccDriverStructuralTargetAbiV1(
                 id = descriptorId,
@@ -419,35 +463,35 @@ internal class GccDriverStructuralInputsV1 private constructor(
             descriptorId: String,
             descriptorSha256: String,
         ): GccDriverStructuralTargetAbiV1 = requireTarget(
-            header.stringField("class", "GCC cc1 ELF header"),
-            header.stringField("dataEncoding", "GCC cc1 ELF header"),
-            Math.toIntExact(header.longField("machine", "GCC cc1 ELF header")),
-            Math.toIntExact(header.longField("osAbi", "GCC cc1 ELF header")),
-            header.stringField("typeName", "GCC cc1 ELF header"),
+            header.stringField("class", "GCC ELF header"),
+            header.stringField("dataEncoding", "GCC ELF header"),
+            Math.toIntExact(header.longField("machine", "GCC ELF header")),
+            Math.toIntExact(header.longField("osAbi", "GCC ELF header")),
+            header.stringField("typeName", "GCC ELF header"),
             descriptorId,
             descriptorSha256,
         )
 
         private fun binary(record: JsonObject, expected: GccCompilerEngineArtifactBinding): GccDriverStructuralBinaryV1 {
-            val header = record.objectField("elf", "GCC cc1 artifact")
-                .objectField("header", "GCC cc1 ELF")
+            val header = record.objectField("elf", "GCC artifact")
+                .objectField("header", "GCC ELF")
             return GccDriverStructuralBinaryV1(
                 bytes = expected.bytes,
                 sha256 = expected.sha256,
-                elfType = header.stringField("typeName", "GCC cc1 ELF header"),
+                elfType = header.stringField("typeName", "GCC ELF header"),
             )
         }
 
         private fun programHeaders(elf: JsonObject): List<StructuralProgramHeaderV1> =
-            elf.arrayField("programHeaders", "GCC cc1 ELF").mapIndexed { index, value ->
-                val header = value as? JsonObject ?: profileFail("GCC cc1 program header $index must be an object")
+            elf.arrayField("programHeaders", "GCC ELF").mapIndexed { index, value ->
+                val header = value as? JsonObject ?: profileFail("GCC program header $index must be an object")
                 fun unsigned(name: String): ULong {
-                    val value = header.longField(name, "GCC cc1 program header $index")
-                    require(value >= 0L) { "GCC cc1 program header $index $name is negative" }
+                    val value = header.longField(name, "GCC program header $index")
+                    require(value >= 0L) { "GCC program header $index $name is negative" }
                     return value.toULong()
                 }
                 StructuralProgramHeaderV1(
-                    typeName = header.stringField("typeName", "GCC cc1 program header $index"),
+                    typeName = header.stringField("typeName", "GCC program header $index"),
                     flags = unsigned("flags"),
                     fileSize = unsigned("fileSize"),
                     memorySize = unsigned("memorySize"),
@@ -468,9 +512,9 @@ internal class GccDriverStructuralInputsV1 private constructor(
                     GccDriverStructuralExecutableRangeV1(start, end)
                 }
                 .sortedWith(compareBy(GccDriverStructuralExecutableRangeV1::startRva, GccDriverStructuralExecutableRangeV1::endExclusiveRva))
-            require(ranges.isNotEmpty()) { "GCC cc1 has no file-backed executable load range" }
+            require(ranges.isNotEmpty()) { "GCC has no file-backed executable load range" }
             require(ranges.zipWithNext().all { (left, right) -> left.endExclusiveRva <= right.startRva }) {
-                "GCC cc1 executable PT_LOAD ranges overlap"
+                "GCC executable PT_LOAD ranges overlap"
             }
             return ranges
         }
@@ -517,7 +561,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
         }
 
         private fun requireDigest(actual: String, expected: String, label: String) {
-            require(actual == expected) { "$label SHA-256 differs from the fixed GCC cc1 profile" }
+            require(actual == expected) { "$label SHA-256 differs from the fixed GCC structural profile" }
         }
 
         private fun <T> translateProfileFailure(action: () -> T): T = try {
@@ -525,7 +569,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
         } catch (failure: GccDriverStructuralProfileException) {
             throw failure
         } catch (failure: Exception) {
-            throw GccDriverStructuralProfileException("cannot authenticate the GCC cc1 structural input profile", failure)
+            throw GccDriverStructuralProfileException("cannot authenticate the GCC structural input profile", failure)
         }
 
         private fun profileFail(message: String): Nothing = throw GccDriverStructuralProfileException(message)

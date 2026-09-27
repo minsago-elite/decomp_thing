@@ -282,9 +282,41 @@ internal class GccCompilerEngineProfileLoader(
         )
     }
 
+    /** Fixed driver export selection, separate from the cc1/lto1 planning suite and its schema. */
+    fun loadDriverTarget(suite: GccCompilerEngineSuite): GccBundledExportTarget {
+        if (suite.profileSha256 != DRIVER_COMPILER_PROFILE_SHA256 ||
+            suite.sourceLockSha256 != DRIVER_SOURCE_LOCK_SHA256 ||
+            suite.baseBuildRecordSha256 != DRIVER_BUILD_RECORD_SHA256 ||
+            suite.toolchainReproductionSha256 != DRIVER_TOOLCHAIN_SHA256
+        ) fail("GCC driver controls differ from the fixed export target")
+        val root = suite.profilePath.parent
+        val sourceLock = readBoundDependency(root, "source-lock.json", DRIVER_SOURCE_LOCK_SHA256,
+            MAXIMUM_CONTROL_BYTES, "driver source lock", "gcc/source-lock")
+        val baseBuild = readBoundDependency(root, "build-record.json", DRIVER_BUILD_RECORD_SHA256,
+            MAXIMUM_CONTROL_BYTES, "driver build record", "gcc/build-record")
+        val manifest = readBoundDependency(root, "oracle-manifest.json", DRIVER_MANIFEST_SHA256,
+            MAXIMUM_MANIFEST_BYTES, "driver oracle manifest", "gcc/oracle-manifest")
+        val profileId = "gcc-driver-${suite.version}"
+        if (baseBuild.document.objectField("oracle").stringField("id") != profileId ||
+            manifest.document.objectField("oracle").stringField("id") != profileId
+        ) fail("GCC driver manifest and base build identity differ")
+        val stageFull = baseBuild.document.objectField("commands").arrayField("stageFull").strings("driver stage command")
+        if (stageFull != listOf("/usr/bin/install", "-m", "0755", "/oracle/install/bin/gcc", "{full}")) {
+            fail("GCC driver build output differs from the fixed base build")
+        }
+        val outputs = baseBuild.document.objectField("outputs")
+        authenticateManifest("driver", suite.version, suite.sourceRevision, sourceLock, baseBuild, manifest.document,
+            outputs.stringField("full"), outputs.stringField("stripped"))
+        val artifacts = manifest.document.objectField("artifacts")
+        return GccBundledExportTarget("driver", profileId, stageFull[3], baseBuild.path, baseBuild.sha256,
+            manifest.path, manifest.sha256,
+            artifacts.objectField("full").artifactBinding("GCC driver full artifact"),
+            artifacts.objectField("stripped").artifactBinding("GCC driver stripped artifact"))
+    }
+
     private fun authenticateAnalysisToolchain(analysis: GccCompilerEngineAnalysisToolchain) {
         if (
-            analysis.exporterId != "decompengine-ghidra-program-model" || analysis.exporterVersion != 11 ||
+            analysis.exporterId != "decompengine-ghidra-program-model" || analysis.exporterVersion != 12 ||
             analysis.exporterMode != "planning" ||
             analysis.plannerId != "deterministic-module-planner" || analysis.plannerVersion != 1
         ) {
@@ -593,6 +625,11 @@ internal class GccCompilerEngineProfileLoader(
     private data class RawArtifact(val path: Path, val bytes: ByteArray, val sha256: String)
 
     private companion object {
+        private const val DRIVER_COMPILER_PROFILE_SHA256 = "59ce90603f7176dcf8d6f899bd20d178b98aba7cb42dc51b7638d7a2713095fc"
+        private const val DRIVER_SOURCE_LOCK_SHA256 = "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc"
+        private const val DRIVER_BUILD_RECORD_SHA256 = "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
+        private const val DRIVER_TOOLCHAIN_SHA256 = "5c2c159d7287305159a220a1260f6ff6bffe9ec78bb1cbe2fb24f85b68a7d4de"
+        private const val DRIVER_MANIFEST_SHA256 = "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9"
         const val MAXIMUM_PROFILE_BYTES = 1024 * 1024
         private const val MAXIMUM_CONTROL_BYTES = 32 * 1024 * 1024
         private const val MAXIMUM_MANIFEST_BYTES = 32 * 1024 * 1024

@@ -3,8 +3,8 @@
     "exporter": {
       "id": "decompengine-ghidra-program-model",
       "recoveryMode": "planning",
-      "sha256": "7803e8fa01ae8404d54f81b131c01e89f0eab9ee324339580c0fd84cba8d0a7f",
-      "version": 11
+      "sha256": "5bb042af49917ca6cfee26a3b04638d7ebe815813d0608d5a11da19757270e8d",
+      "version": 12
     },
     "ghidra": {
       "archiveBytes": 569445154,

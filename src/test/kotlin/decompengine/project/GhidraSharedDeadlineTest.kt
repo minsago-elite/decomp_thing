@@ -205,6 +205,39 @@ class GhidraSharedDeadlineTest {
     }
 
     @Test
+    fun `JVM wrapper interrupts an in-flight delegated analyzer and preserves its prior report`() = inControlTemporaryDirectory { root ->
+        val input = root.resolve("authored.elf").also { it.writeBytes(elfFixture()) }
+        val work = root.resolve("analysis")
+        val report = work.resolve("reports/ghidra_analysis.json")
+        report.parent.toFile().mkdirs()
+        val prior = "prior accepted analysis report\n".toByteArray()
+        report.writeBytes(prior)
+        var entered = false
+        val delegated = object : ExportBudgetedProgramModelAnalyzer {
+            override fun withExportBudgets(budgets: ReconstructionBudgets): ProgramModelAnalyzer = this
+
+            override fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel {
+                assertEquals(input, binaryPath)
+                entered = true
+                Thread.sleep(TimeUnit.SECONDS.toMillis(10))
+                error("delegated analyzer returned after its deadline")
+            }
+        }
+        val requested = ReconstructionProfiles.default.budgets.copy(exportWallClockMillis = 500)
+        val analyzer = GhidraJvmAnalyzer(delegated).withExportBudgets(requested)
+        val started = System.nanoTime()
+
+        val failure = assertFailsWith<GhidraAnalysisException> { analyzer.analyze(input, work) }
+
+        assertTrue(entered, "delegated analysis must begin before cancellation")
+        assertTrue(failure.message.orEmpty().contains("analysis and metadata exceeded 500 milliseconds"))
+        assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(5),
+            "delegated analyzer was not interrupted in flight")
+        assertEquals(prior.toList(), report.readBytes().toList())
+        assertFalse(Thread.currentThread().isInterrupted, "deadline watchdog interrupt leaked to the caller")
+    }
+
+    @Test
     fun `successful shared deadline export reads and returns an authored canonical model`() = inControlTemporaryDirectory { root ->
         val inputBytes = "authored local model input\n".toByteArray(Charsets.UTF_8)
         val input = root.resolve("authored.txt").also { it.writeBytes(inputBytes) }
