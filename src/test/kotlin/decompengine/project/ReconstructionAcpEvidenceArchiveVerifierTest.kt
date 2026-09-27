@@ -49,6 +49,14 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 class ReconstructionAcpEvidenceArchiveVerifierTest {
     @Test
@@ -292,6 +300,104 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         }
 
         assertTrue(failure.message.orEmpty().contains("not accepted") || failure.message.orEmpty().contains("unresolved"))
+    }
+
+    @Test
+    fun `all fallback and mixed accepted archives reject rehashed confidence claims`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "fallback-confidence-")
+        try {
+            for (withAccepted in listOf(false, true)) {
+                val project = temp.resolve(if (withAccepted) "mixed" else "all-fallback")
+                val harness = ArchiveEvidenceHarness(accepted = true)
+                val oversizedEvidence = "/* ${"context".repeat(2_000)} */"
+                val manifest = SourceTreeGenerator.generate(
+                    RecoveredProgramModel(
+                        inputSha256 = "a".repeat(64),
+                        functions = listOf(
+                            RecoveredFunction("fn_0000000000401000", "parse_input", 0x401000UL,
+                                "int parse_input(void)", if (withAccepted) null else oversizedEvidence),
+                            RecoveredFunction("fn_beta", "beta_read", 0x402000UL,
+                                "int beta_read(void)", oversizedEvidence),
+                        ),
+                    ),
+                    project,
+                    reconstructor = BoundedLlmModuleReconstructor(
+                        harness, maximumContextCharacters = 4_096,
+                        harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor,
+                    ),
+                )
+                assertEquals(withAccepted, manifest.files.single { it.path == SOURCE_PATH }.acceptedImplementation)
+                assertTrue("fn_beta" in manifest.unresolvedImplementationIds)
+                val baselineAudit = ArchivalProjectAuditor.audit(project)
+                assertTrue(baselineAudit.moduleConfidenceEvidenceProblems.isEmpty())
+                assertEquals(0, MakeProjectBuilder.build(project).returnCode)
+                ArchivalPackager.create(project, temp.resolve("baseline-$withAccepted.zip"))
+
+                val confidencePath = project.resolve("reports/confidence.json")
+                val confidenceBytes = confidencePath.readBytes()
+                val report = Json.parseToJsonElement(confidenceBytes.decodeToString()).jsonObject
+                val manifestText = project.resolve("source_tree_manifest.json").readText()
+                fun field(record: JsonObject, name: String, value: JsonElement) = JsonObject(record + (name to value))
+                fun revision(report: JsonObject, moduleId: String, change: (JsonObject) -> JsonObject): JsonObject =
+                    field(report, "modules", JsonArray(report.getValue("modules").jsonArray.map { item ->
+                        val module = item.jsonObject
+                        if (module.getValue("id").jsonPrimitive.content == moduleId) {
+                            field(module, "revisionEvidence", change(module.getValue("revisionEvidence").jsonObject))
+                        } else module
+                    }))
+                val mutations = linkedMapOf<String, (JsonObject) -> JsonObject>(
+                    "outer-unresolved" to { field(it, "unresolvedImplementationIds", JsonArray(emptyList())) },
+                    "source-digest" to { revision(it, "beta") { value -> field(value, "sourceSha256", JsonPrimitive("0".repeat(64))) } },
+                    "accepted" to { revision(it, "beta") { value -> field(value, "acceptedImplementation", JsonPrimitive(true)) } },
+                    "compilation" to { revision(it, "beta") { value ->
+                        field(value, "compilation", JsonObject(mapOf("outcome" to JsonPrimitive("passed"))))
+                    } },
+                    "behavior-status" to { revision(it, "beta") { value ->
+                        field(value, "behavior", field(value.getValue("behavior").jsonObject, "status", JsonPrimitive("matched")))
+                    } },
+                    "behavior-reason" to { revision(it, "beta") { value ->
+                        field(value, "behavior", field(value.getValue("behavior").jsonObject, "reason", JsonPrimitive("all behavior verified")))
+                    } },
+                    "behavior-coverage" to { revision(it, "beta") { value ->
+                        field(value, "behavior", field(value.getValue("behavior").jsonObject, "coverage", JsonPrimitive(1.0)))
+                    } },
+                )
+                if (withAccepted) {
+                    // This failure is handled by the separate accepted-revision catch.
+                    mutations["accepted-source-digest"] = { revision(it, "parse") { value ->
+                        field(value, "sourceSha256", JsonPrimitive("0".repeat(64)))
+                    } }
+                }
+                for ((name, mutate) in mutations) {
+                    val changed = (mutate(report).toString() + "\n").toByteArray()
+                    confidencePath.writeText(changed.decodeToString())
+                    project.resolve("source_tree_manifest.json").writeText(
+                        manifestText.replace(sha256(confidenceBytes), sha256(changed)),
+                    )
+                    val expected = when (name) {
+                        "outer-unresolved" -> "confidence unresolvedImplementationIds differs"
+                        "accepted-source-digest" -> "accepted module confidence evidence"
+                        else -> "fallback module confidence evidence"
+                    }
+                    val auditFailure = assertFailsWith<IllegalArgumentException>("$withAccepted/$name") {
+                        ArchivalProjectAuditor.audit(project)
+                    }
+                    assertTrue(auditFailure.message.orEmpty().contains(expected), "$name: ${auditFailure.message}")
+                    val archive = temp.resolve("$withAccepted-$name.zip")
+                    val archiveFailure = assertFailsWith<IllegalArgumentException>("$withAccepted/$name") {
+                        ArchivalPackager.create(project, archive)
+                    }
+                    assertTrue(archiveFailure.message.orEmpty().contains(expected), "$name: ${archiveFailure.message}")
+                    assertFalse(archive.exists())
+                }
+            }
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
     }
 
     private fun createAgentProject(project: Path, accepted: Boolean): Path {

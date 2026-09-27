@@ -1,6 +1,7 @@
 package decompengine.project
 
 import decompengine.repair.readStableRegularFile
+import decompengine.repair.repairAtomicTemporaryName
 import decompengine.validation.BehaviorEvidence
 import decompengine.validation.BehaviorProjectContext
 import decompengine.validation.boolean
@@ -21,14 +22,15 @@ import java.util.Locale
 
 private const val MAXIMUM_AUDIT_REPORT_DEPTH = 32
 private const val MAXIMUM_AUDIT_REPORT_SCAN_ENTRIES = 1_000_000
-private val REPAIR_ATOMIC_TEMPORARY_NAME = Regex("^\\..+\\.repair-atomic\\.tmp$")
+private val REPAIR_ATOMIC_TEMPORARY_NAME =
+    Regex("^(?:\\..+\\.repair-atomic\\.tmp|\\.repair-atomic-sha256-[0-9a-f]{64}\\.tmp)$")
 
 internal fun isRepairAtomicTemporary(path: Path): Boolean =
     path.fileName?.toString()?.matches(REPAIR_ATOMIC_TEMPORARY_NAME) == true
 
 private fun rejectProfileProjectionPreimages(projectDir: Path, profile: ReconstructionProfile) {
     val root = projectDir.toAbsolutePath().normalize()
-    val manifestTemporary = root.resolve(".source_tree_manifest.json.repair-atomic.tmp")
+    val manifestTemporary = root.resolve(repairAtomicTemporaryName("source_tree_manifest.json"))
     require(!Files.exists(manifestTemporary, LinkOption.NOFOLLOW_LINKS)) {
         "repair audit retains a source-manifest atomic temporary: ${root.relativize(manifestTemporary)}"
     }
@@ -36,7 +38,7 @@ private fun rejectProfileProjectionPreimages(projectDir: Path, profile: Reconstr
         val declaredPath = root.resolve(profile.layout.declaration(declarationId).materialize()).normalize()
         require(declaredPath.startsWith(root)) { "repair projection evidence path escapes the project" }
         val targetName = requireNotNull(declaredPath.fileName).toString()
-        val temporary = declaredPath.resolveSibling(".$targetName.repair-atomic.tmp")
+        val temporary = declaredPath.resolveSibling(repairAtomicTemporaryName(targetName))
         require(!Files.exists(temporary, LinkOption.NOFOLLOW_LINKS)) {
             "repair audit retains a profile-declared atomic temporary: ${root.relativize(temporary)}"
         }
@@ -400,6 +402,7 @@ object ArchivalProjectAuditor {
         val compilationUnresolved = mutableSetOf<String>()
         val acceptedOwners = linkedMapOf<String, List<String>>()
         val repairedOwners = linkedMapOf<String, List<String>>()
+        val fallbackSourcePaths = linkedMapOf<String, String>()
         val acceptedSourcePaths = linkedMapOf<String, String>()
         val acceptedInputFingerprints = linkedMapOf<String, String>()
         val plannedModuleEntityIds = linkedMapOf<String, List<String>>()
@@ -447,6 +450,9 @@ object ArchivalProjectAuditor {
             require(ProjectFileRole.PUBLIC_INTERFACE in header.roles) { "audit module header has no declared interface role" }
             require(moduleRevisions.put(identifier, hashes.getValue(source)) == null) { "audit module IDs are duplicated" }
             plannedModuleEntityIds[identifier] = owned + types
+            if (file.acceptedImplementation == false && file.generator.startsWith("unresolved:agent:")) {
+                fallbackSourcePaths[identifier] = source
+            }
             if (file.acceptedImplementation == true) {
                 if (file.generator == "repair-revision") {
                     val repaired = requireNotNull(repairState.value.lineage.repairedSource(source)) {
@@ -544,6 +550,8 @@ object ArchivalProjectAuditor {
                 }
             }
         }
+        val confidenceMustBeValid = acceptedOwners.isEmpty() || repairedOwners.isNotEmpty() ||
+            fallbackSourcePaths.isNotEmpty()
         run {
             val confidence = try {
                 val text = requireNotNull(confidenceText) { "accepted modules require manifest-bound confidence evidence" }
@@ -607,21 +615,28 @@ object ArchivalProjectAuditor {
                     requireScore(module.getValue("score"), expectedScore(owned))
                     requireIds(module, "unresolvedRecoveryEntityIds", owned.filter { it in recoveryUnresolved })
                     requireIds(module, "unresolvedImplementationIds", owned.filter { it in implementationUnresolved })
-                    if (id in repairedOwners) {
+                    if (id in repairedOwners || id in fallbackSourcePaths) {
+                        val revisionKind = if (id in repairedOwners) "repaired" else "fallback"
                         val revision = module.getValue("revisionEvidence").jsonObject
                         val checkpointPath = profile.layout.declaration("module-evidence")
                             .materialize(mapOf("module" to id))
                         val checkpointSnapshot = readStableRegularFile(projectDir, checkpointPath, maximumFileBytes)
                         require(checkpointSnapshot.sha256 == hashes.getValue(checkpointPath)) {
-                            "repaired module checkpoint changed during confidence verification"
+                            "$revisionKind module checkpoint changed during confidence verification"
                         }
-                        val checkpoint = Json.parseToJsonElement(
-                            checkpointSnapshot.bytes.decodeToString(throwOnInvalidSequence = true),
-                        ).jsonObject
+                        val checkpointText = checkpointSnapshot.bytes.decodeToString(throwOnInvalidSequence = true)
+                        UniqueJsonObjectKeyValidator(checkpointText).validate()
+                        val checkpoint = Json.parseToJsonElement(checkpointText).jsonObject
+                        if (id in fallbackSourcePaths) {
+                            require(checkpoint.getValue("accepted") == JsonPrimitive(false) &&
+                                checkpoint.string("sourceSha256") == moduleRevisions.getValue(id)) {
+                                "fallback module checkpoint differs from its unresolved source"
+                            }
+                        }
                         require(revision.keys == setOf("sourcePath", "sourceSha256", "inputFingerprint",
                             "inputFingerprintProvider", "inputBinarySha256", "modelSchemaVersion", "checkpointPath",
                             "checkpointSha256", "acceptedImplementation", "compilation", "behavior") &&
-                            revision.string("sourcePath") == acceptedSourcePaths.getValue(id) &&
+                            revision.string("sourcePath") == (acceptedSourcePaths[id] ?: fallbackSourcePaths.getValue(id)) &&
                             revision.string("sourceSha256") == checkpoint.string("sourceSha256") &&
                             revision.string("inputFingerprint") == checkpoint.string("fingerprint") &&
                             revision.string("inputFingerprintProvider") == "module-reconstruction-input-v2" &&
@@ -631,21 +646,22 @@ object ArchivalProjectAuditor {
                             revision.string("checkpointSha256") == hashes.getValue(checkpointPath) &&
                             revision.getValue("acceptedImplementation") == checkpoint.getValue("accepted") &&
                             revision.getValue("compilation") == checkpoint.getValue("compilation")) {
-                            "repaired module confidence evidence differs from its historical reconstruction checkpoint"
+                            "$revisionKind module confidence evidence differs from its historical reconstruction checkpoint"
                         }
                         val behavior = revision.getValue("behavior").jsonObject
                         require(behavior.keys == setOf("status", "reason", "coverage", "outputAgreement", "unobservedBehavior") &&
                             behavior.string("status") == "unknown" && behavior.getValue("coverage") == JsonNull &&
                             behavior.getValue("outputAgreement") == JsonNull &&
+                            behavior.string("reason") == "no revision-bound behavioral measurements attached" &&
                             behavior.string("unobservedBehavior") == "unknown") {
-                            "repaired module confidence evidence overstates unobserved behavior"
+                            "$revisionKind module confidence evidence overstates unobserved behavior"
                         }
                     }
                 }
                 byId
             } catch (failure: Exception) {
                 if (failure is InterruptedException) throw failure
-                if (acceptedOwners.isEmpty() || repairedOwners.isNotEmpty()) throw failure
+                if (confidenceMustBeValid) throw failure
                 val reason = failure.message.orEmpty().take(512).ifEmpty { failure.javaClass.simpleName }
                 acceptedOwners.forEach { (id, owners) ->
                     if (id !in compilationEvidence) return@forEach
@@ -684,11 +700,13 @@ object ArchivalProjectAuditor {
                     require(behavior.keys == setOf("status", "reason", "coverage", "outputAgreement", "unobservedBehavior") &&
                         behavior.string("status") == "unknown" && behavior.getValue("coverage") == JsonNull &&
                         behavior.getValue("outputAgreement") == JsonNull &&
+                        behavior.string("reason") == "no revision-bound behavioral measurements attached" &&
                         behavior.string("unobservedBehavior") == "unknown") {
                         "accepted module confidence evidence overstates unobserved behavior"
                     }
                 } catch (failure: Exception) {
                     if (failure is InterruptedException) throw failure
+                    if (confidenceMustBeValid) throw failure
                     val reason = failure.message.orEmpty().take(512).ifEmpty { failure.javaClass.simpleName }
                     confidenceProblems[id] = reason
                     compilationProblems.putIfAbsent(id, reason)

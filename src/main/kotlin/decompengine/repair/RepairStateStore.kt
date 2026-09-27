@@ -113,7 +113,7 @@ internal class RepairStateStore private constructor(
 
     fun readProjectedEvidencePreimage(relative: String, maximumBytes: Long): ByteArray? =
         withProjectEvidenceParent(relative) { parent, name ->
-            val temporary = atomicTemporaryName(name)
+            val temporary = repairAtomicTemporaryName(name)
             if (!exists(parent, temporary)) null else readRequiredStable(
                 parent, LinuxFilesystemSyscalls.descriptorPath(parent), temporary, maximumBytes,
                 "repair projection preimage",
@@ -262,7 +262,7 @@ internal class RepairStateStore private constructor(
         keepDisplaced: Boolean = false,
     ) {
         checkOpen()
-        val temporaryName = atomicTemporaryName(name)
+        val temporaryName = repairAtomicTemporaryName(name)
         var linked = false
         var exchanged = false
         var committed = false
@@ -389,7 +389,7 @@ internal class RepairStateStore private constructor(
 
     private fun cleanupAtomicTemporary(parent: LinuxDescriptor, targetName: String) {
         checkOpen()
-        val temporaryName = atomicTemporaryName(targetName)
+        val temporaryName = repairAtomicTemporaryName(targetName)
         val temporary = LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, temporaryName) ?: return
         temporary.use {
             requireManagedRegularFile(temporary.identity, parent.identity, "repair evidence temporary")
@@ -542,7 +542,15 @@ private fun rollbackStateExchange(
 
 internal class RepairStateDurabilityError(message: String) : Error(message)
 
-private fun atomicTemporaryName(targetName: String): String = ".$targetName.repair-atomic.tmp"
+/** Preserve every representable legacy name, including the content-addressed blob spelling. */
+internal fun repairAtomicTemporaryName(targetName: String): String {
+    val legacy = ".$targetName.repair-atomic.tmp"
+    return if (legacy.toByteArray(Charsets.UTF_8).size <= 255) legacy else {
+        // Use a namespace disjoint from every legacy temporary, not a hash-shaped legacy
+        // target: two different evidence targets must never share a recovery preimage.
+        ".repair-atomic-sha256-${decompengine.project.sha256(targetName.toByteArray(Charsets.UTF_8))}.tmp"
+    }
+}
 
 private const val REPORTS_NAME = "reports"
 private const val REVISIONS_NAME = "repair-revisions"
