@@ -546,6 +546,88 @@ class GccBundledFullExportCaptureTest {
     }
 
     @Test
+    fun `failure messages reject undelimited phases beyond producer bounds`() {
+        val messages = listOf(2049, 2050, 2051, 2052, 6000).map { "x".repeat(it) } + listOf(
+            "x".repeat(2046) + "...",
+            "x".repeat(2047) + "...",
+            "𐐀".repeat(1024) + "x",
+            "𐐀".repeat(1025),
+            "𐐀".repeat(1025) + "x",
+        )
+        for (status in listOf("failed", "partial")) for (message in messages) fixture { root, run, reports ->
+            // Every message fits the aggregate status bound. Exact JSON and matching model status
+            // leave the impossible individual phase as the only reason to reject the sidecar.
+            assertTrue(message.length <= 6157)
+            writeFailure(root, JsonPrimitive(message), status)
+            val failure = assertFailsWith<IllegalArgumentException>("$status: ${message.length} UTF-16 units") {
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+            }
+            assertTrue(failure.message.orEmpty().contains("producer phase bounds"), failure.message)
+        }
+    }
+
+    @Test
+    fun `failure messages retain complete and truncated phases at producer UTF16 bounds`() {
+        val messages = listOf(
+            "x", "x".repeat(2048), "x".repeat(2048) + "...",
+            "𐐀".repeat(1024), "𐐀".repeat(1024) + "...",
+            "x".repeat(2048) + "; " + "𐐀".repeat(1024) + "...; final phase",
+            "diagnostic; ".repeat(100) + "complete",
+        )
+        for (status in listOf("failed", "partial")) for (message in messages) fixture { root, run, reports ->
+            writeFailure(root, JsonPrimitive(message), status)
+            val snapshot = GccBundledFullExportCapture.capture(run, reports, artifacts())
+            assertEquals(if (status == "failed") 1L else 0L, snapshot.failed)
+            assertEquals(if (status == "partial") 1L else 0L, snapshot.partial)
+        }
+    }
+
+    @Test
+    fun `failure phase boundaries allow embedded separators when later partitions fail normalization`() {
+        val first = "x".repeat(1000)
+        val second = "y".repeat(1000) + "; \t" + "z".repeat(1000)
+        assertTrue(second.length <= 2048)
+        for (status in listOf("failed", "partial")) fixture { root, run, reports ->
+            // Splitting at the final separator leaves a phase beginning with a tab. The earlier
+            // separator gives two valid phases and retains that tab within the second diagnostic.
+            writeFailure(root, JsonPrimitive("$first; $second"), status)
+            val snapshot = GccBundledFullExportCapture.capture(run, reports, artifacts())
+            assertEquals(if (status == "failed") 1L else 0L, snapshot.failed)
+            assertEquals(if (status == "partial") 1L else 0L, snapshot.partial)
+        }
+    }
+
+    @Test
+    fun `failure messages reject phases whose only boundaries retain edge controls`() {
+        for (status in listOf("failed", "partial")) for (message in listOf(
+            "x".repeat(2048) + "; \t" + "y".repeat(100),
+            "x".repeat(100) + "\t; " + "y".repeat(2048),
+        )) fixture { root, run, reports ->
+            writeFailure(root, JsonPrimitive(message), status)
+            val failure = assertFailsWith<IllegalArgumentException>(status) {
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+            }
+            assertTrue(failure.message.orEmpty().contains("producer phase bounds"), failure.message)
+        }
+    }
+
+    @Test
+    fun `failure messages reject excess phases even below the aggregate status bound`() {
+        for ((status, phases, maximum) in listOf(Triple("partial", 4, 6157), Triple("failed", 5, 8210))) {
+            fixture { root, run, reports ->
+                // Adjacent phases cannot merge into one bounded phase, so every separator is needed.
+                val message = List(phases) { "x".repeat(1500) }.joinToString("; ")
+                assertTrue(message.length < maximum)
+                writeFailure(root, JsonPrimitive(message), status)
+                val failure = assertFailsWith<IllegalArgumentException>(status) {
+                    GccBundledFullExportCapture.capture(run, reports, artifacts())
+                }
+                assertTrue(failure.message.orEmpty().contains("producer phase bounds"), failure.message)
+            }
+        }
+    }
+
+    @Test
     fun `failure sidecars retain their byte bound independently of character limits`() = fixture { root, run, reports ->
         writeFailure(root, JsonPrimitive("x".repeat(1024 * 1024)))
         assertTrue(Files.size(root.resolve("reports/program_model.json.export/failures/fn_0000000000400010.json")) > 1024 * 1024)
@@ -599,7 +681,8 @@ class GccBundledFullExportCaptureTest {
     @Test
     fun `exporter string encoding retains controls and rejects short backspace and formfeed escapes`() {
         // The supplementary character straddles the verifier's nominal chunk size.
-        val value = "x".repeat(4095) + "𐐀 quote\" slash/ back\\ tab\t backspace\b formfeed\u000c zero\u0000 unit\u001f 界𐐀"
+        val controls = "𐐀 quote\" slash/ back\\ tab\t backspace\b formfeed\u000c zero\u0000 unit\u001f 界𐐀"
+        val value = "x".repeat(4095) + controls
         for (kind in listOf("function", "global", "failure")) fixture { root, run, reports ->
             val original = when (kind) {
                 "function" -> functionRecord("fn_0000000000400010", value,
@@ -607,7 +690,7 @@ class GccBundledFullExportCaptureTest {
                     strings = JsonArray(listOf(JsonPrimitive(value))))
                 "global" -> globalRecord("global_0000000000400100", JsonPrimitive("0x400100"),
                     name = JsonPrimitive(value), type = JsonPrimitive(value), initializer = JsonPrimitive(value + "\n\r"))
-                else -> failureRecord(JsonPrimitive(value))
+                else -> failureRecord(JsonPrimitive(controls))
             }
             installSidecar(root, kind, original)
             GccBundledFullExportCapture.capture(run, reports, artifacts())
