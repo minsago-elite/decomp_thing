@@ -214,7 +214,7 @@ class GccBundledFullExportCaptureTest {
     @Test
     fun `full function source presence follows recovered partial and failed exporter outcomes`() {
         for (status in listOf("recovered", "partial", "failed")) fixture { root, run, reports ->
-            if (status != "recovered") writeFailure(root, JsonPrimitive("auxiliary evidence failed"), status)
+            if (status != "recovered") writeFailure(root, JsonPrimitive(failureMessage(status)), status)
             val snapshot = GccBundledFullExportCapture.capture(run, reports, artifacts())
             assertEquals(if (status == "recovered") 1L else 0L, snapshot.recovered)
             assertEquals(if (status == "partial") 1L else 0L, snapshot.partial)
@@ -231,12 +231,74 @@ class GccBundledFullExportCaptureTest {
         ) + listOf<JsonElement>(JsonPrimitive(17), JsonPrimitive(true), JsonObject(emptyMap()), JsonArray(emptyList()))
             .map { "recovered" to it }
         for ((status, source) in invalid) fixture { root, run, reports ->
-            if (status != "recovered") writeFailure(root, JsonPrimitive("auxiliary evidence failed"), status)
+            if (status != "recovered") writeFailure(root, JsonPrimitive(failureMessage(status)), status)
             writeFunction(root, functionRecord("fn_0000000000400010", "f", status, source))
             val failure = assertFailsWith<IllegalArgumentException>("$status: $source") {
                 GccBundledFullExportCapture.capture(run, reports, artifacts())
             }
             assertTrue(failure.message.orEmpty().contains("decompiledC"), failure.message)
+        }
+    }
+
+    @Test
+    fun `matching model bytes cannot authenticate a prototype naming another function`() = fixture { root, run, reports ->
+        val original = functionRecord("fn_0000000000400010", "f")
+        val changed = recordWithField(original, "name", JsonPrimitive("changed"))
+        // Both captured records agree on the changed name, but retain the original int f(void).
+        writeFunction(root, changed)
+        val failure = assertFailsWith<IllegalArgumentException> {
+            GccBundledFullExportCapture.capture(run, reports, artifacts())
+        }
+        assertTrue(failure.message.orEmpty().contains("prototype"), failure.message)
+    }
+
+    @Test
+    fun `function prototypes reject impossible producer name and outer delimiters`() {
+        for (prototype in listOf(
+            "intwanted(void)", "int\twanted(void)", "int unwanted(void)", "int wanted_extra(void)",
+            "int Wanted(void)", "int wanted (void)", "int wanted", "int wanted(void",
+            "int wanted(void);", "int wanted(void) extra", "int wanted(void)\n",
+            "wanted(void)", " wanted(void)",
+        )) fixture { root, run, reports ->
+            writeFunction(root, functionRecord("fn_0000000000400010", "wanted", prototype = JsonPrimitive(prototype)))
+            val failure = assertFailsWith<IllegalArgumentException>(prototype) {
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+            }
+            assertTrue(failure.message.orEmpty().contains("prototype"), failure.message)
+        }
+    }
+
+    @Test
+    fun `function prototypes retain Ghidra display names and argument forms`() {
+        for ((name, prototype) in listOf(
+            "wanted" to "int wanted()",
+            "wanted" to "unsigned long long wanted(void)",
+            "wanted" to "int wanted(char * format, ...)",
+            "ns::wanted" to "struct ns::Result ns::wanted(ns::Value value)",
+            "wanted.isra.0" to "int wanted.isra.0(void)",
+            "operator()" to "undefined operator()(int this)",
+            "operator<<" to "std::ostream & operator<<(int value)",
+            "界𐐀" to "構造体 * 界𐐀(整数 値)",
+            "thunk_FUN_00400010" to "undefined thunk_FUN_00400010(void)",
+            "__x86.get_pc_thunk.bx" to "undefined __x86.get_pc_thunk.bx(void)",
+            "wanted" to "int wanted(int (*callback)(int), char bytes[4])",
+        )) fixture { root, run, reports ->
+            writeFunction(root, functionRecord("fn_0000000000400010", name, prototype = JsonPrimitive(prototype)))
+            assertEquals(1L, GccBundledFullExportCapture.capture(run, reports, artifacts()).recovered, prototype)
+        }
+    }
+
+    @Test
+    fun `function prototype binding permits delimiters inside raw datatype and parameter names`() {
+        for (prototype in listOf(
+            // Return datatype display name "int other(int", function name "wanted", parameter
+            // datatype "int", and raw parameter name "x)" produce this exact display string.
+            "int other(int wanted(int x))",
+            // The raw parameter name "x)more" does not form a balanced C declarator.
+            "int wanted(int x)more)",
+        )) fixture { root, run, reports ->
+            writeFunction(root, functionRecord("fn_0000000000400010", "wanted", prototype = JsonPrimitive(prototype)))
+            assertEquals(1L, GccBundledFullExportCapture.capture(run, reports, artifacts()).recovered, prototype)
         }
     }
 
@@ -483,8 +545,40 @@ class GccBundledFullExportCaptureTest {
     }
 
     @Test
+    fun `failure messages reject line breaks and edge controls normalized by the producer`() {
+        for (status in listOf("failed", "partial")) {
+            val prefix = failureMessage(status)
+            for (message in listOf(
+                "$prefix: first\nsecond", "$prefix: first\rsecond", "$prefix: first\r\nsecond",
+                " $prefix", "$prefix ", "\t$prefix", "$prefix\t", "\u0000$prefix", "$prefix\u001f",
+            )) fixture { root, run, reports ->
+                // Keep the exact producer JSON format and matching function/model status. The decoded
+                // diagnostic is the sole invalid input, even when JSON re-escaping preserves its bytes.
+                writeFailure(root, JsonPrimitive(message), status)
+                val failure = assertFailsWith<IllegalArgumentException>("$status: $message") {
+                    GccBundledFullExportCapture.capture(run, reports, artifacts())
+                }
+                assertTrue(failure.message.orEmpty().contains("producer normalization"), failure.message)
+            }
+        }
+    }
+
+    @Test
+    fun `failure normalization preserves inner controls and Unicode whitespace from the producer`() {
+        for (status in listOf("failed", "partial")) for (detail in listOf(
+            "first second", "first  second", "first\t\u0000second", "first\u0085\u2028\u2029second\u00a0",
+        )) fixture { root, run, reports ->
+            writeFailure(root, JsonPrimitive("${failureMessage(status)}: $detail"), status)
+            val snapshot = GccBundledFullExportCapture.capture(run, reports, artifacts())
+            assertEquals(if (status == "failed") 1L else 0L, snapshot.failed)
+            assertEquals(if (status == "partial") 1L else 0L, snapshot.partial)
+        }
+    }
+
+    @Test
     fun `multi phase failure strings retain Unicode without interpreting embedded separators`() = fixture { root, run, reports ->
-        val message = "call recovery failed: " + "界".repeat(1900) + "; type recovery failed: " + "𐐀".repeat(900)
+        val message = "call recovery failed: IllegalStateException: " + "界".repeat(1900) +
+            "; decompilation failed: IllegalStateException: " + "𐐀".repeat(900)
         writeFailure(root, JsonPrimitive(message))
         val snapshot = GccBundledFullExportCapture.capture(run, reports, artifacts())
         assertEquals(1L, snapshot.failed)
@@ -492,7 +586,10 @@ class GccBundledFullExportCaptureTest {
         assertTrue(snapshot.sidecarManifest.decodeToString().contains("failures/fn_0000000000400010.json"))
         assertEquals("false", OracleJson.parseCanonical(snapshot.assessmentBytes).jsonObject.getValue("complete").jsonPrimitive.content)
 
-        writeFailure(root, JsonPrimitive("diagnostic contains; embedded; separators; ".repeat(100)), "partial")
+        val embedded = "diagnostic contains; embedded; separators; ".repeat(40).trimEnd()
+        val phases = listOf("call recovery", "data-reference recovery", "type recovery")
+            .joinToString("; ") { "$it failed: IllegalStateException: $embedded" }
+        writeFailure(root, JsonPrimitive(phases), "partial")
         assertEquals(1L, GccBundledFullExportCapture.capture(run, reports, artifacts()).partial)
     }
 
@@ -500,7 +597,8 @@ class GccBundledFullExportCaptureTest {
     fun `failure messages respect status specific producer UTF16 boundaries`() {
         for ((status, phases, maximum) in listOf(Triple("failed", 4, 8210), Triple("partial", 3, 6157))) {
             fixture { root, run, reports ->
-                val boundary = List(phases) { "𐐀".repeat(1024) + "..." }.joinToString("; ")
+                val names = listOf("call recovery", "data-reference recovery", "type recovery", "decompilation").take(phases)
+                val boundary = names.joinToString("; ") { sizedFailurePhase(it, 2048, supplementary = true) + "..." }
                 assertEquals(maximum, boundary.length)
                 assertTrue(boundary.toByteArray().size > maximum)
                 writeFailure(root, JsonPrimitive(boundary), status)
@@ -515,8 +613,215 @@ class GccBundledFullExportCaptureTest {
     }
 
     @Test
+    fun `failure messages reject undelimited phases beyond producer bounds`() {
+        for (status in listOf("failed", "partial")) {
+            val phase = if (status == "failed") "decompilation" else "call recovery"
+            val messages = listOf(2049, 2050, 2051, 2052, 6000).map { sizedFailurePhase(phase, it) } + listOf(
+                sizedFailurePhase(phase, 2046) + "...",
+                sizedFailurePhase(phase, 2047) + "...",
+                sizedFailurePhase(phase, 2049, supplementary = true),
+                sizedFailurePhase(phase, 2050, supplementary = true),
+                sizedFailurePhase(phase, 2051, supplementary = true),
+            )
+            for (message in messages) fixture { root, run, reports ->
+                // Every message fits the aggregate status bound. Exact JSON and matching model status
+                // leave the impossible individual phase as the only reason to reject the sidecar.
+                assertTrue(message.length <= 6157)
+                writeFailure(root, JsonPrimitive(message), status)
+                val failure = assertFailsWith<IllegalArgumentException>("$status: ${message.length} UTF-16 units") {
+                    GccBundledFullExportCapture.capture(run, reports, artifacts())
+                }
+                assertTrue(failure.message.orEmpty().contains("producer phase bounds"), failure.message)
+            }
+        }
+    }
+
+    @Test
+    fun `failure messages retain complete and truncated phases at producer UTF16 bounds`() {
+        for (status in listOf("failed", "partial")) {
+            val phase = if (status == "failed") "decompilation" else "type recovery"
+            val messages = listOf(
+                "$phase failed:", sizedFailurePhase(phase, 2048), sizedFailurePhase(phase, 2048) + "...",
+                sizedFailurePhase(phase, 2048, supplementary = true), sizedFailurePhase(phase, 2048, supplementary = true) + "...",
+                sizedFailurePhase("call recovery", 2048) + "; " + sizedFailurePhase(phase, 2048, supplementary = true) + "...",
+                "$phase failed: IllegalStateException: " + "diagnostic; ".repeat(100) + "complete",
+            )
+            for (message in messages) fixture { root, run, reports ->
+                writeFailure(root, JsonPrimitive(message), status)
+                val snapshot = GccBundledFullExportCapture.capture(run, reports, artifacts())
+                assertEquals(if (status == "failed") 1L else 0L, snapshot.failed)
+                assertEquals(if (status == "partial") 1L else 0L, snapshot.partial)
+            }
+        }
+    }
+
+    @Test
+    fun `failure phase boundaries allow embedded separators when later partitions fail normalization`() {
+        for (status in listOf("failed", "partial")) fixture { root, run, reports ->
+            val first = sizedFailurePhase("call recovery", 1000)
+            val second = sizedFailurePhase(if (status == "failed") "decompilation" else "type recovery", 1000) +
+                "; \t" + "z".repeat(1000)
+            assertTrue(second.length <= 2048)
+            // Splitting at the final separator leaves a phase beginning with a tab. The earlier
+            // separator gives two valid phases and retains that tab within the second diagnostic.
+            writeFailure(root, JsonPrimitive("$first; $second"), status)
+            val snapshot = GccBundledFullExportCapture.capture(run, reports, artifacts())
+            assertEquals(if (status == "failed") 1L else 0L, snapshot.failed)
+            assertEquals(if (status == "partial") 1L else 0L, snapshot.partial)
+        }
+    }
+
+    @Test
+    fun `failure messages reject phases whose only boundaries retain edge controls`() {
+        for (status in listOf("failed", "partial")) {
+            val phase = if (status == "failed") "decompilation" else "type recovery"
+            for (message in listOf(
+                sizedFailurePhase("call recovery", 2048) + "; \t" + sizedFailurePhase(phase, 100),
+                sizedFailurePhase("call recovery", 100) + "\t; " + sizedFailurePhase(phase, 2048),
+            )) fixture { root, run, reports ->
+                writeFailure(root, JsonPrimitive(message), status)
+                val failure = assertFailsWith<IllegalArgumentException>(status) {
+                    GccBundledFullExportCapture.capture(run, reports, artifacts())
+                }
+                assertTrue(failure.message.orEmpty().contains("producer phase bounds"), failure.message)
+            }
+        }
+    }
+
+    @Test
+    fun `failure messages reject excess phases even below the aggregate status bound`() {
+        for ((status, phases, maximum) in listOf(Triple("partial", 4, 6157), Triple("failed", 5, 8210))) {
+            fixture { root, run, reports ->
+                // Adjacent phases cannot merge into one bounded phase, so every separator is needed.
+                val names = listOf("call recovery", "data-reference recovery", "type recovery") +
+                    if (status == "failed") listOf("decompilation", "decompilation") else listOf("type recovery")
+                assertEquals(phases, names.size)
+                val message = names.joinToString("; ") { sizedFailurePhase(it, 1500) }
+                assertTrue(message.length < maximum)
+                writeFailure(root, JsonPrimitive(message), status)
+                val failure = assertFailsWith<IllegalArgumentException>(status) {
+                    GccBundledFullExportCapture.capture(run, reports, artifacts())
+                }
+                assertTrue(failure.message.orEmpty().contains("producer phase bounds"), failure.message)
+            }
+        }
+    }
+
+    @Test
+    fun `failure messages reject short diagnostics outside the producer grammar`() {
+        for (status in listOf("failed", "partial")) for (message in listOf(
+            "x", "auxiliary evidence failed", "unknown recovery failed: IllegalStateException",
+            "call recovery failure: IllegalStateException", "call recovery failed:IllegalStateException",
+            "decompilation failed or timed outx", "decompilation failed or timed out:",
+            "decompilation failed or timed out:detail", "decompilation failed or timed out; detail",
+        )) fixture { root, run, reports ->
+            writeFailure(root, JsonPrimitive(message), status)
+            val failure = assertFailsWith<IllegalArgumentException>("$status: $message") {
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+            }
+            assertTrue(failure.message.orEmpty().contains("producer phase bounds"), failure.message)
+        }
+    }
+
+    @Test
+    fun `failure grammar preserves anonymous exceptions omitted empty details and Unicode`() {
+        for (status in listOf("failed", "partial")) {
+            val phase = if (status == "failed") "decompilation" else "call recovery"
+            // A null or Java-trim-empty detail adds no separator. An anonymous exception has an
+            // empty simple name, and appendFailure trims the space after the first colon.
+            val messages = listOf(
+                "$phase failed:", "$phase failed: IllegalStateException",
+                "$phase failed: : detail", "$phase failed: 界𐐀Exception: 界𐐀\u00a0",
+                "$phase failed: IllegalStateException: \tleading detail\u00a0",
+                "$phase failed: IllegalStateException: before; unknown recovery failed: detail; " +
+                    "call recovery failed: repeated label; decompilation failed or timed out; after",
+            ) + if (status == "failed") listOf(
+                "decompilation failed or timed out", "decompilation failed or timed out: detail",
+                "decompilation failed or timed out: \u00a0",
+            ) else emptyList()
+            for (message in messages) fixture { root, run, reports ->
+                writeFailure(root, JsonPrimitive(message), status)
+                val snapshot = GccBundledFullExportCapture.capture(run, reports, artifacts())
+                assertEquals(if (status == "failed") 1L else 0L, snapshot.failed)
+                assertEquals(if (status == "partial") 1L else 0L, snapshot.partial)
+            }
+        }
+    }
+
+    @Test
+    fun `failure grammar permits ordered recovery phases and skipped successful phases`() {
+        val auxiliarySets = listOf(
+            emptyList(), listOf("call recovery"), listOf("data-reference recovery"), listOf("type recovery"),
+            listOf("call recovery", "type recovery"),
+            listOf("call recovery", "data-reference recovery", "type recovery"),
+        )
+        for (status in listOf("failed", "partial")) for (auxiliary in auxiliarySets) {
+            if (status == "partial" && auxiliary.isEmpty()) continue
+            val names = auxiliary + if (status == "failed") listOf("decompilation") else emptyList()
+            fixture { root, run, reports ->
+                // Long phases force each intended boundary instead of fitting phase-like text
+                // inside one exception detail.
+                val message = names.joinToString("; ") { sizedFailurePhase(it, 1500) }
+                writeFailure(root, JsonPrimitive(message), status)
+                val snapshot = GccBundledFullExportCapture.capture(run, reports, artifacts())
+                assertEquals(if (status == "failed") 1L else 0L, snapshot.failed)
+                assertEquals(if (status == "partial") 1L else 0L, snapshot.partial)
+            }
+        }
+    }
+
+    @Test
+    fun `failure grammar rejects forced unknown repeated and reversed recovery phases`() {
+        val invalidNames = listOf(
+            listOf("call recovery", "unknown recovery"),
+            listOf("call recovery", "call recovery"),
+            listOf("type recovery", "call recovery"),
+            listOf("data-reference recovery", "call recovery"),
+        )
+        for (status in listOf("failed", "partial")) for (auxiliary in invalidNames) fixture { root, run, reports ->
+            val names = auxiliary + if (status == "failed") listOf("decompilation") else emptyList()
+            val message = names.joinToString("; ") { sizedFailurePhase(it, 1500) }
+            writeFailure(root, JsonPrimitive(message), status)
+            val failure = assertFailsWith<IllegalArgumentException>("$status: $names") {
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+            }
+            assertTrue(failure.message.orEmpty().contains("producer phase bounds"), failure.message)
+        }
+    }
+
+    @Test
+    fun `failed outcomes require a final decompilation phase`() {
+        for (message in listOf(
+            "call recovery failed: IllegalStateException",
+            listOf("call recovery", "data-reference recovery", "type recovery")
+                .joinToString("; ") { sizedFailurePhase(it, 1500) },
+            sizedFailurePhase("decompilation", 1500) + "; " + sizedFailurePhase("type recovery", 1500),
+        )) fixture { root, run, reports ->
+            writeFailure(root, JsonPrimitive(message), "failed")
+            val failure = assertFailsWith<IllegalArgumentException> {
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+            }
+            assertTrue(failure.message.orEmpty().contains("producer phase bounds"), failure.message)
+        }
+    }
+
+    @Test
+    fun `partial outcomes reject a decompilation phase`() {
+        for (message in listOf(
+            "decompilation failed or timed out", "decompilation failed: IllegalStateException",
+            sizedFailurePhase("call recovery", 1500) + "; " + sizedFailurePhase("decompilation", 1500),
+        )) fixture { root, run, reports ->
+            writeFailure(root, JsonPrimitive(message), "partial")
+            val failure = assertFailsWith<IllegalArgumentException> {
+                GccBundledFullExportCapture.capture(run, reports, artifacts())
+            }
+            assertTrue(failure.message.orEmpty().contains("producer phase bounds"), failure.message)
+        }
+    }
+
+    @Test
     fun `failure sidecars retain their byte bound independently of character limits`() = fixture { root, run, reports ->
-        writeFailure(root, JsonPrimitive("x".repeat(1024 * 1024)))
+        writeFailure(root, JsonPrimitive("decompilation failed: IllegalStateException: " + "x".repeat(1024 * 1024)))
         assertTrue(Files.size(root.resolve("reports/program_model.json.export/failures/fn_0000000000400010.json")) > 1024 * 1024)
         assertFails { GccBundledFullExportCapture.capture(run, reports, artifacts()) }
     }
@@ -529,7 +834,7 @@ class GccBundledFullExportCaptureTest {
                 "global" -> globalRecord("global_0000000000400100", JsonPrimitive("0x400100"), name = JsonPrimitive("g/𐐀"))
                 "type" -> typeRecord(id = typeId("/scalar𐐀"),
                     declaration = JsonPrimitive("/* Ghidra type \"\\/scalar𐐀\" */ typedef int scalar;"))
-                else -> failureRecord(JsonPrimitive("auxiliary / 𐐀 recovery failed"))
+                else -> failureRecord(JsonPrimitive("decompilation failed or timed out: auxiliary / 𐐀 recovery failed"))
             }
             val mutations = listOf<Pair<String, (String) -> String>>(
                 "reordered fields" to { text ->
@@ -568,15 +873,17 @@ class GccBundledFullExportCaptureTest {
     @Test
     fun `exporter string encoding retains controls and rejects short backspace and formfeed escapes`() {
         // The supplementary character straddles the verifier's nominal chunk size.
-        val value = "x".repeat(4095) + "𐐀 quote\" slash/ back\\ tab\t backspace\b formfeed\u000c zero\u0000 unit\u001f 界𐐀"
+        val controls = "𐐀 quote\" slash/ back\\ tab\t backspace\b formfeed\u000c zero\u0000 unit\u001f 界𐐀"
+        val value = "x".repeat(4095) + controls
+        val displayType = "x".repeat(4095) + "𐐀"
         for (kind in listOf("function", "global", "failure")) fixture { root, run, reports ->
             val original = when (kind) {
-                "function" -> functionRecord("fn_0000000000400010", value,
-                    source = JsonPrimitive(value + "\n\r"), prototype = JsonPrimitive(value),
+                "function" -> functionRecord("fn_0000000000400010", "f",
+                    source = JsonPrimitive(value + "\n\r"), prototype = JsonPrimitive("$displayType f(void)"),
                     strings = JsonArray(listOf(JsonPrimitive(value))))
                 "global" -> globalRecord("global_0000000000400100", JsonPrimitive("0x400100"),
                     name = JsonPrimitive(value), type = JsonPrimitive(value), initializer = JsonPrimitive(value + "\n\r"))
-                else -> failureRecord(JsonPrimitive(value))
+                else -> failureRecord(JsonPrimitive("decompilation failed: IllegalStateException: $controls"))
             }
             installSidecar(root, kind, original)
             GccBundledFullExportCapture.capture(run, reports, artifacts())
@@ -745,7 +1052,7 @@ class GccBundledFullExportCaptureTest {
         references: JsonElement = JsonArray(emptyList()),
         calls: JsonElement = JsonArray(emptyList()),
         strings: JsonElement = JsonArray(emptyList()),
-        prototype: JsonElement = JsonPrimitive("int f(void)"),
+        prototype: JsonElement = JsonPrimitive("int $name(void)"),
     ) = prettyRecord(
         "id" to JsonPrimitive(id), "name" to JsonPrimitive(name), "address" to JsonPrimitive("0x400010"),
         "prototype" to prototype, "extractionStatus" to JsonPrimitive(status),
@@ -779,7 +1086,7 @@ class GccBundledFullExportCaptureTest {
                 writeNamedRecords(root, type = id to record)
             }
             "failure" -> {
-                writeFailure(root, JsonPrimitive("auxiliary recovery failed"))
+                writeFailure(root, JsonPrimitive(failureMessage("failed")))
                 Files.writeString(root.resolve("reports/program_model.json.export/failures/fn_0000000000400010.json"), record)
             }
             else -> error("unsupported sidecar fixture: $kind")
@@ -818,6 +1125,17 @@ class GccBundledFullExportCaptureTest {
         // Keep sidecars and assembled model identical so semantic validation is exercised.
         val function = Files.readString(export.resolve("functions/fn_0000000000400010.json"))
         Files.writeString(root.resolve("reports/program_model.json"), modelText(function, global?.second, type?.second))
+    }
+
+    private fun failureMessage(status: String) =
+        "${if (status == "failed") "decompilation" else "call recovery"} failed: IllegalStateException"
+
+    private fun sizedFailurePhase(phase: String, units: Int, supplementary: Boolean = false): String {
+        val prefix = "$phase failed: IllegalStateException: "
+        val remaining = units - prefix.length
+        require(remaining >= 0)
+        val detail = if (supplementary) "𐐀".repeat(remaining / 2) + "x".repeat(remaining % 2) else "x".repeat(remaining)
+        return prefix + detail
     }
 
     private fun failureRecord(message: JsonElement, status: String = "failed") =

@@ -138,8 +138,10 @@ internal object GccBundledFullExportCapture {
     private val SCALAR_TYPE = Regex("typedef unsigned char $TYPE_C_NAME\\[([1-9][0-9]{0,9})];")
     // appendFailure retains at most 2,048 UTF-16 units plus "..." for each phase.
     // Calls, data references and types contribute three phases; only failed decompilation adds a fourth.
-    private const val MAXIMUM_PARTIAL_FAILURE_UNITS = 3 * 2051 + 2 * 2
-    private const val MAXIMUM_FAILED_FAILURE_UNITS = 4 * 2051 + 3 * 2
+    private const val MAXIMUM_FAILURE_PHASE_UNITS = 2048
+    private const val TRUNCATED_FAILURE_PHASE_UNITS = MAXIMUM_FAILURE_PHASE_UNITS + 3
+    private const val MAXIMUM_PARTIAL_FAILURE_UNITS = 3 * TRUNCATED_FAILURE_PHASE_UNITS + 2 * 2
+    private const val MAXIMUM_FAILED_FAILURE_UNITS = 4 * TRUNCATED_FAILURE_PHASE_UNITS + 3 * 2
 
     fun capture(
         run: LinuxDescriptor,
@@ -473,6 +475,9 @@ internal object GccBundledFullExportCapture {
             status in setOf("recovered", "partial", "failed") &&
             string(root, "recoveryAssessment") == "unassessed"
         ) { "GCC full function record is malformed or is bound to another identity" }
+        require(hasProducerFunctionPrototype(string(root, "name"), string(root, "prototype"))) {
+            "GCC full function prototype does not contain its producer-rendered name"
+        }
         val source = root.getValue("decompiledC")
         require(if (status == "failed") source == JsonNull else source is JsonPrimitive && source.isString) {
             "GCC full function decompiledC contradicts its extraction status"
@@ -495,6 +500,33 @@ internal object GccBundledFullExportCapture {
         sourceAddresses += address
         requirePrettyExporterRecord(bytes, root, "function", FUNCTION_FIELDS, FUNCTION_ARRAY_FIELDS, "decompiledC")
         return status
+    }
+
+    /**
+     * FunctionDB.getPrototypeString(false, false) concatenates the return display name, a space,
+     * getName(), and parenthesized parameter display text. Those raw display names may themselves
+     * contain spaces and parentheses: validate a possible literal rendering boundary, not a unique
+     * C declarator. A linear matcher keeps long or repetitive retained strings within their bounds.
+     */
+    private fun hasProducerFunctionPrototype(name: String, prototype: String): Boolean {
+        if (name.isEmpty() || !prototype.endsWith(')')) return false
+        val marker = " $name("
+        // At least one return-display character precedes the marker; ')' follows it.
+        if (marker.length > prototype.length - 2) return false
+        val fallback = IntArray(marker.length)
+        var matched = 0
+        for (index in 1 until marker.length) {
+            while (matched > 0 && marker[index] != marker[matched]) matched = fallback[matched - 1]
+            if (marker[index] == marker[matched]) matched++
+            fallback[index] = matched
+        }
+        matched = 0
+        for (index in 1 until prototype.lastIndex) {
+            while (matched > 0 && prototype[index] != marker[matched]) matched = fallback[matched - 1]
+            if (prototype[index] == marker[matched]) matched++
+            if (matched == marker.length) return true
+        }
+        return false
     }
 
     private fun requireFullGlobalRecord(bytes: ByteArray, expectedId: String): String {
@@ -593,8 +625,16 @@ internal object GccBundledFullExportCapture {
         ) { "GCC full failure record is malformed or is bound to another function" }
         val message = string(root, "message")
         require(message.isNotBlank()) { "GCC full failure message must not be blank" }
+        // appendFailure replaces CR/LF and applies Java String.trim before each retained phase.
+        // Match that ASCII/control trim precisely; other Unicode whitespace can occur in diagnostics.
+        require(message.none { it == '\r' || it == '\n' } && message == message.trim { it <= ' ' }) {
+            "GCC full failure message contradicts producer normalization"
+        }
         val maximumUnits = if (expectedStatus == "failed") MAXIMUM_FAILED_FAILURE_UNITS else MAXIMUM_PARTIAL_FAILURE_UNITS
         require(message.length <= maximumUnits) { "GCC full failure message exceeds its producer UTF-16 bound" }
+        require(hasProducerFailurePhases(message, expectedStatus == "failed")) {
+            "GCC full failure message contradicts producer phase bounds"
+        }
         require(message.toByteArray(StandardCharsets.UTF_8).size <= MAXIMUM_FULL_EVIDENCE_RECORD_BYTES) {
             "GCC full failure message exceeds its byte bound"
         }
@@ -607,6 +647,67 @@ internal object GccBundledFullExportCapture {
             verifier.acceptExporterString(message)
             verifier.accept("}\n")
         }
+    }
+
+    /**
+     * Exception details may contain delimiters and even phase labels. Accept any bounded partition
+     * whose actual phases occur once in producer order, allowing successful evidence phases to be
+     * absent. The pinned Ghidra PrettyPrinter supplies non-null C on successful decompilation, so a
+     * full failed record must end with decompilation; a partial record has only evidence failures.
+     * Each phase scans the text once using a sliding window: O(4 * message.length), after its bound.
+     */
+    private fun hasProducerFailurePhases(message: String, failed: Boolean): Boolean {
+        val exceptionLabels = listOf(
+            "call recovery failed:", "data-reference recovery failed:",
+            "type recovery failed:", "decompilation failed:",
+        )
+        val reachable = BooleanArray(message.length).also { it[0] = true }
+        for (phase in 0..(if (failed) 3 else 2)) {
+            val starts = BooleanArray(message.length)
+            val minimumEnds = IntArray(message.length + 1)
+            val exactEnds = BooleanArray(message.length + 1)
+            // getSimpleName may be empty (anonymous exceptions). After Java trim, that gives the
+            // exact exception label. Named exceptions/details follow one space; class names and
+            // exception details are not inferred from the retained diagnostic.
+            fun recognize(start: Int, label: String, separator: String) {
+                if (!message.startsWith(label, start)) return
+                val labelEnd = start + label.length
+                exactEnds[labelEnd] = true
+                if (message.startsWith(separator, labelEnd)) {
+                    val minimumEnd = labelEnd + separator.length + 1
+                    if (minimumEnd <= message.length) {
+                        starts[start] = true
+                        minimumEnds[minimumEnd]++
+                    }
+                }
+            }
+            for (start in message.indices) if (reachable[start]) {
+                recognize(start, exceptionLabels[phase], " ")
+                if (phase == 3) recognize(start, "decompilation failed or timed out", ": ")
+            }
+            val nextStarts = BooleanArray(message.length)
+            var shortStartCount = 0
+            for (end in 1..message.length) {
+                shortStartCount += minimumEnds[end]
+                val expired = end - MAXIMUM_FAILURE_PHASE_UNITS - 1
+                if (expired >= 0 && starts[expired]) shortStartCount--
+                if (message[end - 1] <= ' ') continue
+                val finalPhase = end == message.length
+                if (!finalPhase && (end + 1 >= message.length || message[end] != ';' || message[end + 1] != ' ')) continue
+                val truncatedStart = end - TRUNCATED_FAILURE_PHASE_UNITS
+                val truncated = truncatedStart >= 0 && starts[truncatedStart] &&
+                    message[end - 3] == '.' && message[end - 2] == '.' && message[end - 1] == '.'
+                if (exactEnds[end] || shortStartCount > 0 || truncated) {
+                    if (finalPhase && (phase == 3) == failed) return true
+                    val next = end + 2
+                    if (next < message.length) nextStarts[next] = true
+                }
+            }
+            // Retain earlier starts to permit skipped successful phases, but add new starts only
+            // after scanning this phase so it cannot contribute twice to the same partition.
+            for (start in message.indices) if (nextStarts[start]) reachable[start] = true
+        }
+        return false
     }
 
     private fun requirePrettyExporterRecord(
