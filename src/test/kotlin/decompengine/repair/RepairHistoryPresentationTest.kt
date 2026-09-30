@@ -55,13 +55,43 @@ class RepairHistoryPresentationTest {
         }
     }
 
-    @Test fun `older canonical assessments remain readable without a success boolean`() {
-        for ((assessment, expected) in listOf("accepted" to "accepted", "pending" to "pending", "rejected" to "rejected")) {
-            val iteration = Json.parseToJsonElement("""{"agentInvocation":{"assessmentStatus":"$assessment",
-                "terminalOutcome":"returned-completed"}}""").jsonObject
-            assertEquals(expected, repairAttemptLabel(iteration))
+    @Test fun `legacy unknown or missing disposition cannot inherit receipt acceptance`() {
+        for (disposition in listOf("legacy_unverified", "unknown", null)) {
+            val iteration = canonicalAcceptedJson()
+            val fields = iteration.toMutableMap().apply {
+                if (disposition == null) remove("disposition") else put("disposition", JsonPrimitive(disposition))
+            }
+            assertEquals("unverified", repairAttemptLabel(JsonObject(fields)))
         }
     }
+
+    @Test fun `malformed or missing ACP binding cannot authorize acceptance`() {
+        val iteration = canonicalAcceptedJson()
+        val binding = iteration.getValue("agentInvocation").jsonObject
+        val malformed = binding.keys.map { JsonObject(binding - it) } + listOf(
+            JsonPrimitive("invalid"), JsonArray(emptyList()), JsonObject(emptyMap()),
+            JsonObject(binding + ("receiptSha256" to JsonPrimitive("bad"))),
+            JsonObject(binding + ("receiptReleaseComplete" to JsonPrimitive(false))),
+            JsonObject(binding + ("assessmentStatus" to JsonPrimitive("unknown"))),
+            JsonNull,
+        )
+        malformed.forEach { value ->
+            assertEquals("unverified", repairAttemptLabel(JsonObject(iteration + ("agentInvocation" to value))), value.toString())
+        }
+        assertEquals("unverified", repairAttemptLabel(JsonObject(iteration - "agentInvocation")))
+        assertEquals("accepted", repairAttemptLabel(iteration))
+        val missingBinding = RepairIteration(1, "compile", "", "", emptyList(), emptyList(),
+            disposition = RepairAttemptDisposition.FULLY_ACCEPTED, publicationMode = RepairPublicationMode.ACP_RELEASE)
+        assertEquals("unverified", repairAttemptLabel(missingBinding))
+        assertEquals("accepted", repairAttemptLabel(missingBinding.copy(publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE)))
+    }
+
+    private fun canonicalAcceptedJson(): JsonObject = Json.parseToJsonElement("""{
+        "disposition":"fully_accepted","publicationMode":"acp_release",
+        "agentInvocation":{"receiptPath":"reports/repair-revisions/revision_fixture.acp-receipt.json",
+        "receiptSha256":"${"a".repeat(64)}","receiptSchemaVersion":2,"requestSha256":"${"b".repeat(64)}",
+        "resultChangesSha256":"${"c".repeat(64)}","terminalOutcome":"returned-completed",
+        "receiptReleaseComplete":true,"assessmentStatus":"accepted"}}""").jsonObject
 
     @Test fun `zero attempt run status and accepted identity remain visible`() {
         for ((status, label) in listOf(RepairRunStatus.RUNNING to "pending",
