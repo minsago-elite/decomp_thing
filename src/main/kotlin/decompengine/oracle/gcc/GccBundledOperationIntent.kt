@@ -33,7 +33,11 @@ internal class GccBundledOperationIntent(
 
     init {
         require(operationId.matches(Regex("[0-9a-f]{64}"))) { "GCC bundled operation ID is invalid" }
-        require(engineId in setOf("cc1", "lto1")) { "GCC bundled engine ID is invalid" }
+        require(engineId in setOf("driver", "cc1", "lto1")) { "GCC bundled engine ID is invalid" }
+        require(engineId != "driver" || (bundledRuntime.invocationVersion == 5 &&
+            runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL && plannerProfile != null)) {
+            "GCC driver requires retained full-recovery export in a fresh uninterrupted operation"
+        }
         require(bundledRuntime.invocationVersion in 1..3 || bundledRuntime.invocationVersion == 5) {
             "fresh operation intent cannot select the resume-only runtime"
         }
@@ -41,8 +45,8 @@ internal class GccBundledOperationIntent(
         require(bundledRuntime.invocationVersion != 5 || runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL) {
             "full-recovery export requires a fresh uninterrupted operation"
         }
-        require(bundledRuntime.invocationVersion != 5 || engineId == "cc1") {
-            "full-recovery structural export is currently supported only for cc1"
+        require(bundledRuntime.invocationVersion != 5 || engineId in setOf("cc1", "driver")) {
+            "full-recovery structural export is currently supported only for cc1 and driver"
         }
         require(budgets.wallClockMillis % 1_000L == 0L) { "GCC bundled wall budget must use whole seconds" }
         require(diskPolicy.maximumFilesystemBytes <= 1024L * 1024 * 1024 * 1024 &&
@@ -60,7 +64,7 @@ internal class GccBundledOperationIntent(
         ) { "GCC bundled intent must bind every distinct artifact role and path exactly once" }
         this.artifacts = java.util.List.copyOf(copied.sortedBy { it.role.wireName })
         bundledRuntime.requireArtifacts(this.artifacts)
-        profilePolicy = plannerProfile?.bindInvocation(engineId, this.artifacts, budgets)
+        profilePolicy = plannerProfile?.bindInvocation(engineId, this.artifacts, budgets, bundledRuntime.invocationVersion == 5)
         val byRole = this.artifacts.associateBy { it.role }
         cliInvocation?.let { invocation ->
             val selected = invocation.options
@@ -116,10 +120,10 @@ internal class GccBundledOperationIntent(
     fun openPlannerProfile(excludedRoots: List<Path>): GccRetainedCompilerEngineProfile? {
         val expected = profilePolicy ?: return null
         val path = artifacts.single { it.role == GccCompilerEngineContainmentArtifactRole.BENCHMARK_PROFILE }.path
-        val retained = GccRetainedCompilerEngineProfile.open(path)
+        val retained = GccRetainedCompilerEngineProfile.open(path, engineId)
         try {
             retained.requireDisjoint(excludedRoots + bundledRuntime.root)
-            require(retained.bindInvocation(engineId, artifacts, budgets).contentEquals(expected)) {
+            require(retained.bindInvocation(engineId, artifacts, budgets, bundledRuntime.invocationVersion == 5).contentEquals(expected)) {
                 "GCC planner profile differs from its prepared operation intent"
             }
             return retained

@@ -470,5 +470,5 @@ private const val OWNER_READ_EXECUTE_MODE = 0x140 // 0500
 private const val MAXIMUM_MANIFEST_BYTES = 64 * 1024 * 1024
 private const val MAXIMUM_STATE_FILE_BYTES = 1024 * 1024
 private const val MAXIMUM_EXECUTABLE_BYTES = 512 * 1024 * 1024
-private val STATE_NAME = Regex("[a-z0-9][a-z0-9._-]{0,126}[a-z0-9]")
-private val TEMPORARY_STATE_NAME = Regex("\\.[a-z0-9][a-z0-9._-]{0,126}[a-z0-9]\\.atomic")
+private val STATE_NAME = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,126}[A-Za-z0-9]")
+private val TEMPORARY_STATE_NAME = Regex("\\.[A-Za-z0-9][A-Za-z0-9._-]{0,126}[A-Za-z0-9]\\.atomic")

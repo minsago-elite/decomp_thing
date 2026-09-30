@@ -13,9 +13,13 @@ import kotlinx.serialization.json.jsonPrimitive
 class GccInstalledCliInvocationTest {
     @Test
     fun `installed launcher reports invalid engine selection without starting analysis`() {
-        val evidence = Files.createTempDirectory("installed-gcc-cli-")
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val evidence = Files.createTempDirectory(scratch, "installed-gcc-cli-")
         assertEquals(2, invokeInstalledGccCli(listOf("invalid-engine", "unused"), evidence, 30))
-        assertTrue(Files.readString(evidence.resolve("launcher-stderr.bin")).contains("expected cc1 or lto1"))
+        val stderrText = Files.readString(evidence.resolve("launcher-stderr.bin"))
+        assertTrue(stderrText.contains("expected cc1, lto1 or driver and its stripped binary"),
+            "launcher stderr: $stderrText")
         val result = OracleJson.parseCanonical(Files.readAllBytes(evidence.resolve("launcher-result.json"))).jsonObject
         assertEquals("false", result.getValue("productionVerified").jsonPrimitive.content)
         assertEquals("2", result.getValue("exitCode").jsonPrimitive.content)

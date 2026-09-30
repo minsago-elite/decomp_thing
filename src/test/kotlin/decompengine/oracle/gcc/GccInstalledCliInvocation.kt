@@ -16,25 +16,27 @@ import kotlinx.serialization.json.longOrNull
 /** Test orchestration only; the CLI's production controller remains the authority. */
 internal fun invokeInstalledGccCli(arguments: List<String>, evidence: Path, timeoutSeconds: Long,
     installation: Path = Path.of(System.getProperty("user.dir"), "build/install/llm_bin_patch"),
+    command: String = "gcc-engine-plan",
 ): Int {
-    require(timeoutSeconds in 1..2700)
+    require(timeoutSeconds in 1..9900)
     require(installation.isAbsolute && installation.normalize() == installation && installation.toRealPath() == installation)
     val launcher = installation.resolve("bin/llm_bin_patch").toRealPath()
     require(Files.isExecutable(launcher))
     val launcherBytes = Files.newInputStream(launcher).use { it.readNBytes(256 * 1024 + 1) }
     require(launcherBytes.size <= 256 * 1024)
-    val command = listOf(launcher.toString(), "gcc-engine-plan") + arguments
+    require(command in setOf("gcc-engine-plan", "gcc-engine-full-export"))
+    val selectedCommand = listOf(launcher.toString(), command) + arguments
     val javaHome = Path.of(System.getProperty("java.home")).toRealPath().toString()
     val request = OracleJson.canonicalBytes(JsonObject(mapOf(
         "provider" to JsonPrimitive("installed-gcc-cli-test-invocation-v1"),
-        "argv" to JsonArray(command.map(::JsonPrimitive)),
+        "argv" to JsonArray(selectedCommand.map(::JsonPrimitive)),
         "launcherSha256" to JsonPrimitive(OracleArtifacts.sha256(launcherBytes)),
         "javaHome" to JsonPrimitive(javaHome), "javaOpts" to JsonPrimitive("-Xmx8g"),
         "outerTimeoutSeconds" to JsonPrimitive(timeoutSeconds),
         "maximumStreamBytes" to JsonPrimitive(65536), "productionVerified" to JsonPrimitive(false),
     )))
     Files.write(evidence.resolve("launcher-invocation.json"), request, CREATE_NEW)
-    val builder = ProcessBuilder(command)
+    val builder = ProcessBuilder(selectedCommand)
     builder.environment().apply {
         remove("JAVA_TOOL_OPTIONS"); remove("JDK_JAVA_OPTIONS"); remove("_JAVA_OPTIONS")
         remove("LLM_BIN_PATCH_OPTS")
@@ -82,7 +84,13 @@ internal fun invokeInstalledGccCli(arguments: List<String>, evidence: Path, time
 }
 
 /** Rechecks retained test observations; checksums are not production provenance. */
-internal fun verifyInstalledCliEvidence(evidence: Path, arguments: List<String>, installation: Path, expectedExit: Int): JsonObject {
+internal fun verifyInstalledCliEvidence(
+    evidence: Path,
+    arguments: List<String>,
+    installation: Path,
+    expectedExit: Int,
+    command: String = "gcc-engine-plan",
+): JsonObject {
     fun read(name: String, maximum: Int): ByteArray =
         decompengine.repair.readStableRegularFile(evidence, name, maximum.toLong()).bytes
     val requestBytes = read("launcher-invocation.json", 256 * 1024)
@@ -96,14 +104,15 @@ internal fun verifyInstalledCliEvidence(evidence: Path, arguments: List<String>,
     require(request["javaOpts"] == JsonPrimitive("-Xmx8g") &&
         request["javaHome"] == JsonPrimitive(Path.of(System.getProperty("java.home")).toRealPath().toString()))
     val timeout = request["outerTimeoutSeconds"] as? JsonPrimitive
-    require(timeout != null && !timeout.isString && timeout.longOrNull in 1L..2700L)
+    require(timeout != null && !timeout.isString && timeout.longOrNull in 1L..9900L)
     decompengine.oracle.fulltree.StableControlFile.open(installation.resolve("bin/llm_bin_patch"),
         256L * 1024, "retained launcher").use { launcher ->
         require(request["launcherSha256"] == JsonPrimitive(launcher.authenticatedSha256))
         launcher.verifyUnchanged("after retained launcher verification")
     }
+    require(command in setOf("gcc-engine-plan", "gcc-engine-full-export"))
     require(request["argv"] == JsonArray((listOf(installation.resolve("bin/llm_bin_patch").toRealPath().toString(),
-        "gcc-engine-plan") + arguments).map(::JsonPrimitive))) { "launcher arguments differ from qualification selection" }
+        command) + arguments).map(::JsonPrimitive))) { "launcher arguments differ from qualification selection" }
     require(result.keys == setOf("provider", "invocationSha256", "exitCode", "productionVerified",
         "stdoutSha256", "stdoutBytes", "stderrSha256", "stderrBytes"))
     require(result["provider"] == JsonPrimitive("installed-gcc-cli-test-result-v2") &&

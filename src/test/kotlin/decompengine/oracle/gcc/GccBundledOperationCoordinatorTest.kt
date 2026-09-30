@@ -556,6 +556,16 @@ class GccBundledOperationCoordinatorTest {
                 assertFails { build(selected.map { if (it.role == role) it.copy(sha256 = SHA_CHANGED) else it }) }
             }
             assertFails { build(limits = GccCompilerEngineContainmentBudgets(suite.budgets.exportWallClockMillis + 1000, budgets().maximumResidentBytes, 32)) }
+            val fullBudget = GccCompilerEngineContainmentBudgets(
+                suite.budgets.fullRecoveryCc1ExportWallClockMillis, budgets().maximumResidentBytes, 32)
+            assertFails { build(limits = fullBudget) }
+            val fullRuntime = GccBundledGhidraRuntime(runtime().root, runtime().classPath, invocationVersion = 5)
+            val fullIntent = GccBundledOperationIntent(OPERATION_ID, "cc1", GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
+                selected, fullRuntime, fullBudget, policy(), profile)
+            assertEquals(fullBudget, fullIntent.budgets)
+            checkNotNull(fullIntent.openPlannerProfile(emptyList())).use { it.requireCurrent() }
+            assertFails { GccBundledOperationIntent(OPERATION_ID, "lto1", GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
+                selected, fullRuntime, fullBudget, policy(), profile) }
             assertFails { build(limits = GccCompilerEngineContainmentBudgets(60_000, suite.budgets.exportMaximumResidentBytes + 1, 32)) }
             assertFails { bound.openPlannerProfile(listOf(root)) }
             assertFails { GccBundledOperationIntent(OPERATION_ID, "lto1", bound.runKind, selected, runtime(), budgets(), policy(), profile) }

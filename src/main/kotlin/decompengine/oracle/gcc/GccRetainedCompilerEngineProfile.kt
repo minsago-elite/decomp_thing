@@ -8,9 +8,47 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
+/** Export identity only; a target projection grants neither planning nor production authority. */
+internal data class GccBundledExportTarget(
+    val id: String,
+    val profileId: String,
+    val buildOutput: String,
+    val buildRecordPath: Path,
+    val buildRecordSha256: String,
+    val oracleManifestPath: Path,
+    val oracleManifestSha256: String,
+    val fullArtifact: GccCompilerEngineArtifactBinding,
+    val strippedArtifact: GccCompilerEngineArtifactBinding,
+) {
+    init { require(id in setOf("driver", "cc1", "lto1")) }
+
+    fun authenticateStrippedArtifact(path: Path): AuthenticatedGccCompilerEngineArtifact =
+        authenticateLargeArtifact(path, strippedArtifact, "GCC $id stripped artifact")
+
+    fun authenticateFullArtifact(path: Path): AuthenticatedGccCompilerEngineArtifact =
+        authenticateLargeArtifact(path, fullArtifact, "GCC $id DWARF-rich artifact")
+
+    fun toPolicyJson(): JsonObject = JsonObject(mapOf(
+        "id" to JsonPrimitive(id),
+        "profileId" to JsonPrimitive(profileId),
+        "buildOutput" to JsonPrimitive(buildOutput),
+        "buildRecordSha256" to JsonPrimitive(buildRecordSha256),
+        "oracleManifestSha256" to JsonPrimitive(oracleManifestSha256),
+        "fullArtifact" to fullArtifact.toPolicyJson(),
+        "strippedArtifact" to strippedArtifact.toPolicyJson(),
+    ))
+
+    private fun GccCompilerEngineArtifactBinding.toPolicyJson(): JsonObject = JsonObject(mapOf(
+        "path" to JsonPrimitive(relativePath),
+        "bytes" to JsonPrimitive(bytes),
+        "sha256" to JsonPrimitive(sha256),
+    ))
+}
+
 /** Retained profile inputs and derived policy; this handle does not authorize worker START. */
 internal class GccRetainedCompilerEngineProfile private constructor(
     val suite: GccCompilerEngineSuite,
+    private val driverTarget: GccBundledExportTarget?,
     private val guards: Map<Path, StableControlFile>,
     policy: ByteArray,
 ) : AutoCloseable {
@@ -36,13 +74,45 @@ internal class GccRetainedCompilerEngineProfile private constructor(
     }
 
     @Synchronized
+    fun target(targetId: String): GccBundledExportTarget {
+        requireCurrent()
+        driverTarget?.let { selected ->
+            require(targetId == selected.id) { "GCC target differs from the retained driver selection" }
+            return selected
+        }
+        val engine = suite.engine(targetId)
+        return GccBundledExportTarget(engine.id, "gcc-${engine.id}-${suite.version}", engine.buildOutput,
+            engine.buildRecordPath, engine.buildRecordSha256, engine.oracleManifestPath, engine.oracleManifestSha256,
+            engine.fullArtifact, engine.strippedArtifact)
+    }
+
+    @Synchronized
+    fun exportWallClockMillis(targetId: String, fullRecovery: Boolean): Long {
+        target(targetId)
+        require(targetId != "driver" || fullRecovery) { "GCC driver requires full-recovery export" }
+        require(!fullRecovery || targetId != "lto1") { "full-recovery export is unsupported for lto1" }
+        return if (fullRecovery && targetId == "cc1") suite.budgets.fullRecoveryCc1ExportWallClockMillis
+        else suite.budgets.exportWallClockMillis
+    }
+
+    @Synchronized
+    fun requirePlanningTarget(targetId: String): GccCompilerEngine {
+        requireCurrent()
+        require(driverTarget == null && targetId != "driver") {
+            "GCC driver export does not authorize compiler-engine planning"
+        }
+        return suite.engine(targetId)
+    }
+
+    @Synchronized
     fun bindInvocation(
         engineId: String,
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
         budgets: GccCompilerEngineContainmentBudgets,
+        fullRecoveryExport: Boolean,
     ): ByteArray {
         requireCurrent()
-        val engine = suite.engine(engineId)
+        val engine = target(engineId)
         val byRole = artifacts.associateBy { it.role }
         require(byRole.size == artifacts.size) { "planner profile invocation repeats artifact roles" }
         val controls = mapOf(
@@ -67,7 +137,7 @@ internal class GccRetainedCompilerEngineProfile private constructor(
         require(archive.bytes == suite.analysis.ghidraArchive.bytes && archive.sha256 == suite.analysis.ghidraArchive.sha256 &&
             byRole.getValue(GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE).sha256 == suite.analysis.exporterSha256
         ) { "GCC operation analysis tools differ from its retained planner profile" }
-        require(budgets.wallClockMillis <= suite.budgets.exportWallClockMillis &&
+        require(budgets.wallClockMillis <= exportWallClockMillis(engineId, fullRecoveryExport) &&
             budgets.maximumResidentBytes <= suite.budgets.exportMaximumResidentBytes
         ) { "GCC operation exceeds its retained profile resource ceilings" }
         requireCurrent()
@@ -96,12 +166,19 @@ internal class GccRetainedCompilerEngineProfile private constructor(
     }
 
     companion object {
-        fun open(path: Path): GccRetainedCompilerEngineProfile {
+        fun open(path: Path): GccRetainedCompilerEngineProfile = openRetained(path, null)
+
+        fun open(path: Path, targetId: String): GccRetainedCompilerEngineProfile {
+            require(targetId in setOf("driver", "cc1", "lto1")) { "GCC export target is unsupported" }
+            return openRetained(path, targetId)
+        }
+
+        private fun openRetained(path: Path, targetId: String?): GccRetainedCompilerEngineProfile {
             requireGccBundledOperationPath(path)
             val guards = linkedMapOf<Path, StableControlFile>()
             var totalBytes = 0L
             try {
-                val suite = GccCompilerEngineProfileLoader { selected, maximum, label ->
+                val loader = GccCompilerEngineProfileLoader { selected, maximum, label ->
                     requireGccBundledOperationPath(selected)
                     require(selected.toRealPath() == selected) { "retained GCC profile path contains indirection" }
                     val guard = guards[selected] ?: run {
@@ -118,10 +195,12 @@ internal class GccRetainedCompilerEngineProfile private constructor(
                     require(snapshot.sha256 == guard.authenticatedSha256) { "retained GCC profile changed during parsing" }
                     guard.verifyUnchanged("after parsing $label")
                     snapshot
-                }.load(path)
+                }
+                val suite = loader.load(path)
+                val driver = if (targetId == "driver") loader.loadDriverTarget(suite) else null
                 val reconstruction = suite.reconstructionProfile()
                 val policy = OracleJson.canonicalBytes(JsonObject(mapOf(
-                    "provider" to JsonPrimitive("gcc-retained-planner-profile-v1"),
+                    "provider" to JsonPrimitive(if (driver == null) "gcc-retained-planner-profile-v1" else "gcc-retained-export-target-profile-v1"),
                     "schemaVersion" to JsonPrimitive(1),
                     "profileSha256" to JsonPrimitive(suite.profileSha256),
                     "plannerId" to JsonPrimitive(suite.analysis.plannerId),
@@ -135,8 +214,8 @@ internal class GccRetainedCompilerEngineProfile private constructor(
                             "sha256" to JsonPrimitive(guard.authenticatedSha256),
                         ))
                     }),
-                )))
-                return GccRetainedCompilerEngineProfile(suite, guards.toMap(), policy).also { it.requireCurrent() }
+                ) + (driver?.let { mapOf("target" to it.toPolicyJson()) } ?: emptyMap())))
+                return GccRetainedCompilerEngineProfile(suite, driver, guards.toMap(), policy).also { it.requireCurrent() }
             } catch (failure: Throwable) {
                 guards.values.toList().asReversed().forEach { guard ->
                     runCatching { guard.close() }.exceptionOrNull()?.takeIf { it !== failure }?.let(failure::addSuppressed)

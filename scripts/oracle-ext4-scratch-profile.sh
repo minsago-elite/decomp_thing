@@ -24,8 +24,9 @@ oracle_ext4_scratch_profile() {
       local engine_mode="${1#--gcc-engine-}"
       environment_prefix="DECOMP_GCC_CLI_${engine_mode^^}"
       environment_prefix="${environment_prefix//-/_}"
-      # Leave filesystem metadata headroom above the CLI's 8 GiB / 32768 minimum.
-      image_size=12G; inode_count=65536 ;;
+      # Full exports can retain a record per function plus global, type, and failure records.
+      # Leave inode headroom above cc1's 50,228-function inventory and the 8 GiB host minimum.
+      image_size=12G; inode_count=262144 ;;
     *)
       echo "unknown oracle scratch profile: $1" >&2
       return 64 ;;
