@@ -110,6 +110,17 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         profile: ReconstructionProfile,
         repairLineage: ArchivedRepairReleaseLineage = ArchivedRepairReleaseLineage.NONE,
     ): List<VerifiedCandidateAcpContribution> {
+        val adapter = ReconstructionAdapters.resolve(profile)
+        adapter.verifyArchivePurpose(projectDir, profile, manifest, payloadSha256.keys)
+        var sourceBytes = 0L
+        for (file in manifest.files.filter { ProjectFileRole.BUILD_INPUT in it.roles }) {
+            val bytes = readBoundedRegularFile(projectDir, file.path,
+                minOf(profile.budgets.archiveMaximumFileBytes, Int.MAX_VALUE.toLong() - 1L).toInt())
+            sourceBytes = Math.addExact(sourceBytes, bytes.size.toLong())
+            require(sourceBytes <= profile.budgets.archiveMaximumTotalBytes) { "archive source inspection exceeds its byte bound" }
+            requirePayloadIdentity(file.path, bytes, payloadSha256, payloadSizes)
+            adapter.validateSourceContent(profile, bytes, file.path)
+        }
         val sourceDeclaration = profile.layout.declaration("module-implementation")
         val checkpointDeclaration = profile.layout.declaration("module-evidence")
         val executionDeclaration = profile.layout.declarations
@@ -124,7 +135,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         require(sha256(modelBytes) == manifestByPath.getValue(modelPath).sha256) {
             "program model differs from its source manifest"
         }
-        val model = ProgramModelJson.read(modelBytes.decodeToString(throwOnInvalidSequence = true))
+        val model = ProgramModelJson.read(modelBytes.decodeToString(throwOnInvalidSequence = true)) { cancellationCheck() }
         require(model.inputSha256 == manifest.inputSha256) { "program model input differs from its source manifest" }
         val promptInputs by lazy {
             val planPath = profile.layout.declaration("module-plan-evidence").materialize()
@@ -160,6 +171,11 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                     "agent evidence checkpoint differs from its source manifest: $checkpointPath"
                 }
                 val checkpoint = parseCheckpoint(checkpointBytes, moduleId, source, repairedSource, profile, model.inputSha256, model.schemaVersion)
+                adapter.validateArchivedCheckpoint(profile, source, ArchivedModuleCheckpointProvenance(
+                    checkpoint.schemaVersion, checkpoint.generator, checkpoint.reconstructorIdentity,
+                    checkpoint.accepted, checkpoint.compilationPresent, !checkpoint.hasNoExecutionEvidence(),
+                    repairedSource != null,
+                ))
                 val receiptSource = repairedSource?.let { lineage ->
                     GeneratedFileEvidence(
                         path = source.path,
@@ -557,6 +573,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             executionTerminalOutcome,
             executionReleaseComplete,
             accepted,
+            root["compilation"]?.let { it !is JsonNull } == true,
             preDispatchBudgetFailure,
         )
     }
@@ -1467,7 +1484,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                     "archive evidence exceeds its $maximumBytes-byte limit: $normalized"
                 }
                 val bytes = LinuxFilesystemSyscalls.openReadableFrom(pinned).use { readable ->
-                    LinuxFilesystemSyscalls.read(readable, maximumBytes, cancellationCheck = {})
+                    LinuxFilesystemSyscalls.read(readable, maximumBytes, cancellationCheck = ::cancellationCheck)
                 }
                 require(bytes.size.toLong() == size) { "archive evidence changed while being read: $normalized" }
                 return bytes
@@ -1475,6 +1492,10 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         } finally {
             directories.asReversed().forEach(LinuxDescriptor::close)
         }
+    }
+
+    private fun cancellationCheck() {
+        if (Thread.currentThread().isInterrupted) throw InterruptedException("archive evidence verification cancelled")
     }
 
     private fun requirePayloadIdentity(
@@ -1517,6 +1538,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         val executionTerminalOutcome: String?,
         val executionReleaseComplete: Boolean?,
         val accepted: Boolean,
+        val compilationPresent: Boolean,
         val preDispatchBudgetFailure: Boolean,
     ) {
         fun hasNoExecutionEvidence(): Boolean = listOf(

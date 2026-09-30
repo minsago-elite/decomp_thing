@@ -107,13 +107,58 @@ field. These local version strings do not authenticate executable identity.
 `GeneratedCProjectRendering` owns shared, public and private C interfaces and the
 GNU Make build definition. It indexes model functions/globals and computes
 cross-module call visibility once per plan, then renders each module's declared
-entities in plan order. `GeneratedCDeclarations` holds the existing C declaration
-normalization policy. This extraction preserves current generated-C semantics;
-full alternate-profile routing remains separate migration work under #84. Declaration normalization does not
-establish recovered ABI accuracy.
+entities in plan order. `GeneratedCDeclarations` preserves the recovered function
+declarator, including its return type, parameters, qualifiers and variadic marker,
+and changes only the emitted function identifier under the existing naming policy.
+It does not replace the model's return type with a guess from the decompiled body
+or manufacture a zero-argument prototype. Global types likewise retain their
+declared spelling and pointer/array structure.
+
+Model-supplied typedef chains are resolved within bounded declaration context to
+identify void, integer and array shapes while retaining their emitted spelling.
+An incomplete array, including one hidden behind a typedef, requires initializer
+evidence before a definition can be generated. `_Noreturn` placeholders and
+static or inline declarations exposed across module boundaries fail with the
+affected entity's identity.
+
+Names such as `undefined8`, `byte` and `pointer` are not converted into guessed C
+types. The strict compiler resolves named types against the supplied declarations;
+missing types fail the existing module gate and remain in its diagnostics and
+unresolved-entity inventory. Explicit typedefs and ordinary identifiers with those
+spellings remain valid. Malformed or unsupported declarators fail with the model
+entity's identity instead of a fallback declaration. Rendering and compilation do
+not establish recovered ABI accuracy; authenticated ABI facts and production
+qualification remain separate requirements.
 
 The generated-C renderer also selects and renders the synthetic entrypoint and
-returns its entity attribution to orchestration. `GeneratedCCandidateValidation`
+returns its entity attribution to orchestration. A synthesized zero-argument call
+requires an explicit `(void)` parameter list or a model-resolved void alias;
+an unspecified `()` declaration, named parameters or a variadic signature cannot
+justify dropping arguments. A synthetic entry accepts void or resolved integer
+returns, preserving the integer process status; unsupported return shapes fail
+before entry artifacts are written.
+An existing `main` keeps its recovered declaration.
+
+The explicit `--evidence-only` path selects the closed
+`declaration-purpose=evidence-carrier-v1` profile option and the fixed
+`evidence-carrier:v1` reconstructor. This changes the profile digest and cache
+identity. Its C sources contain a diagnostic inventory with support symbols
+derived from digests; raw names, declarations, and initializer displays remain
+in the unchanged program-model evidence. Its diagnostic entry point does not
+call a recovered function. The full model, plan, and entity ownership remain in
+the archive, and every entity remains unresolved. Even an empty inventory does
+not claim a completed implementation.
+
+Carrier builds retain the strict compiler flags and archive rebuild checks.
+Their module checkpoints cannot become accepted implementations. Archive
+admission checks the fixed strategy, deterministic source bytes, and unresolved
+state; changing a generator label is insufficient. Project-bound behavior
+evidence and repair promotion reject this purpose. Ordinary generated-C
+reconstruction continues to require the recovered declarations described above.
+These project checks do not classify arbitrary executables supplied without
+their project provenance.
+
+`GeneratedCCandidateValidation`
 owns the C function/global definition and placeholder checks and their lexical
 helpers. Orchestration retains invocation release, prompt budgets, prior issues,
 checkpoint acceptance and rollback. These checks remain the existing local

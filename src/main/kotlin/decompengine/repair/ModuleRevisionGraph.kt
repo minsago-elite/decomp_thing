@@ -500,6 +500,9 @@ private fun exactPathModuleId(path: String): String =
 interface RepairIndexProfile {
     fun resolve(projectRoot: Path, budget: RepairResourceBudget): RepairIndexLayout
 
+    /** Adapter-specific admission of already bounded source bytes before validation or publication. */
+    fun validateSourceContent(path: String, bytes: ByteArray) {}
+
     /** The source-tree contract, when this repair profile owns generated reconstruction output. */
     fun reconstructionProfile(): ReconstructionProfile? = null
 
@@ -820,7 +823,7 @@ internal class ModuleRepairIndex private constructor(
         require(observedPaths == sources.keys.sorted()) {
             "repair source input set changed after the dependency index was created"
         }
-        return captureSourceSnapshot(projectRoot, observedPaths, budget)
+        return captureSourceSnapshot(projectRoot, observedPaths, budget, profile)
     }
 
     internal fun belongsTo(root: Path): Boolean = projectRoot == root.toAbsolutePath().normalize()
@@ -1040,7 +1043,7 @@ internal class ModuleRepairIndex private constructor(
             val profileSha256 = profile.configurationSha256(budget)
             require(profileSha256.matches(Regex("[0-9a-f]{64}"))) { "invalid repair profile fingerprint" }
             val layoutSha256 = layout.canonicalSha256(budget.maximumIndexEvidenceBytes)
-            val snapshot = captureSourceSnapshot(root, sourcePaths, budget)
+            val snapshot = captureSourceSnapshot(root, sourcePaths, budget, profile)
             val sourceMap = snapshot.associateBy { it.path }
             val editable = layout.editablePaths.toCollection(TreeSet())
             require(editable.isNotEmpty()) { "repair index profile has no editable source inputs" }
@@ -1161,7 +1164,7 @@ internal class ModuleRepairIndex private constructor(
                 appendJoined(behaviorRoots)
                 append('\n')
             }
-            val verifiedSnapshot = captureSourceSnapshot(root, sourcePaths, budget)
+            val verifiedSnapshot = captureSourceSnapshot(root, sourcePaths, budget, profile)
             require(revisionSha256(verifiedSnapshot) == revisionSha256(snapshot)) {
                 "repair source inputs changed while dependency evidence was indexed"
             }
@@ -1851,7 +1854,9 @@ internal class ModuleRevisionGraph private constructor(
         val pending = attempt?.let(::requirePending)
         val sources = sourcesAt(pending?.parentId ?: workingHeadId()).toMutableMap()
         pending?.candidateChanges?.forEach { sources[it.path] = IndexedSource(it.path, it.afterBytes, it.afterSha256) }
-        Collections.unmodifiableMap(sources.toSortedMap().mapValues { (_, source) -> readBlob(source.sha256) })
+        Collections.unmodifiableMap(sources.toSortedMap().mapValues { (path, source) ->
+            readBlob(source.sha256).also { index.profile.validateSourceContent(path, it) }
+        })
     }
 
     @Synchronized
@@ -1962,6 +1967,7 @@ internal class ModuleRevisionGraph private constructor(
                     "repair staging context contains $total bytes; limit=${state.budget.maximumStagingBytes}",
                 )
             }
+            index.profile.validateSourceContent(relative, bytes)
             captured[relative] = bytes.copyOf()
         }
         require(total == context.totalBytes) { "repair staging context changed after selection" }
@@ -2224,6 +2230,7 @@ internal class ModuleRevisionGraph private constructor(
                 "repair candidate contains $patchBytes replacement bytes; limit=${state.budget.maximumPatchBytes}",
             )
         }
+        normalized.forEach { (path, bytes) -> index.profile.validateSourceContent(path, bytes) }
         requireCurrentHead()
         val preimages = pending.preimages.associateBy { it.path }
         val replacementDigests = normalized.mapValues { (_, replacement) -> sha256(replacement) }
@@ -2329,10 +2336,17 @@ internal class ModuleRevisionGraph private constructor(
                     after.sha256, before.sha256, after.sha256, after.bytes)
             }
             require(promotion.isNotEmpty())
+            cancellationCheck()
+            val promotionBytes = promotion.associate { change ->
+                cancellationCheck()
+                change.path to readBlob(change.afterBlobSha256).also {
+                    index.profile.validateSourceContent(change.path, it)
+                }
+            }
             pending = pending.copy(promotionChanges = promotion)
             cancellationCheck()
             persist(state.copy(pending = pending))
-            installFiles(promotion.associate { it.path to readBlob(it.afterBlobSha256) },
+            installFiles(promotionBytes,
                 promotion.associate { it.path to requireNotNull(it.beforeSha256) }, pending.id, "promotion")
         }
         fun requireAcceptingIndex() {
@@ -5228,7 +5242,12 @@ private fun parseDelta(element: JsonElement): RevisionFileDelta {
     )
 }
 
-private fun captureSourceSnapshot(root: Path, paths: Collection<String>, budget: RepairResourceBudget): List<IndexedSource> {
+private fun captureSourceSnapshot(
+    root: Path,
+    paths: Collection<String>,
+    budget: RepairResourceBudget,
+    profile: RepairIndexProfile,
+): List<IndexedSource> {
     var total = 0L
     val snapshot = paths.distinct().sorted().map { relative ->
         val normalized = normalizedRelative(relative)
@@ -5237,6 +5256,7 @@ private fun captureSourceSnapshot(root: Path, paths: Collection<String>, budget:
         if (total > budget.maximumSourceBytes) {
             throw RepairBudgetExceededException("repair source inputs exceed ${budget.maximumSourceBytes} bytes")
         }
+        profile.validateSourceContent(normalized, source.bytes)
         IndexedSource(normalized, source.bytes.size.toLong(), source.sha256)
     }
     if (snapshot.size > budget.maximumSourceFiles) {

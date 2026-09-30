@@ -3,7 +3,11 @@ package decompengine.project
 /** Ninja owns compilation/link scheduling; interface and candidate policy remains reusable C. */
 internal class GeneratedCNinjaProjectRendering(model: RecoveredProgramModel, plan: ModulePlan) :
     ProjectRendering by GeneratedCProjectRendering(model, plan) {
-    override fun buildDefinition(sources: List<String>, profile: ReconstructionProfile): String {
+    override fun buildDefinition(sources: List<String>, profile: ReconstructionProfile): String =
+        generatedCNinjaBuildDefinition(sources, profile)
+}
+
+internal fun generatedCNinjaBuildDefinition(sources: List<String>, profile: ReconstructionProfile): String {
         val compiler = profile.adapterConfiguration.getValue("compiler-driver").single()
         val flags = profile.adapterConfiguration.getValue("compiler-flags")
         ProjectBuildConfiguration(compilerExecutable = compiler, cFlags = flags)
@@ -37,4 +41,3 @@ internal class GeneratedCNinjaProjectRendering(model: RecoveredProgramModel, pla
             "build $objectPath: compile $source || verify-sources"
         } + "\nbuild build/reconstructed: link ${objects.joinToString(" ")}\ndefault build/reconstructed\n"
     }
-}

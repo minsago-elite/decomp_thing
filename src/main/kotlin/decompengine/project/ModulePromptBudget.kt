@@ -123,7 +123,7 @@ internal class ProfileModulePromptInputs(
     private val profile: ReconstructionProfile,
 ) {
     private val adapter = ReconstructionAdapters.resolve(profile)
-    private val rendering = adapter.rendering(model, plan)
+    private val rendering = adapter.rendering(model, plan, profile)
     private val modules = plan.modules.associateBy { it.id }
     private val sharedHeader = rendering.sharedInterface()
     private val headers = plan.modules.associate { it.id to rendering.moduleInterface(it) }

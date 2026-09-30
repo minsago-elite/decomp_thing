@@ -15,8 +15,33 @@ internal object GeneratedCReconstructionAdapter : ReconstructionAdapter {
     override val archiveBuild: ArchiveBuildPolicy = GeneratedCArchiveBuildPolicy
     override val behaviorBuild: BehaviorBuildPolicy = GeneratedCBehaviorBuildPolicy
     override val mvpPatchCompiler: MvpPatchCompilerPolicy = GeneratedCMvpPatchCompilerPolicy
-    override fun rendering(model: RecoveredProgramModel, plan: ModulePlan): ProjectRendering =
-        GeneratedCProjectRendering(model, plan)
+    override fun validateProfile(profile: ReconstructionProfile) { GeneratedCEvidenceCarrier.isSelected(profile) }
+    override fun evidenceOnlyProfile(profile: ReconstructionProfile): ReconstructionProfile = GeneratedCEvidenceCarrier.profile(profile)
+    override fun evidenceOnlyReconstructor(profile: ReconstructionProfile): ModuleReconstructor {
+        validateProfile(profile)
+        return GeneratedCEvidenceCarrier.reconstructor
+    }
+    override fun requireImplementationPurpose(profile: ReconstructionProfile, operation: String) =
+        GeneratedCEvidenceCarrier.requireImplementationPurpose(profile, operation)
+    override fun verifyArchivePurpose(projectDir: Path, profile: ReconstructionProfile, manifest: SourceTreeManifest,
+        payloadPaths: Set<String>) = GeneratedCEvidenceCarrier.verifyArchivePurpose(projectDir, profile, manifest, payloadPaths)
+    override fun validateArchivedCheckpoint(profile: ReconstructionProfile, source: GeneratedFileEvidence,
+        checkpoint: ArchivedModuleCheckpointProvenance) = GeneratedCEvidenceCarrier.validateArchivedCheckpoint(profile, source, checkpoint)
+    override fun rendering(model: RecoveredProgramModel, plan: ModulePlan, profile: ReconstructionProfile): ProjectRendering =
+        if (GeneratedCEvidenceCarrier.isSelected(profile)) GeneratedCEvidenceCarrier.rendering(model, plan, profile)
+        else GeneratedCProjectRendering(model, plan)
+    override fun admitGeneration(projectDir: Path, profile: ReconstructionProfile, reconstructor: ModuleReconstructor) {
+        GeneratedCEvidenceCarrier.requireReconstructor(profile, reconstructor)
+        GeneratedCEvidenceCarrier.requireWorkspacePurpose(projectDir, profile)
+    }
+    override fun requiresUnresolvedOutput(profile: ReconstructionProfile): Boolean = GeneratedCEvidenceCarrier.isSelected(profile)
+    override fun diagnosticPurposeDescription(profile: ReconstructionProfile): String {
+        require(GeneratedCEvidenceCarrier.isSelected(profile))
+        return GeneratedCEvidenceCarrier.PURPOSE
+    }
+    override fun validateSourceContent(profile: ReconstructionProfile, bytes: ByteArray, label: String) {
+        if (!GeneratedCEvidenceCarrier.isSelected(profile)) GeneratedCEvidenceCarrier.rejectCarrierContent(bytes, label)
+    }
     override fun build(
         projectDir: Path,
         profile: ReconstructionProfile,
@@ -60,6 +85,14 @@ internal object GeneratedCReconstructionAdapter : ReconstructionAdapter {
     override fun modulePrompt(request: ModuleReconstructionRequest): ModulePromptContent = GeneratedCModulePrompt.render(request)
     override fun defaultReconstructor(): ModuleReconstructor = EvidenceModuleReconstructor()
     override fun assess(module: PlannedModule, model: RecoveredProgramModel, generator: String, source: String): List<ModuleReconstructionIssue> =
-        GeneratedCCandidateValidation.assess(module, model, generator, source)
+        if (generator == GeneratedCEvidenceCarrier.IDENTITY ||
+            GeneratedCEvidenceCarrier.isCarrierContent(source.toByteArray(Charsets.UTF_8))) listOf(ModuleReconstructionIssue("evidence-only-carrier",
+            "diagnostic carrier identity cannot authorize implementation acceptance", module.functionIds + module.globalIds))
+        else GeneratedCCandidateValidation.assess(module, model, generator, source)
+    override fun assess(module: PlannedModule, model: RecoveredProgramModel, generator: String, source: String,
+        profile: ReconstructionProfile): List<ModuleReconstructionIssue> =
+        if (GeneratedCEvidenceCarrier.isSelected(profile)) listOf(ModuleReconstructionIssue("evidence-only-carrier",
+            "diagnostic inventory cannot supply recovered implementations", module.functionIds + module.globalIds))
+        else assess(module, model, generator, source)
     override fun toolchainEvidence(profile: ReconstructionProfile): String = GeneratedCToolchainEvidence.render(profile)
 }
