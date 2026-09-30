@@ -39,6 +39,7 @@ class WebProgressCutoverTest {
         val journal: java.nio.file.Path
         val path: String
         val cookie: String
+        private val eventTimes = mutableMapOf<Int, String>()
         init {
             service.initializeExistingStorage()
             val original = (owner.inspect(job.id) as WorkflowJobInspection.Available).snapshot
@@ -66,7 +67,8 @@ class WebProgressCutoverTest {
                 put("queueDropped", 0); put("historyDropped", first); put("truncated", first > 0)
                 put("events", buildJsonArray { (first..last).forEach { sequence -> add(buildJsonObject {
                     put("sequence", sequence); put("runId", "writer_cutover_fixture"); put("workflow", "reconstruct")
-                    put("time", controls.clock.instant().toString()); put("kind", "workflow_phase"); put("phase", "planning")
+                    // Re-publication must preserve the cursor anchor bytes of retained events.
+                    put("time", eventTimes.getOrPut(sequence) { controls.clock.instant().toString() }); put("kind", "workflow_phase"); put("phase", "planning")
                     put("text", "PRIVATE_CUTOVER_PROSE")
                 }) } })
             }.toString()

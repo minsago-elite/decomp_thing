@@ -16,7 +16,9 @@ input bytes are the existing synthetic ELF header, not a user binary.
 `WebProgressCutoverTest` consumes these controls through the actual
 `WebJobService`, `WorkflowAttemptStore`, `WebApiController` and loopback JVM HTTP
 server. The existing atomic journal publication and bounded latch/barrier
-schedule controls before/after/racing snapshot reads. Its SSE and polling tests
+schedule controls before/after/racing snapshot reads. Retained events keep their
+first-publication timestamps when new events are appended, preserving cursor
+anchors across clock advancement. Its SSE and polling tests
 exercise replay, retention gaps and the exact 24-hour expiry boundary without
 sleeping for workflow time. A fresh-scenario comparison checks stable job/run
 identity, started-at time and public observation payloads after publication.
