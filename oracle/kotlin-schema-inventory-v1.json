@@ -1,0 +1,674 @@
+{
+  "historicalStartingCount": 43,
+  "kind": "kotlin-oracle-schema-inventory",
+  "schemaCount": 73,
+  "schemaInventoryVersion": 1,
+  "schemas": [
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "behavior-corpus",
+      "path": "oracle/behavior-corpus.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "e2844fd3fd6a40dee1fb788474e3ad7e459c3c1fdea8024a25ae94919c0c7785"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "behavior-corpus-report",
+      "path": "oracle/behavior-corpus-report.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "563502dc0f873a7f49f84ca09a97ad0d33f0674dcfe96cb0498f543ee44450b2"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "bounded-shard-index",
+      "path": "oracle/bounded-shard-index.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "5aca060d537835bca7e250b7050145588920a51eb56bf16a2fe53f4960de7b9f"
+    },
+    {
+      "formatVersions": [
+        1,
+        2,
+        3
+      ],
+      "name": "build-record",
+      "path": "oracle/build-record.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "0835b21deed773760b7060413d94bc4141f9ea9200e1034f8a4531081a92c12f"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "clang-diagnostic-matrix",
+      "path": "oracle/clang-diagnostic-matrix.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "387f66279dbef93df56d777133389cfa7ba35132753c3619c01e2e42a91e497c"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "confidence-calibration-artifact",
+      "path": "oracle/confidence-calibration-artifact.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "8bb72519283604101b577160b3dc60206753b59cbe992225a69f0afbb8b1b387"
+    },
+    {
+      "formatVersions": [
+        2
+      ],
+      "name": "extracted-program-model-v2",
+      "path": "oracle/extracted-program-model-v2.schema.json",
+      "registration": "retained-outside-shared-catalog",
+      "schemaSha256": "df79923c870587bfb0521c34c7ce2b878943ee2848c9ef753441c7ef218c326f",
+      "scopeNote": "Retained format; no current Kotlin OracleSchemas consumer is registered for it."
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-call-baseline",
+      "path": "oracle/full-tree-call-baseline.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "c35378dc7552fd8225f09cd673101ac1fbaf5affddc5dc9d41e5b7dc64c52f3f"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-call-observations",
+      "path": "oracle/full-tree-call-observations.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "05bfa03d1a801fb915a7d3c0c854884bebbc16d4497fa5c010dee4f0a4c86d3f"
+    },
+    {
+      "formatVersions": [
+        2
+      ],
+      "name": "full-tree-call-observations-v2",
+      "path": "oracle/full-tree-call-observations-v2.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "c3e706742ddbde20900fe206efb05c03bca6eeaa3dc663ee1490cb057e762248"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-call-truth",
+      "path": "oracle/full-tree-call-truth.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "3de5f745adae1115fea8b899a959d2b413af340bc10e9902af18ce655be9f181"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-call-truth-index",
+      "path": "oracle/full-tree-call-truth-index.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "ea0b03bdae323f6fe6d4d4451266c775bb25efcc90d544917958cb1f03b5abd6"
+    },
+    {
+      "formatVersions": [
+        2
+      ],
+      "name": "full-tree-call-truth-v2",
+      "path": "oracle/full-tree-call-truth-v2.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "a8cc8966faf6a253fe522ba2afde60b3d9abfcef0c7eef3714ce7e77651f181e"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-clang-capture-input",
+      "path": "oracle/full-tree-clang-capture-input.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "fbbc2ce49e0b7d9653952d09a0a9f0ab9e66c32e783fe59348e46fb90aef8cd4"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-clang-compdb-reconciliation",
+      "path": "oracle/full-tree-clang-compdb-reconciliation.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "3ac03e227109e58b019da9bdac95499dc5bb0bd83529fc6368b7843c073f1cfb"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-data-baseline",
+      "path": "oracle/full-tree-data-baseline.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "6c50374ef22618268c8546a22ac3ea4a7fa27f19d5db1772745355f49fca6591"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-data-observations",
+      "path": "oracle/full-tree-data-observations.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "b6da8dc35368c622a41e9b3b5aebb1e4cfe7eddd5de88b513f2065fc8fd1a7c5"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-data-reconciliation",
+      "path": "oracle/full-tree-data-reconciliation.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "ae68d4d2b4df4f0ffb9d851da143006263fbed2a101918e1adce42962a77ac2f"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-data-truth",
+      "path": "oracle/full-tree-data-truth.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "61b02cfa453cf0ccfae36c74c6d414e4ed4bfb5a4679a4f42ee4130e81b45a49"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-data-truth-index",
+      "path": "oracle/full-tree-data-truth-index.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "95613287e84d58491406260c973c4750eb8db3ef7bc1e8aa383f84964ec13337"
+    },
+    {
+      "formatVersions": [
+        2
+      ],
+      "name": "full-tree-determinism-report",
+      "path": "oracle/full-tree-determinism-report.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "693b7ef8e51f6935e749eed485dc75d83b69c9c4cec617afcee10403f915f7d0"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-elf-data",
+      "path": "oracle/full-tree-elf-data.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "d90a5b46e9929779170fcf959006da94818e85176e66d46cad24a49c50572e90"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-elf-functions",
+      "path": "oracle/full-tree-elf-functions.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "6cac4825b3bed5e7bb07fe8333e59dfde13e46ff55b610c2d268e3e371778f07"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-execution-evidence",
+      "path": "oracle/full-tree-execution-evidence.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "bd71c5c9cddc0dcd3433c67c7dda439904a31de7b3bb3e3547fa6405b95c9a98"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-function-baseline",
+      "path": "oracle/full-tree-function-baseline.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "6a511e0802ab8ce21ef4a5bff714bd7a6cc43269ba4c6a0ca3000d854f709f0a"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-function-exclusions",
+      "path": "oracle/full-tree-function-exclusions.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "9f446ce4b122df4e2c45b473d0a43269a457bd04512cc3a9df84aae3329fad25"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-function-observations",
+      "path": "oracle/full-tree-function-observations.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "cb160dc07fbadbdc481289a25cf12741b565be209a3b3e3e2442e71a9ac641dd"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-function-truth",
+      "path": "oracle/full-tree-function-truth.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "b21be27d085c61c60cbaba11da1208b24c897c264001c790b0ca32b2ae24e5f7"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-function-truth-index",
+      "path": "oracle/full-tree-function-truth-index.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "40a2c4d0c3a1b3317e010fd267b56e6ea3ec94620abd79c591b01bc6357e084f"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-generated-file-inventory",
+      "path": "oracle/full-tree-generated-file-inventory.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "4548dd00aa0d45637754db5c412b54bc59c97c039724513e953d0a5b99697180"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-generated-file-provenance",
+      "path": "oracle/full-tree-generated-file-provenance.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "1ff70380fcaccb6f9d8525ceb50cdd8bef972346de06058c21771b38e7643d44"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-header-plan-readiness",
+      "path": "oracle/full-tree-header-plan-readiness.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "7ca4293474079efb2bf3628bafa6285f9379606a08e8bfb88ccc2bea47bb79ba"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-implementation-ownership",
+      "path": "oracle/full-tree-implementation-ownership.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "982b00f81873a4bd4e545e4a0e36a90e329e400efb4ed07e5e70eeebdcb9aad8"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-inventory",
+      "path": "oracle/full-tree-inventory.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "beef604702ae59f96a167173193e084ca02d6a16564b8b94aac03bda963ca6a6"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-materialization-determinism",
+      "path": "oracle/full-tree-materialization-determinism.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "60100667dc6486018e815d21eaa228411813cb6b1978bd7af2ba82a6aea6eadc"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-ninja-compdb-execution-receipt",
+      "path": "oracle/full-tree-ninja-compdb-execution-receipt.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "4c7bdd86bd54be378c1a0c2ba7035862bd953c745b81e6cdf8e1fa727f93b946"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-ninja-compdb-prestart",
+      "path": "oracle/full-tree-ninja-compdb-prestart.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "66a16570511db4897a64a3bddb22d88b19ff44a06339bc3b76cba63c1fa90793"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-planning-inventory",
+      "path": "oracle/full-tree-planning-inventory.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "4b42c0140df447e11f3991cf8a22777a9698373dbb561f90c6f59e8bd5f29eee"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-release-assets",
+      "path": "oracle/full-tree-release-assets.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "d8d6d81901ba83e1d39f02b7351533b19c84440a54769bac195e65369f464ff2"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-release-evidence",
+      "path": "oracle/full-tree-release-evidence.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "08fd02892a9dd50d630910eb0d98393bf5a229e53724dcfbc763d8e29bde74d3"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-scope",
+      "path": "oracle/full-tree-scope.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "e05f3f1fe740512e9691ea75744f0da1fc443fc78415ac6ab8c9c0cb0d66a987"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-source-header-dependencies",
+      "path": "oracle/full-tree-source-header-dependencies.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "c1e7e9cb2fc2a88211d07230b6e6f3af8ef5a18f60d55bb10baa4fcc0480f36b"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-source-inventory",
+      "path": "oracle/full-tree-source-inventory.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "4412f40ca87bf793a75397b35ec2e0910039a9261371a344822d059575d99177"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "function-recovery-oracle",
+      "path": "oracle/function-recovery-oracle.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "270c9851aa284ce002dd90443c32ad4348ed804091a5884d02c8d5cc495cfa7d"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "function-recovery-score",
+      "path": "oracle/function-recovery-score.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "ed08a28fd49427bcc756c888538b1d2db36e25fa18b232443da850e134016f6e"
+    },
+    {
+      "formatVersions": [
+        1,
+        2,
+        3
+      ],
+      "name": "gcc/build-record",
+      "path": "oracle/gcc/build-record.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "0835b21deed773760b7060413d94bc4141f9ea9200e1034f8a4531081a92c12f"
+    },
+    {
+      "formatVersions": [
+        2
+      ],
+      "name": "gcc/compiler-engine-plan-evidence",
+      "path": "oracle/gcc/compiler-engine-plan-evidence.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "17ce76c928336a61a47eacdb4f716e658f689046d5f7da58471ee3087d15f208"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "gcc/compiler-engines",
+      "path": "oracle/gcc/compiler-engines.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "5dbb9ca01eba8c02e7db34a7323902454f839506e4826c0e8145bb58da7befe4"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "gcc/oracle-manifest",
+      "path": "oracle/gcc/oracle-manifest.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "f75499d2b24ac755576dbc62c8a39d5be324c1404743cfcdb8b7ab3765522521"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "gcc/source-lock",
+      "path": "oracle/gcc/source-lock.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "27c1ed85072438ac3ab91f8f189c77c385acb2fbadf309240aecca8dd8619a6d"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "gcc/toolchain-reproduction",
+      "path": "oracle/gcc/toolchain-reproduction.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "cd12cee40840686e6a397751bc796fda18a4ab517306eef19167e8ae07761228"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "heuristic-score-interpretation",
+      "path": "oracle/heuristic-score-interpretation.schema.json",
+      "registration": "retained-outside-shared-catalog",
+      "schemaSha256": "7052f78a3e144c9a78f42157db65de8fb056ff663b27c431cb76b4eb13e08bc9",
+      "scopeNote": "Retained format; no current Kotlin OracleSchemas consumer is registered for it."
+    },
+    {
+      "formatVersions": [
+        2
+      ],
+      "name": "llvm-behavior-candidate-acp-lineage-index-v2",
+      "path": "oracle/llvm-behavior-candidate-acp-lineage-index-v2.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "1c1401b348e49be8c2500cccb5a0a2d6e13f007ac2455a78da7c5e2a3325de71"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "llvm-behavior-candidate-execution-admission",
+      "path": "oracle/llvm-behavior-candidate-execution-admission.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "4322af2af7b02b4b57e7bf6453feb7d6377d98c707d2ac799bcedc22bc0daef7"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "llvm-behavior-candidate-observations",
+      "path": "oracle/llvm-behavior-candidate-observations.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "d1524552b7296d110e2e544fe238831315d3bdc6d25d409a1a120cfe202ba537"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "llvm-behavior-case-ownership",
+      "path": "oracle/llvm-behavior-case-ownership.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "9dc549d07164e8a85080c39ca6d3db4e0f81b7bba7f2eac0eca265d337adfc57"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "llvm-behavior-comparison-assessment",
+      "path": "oracle/llvm-behavior-comparison-assessment.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "4522164763a045758443a70b06ea01c31b93c8bf84a3f5aae2f865babdadb172"
+    },
+    {
+      "formatVersions": [
+        2
+      ],
+      "name": "llvm-behavior-hosted-clean-build-v2",
+      "path": "oracle/llvm-behavior-hosted-clean-build-v2.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "327c964163c2c76a42fe890b780abe44c76183e5a4b07156e4a4a10cfed620a1"
+    },
+    {
+      "formatVersions": [
+        2
+      ],
+      "name": "llvm-behavior-native-sandbox-policy-v2",
+      "path": "oracle/llvm-behavior-native-sandbox-policy-v2.schema.json",
+      "registration": "separate-non-authoritative-validator",
+      "schemaSha256": "bdce127600546944a3545682c22983383a348aa5a453fa823292fd176bb6f079",
+      "scopeNote": "Separate non-authoritative native-helper policy; its validator is intentionally outside the shared OracleSchemas authority."
+    },
+    {
+      "formatVersions": [
+        2
+      ],
+      "name": "llvm-behavior-reference-input-plan-v2",
+      "path": "oracle/llvm-behavior-reference-input-plan-v2.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "e96f2bf456f363150a2ea8a9368831b534b413e8c1d1159c5994c3750c36ce23"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "llvm-behavior-runtime-preflight",
+      "path": "oracle/llvm-behavior-runtime-preflight.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "4dc5d7dd5004c02634b405bd2e82c0742161b558daf5c14e3bb5feeb4151255e"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "llvm/source-lock",
+      "path": "oracle/llvm/source-lock.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "1ef54e2219fd649a4cf7b7043ec6bb723b5b3ff50104e7e03fd1d3c798da3048"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "oracle-manifest",
+      "path": "oracle/oracle-manifest.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "f75499d2b24ac755576dbc62c8a39d5be324c1404743cfcdb8b7ab3765522521"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "recovered-structure",
+      "path": "oracle/recovered-structure.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "2eb0a381ab58c0b375b4ba18e370b0ac4490ee4b27cf8971f60eec54ea9d2e61"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "release-artifacts",
+      "path": "oracle/release-artifacts.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "3ff1c41f8fd784feafd6d4a53e5ff6ee0d944546bee0644a99208f8f35f2efa6"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "structural-identity-map",
+      "path": "oracle/structural-identity-map.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "a6dd8b23f8a7f8fcfc10d87c8bc38a944dd692b68e3c6cc766a2d97e6b3518b6"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "structural-identity-replay-receipt",
+      "path": "oracle/structural-identity-replay-receipt.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "2df831cb0cd83a84a699a1530076047b7b2f6dbf098ee522d9d567387c87adf4"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "structural-model-replay-receipt",
+      "path": "oracle/structural-model-replay-receipt.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "76f781c804926e22a820aa899fdccc9a76cf37a25abaea4a140822b09ea3b508"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "structural-oracle",
+      "path": "oracle/structural-oracle.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "db73af7f557adc2d55cccecbd95ecef55b051b8816b378d4991ef9da251dff4f"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "structural-score",
+      "path": "oracle/structural-score.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "b3f6029babee231264e1544c5180cef9b8be421514159755be546ada784a2fef"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "target-abi",
+      "path": "oracle/target-abi.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "e561725e47f94bbd45867f7a4aa3238124b3422d6c32fa4f7f0345f17ceb33ea"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "toolchain-reproduction",
+      "path": "oracle/toolchain-reproduction.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "6ea0b2f389225791da24b52a9f48d56b2f8a150e22612029156b36dfcf8a96c5"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "unassessed-recovery-population",
+      "path": "oracle/unassessed-recovery-population.schema.json",
+      "registration": "retained-outside-shared-catalog",
+      "schemaSha256": "f41bfd2f5ef84d6172d74e2dcfb80371379d542c34e85b151dd3b7a9dcce692a",
+      "scopeNote": "Retained format; no current Kotlin OracleSchemas consumer is registered for it."
+    }
+  ],
+  "sharedCatalogCount": 69
+}

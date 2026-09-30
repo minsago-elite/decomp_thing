@@ -44,6 +44,41 @@ class OracleArtifactsTest {
     }
 
     @Test
+    fun `canonical publication validates before atomic commit and hashes the canonical bytes`() {
+        val directory = createTempDirectory("oracle-canonical-artifact-").toAbsolutePath().normalize()
+        val target = directory.resolve("artifact.json")
+        val canonical = OracleJson.canonicalBytes(OracleJson.parse("""{"value":1}""".toByteArray()))
+
+        val published = OracleArtifacts.publishCanonical(target, canonical)
+        assertContentEquals(canonical, published.bytes)
+        assertEquals(OracleArtifacts.sha256(canonical), published.sha256)
+        assertContentEquals(canonical, OracleArtifacts.readCanonical(target).bytes)
+        assertEquals(OracleJson.parseCanonical(canonical), OracleJson.parseCanonical(published.bytes))
+
+        listOf(
+            """{"value":1,"value":2}""".toByteArray(),
+            """{"value":1}""".toByteArray(),
+            "{".toByteArray(),
+        ).forEach { rejected ->
+            assertFailsWith<OracleArtifactException> {
+                OracleArtifacts.publishCanonical(target, rejected)
+            }
+            assertContentEquals(canonical, target.readBytes())
+        }
+
+        assertFailsWith<OracleArtifactException> {
+            OracleArtifacts.readCanonical(
+                target,
+                jsonLimits = StrictJsonLimits(maximumNodes = 1),
+            )
+        }
+        assertContentEquals(canonical, target.readBytes())
+
+        target.writeBytes("""{"value":1}""".toByteArray())
+        assertFailsWith<OracleArtifactException> { OracleArtifacts.readCanonical(target) }
+    }
+
+    @Test
     fun `bounded reads reject oversized files and symbolic links`() {
         val directory = createTempDirectory("oracle-read-").toAbsolutePath().normalize()
         val target = directory.resolve("artifact.json")
