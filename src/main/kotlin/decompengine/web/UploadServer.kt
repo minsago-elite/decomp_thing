@@ -29,11 +29,19 @@ import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.project.ModuleReconstructor
 import decompengine.project.ReconstructionProfiles
 import decompengine.project.ReconstructionProfile
+import decompengine.project.verifyAcpExecutionReceiptDocument
+import decompengine.repair.TRACE_REPAIR_ACP_TASK_FIELD
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
@@ -770,13 +778,95 @@ class UploadServer(
         val source = runCatching { archiveEvidence.read(jobId, reportPrefix = view.reports.artifactPrefix).source }
             .recoverCatching { sourceEvidence.read(jobId, view.reports.artifactPrefix).view() }
         val progress = runCatching { readLegacyProgress(jobId, view.reports.runId) }.getOrNull()
+        val repairHistory = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.REPAIR_HISTORY)
+        val artifacts = runCatching { jobs.listArtifactSummaries(jobId, view.reports.runId) }.getOrNull()
+        val repairEvidenceStates = repairHistory?.let { history -> artifacts?.let {
+            repairEvidenceArtifactStates(jobId, view.reports, history, it)
+        } }
         exchange.sendHtml(200, renderJobDocument(view.job, view.reports, view.diagnostics, source.getOrNull(), source.isFailure,
             progressSnapshot = progress,
             explorationReport = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.EXPLORATION),
-            repairHistory = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.REPAIR_HISTORY),
+            repairHistory = repairHistory,
             reconstructionProgress = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.RECONSTRUCTION_PROGRESS),
-            artifacts = runCatching { jobs.listArtifactSummaries(jobId, view.reports.runId) }.getOrNull()))
+            artifacts = artifacts,
+            repairEvidenceArtifactStates = repairEvidenceStates))
     }
+
+    private data class RepairReceiptExpectation(
+        val receiptSha256: String,
+        val requestSha256: String,
+        val resultChangesSha256: String,
+        val terminalOutcome: String,
+        val releaseComplete: Boolean,
+        val attemptId: String,
+    )
+
+    /**
+     * The history projection supplies paths, never authority. Links and these bounded integrity
+     * reads are limited to the same checked artifact listing used by the download route.
+     */
+    private fun repairEvidenceArtifactStates(
+        jobId: String,
+        context: WebReportContext,
+        history: JsonObject,
+        artifacts: List<WebArtifactSummary>,
+    ): Map<String, RepairEvidenceArtifactState> {
+        val references = linkedMapOf<String, RepairReceiptExpectation?>()
+        val invalidReceiptBindings = mutableSetOf<String>()
+        for (iteration in (history["iterations"] as? JsonArray).orEmpty()) {
+            val record = iteration as? JsonObject ?: continue
+            for (field in listOf("before", "after")) {
+                val evidence = record[field] as? JsonObject ?: continue
+                val artifactPath = (evidence["artifactPath"] as? JsonPrimitive)?.contentOrNull
+                val target = safeRepairEvidenceTarget(artifactPath, context, artifacts)
+                    ?: continue
+                if (!references.containsKey(target)) references[target] = null
+            }
+            val binding = record["agentInvocation"] as? JsonObject ?: continue
+            val receiptPath = (binding["receiptPath"] as? JsonPrimitive)?.contentOrNull ?: continue
+            val target = safeRepairEvidenceTarget(receiptPath, context, artifacts) ?: continue
+            val attemptId = (record["revisionId"] as? JsonPrimitive)?.contentOrNull
+                ?.takeIf { it.matches(Regex("revision_[0-9]{8}_[a-f0-9]{16}")) }
+            val expectation = if (attemptId == null) null else runCatching {
+                RepairReceiptExpectation(
+                    requireNotNull((binding["receiptSha256"] as? JsonPrimitive)?.contentOrNull),
+                    requireNotNull((binding["requestSha256"] as? JsonPrimitive)?.contentOrNull),
+                    requireNotNull((binding["resultChangesSha256"] as? JsonPrimitive)?.contentOrNull),
+                    requireNotNull((binding["terminalOutcome"] as? JsonPrimitive)?.contentOrNull),
+                    requireNotNull((binding["receiptReleaseComplete"] as? JsonPrimitive)?.booleanOrNull),
+                    attemptId,
+                )
+            }.getOrNull()
+            references[target] = expectation
+            if (expectation == null) invalidReceiptBindings += target
+        }
+
+        return references.mapValues { (relativePath, receipt) ->
+            val bytes = try { jobs.readArtifact(jobId, relativePath, MAX_REPAIR_EVIDENCE_PRESENTATION_BYTES).bytes }
+                catch (_: Exception) { return@mapValues RepairEvidenceArtifactState.UNAVAILABLE }
+            if (relativePath in invalidReceiptBindings) {
+                RepairEvidenceArtifactState.CORRUPT
+            } else if (receipt != null) {
+                val valid = runCatching {
+                    require(sha256Hex(bytes) == receipt.receiptSha256)
+                    val verified = verifyAcpExecutionReceiptDocument(
+                        bytes, "repair", TRACE_REPAIR_ACP_TASK_FIELD, receipt.attemptId,
+                    )
+                    require(verified.requestSha256 == receipt.requestSha256)
+                    require(verified.resultChangesSha256 == receipt.resultChangesSha256)
+                    require(verified.terminalOutcome == receipt.terminalOutcome)
+                    require(verified.releaseComplete == receipt.releaseComplete)
+                }.isSuccess
+                if (valid) RepairEvidenceArtifactState.AVAILABLE else RepairEvidenceArtifactState.CORRUPT
+            } else if (relativePath.endsWith(".json")) {
+                if (runCatching { decompengine.oracle.core.OracleJson.parse(bytes) }.isSuccess)
+                    RepairEvidenceArtifactState.AVAILABLE else RepairEvidenceArtifactState.CORRUPT
+            } else RepairEvidenceArtifactState.AVAILABLE
+        }
+    }
+
+    private fun sha256Hex(bytes: ByteArray): String = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(bytes).joinToString("") { "%02x".format(it) }
 
     private enum class LegacyJsonReport(val filename: String) {
         EXPLORATION("exploration.json"), REPAIR_HISTORY("repair_history.json"),
@@ -835,6 +925,7 @@ class UploadServer(
 
     private companion object {
         const val MAX_ARTIFACT_BYTES = 64L * 1024 * 1024
+        const val MAX_REPAIR_EVIDENCE_PRESENTATION_BYTES = 16L * 1024 * 1024
     }
 }
 

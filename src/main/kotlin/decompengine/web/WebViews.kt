@@ -9,6 +9,8 @@ import decompengine.jobs.JobRecoveryInventory
 import decompengine.jobs.toJson
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
@@ -215,9 +217,10 @@ fun renderJob(job: Job, reportContext: WebReportContext? = null,
     sourceTree: SourceTreeView? = null, sourceTreeUnavailable: Boolean = false,
     progressSnapshot: JsonObject? = null, explorationReport: JsonObject? = null,
     repairHistory: JsonObject? = null, reconstructionProgress: JsonObject? = null,
-    artifacts: List<WebArtifactSummary>? = null): String = renderJobDocument(
+    artifacts: List<WebArtifactSummary>? = null,
+    repairEvidenceArtifactStates: Map<String, RepairEvidenceArtifactState>? = null): String = renderJobDocument(
     job, reportContext, diagnostics, sourceTree, sourceTreeUnavailable, progressSnapshot, explorationReport,
-    repairHistory, reconstructionProgress, artifacts,
+    repairHistory, reconstructionProgress, artifacts, repairEvidenceArtifactStates,
 ).body
 
 internal fun renderJobDocument(job: Job, reportContext: WebReportContext? = null,
@@ -225,7 +228,8 @@ internal fun renderJobDocument(job: Job, reportContext: WebReportContext? = null
     sourceTree: SourceTreeView? = null, sourceTreeUnavailable: Boolean = false,
     progressSnapshot: JsonObject? = null, explorationReport: JsonObject? = null,
     repairHistory: JsonObject? = null, reconstructionProgress: JsonObject? = null,
-    artifacts: List<WebArtifactSummary>? = null): WebApplicationDocument {
+    artifacts: List<WebArtifactSummary>? = null,
+    repairEvidenceArtifactStates: Map<String, RepairEvidenceArtifactState>? = null): WebApplicationDocument {
     requirePublicElfCategories(job.metadata)
     val reports = reportsFor(job, reportContext)
     val active = job.status in setOf("queued", "analyzing")
@@ -335,7 +339,8 @@ internal fun renderJobDocument(job: Job, reportContext: WebReportContext? = null
             ${renderAgentProgress(progressSnapshot)}
             ${sourceTree?.let { renderSourceTree(job, it, reports) }.orEmpty()}
             ${if (sourceTreeUnavailable) "<section class=\"panel\"><p>Source-tree evidence is unavailable or has not been generated for this revision.</p></section>" else ""}
-            ${runCatching { renderRepairHistory(job, reports, repairHistory) }.getOrElse { renderRepairHistory(job, reports, null) }}
+            ${runCatching { renderRepairHistory(job, reports, repairHistory, artifacts, repairEvidenceArtifactStates) }
+                .getOrElse { renderRepairHistory(job, reports, null, artifacts, null) }}
             ${renderArtifacts(job, artifacts)}
           </main>
         """.trimIndent(),
@@ -534,46 +539,142 @@ private fun renderExploration(job: Job, reports: WebReportContext, root: JsonObj
     """.trimIndent()
 }
 
-fun renderRepairHistory(job: Job, reportContext: WebReportContext? = null, payload: JsonObject? = null): String {
-    if (payload == null) return "<section class=\"panel history-panel\"><h2>Repair history</h2><p>Repair history is unavailable or has not been generated for this attempt.</p></section>"
+fun renderRepairHistory(
+    job: Job,
+    reportContext: WebReportContext? = null,
+    payload: JsonObject? = null,
+    authorizedArtifacts: List<WebArtifactSummary>? = null,
+    artifactStates: Map<String, RepairEvidenceArtifactState>? = null,
+): String {
+    if (payload == null) return "<section class=\"panel history-panel\"><h2>Repair history</h2><p>Repair history is unavailable or corrupt.</p></section>"
+    val reports = reportsFor(job, reportContext)
     val iterations = payload["iterations"] as? JsonArray ?: JsonArray(emptyList())
     val runs = (payload["runs"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
     val runItems = runs.joinToString("") { run ->
         val label = repairRunLabel(run.historyText("status"))
-        "<p class=\"repair-run\">Run ${run.historyText("id").orEmpty().escapeHtml()}: ${label.escapeHtml()} · " +
-            "${run.historyText("attemptedCount").orEmpty().escapeHtml()}/${run.historyText("maximumAttempts").orEmpty().escapeHtml()} attempts" +
-            "<br>Accepted revision: <code>${(run.historyText("acceptedHeadId") ?: "none").escapeHtml()}</code></p>"
+        val attempted = run.historyCount("attemptedCount")
+        val maximum = run.historyCount("maximumAttempts")
+        val accepted = safeRevisionIdentity(run.historyText("acceptedHeadId"))
+        "<p class=\"repair-run\">Repair run: ${label.escapeHtml()} · $attempted/$maximum attempts" +
+            "<br>Accepted revision: <code>${accepted.escapeHtml()}</code></p>"
     }
-    if (iterations.isEmpty() && runs.isEmpty()) return ""
+    if (iterations.isEmpty() && runs.isEmpty()) return "<section class=\"panel history-panel\"><h2>Repair history</h2><p>No repair attempts are recorded.</p></section>"
     val items = iterations.mapNotNull { it as? JsonObject }.joinToString("") { iteration ->
-        val index = iteration.text("index").ifBlank { "?" }
-        val failureKind = iteration.text("failureKind").ifBlank { "unknown" }
-        val summary = iteration.text("summary")
-        val regressions = (iteration["retainedRegressionIds"] as? JsonArray)
-            ?.joinToString(", ") { it.jsonPrimitive.content.escapeHtml() }.orEmpty()
-        val before = renderEvidence("Before", iteration["before"] as? JsonObject)
-        val after = renderEvidence("After", iteration["after"] as? JsonObject)
+        val index = iteration.historyCount("index", allowZero = false).let { if (it == "0") "?" else it }
+        val failureKind = safeRepairFailureKind(iteration.historyText("failureKind"))
+        val regressions = (iteration["retainedRegressionIds"] as? JsonArray)?.size ?: 0
+        val before = renderEvidence("Before", iteration["before"] as? JsonObject, job, reports, authorizedArtifacts, artifactStates)
+        val after = renderEvidence("After", iteration["after"] as? JsonObject, job, reports, authorizedArtifacts, artifactStates)
         val outcome = repairAttemptLabel(iteration)
-        val revision = iteration.historyText("revisionId")?.let {
-            "<p>Attempt revision: <code>${it.escapeHtml()}</code></p>"
-        }.orEmpty()
-        "<article class=\"history-item\"><div class=\"history-index\" aria-label=\"Iteration ${index.escapeHtml()}\">${index.escapeHtml()}</div><div><div class=\"history-title\"><strong>${failureKind.escapeHtml()} — $outcome</strong>${statusPill(outcome)}</div><p>${summary.escapeHtml()}</p>$revision$before$after<p class=\"regressions\"><b>Retained:</b> $regressions</p></div></article>"
+        val revision = safeRevisionIdentity(iteration.historyText("revisionId"))
+        val rollback = repairRollbackLabel(iteration)
+        val assurance = repairEvidenceAssurance(iteration, reports, authorizedArtifacts, artifactStates)
+        """<article class="history-item"><div class="history-index" aria-label="Attempt $index">$index</div><div>
+          <div class="history-title"><strong>$failureKind — ${outcome.escapeHtml()}</strong>${statusPill(outcome)}</div>
+          <p>Attempt revision: <code>${revision.escapeHtml()}</code></p>
+          <p>Rollback: ${rollback.escapeHtml()}</p><p>Evidence assurance: ${assurance.escapeHtml()}</p>
+          $before$after<p class="regressions"><b>Retained regression cases:</b> $regressions</p>
+        </div></article>""".trimIndent()
     }
     return """
       <section class="panel history-panel">
         <div class="section-heading compact"><span class="step">04</span><div><p class="kicker">Iteration log</p><h2>Repair History</h2></div></div>
         $runItems
         <div class="history-list">$items</div>
+        <p class="history-privacy-note">Prompts, source contents, diagnostics, and peer text are withheld. Retained evidence links use the job’s checked artifact access.</p>
       </section>
     """.trimIndent()
 }
 
-private fun renderEvidence(label: String, evidence: JsonObject?): String {
+private fun renderEvidence(
+    label: String,
+    evidence: JsonObject?,
+    job: Job,
+    reports: WebReportContext,
+    authorizedArtifacts: List<WebArtifactSummary>?,
+    artifactStates: Map<String, RepairEvidenceArtifactState>?,
+): String {
     if (evidence == null) return ""
-    val kind = evidence.text("kind")
-    val summary = evidence.text("summary")
-    val artifact = evidence.text("artifactPath")
-    return "<p class=\"evidence-line\"><b>$label:</b><span>${kind.escapeHtml()} — ${summary.escapeHtml()}</span>${if (artifact.isBlank()) "" else "<code>${artifact.escapeHtml()}</code>"}</p>"
+    val kind = safeRepairEvidenceKind(evidence.historyText("kind"))
+    val path = evidence.historyText("artifactPath")
+    val target = safeRepairEvidenceTarget(path, reports, authorizedArtifacts)
+    val artifact = when {
+        path.isNullOrBlank() -> "Evidence artifact was not retained."
+        target == null -> "Evidence artifact is unavailable."
+        artifactStates == null -> "Evidence artifact is unavailable."
+        artifactStates[target] == RepairEvidenceArtifactState.CORRUPT -> "Retained evidence is corrupt."
+        artifactStates[target] == RepairEvidenceArtifactState.UNAVAILABLE || artifactStates[target] == null ->
+            "Retained evidence is unavailable."
+        else -> "<a href=\"${artifactHref(job, target)}\">Open retained evidence</a>"
+    }
+    return "<p class=\"evidence-line\"><b>${label.escapeHtml()}:</b> ${kind.escapeHtml()} evidence · $artifact</p>"
+}
+
+private fun safeRepairFailureKind(value: String?): String = when (value) {
+    "compile" -> "Compile repair"
+    "behavior" -> "Behavior repair"
+    else -> "Repair attempt"
+}
+
+private fun safeRepairEvidenceKind(value: String?): String = when (value) {
+    "compile", "compile-valid" -> "Build validation"
+    "behavior", "valid" -> "Behavior validation"
+    "retained-regression" -> "Regression validation"
+    "crash-recovery" -> "Recovery"
+    "no-validated-improvement" -> "Validation"
+    else -> "Repair"
+}
+
+private fun safeRevisionIdentity(value: String?): String =
+    value?.takeIf { it == "root" || it == "baseline" || it.matches(Regex("revision_[0-9]{8}_[a-f0-9]{16}")) }
+        ?: "unavailable"
+
+private fun JsonObject.historyCount(name: String, allowZero: Boolean = true): String =
+    historyText(name)?.toIntOrNull()?.takeIf { if (allowZero) it in 0..100_000 else it in 1..100_000 }?.toString() ?: "0"
+
+private fun repairRollbackLabel(iteration: JsonObject): String = when (iteration.historyText("disposition")) {
+    "rejected" -> "Completed; the rejected candidate did not advance the source head."
+    "fully_accepted" -> if (repairAttemptLabel(iteration) == "accepted") {
+        "Not required; the candidate was accepted."
+    } else "Unverified; the accepted disposition lacks a complete canonical assessment."
+    "provisional" -> "Not confirmed; the candidate remains provisional."
+    "legacy_unverified" -> "Unverified; the legacy record does not establish rollback."
+    else -> when (repairAttemptLabel(iteration)) {
+        "pending" -> "Pending; completion is not recorded."
+        else -> "Unverified; completion or failure is not recorded."
+    }
+}
+
+private fun repairEvidenceAssurance(
+    iteration: JsonObject,
+    reports: WebReportContext,
+    authorizedArtifacts: List<WebArtifactSummary>?,
+    artifactStates: Map<String, RepairEvidenceArtifactState>?,
+): String {
+    return when (iteration.historyText("publicationMode")) {
+        "test_only_non_release" -> "Test-only evidence; release completeness is not established."
+        "acp_release" -> {
+            val invocation = iteration["agentInvocation"] as? JsonObject
+            val receiptPath = invocation?.historyText("receiptPath")
+            val receiptTarget = safeRepairEvidenceTarget(receiptPath, reports, authorizedArtifacts)
+            val receiptState = receiptTarget?.let { artifactStates?.get(it) }
+            when (receiptState) {
+                RepairEvidenceArtifactState.CORRUPT -> "ACP receipt is corrupt; release completeness is not established."
+                RepairEvidenceArtifactState.UNAVAILABLE, null -> "ACP receipt is unavailable; release completeness is not established."
+                RepairEvidenceArtifactState.AVAILABLE -> {
+                    val receiptComplete = (invocation?.get("receiptReleaseComplete") as? JsonPrimitive)?.booleanOrNull == true &&
+                        invocation.historyText("terminalOutcome") == "returned-completed"
+                    val accepted = repairAttemptLabel(iteration) == "accepted"
+                    when {
+                        !receiptComplete -> "ACP receipt is available but does not establish release completeness."
+                        accepted -> "Release-complete ACP evidence; the retained receipt was verified."
+                        else -> "ACP receipt is complete, but repair release acceptance was not established."
+                    }
+                }
+            }
+        }
+        else -> "Evidence assurance is unavailable; release completeness is not recorded."
+    }
 }
 
 private fun renderArtifacts(job: Job, artifacts: List<WebArtifactSummary>?): String {
@@ -629,7 +730,7 @@ private fun renderReconstructionProgress(progress: JsonObject?): String {
 }
 
 private fun reportsFor(job: Job, supplied: WebReportContext?): WebReportContext =
-    supplied ?: WebReportContext(job.binaryPath.parent.resolve("reports"))
+    supplied ?: WebReportContext(job.binaryPath.toAbsolutePath().parent.resolve("reports"))
 
 private fun metric(label: String, value: String, detail: String, score: Double? = null): String {
     val gauge = score?.let {

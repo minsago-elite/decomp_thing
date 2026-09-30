@@ -3,6 +3,8 @@ package decompengine.repair
 import decompengine.binary.ElfMetadata
 import decompengine.jobs.Job
 import decompengine.presentRepairOutcome
+import decompengine.web.RepairEvidenceArtifactState
+import decompengine.web.WebArtifactSummary
 import decompengine.web.renderRepairHistory
 import java.nio.file.Path
 import kotlinx.serialization.json.*
@@ -11,7 +13,7 @@ import kotlin.test.*
 class RepairHistoryPresentationTest {
     private val job = Job("fixture", "fixture", "complete", "now", sizeBytes = 0, binaryPath = Path.of("fixture"),
         metadata = ElfMetadata("ELF64", "little", 1u, "fixture", "executable", "fixture", 0uL, 0u, 0u, 0u, 0u))
-    private val run = RepairRunState("run_00000001", RepairRunStatus.REJECTED, "baseline", "revision_prior",
+    private val run = RepairRunState("run_00000001", RepairRunStatus.REJECTED, "baseline", "revision_00000001_aaaaaaaaaaaaaaaa",
         null, "a".repeat(64), 10, 1, 1, 2)
 
     @Test fun `persisted canonical outcomes have matching distinct CLI and web labels`() {
@@ -38,7 +40,7 @@ class RepairHistoryPresentationTest {
             val iteration = RepairIteration(7, "fixture", "", "", emptyList(), emptyList(),
                 // Deliberately contradictory legacy success cannot override the canonical assessment.
                 succeeded = true, agentInvocation = binding, disposition = disposition,
-                revisionId = "revision_candidate", runId = run.id,
+                revisionId = "revision_00000002_bbbbbbbbbbbbbbbb", runId = run.id,
                 after = if (expected == "validation-failed") RepairEvidence("assessment-error", "fixture") else null)
             val payload = Json.parseToJsonElement(renderRepairHistoryProjection(listOf(iteration), emptyList(),
                 MAXIMUM_REPAIR_PROJECTION_BYTES, runs = listOf(run))).jsonObject
@@ -47,11 +49,11 @@ class RepairHistoryPresentationTest {
             val cli = presentRepairOutcome(RepairRunOutcome(listOf(iteration), null, run))
             assertTrue(cli.lines.contains("repair iteration 7: $expected"), cli.toString())
             val html = renderRepairHistory(job, payload = payload)
-            assertTrue(html.contains("fixture — $expected"), html)
-            assertTrue(html.contains("Accepted revision: <code>revision_prior</code>"), html)
-            assertTrue(html.contains("Attempt revision: <code>revision_candidate</code>"), html)
-            assertFalse(html.contains("Accepted revision: <code>revision_candidate</code>"))
-            assertTrue(cli.lines.contains("accepted revision: revision_prior"))
+            assertTrue(html.contains("Repair attempt — $expected"), html)
+            assertTrue(html.contains("Accepted revision: <code>revision_00000001_aaaaaaaaaaaaaaaa</code>"), html)
+            assertTrue(html.contains("Attempt revision: <code>revision_00000002_bbbbbbbbbbbbbbbb</code>"), html)
+            assertFalse(html.contains("Accepted revision: <code>revision_00000002_bbbbbbbbbbbbbbbb</code>"))
+            assertTrue(cli.lines.contains("accepted revision: revision_00000001_aaaaaaaaaaaaaaaa"))
         }
     }
 
@@ -101,9 +103,9 @@ class RepairHistoryPresentationTest {
             val payload = Json.parseToJsonElement(renderRepairHistoryProjection(emptyList(), emptyList(),
                 MAXIMUM_REPAIR_PROJECTION_BYTES, runs = listOf(state))).jsonObject
             val html = renderRepairHistory(job, payload = payload)
-            assertTrue(html.contains("run_00000001: $label"), html)
+            assertTrue(html.contains("Repair run: $label"), html)
             assertTrue(html.contains("0/10 attempts"), html)
-            assertTrue(html.contains("Accepted revision: <code>revision_prior</code>"), html)
+            assertTrue(html.contains("Accepted revision: <code>revision_00000001_aaaaaaaaaaaaaaaa</code>"), html)
             assertTrue(presentRepairOutcome(RepairRunOutcome(emptyList(), null, state)).lines.first().contains(": $label"))
         }
     }
@@ -113,9 +115,42 @@ class RepairHistoryPresentationTest {
             "acceptedHeadId":"<prior>","attemptedCount":9,"maximumAttempts":10}],
             "iterations":[{"index":9,"succeeded":true,"revisionId":"<candidate>"}]}""").jsonObject
         val html = renderRepairHistory(job, payload = payload)
-        assertTrue(html.contains("unknown — unverified"), html)
-        assertTrue(html.contains("Accepted revision: <code>&lt;prior&gt;</code>"), html)
-        assertTrue(html.contains("Attempt revision: <code>&lt;candidate&gt;</code>"), html)
+        assertTrue(html.contains("Repair attempt — unverified"), html)
+        assertTrue(html.contains("Accepted revision: <code>unavailable</code>"), html)
+        assertTrue(html.contains("Attempt revision: <code>unavailable</code>"), html)
         assertFalse(html.contains("<prior>") || html.contains("<candidate>"))
+    }
+
+    @Test fun `history shows bounded rollback and evidence assurance without peer text`() {
+        val payload = Json.parseToJsonElement("""{
+            "iterations":[{
+                "index":4,"failureKind":"behavior","summary":"PRIVATE summary","prompt":"PRIVATE prompt",
+                "succeeded":false,"disposition":"rejected","publicationMode":"test_only_non_release",
+                "revisionId":"revision_00000004_cccccccccccccccc",
+                "retainedRegressionIds":["PRIVATE case"],
+                "before":{"kind":"behavior","summary":"PRIVATE before","artifactPath":"reports/before.diff.json"},
+                "after":{"kind":"valid","summary":"PRIVATE after","artifactPath":"reports/foreign.json"}
+            }]
+        }""").jsonObject
+        val artifacts = listOf(WebArtifactSummary("reports/before.diff.json", "before.diff.json", 30))
+        val html = renderRepairHistory(job, payload = payload, authorizedArtifacts = artifacts,
+            artifactStates = mapOf("reports/before.diff.json" to RepairEvidenceArtifactState.CORRUPT))
+
+        assertTrue(html.contains("Rollback: Completed; the rejected candidate did not advance the source head."), html)
+        assertTrue(html.contains("Test-only evidence; release completeness is not established."), html)
+        assertTrue(html.contains("Retained evidence is corrupt."), html)
+        assertTrue(html.contains("Evidence artifact is unavailable."), html)
+        assertTrue(html.contains("Retained regression cases:</b> 1"), html)
+        listOf("PRIVATE summary", "PRIVATE prompt", "PRIVATE case", "PRIVATE before", "PRIVATE after", "foreign.json")
+            .forEach { assertFalse(html.contains(it), html) }
+    }
+
+    @Test fun `accepted outcome stays accepted while a missing receipt withholds completeness`() {
+        val accepted = canonicalAcceptedJson()
+        val payload = JsonObject(mapOf("iterations" to JsonArray(listOf(accepted))))
+        val html = renderRepairHistory(job, payload = payload)
+
+        assertTrue(html.contains("Repair attempt — accepted"), html)
+        assertTrue(html.contains("ACP receipt is unavailable; release completeness is not established."), html)
     }
 }
