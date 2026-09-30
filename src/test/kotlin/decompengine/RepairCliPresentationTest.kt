@@ -52,7 +52,7 @@ class RepairCliPresentationTest {
             disposition = RepairAttemptDisposition.PROVISIONAL)
         val shown = presentRepairOutcome(outcome(RepairRunStatus.ITERATION_EXHAUSTED, null).copy(
             iterations = (1..40).map { iteration.copy(index = it) }))
-        assertEquals(23, shown.lines.size)
+        assertEquals(24, shown.lines.size)
         assertTrue(shown.lines.any { it.contains("20 earlier iterations omitted") })
         assertTrue(shown.lines.any { it == "repair iteration 40: provisional" })
         assertFalse(shown.lines.joinToString("\n").contains("private"))
