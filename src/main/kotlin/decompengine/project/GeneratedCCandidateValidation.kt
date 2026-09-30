@@ -1,8 +1,8 @@
 package decompengine.project
 
 /** Attribution reads retained C syntax, so preprocessing must not hide or rename its definitions. */
-internal fun generatedCAttributionPreprocessorIssue(source: String): String? =
-    GeneratedCCandidateValidation.preprocessorAttributionIssue(source)
+internal fun generatedCAttributionPreprocessorIssue(source: String, allowIncludes: Boolean = true): String? =
+    GeneratedCCandidateValidation.preprocessorAttributionIssue(source, allowIncludes)
 
 /** Generated-C source checks. Invocation and release acceptance remain in orchestration. */
 internal object GeneratedCCandidateValidation {
@@ -147,9 +147,10 @@ internal object GeneratedCCandidateValidation {
         } == true
 
     /** A linear lexical guard, not a preprocessor: even a known-looking #if condition is rejected. */
-    internal fun preprocessorAttributionIssue(source: String): String? = preprocessorAttributionIssue(attributionLexicalView(source))
+    internal fun preprocessorAttributionIssue(source: String, allowIncludes: Boolean = true): String? =
+        preprocessorAttributionIssue(attributionLexicalView(source), allowIncludes)
 
-    private fun preprocessorAttributionIssue(lexical: AttributionLexicalView): String? {
+    private fun preprocessorAttributionIssue(lexical: AttributionLexicalView, allowIncludes: Boolean = true): String? {
         if (lexical.spliceOutsideLiteral) {
             return "escaped physical lines require preprocessing before definition attribution"
         }
@@ -162,6 +163,7 @@ internal object GeneratedCCandidateValidation {
                 else -> continue
             }
             val directive = text.drop(markerLength).trimStart()
+            if (!allowIncludes) return "preprocessing directives are unsupported in recovered type declarations"
             if (directive.isEmpty()) continue // A null directive cannot alter a definition.
             val name = directive.takeWhile { it.isLetterOrDigit() || it == '_' }
             if (name != "include") return "preprocessing directive #${name.ifEmpty { "<unknown>" }} is unsupported"

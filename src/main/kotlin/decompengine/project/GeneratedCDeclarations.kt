@@ -154,7 +154,8 @@ internal class GeneratedCDeclarationContext(types: List<RecoveredType>) {
             require(type.declaration.length <= 1024 * 1024 && characters <= 64L * 1024 * 1024) {
                 "typedef context exceeds its source bounds"
             }
-            require(cDeclarationTokens(type.declaration).none { it.text == "#" }) {
+            require(generatedCAttributionPreprocessorIssue(type.declaration, allowIncludes = false) == null &&
+                cDeclarationTokens(type.declaration).none { it.text == "#" }) {
                 "preprocessor-dependent type declarations cannot establish a typedef shape"
             }
             for (statement in splitCTypeSource(type.declaration, ";")) {
@@ -487,7 +488,8 @@ private fun zeroExpressionEnd(tokens: List<CToken>, start: Int): Int? {
             else -> break
         }
     }
-    if (tokens.getOrNull(cursor)?.text?.matches(cIntegerZeroLiteral) != true) return null
+    val literal = tokens.getOrNull(cursor)?.text ?: return null
+    if (!literal.matches(cIntegerZeroLiteral) && !literal.matches(cFloatingZeroLiteral)) return null
     cursor++
     repeat(parentheses) {
         if (tokens.getOrNull(cursor)?.text != ")") return null
@@ -496,7 +498,21 @@ private fun zeroExpressionEnd(tokens: List<CToken>, start: Int): Int? {
     return cursor
 }
 
-private val cIntegerZeroLiteral = Regex("(?i)(?:0+|0x0+)(?:u(?:l{1,2})?|l{1,2}u?)?")
+// The strict profile does not enable -pedantic: GCC/Clang numeric extensions also
+// compile, so they must not provide alternate spellings for a zero placeholder.
+private const val cIntegerSuffix = "(?:u(?:l{1,2}|wb)?|(?:l{1,2}|wb)u?)"
+private const val cFloatingSuffix = "(?:[fldqw]|f(?:16|32|64|128)x?|bf16|d[fdl])"
+private val cIntegerZeroLiteral = Regex(
+    "(?i)(?:0+|0x0+|0b0+)(?:$cIntegerSuffix[ij]?|[ij](?:$cIntegerSuffix)?)?",
+)
+
+// Match exact zero significands rather than converting to a JVM floating value: conversion
+// would underflow small nonzero C constants and wrongly classify real evidence as a stub.
+private val cFloatingZeroLiteral = Regex(
+    "(?i)(?:(?:0+\\.0*|\\.0+)(?:e[+-]?[0-9]+)?|0+e[+-]?[0-9]+|" +
+        "0x(?:0+(?:\\.0*)?|\\.0+)p[+-]?[0-9]+)" +
+        "(?:$cFloatingSuffix[ij]?|[ij](?:$cFloatingSuffix)?)?",
+)
 
 private fun parenthesizedIdentifierEnd(tokens: List<CToken>, start: Int, name: String): Int? {
     var cursor = start
@@ -856,6 +872,14 @@ private fun cDeclarationTokens(
                 source.getOrNull(cursor + symbolicName.length)?.let { !it.isLetterOrDigit() && it != '_' } != false -> {
                 cursor += symbolicName.length
                 result += CToken(symbolicName, start, cursor)
+            }
+            source[cursor].isDigit() || (source[cursor] == '.' && source.getOrNull(cursor + 1)?.isDigit() == true) -> {
+                // Keep a C preprocessing-number together, including decimal points and signed
+                // exponents. The zero recognizer then validates the entire numeric spelling.
+                cursor++
+                while (cursor < source.length && (source[cursor].isLetterOrDigit() || source[cursor] in "_." ||
+                    (source[cursor] in "+-" && source[cursor - 1] in "eEpP"))) cursor++
+                result += CToken(source.substring(start, cursor), start, cursor)
             }
             source[cursor].isLetterOrDigit() || source[cursor] == '_' -> {
                 do { cursor++ } while (cursor < source.length && (source[cursor].isLetterOrDigit() || source[cursor] == '_'))

@@ -81,6 +81,54 @@ class GeneratedCPlaceholderValidationTest {
     }
 
     @Test
+    fun `floating zero spellings cannot disguise direct or typed return placeholders`() {
+        val function = function("double convert(void)", "double convert(void) { return observe(); }")
+        for (zero in listOf("0.0", "0.0f", "0.L", ".0", "00.000F", "0e0", "0E+12L", "0.0e-9000",
+            "0x0p0", "0X00.00P+12F", "0x.0p-4L", "-(0.0)", "+(.0f)",
+            "0.0f128", "0.0f64", "0.0f32", "0.0f32x", "0.0f64x", "0.0df", "0.0dd", "0.0dl",
+            "0.0q", "0.0Q", "0.0w", "0.0d", "0.0D", "0.0bf16", "0.0f16", "0.0f64i", "0.0if64",
+            "0.0i", "0.0j", "0.0fi", "0.0if", "0.0Li", "0.0iL", "0i", "0Ui", "0iU",
+            "0b0", "0B00", "0wb", "0uwb", "0wbu", "0ULLi")) {
+            for (body in listOf("return $zero;", "double candidate = $zero; return candidate;",
+                "double candidate = {$zero,}; ; return ((candidate));")) {
+                assertTrue(assess(function, body).any {
+                    it.code == "generic-return-placeholder" && it.entityIds == listOf("fn_convert")
+                }, body)
+            }
+        }
+        // Do not underflow nonzero constants, join separated tokens, or erase side effects.
+        for (value in listOf("0.1", "1e-9999", "0x1p-9999", "0x0.1p0", "0.0 + observe()",
+            "0 .0", "0/* gap */.0", "0e + 0", "0.0ff", "0x0.0", "0f", "0.0foo",
+            "0.1f128", "1e-9999df", "0.1i", "0.1q", "0.1bf16", "0b1", "1wb", "1uwb")) {
+            assertFalse(isGeneratedCSimpleReturnBody("return $value;"), value)
+            assertFalse(isGeneratedCPlaceholderBody(function, "double candidate = $value; return candidate;"), value)
+        }
+        for (body in listOf("return 0.0;", "double candidate = -0x0p0; return candidate;")) {
+            assertTrue(assess(function.copy(decompiledC = "double convert(void) { $body }"), body)
+                .none { it.code == "generic-return-placeholder" }, body)
+        }
+    }
+
+    @Test
+    fun `floating zero candidates compile but remain unresolved at generation admission`() {
+        for (type in listOf("float", "double", "long double")) {
+            val prototype = "$type convert(void)"
+            val input = model(function(prototype, "$prototype { return 1.5; }"), main())
+            val project = project()
+            val manifest = SourceTreeGenerator.generate(input, project, reconstructor = ModuleReconstructor { request ->
+                val evidence = EvidenceModuleReconstructor().reconstruct(request)
+                evidence.copy(source = evidence.source.replace("= {0};", "= 0.0f;"),
+                    generator = "scripted-agent", issues = emptyList())
+            })
+            assertTrue("fn_convert" in manifest.unresolvedImplementationIds, type)
+            assertTrue(Files.walk(project.resolve("reports/modules")).use { paths ->
+                paths.filter { it.toString().endsWith(".json") }.toList().any { it.readText().contains("generic-return-placeholder") }
+            }, type)
+            assertEquals(0, MakeProjectBuilder.build(project).returnCode, type)
+        }
+    }
+
+    @Test
     fun `trailing comma zero candidates compile but cannot become accepted implementations`() {
         for ((prototype, recovered) in listOf(
             "int convert(int value)" to "int convert(int value) { return value + 1; }",

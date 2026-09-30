@@ -15,6 +15,24 @@ import kotlin.test.assertTrue
 
 class GeneratedCDeclarationsTest {
     @Test
+    fun `recovered types reject every directive spelling before header publication`() {
+        for (marker in listOf("#", "%:", "??=")) {
+            for (directive in listOf("define target renamed", "include <stddef.h>", "if 0", "")) {
+                val declaration = "/* retained */ $marker$directive\ntypedef int Value;"
+                val failure = assertFailsWith<IllegalArgumentException>(declaration) {
+                    GeneratedCDeclarationContext(listOf(RecoveredType("type_directive", declaration)))
+                }
+                assertTrue(failure.message.orEmpty().contains("type_directive"), failure.message)
+                assertTrue(failure.message.orEmpty().contains("preprocessor"), failure.message)
+            }
+        }
+        // Literal/comment contents cannot become directives, and retained bytes are untouched.
+        val declaration = "/* %:define target renamed\n??=if 0 */ typedef char Value[sizeof(\"%:define target renamed\")];"
+        val context = GeneratedCDeclarationContext(listOf(RecoveredType("type_literal", declaration)))
+        assertEquals("extern Value item;", globalDeclaration(global("Value"), true, context))
+    }
+
+    @Test
     fun `prototype retains return parameters qualifiers and variadic declarators`() {
         for (prototype in listOf(
             "unsigned long convert(unsigned short count, const char *restrict text)",
