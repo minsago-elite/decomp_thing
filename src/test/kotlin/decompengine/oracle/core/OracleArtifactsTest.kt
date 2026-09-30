@@ -48,6 +48,17 @@ class OracleArtifactsTest {
         val directory = createTempDirectory("oracle-canonical-artifact-").toAbsolutePath().normalize()
         val target = directory.resolve("artifact.json")
         val canonical = OracleJson.canonicalBytes(OracleJson.parse("""{"value":1}""".toByteArray()))
+        val oversizedTarget = directory.resolve("oversized.json")
+
+        assertFailsWith<OracleArtifactException> {
+            OracleArtifacts.publishCanonical(
+                oversizedTarget,
+                canonical,
+                limits = OracleArtifactLimits(maximumBytes = canonical.size - 1),
+            )
+        }
+        assertFalse(Files.exists(oversizedTarget))
+        assertFalse(directory.listDirectoryEntries().any { it.fileName.toString().startsWith(".decomp-oracle-") })
 
         val published = OracleArtifacts.publishCanonical(target, canonical)
         assertContentEquals(canonical, published.bytes)

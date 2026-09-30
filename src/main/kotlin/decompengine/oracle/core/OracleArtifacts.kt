@@ -80,10 +80,10 @@ object OracleArtifacts {
         limits: OracleArtifactLimits = OracleArtifactLimits(),
         jsonLimits: StrictJsonLimits = StrictJsonLimits(),
     ): OracleArtifactSnapshot {
-        val payload = bytes.copyOf()
-        if (payload.size > limits.maximumBytes) {
+        if (bytes.size > limits.maximumBytes || bytes.size > jsonLimits.maximumInputBytes) {
             throw OracleArtifactException("artifact exceeds the configured byte limit")
         }
+        val payload = bytes.copyOf()
         requireCanonicalJson(payload, jsonLimits)
         return publishAtomically(path, payload, limits)
     }
