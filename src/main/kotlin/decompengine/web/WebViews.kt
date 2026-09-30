@@ -1,5 +1,9 @@
 package decompengine.web
 
+import decompengine.repair.historyText
+import decompengine.repair.repairAttemptLabel
+import decompengine.repair.repairRunLabel
+
 import decompengine.jobs.Job
 import decompengine.jobs.JobRecoveryInventory
 import decompengine.jobs.toJson
@@ -532,23 +536,33 @@ private fun renderExploration(job: Job, reports: WebReportContext, root: JsonObj
 
 fun renderRepairHistory(job: Job, reportContext: WebReportContext? = null, payload: JsonObject? = null): String {
     if (payload == null) return "<section class=\"panel history-panel\"><h2>Repair history</h2><p>Repair history is unavailable or has not been generated for this attempt.</p></section>"
-    val iterations = payload["iterations"] as? JsonArray ?: return ""
-    if (iterations.isEmpty()) return ""
+    val iterations = payload["iterations"] as? JsonArray ?: JsonArray(emptyList())
+    val runs = (payload["runs"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
+    val runItems = runs.joinToString("") { run ->
+        val label = repairRunLabel(run.historyText("status"))
+        "<p class=\"repair-run\">Run ${run.historyText("id").orEmpty().escapeHtml()}: ${label.escapeHtml()} · " +
+            "${run.historyText("attemptedCount").orEmpty().escapeHtml()}/${run.historyText("maximumAttempts").orEmpty().escapeHtml()} attempts" +
+            "<br>Accepted revision: <code>${(run.historyText("acceptedHeadId") ?: "none").escapeHtml()}</code></p>"
+    }
+    if (iterations.isEmpty() && runs.isEmpty()) return ""
     val items = iterations.mapNotNull { it as? JsonObject }.joinToString("") { iteration ->
         val index = iteration.text("index").ifBlank { "?" }
         val failureKind = iteration.text("failureKind").ifBlank { "unknown" }
         val summary = iteration.text("summary")
-        val succeeded = iteration["succeeded"]?.toString() == "true"
         val regressions = (iteration["retainedRegressionIds"] as? JsonArray)
             ?.joinToString(", ") { it.jsonPrimitive.content.escapeHtml() }.orEmpty()
         val before = renderEvidence("Before", iteration["before"] as? JsonObject)
         val after = renderEvidence("After", iteration["after"] as? JsonObject)
-        val outcome = if (succeeded) "passed" else "needs another iteration"
-        "<article class=\"history-item\"><div class=\"history-index\" aria-label=\"Iteration ${index.escapeHtml()}\">${index.escapeHtml()}</div><div><div class=\"history-title\"><strong>${failureKind.escapeHtml()} — $outcome</strong>${statusPill(if (succeeded) "complete" else "analyzing")}</div><p>${summary.escapeHtml()}</p>$before$after<p class=\"regressions\"><b>Retained:</b> $regressions</p></div></article>"
+        val outcome = repairAttemptLabel(iteration)
+        val revision = iteration.historyText("revisionId")?.let {
+            "<p>Attempt revision: <code>${it.escapeHtml()}</code></p>"
+        }.orEmpty()
+        "<article class=\"history-item\"><div class=\"history-index\" aria-label=\"Iteration ${index.escapeHtml()}\">${index.escapeHtml()}</div><div><div class=\"history-title\"><strong>${failureKind.escapeHtml()} — $outcome</strong>${statusPill(outcome)}</div><p>${summary.escapeHtml()}</p>$revision$before$after<p class=\"regressions\"><b>Retained:</b> $regressions</p></div></article>"
     }
     return """
       <section class="panel history-panel">
         <div class="section-heading compact"><span class="step">04</span><div><p class="kicker">Iteration log</p><h2>Repair History</h2></div></div>
+        $runItems
         <div class="history-list">$items</div>
       </section>
     """.trimIndent()

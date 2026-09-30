@@ -1227,7 +1227,7 @@ class UploadServerTest {
             assertTrue(body.contains("Iteration 1"))
             assertTrue(body.contains("match observed stdout"))
             assertTrue(body.contains("hello_default"))
-            assertTrue(body.contains("behavior — passed"))
+            assertTrue(body.contains("behavior — unverified"))
             assertTrue(body.contains("Before:"))
             assertTrue(body.contains("one mismatch"))
             assertTrue(body.contains("After:"))

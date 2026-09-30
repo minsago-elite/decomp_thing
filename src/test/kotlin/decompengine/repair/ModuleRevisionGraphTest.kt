@@ -227,6 +227,27 @@ class ModuleRevisionGraphTest {
             assertEquals(RepairAttemptDisposition.LEGACY_UNVERIFIED, iteration.disposition)
             assertEquals(RepairPublicationMode.ACP_RELEASE, iteration.publicationMode)
             assertEquals(binding, iteration.agentInvocation)
+            assertEquals("unverified", repairAttemptLabel(iteration))
+            reopened.enableRunContract()
+            val migrated = reopened.derivedRepairIterations().single()
+            assertEquals(ModuleRevisionStatus.LEGACY_UNVERIFIED, reopened.snapshot.nodes.last().status)
+            assertEquals(RepairAttemptDisposition.LEGACY_UNVERIFIED, migrated.disposition)
+            assertEquals(binding, migrated.agentInvocation)
+            assertEquals(null, reopened.snapshot.fullyAcceptedHeadId)
+            val run = reopened.beginRun(1, 60_000)
+            val cli = decompengine.presentRepairOutcome(RepairRunOutcome(listOf(migrated), null, run))
+            assertTrue(cli.lines.contains("repair iteration 1: unverified"))
+            assertTrue(cli.lines.contains("accepted revision: none"))
+            val payload = Json.parseToJsonElement(renderRepairHistoryProjection(listOf(migrated), emptyList(),
+                MAXIMUM_REPAIR_PROJECTION_BYTES, runs = listOf(run))).jsonObject
+            val job = decompengine.jobs.Job("fixture", "fixture", "complete", "now", sizeBytes = 0,
+                binaryPath = target, metadata = decompengine.binary.ElfMetadata("ELF64", "little", 1u,
+                    "fixture", "executable", "fixture", 0uL, 0u, 0u, 0u, 0u))
+            val html = decompengine.web.renderRepairHistory(job, payload = payload)
+            assertTrue(html.contains("compile — unverified"), html)
+            assertTrue(html.contains("Accepted revision: <code>none</code>"), html)
+            assertFalse(html.contains("compile — accepted"), html)
+            reopened.finishRun(RepairRunStatus.REJECTED, null)
         }
         val graphPath = project.resolve("reports/repair-revisions/graph.json")
         graphPath.writeText(
