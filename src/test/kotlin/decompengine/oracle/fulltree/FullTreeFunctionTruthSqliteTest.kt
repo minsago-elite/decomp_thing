@@ -20,6 +20,47 @@ import kotlinx.serialization.json.JsonPrimitive
 
 class FullTreeFunctionTruthSqliteTest {
     @Test
+    fun `truth keeps alternate names on one emitted RVA record and rejects a rehashed alias split`() {
+        inControlTemporaryDirectory { root ->
+            val fixture = createFunctionTruthFixture(root.resolve("alias-split-inputs"))
+            val generated = generateTruth(fixture, root.resolve("alias-truth"), maximumWorkers = 2)
+
+            val shardPath = generated.root.resolve("shards/generated-tools-clang.json")
+            val shard = parseControlObject(shardPath)
+            val matches = shard.controlArray("functions").controlObjects("functions")
+                .filter { it.controlString("rva") == "0x1139" }
+            assertEquals(1, matches.size, "aliases must not create additional score records")
+            val function = matches.single()
+            assertEquals("scored", function.controlString("population"))
+            val aliases = function.controlArray("aliases").controlObjects("aliases")
+            assertEquals(
+                listOf("_Z15generated_valuev", "generated_value"),
+                aliases.map { it.controlString("name") },
+            )
+            val linkageEvidence = aliases.first().controlArray("evidence").controlObjects("evidence")
+            assertEquals(1, linkageEvidence.count { it.controlString("kind") == "dwarf-subprogram" })
+            assertEquals(2, linkageEvidence.count { it.controlString("kind") == "elf-symbol" })
+            assertTrue(linkageEvidence.any { it.controlString("locator").contains("DW_AT_linkage_name") })
+            val sourceNameEvidence = aliases.last().controlArray("evidence").controlObjects("evidence")
+            assertEquals(1, sourceNameEvidence.size)
+            assertEquals("dwarf-subprogram", sourceNameEvidence.single().controlString("kind"))
+            assertTrue(sourceNameEvidence.single().controlString("locator").contains("DW_AT_name"))
+            assertEquals(1L, shard.controlObject("counts").controlLong("functions"))
+            assertEquals(2L, generated.counts.scoredRvas)
+
+            val split = copyTruthCandidate(generated.root, root.resolve("split-alias-truth"))
+            forgeAliasSplitTruthCandidate(split, "generated-tools-clang")
+            val splitBytes = truthTreeBytes(split)
+            assertFailsWith<FullTreeFunctionTruthException> {
+                validateTruth(fixture, split, maximumWorkers = 2)
+            }
+            assertEquals(splitBytes, truthTreeBytes(split), "validation must retain rejected candidate bytes")
+            assertDirectoryEmpty(fixture.scratch)
+            assertNoTruthResidue(root)
+        }
+    }
+
+    @Test
     fun `artifact-backed truth is worker deterministic bounded and non-authoritative`() =
         inControlTemporaryDirectory { root ->
             val fixture = createFunctionTruthFixture(root.resolve("authenticated ?#% inputs"))
@@ -701,6 +742,73 @@ private fun forgeSelfConsistentTruthCandidate(root: Path) {
         withoutSelf + ("indexSha256" to JsonPrimitive(forgedLogicalIndex)),
     )
     Files.write(indexPath, OracleJson.canonicalBytes(forgedIndex))
+    freezeTruthCandidate(root)
+}
+
+private fun forgeAliasSplitTruthCandidate(root: Path, shardId: String) {
+    makeTruthCandidateWritable(root)
+    val shardPath = root.resolve("shards/$shardId.json")
+    val shard = parseControlObject(shardPath)
+    val functions = shard.controlArray("functions").controlObjects("functions")
+    val selected = functions.single { it.controlString("rva") == "0x1139" }
+    val aliases = selected.controlArray("aliases")
+    check(aliases.size == 2) { "the frozen alias fixture must contain two alternate names" }
+    val splitFunctions = functions.flatMap { function ->
+        if (function !== selected) {
+            listOf(function)
+        } else {
+            aliases.map { alias ->
+                JsonObject(function.toMutableMap().apply { this["aliases"] = JsonArray(listOf(alias)) })
+            }
+        }
+    }
+    val shardBytes = OracleJson.canonicalBytes(
+        JsonObject(
+            shard.toMutableMap().apply {
+                this["counts"] = JsonObject(
+                    shard.controlObject("counts").toMutableMap().apply {
+                        this["functions"] = JsonPrimitive(functions.size + 1)
+                    },
+                )
+                this["functions"] = JsonArray(splitFunctions)
+            },
+        ),
+    )
+    Files.write(shardPath, shardBytes)
+
+    val indexPath = root.resolve("index.json")
+    val index = parseControlObject(indexPath)
+    val shardRecords = index.controlArray("shards").map { raw ->
+        val record = raw as JsonObject
+        if (record.controlString("id") != shardId) {
+            record
+        } else {
+            JsonObject(
+                record.toMutableMap().apply {
+                    this["bytes"] = JsonPrimitive(shardBytes.size)
+                    this["functions"] = JsonPrimitive(record.controlLong("functions") + 1L)
+                    this["sha256"] = JsonPrimitive(OracleArtifacts.sha256(shardBytes))
+                },
+            )
+        }
+    }
+    val counts = index.controlObject("counts")
+    val withoutSelf = JsonObject(
+        index.toMutableMap().apply {
+            remove("indexSha256")
+            this["counts"] = JsonObject(counts.toMutableMap().apply {
+                this["dwarfRvas"] = JsonPrimitive(counts.controlLong("dwarfRvas") + 1L)
+                this["scoredRvas"] = JsonPrimitive(counts.controlLong("scoredRvas") + 1L)
+            })
+            this["shards"] = JsonArray(shardRecords)
+        },
+    )
+    Files.write(
+        indexPath,
+        OracleJson.canonicalBytes(
+            JsonObject(withoutSelf + ("indexSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(withoutSelf))))),
+        ),
+    )
     freezeTruthCandidate(root)
 }
 
