@@ -134,7 +134,7 @@ class UploadServerTest {
         val id = uploadedJobId(server)
         val job = decompengine.jobs.JobStore(root).get(id)
         val reports = root.resolve(id).resolve("reports").createDirectories()
-        val history = """{"iterations":[{"index":1,"failureKind":"fixture","summary":"supplied_history","succeeded":false}]}"""
+        val history = """{"regressionInputs":[],"iterations":[{"index":1,"failureKind":"fixture","summary":"supplied_history","prompt":"","succeeded":false,"retainedRegressionIds":[],"before":null,"after":null,"patches":[]}]}"""
         val progress = """{"phase":"supplied_progress","completed":1,"total":2}"""
         val paths = listOf(reports.resolve("repair_history.json"), reports.resolve("reconstruction_progress.json"))
         paths[0].writeText(history.replace("supplied_history", "stored_history"))
@@ -1205,6 +1205,9 @@ class UploadServerTest {
             reportsDir.resolve("repair_history.json").writeText(
                 """
                 {
+                  "schemaVersion": 3,
+                  "runs": [],
+                  "regressionInputs": [],
                   "iterations": [
                     {
                       "index": 1,
@@ -1214,6 +1217,8 @@ class UploadServerTest {
                       "succeeded": true,
                       "disposition": "rejected",
                       "publicationMode": "test_only_non_release",
+                      "agentInvocation": null,
+                      "patches": [],
                       "before": {"kind":"behavior","summary":"PRIVATE before detail","artifactPath":"reports/before.diff.json"},
                       "after": {"kind":"valid","summary":"PRIVATE after detail","artifactPath":"reports/after.behavior.json"},
                       "retainedRegressionIds": ["PRIVATE case identity"]
@@ -1246,13 +1251,45 @@ class UploadServerTest {
     }
 
     @Test
+    fun `repair history distinguishes empty projections from missing and malformed structure`() {
+        withServer { server, dataDir ->
+            val upload = upload(server, "history-shape.elf", elfFixture(), acceptJson = true)
+            val jobId = Json.parseToJsonElement(upload.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            val history = dataDir.resolve(jobId).resolve("reports").createDirectories().resolve("repair_history.json")
+            val empty = """{"schemaVersion":3,"runs":[],"regressionInputs":[],"iterations":[]}"""
+            history.writeText(empty)
+            val emptyBody = request(server, "GET", "/jobs/$jobId").body.decodeToString()
+            assertTrue(emptyBody.contains("No repair attempts are recorded."), emptyBody)
+            assertFalse(emptyBody.contains("Repair history is unavailable or corrupt."), emptyBody)
+
+            val corrupt = listOf(
+                """{"schemaVersion":3,"runs":[],"regressionInputs":[]}""",
+                """{"schemaVersion":3,"regressionInputs":[],"iterations":[]}""",
+                """{"schemaVersion":3,"runs":[],"regressionInputs":[],"iterations":{}}""",
+                """{"schemaVersion":3,"runs":"wrong-type","regressionInputs":[],"iterations":[]}""",
+                """{"schemaVersion":3,"runs":[],"regressionInputs":null,"iterations":[]}""",
+                """{"schemaVersion":3,"runs":[],"regressionInputs":[null],"iterations":[]}""",
+                """{"schemaVersion":3,"runs":[],"regressionInputs":[],"iterations":[null]}""",
+                """{"schemaVersion":3,"runs":[{}],"regressionInputs":[],"iterations":[]}""",
+                """{"schemaVersion":3,"runs":[],"regressionInputs":[],"iterations":[{"index":"bad"}]}""",
+            )
+            corrupt.forEach { payload ->
+                history.writeText(payload)
+                val body = request(server, "GET", "/jobs/$jobId").body.decodeToString()
+                assertTrue(body.contains("Repair history is unavailable or corrupt."), payload)
+                assertFalse(body.contains("No repair attempts are recorded."), payload)
+            }
+        }
+    }
+
+    @Test
     fun `repair history presentation rejects a linked report and does not expose its target`() {
         withServer { server, dataDir ->
             val upload = upload(server, "history.elf", elfFixture(), acceptJson = true)
             val jobId = Json.parseToJsonElement(upload.body.decodeToString()).jsonObject["id"].toString().trim('"')
             val reports = dataDir.resolve(jobId).resolve("reports").createDirectories()
             val outside = dataDir.resolve("foreign-repair-history.json")
-            outside.writeText("""{"iterations":[{"index":1,"failureKind":"foreign","summary":"foreign repair marker","succeeded":true}]}""")
+            outside.writeText("""{"regressionInputs":[],"iterations":[{"index":1,"failureKind":"behavior","prompt":"","summary":"foreign repair marker","succeeded":true,"retainedRegressionIds":[],"before":null,"after":null,"patches":[]}]}""")
             val history = reports.resolve("repair_history.json")
             Files.createSymbolicLink(history, outside)
 
@@ -1266,7 +1303,7 @@ class UploadServerTest {
             assertTrue(!download.body.decodeToString().contains("foreign repair marker"))
 
             Files.delete(history)
-            history.writeText("""{"iterations":[{"index":2,"failureKind":"local","summary":"accepted display marker","succeeded":false}]}""")
+            history.writeText("""{"regressionInputs":[],"iterations":[{"index":2,"failureKind":"behavior","prompt":"","summary":"accepted display marker","succeeded":false,"retainedRegressionIds":[],"before":null,"after":null,"patches":[]}]}""")
             val restored = request(server, "GET", "/jobs/$jobId")
             assertEquals(200, restored.status)
             assertTrue(restored.body.decodeToString().contains("Repair attempt — unverified"))
@@ -1288,9 +1325,10 @@ class UploadServerTest {
             val receiptDigest = MessageDigest.getInstance("SHA-256").digest(receiptBytes)
                 .joinToString("") { "%02x".format(it) }
             reports.resolve("repair_history.json").writeText(
-                """{"iterations":[{"index":1,"failureKind":"behavior","succeeded":true,
+                """{"schemaVersion":3,"runs":[],"regressionInputs":[],"iterations":[{"index":1,"failureKind":"behavior","prompt":"","summary":"","succeeded":true,
                   "disposition":"fully_accepted","publicationMode":"acp_release","revisionId":"$attemptId",
-                  "before":{"kind":"behavior","artifactPath":{"private":"PRIVATE path"}},
+                  "parentRevisionId":"baseline","runId":null,"retainedRegressionIds":[],"patches":[],
+                  "before":{"kind":"behavior","summary":"","artifactPath":null},"after":null,
                   "agentInvocation":{"receiptPath":"$receiptPath","receiptSha256":"$receiptDigest",
                     "receiptSchemaVersion":2,"requestSha256":"${"b".repeat(64)}",
                     "resultChangesSha256":"${"c".repeat(64)}","terminalOutcome":"returned-completed",

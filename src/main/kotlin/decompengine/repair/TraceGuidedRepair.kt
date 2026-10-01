@@ -28,7 +28,10 @@ import decompengine.project.AcpExecutionReceiptDocument
 import decompengine.project.BoundedAgentExecutionEventRecorder
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
@@ -811,6 +814,103 @@ class RepairHistory(
         root["iterations"]?.jsonArray?.map { parseIteration(it, schemaVersion) }?.map(RepairIteration::deepFrozenCopy)
             ?.let(iterations::addAll)
         if (schemaVersion >= 3) root["runs"]?.jsonArray?.map { parseRepairRunState(it.toString()) }?.let(runs::addAll)
+    }
+}
+
+/** Validate the supported persisted projection before presenting it. The required root arrays and
+ * every present record are checked with the same versioned parsers used by RepairHistory.load. */
+internal fun validateRepairHistoryProjection(root: JsonObject) {
+    val version = root["schemaVersion"]?.let { element ->
+        val primitive = element as? JsonPrimitive ?: error("repair history schemaVersion is malformed")
+        require(!primitive.isString) { "repair history schemaVersion is malformed" }
+        primitive.intOrNull ?: error("repair history schemaVersion is malformed")
+    } ?: 1
+    require(version in 1..3) { "unsupported repair history schema" }
+    require(root.keys.all { it in setOf("schemaVersion", "regressionInputs", "iterations", "runs") }) {
+        "repair history contains unsupported projection fields"
+    }
+    val regressionInputs = root["regressionInputs"] as? JsonArray
+        ?: error("repair history regressionInputs are missing or malformed")
+    val iterations = root["iterations"] as? JsonArray
+        ?: error("repair history iterations are missing or malformed")
+    regressionInputs.forEach { element ->
+        val value = element as? JsonObject ?: error("repair history regression input is malformed")
+        value.requireOptionalStringArray("args")
+        parseProcessInput(element)
+    }
+    iterations.forEach { element ->
+        val value = element as? JsonObject ?: error("repair history iteration is malformed")
+        if (version == 1) require(value.keys.none { it in setOf("agentInvocation", "publicationMode", "disposition", "revisionId", "parentRevisionId", "runId") }) {
+            "schema-1 repair history contains fields from a newer schema"
+        }
+        if (version == 2) require(value.keys.none { it in setOf("disposition", "revisionId", "parentRevisionId", "runId") }) {
+            "schema-2 repair history contains fields from a newer schema"
+        }
+        value.requireOptionalStringArray("retainedRegressionIds")
+        if (version >= 2) {
+            value["agentInvocation"]?.let { invocation ->
+                if (invocation !== JsonNull) validateHistoryInvocation(invocation)
+            }
+        }
+        if (version >= 3) {
+            val succeeded = value["succeeded"] as? JsonPrimitive
+                ?: error("schema-3 repair history iteration is missing succeeded")
+            require(!succeeded.isString && succeeded.booleanOrNull != null) { "repair history succeeded is malformed" }
+            value.requireOptionalNullableString("revisionId")
+            value.requireOptionalNullableString("parentRevisionId")
+            value.requireOptionalNullableString("runId")
+        }
+        parseIteration(element, version)
+    }
+    if (version >= 3) {
+        val runs = root["runs"] as? JsonArray ?: error("repair history runs are missing or malformed")
+        runs.forEach { element ->
+            parseRepairRunState(element.toString())
+        }
+    } else {
+        require("runs" !in root) { "legacy repair history cannot contain canonical runs" }
+    }
+}
+
+private fun validateHistoryInvocation(element: kotlinx.serialization.json.JsonElement) {
+    val value = element as? JsonObject ?: error("repair history invocation is malformed")
+    for (field in listOf("receiptPath", "receiptSha256", "requestSha256", "resultChangesSha256", "terminalOutcome", "assessmentStatus")) {
+        value.requireOptionalString(field)
+    }
+    value.requireInteger("receiptSchemaVersion")
+    val releaseComplete = value["receiptReleaseComplete"] as? JsonPrimitive
+        ?: error("repair history invocation release completeness is missing or malformed")
+    require(!releaseComplete.isString && releaseComplete.booleanOrNull != null) {
+        "repair history invocation release completeness is malformed"
+    }
+    parseHistoryAgentInvocation(element)
+}
+
+private fun JsonObject.requireOptionalString(name: String) {
+    this[name]?.let { value -> require(value is JsonPrimitive && value.isString) { "repair history $name is malformed" } }
+}
+
+private fun JsonObject.requireOptionalNullableString(name: String) {
+    this[name]?.let { value ->
+        require(value === JsonNull || value is JsonPrimitive && value.isString) { "repair history $name is malformed" }
+    }
+}
+
+private fun JsonObject.requireInteger(name: String) {
+    val value = this[name] as? JsonPrimitive ?: error("repair history $name is missing or malformed")
+    require(!value.isString && value.intOrNull != null) { "repair history $name is malformed" }
+}
+
+private fun JsonObject.requireOptionalArray(name: String, validate: (kotlinx.serialization.json.JsonElement) -> Unit) {
+    this[name]?.let { element ->
+        val values = element as? JsonArray ?: error("repair history $name is malformed")
+        values.forEach(validate)
+    }
+}
+
+private fun JsonObject.requireOptionalStringArray(name: String) {
+    requireOptionalArray(name) { value ->
+        require(value is JsonPrimitive && value.isString) { "repair history $name element is malformed" }
     }
 }
 

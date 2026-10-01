@@ -31,6 +31,7 @@ import decompengine.project.ReconstructionProfiles
 import decompengine.project.ReconstructionProfile
 import decompengine.project.verifyAcpExecutionReceiptDocument
 import decompengine.repair.TRACE_REPAIR_ACP_TASK_FIELD
+import decompengine.repair.validateRepairHistoryProjection
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -789,11 +790,13 @@ class UploadServer(
             repairHistory = repairHistory,
             reconstructionProgress = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.RECONSTRUCTION_PROGRESS),
             artifacts = artifacts,
-            repairEvidenceArtifactStates = repairEvidenceStates))
+            repairEvidenceArtifactStates = repairEvidenceStates?.first,
+            repairReceiptBindingStates = repairEvidenceStates?.second))
     }
 
     private data class RepairReceiptExpectation(
         val receiptSha256: String,
+        val receiptSchemaVersion: Int,
         val requestSha256: String,
         val resultChangesSha256: String,
         val terminalOutcome: String,
@@ -810,59 +813,69 @@ class UploadServer(
         context: WebReportContext,
         history: JsonObject,
         artifacts: List<WebArtifactSummary>,
-    ): Map<String, RepairEvidenceArtifactState> {
-        val references = linkedMapOf<String, RepairReceiptExpectation?>()
-        val invalidReceiptBindings = mutableSetOf<String>()
-        for (iteration in (history["iterations"] as? JsonArray).orEmpty()) {
-            val record = iteration as? JsonObject ?: continue
+    ): Pair<Map<String, RepairEvidenceArtifactState>, Map<RepairReceiptBindingIdentity, RepairEvidenceArtifactState>> {
+        val evidenceReferences = linkedSetOf<String>()
+        val receiptReferences = linkedMapOf<RepairReceiptBindingIdentity, Pair<String, RepairReceiptExpectation?>>()
+        for (record in history.getValue("iterations").jsonArray.map { it.jsonObject }) {
             for (field in listOf("before", "after")) {
                 val evidence = record[field] as? JsonObject ?: continue
                 val artifactPath = (evidence["artifactPath"] as? JsonPrimitive)?.contentOrNull
                 val target = safeRepairEvidenceTarget(artifactPath, context, artifacts)
                     ?: continue
-                if (!references.containsKey(target)) references[target] = null
+                evidenceReferences += target
             }
             val binding = record["agentInvocation"] as? JsonObject ?: continue
             val receiptPath = (binding["receiptPath"] as? JsonPrimitive)?.contentOrNull ?: continue
             val target = safeRepairEvidenceTarget(receiptPath, context, artifacts) ?: continue
-            val attemptId = (record["revisionId"] as? JsonPrimitive)?.contentOrNull
+            val identity = repairReceiptBindingIdentity(record) ?: continue
+            val attemptId = identity.revisionId
                 ?.takeIf { it.matches(Regex("revision_[0-9]{8}_[a-f0-9]{16}")) }
             val expectation = if (attemptId == null) null else runCatching {
                 RepairReceiptExpectation(
-                    requireNotNull((binding["receiptSha256"] as? JsonPrimitive)?.contentOrNull),
-                    requireNotNull((binding["requestSha256"] as? JsonPrimitive)?.contentOrNull),
-                    requireNotNull((binding["resultChangesSha256"] as? JsonPrimitive)?.contentOrNull),
-                    requireNotNull((binding["terminalOutcome"] as? JsonPrimitive)?.contentOrNull),
-                    requireNotNull((binding["receiptReleaseComplete"] as? JsonPrimitive)?.booleanOrNull),
+                    requireNotNull(identity.receiptSha256),
+                    requireNotNull(identity.receiptSchemaVersion),
+                    requireNotNull(identity.requestSha256),
+                    requireNotNull(identity.resultChangesSha256),
+                    requireNotNull(identity.terminalOutcome),
+                    requireNotNull(identity.receiptReleaseComplete),
                     attemptId,
                 )
             }.getOrNull()
-            references[target] = expectation
-            if (expectation == null) invalidReceiptBindings += target
+            receiptReferences[identity] = target to expectation
         }
 
-        return references.mapValues { (relativePath, receipt) ->
-            val bytes = try { jobs.readArtifact(jobId, relativePath, MAX_REPAIR_EVIDENCE_PRESENTATION_BYTES).bytes }
-                catch (_: Exception) { return@mapValues RepairEvidenceArtifactState.UNAVAILABLE }
-            if (relativePath in invalidReceiptBindings) {
+        val artifactBytes = mutableMapOf<String, Result<ByteArray>>()
+        fun readOnce(relativePath: String): Result<ByteArray> = artifactBytes.getOrPut(relativePath) {
+            runCatching { jobs.readArtifact(jobId, relativePath, MAX_REPAIR_EVIDENCE_PRESENTATION_BYTES).bytes }
+        }
+        val evidenceStates = evidenceReferences.associateWith { relativePath ->
+            val bytes = readOnce(relativePath).getOrElse { return@associateWith RepairEvidenceArtifactState.UNAVAILABLE }
+            if (relativePath.endsWith(".json")) {
+                if (runCatching { decompengine.oracle.core.OracleJson.parse(bytes) }.isSuccess)
+                    RepairEvidenceArtifactState.AVAILABLE else RepairEvidenceArtifactState.CORRUPT
+            } else RepairEvidenceArtifactState.AVAILABLE
+        }
+        val receiptStates = receiptReferences.mapValues { (_, reference) ->
+            val (relativePath, receipt) = reference
+            val bytes = readOnce(relativePath).getOrElse { return@mapValues RepairEvidenceArtifactState.UNAVAILABLE }
+            if (receipt == null) {
                 RepairEvidenceArtifactState.CORRUPT
-            } else if (receipt != null) {
+            } else {
                 val valid = runCatching {
                     require(sha256Hex(bytes) == receipt.receiptSha256)
                     val verified = verifyAcpExecutionReceiptDocument(
                         bytes, "repair", TRACE_REPAIR_ACP_TASK_FIELD, receipt.attemptId,
                     )
+                    require(receipt.receiptSchemaVersion == 2)
                     require(verified.requestSha256 == receipt.requestSha256)
                     require(verified.resultChangesSha256 == receipt.resultChangesSha256)
                     require(verified.terminalOutcome == receipt.terminalOutcome)
                     require(verified.releaseComplete == receipt.releaseComplete)
                 }.isSuccess
                 if (valid) RepairEvidenceArtifactState.AVAILABLE else RepairEvidenceArtifactState.CORRUPT
-            } else if (relativePath.endsWith(".json")) {
-                if (runCatching { decompengine.oracle.core.OracleJson.parse(bytes) }.isSuccess)
-                    RepairEvidenceArtifactState.AVAILABLE else RepairEvidenceArtifactState.CORRUPT
-            } else RepairEvidenceArtifactState.AVAILABLE
+            }
         }
+        return evidenceStates to receiptStates
     }
 
     private fun sha256Hex(bytes: ByteArray): String = java.security.MessageDigest.getInstance("SHA-256")
@@ -875,8 +888,10 @@ class UploadServer(
 
     private fun readLegacyJsonReport(jobId: String, context: WebReportContext, report: LegacyJsonReport): kotlinx.serialization.json.JsonObject? =
         runCatching {
-            decompengine.oracle.core.OracleJson.parse(jobs.readArtifact(jobId,
-                "${context.artifactPrefix}/${report.filename}", 1_048_576).bytes) as kotlinx.serialization.json.JsonObject
+            val root = decompengine.oracle.core.OracleJson.parse(jobs.readArtifact(jobId,
+                "${context.artifactPrefix}/${report.filename}", 1_048_576).bytes).jsonObject
+            if (report == LegacyJsonReport.REPAIR_HISTORY) validateRepairHistoryProjection(root)
+            root
         }.getOrNull()
 
     private fun handleSource(exchange: HttpExchange, jobId: String, relativePath: String) {
