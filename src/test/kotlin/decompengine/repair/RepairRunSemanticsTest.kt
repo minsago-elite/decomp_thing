@@ -340,6 +340,10 @@ class RepairRunSemanticsTest {
             assertNull(graph.snapshot.fullyAcceptedHeadId)
             assertEquals(RepairRunStatus.INTERRUPTED, graph.snapshot.runs.single().status)
             assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
+            val rollback = requireNotNull(graph.snapshot.nodes.last().rollbackRecord)
+            assertEquals(RepairRollbackState.RESTORED_VERIFIED, rollback.state)
+            assertEquals(false, rollback.legacyPendingStateUnknown)
+            assertEquals(true, rollback.candidateSourceInstallStarted)
         }
     }
 

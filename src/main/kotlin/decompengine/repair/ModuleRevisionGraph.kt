@@ -4648,7 +4648,9 @@ private fun restorePendingPreimagesBeforeIndex(
         if (node.status == ModuleRevisionStatus.ACCEPTED) node.copy(status = ModuleRevisionStatus.LEGACY_UNVERIFIED)
         else node
     } else loaded.nodes
-    val upgradedPending = oldPending.copy(legacyRecoveryRequired = true)
+    val upgradedPending = oldPending.copy(
+        legacyRecoveryRequired = oldPending.legacyRecoveryRequired || loaded.schemaVersion < 4,
+    )
     val upgraded = loaded.copy(schemaVersion = 4, nodes = upgradedNodes, pending = upgradedPending)
     val targetId = if (upgradedPending.detached) upgraded.headId else upgradedPending.parentId
     val targetSources = revisionSourcesAt(upgraded.nodes, targetId)
