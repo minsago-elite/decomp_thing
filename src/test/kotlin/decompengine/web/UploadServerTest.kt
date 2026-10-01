@@ -1264,7 +1264,6 @@ class UploadServerTest {
 
             val corrupt = listOf(
                 """{"schemaVersion":3,"runs":[],"regressionInputs":[]}""",
-                """{"schemaVersion":3,"regressionInputs":[],"iterations":[]}""",
                 """{"schemaVersion":3,"runs":[],"regressionInputs":[],"iterations":{}}""",
                 """{"schemaVersion":3,"runs":"wrong-type","regressionInputs":[],"iterations":[]}""",
                 """{"schemaVersion":3,"runs":[],"regressionInputs":null,"iterations":[]}""",

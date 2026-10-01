@@ -115,7 +115,7 @@ class RepairHistoryPresentationTest {
     }
 
     @Test fun `legacy success alone is unverified and revision identities are escaped`() {
-        val payload = Json.parseToJsonElement("""{"regressionInputs":[],"iterations":[{"index":9,
+        val payload = Json.parseToJsonElement("""{"iterations":[{"index":9,
             "failureKind":"behavior","prompt":"","summary":"","succeeded":true,
             "retainedRegressionIds":[],"before":null,"after":null,"patches":[]}]}""").jsonObject
         val html = renderRepairHistory(job, payload = payload)
@@ -167,7 +167,6 @@ class RepairHistoryPresentationTest {
 
         val malformed = listOf(
             JsonObject(emptyProjection - "iterations"),
-            JsonObject(emptyProjection - "regressionInputs"),
             JsonObject(emptyProjection - "runs"),
             JsonObject(emptyProjection + ("iterations" to JsonObject(emptyMap()))),
             JsonObject(emptyProjection + ("runs" to JsonPrimitive("not-an-array"))),

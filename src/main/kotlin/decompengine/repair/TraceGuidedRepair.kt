@@ -826,11 +826,9 @@ internal fun validateRepairHistoryProjection(root: JsonObject) {
         primitive.intOrNull ?: error("repair history schemaVersion is malformed")
     } ?: 1
     require(version in 1..3) { "unsupported repair history schema" }
-    require(root.keys.all { it in setOf("schemaVersion", "regressionInputs", "iterations", "runs") }) {
-        "repair history contains unsupported projection fields"
-    }
-    val regressionInputs = root["regressionInputs"] as? JsonArray
-        ?: error("repair history regressionInputs are missing or malformed")
+    val regressionInputs = root["regressionInputs"]?.let { element ->
+        element as? JsonArray ?: error("repair history regressionInputs are malformed")
+    } ?: JsonArray(emptyList())
     val iterations = root["iterations"] as? JsonArray
         ?: error("repair history iterations are missing or malformed")
     regressionInputs.forEach { element ->
