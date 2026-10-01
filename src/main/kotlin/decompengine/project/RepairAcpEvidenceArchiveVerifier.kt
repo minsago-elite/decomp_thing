@@ -365,8 +365,8 @@ internal object RepairAcpEvidenceArchiveVerifier {
                     rollback.expectedSourceRevisionSha256 == revisionSha256(accepted.values)
                 ) { "repair release rollback outcome is cross-paired with its attempt or target: ${node.id}" }
                 if (rollback.state == "not_required_verified") {
-                    require(node.changes.isEmpty()) {
-                        "repair release rollback is marked unnecessary after candidate changes: ${node.id}"
+                    require(rollback.candidateSourceInstallStarted == false) {
+                        "repair release rollback is marked unnecessary after a source exchange may have started: ${node.id}"
                     }
                 }
             }
@@ -988,6 +988,9 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 legacyPendingStateUnknown = root.requiredBoolean(
                     "legacyPendingStateUnknown", "repair release rollback record",
                 ),
+                candidateSourceInstallStarted = root.requiredNullableBoolean(
+                    "candidateSourceInstallStarted", "repair release rollback record",
+                ),
             )
         }
 
@@ -1124,6 +1127,7 @@ private data class ReleaseRollbackRecord(
     val failureCode: String?,
     val observedSourceRevisionSha256: String?,
     val legacyPendingStateUnknown: Boolean,
+    val candidateSourceInstallStarted: Boolean?,
 ) {
     init {
         require(schemaVersion == 1)
@@ -1144,6 +1148,7 @@ private data class ReleaseRollbackRecord(
         if (state in setOf("restored_verified", "restored_after_failure", "not_required_verified")) {
             require(observedSourceRevisionSha256 == expectedSourceRevisionSha256)
         }
+        if (state == "not_required_verified") require(candidateSourceInstallStarted == false)
     }
 }
 
@@ -1578,6 +1583,18 @@ private fun JsonObject.requiredBoolean(field: String, label: String): Boolean {
     return value.booleanOrNull ?: error("$label is missing boolean $field")
 }
 
+private fun JsonObject.requiredNullableBoolean(field: String, label: String): Boolean? {
+    require(field in this) { "$label is missing boolean $field" }
+    return when (val value = getValue(field)) {
+        JsonNull -> null
+        is JsonPrimitive -> {
+            require(!value.isString) { "$label $field must be a JSON boolean or null" }
+            value.booleanOrNull ?: error("$label has invalid boolean $field")
+        }
+        else -> error("$label has invalid boolean $field")
+    }
+}
+
 private fun JsonObject.requiredSha256(field: String, label: String): String =
     requiredString(field, label).also { require(it.matches(SHA256)) { "$label $field is not lowercase SHA-256" } }
 
@@ -1665,6 +1682,7 @@ private val NODE_FIELDS_V4 = NODE_FIELDS_V3 + "rollbackRecord"
 private val ROLLBACK_RECORD_FIELDS = setOf(
     "schemaVersion", "attemptId", "runId", "targetRevisionId", "expectedSourceRevisionSha256", "state",
     "failureStage", "failureCode", "observedSourceRevisionSha256", "legacyPendingStateUnknown",
+    "candidateSourceInstallStarted",
 )
 private val DELTA_FIELDS = setOf(
     "path", "beforeSha256", "beforeBytes", "afterSha256", "beforeBlobSha256", "afterBlobSha256", "afterBytes",

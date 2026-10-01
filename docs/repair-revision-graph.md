@@ -194,8 +194,9 @@ boundary violates this authority contract; deployments with such adversaries mus
 project directories with a stronger filesystem boundary.
 
 Schema-4 rollback flows also persist an attempt record bound to the attempt/run, exact target
-revision, and expected full source-tree digest before a restore exchange. Startup writes the same
-marker before recovering a pending attempt, including before pre-index source recovery. A rejected
+revision, expected full source-tree digest, and whether candidate source installation started
+before a restore exchange. Startup writes the same marker before recovering a pending attempt,
+including before pre-index source recovery. A rejected
 node is committed only after every source file is read back and the complete tree digest matches
 the target. Failure state is committed only as an allowlisted stage/code record; an observed digest
 is included only after complete-tree measurement. If failure-record publication fails, the
@@ -203,7 +204,9 @@ write-ahead marker remains authoritative. A later successful recovery after a du
 recorded as `RESTORED_AFTER_FAILURE`. Older schema-1/2/3 pending attempts are upgraded as
 recovery-required/unknown and are not assigned a failure outcome from generic validation status.
 Detached promotion records the published pre-promotion head as its target, which can differ from
-the attempt's provisional parent.
+the attempt's provisional parent. A staged detached candidate does not count as source installation;
+`NOT_REQUIRED_VERIFIED` is allowed only when the durable installation marker is false. Legacy pending
+records with an existing candidate retain an unknown installation marker and require verified restore.
 
 The project-root inode lock serializes every repair-owned context selection, publication, build,
 behavior assessment, acceptance, and rollback. JVM admission and the root-inode lock consume one

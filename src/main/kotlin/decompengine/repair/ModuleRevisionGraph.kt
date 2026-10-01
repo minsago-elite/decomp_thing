@@ -25,6 +25,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
@@ -1301,6 +1302,7 @@ data class RepairRollbackRecord(
     val failureCode: RepairRollbackFailureCode? = null,
     val observedSourceRevisionSha256: String? = null,
     val legacyPendingStateUnknown: Boolean = false,
+    val candidateSourceInstallStarted: Boolean? = false,
 ) {
     init {
         require(schemaVersion == 1)
@@ -1321,6 +1323,9 @@ data class RepairRollbackRecord(
         if (state in setOf(RepairRollbackState.RESTORED_VERIFIED,
                 RepairRollbackState.RESTORED_AFTER_FAILURE, RepairRollbackState.NOT_REQUIRED_VERIFIED)) {
             require(observedSourceRevisionSha256 == expectedSourceRevisionSha256)
+        }
+        if (state == RepairRollbackState.NOT_REQUIRED_VERIFIED) {
+            require(candidateSourceInstallStarted == false)
         }
     }
 }
@@ -1541,6 +1546,11 @@ private fun initialRollbackRecord(
         expectedSourceRevisionSha256 = revisionSha256(targetSources.values),
         state = RepairRollbackState.RESTORE_IN_PROGRESS,
         legacyPendingStateUnknown = legacyPendingStateUnknown,
+        candidateSourceInstallStarted = when {
+            pending.candidateSourceRevisionSha256 == null -> false
+            legacyPendingStateUnknown -> null
+            else -> false
+        },
     )
 }
 
@@ -2375,12 +2385,13 @@ internal class ModuleRevisionGraph private constructor(
             )
         }
         val candidateStatePending = if (!pending.detached && state.schemaVersion >= 4) {
+            val rollbackRecord = candidatePending.rollbackRecord ?: initialRollbackRecord(
+                state,
+                candidatePending,
+                candidatePending.legacyRecoveryRequired,
+            )
             candidatePending.copy(
-                rollbackRecord = candidatePending.rollbackRecord ?: initialRollbackRecord(
-                    state,
-                    candidatePending,
-                    candidatePending.legacyRecoveryRequired,
-                ),
+                rollbackRecord = rollbackRecord.copy(candidateSourceInstallStarted = true),
             )
         } else candidatePending
         val candidateState = state.copy(pending = candidateStatePending)
@@ -2469,7 +2480,8 @@ internal class ModuleRevisionGraph private constructor(
             }
             pending = pending.copy(
                 promotionChanges = promotion,
-                rollbackRecord = pending.rollbackRecord ?: initialRollbackRecord(state, pending, false),
+                rollbackRecord = (pending.rollbackRecord ?: initialRollbackRecord(state, pending, false))
+                    .copy(candidateSourceInstallStarted = true),
             )
             cancellationCheck()
             persist(state.copy(pending = pending))
@@ -2988,7 +3000,7 @@ internal class ModuleRevisionGraph private constructor(
                     "rollback expected digest differs from its target revision: ${node.id}"
                 }
                 if (record.state == RepairRollbackState.NOT_REQUIRED_VERIFIED) {
-                    require(record.failureCode == null)
+                    require(record.failureCode == null && record.candidateSourceInstallStarted == false)
                 }
             }
             ids += node.id
@@ -3334,7 +3346,7 @@ internal class ModuleRevisionGraph private constructor(
             }
             val outcome = when {
                 inProgress.failureCode != null -> RepairRollbackState.RESTORED_AFTER_FAILURE
-                markedPending.candidateSourceRevisionSha256 == null -> RepairRollbackState.NOT_REQUIRED_VERIFIED
+                inProgress.candidateSourceInstallStarted == false -> RepairRollbackState.NOT_REQUIRED_VERIFIED
                 else -> RepairRollbackState.RESTORED_VERIFIED
             }
             return inProgress.copy(
@@ -4323,8 +4335,8 @@ private fun validatePendingRollbackRecord(
     }
     require(record.legacyPendingStateUnknown == pending.legacyRecoveryRequired)
     if (record.state == RepairRollbackState.NOT_REQUIRED_VERIFIED) {
-        require(pending.candidateSourceRevisionSha256 == null && record.failureCode == null) {
-            "rollback was marked unnecessary after a candidate source was installed"
+        require(record.candidateSourceInstallStarted == false && record.failureCode == null) {
+            "rollback was marked unnecessary after a source exchange may have started"
         }
     }
     if (record.state == RepairRollbackState.RESTORE_FAILED_UNRESOLVED) {
@@ -4517,6 +4529,9 @@ private fun validateGraphBeforeRecovery(
             require(record.targetRevisionId in setOfNotNull(node.parentId, derivedHead))
             val targetSources = revisionSourcesAt(state.nodes.take(nodeIndex), record.targetRevisionId)
             require(record.expectedSourceRevisionSha256 == revisionSha256(targetSources.values))
+            if (record.state == RepairRollbackState.NOT_REQUIRED_VERIFIED) {
+                require(record.candidateSourceInstallStarted == false)
+            }
         }
     }
     require(state.headId == derivedHead) { "revision graph head is not derived from its ordered nodes" }
@@ -5411,7 +5426,9 @@ private fun RepairRollbackRecord.toJson(): String =
         "\"failureCode\":${failureCode?.name?.lowercase()?.let { "\"$it\"" } ?: "null"}," +
         "\"observedSourceRevisionSha256\":" +
         (observedSourceRevisionSha256?.let { "\"$it\"" } ?: "null") + "," +
-        "\"legacyPendingStateUnknown\":$legacyPendingStateUnknown}"
+        "\"legacyPendingStateUnknown\":$legacyPendingStateUnknown," +
+        "\"candidateSourceInstallStarted\":" +
+        (candidateSourceInstallStarted?.toString() ?: "null") + "}"
 
 private fun RevisionRepairMetadata.toJson(schemaVersion: Int): String = buildString {
     append("{\"iterationIndex\":").append(iterationIndex)
@@ -5573,6 +5590,15 @@ private fun parseRepairRollbackRecord(element: JsonElement): RepairRollbackRecor
         failureCode = value.optionalString("failureCode")?.let { RepairRollbackFailureCode.valueOf(it.uppercase()) },
         observedSourceRevisionSha256 = value.optionalString("observedSourceRevisionSha256"),
         legacyPendingStateUnknown = value["legacyPendingStateUnknown"]?.jsonPrimitive?.content?.toBooleanStrict() ?: false,
+        candidateSourceInstallStarted = run {
+            require("candidateSourceInstallStarted" in value) {
+                "rollback record is missing candidateSourceInstallStarted"
+            }
+            value.getValue("candidateSourceInstallStarted").let {
+                if (it is JsonNull) null else it.jsonPrimitive.booleanOrNull
+                    ?: error("candidateSourceInstallStarted must be a boolean or null")
+            }
+        },
     )
 }
 

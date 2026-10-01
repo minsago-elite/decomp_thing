@@ -284,8 +284,30 @@ class RepairRunSemanticsTest {
             val rollback = requireNotNull(rejected.rollbackRecord)
             assertEquals(provisional.id, rejected.parentId)
             assertEquals(publishedHead, rollback.targetRevisionId)
-            assertEquals(RepairRollbackState.RESTORED_VERIFIED, rollback.state)
+            assertEquals(RepairRollbackState.NOT_REQUIRED_VERIFIED, rollback.state)
+            assertEquals(false, rollback.candidateSourceInstallStarted)
             assertEquals(publishedSourceRevision, rollback.expectedSourceRevisionSha256)
+            assertEquals("broken", fixture.root.resolve("code.c").readText())
+        }
+    }
+
+    @Test
+    fun `detached staged candidate has verified no rollback only before source promotion`() {
+        val fixture = fixture("broken")
+        ModuleRevisionGraph.open(fixture.root, profile).use { graph ->
+            graph.enableRunContract()
+            val corpus = graph.retainRegressionInputs(inputs)
+            graph.beginRun(1, 60_000)
+            val attempt = graph.beginAttempt(listOf("code.c"), metadata(corpus))
+            graph.installCandidate(attempt, mapOf("code.c" to "pass1".toByteArray()))
+
+            assertEquals("broken", fixture.root.resolve("code.c").readText())
+            val rejected = graph.reject(attempt, RepairEvidence("rejected", "staged candidate was never promoted"))
+
+            val rollback = requireNotNull(rejected.rollbackRecord)
+            assertEquals(RepairRollbackState.NOT_REQUIRED_VERIFIED, rollback.state)
+            assertEquals(false, rollback.candidateSourceInstallStarted)
+            assertEquals(rollback.expectedSourceRevisionSha256, rollback.observedSourceRevisionSha256)
             assertEquals("broken", fixture.root.resolve("code.c").readText())
         }
     }

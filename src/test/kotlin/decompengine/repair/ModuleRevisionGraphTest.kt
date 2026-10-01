@@ -2286,6 +2286,7 @@ class ModuleRevisionGraphTest {
             assertEquals(RepairRollbackStage.SOURCE_RESTORE, outcome.failureStage)
             assertEquals(RepairRollbackFailureCode.RESTORE_OPERATION_FAILED, outcome.failureCode)
             assertEquals(outcome.expectedSourceRevisionSha256, outcome.observedSourceRevisionSha256)
+            assertEquals(true, outcome.candidateSourceInstallStarted)
         }
     }
 
@@ -2363,6 +2364,7 @@ class ModuleRevisionGraphTest {
             val outcome = requireNotNull(recovered.snapshot.nodes.last().rollbackRecord)
             assertEquals(RepairRollbackState.RESTORED_VERIFIED, outcome.state)
             assertTrue(outcome.legacyPendingStateUnknown)
+            assertEquals(null, outcome.candidateSourceInstallStarted)
             assertEquals(null, outcome.runId)
         }
         assertContentEquals(
