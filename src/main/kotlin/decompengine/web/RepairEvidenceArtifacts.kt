@@ -9,7 +9,7 @@ private val SAFE_REPAIR_ARTIFACT_SEGMENT = Regex("[A-Za-z0-9._-]{1,160}")
 enum class RepairEvidenceArtifactState { AVAILABLE, UNAVAILABLE, CORRUPT }
 
 /** Receipt integrity is per persisted invocation, even if several records name the same path. */
-internal data class RepairReceiptBindingIdentity(
+data class RepairReceiptBindingIdentity(
     val receiptPath: String,
     val revisionId: String?,
     val receiptSha256: String?,
