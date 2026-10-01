@@ -17,6 +17,9 @@ import decompengine.project.RecoveredProgramModel
 import decompengine.project.RecoveredFunction
 import decompengine.project.MakeProjectBuilder
 import decompengine.project.ArchivalPackager
+import decompengine.repair.ModuleRevisionAttempt
+import decompengine.repair.ModuleRevisionGraphTest
+import decompengine.repair.TRACE_REPAIR_ACP_RECEIPT_KIND
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
@@ -1269,6 +1272,7 @@ class UploadServerTest {
                 """{"schemaVersion":3,"runs":[],"regressionInputs":null,"iterations":[]}""",
                 """{"schemaVersion":3,"runs":[],"regressionInputs":[null],"iterations":[]}""",
                 """{"schemaVersion":3,"runs":[],"regressionInputs":[],"iterations":[null]}""",
+                """{"schemaVersion":3,"runs":[],"iterations":[]}""",
                 """{"schemaVersion":3,"runs":[{}],"regressionInputs":[],"iterations":[]}""",
                 """{"schemaVersion":3,"runs":[],"regressionInputs":[],"iterations":[{"index":"bad"}]}""",
             )
@@ -1305,8 +1309,57 @@ class UploadServerTest {
             history.writeText("""{"regressionInputs":[],"iterations":[{"index":2,"failureKind":"behavior","prompt":"","summary":"accepted display marker","succeeded":false,"retainedRegressionIds":[],"before":null,"after":null,"patches":[]}]}""")
             val restored = request(server, "GET", "/jobs/$jobId")
             assertEquals(200, restored.status)
-            assertTrue(restored.body.decodeToString().contains("Repair attempt — unverified"))
+            assertTrue(restored.body.decodeToString().contains("Behavior repair — unverified"))
             assertFalse(restored.body.decodeToString().contains("accepted display marker"))
+        }
+    }
+
+    @Test
+    fun `genuine repair receipt is verified only for its complete server binding`() {
+        withServer { server, dataDir ->
+            val upload = upload(server, "receipt-valid.elf", elfFixture(), acceptJson = true)
+            val jobId = Json.parseToJsonElement(upload.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            val jobDir = dataDir.resolve(jobId)
+            val reports = jobDir.resolve("reports").createDirectories()
+            val revisions = reports.resolve("repair-revisions").createDirectories()
+            val attemptId = "revision_00000001_aaaaaaaaaaaaaaaa"
+            val receiptPath = "reports/repair-revisions/$attemptId.acp-receipt.json"
+            val document = ModuleRevisionGraphTest().completeAcpReceiptDocument(
+                jobDir, ModuleRevisionAttempt(attemptId), "src/modules/alpha.c",
+                "original source".toByteArray(), "accepted source".toByteArray(),
+            )
+            assertTrue(document.releaseComplete)
+            val receiptBytes = document.json.toByteArray()
+            assertEquals(TRACE_REPAIR_ACP_RECEIPT_KIND,
+                Json.parseToJsonElement(document.json).jsonObject["kind"].toString().trim('"'))
+            revisions.resolve("$attemptId.acp-receipt.json").writeBytes(receiptBytes)
+
+            fun iteration(index: Int, revision: String, requestSha256: String) = """
+                {"index":$index,"failureKind":"behavior","prompt":"","summary":"","succeeded":true,
+                "retainedRegressionIds":[],"before":null,"after":null,"patches":[],
+                "disposition":"fully_accepted","publicationMode":"acp_release",
+                "revisionId":"$revision","parentRevisionId":"baseline","runId":null,
+                "agentInvocation":{"receiptPath":"$receiptPath","receiptSha256":"${document.sha256}",
+                "receiptSchemaVersion":${document.schemaVersion},"requestSha256":"$requestSha256",
+                "resultChangesSha256":"${document.resultChangesSha256}","terminalOutcome":"${document.terminalOutcome}",
+                "receiptReleaseComplete":true,"assessmentStatus":"accepted"}}
+            """.trimIndent()
+            val history = reports.resolve("repair_history.json")
+            history.writeText("""
+                {"schemaVersion":3,"runs":[],"regressionInputs":[],"iterations":[
+                ${iteration(1, attemptId, document.requestSha256)},
+                ${iteration(2, "revision_00000002_bbbbbbbbbbbbbbbb", "${"d".repeat(64)}")} ]}
+            """.trimIndent())
+
+            val page = request(server, "GET", "/jobs/$jobId")
+            val body = page.body.decodeToString()
+            assertEquals(200, page.status)
+            assertTrue(body.contains("Release-complete ACP evidence; the retained receipt was verified."), body)
+            assertTrue(body.contains("ACP receipt is corrupt; release completeness is not established."), body)
+            assertEquals(1, Regex("Release-complete ACP evidence; the retained receipt was verified\\.")
+                .findAll(body).count(), body)
+            assertFalse(body.contains(document.json), body)
+            assertFalse(body.contains("peer completion summary"), body)
         }
     }
 

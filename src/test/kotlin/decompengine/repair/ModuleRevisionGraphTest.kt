@@ -4503,7 +4503,7 @@ class ModuleRevisionGraphTest {
         )
     }
 
-    private fun completeAcpReceiptDocument(
+    internal fun completeAcpReceiptDocument(
         project: Path,
         attempt: ModuleRevisionAttempt,
         relativePath: String,

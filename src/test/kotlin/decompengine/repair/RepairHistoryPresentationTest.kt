@@ -119,8 +119,8 @@ class RepairHistoryPresentationTest {
             "failureKind":"behavior","prompt":"","summary":"","succeeded":true,
             "retainedRegressionIds":[],"before":null,"after":null,"patches":[]}]}""").jsonObject
         val html = renderRepairHistory(job, payload = payload)
-        assertTrue(html.contains("Repair attempt — unverified"), html)
-        assertFalse(html.contains("Repair attempt — accepted"))
+        assertTrue(html.contains("Behavior repair — unverified"), html)
+        assertFalse(html.contains("Behavior repair — accepted"))
     }
 
     @Test fun `history shows bounded rollback and evidence assurance without peer text`() {
@@ -156,7 +156,7 @@ class RepairHistoryPresentationTest {
             "iterations" to JsonArray(listOf(accepted))))
         val html = renderRepairHistory(job, payload = payload)
 
-        assertTrue(html.contains("Repair attempt — accepted"), html)
+        assertTrue(html.contains("Behavior repair — accepted"), html)
         assertTrue(html.contains("ACP receipt is unavailable; release completeness is not established."), html)
     }
 
@@ -168,6 +168,7 @@ class RepairHistoryPresentationTest {
         val malformed = listOf(
             JsonObject(emptyProjection - "iterations"),
             JsonObject(emptyProjection - "runs"),
+            JsonObject(emptyProjection - "regressionInputs"),
             JsonObject(emptyProjection + ("iterations" to JsonObject(emptyMap()))),
             JsonObject(emptyProjection + ("runs" to JsonPrimitive("not-an-array"))),
             JsonObject(emptyProjection + ("iterations" to JsonArray(listOf(JsonNull)))),
@@ -182,6 +183,28 @@ class RepairHistoryPresentationTest {
             assertTrue(html.contains("Repair history is unavailable or corrupt."), html)
             assertFalse(html.contains("No repair attempts are recorded."), html)
         }
+
+        val validIteration = canonicalAcceptedJson()
+        for ((field, invalid) in listOf("failureKind" to JsonPrimitive(3), "summary" to JsonPrimitive(false))) {
+            val payload = JsonObject(emptyProjection + ("iterations" to JsonArray(listOf(
+                JsonObject(validIteration + (field to invalid)),
+            ))))
+            val html = renderRepairHistory(job, payload = payload)
+            assertTrue(html.contains("Repair history is unavailable or corrupt."), html)
+            assertFalse(html.contains("No repair attempts are recorded."), html)
+        }
+
+        val legacyWithoutRegressionInputs = Json.parseToJsonElement("""{"iterations":[{"index":1,
+            "failureKind":"behavior","prompt":"","summary":"legacy","succeeded":true,
+            "retainedRegressionIds":[],"before":null,"after":null,"patches":[]}] }""").jsonObject
+        assertTrue(renderRepairHistory(job, payload = legacyWithoutRegressionInputs)
+            .contains("Behavior repair — unverified"))
+        val schemaTwoWithoutRegressionInputs = Json.parseToJsonElement("""{"schemaVersion":2,"iterations":[{"index":1,
+            "failureKind":"behavior","prompt":"","summary":"legacy","succeeded":false,
+            "retainedRegressionIds":[],"before":null,"after":null,"patches":[],
+            "agentInvocation":null,"publicationMode":"test_only_non_release"}] }""").jsonObject
+        assertTrue(renderRepairHistory(job, payload = schemaTwoWithoutRegressionInputs)
+            .contains("Behavior repair — unverified"))
     }
 
     @Test fun `verified receipt state is bound to the complete invocation record`() {
@@ -190,7 +213,7 @@ class RepairHistoryPresentationTest {
             "retainedRegressionIds":[],"before":null,"after":null,"patches":[],
             "disposition":"fully_accepted","publicationMode":"acp_release",
             "revisionId":"$revision","parentRevisionId":"baseline","runId":null,
-            "agentInvocation":{"receiptPath":"reports/repair-revisions/shared.acp-receipt.json",
+            "agentInvocation":{"receiptPath":"reports/repair-revisions/revision_00000001_aaaaaaaaaaaaaaaa.acp-receipt.json",
             "receiptSha256":"${"a".repeat(64)}","receiptSchemaVersion":2,"requestSha256":"$requestDigest",
             "resultChangesSha256":"${"c".repeat(64)}","terminalOutcome":"returned-completed",
             "receiptReleaseComplete":true,"assessmentStatus":"accepted"}}""").jsonObject
@@ -201,11 +224,11 @@ class RepairHistoryPresentationTest {
             "regressionInputs" to JsonArray(emptyList()), "runs" to JsonArray(emptyList()),
             "iterations" to JsonArray(listOf(first, second))))
         val html = renderRepairHistory(job, payload = payload,
-            authorizedArtifacts = listOf(WebArtifactSummary(identity.receiptPath, "shared.acp-receipt.json", 1)),
+            authorizedArtifacts = listOf(WebArtifactSummary(identity.receiptPath,
+                "revision_00000001_aaaaaaaaaaaaaaaa.acp-receipt.json", 1)),
             receiptBindingStates = mapOf(identity to RepairEvidenceArtifactState.AVAILABLE))
-        val firstAttempt = html.substringAfter(identity.revisionId!!).substringBefore("</article>")
-        val secondAttempt = html.substringAfter(second.getValue("revisionId").jsonPrimitive.content).substringBefore("</article>")
-        assertTrue(firstAttempt.contains("Release-complete ACP evidence; the retained receipt was verified."), firstAttempt)
-        assertTrue(secondAttempt.contains("ACP receipt is unavailable; release completeness is not established."), secondAttempt)
+        assertEquals(1, Regex("Release-complete ACP evidence; the retained receipt was verified\\.")
+            .findAll(html).count(), html)
+        assertTrue(html.contains("ACP receipt is unavailable; release completeness is not established."), html)
     }
 }

@@ -828,11 +828,13 @@ internal fun validateRepairHistoryProjection(root: JsonObject) {
     require(version in 1..3) { "unsupported repair history schema" }
     val regressionInputs = root["regressionInputs"]?.let { element ->
         element as? JsonArray ?: error("repair history regressionInputs are malformed")
-    } ?: JsonArray(emptyList())
+    } ?: if (version < 3) JsonArray(emptyList()) else error("schema-3 repair history regressionInputs are missing")
     val iterations = root["iterations"] as? JsonArray
         ?: error("repair history iterations are missing or malformed")
     regressionInputs.forEach { element ->
         val value = element as? JsonObject ?: error("repair history regression input is malformed")
+        value.requireString("id")
+        value.requireString("stdinHex")
         value.requireOptionalStringArray("args")
         parseProcessInput(element)
     }
@@ -844,7 +846,28 @@ internal fun validateRepairHistoryProjection(root: JsonObject) {
         if (version == 2) require(value.keys.none { it in setOf("disposition", "revisionId", "parentRevisionId", "runId") }) {
             "schema-2 repair history contains fields from a newer schema"
         }
+        value.requireString("failureKind")
+        value.requireString("summary")
+        value.requireOptionalString("prompt")
         value.requireOptionalStringArray("retainedRegressionIds")
+        if (version >= 2) value.requireString("publicationMode")
+        value.requireOptionalArray("patches") { patch ->
+            val patchObject = patch as? JsonObject ?: error("repair history patch is malformed")
+            patchObject.requireString("relativePath")
+            if (patchObject["replacementHex"] == null || patchObject["replacementHex"] === JsonNull) {
+                patchObject.requireString("replacement")
+            } else {
+                patchObject.requireString("replacementHex")
+            }
+        }
+        for (field in listOf("before", "after")) {
+            value[field]?.takeUnless { it === JsonNull }?.let { evidence ->
+                val evidenceObject = evidence as? JsonObject ?: error("repair history $field evidence is malformed")
+                evidenceObject.requireString("kind")
+                evidenceObject.requireString("summary")
+                evidenceObject.requireOptionalNullableString("artifactPath")
+            }
+        }
         if (version >= 2) {
             value["agentInvocation"]?.let { invocation ->
                 if (invocation !== JsonNull) validateHistoryInvocation(invocation)
@@ -854,6 +877,7 @@ internal fun validateRepairHistoryProjection(root: JsonObject) {
             val succeeded = value["succeeded"] as? JsonPrimitive
                 ?: error("schema-3 repair history iteration is missing succeeded")
             require(!succeeded.isString && succeeded.booleanOrNull != null) { "repair history succeeded is malformed" }
+            value.requireString("disposition")
             value.requireOptionalNullableString("revisionId")
             value.requireOptionalNullableString("parentRevisionId")
             value.requireOptionalNullableString("runId")
@@ -873,7 +897,7 @@ internal fun validateRepairHistoryProjection(root: JsonObject) {
 private fun validateHistoryInvocation(element: kotlinx.serialization.json.JsonElement) {
     val value = element as? JsonObject ?: error("repair history invocation is malformed")
     for (field in listOf("receiptPath", "receiptSha256", "requestSha256", "resultChangesSha256", "terminalOutcome", "assessmentStatus")) {
-        value.requireOptionalString(field)
+        value.requireString(field)
     }
     value.requireInteger("receiptSchemaVersion")
     val releaseComplete = value["receiptReleaseComplete"] as? JsonPrimitive
@@ -886,6 +910,11 @@ private fun validateHistoryInvocation(element: kotlinx.serialization.json.JsonEl
 
 private fun JsonObject.requireOptionalString(name: String) {
     this[name]?.let { value -> require(value is JsonPrimitive && value.isString) { "repair history $name is malformed" } }
+}
+
+private fun JsonObject.requireString(name: String) {
+    val value = this[name] as? JsonPrimitive ?: error("repair history $name is missing or malformed")
+    require(value.isString) { "repair history $name is malformed" }
 }
 
 private fun JsonObject.requireOptionalNullableString(name: String) {

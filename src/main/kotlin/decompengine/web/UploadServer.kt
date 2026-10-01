@@ -30,6 +30,7 @@ import decompengine.project.ModuleReconstructor
 import decompengine.project.ReconstructionProfiles
 import decompengine.project.ReconstructionProfile
 import decompengine.project.verifyAcpExecutionReceiptDocument
+import decompengine.repair.TRACE_REPAIR_ACP_RECEIPT_KIND
 import decompengine.repair.TRACE_REPAIR_ACP_TASK_FIELD
 import decompengine.repair.validateRepairHistoryProjection
 import kotlinx.serialization.json.Json
@@ -862,7 +863,7 @@ class UploadServer(
                 val valid = runCatching {
                     require(sha256Hex(bytes) == receipt.receiptSha256)
                     val verified = verifyAcpExecutionReceiptDocument(
-                        bytes, "repair", TRACE_REPAIR_ACP_TASK_FIELD, receipt.attemptId,
+                        bytes, TRACE_REPAIR_ACP_RECEIPT_KIND, TRACE_REPAIR_ACP_TASK_FIELD, receipt.attemptId,
                     )
                     require(receipt.receiptSchemaVersion == 2)
                     require(verified.requestSha256 == receipt.requestSha256)
