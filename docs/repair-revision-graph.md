@@ -193,6 +193,18 @@ same-credential process that mutates those reserved names outside the lock at th
 boundary violates this authority contract; deployments with such adversaries must protect the
 project directories with a stronger filesystem boundary.
 
+Schema-4 rollback flows also persist an attempt record bound to the attempt/run, exact target
+revision, and expected full source-tree digest before a restore exchange. Startup writes the same
+marker before recovering a pending attempt, including before pre-index source recovery. A rejected
+node is committed only after every source file is read back and the complete tree digest matches
+the target. Failure state is committed only as an allowlisted stage/code record; an observed digest
+is included only after complete-tree measurement. If failure-record publication fails, the
+write-ahead marker remains authoritative. A later successful recovery after a durable failure is
+recorded as `RESTORED_AFTER_FAILURE`. Older schema-1/2/3 pending attempts are upgraded as
+recovery-required/unknown and are not assigned a failure outcome from generic validation status.
+Detached promotion records the published pre-promotion head as its target, which can differ from
+the attempt's provisional parent.
+
 The project-root inode lock serializes every repair-owned context selection, publication, build,
 behavior assessment, acceptance, and rollback. JVM admission and the root-inode lock consume one
 monotonic persisted wait deadline rather than independent timeout windows. Each individual exchange

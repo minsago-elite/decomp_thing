@@ -29,7 +29,7 @@ class RepairRunSemanticsTest {
         assertEquals("pass3", fixture.root.resolve("code.c").readText())
         ModuleRevisionGraph.open(fixture.root, profile).use { graph ->
             val state = graph.snapshot
-            assertEquals(3, state.schemaVersion)
+            assertEquals(4, state.schemaVersion)
             assertEquals(state.headId, state.fullyAcceptedHeadId)
             assertNull(state.provisionalHeadId)
             assertEquals(state.nodes[1].id, state.nodes[2].parentId)
@@ -245,6 +245,48 @@ class RepairRunSemanticsTest {
             assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
             assertTrue(graph.snapshot.nodes.last().recoveredAfterCrash)
             assertNull(graph.snapshot.fullyAcceptedHeadId)
+        }
+    }
+
+    @Test
+    fun `detached rollback record targets published head separately from provisional parent`() {
+        val fixture = fixture("broken")
+        ModuleRevisionGraph.open(fixture.root, profile).use { graph ->
+            graph.enableRunContract()
+            val corpus = graph.retainRegressionInputs(inputs)
+            graph.beginRun(3, 60_000)
+            graph.bindOriginalBinary(sha256("reference".toByteArray()))
+            val publishedHead = graph.snapshot.headId
+            val publishedSourceRevision = graph.snapshot.nodes.single { it.id == publishedHead }.sourceRevisionSha256
+
+            val first = graph.beginAttempt(listOf("code.c"), metadata(corpus))
+            graph.installCandidate(first, mapOf("code.c" to "pass1".toByteArray()))
+            val firstState = graph.snapshot
+            val firstProof = RepairValidationProof(
+                repairCandidateSourceSha256(graph.candidateSources(first)), firstState.profileSha256,
+                firstState.indexSha256, corpus.sha256, sha256("reference".toByteArray()),
+                sha256("pass1".toByteArray()), sha256("fixture-runtime".toByteArray()),
+                sha256("fixture-evidence".toByteArray()), true, RepairValidationAssurance.TEST_ONLY_HOST_PROCESS,
+            )
+            val provisional = graph.recordProvisional(
+                first,
+                RepairEvidence("behavior", "provisional fixture"),
+                firstProof,
+            )
+            assertEquals(publishedHead, graph.snapshot.headId)
+
+            val second = graph.beginAttempt(
+                listOf("code.c"),
+                metadata(corpus).copy(iterationIndex = 2, failureKind = "behavior"),
+            )
+            graph.installCandidate(second, mapOf("code.c" to "pass2".toByteArray()))
+            val rejected = graph.reject(second, RepairEvidence("rejected", "restore published head"))
+            val rollback = requireNotNull(rejected.rollbackRecord)
+            assertEquals(provisional.id, rejected.parentId)
+            assertEquals(publishedHead, rollback.targetRevisionId)
+            assertEquals(RepairRollbackState.RESTORED_VERIFIED, rollback.state)
+            assertEquals(publishedSourceRevision, rollback.expectedSourceRevisionSha256)
+            assertEquals("broken", fixture.root.resolve("code.c").readText())
         }
     }
 

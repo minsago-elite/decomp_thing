@@ -1264,7 +1264,66 @@ data class ModuleRevisionNode(
     val evidenceSummary: String? = null,
     val repairMetadata: RevisionRepairMetadata? = null,
     val validationProof: RepairValidationProof? = null,
+    val rollbackRecord: RepairRollbackRecord? = null,
 )
+
+enum class RepairRollbackState {
+    RESTORE_IN_PROGRESS,
+    RESTORE_FAILED_UNRESOLVED,
+    RESTORED_VERIFIED,
+    RESTORED_AFTER_FAILURE,
+    NOT_REQUIRED_VERIFIED,
+}
+
+enum class RepairRollbackStage { SOURCE_RESTORE, SOURCE_VERIFICATION }
+
+enum class RepairRollbackFailureCode {
+    RESTORE_OPERATION_FAILED,
+    UNRECOGNIZED_SOURCE_STATE,
+    TARGET_DIGEST_MISMATCH,
+}
+
+private class RepairRollbackException(
+    val rollbackStage: RepairRollbackStage,
+    val failureCode: RepairRollbackFailureCode,
+    message: String,
+) : IllegalStateException(message)
+
+/** Durable, allowlisted evidence that one attempt restored its exact authorized source revision. */
+data class RepairRollbackRecord(
+    val schemaVersion: Int = 1,
+    val attemptId: String,
+    val runId: String?,
+    val targetRevisionId: String,
+    val expectedSourceRevisionSha256: String,
+    val state: RepairRollbackState,
+    val failureStage: RepairRollbackStage? = null,
+    val failureCode: RepairRollbackFailureCode? = null,
+    val observedSourceRevisionSha256: String? = null,
+    val legacyPendingStateUnknown: Boolean = false,
+) {
+    init {
+        require(schemaVersion == 1)
+        require(attemptId.matches(Regex("revision_[A-Za-z0-9_]+")))
+        require(runId == null || runId.matches(Regex("run_[0-9]{8}")))
+        require(targetRevisionId.matches(Regex("(?:root|revision)_[A-Za-z0-9_]+")))
+        require(expectedSourceRevisionSha256.matches(Regex("[0-9a-f]{64}")))
+        require(observedSourceRevisionSha256 == null ||
+            observedSourceRevisionSha256.matches(Regex("[0-9a-f]{64}")))
+        require((failureStage == null) == (failureCode == null))
+        when (state) {
+            RepairRollbackState.RESTORE_FAILED_UNRESOLVED -> require(failureCode != null)
+            RepairRollbackState.RESTORED_AFTER_FAILURE -> require(failureCode != null)
+            RepairRollbackState.RESTORED_VERIFIED,
+            RepairRollbackState.NOT_REQUIRED_VERIFIED -> require(failureCode == null)
+            RepairRollbackState.RESTORE_IN_PROGRESS -> Unit
+        }
+        if (state in setOf(RepairRollbackState.RESTORED_VERIFIED,
+                RepairRollbackState.RESTORED_AFTER_FAILURE, RepairRollbackState.NOT_REQUIRED_VERIFIED)) {
+            require(observedSourceRevisionSha256 == expectedSourceRevisionSha256)
+        }
+    }
+}
 
 data class ModuleRevisionGraphSnapshot(
     val profileId: String,
@@ -1387,6 +1446,8 @@ private data class PendingAttempt(
     val repairMetadata: RevisionRepairMetadata?,
     val detached: Boolean = false,
     val promotionChanges: List<RevisionFileDelta> = emptyList(),
+    val rollbackRecord: RepairRollbackRecord? = null,
+    val legacyRecoveryRequired: Boolean = false,
 )
 
 private fun validatePendingPreimageAggregate(
@@ -1446,6 +1507,7 @@ private fun ModuleRevisionNode.deepFrozenCopy(): ModuleRevisionNode = copy(
     changedModules = immutableList(changedModules),
     invalidatedModules = immutableList(invalidatedModules),
     repairMetadata = repairMetadata?.deepFrozenCopy(),
+    rollbackRecord = rollbackRecord?.copy(),
 )
 
 private fun PendingAttempt.deepFrozenCopy(): PendingAttempt = copy(
@@ -1454,6 +1516,7 @@ private fun PendingAttempt.deepFrozenCopy(): PendingAttempt = copy(
     candidateChanges = immutableList(candidateChanges.map(RevisionFileDelta::copy)),
     promotionChanges = immutableList(promotionChanges.map(RevisionFileDelta::copy)),
     repairMetadata = repairMetadata?.deepFrozenCopy(),
+    rollbackRecord = rollbackRecord?.copy(),
 )
 
 private fun RevisionGraphState.deepFrozenCopy(): RevisionGraphState = copy(
@@ -1463,6 +1526,23 @@ private fun RevisionGraphState.deepFrozenCopy(): RevisionGraphState = copy(
     pending = pending?.deepFrozenCopy(),
     runs = immutableList(runs.map { it.copy(lastEvidence = it.lastEvidence?.copy()) }),
 )
+
+private fun initialRollbackRecord(
+    state: RevisionGraphState,
+    pending: PendingAttempt,
+    legacyPendingStateUnknown: Boolean,
+): RepairRollbackRecord {
+    val targetId = if (pending.detached) state.headId else pending.parentId
+    val targetSources = revisionSourcesAt(state.nodes, targetId)
+    return RepairRollbackRecord(
+        attemptId = pending.id,
+        runId = pending.repairMetadata?.runId,
+        targetRevisionId = targetId,
+        expectedSourceRevisionSha256 = revisionSha256(targetSources.values),
+        state = RepairRollbackState.RESTORE_IN_PROGRESS,
+        legacyPendingStateUnknown = legacyPendingStateUnknown,
+    )
+}
 
 private fun revisionSourcesAt(nodes: List<ModuleRevisionNode>, nodeId: String): Map<String, IndexedSource> {
     val byId = nodes.associateBy { it.id }
@@ -1776,18 +1856,47 @@ internal class ModuleRevisionGraph private constructor(
     /** Preserve the original bytes before assigning honest authority to legacy head records. */
     @Synchronized
     fun enableRunContract() = graphOperation {
-        if (state.schemaVersion == 3) return@graphOperation
         require(state.pending == null)
-        stateStore.preserveLegacyState("graph", stateStore.readGraph(state.budget.maximumGraphBytes), state.budget.maximumGraphBytes)
-        val historyPath = projectRoot.resolve("reports/repair_history.json")
-        if (Files.exists(historyPath, LinkOption.NOFOLLOW_LINKS)) {
-            stateStore.preserveLegacyState("history", readStableRegularFile(projectRoot,
-                "reports/repair_history.json", state.budget.maximumProjectionBytes).bytes, state.budget.maximumProjectionBytes)
-        }
-        persist(state.copy(schemaVersion = 3, nodes = state.nodes.map { node ->
+        upgradeGraphToRollbackContract(allowPending = false)
+    }
+
+    private fun upgradeGraphToRollbackContract(allowPending: Boolean) {
+        if (state.schemaVersion >= 4) return
+        require(allowPending || state.pending == null)
+        val legacyRunContract = state.schemaVersion < 3
+        if (legacyRunContract) preserveLegacyRunState()
+        val upgradedNodes = if (legacyRunContract) state.nodes.map { node ->
             if (node.status == ModuleRevisionStatus.ACCEPTED) node.copy(status = ModuleRevisionStatus.LEGACY_UNVERIFIED)
             else node
-        }))
+        } else state.nodes
+        val upgradedPending = state.pending?.let { pending ->
+            val legacyPending = pending.legacyRecoveryRequired || state.schemaVersion < 4
+            pending.copy(
+                legacyRecoveryRequired = legacyPending,
+                rollbackRecord = pending.rollbackRecord ?: initialRollbackRecord(
+                    state,
+                    pending,
+                    legacyPending,
+                ),
+            )
+        }
+        persist(state.copy(schemaVersion = 4, nodes = upgradedNodes, pending = upgradedPending))
+    }
+
+    private fun preserveLegacyRunState() {
+        stateStore.preserveLegacyState(
+            "graph",
+            stateStore.readGraph(state.budget.maximumGraphBytes),
+            state.budget.maximumGraphBytes,
+        )
+        val historyPath = projectRoot.resolve("reports/repair_history.json")
+        if (Files.exists(historyPath, LinkOption.NOFOLLOW_LINKS)) {
+            stateStore.preserveLegacyState(
+                "history",
+                readStableRegularFile(projectRoot, "reports/repair_history.json", state.budget.maximumProjectionBytes).bytes,
+                state.budget.maximumProjectionBytes,
+            )
+        }
     }
 
     @Synchronized
@@ -1862,7 +1971,7 @@ internal class ModuleRevisionGraph private constructor(
     @Synchronized
     fun recordProvisional(attempt: ModuleRevisionAttempt, evidence: RepairEvidence, proof: RepairValidationProof): ModuleRevisionNode = graphOperation {
         val pending = requirePending(attempt)
-        require(state.schemaVersion == 3 && pending.detached && pending.promotionChanges.isEmpty())
+        require(state.schemaVersion >= 3 && pending.detached && pending.promotionChanges.isEmpty())
         requireValidationProof(pending.candidateSourceRevisionSha256, proof, full = false)
         requireCurrentHead()
         val node = finalizeNode(pending, ModuleRevisionStatus.PROVISIONAL, evidence, false).copy(validationProof = proof)
@@ -2099,7 +2208,7 @@ internal class ModuleRevisionGraph private constructor(
             null,
             emptyList(),
             portableMetadata,
-            detached = state.schemaVersion >= 3,
+            detached = state.schemaVersion >= 3 && state.runs.lastOrNull()?.terminal == false,
         )
         val run = state.runs.lastOrNull()?.takeUnless { it.terminal }
         run?.let {
@@ -2265,7 +2374,16 @@ internal class ModuleRevisionGraph private constructor(
                 "repair revision blobs require $projectedBlobBytes bytes; limit=${state.budget.maximumStoredBlobBytes}",
             )
         }
-        val candidateState = state.copy(pending = candidatePending)
+        val candidateStatePending = if (!pending.detached && state.schemaVersion >= 4) {
+            candidatePending.copy(
+                rollbackRecord = candidatePending.rollbackRecord ?: initialRollbackRecord(
+                    state,
+                    candidatePending,
+                    candidatePending.legacyRecoveryRequired,
+                ),
+            )
+        } else candidatePending
+        val candidateState = state.copy(pending = candidateStatePending)
         try {
             requireRecoverablePendingState(candidateState)
         } catch (failure: Exception) {
@@ -2291,7 +2409,13 @@ internal class ModuleRevisionGraph private constructor(
                     "(expected=${index.indexSha256}, observed=${candidateIndex.indexSha256})"
             }
         } catch (failure: Exception) {
-            runCatching { restorePreimages(candidatePending) }.onFailure(failure::addSuppressed)
+            try {
+                val rollback = rollbackPending(candidatePending)
+                val active = requireNotNull(state.pending)
+                persist(state.copy(pending = active.copy(rollbackRecord = rollback)))
+            } catch (rollbackFailure: Exception) {
+                failure.addSuppressed(rollbackFailure)
+            }
             throw failure
         }
         immutableList(changes.map(RevisionFileDelta::copy))
@@ -2343,7 +2467,10 @@ internal class ModuleRevisionGraph private constructor(
                     index.profile.validateSourceContent(change.path, it)
                 }
             }
-            pending = pending.copy(promotionChanges = promotion)
+            pending = pending.copy(
+                promotionChanges = promotion,
+                rollbackRecord = pending.rollbackRecord ?: initialRollbackRecord(state, pending, false),
+            )
             cancellationCheck()
             persist(state.copy(pending = pending))
             installFiles(promotionBytes,
@@ -2413,7 +2540,7 @@ internal class ModuleRevisionGraph private constructor(
     fun acceptAssessedBaseline(proof: RepairValidationProof, evidence: RepairEvidence,
         cancellationCheck: () -> Unit = {}): RepairRunState = graphOperation {
         cancellationCheck()
-        require(state.schemaVersion == 3 && state.pending == null && state.provisionalHeadId == null)
+        require(state.schemaVersion >= 3 && state.pending == null && state.provisionalHeadId == null)
         requireValidationProof(revisionSha256(requireCurrentHead()), proof, full = true)
         val run = requireNotNull(state.runs.lastOrNull())
         require(!run.terminal)
@@ -2429,18 +2556,16 @@ internal class ModuleRevisionGraph private constructor(
     @Synchronized
     fun reject(attempt: ModuleRevisionAttempt, evidence: RepairEvidence? = null): ModuleRevisionNode = graphOperation {
         val pending = requirePending(attempt)
-        val node = finalizeNode(pending, ModuleRevisionStatus.REJECTED, evidence, recovered = false)
-        val rejectedState = state.copy(nodes = state.nodes + node, pending = null)
-        val preparedRejection = requireCommitReadyState(rejectedState)
-        if (pending.detached) {
-            restoreDetachedPromotion(pending)
-        } else if (pending.candidateSourceRevisionSha256 == null) {
-            require(revisionSha256(index.sourceSnapshot()) == pending.parentSourceRevisionSha256) {
-                "source tree changed while a pre-candidate repair attempt was pending"
-            }
-        } else {
-            restorePreimages(pending)
-        }
+        val rollbackRecord = rollbackPending(pending)
+        val recoveredPending = requirePending(attempt)
+        val node = finalizeNode(
+            recoveredPending,
+            ModuleRevisionStatus.REJECTED,
+            evidence,
+            recovered = false,
+            rollbackRecord = rollbackRecord,
+        )
+        val preparedRejection = requireCommitReadyState(state.copy(nodes = state.nodes + node, pending = null))
         persist(preparedRejection)
         try {
             synchronizeCompatibilityLog()
@@ -2544,7 +2669,7 @@ internal class ModuleRevisionGraph private constructor(
                 derivedRepairIterations(),
                 retainedRegressionCorpus().inputs,
                 state.budget.maximumProjectionBytes,
-                state.schemaVersion,
+                minOf(state.schemaVersion, 3),
                 state.runs,
             ).toByteArray(Charsets.UTF_8),
         )
@@ -2611,7 +2736,7 @@ internal class ModuleRevisionGraph private constructor(
             derivedRepairIterations(candidate.nodes, candidate.budget),
             candidate.retainedRegressionInputs,
             candidate.budget.maximumProjectionBytes,
-            candidate.schemaVersion,
+            minOf(candidate.schemaVersion, 3),
             candidate.runs,
         )
         renderCompatibilityProjection(candidate.nodes, candidate.budget.maximumProjectionBytes)
@@ -2705,7 +2830,7 @@ internal class ModuleRevisionGraph private constructor(
     }
 
     private fun validateLoadedState(verifyBlobContents: Boolean = true) {
-        require(state.schemaVersion in 1..3) { "unsupported repair revision graph schema" }
+    require(state.schemaVersion in 1..4) { "unsupported repair revision graph schema" }
         require(state.budget == index.budget) { "revision graph resource budget differs from the requested budget" }
         require(state.profileId == index.profileId && state.profileSha256 == index.profileSha256) {
             "revision graph repair index profile does not match current project evidence"
@@ -2844,6 +2969,28 @@ internal class ModuleRevisionGraph private constructor(
                     acceptedSources = candidateSources.toSortedMap()
                 }
             }
+            node.rollbackRecord?.let { record ->
+                require(state.schemaVersion >= 4 && node.status == ModuleRevisionStatus.REJECTED) {
+                    "rollback outcome is attached to a non-rejected or legacy revision: ${node.id}"
+                }
+                require(record.attemptId == node.id && record.runId == node.repairMetadata?.runId)
+                require(record.state in setOf(
+                    RepairRollbackState.RESTORED_VERIFIED,
+                    RepairRollbackState.RESTORED_AFTER_FAILURE,
+                    RepairRollbackState.NOT_REQUIRED_VERIFIED,
+                )) { "finalized rollback has a non-final outcome: ${node.id}" }
+                val permittedTargets = setOfNotNull(node.parentId, derivedHeadId)
+                require(record.targetRevisionId in permittedTargets) {
+                    "rollback target is unrelated to the rejected attempt: ${node.id}"
+                }
+                val targetSources = revisionSourcesAt(state.nodes.take(indexInGraph), record.targetRevisionId)
+                require(record.expectedSourceRevisionSha256 == revisionSha256(targetSources.values)) {
+                    "rollback expected digest differs from its target revision: ${node.id}"
+                }
+                if (record.state == RepairRollbackState.NOT_REQUIRED_VERIFIED) {
+                    require(record.failureCode == null)
+                }
+            }
             ids += node.id
         }
         require(state.headId in ids) { "revision graph head does not exist" }
@@ -2924,6 +3071,12 @@ internal class ModuleRevisionGraph private constructor(
                 require(metadata.iterationIndex == previousRepairIteration + 1) {
                     "pending repair iteration index is not contiguous"
                 }
+            }
+            pending.rollbackRecord?.let { record ->
+                require(state.schemaVersion >= 4)
+                val targetId = if (pending.detached) state.headId else pending.parentId
+                val targetSources = sourcesAt(targetId)
+                validatePendingRollbackRecord(record, pending, targetId, revisionSha256(targetSources.values))
             }
         }
         if (state.pending == null) {
@@ -3053,24 +3206,18 @@ internal class ModuleRevisionGraph private constructor(
     private fun recoverPendingAttempt() {
         val pending = state.pending ?: return
         val recoverablePending = recoverPersistedInvocationBinding(pending)
+        if (recoverablePending !== pending) persist(state.copy(pending = recoverablePending))
+        val rollbackRecord = rollbackPending(recoverablePending)
+        val restoredPending = requireNotNull(state.pending)
         val node = finalizeNode(
-            recoverablePending,
+            restoredPending,
             ModuleRevisionStatus.REJECTED,
             RepairEvidence("crash-recovery", "restored pending repair preimages after restart"),
             recovered = true,
+            rollbackRecord = rollbackRecord,
         )
         val recoveredState = state.copy(nodes = state.nodes + node, pending = null)
-        val preparedRecovery = requireCommitReadyState(recoveredState)
-        if (recoverablePending.detached) {
-            restoreDetachedPromotion(recoverablePending)
-        } else if (recoverablePending.candidateSourceRevisionSha256 == null) {
-            require(revisionSha256(index.sourceSnapshot()) == recoverablePending.parentSourceRevisionSha256) {
-                "source tree changed while a pre-candidate repair attempt was pending"
-            }
-        } else {
-            restorePreimages(recoverablePending)
-        }
-        persist(preparedRecovery)
+        persist(requireCommitReadyState(recoveredState))
     }
 
     private fun recoverPersistedInvocationBinding(pending: PendingAttempt): PendingAttempt {
@@ -3106,6 +3253,7 @@ internal class ModuleRevisionGraph private constructor(
         status: ModuleRevisionStatus,
         evidence: RepairEvidence?,
         recovered: Boolean,
+        rollbackRecord: RepairRollbackRecord? = null,
     ): ModuleRevisionNode {
         require(state.nodes.size < state.budget.maximumRevisionNodes) { "revision graph reached its node budget" }
         val paths = pending.candidateChanges.map { it.path }
@@ -3144,6 +3292,7 @@ internal class ModuleRevisionGraph private constructor(
             recoveredAfterCrash = recovered,
             evidenceSummary = evidence?.summary?.let(::portableEvidenceText),
             repairMetadata = finalizedMetadata,
+            rollbackRecord = rollbackRecord?.copy(),
         )
     }
 
@@ -3156,6 +3305,64 @@ internal class ModuleRevisionGraph private constructor(
             recovered = true,
         )
         requireCommitReadyState(candidate.copy(nodes = candidate.nodes + recoveredNode, pending = null))
+    }
+
+    private fun rollbackPending(pending: PendingAttempt): RepairRollbackRecord {
+        upgradeGraphToRollbackContract(allowPending = true)
+        val activePending = requireNotNull(state.pending)
+        require(activePending.id == pending.id) { "rollback attempt does not match pending graph state" }
+        val priorRecord = activePending.rollbackRecord ?: initialRollbackRecord(
+            state,
+            activePending,
+            activePending.legacyRecoveryRequired,
+        )
+        val inProgress = priorRecord.copy(state = RepairRollbackState.RESTORE_IN_PROGRESS)
+        persist(state.copy(pending = activePending.copy(rollbackRecord = inProgress)))
+        val markedPending = requireNotNull(state.pending)
+        var stage = RepairRollbackStage.SOURCE_RESTORE
+        try {
+            if (markedPending.detached) restoreDetachedPromotion(markedPending)
+            else restorePreimages(markedPending)
+            stage = RepairRollbackStage.SOURCE_VERIFICATION
+            val observed = revisionSha256(index.sourceSnapshot())
+            if (observed != inProgress.expectedSourceRevisionSha256) {
+                throw RepairRollbackException(
+                    stage,
+                    RepairRollbackFailureCode.TARGET_DIGEST_MISMATCH,
+                    "restored source tree does not match its authorized rollback target",
+                )
+            }
+            val outcome = when {
+                inProgress.failureCode != null -> RepairRollbackState.RESTORED_AFTER_FAILURE
+                markedPending.candidateSourceRevisionSha256 == null -> RepairRollbackState.NOT_REQUIRED_VERIFIED
+                else -> RepairRollbackState.RESTORED_VERIFIED
+            }
+            return inProgress.copy(
+                state = outcome,
+                observedSourceRevisionSha256 = observed,
+            )
+        } catch (failure: Exception) {
+            val rollbackFailure = failure as? RepairRollbackException
+            val observed = currentSourceRevisionOrNull()
+            val failedRecord = inProgress.copy(
+                state = RepairRollbackState.RESTORE_FAILED_UNRESOLVED,
+                failureStage = rollbackFailure?.rollbackStage ?: stage,
+                failureCode = rollbackFailure?.failureCode ?: RepairRollbackFailureCode.RESTORE_OPERATION_FAILED,
+                observedSourceRevisionSha256 = observed,
+            )
+            try {
+                persist(state.copy(pending = markedPending.copy(rollbackRecord = failedRecord)))
+            } catch (publicationFailure: Exception) {
+                failure.addSuppressed(publicationFailure)
+            }
+            throw failure
+        }
+    }
+
+    private fun currentSourceRevisionOrNull(): String? = try {
+        revisionSha256(index.sourceSnapshot())
+    } catch (_: Exception) {
+        null
     }
 
     private fun restorePreimages(pending: PendingAttempt) {
@@ -3176,7 +3383,11 @@ internal class ModuleRevisionGraph private constructor(
                     replacements[candidate.path] = readBlob(requireNotNull(parent.beforeBlobSha256))
                     expectedCurrent[candidate.path] = candidate.afterSha256
                 }
-                else -> error("refusing to overwrite an unrecognized source replacement during rollback: ${candidate.path}")
+                else -> throw RepairRollbackException(
+                    RepairRollbackStage.SOURCE_RESTORE,
+                    RepairRollbackFailureCode.UNRECOGNIZED_SOURCE_STATE,
+                    "refusing to overwrite an unrecognized source replacement during rollback: ${candidate.path}",
+                )
             }
         }
         if (replacements.isNotEmpty()) {
@@ -3188,14 +3399,16 @@ internal class ModuleRevisionGraph private constructor(
         )
         }
         val restored = revisionSha256(index.sourceSnapshot())
-        require(restored == pending.parentSourceRevisionSha256) {
-            "could not restore the exact parent source revision: expected=${pending.parentSourceRevisionSha256} observed=$restored"
-        }
+        if (restored != pending.parentSourceRevisionSha256) throw RepairRollbackException(
+            RepairRollbackStage.SOURCE_VERIFICATION,
+            RepairRollbackFailureCode.TARGET_DIGEST_MISMATCH,
+            "could not restore the exact parent source revision",
+        )
     }
 
     private fun restoreDetachedPromotion(pending: PendingAttempt) {
         if (pending.promotionChanges.isEmpty()) {
-            requireCurrentHead()
+            verifyDetachedRollbackTarget()
             return
         }
         val replacements = TreeMap<String, ByteArray>()
@@ -3208,11 +3421,25 @@ internal class ModuleRevisionGraph private constructor(
                     replacements[change.path] = readBlob(requireNotNull(change.beforeBlobSha256))
                     expected[change.path] = change.afterSha256
                 }
-                else -> error("repair promotion source changed before rollback: ${change.path}")
+                else -> throw RepairRollbackException(
+                    RepairRollbackStage.SOURCE_RESTORE,
+                    RepairRollbackFailureCode.UNRECOGNIZED_SOURCE_STATE,
+                    "repair promotion source changed before rollback: ${change.path}",
+                )
             }
         }
         if (replacements.isNotEmpty()) installFiles(replacements, expected, pending.id, "promotion-rollback")
-        requireCurrentHead()
+        verifyDetachedRollbackTarget()
+    }
+
+    private fun verifyDetachedRollbackTarget() {
+        val expected = state.nodes.single { it.id == state.headId }.sourceRevisionSha256
+        val observed = revisionSha256(index.sourceSnapshot())
+        if (observed != expected) throw RepairRollbackException(
+            RepairRollbackStage.SOURCE_VERIFICATION,
+            RepairRollbackFailureCode.TARGET_DIGEST_MISMATCH,
+            "restored source tree does not match the pre-promotion published head",
+        )
     }
 
     private fun installFiles(
@@ -3854,7 +4081,7 @@ internal class ModuleRevisionGraph private constructor(
                             budget.maximumSourceFileBytes,
                         )
                     }
-                    restorePendingPreimagesBeforeIndex(projectRoot, stateStore, profile, budget)
+                    restorePendingPreimagesBeforeIndex(projectRoot, stateStore, profile, budget, faultInjector)
                     val currentIndex = SecureRepairRuntime.loadIndex(graphAuthority, projectRoot, profile, budget)
                     require(currentIndex.belongsTo(projectRoot) && currentIndex.budget == budget) {
                         "repair dependency index belongs to a different project or resource budget"
@@ -4047,6 +4274,21 @@ private fun validateRepairRunContract(state: RevisionGraphState) {
         }
     }
     state.pending?.let { pending ->
+        if (pending.legacyRecoveryRequired) {
+            require(state.schemaVersion >= 4 && pending.rollbackRecord != null) {
+                "legacy pending repair has no durable recovery marker"
+            }
+            require(pending.rollbackRecord.legacyPendingStateUnknown)
+        }
+        if (!pending.detached) {
+            require(state.schemaVersion >= 4 && pending.repairMetadata?.runId == null) {
+                "non-detached pending repair is not a supported legacy or standalone attempt"
+            }
+            require(state.runs.none { !it.terminal }) {
+                "non-detached pending repair cannot belong to an active run"
+            }
+            return@let
+        }
         require(pending.detached)
         val metadata = requireNotNull(pending.repairMetadata) { "pending repair lacks owning run metadata" }
         val run = requireNotNull(metadata.runId?.let(runs::get)) { "pending repair names no durable run" }
@@ -4066,6 +4308,30 @@ private fun validateRepairRunContract(state: RevisionGraphState) {
             require(pending.promotionChanges == expected) { "repair publication delta is not bound to canonical source and candidate lineage" }
             require(expected.all { it.path in state.editablePaths })
         }
+    }
+}
+
+private fun validatePendingRollbackRecord(
+    record: RepairRollbackRecord,
+    pending: PendingAttempt,
+    targetId: String,
+    targetSha256: String,
+) {
+    require(record.attemptId == pending.id && record.runId == pending.repairMetadata?.runId)
+    require(record.targetRevisionId == targetId && record.expectedSourceRevisionSha256 == targetSha256) {
+        "pending rollback record is not bound to its exact target revision"
+    }
+    require(record.legacyPendingStateUnknown == pending.legacyRecoveryRequired)
+    if (record.state == RepairRollbackState.NOT_REQUIRED_VERIFIED) {
+        require(pending.candidateSourceRevisionSha256 == null && record.failureCode == null) {
+            "rollback was marked unnecessary after a candidate source was installed"
+        }
+    }
+    if (record.state == RepairRollbackState.RESTORE_FAILED_UNRESOLVED) {
+        require(record.failureStage != null && record.failureCode != null)
+    }
+    if (record.state == RepairRollbackState.RESTORED_AFTER_FAILURE) {
+        require(record.failureStage != null && record.failureCode != null)
     }
 }
 
@@ -4240,6 +4506,18 @@ private fun validateGraphBeforeRecovery(
                 derivedHead = node.id
             }
         }
+        node.rollbackRecord?.let { record ->
+            require(state.schemaVersion >= 4 && node.status == ModuleRevisionStatus.REJECTED)
+            require(record.attemptId == node.id && record.runId == node.repairMetadata?.runId)
+            require(record.state in setOf(
+                RepairRollbackState.RESTORED_VERIFIED,
+                RepairRollbackState.RESTORED_AFTER_FAILURE,
+                RepairRollbackState.NOT_REQUIRED_VERIFIED,
+            ))
+            require(record.targetRevisionId in setOfNotNull(node.parentId, derivedHead))
+            val targetSources = revisionSourcesAt(state.nodes.take(nodeIndex), record.targetRevisionId)
+            require(record.expectedSourceRevisionSha256 == revisionSha256(targetSources.values))
+        }
     }
     require(state.headId == derivedHead) { "revision graph head is not derived from its ordered nodes" }
     require(state.nextOrdinal > priorOrdinal)
@@ -4291,6 +4569,12 @@ private fun validateGraphBeforeRecovery(
             require(pending.candidateChanges.isNotEmpty())
             require(pending.candidateSourceRevisionSha256 == revisionSha256(candidate.values))
         }
+        pending.rollbackRecord?.let { record ->
+            require(state.schemaVersion >= 4)
+            val targetId = if (pending.detached) state.headId else pending.parentId
+            val targetSources = revisionSourcesAt(state.nodes, targetId)
+            validatePendingRollbackRecord(record, pending, targetId, revisionSha256(targetSources.values))
+        }
     } ?: require(state.nextOrdinal == priorOrdinal + 1)
 
     val referencedBytes = referencedSizes.values.fold(0L, Math::addExact)
@@ -4314,6 +4598,7 @@ private fun restorePendingPreimagesBeforeIndex(
     store: RepairStateStore,
     profile: RepairIndexProfile,
     requestedBudget: RepairResourceBudget,
+    faultInjector: ModuleRevisionFaultInjector?,
 ) {
     if (!store.graphExists()) return
     val graphBytes = store.readGraph(requestedBudget.maximumGraphBytes)
@@ -4324,58 +4609,141 @@ private fun restorePendingPreimagesBeforeIndex(
     val binding = parseCanonicalRecoveryBinding(
         store.readBinding(requestedBudget.maximumGraphBytes),
     )
-    val acceptedSources = validateGraphBeforeRecovery(
+    validateGraphBeforeRecovery(
         loaded,
         profile,
         binding,
         store.blobsPath,
         requestedBudget,
     )
-    val pending = loaded.pending ?: return
-    val candidateByPath = (if (pending.detached) pending.promotionChanges else pending.candidateChanges).associateBy { it.path }
-    val replacements = TreeMap<String, ByteArray>()
-    // Preflight the complete accepted source set before the first write. A pending candidate may be
-    // partially installed, but an unrecognized out-of-band replacement is never overwritten.
-    acceptedSources.forEach { (relative, accepted) ->
-        val observed = readStableRegularFile(projectRoot, relative, requestedBudget.maximumSourceFileBytes)
-        val candidate = candidateByPath[relative]
-        when {
-            observed.sha256 == accepted.sha256 && observed.bytes.size.toLong() == accepted.bytes -> Unit
-            candidate != null && observed.sha256 == candidate.afterSha256 &&
-                observed.bytes.size.toLong() == candidate.afterBytes -> {
-                val beforeDigest = requireNotNull(candidate.beforeBlobSha256)
-                val preimage = readStableRegularFile(
-                    store.blobsPath,
-                    beforeDigest,
-                    requestedBudget.maximumSourceFileBytes,
-                )
-                require(preimage.sha256 == beforeDigest) {
-                    "pending repair recovery blob changed after graph validation: $beforeDigest"
-                }
-                replacements[relative] = preimage.bytes
-            }
-            else -> error("pending repair recovery found an unrecognized source replacement: $relative")
+    val oldPending = loaded.pending ?: return
+    val legacyRunContract = loaded.schemaVersion < 3
+    if (legacyRunContract) {
+        store.preserveLegacyState("graph", graphBytes, requestedBudget.maximumGraphBytes)
+        val historyPath = projectRoot.resolve("reports/repair_history.json")
+        if (Files.exists(historyPath, LinkOption.NOFOLLOW_LINKS)) {
+            store.preserveLegacyState(
+                "history",
+                readStableRegularFile(projectRoot, "reports/repair_history.json", requestedBudget.maximumProjectionBytes).bytes,
+                requestedBudget.maximumProjectionBytes,
+            )
         }
     }
-    if (pending.candidateSourceRevisionSha256 == null) {
-        require(replacements.isEmpty()) { "pre-candidate recovery unexpectedly requires source writes" }
-        return
-    }
-    require(replacements.keys.all { it in if (pending.detached) loaded.editablePaths else pending.allowedPaths })
-    if (replacements.isEmpty()) return
-    publishRepairFiles(
-        projectRoot,
-        replacements,
-        replacements.keys.associateWith { candidateByPath.getValue(it).afterSha256 },
-        requestedBudget.maximumSourceFileBytes,
-        pending.id,
-        "startup-rollback",
-        null,
+    val upgradedNodes = if (legacyRunContract) loaded.nodes.map { node ->
+        if (node.status == ModuleRevisionStatus.ACCEPTED) node.copy(status = ModuleRevisionStatus.LEGACY_UNVERIFIED)
+        else node
+    } else loaded.nodes
+    val upgradedPending = oldPending.copy(legacyRecoveryRequired = true)
+    val upgraded = loaded.copy(schemaVersion = 4, nodes = upgradedNodes, pending = upgradedPending)
+    val targetId = if (upgradedPending.detached) upgraded.headId else upgradedPending.parentId
+    val targetSources = revisionSourcesAt(upgraded.nodes, targetId)
+    val initial = upgradedPending.rollbackRecord ?: initialRollbackRecord(
+        upgraded,
+        upgradedPending,
+        upgradedPending.legacyRecoveryRequired,
     )
-    replacements.forEach { (relative, expected) ->
-        val observed = readStableRegularFile(projectRoot, relative, requestedBudget.maximumSourceFileBytes)
-        require(observed.bytes.contentEquals(expected)) { "pending repair preimage restoration failed: $relative" }
+    val inProgress = initial.copy(state = RepairRollbackState.RESTORE_IN_PROGRESS)
+    val pending = upgradedPending.copy(rollbackRecord = inProgress)
+    val marked = upgraded.copy(pending = pending)
+
+    fun persistRecoveryState(next: RevisionGraphState) {
+        val payload = renderGraph(next).toByteArray(Charsets.UTF_8)
+        require(payload.size.toLong() <= requestedBudget.maximumGraphBytes) {
+            "repair revision graph exceeds ${requestedBudget.maximumGraphBytes} bytes"
+        }
+        validateGraphBeforeRecovery(next, profile, binding, store.blobsPath, requestedBudget)
+        store.writeGraph(payload)
     }
+
+    // This atomic, synced marker is durable before source preflight can proceed to an exchange.
+    persistRecoveryState(marked)
+    var stage = RepairRollbackStage.SOURCE_RESTORE
+    try {
+        val candidateByPath = (if (pending.detached) pending.promotionChanges else pending.candidateChanges)
+            .associateBy { it.path }
+        val replacements = TreeMap<String, ByteArray>()
+        // Preflight the entire source set. Unknown replacements are never overwritten.
+        targetSources.toSortedMap().forEach { (relative, expected) ->
+            val observed = readStableRegularFile(projectRoot, relative, requestedBudget.maximumSourceFileBytes)
+            val candidate = candidateByPath[relative]
+            when {
+                observed.sha256 == expected.sha256 && observed.bytes.size.toLong() == expected.bytes -> Unit
+                candidate != null && observed.sha256 == candidate.afterSha256 &&
+                    observed.bytes.size.toLong() == candidate.afterBytes -> {
+                    val beforeDigest = requireNotNull(candidate.beforeBlobSha256)
+                    val preimage = readStableRegularFile(
+                        store.blobsPath,
+                        beforeDigest,
+                        requestedBudget.maximumSourceFileBytes,
+                    )
+                    require(preimage.sha256 == beforeDigest) {
+                        "pending repair recovery blob changed after graph validation"
+                    }
+                    replacements[relative] = preimage.bytes
+                }
+                else -> throw RepairRollbackException(
+                    RepairRollbackStage.SOURCE_RESTORE,
+                    RepairRollbackFailureCode.UNRECOGNIZED_SOURCE_STATE,
+                    "pending repair recovery found an unrecognized source replacement",
+                )
+            }
+        }
+        if (pending.candidateSourceRevisionSha256 == null) {
+            require(replacements.isEmpty()) { "pre-candidate recovery unexpectedly requires source writes" }
+        }
+        require(replacements.keys.all { it in if (pending.detached) upgraded.editablePaths else pending.allowedPaths })
+        if (replacements.isNotEmpty()) {
+            publishRepairFiles(
+                projectRoot,
+                replacements,
+                replacements.keys.associateWith { candidateByPath.getValue(it).afterSha256 },
+                requestedBudget.maximumSourceFileBytes,
+                pending.id,
+                "startup-rollback",
+                faultInjector,
+            )
+        }
+        stage = RepairRollbackStage.SOURCE_VERIFICATION
+        val observedRevision = measureSourceRevision(
+            projectRoot,
+            targetSources.keys.toList(),
+            requestedBudget.maximumSourceFileBytes,
+        )
+        if (observedRevision != inProgress.expectedSourceRevisionSha256) {
+            throw RepairRollbackException(
+                RepairRollbackStage.SOURCE_VERIFICATION,
+                RepairRollbackFailureCode.TARGET_DIGEST_MISMATCH,
+                "pending repair rollback did not restore its exact source revision",
+            )
+        }
+    } catch (failure: Exception) {
+        val rollbackFailure = failure as? RepairRollbackException
+        val observed = try {
+            measureSourceRevision(projectRoot, targetSources.keys.toList(), requestedBudget.maximumSourceFileBytes)
+        } catch (_: Exception) {
+            null
+        }
+        val failedRecord = inProgress.copy(
+            state = RepairRollbackState.RESTORE_FAILED_UNRESOLVED,
+            failureStage = rollbackFailure?.rollbackStage ?: stage,
+            failureCode = rollbackFailure?.failureCode ?: RepairRollbackFailureCode.RESTORE_OPERATION_FAILED,
+            observedSourceRevisionSha256 = observed,
+        )
+        try {
+            persistRecoveryState(marked.copy(pending = pending.copy(rollbackRecord = failedRecord)))
+        } catch (publicationFailure: Exception) {
+            failure.addSuppressed(publicationFailure)
+        }
+        throw failure
+    }
+}
+
+private fun measureSourceRevision(projectRoot: Path, sourcePaths: List<String>, maximumSourceFileBytes: Long): String {
+    val sources = sourcePaths.sorted().map { relative ->
+        val observed = readStableRegularFile(projectRoot, relative, maximumSourceFileBytes)
+        IndexedSource(relative, observed.bytes.size.toLong(), observed.sha256)
+    }
+    return revisionSha256(sources)
 }
 
 private data class RepairStagedReplacement(
@@ -4998,6 +5366,7 @@ private fun ModuleRevisionNode.toJson(schemaVersion: Int): String = buildString 
     append("\n  \"repairMetadata\": ")
         .append(repairMetadata?.toJson(schemaVersion) ?: "null").append(',')
     if (schemaVersion >= 3) append("\n  \"validationProof\": ").append(validationProof?.toStateJson() ?: "null").append(',')
+    if (schemaVersion >= 4) append("\n  \"rollbackRecord\": ").append(rollbackRecord?.toJson() ?: "null").append(',')
     append("\n  \"recoveredAfterCrash\": ").append(recoveredAfterCrash).append(',')
     append("\n  \"changes\": [")
     append(changes.joinToString(",") { "\n" + it.toJson().prependIndent("    ") })
@@ -5024,8 +5393,25 @@ private fun PendingAttempt.toJson(schemaVersion: Int): String = buildString {
         append("\"detached\":").append(detached).append(',')
         append("\"promotionChanges\":[").append(promotionChanges.joinToString(",") { it.toJson() }).append("],")
     }
-    append("\"repairMetadata\":").append(repairMetadata?.toJson(schemaVersion) ?: "null").append('}')
+    append("\"repairMetadata\":").append(repairMetadata?.toJson(schemaVersion) ?: "null")
+    if (schemaVersion >= 4) {
+        append(",\"legacyRecoveryRequired\":").append(legacyRecoveryRequired)
+        append(",\"rollbackRecord\":").append(rollbackRecord?.toJson() ?: "null")
+    }
+    append('}')
 }
+
+private fun RepairRollbackRecord.toJson(): String =
+    "{\"schemaVersion\":$schemaVersion,\"attemptId\":\"${attemptId.jsonEscape()}\"," +
+        "\"runId\":${runId?.let { "\"${it.jsonEscape()}\"" } ?: "null"}," +
+        "\"targetRevisionId\":\"${targetRevisionId.jsonEscape()}\"," +
+        "\"expectedSourceRevisionSha256\":\"$expectedSourceRevisionSha256\"," +
+        "\"state\":\"${state.name.lowercase()}\"," +
+        "\"failureStage\":${failureStage?.name?.lowercase()?.let { "\"$it\"" } ?: "null"}," +
+        "\"failureCode\":${failureCode?.name?.lowercase()?.let { "\"$it\"" } ?: "null"}," +
+        "\"observedSourceRevisionSha256\":" +
+        (observedSourceRevisionSha256?.let { "\"$it\"" } ?: "null") + "," +
+        "\"legacyPendingStateUnknown\":$legacyPendingStateUnknown}"
 
 private fun RevisionRepairMetadata.toJson(schemaVersion: Int): String = buildString {
     append("{\"iterationIndex\":").append(iterationIndex)
@@ -5073,7 +5459,7 @@ private fun parseGraph(payload: String): RevisionGraphState {
     val root = Json.parseToJsonElement(payload).jsonObject
     val schemaVersion = root["schemaVersion"]?.jsonPrimitive?.intOrNull
         ?: error("repair revision graph is missing schemaVersion")
-    require(schemaVersion in 1..3) { "unsupported repair revision graph schema" }
+    require(schemaVersion in 1..4) { "unsupported repair revision graph schema" }
     val budget = root.getValue("budget").jsonObject.let { value ->
         RepairResourceBudget(
             maximumIndexedModules = value.requiredInt("maximumIndexedModules"),
@@ -5151,6 +5537,7 @@ private fun parseNode(element: JsonElement, schemaVersion: Int): ModuleRevisionN
         value.optionalString("evidenceSummary"),
         value["repairMetadata"]?.takeUnless { it is JsonNull }?.let { parseRepairMetadata(it, schemaVersion) },
         if (schemaVersion >= 3) value["validationProof"]?.takeUnless { it is JsonNull }?.jsonObject?.let(::parseRepairValidationProof) else null,
+        if (schemaVersion >= 4) value["rollbackRecord"]?.takeUnless { it is JsonNull }?.let(::parseRepairRollbackRecord) else null,
     )
 }
 
@@ -5168,6 +5555,24 @@ private fun parsePending(element: JsonElement, schemaVersion: Int): PendingAttem
         value["repairMetadata"]?.takeUnless { it is JsonNull }?.let { parseRepairMetadata(it, schemaVersion) },
         if (schemaVersion >= 3) value.getValue("detached").jsonPrimitive.content.toBooleanStrict() else false,
         if (schemaVersion >= 3) value.getValue("promotionChanges").jsonArray.map(::parseDelta) else emptyList(),
+        if (schemaVersion >= 4) value["rollbackRecord"]?.takeUnless { it is JsonNull }?.let(::parseRepairRollbackRecord) else null,
+        if (schemaVersion >= 4) value["legacyRecoveryRequired"]?.jsonPrimitive?.content?.toBooleanStrict() ?: false else false,
+    )
+}
+
+private fun parseRepairRollbackRecord(element: JsonElement): RepairRollbackRecord {
+    val value = element.jsonObject
+    return RepairRollbackRecord(
+        schemaVersion = value.requiredInt("schemaVersion"),
+        attemptId = value.requiredString("attemptId"),
+        runId = value.optionalString("runId"),
+        targetRevisionId = value.requiredString("targetRevisionId"),
+        expectedSourceRevisionSha256 = value.requiredString("expectedSourceRevisionSha256"),
+        state = RepairRollbackState.valueOf(value.requiredString("state").uppercase()),
+        failureStage = value.optionalString("failureStage")?.let { RepairRollbackStage.valueOf(it.uppercase()) },
+        failureCode = value.optionalString("failureCode")?.let { RepairRollbackFailureCode.valueOf(it.uppercase()) },
+        observedSourceRevisionSha256 = value.optionalString("observedSourceRevisionSha256"),
+        legacyPendingStateUnknown = value["legacyPendingStateUnknown"]?.jsonPrimitive?.content?.toBooleanStrict() ?: false,
     )
 }
 

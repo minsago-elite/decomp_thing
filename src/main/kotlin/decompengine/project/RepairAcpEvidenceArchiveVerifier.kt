@@ -123,7 +123,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
         require(graphBytes.size.toLong() <= graph.budget.maximumGraphBytes) {
             "repair release graph exceeds its persisted byte bound"
         }
-        require(graph.schemaVersion == 3) {
+        require(graph.schemaVersion in 3..4) {
             "legacy schema-v1/v2 repair evidence is non-release"
         }
         require(graph.pending == null) {
@@ -357,6 +357,18 @@ internal object RepairAcpEvidenceArchiveVerifier {
             }
             require(node.sourceRevisionSha256 == revisionSha256(candidate.values)) {
                 "repair release graph revision digest is invalid: ${node.id}"
+            }
+            node.rollbackRecord?.let { rollback ->
+                require(node.status == "rejected" && rollback.attemptId == node.id &&
+                    rollback.runId == node.repairMetadata?.runId &&
+                    rollback.targetRevisionId == derivedHead &&
+                    rollback.expectedSourceRevisionSha256 == revisionSha256(accepted.values)
+                ) { "repair release rollback outcome is cross-paired with its attempt or target: ${node.id}" }
+                if (rollback.state == "not_required_verified") {
+                    require(node.changes.isEmpty()) {
+                        "repair release rollback is marked unnecessary after candidate changes: ${node.id}"
+                    }
+                }
             }
             val metadata = requireNotNull(node.repairMetadata)
             require(metadata.iterationIndex == previousIteration + 1) {
@@ -866,8 +878,8 @@ internal object RepairAcpEvidenceArchiveVerifier {
     private fun parseGraph(bytes: ByteArray): ReleaseRepairGraph {
         val root = strictObject(bytes, GRAPH_JSON_LIMITS, "repair release graph")
         val schema = root.requiredInt("schemaVersion", "repair release graph")
-        require(schema in 1..3) { "unsupported repair release graph schema" }
-        require(schema == 3) { "legacy schema-v1/v2 repair evidence is non-release; accepted labels lack full validation authority" }
+        require(schema in 1..4) { "unsupported repair release graph schema" }
+        require(schema in 3..4) { "legacy schema-v1/v2 repair evidence is non-release; accepted labels lack full validation authority" }
         root.requireExactKeys(GRAPH_FIELDS, "repair release graph")
         val budget = parseBudget(root.requiredObject("budget", "repair release graph"))
         return ReleaseRepairGraph(
@@ -894,7 +906,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
 
     private fun parseNode(element: JsonElement, schemaVersion: Int): ReleaseRepairNode {
         val root = element.requiredObject("repair release graph node")
-        root.requireExactKeys(NODE_FIELDS, "repair release graph node")
+        root.requireExactKeys(if (schemaVersion >= 4) NODE_FIELDS_V4 else NODE_FIELDS_V3, "repair release graph node")
         return ReleaseRepairNode(
             id = root.requiredString("id", "repair release graph node"),
             parentId = root.optionalString("parentId", "repair release graph node"),
@@ -911,6 +923,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
             recoveredAfterCrash = root.requiredBoolean("recoveredAfterCrash", "repair release graph node"),
             changes = root.requiredArray("changes", "repair release graph node").map(::parseDelta),
             validationProof = root.optionalValidationProof("validationProof", "repair release graph node"),
+            rollbackRecord = if (schemaVersion >= 4) root.optionalRollbackRecord("rollbackRecord") else null,
         ).also { node ->
             require((node.evidenceKind == null) == (node.evidenceSummary == null)) {
                 "repair release graph evidence kind and summary are incomplete: ${node.id}"
@@ -953,6 +966,30 @@ internal object RepairAcpEvidenceArchiveVerifier {
             afterBytes = root.requiredNonNegativeLong("afterBytes", "repair release graph delta"),
         )
     }
+
+    private fun JsonObject.optionalRollbackRecord(field: String): ReleaseRollbackRecord? =
+        get(field)?.takeUnless { it is JsonNull }?.let { element ->
+            val root = element.requiredObject("repair release rollback record")
+            root.requireExactKeys(ROLLBACK_RECORD_FIELDS, "repair release rollback record")
+            ReleaseRollbackRecord(
+                schemaVersion = root.requiredInt("schemaVersion", "repair release rollback record"),
+                attemptId = root.requiredString("attemptId", "repair release rollback record"),
+                runId = root.optionalString("runId", "repair release rollback record"),
+                targetRevisionId = root.requiredString("targetRevisionId", "repair release rollback record"),
+                expectedSourceRevisionSha256 = root.requiredSha256(
+                    "expectedSourceRevisionSha256", "repair release rollback record",
+                ),
+                state = root.requiredString("state", "repair release rollback record"),
+                failureStage = root.optionalString("failureStage", "repair release rollback record"),
+                failureCode = root.optionalString("failureCode", "repair release rollback record"),
+                observedSourceRevisionSha256 = root.optionalSha256(
+                    "observedSourceRevisionSha256", "repair release rollback record",
+                ),
+                legacyPendingStateUnknown = root.requiredBoolean(
+                    "legacyPendingStateUnknown", "repair release rollback record",
+                ),
+            )
+        }
 
     private fun parseRegressionInput(element: JsonElement): ReleaseRegressionInput {
         val root = element.requiredObject("repair release regression input")
@@ -1070,9 +1107,44 @@ private data class ReleaseRepairNode(
     val recoveredAfterCrash: Boolean,
     val changes: List<ReleaseRepairDelta>,
     val validationProof: ReleaseValidationProof?,
+    val rollbackRecord: ReleaseRollbackRecord?,
 ) {
     val evidence: ReleaseRepairEvidence?
         get() = evidenceKind?.let { ReleaseRepairEvidence(it, evidenceSummary.orEmpty(), evidenceArtifact) }
+}
+
+private data class ReleaseRollbackRecord(
+    val schemaVersion: Int,
+    val attemptId: String,
+    val runId: String?,
+    val targetRevisionId: String,
+    val expectedSourceRevisionSha256: String,
+    val state: String,
+    val failureStage: String?,
+    val failureCode: String?,
+    val observedSourceRevisionSha256: String?,
+    val legacyPendingStateUnknown: Boolean,
+) {
+    init {
+        require(schemaVersion == 1)
+        require(attemptId.matches(Regex("revision_[A-Za-z0-9_]+")))
+        require(runId == null || runId.matches(Regex("run_[0-9]{8}")))
+        require(targetRevisionId.matches(Regex("(?:root|revision)_[A-Za-z0-9_]+")))
+        require(state in setOf(
+            "restored_verified", "restored_after_failure", "not_required_verified",
+        ))
+        require(failureStage == null || failureStage in setOf("source_restore", "source_verification"))
+        require(failureCode == null || failureCode in setOf(
+            "restore_operation_failed", "unrecognized_source_state", "target_digest_mismatch",
+        ))
+        require((failureStage == null) == (failureCode == null))
+        require(observedSourceRevisionSha256 == null || observedSourceRevisionSha256.matches(SHA256))
+        if (state == "restored_after_failure") require(failureCode != null)
+        if (state in setOf("restored_verified", "not_required_verified")) require(failureCode == null)
+        if (state in setOf("restored_verified", "restored_after_failure", "not_required_verified")) {
+            require(observedSourceRevisionSha256 == expectedSourceRevisionSha256)
+        }
+    }
 }
 
 private data class ReleaseRepairDelta(
@@ -1585,9 +1657,14 @@ private val BUDGET_FIELDS = setOf(
     "maximumDiscoveryDepth", "maximumStateDirectoryEntries", "maximumGraphLockWaitMillis", "maximumRevisionNodes",
     "maximumGraphBytes", "maximumStoredBlobBytes",
 )
-private val NODE_FIELDS = setOf(
+private val NODE_FIELDS_V3 = setOf(
     "id", "parentId", "ordinal", "status", "sourceRevisionSha256", "changedModules", "invalidatedModules",
     "evidenceKind", "evidenceArtifact", "evidenceSummary", "repairMetadata", "recoveredAfterCrash", "changes", "validationProof",
+)
+private val NODE_FIELDS_V4 = NODE_FIELDS_V3 + "rollbackRecord"
+private val ROLLBACK_RECORD_FIELDS = setOf(
+    "schemaVersion", "attemptId", "runId", "targetRevisionId", "expectedSourceRevisionSha256", "state",
+    "failureStage", "failureCode", "observedSourceRevisionSha256", "legacyPendingStateUnknown",
 )
 private val DELTA_FIELDS = setOf(
     "path", "beforeSha256", "beforeBytes", "afterSha256", "beforeBlobSha256", "afterBlobSha256", "afterBytes",
