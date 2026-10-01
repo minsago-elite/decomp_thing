@@ -208,21 +208,21 @@ class RepairHistoryPresentationTest {
     }
 
     @Test fun `verified receipt state is bound to the complete invocation record`() {
-        fun record(revision: String, requestDigest: String): JsonObject = Json.parseToJsonElement("""{
+        fun record(requestDigest: String, resultDigest: String): JsonObject = Json.parseToJsonElement("""{
             "index":1,"failureKind":"behavior","prompt":"","summary":"","succeeded":true,
             "retainedRegressionIds":[],"before":null,"after":null,"patches":[],
             "disposition":"fully_accepted","publicationMode":"acp_release",
-            "revisionId":"$revision","parentRevisionId":"baseline","runId":null,
+            "revisionId":"revision_00000001_aaaaaaaaaaaaaaaa","parentRevisionId":"baseline","runId":null,
             "agentInvocation":{"receiptPath":"reports/repair-revisions/revision_00000001_aaaaaaaaaaaaaaaa.acp-receipt.json",
             "receiptSha256":"${"a".repeat(64)}","receiptSchemaVersion":2,"requestSha256":"$requestDigest",
-            "resultChangesSha256":"${"c".repeat(64)}","terminalOutcome":"returned-completed",
+            "resultChangesSha256":"$resultDigest","terminalOutcome":"returned-completed",
             "receiptReleaseComplete":true,"assessmentStatus":"accepted"}}""").jsonObject
-        val first = record("revision_00000001_aaaaaaaaaaaaaaaa", "${"b".repeat(64)}")
-        val second = record("revision_00000002_bbbbbbbbbbbbbbbb", "${"d".repeat(64)}")
-        val identity = requireNotNull(repairReceiptBindingIdentity(first))
+        val earlierConflicting = record("${"d".repeat(64)}", "${"e".repeat(64)}")
+        val laterMatching = record("${"b".repeat(64)}", "${"c".repeat(64)}")
+        val identity = requireNotNull(repairReceiptBindingIdentity(laterMatching))
         val payload = JsonObject(mapOf("schemaVersion" to JsonPrimitive(3),
             "regressionInputs" to JsonArray(emptyList()), "runs" to JsonArray(emptyList()),
-            "iterations" to JsonArray(listOf(first, second))))
+            "iterations" to JsonArray(listOf(earlierConflicting, laterMatching))))
         val html = renderRepairHistory(job, payload = payload,
             authorizedArtifacts = listOf(WebArtifactSummary(identity.receiptPath,
                 "revision_00000001_aaaaaaaaaaaaaaaa.acp-receipt.json", 1)),

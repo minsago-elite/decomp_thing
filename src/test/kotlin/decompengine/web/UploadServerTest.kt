@@ -1334,21 +1334,21 @@ class UploadServerTest {
                 Json.parseToJsonElement(document.json).jsonObject["kind"].toString().trim('"'))
             revisions.resolve("$attemptId.acp-receipt.json").writeBytes(receiptBytes)
 
-            fun iteration(index: Int, revision: String, requestSha256: String) = """
+            fun iteration(index: Int, requestSha256: String, resultChangesSha256: String) = """
                 {"index":$index,"failureKind":"behavior","prompt":"","summary":"","succeeded":true,
                 "retainedRegressionIds":[],"before":null,"after":null,"patches":[],
                 "disposition":"fully_accepted","publicationMode":"acp_release",
-                "revisionId":"$revision","parentRevisionId":"baseline","runId":null,
+                "revisionId":"$attemptId","parentRevisionId":"baseline","runId":null,
                 "agentInvocation":{"receiptPath":"$receiptPath","receiptSha256":"${document.sha256}",
                 "receiptSchemaVersion":${document.schemaVersion},"requestSha256":"$requestSha256",
-                "resultChangesSha256":"${document.resultChangesSha256}","terminalOutcome":"${document.terminalOutcome}",
+                "resultChangesSha256":"$resultChangesSha256","terminalOutcome":"${document.terminalOutcome}",
                 "receiptReleaseComplete":true,"assessmentStatus":"accepted"}}
             """.trimIndent()
             val history = reports.resolve("repair_history.json")
             history.writeText("""
                 {"schemaVersion":3,"runs":[],"regressionInputs":[],"iterations":[
-                ${iteration(1, attemptId, document.requestSha256)},
-                ${iteration(2, "revision_00000002_bbbbbbbbbbbbbbbb", "${"d".repeat(64)}")} ]}
+                ${iteration(1, "${"d".repeat(64)}", "${"e".repeat(64)}")},
+                ${iteration(2, document.requestSha256, document.resultChangesSha256)} ]}
             """.trimIndent())
 
             val page = request(server, "GET", "/jobs/$jobId")
