@@ -24,16 +24,24 @@ import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowPhase
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
-import decompengine.project.EvidenceModuleReconstructor
+import decompengine.project.ReconstructionAdapters
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.project.ModuleReconstructor
 import decompengine.project.ReconstructionProfiles
 import decompengine.project.ReconstructionProfile
+import decompengine.project.verifyAcpExecutionReceiptDocument
+import decompengine.repair.TRACE_REPAIR_ACP_RECEIPT_KIND
+import decompengine.repair.TRACE_REPAIR_ACP_TASK_FIELD
+import decompengine.repair.validateRepairHistoryProjection
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
@@ -79,6 +87,7 @@ class SourceTreeJobReconstructor(
                 ArchivalReconstructionService(
                     analyzer,
                     strategy.reconstructor,
+                    profile = strategy.profile,
                     progress = progress,
                 ).reconstruct(job.binaryPath, reportsDir)
             } catch (failure: Exception) {
@@ -98,12 +107,14 @@ internal data class WebReconstructionStrategy(
     val mode: WebReconstructionMode,
     val reconstructor: ModuleReconstructor,
     val harnessProvenance: AcpHarnessProvenance?,
+    val profile: ReconstructionProfile,
 )
 
 /** Resolves exactly one web reconstruction mode without credential-based fallbacks. */
 internal fun selectWebReconstructionStrategy(
     environment: Map<String, String>,
     progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
+    profile: ReconstructionProfile = ReconstructionProfiles.default,
 ): WebReconstructionStrategy {
     val configuredMode = environment[WEB_RECONSTRUCTION_MODE_ENVIRONMENT] ?: WebReconstructionMode.AGENT.configurationValue
     return when (configuredMode) {
@@ -117,13 +128,18 @@ internal fun selectWebReconstructionStrategy(
                     progress = progress,
                 ),
                 selection.provenance,
+                profile,
             )
         }
-        WebReconstructionMode.EVIDENCE_ONLY.configurationValue -> WebReconstructionStrategy(
-            WebReconstructionMode.EVIDENCE_ONLY,
-            EvidenceModuleReconstructor(),
-            null,
-        )
+        WebReconstructionMode.EVIDENCE_ONLY.configurationValue -> {
+            val selectedProfile = ReconstructionAdapters.resolve(profile).evidenceOnlyProfile(profile)
+            WebReconstructionStrategy(
+                WebReconstructionMode.EVIDENCE_ONLY,
+                ReconstructionAdapters.resolve(selectedProfile).evidenceOnlyReconstructor(selectedProfile),
+                null,
+                selectedProfile,
+            )
+        }
         else -> throw IllegalArgumentException(
             "$WEB_RECONSTRUCTION_MODE_ENVIRONMENT must be exactly " +
                 "${WebReconstructionMode.AGENT.configurationValue} or " +
@@ -175,7 +191,7 @@ class UploadServer(
     uiMode: WebUiMode = WebUiMode.LEGACY,
     basePath: String = "/",
     devFrontendOrigin: String? = null,
-    sourceProfiles: List<ReconstructionProfile> = ReconstructionProfiles.builtIn,
+    sourceProfiles: List<ReconstructionProfile> = defaultWebSourceProfiles(),
     sensitiveValues: Collection<String> = System.getenv().values,
     private val listenBacklog: Int = 64,
     private val authenticationInspector: (decompengine.agent.AgentCancellation) -> decompengine.acp.AcpAuthenticationInventory = defaultWebAuthenticationInspector(),
@@ -762,13 +778,107 @@ class UploadServer(
         val source = runCatching { archiveEvidence.read(jobId, reportPrefix = view.reports.artifactPrefix).source }
             .recoverCatching { sourceEvidence.read(jobId, view.reports.artifactPrefix).view() }
         val progress = runCatching { readLegacyProgress(jobId, view.reports.runId) }.getOrNull()
+        val repairHistory = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.REPAIR_HISTORY)
+        val artifacts = runCatching { jobs.listArtifactSummaries(jobId, view.reports.runId) }.getOrNull()
+        val repairEvidenceStates = repairHistory?.let { history -> artifacts?.let {
+            repairEvidenceArtifactStates(jobId, view.reports, history, it)
+        } }
         exchange.sendHtml(200, renderJobDocument(view.job, view.reports, view.diagnostics, source.getOrNull(), source.isFailure,
             progressSnapshot = progress,
             explorationReport = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.EXPLORATION),
-            repairHistory = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.REPAIR_HISTORY),
+            repairHistory = repairHistory,
             reconstructionProgress = readLegacyJsonReport(jobId, view.reports, LegacyJsonReport.RECONSTRUCTION_PROGRESS),
-            artifacts = runCatching { jobs.listArtifactSummaries(jobId, view.reports.runId) }.getOrNull()))
+            artifacts = artifacts,
+            repairEvidenceArtifactStates = repairEvidenceStates?.first,
+            repairReceiptBindingStates = repairEvidenceStates?.second))
     }
+
+    private data class RepairReceiptExpectation(
+        val receiptSha256: String,
+        val receiptSchemaVersion: Int,
+        val requestSha256: String,
+        val resultChangesSha256: String,
+        val terminalOutcome: String,
+        val releaseComplete: Boolean,
+        val attemptId: String,
+    )
+
+    /**
+     * The history projection supplies paths, never authority. Links and these bounded integrity
+     * reads are limited to the same checked artifact listing used by the download route.
+     */
+    private fun repairEvidenceArtifactStates(
+        jobId: String,
+        context: WebReportContext,
+        history: JsonObject,
+        artifacts: List<WebArtifactSummary>,
+    ): Pair<Map<String, RepairEvidenceArtifactState>, Map<RepairReceiptBindingIdentity, RepairEvidenceArtifactState>> {
+        val evidenceReferences = linkedSetOf<String>()
+        val receiptReferences = linkedMapOf<RepairReceiptBindingIdentity, Pair<String, RepairReceiptExpectation?>>()
+        for (record in history.getValue("iterations").jsonArray.map { it.jsonObject }) {
+            for (field in listOf("before", "after")) {
+                val evidence = record[field] as? JsonObject ?: continue
+                val artifactPath = (evidence["artifactPath"] as? JsonPrimitive)?.contentOrNull
+                val target = safeRepairEvidenceTarget(artifactPath, context, artifacts)
+                    ?: continue
+                evidenceReferences += target
+            }
+            val binding = record["agentInvocation"] as? JsonObject ?: continue
+            val receiptPath = (binding["receiptPath"] as? JsonPrimitive)?.contentOrNull ?: continue
+            val target = safeRepairEvidenceTarget(receiptPath, context, artifacts) ?: continue
+            val identity = repairReceiptBindingIdentity(record) ?: continue
+            val attemptId = identity.revisionId
+                ?.takeIf { it.matches(Regex("revision_[0-9]{8}_[a-f0-9]{16}")) }
+            val expectation = if (attemptId == null) null else runCatching {
+                RepairReceiptExpectation(
+                    requireNotNull(identity.receiptSha256),
+                    requireNotNull(identity.receiptSchemaVersion),
+                    requireNotNull(identity.requestSha256),
+                    requireNotNull(identity.resultChangesSha256),
+                    requireNotNull(identity.terminalOutcome),
+                    requireNotNull(identity.receiptReleaseComplete),
+                    attemptId,
+                )
+            }.getOrNull()
+            receiptReferences[identity] = target to expectation
+        }
+
+        val artifactBytes = mutableMapOf<String, Result<ByteArray>>()
+        fun readOnce(relativePath: String): Result<ByteArray> = artifactBytes.getOrPut(relativePath) {
+            runCatching { jobs.readArtifact(jobId, relativePath, MAX_REPAIR_EVIDENCE_PRESENTATION_BYTES).bytes }
+        }
+        val evidenceStates = evidenceReferences.associateWith { relativePath ->
+            val bytes = readOnce(relativePath).getOrElse { return@associateWith RepairEvidenceArtifactState.UNAVAILABLE }
+            if (relativePath.endsWith(".json")) {
+                if (runCatching { decompengine.oracle.core.OracleJson.parse(bytes) }.isSuccess)
+                    RepairEvidenceArtifactState.AVAILABLE else RepairEvidenceArtifactState.CORRUPT
+            } else RepairEvidenceArtifactState.AVAILABLE
+        }
+        val receiptStates = receiptReferences.mapValues { (_, reference) ->
+            val (relativePath, receipt) = reference
+            val bytes = readOnce(relativePath).getOrElse { return@mapValues RepairEvidenceArtifactState.UNAVAILABLE }
+            if (receipt == null) {
+                RepairEvidenceArtifactState.CORRUPT
+            } else {
+                val valid = runCatching {
+                    require(sha256Hex(bytes) == receipt.receiptSha256)
+                    val verified = verifyAcpExecutionReceiptDocument(
+                        bytes, TRACE_REPAIR_ACP_RECEIPT_KIND, TRACE_REPAIR_ACP_TASK_FIELD, receipt.attemptId,
+                    )
+                    require(receipt.receiptSchemaVersion == 2)
+                    require(verified.requestSha256 == receipt.requestSha256)
+                    require(verified.resultChangesSha256 == receipt.resultChangesSha256)
+                    require(verified.terminalOutcome == receipt.terminalOutcome)
+                    require(verified.releaseComplete == receipt.releaseComplete)
+                }.isSuccess
+                if (valid) RepairEvidenceArtifactState.AVAILABLE else RepairEvidenceArtifactState.CORRUPT
+            }
+        }
+        return evidenceStates to receiptStates
+    }
+
+    private fun sha256Hex(bytes: ByteArray): String = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(bytes).joinToString("") { "%02x".format(it) }
 
     private enum class LegacyJsonReport(val filename: String) {
         EXPLORATION("exploration.json"), REPAIR_HISTORY("repair_history.json"),
@@ -777,8 +887,10 @@ class UploadServer(
 
     private fun readLegacyJsonReport(jobId: String, context: WebReportContext, report: LegacyJsonReport): kotlinx.serialization.json.JsonObject? =
         runCatching {
-            decompengine.oracle.core.OracleJson.parse(jobs.readArtifact(jobId,
-                "${context.artifactPrefix}/${report.filename}", 1_048_576).bytes) as kotlinx.serialization.json.JsonObject
+            val root = decompengine.oracle.core.OracleJson.parse(jobs.readArtifact(jobId,
+                "${context.artifactPrefix}/${report.filename}", 1_048_576).bytes).jsonObject
+            if (report == LegacyJsonReport.REPAIR_HISTORY) validateRepairHistoryProjection(root)
+            root
         }.getOrNull()
 
     private fun handleSource(exchange: HttpExchange, jobId: String, relativePath: String) {
@@ -827,6 +939,7 @@ class UploadServer(
 
     private companion object {
         const val MAX_ARTIFACT_BYTES = 64L * 1024 * 1024
+        const val MAX_REPAIR_EVIDENCE_PRESENTATION_BYTES = 16L * 1024 * 1024
     }
 }
 

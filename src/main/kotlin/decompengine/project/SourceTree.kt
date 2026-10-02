@@ -129,6 +129,19 @@ class BoundedLlmModuleReconstructor(
     private fun contextBudget(profile: ReconstructionProfile): Int =
         minOf(maximumContextCharacters, profile.budgets.reconstructionMaximumContextCharacters)
 
+    private fun promptBudgetFailure(request: ModuleReconstructionRequest, prompt: String): ModuleContextBudgetExceededException? {
+        val budget = contextBudget(request.profile)
+        return if (prompt.length <= budget) null else ModuleContextBudgetExceededException(
+            request.module.id, prompt.length, budget, sha256(prompt.toByteArray()), PRE_DISPATCH_BUDGET_PERMIT,
+        )
+    }
+
+    internal fun requireRetainableFallbackObservation(request: ModuleReconstructionRequest) {
+        if (promptBudgetFailure(request, modulePromptEvidence(request).text) != null) {
+            requireRetainableModuleObservation(request.observedBehavior)
+        }
+    }
+
     override fun requiresExecutionEvidenceForCheckpointReuse(): Boolean = true
 
     private fun sessionContinuation(
@@ -190,62 +203,16 @@ class BoundedLlmModuleReconstructor(
 
     override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule {
         val target = request.module.sourcePath
-        val layout = request.profile.layout
-        val implementation = layout.declaration("module-implementation")
-        require(target == implementation.materialize(mapOf("module" to request.module.id)) &&
-            ProjectFileRole.MODULE_IMPLEMENTATION in implementation.roles &&
-            ProjectFileRole.EDITABLE in implementation.roles
-        ) { "planned module target must match the profile-owned editable implementation" }
-        val sharedInterface = layout.declaration("shared-interface")
-        val sharedInterfacePath = sharedInterface.materialize()
-        requireViewableTextInterface(sharedInterface, ProjectFileRole.PUBLIC_INTERFACE)
-        val moduleInterface = layout.declaration("module-interface")
-        val moduleInterfacePath = moduleInterface.materialize(mapOf("module" to request.module.id))
-        require(request.module.headerPath == moduleInterfacePath) {
-            "planned module header must match the profile-declared module interface"
-        }
-        requireViewableTextInterface(moduleInterface, ProjectFileRole.PUBLIC_INTERFACE)
-        val privateInterface = layout.declaration("module-private-interface")
-        val privateInterfacePath = privateInterface.materialize(mapOf("module" to request.module.id))
-        requireViewableTextInterface(privateInterface, ProjectFileRole.PRIVATE_INTERFACE)
-        request.dependencyHeaders.keys.forEach { path ->
-            val declaration = layout.declarationForPath(path)
-            require(declaration.id == "module-interface") {
-                "module reconstruction dependency is not a declared module interface: $path"
-            }
-            requireViewableTextInterface(declaration, ProjectFileRole.PUBLIC_INTERFACE)
-        }
-        val contextPaths = listOf(sharedInterfacePath, moduleInterfacePath, privateInterfacePath) +
-            request.dependencyHeaders.keys
-        require(contextPaths.distinct().size == contextPaths.size && target !in contextPaths) {
-            "module reconstruction context paths must be distinct from each other and the editable target"
-        }
-        val prompt = ReconstructionAdapters.resolve(request.profile).modulePrompt(request)
+        val implementation = request.profile.layout.declaration("module-implementation")
+        val prompt = modulePromptEvidence(request)
         val objective = prompt.objective
         val evidence = prompt.evidence
-        val files = linkedMapOf(
-            sharedInterfacePath to request.sharedHeader,
-            moduleInterfacePath to request.moduleHeader,
-            privateInterfacePath to request.privateHeader,
-        )
-            .apply { putAll(request.dependencyHeaders) }
-        val observed = request.observedBehavior ?: "<not yet available; report this limitation>"
-        val promptEvidence = buildString {
-            append(objective).append("\n\n").append(evidence).append("\n\n").append(observed)
-            files.toSortedMap().forEach { (path, content) ->
-                append("\n\n--- ").append(path).append(" ---\n").append(content)
-            }
-        }
+        val files = prompt.files
+        val observed = prompt.observed
+        val promptEvidence = prompt.text
         val contextSize = promptEvidence.length
         val contextBudget = contextBudget(request.profile)
-        if (contextSize > contextBudget) {
-            throw ModuleContextBudgetExceededException(
-                request.module.id,
-                contextSize,
-                contextBudget,
-                sha256(promptEvidence.toByteArray()),
-            )
-        }
+        promptBudgetFailure(request, promptEvidence)?.let { throw it }
         val promptSha256 = sha256(promptEvidence.toByteArray())
         val workspaceRoot = request.workspaceRoot.toAbsolutePath().normalize()
         val root = AgentWorkspaceRoot("project", workspaceRoot)
@@ -350,28 +317,24 @@ class BoundedLlmModuleReconstructor(
     }
 }
 
-private fun requireViewableTextInterface(declaration: ProjectFileDeclaration, expectedRole: ProjectFileRole) {
-    require(expectedRole in declaration.roles) {
-        "module reconstruction context ${declaration.id} lacks its declared $expectedRole role"
-    }
-    require(ProjectFileRole.VIEWABLE in declaration.roles) {
-        "module reconstruction context ${declaration.id} is not declared viewable"
-    }
-    require(declaration.contentKind == ProjectContentKind.UTF8_TEXT) {
-        "module reconstruction context ${declaration.id} is not declared UTF-8 text"
-    }
-}
-
 private const val MAXIMUM_HARNESS_PROVENANCE_BYTES = 4 * 1024
 
-class ModuleContextBudgetExceededException(
+private object PRE_DISPATCH_BUDGET_PERMIT
+
+class ModuleContextBudgetExceededException internal constructor(
     val moduleId: String,
     val promptCharacters: Int,
     val promptBudgetCharacters: Int,
     val promptSha256: String,
+    private val originPermit: Any?,
 ) : IllegalArgumentException(
     "module $moduleId exceeds context budget: $promptCharacters > $promptBudgetCharacters characters",
-)
+) {
+    constructor(moduleId: String, promptCharacters: Int, promptBudgetCharacters: Int, promptSha256: String) :
+        this(moduleId, promptCharacters, promptBudgetCharacters, promptSha256, null)
+
+    internal val raisedBeforeDispatch: Boolean get() = originPermit === PRE_DISPATCH_BUDGET_PERMIT
+}
 
 class ModuleReconstructionInterruptedException(
     val moduleId: String,
@@ -604,31 +567,39 @@ object SourceTreeGenerator {
         val adapter = ReconstructionAdapters.resolve(profile)
         requireWorkflowOwnedPathsAreReserved(profile)
         val selectedReconstructor = reconstructor ?: adapter.defaultReconstructor()
+        adapter.admitGeneration(projectDir, profile, selectedReconstructor)
+        val unresolvedOutput = adapter.requiresUnresolvedOutput(profile)
         val compilationPolicy = adapter.compilation
         val selectedPlanner = planner?.withProfileBounds(profile) ?: DeterministicModulePlanner.forProfile(profile)
         val planning = selectedPlanner.planWithComplexity(model, overrides)
         val plan = planning.plan
-        val rendering = adapter.rendering(model, plan)
+        val rendering = adapter.rendering(model, plan, profile)
         requireProjectedArchiveEntryBudget(profile, plan.modules.size, rendering.entrypoint() != null)
         val typesHeader = rendering.sharedInterface()
         val typesHeaderPath = profile.layout.declaration("shared-interface").materialize()
         val typesHeaderFile = projectDir.resolve(typesHeaderPath)
-        typesHeaderFile.parent.createDirectories()
-        typesHeaderFile.writeText(typesHeader)
         val headers = plan.modules.associate { module -> module.id to rendering.moduleInterface(module) }
         val moduleById = plan.modules.associateBy { it.id }
-        val functionById = model.functions.associateBy { it.id }
-        val functionOwners = plan.modules.flatMap { module -> module.functionIds.map { it to module.id } }.toMap()
-        val globalOwners = plan.modules.flatMap { module -> module.globalIds.map { it to module.id } }.toMap()
-        val dependenciesByModule = plan.modules.associate { module -> module.id to
-            module.functionIds.flatMap { id ->
-                val function = functionById.getValue(id)
-                function.calls.mapNotNull(functionOwners::get) + function.referencedGlobals.mapNotNull(globalOwners::get)
-            }.filter { it != module.id }.distinct().sorted()
-        }
+        val dependenciesByModule = moduleDependencies(model, plan)
         val headerHashes = headers.mapValues { sha256(it.value.toByteArray()) }
         val interfaceFingerprints = moduleInterfaceFingerprints(dependenciesByModule, headerHashes)
         val privateHeaders = plan.modules.associate { module -> module.id to rendering.privateInterface(module) }
+        if (selectedReconstructor is BoundedLlmModuleReconstructor && observedBehavior != null &&
+            observedBehavior.toByteArray(Charsets.UTF_8).size > MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES) {
+            // Validate actual fallback inputs before writing any project state. Larger
+            // observations that fit an authorized prompt budget need no retained copy.
+            plan.modules.forEach { module ->
+                val dependencyHeaders = dependenciesByModule.getValue(module.id).associate { dependency ->
+                    moduleById.getValue(dependency).headerPath to headers.getValue(dependency)
+                }
+                selectedReconstructor.requireRetainableFallbackObservation(ModuleReconstructionRequest(
+                    module, model, typesHeader, headers.getValue(module.id), privateHeaders.getValue(module.id),
+                    dependencyHeaders, projectDir, observedBehavior, profile = profile,
+                ))
+            }
+        }
+        typesHeaderFile.parent.createDirectories()
+        typesHeaderFile.writeText(typesHeader)
         headers.forEach { (id, content) ->
             val path = profile.layout.declaration("module-interface").materialize(mapOf("module" to id))
             val file = projectDir.resolve(path)
@@ -705,8 +676,14 @@ object SourceTreeGenerator {
                 throw ModuleReconstructionEvidencePersistenceException(failure)
             }
             val recordedCheckpoint = readCheckpoint(checkpointPath)
+            // Acceptance rules may tighten without changing model or profile bytes. A previous
+            // compiler pass cannot authorize either cache reuse or rollback past the current gate.
+            val currentSourcePassesAdapter by lazy {
+                sourcePath.exists() && adapter.assess(module, model, recordedCheckpoint?.generator.orEmpty(),
+                    sourcePath.readText()).isEmpty()
+            }
             fun ModuleCheckpoint.hasCurrentModuleAcceptance(): Boolean =
-                schemaVersion == 6 && inputBinarySha256 == model.inputSha256 &&
+                !unresolvedOutput && schemaVersion == 6 && inputBinarySha256 == model.inputSha256 &&
                     modelSchemaVersion == model.schemaVersion && profileSha256 == profile.sha256 &&
                     accepted && issues.isEmpty() &&
                     modulePromptAttributionIsValid(
@@ -718,7 +695,8 @@ object SourceTreeGenerator {
                     entityIds.size == entityIds.toSet().size &&
                     entityIds.toSet() == (module.functionIds + module.globalIds).toSet() &&
                     compilation?.passed == true &&
-                    compilation.command == compilationPolicy.command(profile, module.sourcePath)
+                    compilation.command == compilationPolicy.command(profile, module.sourcePath) &&
+                    currentSourcePassesAdapter
             val verifiedPreviousAcceptance = recordedCheckpoint?.takeIf {
                 it.hasCurrentModuleAcceptance() && sourcePath.exists() && sha256(sourcePath.readBytes()) == it.sourceSha256 &&
                     it.hasCurrentExecutionEvidence(projectDir, configuredExecutionEvidencePath, false)
@@ -772,6 +750,7 @@ object SourceTreeGenerator {
                     progress.phase(AgentWorkflowPhase.ROLLED_BACK, module.id, previousAccepted.sourceSha256)
                     return attemptEvidence
                 }
+                var workflowOrigin = "reconstructor-return"
                 val attempted = try {
                     selectedReconstructor.reconstruct(request)
                 } catch (interrupted: ModuleReconstructionInterruptedException) {
@@ -792,10 +771,16 @@ object SourceTreeGenerator {
                     restoreAcceptedRevision()
                     throw failure
                 } catch (failure: Exception) {
+                    if (failure is InterruptedException || Thread.currentThread().isInterrupted) throw failure
+                    if (unresolvedOutput) throw failure
                     if (generateSequence<Throwable>(failure) { it.cause }.any { it is AgentSessionRecoveryException }) throw failure
+                    workflowOrigin = if (selectedReconstructor is BoundedLlmModuleReconstructor &&
+                        failure is ModuleContextBudgetExceededException && failure.raisedBeforeDispatch)
+                        "pre-dispatch-context-budget-fallback" else "exception-fallback"
                     unresolvedFallback(request, cacheIdentity, failure)
                 }
                 val normalizedSource = attempted.source.trimEnd() + "\n"
+                adapter.validateSourceContent(profile, normalizedSource.toByteArray(), module.sourcePath)
                 val executionEvidence = attempted.agentExecutionEvidence?.let(::persistExecutionEvidence)
                     ?: persistedExecutionEvidence
                 progress.phase(AgentWorkflowPhase.POLICY_CHECKING, module.id)
@@ -832,7 +817,7 @@ object SourceTreeGenerator {
                         )
                     }
                 } else null
-                val accepted = issues.isEmpty()
+                val accepted = !unresolvedOutput && issues.isEmpty()
                 val normalizedSourceSha256 = sha256(normalizedSource.toByteArray())
                 val candidateCheckpoint = ModuleCheckpoint(
                     inputBinarySha256 = model.inputSha256,
@@ -841,6 +826,10 @@ object SourceTreeGenerator {
                     fingerprint = fingerprint,
                     sourceSha256 = normalizedSourceSha256,
                     generator = attempted.generator,
+                    workflowOrigin = workflowOrigin,
+                    preDispatchObservedBehavior = observedBehavior.takeIf {
+                        workflowOrigin == "pre-dispatch-context-budget-fallback"
+                    },
                     reconstructorIdentity = cacheIdentity,
                     promptSha256 = attempted.promptSha256,
                     promptCharacters = attempted.promptCharacters,
@@ -1031,7 +1020,7 @@ object SourceTreeGenerator {
         val toolchain = adapter.toolchainEvidence(profile)
         projectDir.resolve(toolchainPath).also { it.parent.createDirectories() }.writeText(toolchain)
         generated += evidence(profile, toolchainPath, toolchain, "environment", emptyList())
-        val unresolvedMarkdown = renderUnresolvedMarkdown(model, plan, unresolvedImplementations)
+        val unresolvedMarkdown = renderUnresolvedMarkdown(model, plan, unresolvedImplementations, unresolvedOutput)
         projectDir.resolve(unresolvedPath).also { it.parent.createDirectories() }.writeText(unresolvedMarkdown)
         generated += evidence(profile, unresolvedPath, unresolvedMarkdown, "evidence", unresolvedImplementations.toList())
         val manifest = SourceTreeManifest(
@@ -1039,9 +1028,9 @@ object SourceTreeGenerator {
             profileSha256 = profile.sha256,
             inputSha256 = model.inputSha256,
             files = generated,
-            unresolvedEntityIds = model.functions.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
-                model.globals.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
-                model.types.filter { model.isRecoveryUnresolved(it.status) }.map { it.id },
+            unresolvedEntityIds = model.functions.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.map { it.id } +
+                model.globals.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.map { it.id } +
+                model.types.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.map { it.id },
             unresolvedImplementationIds = unresolvedImplementations.toList(),
         )
         projectDir.resolve("source_tree_manifest.json").writeText(manifest.toJson())
@@ -1112,6 +1101,8 @@ object SourceTreeGenerator {
         val fingerprint: String,
         val sourceSha256: String,
         val generator: String,
+        val workflowOrigin: String = "reconstructor-return",
+        val preDispatchObservedBehavior: String? = null,
         val reconstructorIdentity: String,
         val promptSha256: String,
         val promptCharacters: Int?,
@@ -1135,6 +1126,13 @@ object SourceTreeGenerator {
             require(schemaVersion < 6 || (inputBinarySha256 != null && modelSchemaVersion in setOf(1, 2) &&
                 profileSha256?.matches(Regex("[0-9a-f]{64}")) == true)) { "module checkpoint lacks input identity" }
             require(schemaVersion in 2..6) { "unsupported module checkpoint schemaVersion: $schemaVersion" }
+            require(workflowOrigin in setOf("reconstructor-return", "exception-fallback",
+                "pre-dispatch-context-budget-fallback")) { "unsupported module checkpoint workflow origin" }
+            require(preDispatchObservedBehavior == null ||
+                workflowOrigin == "pre-dispatch-context-budget-fallback") {
+                "retained pre-dispatch prompt input requires an undispatched fallback"
+            }
+            requireRetainableModuleObservation(preDispatchObservedBehavior)
             require(schemaVersion < 5 || !accepted ||
                 (compilation?.passed == true && compilation.sourceSha256 == sourceSha256)
             ) { "accepted module checkpoint lacks successful compilation of its exact source bytes" }
@@ -1195,6 +1193,13 @@ object SourceTreeGenerator {
             append("\n  \"fingerprint\": \"").append(fingerprint).append("\",")
             append("\n  \"sourceSha256\": \"").append(sourceSha256).append("\",")
             append("\n  \"generator\": \"").append(generator.jsonEscape()).append("\",")
+            if (schemaVersion >= 6) {
+                append("\n  \"workflowOrigin\": \"").append(workflowOrigin).append("\",")
+            }
+            if (schemaVersion >= 6 && workflowOrigin == "pre-dispatch-context-budget-fallback") {
+                append("\n  \"preDispatchObservedBehavior\": ")
+                append(preDispatchObservedBehavior?.let { kotlinx.serialization.json.JsonPrimitive(it) } ?: JsonNull).append(',')
+            }
             append("\n  \"reconstructorIdentity\": \"").append(reconstructorIdentity.jsonEscape()).append("\",")
             append("\n  \"promptSha256\": \"").append(promptSha256).append("\",")
             append("\n  \"promptCharacters\": ").append(promptCharacters ?: "null").append(',')
@@ -1268,6 +1273,8 @@ object SourceTreeGenerator {
                 fingerprint = root.getValue("fingerprint").jsonPrimitive.content,
                 sourceSha256 = root.getValue("sourceSha256").jsonPrimitive.content,
                 generator = root.getValue("generator").jsonPrimitive.content,
+                workflowOrigin = optionalString("workflowOrigin") ?: "reconstructor-return",
+                preDispatchObservedBehavior = optionalString("preDispatchObservedBehavior"),
                 reconstructorIdentity = root.getValue("reconstructorIdentity").jsonPrimitive.content,
                 promptSha256 = root.getValue("promptSha256").jsonPrimitive.content,
                 promptCharacters = root["promptCharacters"]?.jsonPrimitive?.intOrNull,
@@ -1446,6 +1453,11 @@ object SourceTreeGenerator {
     ): List<ModuleReconstructionIssue> {
         val entityIds = module.functionIds + module.globalIds
         val issues = reconstructed.issues.toMutableList()
+        if (reconstructed.generator == "repair-revision") {
+            issues += ModuleReconstructionIssue(
+                "reserved-generator", "repair-revision is reserved for authenticated repair publication", entityIds,
+            )
+        }
         if (source.isBlank() && entityIds.isNotEmpty()) {
             issues += ModuleReconstructionIssue("empty-source", "module source is empty", entityIds)
         }
@@ -1494,7 +1506,7 @@ object SourceTreeGenerator {
                 }
             }
         }
-        issues += adapter.assess(module, model, reconstructed.generator, source)
+        issues += adapter.assess(module, model, reconstructed.generator, source, profile)
         return issues.distinctBy { Triple(it.code, it.message, it.entityIds.sorted()) }
     }
 
@@ -1518,7 +1530,7 @@ object SourceTreeGenerator {
         }
     }
 
-    private fun moduleFingerprint(
+    internal fun moduleFingerprint(
         module: PlannedModule,
         model: RecoveredProgramModel,
         sharedHeader: String,
@@ -1577,9 +1589,10 @@ object SourceTreeGenerator {
         }
         val allStatuses = model.functions.map { it.status } + model.globals.map { it.status } + model.types.map { it.status }
         val projectScore = if (allStatuses.isEmpty()) 0.0 else allStatuses.map(::score).average()
-        val unresolvedRecovery = model.functions.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
-            model.globals.filter { model.isRecoveryUnresolved(it.status) }.map { it.id } +
-            model.types.filter { model.isRecoveryUnresolved(it.status) }.map { it.id }
+        val unresolvedOutput = ReconstructionAdapters.resolve(profile).requiresUnresolvedOutput(profile)
+        val unresolvedRecovery = model.functions.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.map { it.id } +
+            model.globals.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.map { it.id } +
+            model.types.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.map { it.id }
         fun idsJson(ids: Collection<String>) = ids.distinct().sorted().joinToString(prefix = "[", postfix = "]", separator = ",") {
             "\"${it.jsonEscape()}\""
         }
@@ -1666,11 +1679,12 @@ object SourceTreeGenerator {
         model: RecoveredProgramModel,
         plan: ModulePlan,
         unresolvedImplementationIds: Set<String>,
+        unresolvedOutput: Boolean = false,
     ): String {
         val rows = buildList {
-            model.functions.filter { model.isRecoveryUnresolved(it.status) }.forEach { add("function" to Triple(it.id, it.status, "0x${it.address.toString(16)}")) }
-            model.globals.filter { model.isRecoveryUnresolved(it.status) }.forEach { add("global" to Triple(it.id, it.status, "0x${it.address.toString(16)}")) }
-            model.types.filter { model.isRecoveryUnresolved(it.status) }.forEach { add("type" to Triple(it.id, it.status, it.sourceAddress?.let { address -> "0x${address.toString(16)}" } ?: "no address")) }
+            model.functions.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.forEach { add("function" to Triple(it.id, it.status, "0x${it.address.toString(16)}")) }
+            model.globals.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.forEach { add("global" to Triple(it.id, it.status, "0x${it.address.toString(16)}")) }
+            model.types.filter { unresolvedOutput || model.isRecoveryUnresolved(it.status) }.forEach { add("type" to Triple(it.id, it.status, it.sourceAddress?.let { address -> "0x${address.toString(16)}" } ?: "no address")) }
         }
         return buildString {
             append("# Unresolved reconstruction evidence\n\n")
@@ -1685,13 +1699,14 @@ object SourceTreeGenerator {
                 append("| Kind | Stable ID | Status | Provenance |\n|---|---|---|---|\n")
                 rows.sortedBy { it.second.first }.forEach { (kind, details) ->
                     val status = details.second.name.lowercase()
-                    val assessment = if (model.schemaVersion == 2) "unassessed (extraction: $status)" else status
+                    val assessment = if (unresolvedOutput || model.schemaVersion == 2) "unassessed (extraction: $status)" else status
                     append("| $kind | `${details.first}` | $assessment | ${details.third} |\n")
                 }
             }
             append("\n## Implementation generation\n\n")
+            if (unresolvedOutput) append("Evidence-only diagnostic inventory; no implementation acceptance or recovered behavior is claimed.\n\n")
             if (unresolvedImplementationIds.isEmpty()) {
-                append("Every planner-owned implementation passed the acceptance checks.\n")
+                if (!unresolvedOutput) append("Every planner-owned implementation passed the acceptance checks.\n")
             } else {
                 val owner = plan.modules.flatMap { module ->
                     (module.functionIds + module.globalIds).map { id -> id to module.id }

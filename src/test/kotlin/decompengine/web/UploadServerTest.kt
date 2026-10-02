@@ -17,6 +17,9 @@ import decompengine.project.RecoveredProgramModel
 import decompengine.project.RecoveredFunction
 import decompengine.project.MakeProjectBuilder
 import decompengine.project.ArchivalPackager
+import decompengine.repair.ModuleRevisionAttempt
+import decompengine.repair.ModuleRevisionGraphTest
+import decompengine.repair.TRACE_REPAIR_ACP_RECEIPT_KIND
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
@@ -41,6 +44,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertContentEquals
 import kotlin.test.assertNotEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class UploadServerTest {
@@ -133,7 +137,7 @@ class UploadServerTest {
         val id = uploadedJobId(server)
         val job = decompengine.jobs.JobStore(root).get(id)
         val reports = root.resolve(id).resolve("reports").createDirectories()
-        val history = """{"iterations":[{"index":1,"failureKind":"fixture","summary":"supplied_history","succeeded":false}]}"""
+        val history = """{"regressionInputs":[],"iterations":[{"index":1,"failureKind":"fixture","summary":"supplied_history","prompt":"","succeeded":false,"retainedRegressionIds":[],"before":null,"after":null,"patches":[]}]}"""
         val progress = """{"phase":"supplied_progress","completed":1,"total":2}"""
         val paths = listOf(reports.resolve("repair_history.json"), reports.resolve("reconstruction_progress.json"))
         paths[0].writeText(history.replace("supplied_history", "stored_history"))
@@ -141,7 +145,8 @@ class UploadServerTest {
         val before = paths.map { it.readBytes() }
         val rendered = renderJob(job, repairHistory = Json.parseToJsonElement(history).jsonObject,
             reconstructionProgress = Json.parseToJsonElement(progress).jsonObject)
-        assertTrue(rendered.contains("supplied_history") && rendered.contains("supplied_progress"))
+        assertTrue(!rendered.contains("supplied_history") && rendered.contains("Repair attempt — unverified") &&
+            rendered.contains("supplied_progress"))
         assertTrue(!rendered.contains("stored_history") && !rendered.contains("stored_progress"))
         val omitted = renderJob(job)
         assertTrue(omitted.contains("Repair history is unavailable"))
@@ -149,7 +154,8 @@ class UploadServerTest {
         assertTrue(!omitted.contains("stored_history") && !omitted.contains("stored_progress"))
         val loaded = request(server, "GET", "/jobs/$id")
         assertEquals(200, loaded.status)
-        assertTrue(loaded.body.decodeToString().contains("stored_history"))
+        assertTrue(!loaded.body.decodeToString().contains("stored_history"))
+        assertTrue(loaded.body.decodeToString().contains("Repair attempt — unverified"))
         assertTrue(loaded.body.decodeToString().contains("stored_progress"))
         paths.forEachIndexed { index, path -> assertContentEquals(before[index], path.readBytes()) }
         for (invalid in listOf("PRIVATE_INVALID {", "x".repeat(1_048_577), "[]", "{\"phase\":1,\"phase\":2}")) {
@@ -1197,18 +1203,28 @@ class UploadServerTest {
             val job = Json.parseToJsonElement(upload.body.decodeToString()).jsonObject
             val jobId = job["id"].toString().trim('"')
             val reportsDir = dataDir.resolve(jobId).resolve("reports").createDirectories()
+            reportsDir.resolve("before.diff.json").writeText("not valid JSON")
+            reportsDir.resolve("after.behavior.json").writeText("{\"schemaVersion\":1}")
             reportsDir.resolve("repair_history.json").writeText(
                 """
                 {
+                  "schemaVersion": 3,
+                  "runs": [],
+                  "regressionInputs": [],
                   "iterations": [
                     {
                       "index": 1,
                       "failureKind": "behavior",
-                      "summary": "match observed stdout",
+                      "summary": "PRIVATE repair summary",
+                      "prompt": "PRIVATE prompt and source text",
                       "succeeded": true,
-                      "before": {"kind":"behavior","summary":"one mismatch","artifactPath":"before.diff.json"},
-                      "after": {"kind":"valid","summary":"all cases match","artifactPath":"after.behavior.json"},
-                      "retainedRegressionIds": ["hello_default"]
+                      "disposition": "rejected",
+                      "publicationMode": "test_only_non_release",
+                      "agentInvocation": null,
+                      "patches": [],
+                      "before": {"kind":"behavior","summary":"PRIVATE before detail","artifactPath":"reports/before.diff.json"},
+                      "after": {"kind":"valid","summary":"PRIVATE after detail","artifactPath":"reports/after.behavior.json"},
+                      "retainedRegressionIds": ["PRIVATE case identity"]
                     }
                   ]
                 }
@@ -1224,14 +1240,48 @@ class UploadServerTest {
             assertTrue(body.contains("ELF64"))
             assertTrue(body.contains("x86-64"))
             assertTrue(body.contains("Repair History"))
-            assertTrue(body.contains("Iteration 1"))
-            assertTrue(body.contains("match observed stdout"))
-            assertTrue(body.contains("hello_default"))
-            assertTrue(body.contains("behavior — passed"))
-            assertTrue(body.contains("Before:"))
-            assertTrue(body.contains("one mismatch"))
-            assertTrue(body.contains("After:"))
-            assertTrue(body.contains("all cases match"))
+            assertTrue(body.contains("Attempt 1"))
+            assertTrue(body.contains("Behavior repair — rejected"))
+            assertTrue(body.contains("Rollback: Completed; the rejected candidate did not advance the source head."))
+            assertTrue(body.contains("Test-only evidence; release completeness is not established."))
+            assertTrue(body.contains("<b>Before:</b> Behavior validation evidence · Retained evidence is corrupt."))
+            assertTrue(body.contains("<b>After:</b> Behavior validation evidence · <a href=\"/jobs/$jobId/artifacts/reports/after.behavior.json\">Open retained evidence</a>"))
+            assertTrue(body.contains("Retained regression cases:</b> 1"))
+            listOf("PRIVATE repair summary", "PRIVATE prompt", "PRIVATE before detail", "PRIVATE after detail",
+                "PRIVATE case identity", "hello_default", "one mismatch", "all cases match")
+                .forEach { assertFalse(body.contains(it), body) }
+        }
+    }
+
+    @Test
+    fun `repair history distinguishes empty projections from missing and malformed structure`() {
+        withServer { server, dataDir ->
+            val upload = upload(server, "history-shape.elf", elfFixture(), acceptJson = true)
+            val jobId = Json.parseToJsonElement(upload.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            val history = dataDir.resolve(jobId).resolve("reports").createDirectories().resolve("repair_history.json")
+            val empty = """{"schemaVersion":3,"runs":[],"regressionInputs":[],"iterations":[]}"""
+            history.writeText(empty)
+            val emptyBody = request(server, "GET", "/jobs/$jobId").body.decodeToString()
+            assertTrue(emptyBody.contains("No repair attempts are recorded."), emptyBody)
+            assertFalse(emptyBody.contains("Repair history is unavailable or corrupt."), emptyBody)
+
+            val corrupt = listOf(
+                """{"schemaVersion":3,"runs":[],"regressionInputs":[]}""",
+                """{"schemaVersion":3,"runs":[],"regressionInputs":[],"iterations":{}}""",
+                """{"schemaVersion":3,"runs":"wrong-type","regressionInputs":[],"iterations":[]}""",
+                """{"schemaVersion":3,"runs":[],"regressionInputs":null,"iterations":[]}""",
+                """{"schemaVersion":3,"runs":[],"regressionInputs":[null],"iterations":[]}""",
+                """{"schemaVersion":3,"runs":[],"regressionInputs":[],"iterations":[null]}""",
+                """{"schemaVersion":3,"runs":[],"iterations":[]}""",
+                """{"schemaVersion":3,"runs":[{}],"regressionInputs":[],"iterations":[]}""",
+                """{"schemaVersion":3,"runs":[],"regressionInputs":[],"iterations":[{"index":"bad"}]}""",
+            )
+            corrupt.forEach { payload ->
+                history.writeText(payload)
+                val body = request(server, "GET", "/jobs/$jobId").body.decodeToString()
+                assertTrue(body.contains("Repair history is unavailable or corrupt."), payload)
+                assertFalse(body.contains("No repair attempts are recorded."), payload)
+            }
         }
     }
 
@@ -1242,7 +1292,7 @@ class UploadServerTest {
             val jobId = Json.parseToJsonElement(upload.body.decodeToString()).jsonObject["id"].toString().trim('"')
             val reports = dataDir.resolve(jobId).resolve("reports").createDirectories()
             val outside = dataDir.resolve("foreign-repair-history.json")
-            outside.writeText("""{"iterations":[{"index":1,"failureKind":"foreign","summary":"foreign repair marker","succeeded":true}]}""")
+            outside.writeText("""{"regressionInputs":[],"iterations":[{"index":1,"failureKind":"behavior","prompt":"","summary":"foreign repair marker","succeeded":true,"retainedRegressionIds":[],"before":null,"after":null,"patches":[]}]}""")
             val history = reports.resolve("repair_history.json")
             Files.createSymbolicLink(history, outside)
 
@@ -1250,16 +1300,101 @@ class UploadServerTest {
             val download = request(server, "GET", "/jobs/$jobId/artifacts/reports/repair_history.json")
 
             assertEquals(200, page.status)
-            assertTrue(page.body.decodeToString().contains("Repair history is unavailable"))
+            assertTrue(page.body.decodeToString().contains("Repair history is unavailable or corrupt"))
             assertTrue(!page.body.decodeToString().contains("foreign repair marker"))
             assertTrue(download.status != 200)
             assertTrue(!download.body.decodeToString().contains("foreign repair marker"))
 
             Files.delete(history)
-            history.writeText("""{"iterations":[{"index":2,"failureKind":"local","summary":"accepted display marker","succeeded":false}]}""")
+            history.writeText("""{"regressionInputs":[],"iterations":[{"index":2,"failureKind":"behavior","prompt":"","summary":"accepted display marker","succeeded":false,"retainedRegressionIds":[],"before":null,"after":null,"patches":[]}]}""")
             val restored = request(server, "GET", "/jobs/$jobId")
             assertEquals(200, restored.status)
-            assertTrue(restored.body.decodeToString().contains("accepted display marker"))
+            assertTrue(restored.body.decodeToString().contains("Behavior repair — unverified"))
+            assertFalse(restored.body.decodeToString().contains("accepted display marker"))
+        }
+    }
+
+    @Test
+    fun `genuine repair receipt is verified only for its complete server binding`() {
+        withServer { server, dataDir ->
+            val upload = upload(server, "receipt-valid.elf", elfFixture(), acceptJson = true)
+            val jobId = Json.parseToJsonElement(upload.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            val jobDir = dataDir.resolve(jobId)
+            val reports = jobDir.resolve("reports").createDirectories()
+            val revisions = reports.resolve("repair-revisions").createDirectories()
+            val attemptId = "revision_00000001_aaaaaaaaaaaaaaaa"
+            val receiptPath = "reports/repair-revisions/$attemptId.acp-receipt.json"
+            val document = ModuleRevisionGraphTest().completeAcpReceiptDocument(
+                jobDir, ModuleRevisionAttempt(attemptId), "src/modules/alpha.c",
+                "original source".toByteArray(), "accepted source".toByteArray(),
+            )
+            assertTrue(document.releaseComplete)
+            val receiptBytes = document.json.toByteArray()
+            assertEquals(TRACE_REPAIR_ACP_RECEIPT_KIND,
+                Json.parseToJsonElement(document.json).jsonObject["kind"].toString().trim('"'))
+            revisions.resolve("$attemptId.acp-receipt.json").writeBytes(receiptBytes)
+
+            fun iteration(index: Int, requestSha256: String, resultChangesSha256: String) = """
+                {"index":$index,"failureKind":"behavior","prompt":"","summary":"","succeeded":true,
+                "retainedRegressionIds":[],"before":null,"after":null,"patches":[],
+                "disposition":"fully_accepted","publicationMode":"acp_release",
+                "revisionId":"$attemptId","parentRevisionId":"baseline","runId":null,
+                "agentInvocation":{"receiptPath":"$receiptPath","receiptSha256":"${document.sha256}",
+                "receiptSchemaVersion":${document.schemaVersion},"requestSha256":"$requestSha256",
+                "resultChangesSha256":"$resultChangesSha256","terminalOutcome":"${document.terminalOutcome}",
+                "receiptReleaseComplete":true,"assessmentStatus":"accepted"}}
+            """.trimIndent()
+            val history = reports.resolve("repair_history.json")
+            history.writeText("""
+                {"schemaVersion":3,"runs":[],"regressionInputs":[],"iterations":[
+                ${iteration(1, "${"d".repeat(64)}", "${"e".repeat(64)}")},
+                ${iteration(2, document.requestSha256, document.resultChangesSha256)} ]}
+            """.trimIndent())
+
+            val page = request(server, "GET", "/jobs/$jobId")
+            val body = page.body.decodeToString()
+            assertEquals(200, page.status)
+            assertTrue(body.contains("Release-complete ACP evidence; the retained receipt was verified."), body)
+            assertTrue(body.contains("ACP receipt is corrupt; release completeness is not established."), body)
+            assertEquals(1, Regex("Release-complete ACP evidence; the retained receipt was verified\\.")
+                .findAll(body).count(), body)
+            assertFalse(body.contains(document.json), body)
+            assertFalse(body.contains("peer completion summary"), body)
+        }
+    }
+
+    @Test
+    fun `corrupt bound ACP receipt is labelled without overriding canonical acceptance or exposing bytes`() {
+        withServer { server, dataDir ->
+            val upload = upload(server, "receipt.elf", elfFixture(), acceptJson = true)
+            val jobId = Json.parseToJsonElement(upload.body.decodeToString()).jsonObject["id"].toString().trim('"')
+            val reports = dataDir.resolve(jobId).resolve("reports").createDirectories()
+            val revisions = reports.resolve("repair-revisions").createDirectories()
+            val attemptId = "revision_00000001_aaaaaaaaaaaaaaaa"
+            val receiptPath = "reports/repair-revisions/$attemptId.acp-receipt.json"
+            val receiptBytes = """{"schemaVersion":2,"kind":"repair","attemptId":"$attemptId","private":"PRIVATE receipt body"}""".toByteArray()
+            revisions.resolve("$attemptId.acp-receipt.json").writeBytes(receiptBytes)
+            val receiptDigest = MessageDigest.getInstance("SHA-256").digest(receiptBytes)
+                .joinToString("") { "%02x".format(it) }
+            reports.resolve("repair_history.json").writeText(
+                """{"schemaVersion":3,"runs":[],"regressionInputs":[],"iterations":[{"index":1,"failureKind":"behavior","prompt":"","summary":"","succeeded":true,
+                  "disposition":"fully_accepted","publicationMode":"acp_release","revisionId":"$attemptId",
+                  "parentRevisionId":"baseline","runId":null,"retainedRegressionIds":[],"patches":[],
+                  "before":{"kind":"behavior","summary":"","artifactPath":null},"after":null,
+                  "agentInvocation":{"receiptPath":"$receiptPath","receiptSha256":"$receiptDigest",
+                    "receiptSchemaVersion":2,"requestSha256":"${"b".repeat(64)}",
+                    "resultChangesSha256":"${"c".repeat(64)}","terminalOutcome":"returned-completed",
+                    "receiptReleaseComplete":true,"assessmentStatus":"accepted"}}]}"""
+            )
+
+            val page = request(server, "GET", "/jobs/$jobId")
+            val body = page.body.decodeToString()
+            assertEquals(200, page.status)
+            assertTrue(body.contains("Behavior repair — accepted"), body)
+            assertTrue(body.contains("ACP receipt is corrupt; release completeness is not established."), body)
+            assertTrue(body.contains("Evidence artifact was not retained."), body)
+            assertFalse(body.contains("PRIVATE receipt body"), body)
+            assertFalse(body.contains("PRIVATE path"), body)
         }
     }
 

@@ -85,12 +85,26 @@ internal object RepairAcpEvidenceArchiveVerifier {
         manifest: SourceTreeManifest,
         reconstructionProfile: ReconstructionProfile,
         repairProfile: RepairIndexProfile = GeneratedCRepairIndexProfile,
+    ): ArchivedRepairReleaseLineage = verifyIfPresent(
+        projectDir, payloadSha256, payloadSizes, manifest, reconstructionProfile, { repairProfile },
+    )
+
+    fun verifyIfPresent(
+        projectDir: Path,
+        payloadSha256: Map<String, String>,
+        payloadSizes: Map<String, Long>,
+        manifest: SourceTreeManifest,
+        reconstructionProfile: ReconstructionProfile,
+        repairProfileProvider: () -> RepairIndexProfile,
     ): ArchivedRepairReleaseLineage {
         val repairPaths = payloadSha256.keys.filterTo(linkedSetOf()) { path ->
             path == REPAIR_HISTORY_PATH || path.startsWith(REPAIR_STATE_PREFIX)
         }
         if (repairPaths.isEmpty()) return ArchivedRepairReleaseLineage.NONE
 
+        // Absence of repair evidence grants no repair authority and needs no repair policy.
+        // Diagnostic-only reconstruction profiles intentionally cannot construct that policy.
+        val repairProfile = repairProfileProvider()
         require(reconstructionProfile.id == repairProfile.profileId()) {
             "repair release evidence profile differs from the archived reconstruction profile"
         }

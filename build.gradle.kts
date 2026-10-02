@@ -1426,7 +1426,7 @@ dependencies {
 
 tasks.processResources {
     from("oracle") {
-        include("**/*.schema.json")
+        include("**/*.schema.json", "kotlin-schema-inventory-v1.json")
         into("oracle")
     }
 }

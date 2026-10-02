@@ -520,6 +520,7 @@ class ArchivalReconstructionService(
 
     fun reconstruct(binaryPath: Path, outputDir: Path): ArchivalReconstructionResult {
         if (Thread.interrupted()) throw InterruptedException("archival reconstruction cancelled")
+        adapter.admitGeneration(outputDir.resolve("source-tree"), profile, reconstructor ?: adapter.defaultReconstructor())
         outputDir.createDirectories()
         val observedBehavior = ReconstructionExplorationInput.read(
             outputDir, profile.budgets.reconstructionMaximumContextCharacters,
@@ -561,12 +562,13 @@ class ArchivalReconstructionService(
             hostSafetyLimits = hostSafetyLimits,
         )
         val unresolvedEntities = requireNotNull(bundle.audit).unresolvedEntityIds
-        val implementationStatus = if (unresolvedEntities.isEmpty()) "complete" else "unresolved"
+        val completeImplementation = !adapter.requiresUnresolvedOutput(profile) && unresolvedEntities.isEmpty()
+        val implementationStatus = if (completeImplementation) "complete" else "unresolved"
         progressPath.writeText(
             "{\"phase\":\"$implementationStatus\",\"completed\":$moduleTotal,\"total\":$moduleTotal," +
                 "\"unresolvedEntityCount\":${unresolvedEntities.size}}\n",
         )
-        progress.phase(if (unresolvedEntities.isEmpty()) AgentWorkflowPhase.COMPLETED else AgentWorkflowPhase.UNRESOLVED)
+        progress.phase(if (completeImplementation) AgentWorkflowPhase.COMPLETED else AgentWorkflowPhase.UNRESOLVED)
         outputDir.resolve("reconstruction.json").writeText(
             """
             {

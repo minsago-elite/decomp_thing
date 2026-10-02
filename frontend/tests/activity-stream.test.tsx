@@ -6,6 +6,7 @@ import type * as ClientModule from '../src/api/client';
 import type { Snapshot, WebEvent } from '../src/api/generated';
 import { decodeContract } from '../src/api/decode';
 import { Activity } from '../src/jobs/Activity';
+import { controlledEventConnection as connection } from './fixtures/workflow';
 
 const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal: AbortSignal }) => Promise<unknown>>() }));
 vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>(), createApiClient: () => transport }));
@@ -17,16 +18,8 @@ if (first.kind !== 'event' || first.type !== 'workflow.observation') throw new E
 page.data.items = [first];
 const next = (offset: number): WebEvent => ({ ...first, sequence: String(BigInt(first.sequence) + BigInt(offset)), cursor: `cursor_next_${offset}` });
 const fetcher = vi.fn<typeof fetch>();
-function connection() {
-  let controller!: ReadableStreamDefaultController<Uint8Array>;
-  const cancel = vi.fn();
-  const body = new ReadableStream<Uint8Array>({ start(value) { controller = value; }, cancel });
-  return { cancel, close: () => controller.close(), send: (...items: WebEvent[]) => controller.enqueue(new TextEncoder().encode(items.map(event =>
-    `${event.type === 'retention.gap' ? '' : `id: ${event.cursor}\n`}event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''))),
-    response: new Response(body, { headers: { 'Content-Type': 'text/event-stream', 'X-Request-ID': 'request_example_1' } }) };
-}
 beforeEach(() => {
-  vi.useFakeTimers(); transport.get.mockReset(); fetcher.mockReset(); vi.stubGlobal('fetch', fetcher);
+  vi.useFakeTimers(); vi.setSystemTime(new Date("2026-09-08T00:00:00Z")); transport.get.mockReset(); fetcher.mockReset(); vi.stubGlobal('fetch', fetcher);
   vi.spyOn(Math, 'random').mockReturnValue(0.5);
   transport.get.mockResolvedValueOnce(snapshot).mockResolvedValueOnce(page);
 });

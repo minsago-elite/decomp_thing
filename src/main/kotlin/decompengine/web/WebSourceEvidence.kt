@@ -7,6 +7,8 @@ import decompengine.project.GeneratedFileEvidence
 import decompengine.project.ProjectContentKind
 import decompengine.project.ProjectFileRole
 import decompengine.project.ReconstructionProfile
+import decompengine.project.ReconstructionAdapters
+import decompengine.project.ReconstructionProfiles
 import decompengine.project.SourceTreeManifest
 import decompengine.project.SourceTreeManifestReader
 import decompengine.project.moduleIdForPath
@@ -27,7 +29,7 @@ internal class WebSourceEvidence(
     profiles: List<ReconstructionProfile>,
     private val readArtifact: (String, String, Long) -> StableRegularFile = store::readArtifact,
 ) {
-    private val profiles = profiles.associateBy(ReconstructionProfile::id)
+    private val profiles = profiles.associateBy { it.id to it.sha256 }
 
     init {
         require(profiles.size in 1..16 && this.profiles.size == profiles.size) {
@@ -42,8 +44,10 @@ internal class WebSourceEvidence(
         val manifestSnapshot = readArtifact(jobId, manifestPath, MAXIMUM_MANIFEST_BYTES)
         val manifestDocument = OracleJson.parse(manifestSnapshot.bytes, JSON_LIMITS) as? JsonObject
             ?: throw IllegalArgumentException("source manifest must be an object")
-        val profileId = manifestDocument["profileId"]?.jsonPrimitive?.content
-        val profile = profiles[profileId] ?: throw IllegalArgumentException("source profile is not admitted by this host")
+        val profileId = manifestDocument["profileId"]?.jsonPrimitive?.takeIf { it.isString }?.content
+        val profileSha256 = manifestDocument["profileSha256"]?.jsonPrimitive?.takeIf { it.isString }?.content
+        val profile = profiles[profileId to profileSha256]
+            ?: throw IllegalArgumentException("source profile identity is not admitted by this host")
         val manifest = SourceTreeManifestReader.parse(manifestDocument.toString(), profile)
         require(manifest.inputSha256 == input.sha256) { "source manifest belongs to a different uploaded input" }
         require(manifest.files.size <= 4096) { "source manifest exceeds the file-count bound" }
@@ -82,6 +86,11 @@ internal class WebSourceEvidence(
             maximumTotalStringBytes = MAXIMUM_MANIFEST_BYTES.toInt(),
         )
     }
+}
+
+/** Explicit application-owned variants; manifests cannot register profiles or supply policy descriptors. */
+internal fun defaultWebSourceProfiles(): List<ReconstructionProfile> = ReconstructionProfiles.builtIn.flatMap { base ->
+    listOf(base, ReconstructionAdapters.resolve(base).evidenceOnlyProfile(base))
 }
 
 internal class WebSourceSnapshot(

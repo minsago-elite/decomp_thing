@@ -67,6 +67,7 @@ internal class GeneratedCValidationSnapshot private constructor(
             if (sourceMetadataBytes > minOf(budget.maximumIndexEvidenceBytes, 64L * 1024 * 1024)) {
                 throw RepairBudgetExceededException("validation source manifest exceeds its metadata bound")
             }
+            registration.indexProfile.validateSourceContent(relative, bytes)
             revision.update("${relative.length}:$relative:${bytes.size}:${sha256(bytes)}\n".toByteArray(Charsets.UTF_8))
             writeSource(relative, bytes, executable = false)
             sourceManifest += JsonObject(mapOf(

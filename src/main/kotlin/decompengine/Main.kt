@@ -14,7 +14,8 @@ import decompengine.project.GeneratedCMakeReconstructionProfile
 import decompengine.project.ReconstructionProfiles
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
-import decompengine.project.EvidenceModuleReconstructor
+import decompengine.project.ReconstructionAdapters
+import decompengine.project.ReconstructionProfile
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
 import decompengine.project.ModuleReconstructor
 import decompengine.agent.AgentHarness
@@ -40,6 +41,7 @@ fun main(args: Array<String>) {
         "explore" -> runExplore(args.drop(1))
         "reconstruct" -> runReconstruct(args.drop(1))
         "gcc-engine-plan" -> runGccEnginePlan(args.drop(1))
+        "gcc-engine-full-export" -> runGccEngineFullExport(args.drop(1))
         "web" -> runWeb(args.drop(1))
         null, "help", "--help", "-h" -> printHelp()
         else -> {
@@ -51,19 +53,32 @@ fun main(args: Array<String>) {
 }
 
 private fun runGccEnginePlan(args: List<String>) {
+    runGccEngineCommand(args, fullRecoveryExport = false)
+}
+
+private fun runGccEngineFullExport(args: List<String>) {
+    runGccEngineCommand(args, fullRecoveryExport = true)
+}
+
+private fun runGccEngineCommand(args: List<String>, fullRecoveryExport: Boolean) {
     val options = try {
-        decompengine.oracle.gcc.GccBundledCliOptions.parse(args)
+        decompengine.oracle.gcc.GccBundledCliOptions.parse(args, fullRecoveryExport)
     } catch (failure: IllegalArgumentException) {
         System.err.println(failure.message)
-        System.err.println("usage: llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> " +
-            "--profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount> " +
-            "[--resume-after-checkpoint <multiple-of-512>]")
+        val command = if (fullRecoveryExport) "gcc-engine-full-export" else "gcc-engine-plan"
+        val resumeOption = if (fullRecoveryExport) "" else " [--resume-after-checkpoint <multiple-of-512>]"
+        System.err.println("usage: llm_bin_patch $command <cc1|lto1> <stripped-binary> " +
+            "--profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>$resumeOption")
         kotlin.system.exitProcess(2)
     }
     val result = decompengine.oracle.gcc.GccBundledCliCommand.run(options, args)
     println("engine: ${options.engineId}")
     println("operation result: $result")
-    println("Model and plan paths and their digests are recorded in the result; scratch is retained.")
+    if (fullRecoveryExport) {
+        println("Full model provenance is recorded in the result; structural scoring remains unavailable and scratch is retained.")
+    } else {
+        println("Model and plan paths and their digests are recorded in the result; scratch is retained.")
+    }
 }
 
 private fun runReconstruct(args: List<String>) {
@@ -113,7 +128,7 @@ private fun runReconstruct(args: List<String>) {
         onPhase = { System.err.println("reconstruction: ${it.name.lowercase().replace('_', ' ')}") },
     ).use { progress ->
         val strategy = try {
-            selectReconstructionStrategy(evidenceOnly, maximumContext, harnessOverride, environment, progress)
+            selectReconstructionStrategy(evidenceOnly, maximumContext, harnessOverride, environment, progress, profile)
         } catch (e: IllegalArgumentException) {
             progress.phase(AgentWorkflowPhase.FAILED)
             progress.close()
@@ -125,7 +140,8 @@ private fun runReconstruct(args: List<String>) {
         )
         val result = try {
             ArchivalReconstructionService(
-                GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor, profile = profile, progress = progress,
+                GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor,
+                profile = strategy.profile, progress = progress,
             ).reconstruct(binary, output)
         } catch (failure: Exception) {
             progress.phase(AgentWorkflowPhase.FAILED)
@@ -141,6 +157,7 @@ private fun runReconstruct(args: List<String>) {
 internal data class ReconstructionStrategy(
     val reconstructor: ModuleReconstructor,
     val harnessProvenance: String?,
+    val profile: ReconstructionProfile,
 )
 
 internal fun selectReconstructionStrategy(
@@ -149,12 +166,15 @@ internal fun selectReconstructionStrategy(
     harnessOverride: String?,
     environment: Map<String, String>,
     progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
+    profile: ReconstructionProfile = ReconstructionProfiles.default,
 ): ReconstructionStrategy {
     require(!evidenceOnly || harnessOverride == null) {
         "--harness cannot be used with --evidence-only"
     }
     if (evidenceOnly) {
-        return ReconstructionStrategy(EvidenceModuleReconstructor(), null)
+        val selectedProfile = ReconstructionAdapters.resolve(profile).evidenceOnlyProfile(profile)
+        return ReconstructionStrategy(ReconstructionAdapters.resolve(selectedProfile).evidenceOnlyReconstructor(selectedProfile),
+            null, selectedProfile)
     }
 
     val effectiveEnvironment = withHarnessOverride(environment, harnessOverride)
@@ -167,6 +187,7 @@ internal fun selectReconstructionStrategy(
             progress = progress,
         ),
         selection.provenance.stableDescriptor,
+        profile,
     )
 }
 
@@ -527,6 +548,7 @@ private fun printHelp() {
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
           llm_bin_patch reconstruct <binary> --output <directory> [--profile generated-c-make-v1|generated-c-ninja-v1] [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]
           llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
+          llm_bin_patch gcc-engine-full-export <cc1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173]
 
         Agent harness selection for doctor, patch, reconstruction, and repair:
@@ -537,6 +559,7 @@ private fun printHelp() {
           Doctor's --profile selects generated-c-make-v1 (default) or generated-c-ninja-v1.
           Reconstruction's --evidence-only mode is agent-free and cannot be combined with --harness.
           gcc-engine-plan requires contained execution and retains scratch plus linked evidence; results remain incomplete and release-ineligible.
+          gcc-engine-full-export runs a fresh contained full-recovery export and emits an authenticated structural profile binding; it does not score or certify structural truth.
           --resume-after-checkpoint <multiple-of-512> interrupts and resumes within this process; it is not cold recovery.
           Scratch defaults: 8 GiB available / 64 GiB maximum filesystem, 32768 available / 1000000 maximum inodes.
           Override with --scratch-min-bytes, --scratch-max-bytes, --scratch-min-inodes, --scratch-max-inodes.
