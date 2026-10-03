@@ -134,3 +134,70 @@ accuracy still requires authenticated candidate types, identity joins, and
 production scoring. `complete`, `scored`, `productionVerified`, and
 `releaseEligible` remain false. Qualification success alone does not establish
 90% function or global recovery and does not complete #692 or #680.
+
+## Merged census evidence and post-merge boundary
+
+PR [#1456](https://github.com/minsago-elite/decomp_thing/pull/1456) was
+independently reviewed at candidate head
+`5818d52c5a554eb21b95bdb2d2b77030aa68e0f3`, based on
+`e9b1d817e3a3b129cac390827f26f1dd1820deff`. The qualification artifact's
+`source-revision.txt` identifies its producer as synthetic merge
+`99c9041da130b99fd961e0aa0e33c8ce2725c362` (base first, candidate head
+second). The PR was squash-merged as `378a2266ac4a793e5a8c23f740e95741c7326c54`.
+That merge SHA is a different revision from both the reviewed candidate and
+the synthetic artifact producer.
+
+All five required workflows passed for the reviewed PR candidate:
+
+| Workflow | Run |
+| --- | ---: |
+| [Full CI](https://github.com/minsago-elite/decomp_thing/actions/runs/37140200371) | 37140200371 |
+| [Built-in core](https://github.com/minsago-elite/decomp_thing/actions/runs/37140200374) | 37140200374 |
+| [ACP contract](https://github.com/minsago-elite/decomp_thing/actions/runs/37140200395) | 37140200395 |
+| [LLVM oracle](https://github.com/minsago-elite/decomp_thing/actions/runs/37140200361) | 37140200361 |
+| [GCC oracle](https://github.com/minsago-elite/decomp_thing/actions/runs/37140200393) | 37140200393 |
+
+The retained GCC qualification artifact is
+[11280580825](https://github.com/minsago-elite/decomp_thing/actions/runs/37140200393).
+Its archive SHA-256 is
+`8d9811c2777f22013e59c7384511ffdc00496783a649fd08b6c6bc3b7ceffdf7`; the
+contained evidence SHA-256 is
+`738b2f3f77626762659788bfb9c9a81f35970bf9acb7f77a41aba20eccdfac08`. It
+records provider `gcc-driver-dwarf-interface-evidence-v2` and wire schema 2,
+scanner v2, and projector
+`dwarf-sysv-amd64-lp64-projection-v3` with rule-profile SHA-256
+`021b9e246e8c0cd250dbd660e03b0baba41338ba4c23e0fe4831fc11570c35df`.
+The pinned GCC source revision is
+`78d4ac73dd391005b895a6148cd9831e28e1208b`.
+
+The audited bundle contained 90 parts, 307,013,611 bytes, and 8,145,070 JSON
+nodes. Its 8,884 type headers and 40,765 ordered child rows joined exactly.
+The retained record counts were: 2,846 functions; 8,884 types; 40,765
+`typeChildren`; 24,231 globals; 703 object symbols; 7 stripped objects;
+7,231 projected types; 2,846 projected functions; 24,231 projected global
+types; 12,844 oracle functions; 2 unmatched functions; and 25,628 derived
+global-projection records.
+
+These are source-observation and projection counts, not recovered-accuracy
+scores. The reviewed function population is 12,844 oracle rows: 3,284 physical
+functions plus 9,560 explicit exclusions. Of the 3,284 physical functions,
+2,245 had observable source facts and 1,039 remained unresolved. The 24,231
+`globals` rows are raw global observations; there is no reviewed global oracle
+denominator in this artifact, and neither these rows nor the derived
+`globalProjection` rows establish global recovery accuracy. The evidence does
+not set `complete`, `scored`, `productionVerified`, or `releaseEligible` to
+true.
+
+No Actions workflow ran on merge SHA
+`378a2266ac4a793e5a8c23f740e95741c7326c54`. Its squash commit message
+inherited a `[skip ci]` directive, so the push event was skipped. The five
+workflow runs above and the GCC qualification artifact are pre-merge evidence;
+they are not post-merge checks. Post-merge verification remains pending until a
+normal, non-skipping default-branch push has completed on its exact resulting
+SHA. Record that SHA and its push run IDs here only after those runs complete;
+do not attribute them to `378a2266ac4a793e5a8c23f740e95741c7326c54`.
+
+Issue [#1463](https://github.com/minsago-elite/decomp_thing/issues/1463) tracks
+that post-merge boundary. This reference is documentation only; a native
+parent/sub-issue relationship has not been established. The evidence above
+does not close #692 or #876 and grants no production or release authority.
