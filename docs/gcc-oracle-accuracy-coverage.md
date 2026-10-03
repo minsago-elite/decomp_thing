@@ -68,6 +68,16 @@ unresolved. The rules follow the
 [x86-64 psABI](https://gitlab.com/x86-psABIs/x86-64-ABI/-/raw/master/x86-64-ABI/low-level-sys-info.tex)
 and [DWARF 5](https://dwarfstd.org/doc/DWARF5.pdf).
 
+The projector identity is `dwarf-sysv-amd64-lp64-projection-v3`. This semantic
+correction rejects a complete aggregate when its byte size is not divisible by
+its explicit alignment, preserving the raw observation as unresolved ABI
+evidence. The rule profile records this in `aggregateRules` and is bound by
+SHA-256 `021b9e246e8c0cd250dbd660e03b0baba41338ba4c23e0fe4831fc11570c35df`.
+The evidence bundle schema and provider remain version 2 because their wire
+shape is unchanged. The pinned GCC census rows were unchanged by this
+correction; the projector version and rule-profile hash still identify the
+updated semantics.
+
 Global candidates join retained ELF object observations using proved storage
 addresses or TLS offsets, sizes, and storage domains. Symbol names alone do
 not establish a match. Unmatched symbols, local variables, and unresolved

@@ -187,6 +187,47 @@ class DwarfSysvAmd64InterfaceProjectionTest {
     }
 
     @Test
+    fun `compiled aligned typedef stays observable while unsupported typedef over-alignment stays unresolved`() =
+        inInterfaceFixtureDirectory { root ->
+            val artifact = compile(root, "aligned-typedef.c", """
+                typedef struct __attribute__((aligned(16))) SupportedAligned {
+                    int value;
+                } SupportedAligned;
+                typedef struct PlainRecord { int value; } PlainRecord;
+                typedef PlainRecord UnsupportedOverAligned __attribute__((aligned(16)));
+                __attribute__((noinline,used)) SupportedAligned supported(SupportedAligned value) { return value; }
+                __attribute__((noinline,used)) UnsupportedOverAligned unsupported(UnsupportedOverAligned value) { return value; }
+                int main(void) {
+                    SupportedAligned supported_value = { 1 };
+                    UnsupportedOverAligned unsupported_value = { 2 };
+                    return supported(supported_value).value + unsupported(unsupported_value).value;
+                }
+            """.trimIndent())
+            val facts = scanInterfaceFixture(artifact, root)
+            val supportedAlias = facts.types.values.single { it.tag == 0x16L && "SupportedAligned" in it.name.values }
+            assertEquals(listOf("16"), supportedAlias.attributes.getValue(0x88L).values)
+            val supportedAggregate = facts.types.getValue(supportedAlias.type.values.single())
+            assertEquals(0x13L, supportedAggregate.tag)
+            assertEquals(listOf("16"), supportedAggregate.byteSize.values)
+            assertEquals(listOf("16"), supportedAggregate.attributes.getValue(0x88L).values)
+
+            val projected = DwarfSysvAmd64InterfaceProjection.project(facts, target())
+            val supported = projectedFunction(facts, projected, "supported")
+            assertTrue(supported.fullyObservable, supported.reasons.toString())
+            assertTrue(supported.returnType!!.observable)
+            assertEquals(16L, supported.returnType!!.shape?.alignmentBytes)
+            assertTrue(supported.parameters.single()!!.observable)
+            assertEquals(16L, supported.parameters.single()!!.shape?.alignmentBytes)
+
+            val unsupportedAlias = facts.types.values.single { it.tag == 0x16L && "UnsupportedOverAligned" in it.name.values }
+            assertEquals(listOf("16"), unsupportedAlias.attributes.getValue(0x88L).values)
+            val unsupported = projectedFunction(facts, projected, "unsupported")
+            assertFalse(unsupported.fullyObservable)
+            assertFalse(unsupported.returnType!!.observable)
+            assertFalse(unsupported.parameters.single()!!.observable)
+        }
+
+    @Test
     fun `validated static qualifier and imported children preserve instance ABI and every raw fact`() {
         val deferred = DwarfInterfaceFact(DwarfInterfaceFactState.KNOWN, listOf("unexpanded-static-type"),
             listOf("static:attribute=0x49"), listOf("type-reference-not-expanded:abi-layout-non-layout-child"))
@@ -308,7 +349,9 @@ class DwarfSysvAmd64InterfaceProjectionTest {
         assertFailsWith<IllegalArgumentException> { DwarfSysvAmd64InterfaceProjection.project(listOf(function()), mapOf("int" to intType), changed) }
         assertFailsWith<IllegalArgumentException> { DwarfSysvAmd64InterfaceProjection.project(listOf(function(), function()), mapOf("int" to intType), target) }
         val projected = project(function(), intType)
+        assertEquals("dwarf-sysv-amd64-lp64-projection-v3", DwarfSysvAmd64InterfaceProjection.VERSION)
         assertEquals(64, projected.ruleProfileSha256.length)
+        assertEquals("021b9e246e8c0cd250dbd660e03b0baba41338ba4c23e0fe4831fc11570c35df", projected.ruleProfileSha256)
         assertFailsWith<UnsupportedOperationException> { (projected.functions as MutableList<*>).clear() }
         assertFailsWith<UnsupportedOperationException> { (projected.types as MutableList<*>).clear() }
         assertEquals(projected.ruleProfileSha256, project(function(), intType).ruleProfileSha256)

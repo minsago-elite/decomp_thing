@@ -63,7 +63,7 @@ internal class DwarfSysvAmd64Projection internal constructor(
  * Unsupported forms/layouts preserve unknown; absent defaults apply only to valid C/C++ evidence.
  */
 internal object DwarfSysvAmd64InterfaceProjection {
-    const val VERSION = "dwarf-sysv-amd64-lp64-projection-v2"
+    const val VERSION = "dwarf-sysv-amd64-lp64-projection-v3"
     private const val TARGET_SHA = "362e5b8fb1b068d932e35c7bf92d2206cceb9edb5b2991b66e3b12673f608c4b"
     private const val MAX_DEPTH = 64
     private const val MAX_TYPES = 200_000
@@ -100,7 +100,7 @@ internal object DwarfSysvAmd64InterfaceProjection {
         put("cLanguages", strings(cLanguages.sorted())); put("cppLanguages", strings(cppLanguages.sorted()))
         put("scalarRules", "integer-encodings:1,2,5,6,7,8;integer-bytes:1,2,4,8,16;boolean=1;pointer-reference=8;float-bytes:2,4,8;16-byte-float-only-long-double-or-__float128-or-_Float128;complex=two-components")
         put("scalarAlignment", "natural-size;complex-component-alignment;explicit-alignment-must-equal-natural")
-        put("aggregateRules", "complete-known-size-and-explicit-alignment;all-instance-members-proved;ordinary-C;C++-only-explicit-pass-by-value-or-reference;union-offset=0")
+        put("aggregateRules", "complete-known-size-and-explicit-alignment;aggregate-size-multiple-of-explicit-alignment;all-instance-members-proved;ordinary-C;C++-only-explicit-pass-by-value-or-reference;union-offset=0")
         put("nonInstanceChildRules", "DWARF5-static-variable-and-const-volatile-restrict-atomic-declarations-require-validated-type-reference;imported-declaration-requires-validated-import-reference;no-instance-location-or-bit-layout;only-exact-unsupported-child-capture-warning-permitted;raw-facts-retained")
         put("arrayRules", "C-C++-row-major;constant-count-or-inclusive-bounds;absent-lower-bound=0;contiguous-stride;checked-size-product")
         put("bitfieldRules", "integer-storage;explicit-storage-offset-required-for-nonzero-width;data-bit-offset-or-little-endian-legacy-bit-offset;misaligned-storage-unknown")
