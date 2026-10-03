@@ -97,6 +97,8 @@ done
 
 DECOMP_TEST_CLANG="$clang_executable" \
 DECOMP_REQUIRE_CLANG_TESTS=1 \
-  ./gradlew --no-daemon test --tests decompengine.project.ClangGeneratedProjectTest
+  ./gradlew --no-daemon test \
+    --tests decompengine.project.ClangGeneratedProjectTest \
+    --tests decompengine.oracle.fulltree.FullTreeSourceEntityIdentityProducerTest
 
 echo "LLVM/Clang compatibility validation passed"
