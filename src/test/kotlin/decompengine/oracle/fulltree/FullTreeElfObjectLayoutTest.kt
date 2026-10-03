@@ -16,6 +16,27 @@ import kotlin.test.assertTrue
 
 class FullTreeElfObjectLayoutTest {
     @Test
+    fun `object fact budget accounts for every retained object string`() {
+        val symbol = FullTreeElfObjectSymbol(
+            name = "n".repeat(128), locator = "locator:" + "l".repeat(512),
+            type = 1, binding = 1, visibility = 0, other = 0,
+            rawSectionIndex = 1, resolvedSectionIndex = 1,
+            sectionKind = FullTreeElfSymbolSectionKind.DEFINED, sectionName = "section".repeat(32),
+            value = 1UL, size = 8UL, rva = 1UL, storage = FullTreeElfObjectStorage.MAPPED_LOAD,
+            sectionFlags = 2UL, sectionType = 1L, sectionAddress = 0x100UL, sectionSize = 0x100UL,
+            segmentIndices = listOf(0, 1), reasons = listOf("reason".repeat(64)),
+        )
+        val textFields = listOfNotNull(symbol.name, symbol.locator, symbol.sectionName) + symbol.reasons
+        val expectedBytes = 1024L + 2L * 32L + textFields.sumOf { 32L + it.length.toLong() * 2L }
+        val exact = DwarfInterfaceFactBudget(expectedBytes)
+        exact.chargeElfObjectSymbol(symbol, "test ELF object facts")
+        assertEquals(expectedBytes, exact.chargedBytes)
+        assertFailsWith<FullTreeControlException> {
+            DwarfInterfaceFactBudget(expectedBytes - 1).chargeElfObjectSymbol(symbol, "test ELF object facts")
+        }
+    }
+
+    @Test
     fun `retained object budget charges cumulative overlapping segment memberships`() =
         inInterfaceFixtureDirectory { directory ->
             val small = BoundedDwarfInterfaceFactLimits(maximumRetainedFactBytes = 128 * 1024)

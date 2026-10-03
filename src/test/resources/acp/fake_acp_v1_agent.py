@@ -1169,6 +1169,11 @@ if MODE != "missing-usage":
     }
 respond(prompt, prompt_result)
 
+if MODE in RECONSTRUCTION_MODES:
+    # Keep the fake agent alive until the client closes its protocol input. Exiting directly
+    # after the final response races the harness's response acceptance and shutdown transition.
+    sys.stdin.read()
+
 if MODE == "response-then-crash":
     raise SystemExit(31)
 

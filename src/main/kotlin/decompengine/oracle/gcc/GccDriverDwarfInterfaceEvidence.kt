@@ -151,9 +151,13 @@ internal object GccDriverDwarfInterfaceEvidence {
                 "GCC driver interface facts differ from the retained rich artifact"
             }
             val strippedObjects = arrayListOf<FullTreeElfObjectSymbol>()
+            val retainedObjectBudget = DwarfInterfaceFactBudget(
+                SCAN_LIMITS.maximumRetainedFactBytes, facts.modeledRetainedFactBytes,
+            )
             val strippedLayout = FullTreeElfLayout.scanObjects(guards.getValue("stripped"), "checked GCC driver stripped objects",
                 checkpoint = checkpoint) {
                 require(strippedObjects.size < SCAN_LIMITS.maximumObjects) { "stripped GCC object inventory exceeds object-count bound" }
+                retainedObjectBudget.chargeElfObjectSymbol(it, "stripped ELF object facts")
                 strippedObjects += it
             }
             require(strippedLayout.imageBase == facts.imageBase && strippedLayout.executableRanges == facts.executableRanges &&

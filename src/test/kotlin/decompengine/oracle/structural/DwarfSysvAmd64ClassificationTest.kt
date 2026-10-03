@@ -78,6 +78,8 @@ class DwarfSysvAmd64ClassificationTest {
         assertEquals(listOf(DwarfAbiClass.SSE, DwarfAbiClass.NO_CLASS), classify(aggregate(
             12, 1, DwarfAbiFieldShape(0, float), DwarfAbiFieldShape(32, overAlignedFloat),
         )).classes, "extra aggregate alignment does not misalign its naturally aligned scalar leaves")
+        assertTrue(classify(aggregate(8, 8, DwarfAbiFieldShape(0, int))).known,
+            "a valid over-aligned aggregate remains classifiable")
         assertMemory(aggregate(9, 1, DwarfAbiFieldShape(0, byte), DwarfAbiFieldShape(8, double)))
         val integer128 = scalar(DwarfAbiScalarKind.INTEGER, 16)
         val quadFloat = scalar(DwarfAbiScalarKind.FLOAT128, 16)
@@ -152,6 +154,7 @@ class DwarfSysvAmd64ClassificationTest {
         assertUnknown(aggregate(8, 8, DwarfAbiFieldShape(Long.MAX_VALUE, long)), "offset")
         assertUnknown(aggregate(4, 4, DwarfAbiFieldShape(0, long)), "extent")
         assertUnknown(aggregate(8, 8, DwarfAbiFieldShape(0, long), DwarfAbiFieldShape(32, int)), "overlapping")
+        assertUnknown(aggregate(4, 8, DwarfAbiFieldShape(0, int)), "aggregate size")
         assertUnknown(DwarfAbiTypeShape("array", 4, 4, arrayElement = int), "count is missing")
         assertUnknown(DwarfAbiTypeShape("array", 4, 4, arrayElement = int, arrayCount = 2), "does not match")
         assertUnknown(aggregate(0, 1, DwarfAbiFieldShape(0, byte)), "extent")

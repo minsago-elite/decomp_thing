@@ -10,6 +10,49 @@ import kotlin.test.assertTrue
 
 class BoundedDwarfGlobalSyntheticFactsTest {
     @Test
+    fun `bounded scalar evidence accounting includes the retained origin specification DAG`() =
+        inInterfaceFixtureDirectory { root ->
+            val shared = (0 until 31).map { index ->
+                val references = if (index < 15) listOf(
+                    reference(0x31, "shared-${index * 2 + 1}"),
+                    reference(0x47, "shared-${index * 2 + 2}"),
+                ) else emptyList()
+                variable("shared-$index", references)
+            }
+            val roots = (0 until 256).map { index -> variable("root-$index", listOf(
+                reference(0x31, "shared-0"), absoluteLocation(0x400180L + index),
+            )) }
+            val fixture = typeElf(*(roots + shared).toTypedArray())
+            val facts = scan(root, fixture)
+            assertEquals(287, facts.globals.size)
+            val rootFact = facts.global(fixture, "root-0")
+            assertEquals(32, rootFact.origins.size)
+            assertEquals(16, rootFact.external.evidence.size)
+
+            val integralFacts = facts.globals.flatMap { global ->
+                listOf(global.language, global.external, global.declaration, global.artificial,
+                    global.visibility, global.byteSize, global.alignment)
+            }
+            fun strings(fact: DwarfInterfaceFact<String>) = fact.values + fact.evidence + fact.reasons
+            val scalarTextPayloadLowerBound = integralFacts.sumOf { fact ->
+                strings(fact).sumOf { text -> text.length.toLong() * 2L }
+            }
+            val modeledScalarFactBytes = integralFacts.sumOf { fact ->
+                strings(fact).fold(192L) { total, text -> total + 32L + text.length.toLong() * 2L }
+            }
+            assertTrue(scalarTextPayloadLowerBound > 1024L * 1024L,
+                "expected a megabyte-scale retained scalar evidence lower bound, got $scalarTextPayloadLowerBound")
+            assertTrue(modeledScalarFactBytes > scalarTextPayloadLowerBound)
+
+            val tightLimit = facts.modeledRetainedFactBytes - modeledScalarFactBytes + 64L * 1024L
+            val failure = assertFailsWith<FullTreeControlException> {
+                scan(root, fixture, BoundedDwarfInterfaceFactLimits(maximumRetainedFactBytes = tightLimit))
+            }
+            assertTrue(failure.message.orEmpty().contains("DWARF interface integral exceeds retained fact bound"),
+                failure.message)
+        }
+
+    @Test
     fun `implicit constant globals retain negative and positive signed values from abbreviations`(): Unit =
         inInterfaceFixtureDirectory { root ->
             val fixture = typeElf(

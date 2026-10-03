@@ -335,8 +335,7 @@ internal object BoundedDwarfInterfaceFactScanner {
             if (objects.size >= limits.maximumObjects) throw FullTreeControlException("interface scan exceeds object symbol bound")
             // Charge boxed indices and retained list slots before keeping the symbol. The
             // temporary single-symbol builder remains bounded by maximumProgramHeaders.
-            budget.charge(1024L + symbol.name.length.toLong() * 2L +
-                symbol.segmentIndices.size.toLong() * 32L, "ELF object facts")
+            budget.chargeElfObjectSymbol(symbol, "ELF object facts")
             objects += symbol
         }
         val executable = FullTreeElfExecutableMembership.fromSorted(layout.executableRanges)
@@ -410,12 +409,29 @@ internal object BoundedDwarfInterfaceFactScanner {
 }
 
 /** Modeled retained facts, separate from exact encoded shard bytes and the JVM heap limit. */
-internal class DwarfInterfaceFactBudget(private val maximumBytes: Long) {
-    var chargedBytes = 0L
+internal class DwarfInterfaceFactBudget(
+    private val maximumBytes: Long,
+    initiallyChargedBytes: Long = 0L,
+) {
+    var chargedBytes = initiallyChargedBytes
         private set
+    init {
+        require(maximumBytes > 0 && initiallyChargedBytes in 0..maximumBytes)
+    }
     fun charge(bytes: Long, label: String) {
         if (bytes < 0 || bytes > maximumBytes - chargedBytes) throw FullTreeControlException("$label exceeds retained fact bound")
         chargedBytes += bytes
+    }
+    fun chargeElfObjectSymbol(symbol: FullTreeElfObjectSymbol, label: String) {
+        var bytes = Math.addExact(1024L, Math.multiplyExact(symbol.segmentIndices.size.toLong(), 32L))
+        fun addString(value: String) {
+            bytes = Math.addExact(bytes, Math.addExact(32L, Math.multiplyExact(value.length.toLong(), 2L)))
+        }
+        addString(symbol.name)
+        addString(symbol.locator)
+        symbol.sectionName?.let(::addString)
+        symbol.reasons.forEach(::addString)
+        charge(bytes, label)
     }
     fun chargeStringFact(fact: DwarfInterfaceFact<String>, label: String) {
         var bytes = 192L
@@ -530,7 +546,7 @@ private class InterfaceFunctionReader(
         interfaceStringFact(inheritance, name, limits, budget)
 
     private fun integralFact(inheritance: InterfaceInheritance, name: Long): DwarfInterfaceFact<String> =
-        interfaceIntegralFact(inheritance, name)
+        interfaceIntegralFact(inheritance, name, budget)
 
 }
 
@@ -548,7 +564,11 @@ internal fun interfaceStringFact(inheritance: InterfaceInheritance, name: Long,
             }
         }.also { budget.chargeStringFact(it, "DWARF interface string") }
 
-internal fun interfaceIntegralFact(inheritance: InterfaceInheritance, name: Long): DwarfInterfaceFact<String> =
+internal fun interfaceIntegralFact(
+    inheritance: InterfaceInheritance,
+    name: Long,
+    budget: DwarfInterfaceFactBudget,
+): DwarfInterfaceFact<String> =
         inheritedFact(inheritance, name) { source, attribute ->
             val locator = "${dwarfInterfaceLocator(source)}:attribute=${canonicalHex(name)}"
             val value = when (val raw = attribute.value) {
@@ -560,7 +580,7 @@ internal fun interfaceIntegralFact(inheritance: InterfaceInheritance, name: Long
             }
             if (value == null) DwarfInterfaceFact(DwarfInterfaceFactState.UNKNOWN, emptyList(), listOf(locator), listOf("unsupported-integral-form"))
             else DwarfInterfaceFact(DwarfInterfaceFactState.KNOWN, listOf(value), listOf(locator))
-        }
+        }.also { budget.chargeStringFact(it, "DWARF interface integral") }
 
 /** Attribute override follows each origin/specification edge independently; conflicting branches remain explicit. */
 internal fun <T> inheritedFact(

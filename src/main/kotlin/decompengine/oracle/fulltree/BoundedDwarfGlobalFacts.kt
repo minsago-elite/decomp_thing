@@ -108,12 +108,12 @@ internal class BoundedDwarfGlobalFactReader(
             if (it.state == DwarfInterfaceFactState.ABSENT) string(inheritance, DW_AT_MIPS_LINKAGE_NAME) else it
         }
         val language = interfaceIntegralFact(InterfaceInheritance(repository,
-            ResolvedFunctionDie(source.unit, source.unit.index.root), limits.maximumReferenceChainEntries), GLOBAL_LANGUAGE)
+            ResolvedFunctionDie(source.unit, source.unit.index.root), limits.maximumReferenceChainEntries), GLOBAL_LANGUAGE, budget)
         return DwarfGlobalVariableFacts(dwarfInterfaceLocator(source), string(inheritance, DW_AT_NAME), linkage,
-            language, type, interfaceIntegralFact(inheritance, GLOBAL_EXTERNAL),
-            interfaceIntegralFact(inheritance, DW_AT_DECLARATION), interfaceIntegralFact(inheritance, GLOBAL_ARTIFICIAL),
-            interfaceIntegralFact(inheritance, GLOBAL_VISIBILITY), interfaceIntegralFact(inheritance, GLOBAL_BYTE_SIZE),
-            interfaceIntegralFact(inheritance, GLOBAL_ALIGNMENT), constant(inheritance), scope, location, address, rva,
+            language, type, interfaceIntegralFact(inheritance, GLOBAL_EXTERNAL, budget),
+            interfaceIntegralFact(inheritance, DW_AT_DECLARATION, budget), interfaceIntegralFact(inheritance, GLOBAL_ARTIFICIAL, budget),
+            interfaceIntegralFact(inheritance, GLOBAL_VISIBILITY, budget), interfaceIntegralFact(inheritance, GLOBAL_BYTE_SIZE, budget),
+            interfaceIntegralFact(inheritance, GLOBAL_ALIGNMENT, budget), constant(inheritance), scope, location, address, rva,
             tls, storage, scopes, inheritance.sources.map(::dwarfInterfaceLocator), inheritance.reasons)
     }
 

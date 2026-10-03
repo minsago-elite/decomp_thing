@@ -189,6 +189,9 @@ object DwarfSysvAmd64Classification {
             if (listOf(shape.scalar != null, array, composite).count { it } != 1) {
                 unsupported("type must have exactly one supported shape kind")
             }
+            if (composite && shape.byteSize % alignment != 0L) {
+                unsupported("aggregate size is not a multiple of its alignment")
+            }
             if (shape.fields.size > limits.maximumFields) unsupported("member count exceeds field limit")
             if (!composite && shape.fields.isNotEmpty()) unsupported("non-aggregate has members")
             if (shape.invisibleReference && (!composite || !rootInvisible)) {

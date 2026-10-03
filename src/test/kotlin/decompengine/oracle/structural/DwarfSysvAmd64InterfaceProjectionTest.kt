@@ -174,6 +174,18 @@ class DwarfSysvAmd64InterfaceProjectionTest {
     }
 
     @Test
+    fun `aggregate size incompatible with alignment leaves both parameter and return ABI unknown`() {
+        val impossible = aggregate("size-four-align-eight", 4, 8, listOf(member("field", "int", 0)))
+        val projected = project(function(returned = known(impossible.id),
+            parameters = listOf(parameter(impossible.id))), impossible, intType).functions.single()
+        assertFalse(projected.fullyObservable)
+        assertFalse(projected.returnType!!.observable)
+        assertFalse(projected.parameters.single()!!.observable)
+        assertTrue(projected.returnType!!.reasons.any { it.contains("aggregate-size-is-not-multiple-of-alignment") })
+        assertTrue(projected.parameters.single()!!.reasons.any { it.contains("aggregate-size-is-not-multiple-of-alignment") })
+    }
+
+    @Test
     fun `validated static qualifier and imported children preserve instance ABI and every raw fact`() {
         val deferred = DwarfInterfaceFact(DwarfInterfaceFactState.KNOWN, listOf("unexpanded-static-type"),
             listOf("static:attribute=0x49"), listOf("type-reference-not-expanded:abi-layout-non-layout-child"))
