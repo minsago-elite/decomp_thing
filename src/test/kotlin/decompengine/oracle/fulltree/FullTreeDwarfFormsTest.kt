@@ -204,6 +204,32 @@ class FullTreeDwarfFormsTest {
     }
 
     @Test
+    fun `data16 data values preserve unsigned payload and indirection in both byte orders`() {
+        for (byteOrder in listOf(ByteOrder.LITTLE_ENDIAN, ByteOrder.BIG_ENDIAN)) {
+            for (depth in 0..2) for (value in listOf(0UL, 0x0123_4567_89ab_cdefUL, ULong.MAX_VALUE)) {
+                val little = unsigned(value, 8) + ByteArray(8)
+                val payload = if (byteOrder == ByteOrder.LITTLE_ENDIAN) little else little.reversedArray()
+                val prefix = if (depth == 0) byteArrayOf() else
+                    ByteArray(depth - 1) { FULL_TREE_DW_FORM_INDIRECT.toByte() } + byteArrayOf(FULL_TREE_DW_FORM_DATA16.toByte())
+                val form = if (depth == 0) FULL_TREE_DW_FORM_DATA16 else FULL_TREE_DW_FORM_INDIRECT
+                val result = assertIs<FullTreeDwarfUnsignedConstantValue>(readForm(prefix + payload, form,
+                    context = FullTreeDwarfFormContext.DATA_VALUE, byteOrder = byteOrder))
+                assertEquals(value, result.rawValue)
+                assertEquals(FULL_TREE_DW_FORM_DATA16, result.resolvedForm)
+                assertEquals(depth, result.indirectDepth)
+                val overflow = payload.copyOf().also { it[if (byteOrder == ByteOrder.LITTLE_ENDIAN) 8 else 0] = 1 }
+                assertFailsWith<FullTreeControlException> {
+                    readForm(prefix + overflow, form, context = FullTreeDwarfFormContext.DATA_VALUE, byteOrder = byteOrder)
+                }
+                assertFailsWith<FullTreeControlException> {
+                    readForm(prefix + payload.copyOf(15), form,
+                        context = FullTreeDwarfFormContext.DATA_VALUE, byteOrder = byteOrder)
+                }
+            }
+        }
+    }
+
+    @Test
     fun `typed ULEB operands retain the full unsigned 64 bit domain`() {
         val maximum = uleb(ULong.MAX_VALUE)
         val maximumSection = section(maximum)

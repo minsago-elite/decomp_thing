@@ -595,7 +595,16 @@ internal class FunctionDwarfUnitRepository(
     retainedTags: Set<Long> = setOf(DW_TAG_SUBPROGRAM),
     private val contextForAttribute: (FullTreeDwarfAbbreviationAttribute) -> FullTreeDwarfFormContext =
         ::functionAttributeContext,
+    private val retainAllRecords: Boolean = false,
+    private val maximumRetainedWorkingSetBytes: Long? = null,
 ) {
+    // Active operation pins distinguish retained units from cumulative decoding work. An evicted
+    // unit stays available while a reference graph holds it, avoiding duplicate live CU copies.
+    private var operationPins: LinkedHashMap<Long, FunctionDwarfUnit>? = null
+    var loadedUnitBytes: Long = 0L
+        private set
+    var peakRetainedUnitBytes: Long = 0L
+        private set
     private val info = sections.required(".debug_info")
     private val abbreviations = sections.required(".debug_abbrev")
     private val retainedTags = Collections.unmodifiableSet(retainedTags.toSet())
@@ -604,24 +613,59 @@ internal class FunctionDwarfUnitRepository(
             size > producerLimits.maximumCachedCompilationUnits
     }
 
-    fun load(header: FullTreeDwarfCompilationUnitHeader): FunctionDwarfUnit = cache[header.offset] ?: run {
+    private fun retainedUnits(): Map<Long, FunctionDwarfUnit> = LinkedHashMap(cache).apply {
+        operationPins?.let(::putAll)
+    }
+
+    private fun retainedBytes(): Long = retainedUnits().values.fold(0L) { count, unit ->
+        Math.addExact(count, Math.multiplyExact(unit.index.modeledRetainedBytes, 2L))
+    }
+
+    private fun checkRetention() {
+        val bytes = retainedBytes()
+        if (maximumRetainedWorkingSetBytes != null && bytes > maximumRetainedWorkingSetBytes) {
+            throw FullTreeControlException("DWARF repository exceeds retained working-set byte bound")
+        }
+        peakRetainedUnitBytes = maxOf(peakRetainedUnitBytes, bytes)
+    }
+
+    /** The block must return immutable facts, not units or DIE references into its pinned indexes. */
+    fun <T> withRetainedUnits(root: FunctionDwarfUnit, block: () -> T): T {
+        check(operationPins == null) { "DWARF retained-unit scopes may not nest" }
+        operationPins = linkedMapOf(root.header.offset to root)
+        return try {
+            checkRetention()
+            block()
+        } finally { operationPins = null }
+    }
+
+    fun load(header: FullTreeDwarfCompilationUnitHeader): FunctionDwarfUnit {
+        operationPins?.get(header.offset)?.let { return it }
+        cache[header.offset]?.let { unit ->
+            operationPins?.put(header.offset, unit)
+            return unit
+        }
+        // Evict before decoding; active graphs retain their pins independently of the cache.
+        if (cache.size >= producerLimits.maximumCachedCompilationUnits) cache.remove(cache.keys.first())
+        val available = maximumRetainedWorkingSetBytes?.let { maximum ->
+            val remaining = (maximum - retainedBytes()) / 2L
+            if (remaining <= 0L) throw FullTreeControlException("DWARF repository exceeds retained working-set byte bound")
+            remaining
+        }
         val index = FullTreeDwarfDies.readCompilationUnit(
-            info,
-            abbreviations,
-            header,
-            controlLimits,
-            producerLimits.dieLimits,
-            parseBudget,
-            contextForAttribute = contextForAttribute,
-            retainRecord = { tag, depth -> depth == 0 || tag in retainedTags },
+            info, abbreviations, header, controlLimits,
+            available?.let { producerLimits.dieLimits.copy(
+                maximumRetainedBytes = minOf(it, producerLimits.dieLimits.maximumRetainedBytes),
+            ) } ?: producerLimits.dieLimits,
+            parseBudget, contextForAttribute = contextForAttribute,
+            retainRecord = { tag, depth -> retainAllRecords || depth == 0 || tag in retainedTags },
         )
-        FunctionDwarfUnit(
-            header,
-            index,
-            controlLimits,
-            sections,
-            parseBudget,
-        ).also { cache[header.offset] = it }
+        loadedUnitBytes = Math.addExact(loadedUnitBytes, Math.multiplyExact(index.modeledRetainedBytes, 2L))
+        return FunctionDwarfUnit(header, index, controlLimits, sections, parseBudget).also { unit ->
+            cache[header.offset] = unit
+            operationPins?.put(header.offset, unit)
+            checkRetention()
+        }
     }
 
     fun referenceChain(
@@ -708,6 +752,14 @@ internal class FunctionDwarfUnit(
     val sections: FullTreeDwarfSections,
     private val parseBudget: FullTreeDwarfParseBudget,
 ) {
+    private val childrenByParent: Map<Long?, List<FullTreeDwarfDieRecord>> by lazy {
+        index.recordsInPhysicalOrder.groupBy { it.parentOffset }
+    }
+
+    /** Physical direct children, indexed once while this bounded unit is retained. */
+    fun directChildren(record: FullTreeDwarfDieRecord): List<FullTreeDwarfDieRecord> =
+        childrenByParent[record.offset].orEmpty()
+
     val stringOffsetsBase: Long? = index.root.optionalNonNegativeLong(
         DW_AT_STR_OFFSETS_BASE,
         "DW_AT_str_offsets_base",

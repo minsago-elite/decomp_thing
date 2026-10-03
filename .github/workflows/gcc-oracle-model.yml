@@ -5,6 +5,7 @@ on:
     branches: [master]
     tags: ['**']
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && 'pull-request' || github.sha }}
@@ -12,6 +13,7 @@ concurrency:
 
 jobs:
   provenance-and-elf-verifier:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -29,8 +31,24 @@ jobs:
             slirp4netns=1.2.1-1build2 uidmap
       - name: Verify source provenance metadata
         run: python3 scripts/verify-gcc-oracle-source.py --metadata-only
+      - name: Restore locked GCC source artifacts
+        id: gcc-source-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ runner.temp }}/gcc-oracle-source/gcc-16.2.0.tar.xz
+            ${{ runner.temp }}/gcc-oracle-source/gcc-16.2.0.tar.xz.sig
+          key: gcc-source-v1-${{ runner.os }}-${{ hashFiles('oracle/gcc/16.2.0/source-lock.json') }}
       - name: Fetch and fully verify the pinned source release
         run: python3 scripts/fetch-gcc-oracle-source.py "$RUNNER_TEMP/gcc-oracle-source"
+      - name: Save authenticated GCC source artifacts
+        if: steps.gcc-source-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ runner.temp }}/gcc-oracle-source/gcc-16.2.0.tar.xz
+            ${{ runner.temp }}/gcc-oracle-source/gcc-16.2.0.tar.xz.sig
+          key: ${{ steps.gcc-source-cache.outputs.cache-primary-key }}
       - name: Reproduce and verify the recorded toolchain image
         run: |
           echo '8b0af79ba3426f49ba599eb0c7eea433c62ac5bb6ab5e7797f7d09d978f43543  oracle/gcc/16.2.0/build-toolchain.Dockerfile' \
@@ -72,6 +90,8 @@ jobs:
         run: |
           install -d "$RUNNER_TEMP/docker-client"
           curl --fail --silent --show-error --location \
+            --retry 3 --retry-all-errors --retry-max-time 300 \
+            --connect-timeout 15 --max-time 180 \
             https://download.docker.com/linux/static/stable/x86_64/docker-29.7.2.tgz \
             --output "$RUNNER_TEMP/docker-client/docker-29.7.2.tgz"
           echo "803d433f226db4776e1768fd319fc6c6e4935a456acf84fcc0080818b854bc8f  $RUNNER_TEMP/docker-client/docker-29.7.2.tgz" \
@@ -87,6 +107,8 @@ jobs:
           test "$("$RUNNER_TEMP/docker-client/docker/dockerd" --version)" = \
             'Docker version 29.7.2, build 6a43e3d'
           curl --fail --silent --show-error --location \
+            --retry 3 --retry-all-errors --retry-max-time 300 \
+            --connect-timeout 15 --max-time 180 \
             https://download.docker.com/linux/static/stable/x86_64/docker-rootless-extras-29.7.2.tgz \
             --output "$RUNNER_TEMP/docker-client/docker-rootless-extras-29.7.2.tgz"
           echo "15a5cb81f2c5cf15ea21427f2e8241eac0deb2221175f993b5e76926e705ec6a  $RUNNER_TEMP/docker-client/docker-rootless-extras-29.7.2.tgz" \
@@ -223,3 +245,54 @@ jobs:
           if test -f "$RUNNER_TEMP/rootless-wrapper.pid"; then
             kill "$(cat "$RUNNER_TEMP/rootless-wrapper.pid")" 2>/dev/null || true
           fi
+
+  driver-dwarf-interfaces:
+    name: Retained GCC driver DWARF interfaces
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'qualify:driver-dwarf-interfaces')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      DECOMP_REQUIRE_GCC_DWARF_INTERFACES: 'true'
+      DECOMP_GCC_DWARF_EVIDENCE_ROOT: ${{ github.workspace }}/build/gcc-driver-dwarf-interfaces
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+          cache-read-only: ${{ github.ref != 'refs/heads/master' }}
+      - name: Install pinned build-only frontend toolchain
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/build"
+          bash scripts/install-frontend-node.sh "$GITHUB_WORKSPACE/build/frontend-node"
+          echo "$GITHUB_WORKSPACE/build/frontend-node/bin" >> "$GITHUB_PATH"
+      - name: Capture and replay retained driver interface facts
+        run: |
+          mkdir -p build/gcc-driver-dwarf-interfaces
+          git rev-parse HEAD > build/gcc-driver-dwarf-interfaces/source-revision.txt
+          ./gradlew --no-daemon test \
+            --tests 'decompengine.oracle.fulltree.BoundedDwarf*Test' \
+            --tests 'decompengine.oracle.fulltree.FullTreeElfObjectLayoutTest' \
+            --tests 'decompengine.oracle.structural.DwarfSysvAmd64*Test' \
+            --tests 'decompengine.oracle.gcc.GccDriverDwarf*Test'
+      - name: Retain interface facts and verification reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gcc-driver-dwarf-interfaces
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            build/gcc-driver-dwarf-interfaces
+            build/reports/tests/test
+            build/test-results/test

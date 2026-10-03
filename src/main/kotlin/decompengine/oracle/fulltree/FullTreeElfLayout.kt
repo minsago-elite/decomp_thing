@@ -4,6 +4,11 @@ import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.util.Collections
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 data class FullTreeElfLayoutLimits(
     val maximumProgramHeaders: Int = 65_535,
@@ -131,6 +136,112 @@ internal data class FullTreeElfFunctionSymbol(
     val rva: ULong?,
 )
 
+internal enum class FullTreeElfSymbolSectionKind { DEFINED, UNDEFINED, COMMON, ABSOLUTE, RESERVED }
+internal enum class FullTreeElfObjectStorage { MAPPED_LOAD, TLS, UNDEFINED, COMMON, ABSOLUTE, NONALLOC, UNMAPPED }
+
+/** Raw PT_LOAD/PT_TLS evidence. File and memory ends are virtual addresses, not file offsets. */
+internal data class FullTreeElfMemorySegment(
+    val index: Int,
+    val flags: Long,
+    val fileOffset: ULong,
+    val virtualAddress: ULong,
+    val fileSize: ULong,
+    val memorySize: ULong,
+    val endExclusive: ULong,
+    val fileEndExclusive: ULong,
+    val rva: ULong?,
+    /** Null means absent evidence; real ELF 0 and 1 are retained as known no-alignment values. */
+    val alignment: ULong? = null,
+) {
+    fun toJson(): JsonObject = JsonObject(linkedMapOf(
+        "index" to JsonPrimitive(index), "flags" to JsonPrimitive(flags),
+        "fileOffset" to elfHex(fileOffset), "virtualAddress" to elfHex(virtualAddress),
+        "fileSize" to elfHex(fileSize), "memorySize" to elfHex(memorySize),
+        "endExclusive" to elfHex(endExclusive), "fileEndExclusive" to elfHex(fileEndExclusive),
+        "rva" to elfHex(rva),
+        "alignment" to elfHex(alignment),
+    ))
+}
+
+/**
+ * One symbol-table entry; aliases and repeated dynamic/static entries are intentionally retained.
+ * GABI symbol-table semantics distinguish TLS offsets, COMMON alignment, and absolute values:
+ * https://gabi.xinuos.com/v42/elf/05-symtab.html
+ */
+internal class FullTreeElfObjectSymbol(
+    val name: String,
+    val locator: String,
+    val type: Int,
+    val binding: Int,
+    val visibility: Int,
+    val other: Int,
+    val rawSectionIndex: Int,
+    val resolvedSectionIndex: Long?,
+    val sectionKind: FullTreeElfSymbolSectionKind,
+    val sectionName: String?,
+    val value: ULong,
+    val size: ULong,
+    val rva: ULong?,
+    val storage: FullTreeElfObjectStorage,
+    val sectionFlags: ULong?,
+    val sectionType: Long?,
+    val sectionAddress: ULong?,
+    val sectionSize: ULong?,
+    segmentIndices: List<Int>,
+    reasons: List<String>,
+) {
+    val segmentIndices: List<Int> = Collections.unmodifiableList(ArrayList(segmentIndices))
+    val reasons: List<String> = Collections.unmodifiableList(ArrayList(reasons))
+    fun toJson(): JsonObject = JsonObject(linkedMapOf(
+        "name" to JsonPrimitive(name), "locator" to JsonPrimitive(locator),
+        "type" to JsonPrimitive(type), "binding" to JsonPrimitive(binding),
+        "visibility" to JsonPrimitive(visibility), "other" to JsonPrimitive(other),
+        "rawSectionIndex" to JsonPrimitive(rawSectionIndex),
+        "resolvedSectionIndex" to (resolvedSectionIndex?.let(::JsonPrimitive) ?: JsonNull),
+        "sectionKind" to JsonPrimitive(sectionKind.name.lowercase()),
+        "sectionName" to (sectionName?.let(::JsonPrimitive) ?: JsonNull),
+        "value" to elfHex(value), "size" to elfHex(size), "rva" to elfHex(rva),
+        "storage" to JsonPrimitive(storage.name.lowercase()),
+        "sectionFlags" to elfHex(sectionFlags),
+        "sectionType" to (sectionType?.let(::JsonPrimitive) ?: JsonNull),
+        "sectionAddress" to elfHex(sectionAddress), "sectionSize" to elfHex(sectionSize),
+        "segmentIndices" to JsonArray(segmentIndices.map(::JsonPrimitive)),
+        "reasons" to JsonArray(reasons.map(::JsonPrimitive)),
+    ))
+}
+
+internal class FullTreeElfObjectLayoutObservation(
+    val elfClass: Int,
+    val byteOrder: Int,
+    val elfType: String,
+    val machine: Int,
+    val osAbi: Int,
+    val abiVersion: Int,
+    val imageBase: ULong,
+    executableRanges: List<FullTreeElfExecutableRange>,
+    val scannedSymbols: Long,
+    loadedMemory: List<FullTreeElfMemorySegment>,
+    tlsSegments: List<FullTreeElfMemorySegment>,
+) {
+    val executableRanges: List<FullTreeElfExecutableRange> = Collections.unmodifiableList(ArrayList(executableRanges))
+    val loadedMemory: List<FullTreeElfMemorySegment> = Collections.unmodifiableList(ArrayList(loadedMemory))
+    val tlsSegments: List<FullTreeElfMemorySegment> = Collections.unmodifiableList(ArrayList(tlsSegments))
+    fun toJson(): JsonObject = JsonObject(linkedMapOf(
+        "elfClass" to JsonPrimitive(elfClass), "byteOrder" to JsonPrimitive(byteOrder),
+        "elfType" to JsonPrimitive(elfType), "machine" to JsonPrimitive(machine),
+        "osAbi" to JsonPrimitive(osAbi), "abiVersion" to JsonPrimitive(abiVersion),
+        "imageBase" to elfHex(imageBase),
+        "executableRanges" to JsonArray(executableRanges.map {
+            JsonObject(linkedMapOf("start" to elfHex(it.start), "endExclusive" to elfHex(it.endExclusive)))
+        }),
+        "scannedSymbols" to JsonPrimitive(scannedSymbols),
+        "loadedMemory" to JsonArray(loadedMemory.map { it.toJson() }),
+        "tlsSegments" to JsonArray(tlsSegments.map { it.toJson() }),
+    ))
+}
+
+private fun elfHex(value: ULong?): JsonElement = value?.let { JsonPrimitive("0x${it.toString(16)}") } ?: JsonNull
+
 /**
  * Bounded random-access ELF reader for the v1 function-index contract.
  *
@@ -162,6 +273,18 @@ internal object FullTreeElfLayout {
         checkpoint: (String) -> Unit = {},
         consume: (FullTreeElfFunctionSymbol) -> Unit,
     ): FullTreeElfLayoutObservation = ElfReader(file, label, limits, checkpoint).scanFunctions(consume)
+
+    fun scanObjects(
+        file: StableControlFile,
+        label: String,
+        limits: FullTreeElfLayoutLimits = FullTreeElfLayoutLimits(),
+        checkpoint: (String) -> Unit = {},
+        consume: (FullTreeElfObjectSymbol) -> Unit,
+    ): FullTreeElfObjectLayoutObservation {
+        val observation = ElfReader(file, label, limits, checkpoint).scanObjects(consume)
+        file.verifyUnchanged("$label ELF object source")
+        return observation
+    }
 }
 
 private class ElfReader(
@@ -177,31 +300,244 @@ private class ElfReader(
 
     fun scanFunctions(consume: (FullTreeElfFunctionSymbol) -> Unit): FullTreeElfLayoutObservation {
         val headers = parseHeaders()
-        val elfClass = headers.elfClass
-        val byteOrder = headers.byteOrder
-        val sectionOffset = headers.sectionOffset
-        val sectionEntrySize = headers.sectionEntrySize
-        val sectionCount = headers.sectionCount
-        val nameIndex = headers.nameIndex
-
-        val sections = ArrayList<FunctionElfSection>(sectionCount)
-        repeat(sectionCount) { index ->
-            step("section headers")
-            val offset = checkedAdd(
-                sectionOffset,
-                checkedMultiply(index.toLong(), sectionEntrySize.toLong(), "section-header offset"),
-                "section-header offset",
-            )
-            sections += readSection(offset, sectionEntrySize, elfClass, byteOrder, index)
-        }
-        val namedSections = attachSectionNames(sections, nameIndex)
-        val coreLayout = readCoreLayout(headers)
-        val imageBase = coreLayout.imageBase
-        val executable = coreLayout.executableRanges
-        val executableMembership = FullTreeElfExecutableMembership.fromSorted(executable) {
+        val sections = readNamedSections(headers)
+        val core = readCoreLayout(headers)
+        val membership = FullTreeElfExecutableMembership.fromSorted(core.executableRanges) {
             step("executable-range membership index")
         }
+        val scanned = scanSymbols(headers, sections, objectMode = false) { symbol ->
+            if (symbol.info and ELF_ST_TYPE_MASK == STT_FUNC && symbol.nameOffset != 0L) {
+                val name = symbolName(symbol, "function alias")
+                if (name.isNotEmpty()) {
+                    val locator = symbolLocator(symbol, "function")
+                    if (symbol.sectionKind == FullTreeElfSymbolSectionKind.UNDEFINED) {
+                        consume(FullTreeElfFunctionSymbol(name, locator, null))
+                    } else if (symbol.value >= core.imageBase) {
+                        val rva = symbol.value - core.imageBase
+                        if (membership.contains(rva)) consume(FullTreeElfFunctionSymbol(name, locator, rva))
+                    }
+                }
+            }
+        }
+        return FullTreeElfLayoutObservation(
+            core.elfClass, core.byteOrder, core.elfType, core.machine, core.osAbi, core.abiVersion,
+            core.imageBase, core.executableRanges, scanned,
+        )
+    }
 
+    fun scanObjects(consume: (FullTreeElfObjectSymbol) -> Unit): FullTreeElfObjectLayoutObservation {
+        val headers = parseHeaders()
+        val sections = readNamedSections(headers)
+        val ranges = readExecutableRanges(
+            headers.programOffset, headers.programEntrySize, headers.programCount,
+            headers.elfClass, headers.byteOrder, includeObjectStorage = true,
+        )
+        val core = readCoreLayout(headers, ranges)
+        val scanned = scanSymbols(headers, sections, objectMode = true) { symbol ->
+            val type = symbol.info and ELF_ST_TYPE_MASK
+            if (type == STT_OBJECT || type == STT_TLS) {
+                consume(observeObject(symbol, sections, core, ranges))
+            }
+        }
+        return FullTreeElfObjectLayoutObservation(
+            core.elfClass, core.byteOrder, core.elfType, core.machine, core.osAbi, core.abiVersion,
+            core.imageBase, core.executableRanges, scanned, ranges.loaded, ranges.tls,
+        )
+    }
+
+    private fun observeObject(
+        symbol: ParsedElfSymbol,
+        sections: List<FunctionElfSection>,
+        core: FullTreeElfCoreLayout,
+        ranges: LoadedRanges,
+    ): FullTreeElfObjectSymbol {
+        val type = symbol.info and ELF_ST_TYPE_MASK
+        val reasons = arrayListOf<String>()
+        val segments = arrayListOf<Int>()
+        val section = if (symbol.sectionKind == FullTreeElfSymbolSectionKind.DEFINED) {
+            sections[symbol.resolvedSectionIndex.toInt()]
+        } else null
+        if (symbol.size == 0UL) reasons += "zero_size_metadata"
+        val end = if (section == null) null else objectEnd(symbol.value, symbol.size, core.elfClass)
+        if (section != null && end == null) reasons += "symbol_extent_overflows_address_width"
+        var rva: ULong? = null
+        val storage = when (symbol.sectionKind) {
+            FullTreeElfSymbolSectionKind.UNDEFINED -> {
+                reasons += "undefined_symbol_has_no_storage"
+                FullTreeElfObjectStorage.UNDEFINED
+            }
+            FullTreeElfSymbolSectionKind.COMMON -> {
+                reasons += "common_value_is_alignment_not_address"
+                FullTreeElfObjectStorage.COMMON
+            }
+            FullTreeElfSymbolSectionKind.ABSOLUTE -> {
+                reasons += "absolute_value_has_no_section_storage"
+                FullTreeElfObjectStorage.ABSOLUTE
+            }
+            FullTreeElfSymbolSectionKind.RESERVED -> {
+                reasons += "reserved_section_index_has_no_supported_storage_semantics"
+                FullTreeElfObjectStorage.UNMAPPED
+            }
+            FullTreeElfSymbolSectionKind.DEFINED -> {
+                checkNotNull(section)
+                when {
+                    section.type == SHT_NULL -> {
+                        reasons += "inactive_section_has_no_storage"
+                        FullTreeElfObjectStorage.UNMAPPED
+                    }
+                    section.flags and SHF_ALLOC == 0UL -> {
+                        reasons += "section_is_not_allocated"
+                        FullTreeElfObjectStorage.NONALLOC
+                    }
+                    section.flags and SHF_COMPRESSED != 0UL -> {
+                        reasons += "allocated_section_is_compressed"
+                        FullTreeElfObjectStorage.UNMAPPED
+                    }
+                    type == STT_TLS -> {
+                        reasons += "tls_value_is_template_offset_not_process_address"
+                        if (section.flags and SHF_TLS == 0UL) {
+                            reasons += "tls_symbol_section_lacks_tls_flag"
+                        } else if (end != null) {
+                            ranges.tls.forEach { segment ->
+                                step("TLS object storage membership")
+                                if (symbol.value < segment.memorySize && end <= segment.memorySize &&
+                                    ULong.MAX_VALUE - segment.virtualAddress >= symbol.value
+                                ) {
+                                    val address = segment.virtualAddress + symbol.value
+                                    val absoluteEnd = objectEnd(address, symbol.size, core.elfClass)
+                                    if (absoluteEnd != null && objectFitsSection(address, absoluteEnd, section, core.elfClass) &&
+                                        objectFileMappingMatches(address, absoluteEnd, section, segment)
+                                    ) segments += segment.index
+                                }
+                            }
+                        }
+                        if (segments.isEmpty()) {
+                            reasons += "tls_extent_is_not_contained_in_section_and_template"
+                            FullTreeElfObjectStorage.UNMAPPED
+                        } else FullTreeElfObjectStorage.TLS
+                    }
+                    section.flags and SHF_TLS != 0UL -> {
+                        reasons += "non_tls_symbol_in_tls_section"
+                        FullTreeElfObjectStorage.UNMAPPED
+                    }
+                    end == null -> FullTreeElfObjectStorage.UNMAPPED
+                    !objectFitsSection(symbol.value, end, section, core.elfClass) -> {
+                        val sectionEnd = objectEnd(section.address, section.size, core.elfClass)
+                        reasons += when {
+                            sectionEnd == null -> "section_extent_overflows_address_width"
+                            symbol.value < section.address || symbol.value >= sectionEnd -> "symbol_starts_outside_section"
+                            else -> "symbol_extent_crosses_section_boundary"
+                        }
+                        FullTreeElfObjectStorage.UNMAPPED
+                    }
+                    else -> {
+                        var startsInLoad = false
+                        var fitsLoad = false
+                        ranges.loaded.forEach { segment ->
+                            step("loaded object storage membership")
+                            if (symbol.value >= segment.virtualAddress && symbol.value < segment.endExclusive) {
+                                startsInLoad = true
+                                if (end <= segment.endExclusive) {
+                                    fitsLoad = true
+                                    if (objectFileMappingMatches(symbol.value, end, section, segment)) segments += segment.index
+                                }
+                            }
+                        }
+                        if (segments.isEmpty()) {
+                            reasons += when {
+                                !startsInLoad -> "symbol_starts_outside_load_segments"
+                                !fitsLoad -> "symbol_extent_crosses_load_segment_boundary"
+                                else -> "section_and_segment_file_mapping_disagree"
+                            }
+                            FullTreeElfObjectStorage.UNMAPPED
+                        } else {
+                            rva = symbol.value - core.imageBase
+                            reasons += if (section.type == SHT_NOBITS) "zero_fill_storage" else "file_backed_storage"
+                            FullTreeElfObjectStorage.MAPPED_LOAD
+                        }
+                    }
+                }
+            }
+        }
+        return FullTreeElfObjectSymbol(
+            name = symbolName(symbol, "object alias"), locator = symbolLocator(symbol, "object"),
+            type = type, binding = symbol.info ushr 4, visibility = symbol.other and 3, other = symbol.other,
+            rawSectionIndex = symbol.rawSectionIndex,
+            resolvedSectionIndex = if (section == null) null else symbol.resolvedSectionIndex,
+            sectionKind = symbol.sectionKind, sectionName = section?.name,
+            value = symbol.value, size = symbol.size, rva = rva, storage = storage,
+            sectionFlags = section?.flags, sectionType = section?.type,
+            sectionAddress = section?.address, sectionSize = section?.size,
+            segmentIndices = segments, reasons = reasons,
+        )
+    }
+
+    private fun objectEnd(value: ULong, size: ULong, elfClass: Int): ULong? {
+        if (ULong.MAX_VALUE - value < size) return null
+        val end = value + size
+        if (elfClass == ELFCLASS32 && end > ELF32_ADDRESS_SPACE_END) return null
+        return end
+    }
+
+    private fun objectFitsSection(value: ULong, end: ULong, section: FunctionElfSection, elfClass: Int): Boolean {
+        val sectionEnd = objectEnd(section.address, section.size, elfClass) ?: return false
+        // A zero-sized symbol is metadata at a real byte, never proof of an object beyond the section.
+        return value >= section.address && value < sectionEnd && end <= sectionEnd
+    }
+
+    private fun objectFileMappingMatches(
+        value: ULong,
+        end: ULong,
+        section: FunctionElfSection,
+        segment: FullTreeElfMemorySegment,
+    ): Boolean {
+        if (section.type == SHT_NOBITS) return value >= segment.fileEndExclusive
+        if (value >= segment.fileEndExclusive || end > segment.fileEndExclusive) return false
+        val sectionDelta = value - section.address
+        val segmentDelta = value - segment.virtualAddress
+        if (ULong.MAX_VALUE - section.offset.toULong() < sectionDelta ||
+            ULong.MAX_VALUE - segment.fileOffset < segmentDelta
+        ) return false
+        return section.offset.toULong() + sectionDelta == segment.fileOffset + segmentDelta
+    }
+
+    private fun readNamedSections(headers: ParsedElfHeaders): List<FunctionElfSection> {
+        val sections = ArrayList<FunctionElfSection>(headers.sectionCount)
+        repeat(headers.sectionCount) { index ->
+            step("section headers")
+            val offset = checkedAdd(
+                headers.sectionOffset,
+                checkedMultiply(index.toLong(), headers.sectionEntrySize.toLong(), "section-header offset"),
+                "section-header offset",
+            )
+            sections += readSection(offset, headers.sectionEntrySize, headers.elfClass, headers.byteOrder, index)
+        }
+        return attachSectionNames(sections, headers.nameIndex)
+    }
+
+    private fun symbolName(symbol: ParsedElfSymbol, subject: String): String =
+        if (symbol.nameOffset == 0L) "" else readUtf8String(
+            symbol.strings, symbol.nameOffset, limits.maximumFunctionNameBytes,
+            limits.maximumFunctionNameCodePoints, subject,
+        )
+
+    private fun symbolLocator(symbol: ParsedElfSymbol, subject: String): String {
+        val locator = "$label:section[${symbol.tableIndex}]=${symbol.tableName}:symbol[${symbol.index}]"
+        if (locator.toByteArray(StandardCharsets.UTF_8).size > limits.maximumLocatorBytes) {
+            fail("$subject evidence locator exceeds its byte bound")
+        }
+        return locator
+    }
+
+    private fun scanSymbols(
+        headers: ParsedElfHeaders,
+        namedSections: List<FunctionElfSection>,
+        objectMode: Boolean,
+        consume: (ParsedElfSymbol) -> Unit,
+    ): Long {
+        val elfClass = headers.elfClass
+        val byteOrder = headers.byteOrder
+        val sectionCount = headers.sectionCount
         val symbolTables = namedSections.withIndex().filter { it.value.type == SHT_SYMTAB || it.value.type == SHT_DYNSYM }
         if (symbolTables.size > limits.maximumSymbolTables) fail("ELF symbol-table count exceeds its bound")
         var totalSymbols = 0L
@@ -252,14 +588,20 @@ private class ElfReader(
                 val info: Int
                 val rawSectionIndex: Int
                 val value: ULong
+                val size: ULong
+                val other: Int
                 if (elfClass == ELFCLASS64) {
                     nameOffset = u32(symbol, 0, byteOrder)
                     info = symbol[4].toInt() and 0xff
                     rawSectionIndex = u16(symbol, 6, byteOrder)
                     value = u64(symbol, 8, byteOrder)
+                    size = u64(symbol, 16, byteOrder)
+                    other = symbol[5].toInt() and 0xff
                 } else {
                     nameOffset = u32(symbol, 0, byteOrder)
                     value = u32(symbol, 4, byteOrder).toULong()
+                    size = u32(symbol, 8, byteOrder).toULong()
+                    other = symbol[13].toInt() and 0xff
                     info = symbol[12].toInt() and 0xff
                     rawSectionIndex = u16(symbol, 14, byteOrder)
                 }
@@ -286,44 +628,16 @@ private class ElfReader(
                     resolvedSectionIndex,
                     sectionCount,
                     usesExtendedIndex,
+                    objectMode,
                 )
-                if (info and ELF_ST_TYPE_MASK == STT_FUNC && nameOffset != 0L) {
-                    val name = readUtf8String(
-                        strings,
-                        nameOffset,
-                        limits.maximumFunctionNameBytes,
-                        limits.maximumFunctionNameCodePoints,
-                        "function alias",
-                    )
-                    if (name.isNotEmpty()) {
-                        val locator = "$label:section[$sectionIndex]=${section.name}:symbol[$symbolIndex]"
-                        if (locator.toByteArray(StandardCharsets.UTF_8).size > limits.maximumLocatorBytes) {
-                            fail("function evidence locator exceeds its byte bound")
-                        }
-                        if (sectionKind == SymbolSectionKind.UNDEFINED) {
-                            consume(FullTreeElfFunctionSymbol(name, locator, null))
-                        } else if (value >= imageBase) {
-                            val rva = value - imageBase
-                            if (executableMembership.contains(rva)) {
-                                consume(FullTreeElfFunctionSymbol(name, locator, rva))
-                            }
-                        }
-                    }
-                }
+                consume(ParsedElfSymbol(
+                    sectionIndex, section.name, symbolIndex, strings, nameOffset, info, other,
+                    rawSectionIndex, resolvedSectionIndex, sectionKind, value, size,
+                ))
                 symbolIndex++
             }
         }
-        return FullTreeElfLayoutObservation(
-            elfClass = coreLayout.elfClass,
-            byteOrder = coreLayout.byteOrder,
-            elfType = coreLayout.elfType,
-            machine = coreLayout.machine,
-            osAbi = coreLayout.osAbi,
-            abiVersion = coreLayout.abiVersion,
-            imageBase = coreLayout.imageBase,
-            executableRanges = coreLayout.executableRanges,
-            scannedSymbols = scanned,
-        )
+        return scanned
     }
 
     private fun parseHeaders(): ParsedElfHeaders {
@@ -437,14 +751,16 @@ private class ElfReader(
         )
     }
 
-    private fun readCoreLayout(headers: ParsedElfHeaders): FullTreeElfCoreLayout {
-        val ranges = readExecutableRanges(
+    private fun readCoreLayout(
+        headers: ParsedElfHeaders,
+        ranges: LoadedRanges = readExecutableRanges(
             headers.programOffset,
             headers.programEntrySize,
             headers.programCount,
             headers.elfClass,
             headers.byteOrder,
-        )
+        ),
+    ): FullTreeElfCoreLayout {
         val executable = ranges.executable.sortedWith(
             compareBy<FullTreeElfExecutableRange> { it.start }.thenBy { it.endExclusive },
         )
@@ -500,9 +816,10 @@ private class ElfReader(
         count: Int,
         elfClass: Int,
         byteOrder: Int,
+        includeObjectStorage: Boolean = false,
     ): LoadedRanges {
-        val loads = arrayListOf<Pair<ULong, ULong>>()
-        val executable = arrayListOf<Pair<ULong, ULong>>()
+        val loads = arrayListOf<FullTreeElfMemorySegment>()
+        val tls = arrayListOf<FullTreeElfMemorySegment>()
         repeat(count) { index ->
             step("program headers")
             val offset = checkedAdd(
@@ -512,44 +829,65 @@ private class ElfReader(
             )
             val bytes = window.bytes(offset, if (elfClass == ELFCLASS64) ELF64_PROGRAM_BYTES else ELF32_PROGRAM_BYTES)
             val type = u32(bytes, 0, byteOrder)
-            if (type != PT_LOAD.toLong()) return@repeat
+            if (type != PT_LOAD.toLong() && !(includeObjectStorage && type == PT_TLS.toLong())) return@repeat
+            val subject = if (type == PT_TLS.toLong()) "PT_TLS" else "PT_LOAD"
             val flags: Long
             val fileOffset: ULong
             val virtualAddress: ULong
             val fileSize: ULong
             val memorySize: ULong
+            val alignment: ULong
             if (elfClass == ELFCLASS64) {
                 flags = u32(bytes, 4, byteOrder)
                 fileOffset = u64(bytes, 8, byteOrder)
                 virtualAddress = u64(bytes, 16, byteOrder)
                 fileSize = u64(bytes, 32, byteOrder)
                 memorySize = u64(bytes, 40, byteOrder)
+                alignment = u64(bytes, 48, byteOrder)
             } else {
                 fileOffset = u32(bytes, 4, byteOrder).toULong()
                 virtualAddress = u32(bytes, 8, byteOrder).toULong()
                 fileSize = u32(bytes, 16, byteOrder).toULong()
                 memorySize = u32(bytes, 20, byteOrder).toULong()
                 flags = u32(bytes, 24, byteOrder)
+                alignment = u32(bytes, 28, byteOrder).toULong()
             }
-            if (fileSize > memorySize) fail("PT_LOAD file size exceeds its memory size")
+            // Validate the new object-storage evidence without changing historical layout/function policy.
+            // GABI p_align: 0/1 means no alignment; otherwise power-of-two with congruent offset/address.
+            if (includeObjectStorage && alignment > 1UL) {
+                if (alignment and (alignment - 1UL) != 0UL) fail("$subject alignment is not a power of two")
+                if (virtualAddress % alignment != fileOffset % alignment) {
+                    fail("$subject virtual address and file offset are incongruent with its alignment")
+                }
+            }
+            if (fileSize > memorySize) fail("$subject file size exceeds its memory size")
             requireFileRange(
-                fileOffsetValue(fileOffset, "PT_LOAD file offset"),
-                fileOffsetValue(fileSize, "PT_LOAD file size"),
-                "PT_LOAD file range",
+                fileOffsetValue(fileOffset, "$subject file offset"),
+                fileOffsetValue(fileSize, "$subject file size"),
+                "$subject file range",
             )
-            if (memorySize == 0UL) return@repeat
-            val end = addUnsigned(virtualAddress, memorySize, "PT_LOAD virtual range")
+            if (memorySize == 0UL && !includeObjectStorage) return@repeat
+            val end = addUnsigned(virtualAddress, memorySize, "$subject virtual range")
             if (elfClass == ELFCLASS32 && end > ELF32_ADDRESS_SPACE_END) {
-                fail("ELF32 PT_LOAD virtual range exceeds its address width")
+                fail("ELF32 $subject virtual range exceeds its address width")
             }
-            loads += virtualAddress to end
-            if (flags and PF_X != 0L) executable += virtualAddress to end
+            val segment = FullTreeElfMemorySegment(
+                index, flags, fileOffset, virtualAddress, fileSize, memorySize,
+                end, addUnsigned(virtualAddress, fileSize, "$subject file-backed virtual range"), null, alignment,
+            )
+            if (type == PT_LOAD.toLong()) loads += segment else tls += segment
         }
-        if (loads.isEmpty()) fail("ELF has no nonempty PT_LOAD segment")
-        val imageBase = loads.minOf { it.first }
+        val nonempty = loads.filter { it.memorySize != 0UL }
+        if (nonempty.isEmpty()) fail("ELF has no nonempty PT_LOAD segment")
+        val imageBase = nonempty.minOf { it.virtualAddress }
         return LoadedRanges(
             imageBase,
-            executable.map { (start, end) -> FullTreeElfExecutableRange(start - imageBase, end - imageBase) },
+            nonempty.filter { it.flags and PF_X != 0L }.map {
+                FullTreeElfExecutableRange(it.virtualAddress - imageBase, it.endExclusive - imageBase)
+            },
+            loads.map { it.copy(rva = it.virtualAddress.takeIf { address -> address >= imageBase }?.minus(imageBase)) },
+            // A TLS template has a linked virtual address; STT_TLS values remain offsets into it.
+            tls.map { it.copy(rva = it.virtualAddress.takeIf { address -> address >= imageBase }?.minus(imageBase)) },
         )
     }
 
@@ -679,17 +1017,20 @@ private class ElfReader(
         value: Long,
         sectionCount: Int,
         extended: Boolean,
-    ): SymbolSectionKind {
+        objectMode: Boolean,
+    ): FullTreeElfSymbolSectionKind {
         if (extended) {
             if (value in SHN_LORESERVE.toLong() until sectionCount.toLong()) {
-                return SymbolSectionKind.DEFINED
+                return FullTreeElfSymbolSectionKind.DEFINED
             }
             fail("SHN_XINDEX does not resolve to a real high section index")
         }
         return when {
-            value == SHN_UNDEF.toLong() -> SymbolSectionKind.UNDEFINED
-            value == SHN_ABS.toLong() -> SymbolSectionKind.DEFINED
-            value in 1 until minOf(sectionCount, SHN_LORESERVE).toLong() -> SymbolSectionKind.DEFINED
+            value == SHN_UNDEF.toLong() -> FullTreeElfSymbolSectionKind.UNDEFINED
+            value == SHN_ABS.toLong() -> FullTreeElfSymbolSectionKind.ABSOLUTE
+            value in 1 until minOf(sectionCount, SHN_LORESERVE).toLong() -> FullTreeElfSymbolSectionKind.DEFINED
+            objectMode && value == SHN_COMMON.toLong() -> FullTreeElfSymbolSectionKind.COMMON
+            objectMode && value >= SHN_LORESERVE -> FullTreeElfSymbolSectionKind.RESERVED
             else -> fail("symbol uses an unsupported reserved or invalid section index")
         }
     }
@@ -728,12 +1069,24 @@ private data class ParsedElfHeaders(
 private data class LoadedRanges(
     val imageBase: ULong,
     val executable: List<FullTreeElfExecutableRange>,
+    val loaded: List<FullTreeElfMemorySegment>,
+    val tls: List<FullTreeElfMemorySegment>,
 )
 
-private enum class SymbolSectionKind {
-    UNDEFINED,
-    DEFINED,
-}
+private data class ParsedElfSymbol(
+    val tableIndex: Int,
+    val tableName: String,
+    val index: Long,
+    val strings: FunctionElfSection,
+    val nameOffset: Long,
+    val info: Int,
+    val other: Int,
+    val rawSectionIndex: Int,
+    val resolvedSectionIndex: Long,
+    val sectionKind: FullTreeElfSymbolSectionKind,
+    val value: ULong,
+    val size: ULong,
+)
 
 private data class FunctionElfSection(
     val index: Int,
@@ -868,6 +1221,7 @@ private const val ELFDATA2MSB = 2
 private const val EV_CURRENT = 1
 private const val ET_EXEC = 2
 private const val ET_DYN = 3
+private const val PT_TLS = 7
 private const val PT_LOAD = 1
 private const val PF_X = 1L
 private const val SHT_SYMTAB = 2L
@@ -876,12 +1230,17 @@ private const val SHT_STRTAB = 3L
 private const val SHT_NOBITS = 8L
 private const val SHT_DYNSYM = 11L
 private const val SHT_SYMTAB_SHNDX = 18L
+private const val SHF_ALLOC = 0x2UL
+private const val SHF_TLS = 0x400UL
 private const val SHF_COMPRESSED = 0x800UL
 private const val SHN_UNDEF = 0
 private const val SHN_LORESERVE = 0xff00
+private const val SHN_COMMON = 0xfff2
 private const val SHN_ABS = 0xfff1
 private const val SHN_XINDEX = 0xffff
 private const val PN_XNUM = 0xffff
+private const val STT_OBJECT = 1
+private const val STT_TLS = 6
 private const val STT_FUNC = 2
 private const val ELF_ST_TYPE_MASK = 0x0f
 private val ELF32_ADDRESS_SPACE_END = 1UL shl 32
