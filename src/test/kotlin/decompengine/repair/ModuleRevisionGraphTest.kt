@@ -1529,9 +1529,14 @@ class ModuleRevisionGraphTest {
         }
 
         assertContentEquals(concurrent, target.readBytes())
+        val failedRecord = project.resolve("reports/repair-revisions/graph.json").readText()
+        assertTrue(failedRecord.contains("restore_failed_unresolved"))
+        assertTrue(failedRecord.contains("unrecognized_source_state") ||
+            failedRecord.contains("restore_operation_failed"))
         Files.delete(target)
         Files.move(held, target)
-        graph.reject(attempt, RepairEvidence("cas-conflict", "concurrent rollback publication rejected"))
+        val rejected = graph.reject(attempt, RepairEvidence("cas-conflict", "concurrent rollback publication rejected"))
+        assertEquals(RepairRollbackState.RESTORED_AFTER_FAILURE, requireNotNull(rejected.rollbackRecord).state)
         graph.close()
         assertContentEquals(parent, target.readBytes())
     }
@@ -2215,10 +2220,157 @@ class ModuleRevisionGraphTest {
                     assertContentEquals(alphaBefore, alpha.readBytes())
                     assertContentEquals(betaBefore, beta.readBytes())
                     assertTrue(recovered.snapshot.nodes.last().recoveredAfterCrash)
+                    assertEquals(
+                        RepairRollbackState.RESTORED_VERIFIED,
+                        requireNotNull(recovered.snapshot.nodes.last().rollbackRecord).state,
+                    )
                 }
             }
             }
         }
+    }
+
+    @Test
+    fun `durable rollback failure remains visible and later recovery records restoration after failure`() {
+        val project = generatedProject()
+        val alpha = project.resolve("src/modules/alpha.c")
+        val beta = project.resolve("src/modules/beta.c")
+        val alphaOriginal = alpha.readBytes()
+        val betaOriginal = beta.readBytes()
+        val alphaCandidate = alphaOriginal + "\n/* rollback retry alpha */\n".toByteArray()
+        val betaCandidate = betaOriginal + "\n/* rollback retry beta */\n".toByteArray()
+        var armed = false
+        var failRollbackOnce = true
+        val graph = ModuleRevisionGraph.openForTesting(
+            project,
+            GeneratedCRepairIndexProfile,
+            faultInjector = ModuleRevisionFaultInjector { point ->
+                if (armed && failRollbackOnce && point is ModuleRevisionFaultPoint.AfterPublicationMove &&
+                    point.phase == "rollback" && point.index == 0
+                ) {
+                    failRollbackOnce = false
+                    throw IllegalStateException("injected failure after first restored source")
+                }
+            },
+        )
+        val attempt = graph.beginAttempt(listOf("src/modules/alpha.c", "src/modules/beta.c"))
+        graph.installCandidate(
+            attempt,
+            mapOf("src/modules/alpha.c" to alphaCandidate, "src/modules/beta.c" to betaCandidate),
+        )
+        armed = true
+
+        assertFailsWith<IllegalStateException> {
+            graph.reject(attempt, RepairEvidence("rejected", "rollback failure is retained"))
+        }
+        assertContentEquals(alphaOriginal, alpha.readBytes())
+        assertContentEquals(betaCandidate, beta.readBytes())
+        val unresolvedGraph = project.resolve("reports/repair-revisions/graph.json").readText()
+        assertTrue(unresolvedGraph.contains("restore_failed_unresolved"))
+        assertTrue(unresolvedGraph.contains("restore_operation_failed"))
+        val failedRecord = Json.parseToJsonElement(unresolvedGraph).jsonObject
+            .getValue("pending").jsonObject.getValue("rollbackRecord").jsonObject
+        assertTrue(
+            failedRecord.getValue("observedSourceRevisionSha256").jsonPrimitive.content !=
+                failedRecord.getValue("expectedSourceRevisionSha256").jsonPrimitive.content,
+        )
+        assertEquals(attempt.id, graph.snapshot.pendingAttemptId)
+        graph.close()
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { recovered ->
+            assertContentEquals(alphaOriginal, alpha.readBytes())
+            assertContentEquals(betaOriginal, beta.readBytes())
+            val outcome = requireNotNull(recovered.snapshot.nodes.last().rollbackRecord)
+            assertEquals(attempt.id, outcome.attemptId)
+            assertEquals(RepairRollbackState.RESTORED_AFTER_FAILURE, outcome.state)
+            assertEquals(RepairRollbackStage.SOURCE_RESTORE, outcome.failureStage)
+            assertEquals(RepairRollbackFailureCode.RESTORE_OPERATION_FAILED, outcome.failureCode)
+            assertEquals(outcome.expectedSourceRevisionSha256, outcome.observedSourceRevisionSha256)
+            assertEquals(true, outcome.candidateSourceInstallStarted)
+        }
+    }
+
+    @Test
+    fun `failure record publication failure leaves only the write ahead marker durable`() {
+        val project = generatedProject()
+        val target = project.resolve("src/modules/alpha.c")
+        val original = target.readBytes()
+        val candidate = original + "\n/* marker survives failed record write */\n".toByteArray()
+        var armed = false
+        var rollbackFaulted = false
+        var graphSyncCount = 0
+        var markerDurableBeforeExchange = false
+        val graph = ModuleRevisionGraph.openForTesting(
+            project,
+            GeneratedCRepairIndexProfile,
+            faultInjector = ModuleRevisionFaultInjector { point ->
+                if (armed) {
+                    if (!rollbackFaulted && point is ModuleRevisionFaultPoint.BeforePublicationExchange &&
+                        point.phase == "rollback"
+                    ) {
+                        rollbackFaulted = true
+                        val durableGraph = project.resolve("reports/repair-revisions/graph.json").readText()
+                        markerDurableBeforeExchange = durableGraph.contains("restore_in_progress") &&
+                            !durableGraph.contains("restore_failed_unresolved")
+                        throw IllegalStateException("injected rollback exchange failure")
+                    }
+                    if (point is ModuleRevisionFaultPoint.AfterStateTemporaryDirectorySync &&
+                        point.scope == "revision-state" && point.name == "graph.json"
+                    ) {
+                        graphSyncCount++
+                        if (graphSyncCount == 3) {
+                            throw IllegalStateException("injected failure-record publication failure")
+                        }
+                    }
+                }
+            },
+        )
+        val attempt = graph.beginAttempt(listOf("src/modules/alpha.c"))
+        graph.installCandidate(attempt, mapOf("src/modules/alpha.c" to candidate))
+        armed = true
+
+        assertFailsWith<IllegalStateException> { graph.reject(attempt, RepairEvidence("rejected", "retry after write failure")) }
+        assertTrue(markerDurableBeforeExchange)
+        assertContentEquals(candidate, target.readBytes())
+        val marker = project.resolve("reports/repair-revisions/graph.json").readText()
+        assertTrue(marker.contains("restore_in_progress"))
+        assertFalse(marker.contains("restore_failed_unresolved"))
+        graph.close()
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { recovered ->
+            assertContentEquals(original, target.readBytes())
+            val outcome = requireNotNull(recovered.snapshot.nodes.last().rollbackRecord)
+            assertEquals(RepairRollbackState.RESTORED_VERIFIED, outcome.state)
+            assertEquals(null, outcome.failureCode)
+        }
+    }
+
+    @Test
+    fun `persisted schema two pending attempt migrates as unknown and restores its bound parent`() {
+        val project = generatedProject()
+        val target = project.resolve("src/modules/alpha.c")
+        val original = target.readBytes()
+        val candidate = original + "\n/* schema two recovery */\n".toByteArray()
+        val graphPath = project.resolve("reports/repair-revisions/graph.json")
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            val attempt = graph.beginAttempt(listOf("src/modules/alpha.c"))
+            graph.installCandidate(attempt, mapOf("src/modules/alpha.c" to candidate))
+            assertTrue(graphPath.readText().contains("\"schemaVersion\": 2"))
+        }
+        val legacyGraph = graphPath.readBytes()
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { recovered ->
+            assertContentEquals(original, target.readBytes())
+            val outcome = requireNotNull(recovered.snapshot.nodes.last().rollbackRecord)
+            assertEquals(RepairRollbackState.RESTORED_VERIFIED, outcome.state)
+            assertTrue(outcome.legacyPendingStateUnknown)
+            assertEquals(null, outcome.candidateSourceInstallStarted)
+            assertEquals(null, outcome.runId)
+        }
+        assertContentEquals(
+            legacyGraph,
+            graphPath.parent.resolve("legacy-graph-${sha256(legacyGraph)}.json").readBytes(),
+        )
     }
 
     @Test
@@ -3102,7 +3254,7 @@ class ModuleRevisionGraphTest {
             }),
             Mutation("legacy-schema", "schema-v1/v2 repair evidence is non-release", { fixture ->
                 val graph = fixture.project.resolve("reports/repair-revisions/graph.json")
-                graph.writeText(graph.readText().replaceFirst("\"schemaVersion\": 3", "\"schemaVersion\": 1"))
+                graph.writeText(graph.readText().replaceFirst("\"schemaVersion\": 4", "\"schemaVersion\": 1"))
             }),
             Mutation("receipt-record-cross-pair", "records differ from the exact workflow change set", { fixture ->
                 val receipt = fixture.project.resolve(fixture.receiptPath)

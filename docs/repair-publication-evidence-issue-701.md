@@ -11,7 +11,7 @@ does not manufacture an accepted revision.
 
 `BehaviorEvidence` binds a behavior report to the project revision, source
 inputs, rebuilt artifact identity, retained corpus, and report hash. The archive
-verifier requires schema-3 graph and history together, rejects pending or legacy
+verifier requires a schema-3/4 graph and schema-3 history together, rejects pending or legacy
 state as release authority, and admits preserved legacy bytes only by their
 exact archive commitment. These are the publication and evidence contracts
 available in the current source.
