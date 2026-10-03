@@ -183,6 +183,7 @@ class DwarfSysvAmd64InterfaceProjectionTest {
         assertFalse(projected.parameters.single()!!.observable)
         assertTrue(projected.returnType!!.reasons.any { it.contains("aggregate-size-is-not-multiple-of-alignment") })
         assertTrue(projected.parameters.single()!!.reasons.any { it.contains("aggregate-size-is-not-multiple-of-alignment") })
+        assertUnknownType(aggregate("zero-alignment", 4, 0, listOf(member("field", "int", 0))), intType)
     }
 
     @Test

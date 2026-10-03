@@ -348,7 +348,7 @@ internal object DwarfSysvAmd64InterfaceProjection {
             n.attributes[0x3c]?.let { if (!absent(it) && single(it) != "0") unknown("aggregate-declaration-only-or-unresolved") }
             val bytes = number(n.byteSize)
             val alignment = n.attributes[0x88]?.let(::number) ?: unknown("aggregate-alignment-not-explicit")
-            if (bytes % alignment != 0L) unknown("aggregate-size-is-not-multiple-of-alignment")
+            if (alignment == 0L || bytes % alignment != 0L) unknown("aggregate-size-is-not-multiple-of-alignment")
             val convention = n.attributes[0x36]
             val invisible = if (lang in cppLanguages) when (single(convention)) {
                 "4" -> true; "5" -> false; else -> unknown("C++-aggregate-call-semantics-unspecified")
