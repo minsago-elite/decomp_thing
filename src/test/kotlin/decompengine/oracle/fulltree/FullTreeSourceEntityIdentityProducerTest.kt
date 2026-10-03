@@ -18,6 +18,27 @@ import kotlinx.serialization.json.JsonPrimitive
 
 class FullTreeSourceEntityIdentityProducerTest {
     @Test
+    fun `line table cache bounds cover every authenticated compilation unit`() {
+        val perUnit = 16L * 1024L
+        val configured = FullTreeDwarfLineTableLimits(
+            maximumDirectories = 1_000,
+            maximumFiles = 1_000,
+            maximumAggregatePathBytes = 1L shl 20,
+        )
+        val bounded = boundedSourceIdentityLineTableLimits(configured, perUnit)
+        val modeledPerUnit = 1_024L + 2L * bounded.maximumAggregatePathBytes +
+            128L * (bounded.maximumDirectories + bounded.maximumFiles)
+        assertTrue(bounded.maximumDirectories <= configured.maximumDirectories)
+        assertTrue(bounded.maximumFiles <= configured.maximumFiles)
+        assertTrue(bounded.maximumAggregatePathBytes <= configured.maximumAggregatePathBytes)
+        assertTrue(modeledPerUnit <= perUnit)
+        assertTrue(Math.multiplyExact(modeledPerUnit, 32L) <= Math.multiplyExact(perUnit, 32L))
+        assertFailsWith<FullTreeControlException> {
+            boundedSourceIdentityLineTableLimits(configured, 1_024L)
+        }
+    }
+
+    @Test
     fun `available GCC and Clang DWARF5 fixture rows yield deterministic bounded facts`() {
         val root = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize()
         val fixture = root.resolve("src/test/resources/oracle/inline-template-identity-v1")
@@ -128,6 +149,8 @@ class FullTreeSourceEntityIdentityProducerTest {
                     assertTrue(overBound.message.orEmpty().contains("exceeds"), runDescription)
 
                     if (compiler.toRealPath() == gcc.toRealPath()) {
+                        verifyPinnedLineTableAccounting(artifact, rowRoot)
+
                         val dieBoundFailure = assertFailsWith<FullTreeControlException>(runDescription) {
                             FullTreeSourceEntityIdentityProducer.scanShard(
                                 artifact,
@@ -169,6 +192,7 @@ class FullTreeSourceEntityIdentityProducerTest {
                             )
                         }
                         assertTrue(mutatedDuringScan, "artifact mutation checkpoint was not reached; $runDescription")
+                        verifyIdentityEdgeLimitAbort(compiler, fixture, rowRoot, scope)
                     }
                 }
 
@@ -180,6 +204,118 @@ class FullTreeSourceEntityIdentityProducerTest {
                 )
             }
         }
+    }
+
+    private fun verifyPinnedLineTableAccounting(artifact: Path, scratch: Path) {
+        val lineLimits = FullTreeDwarfLineTableLimits(
+            maximumDirectories = 512,
+            maximumFiles = 512,
+            maximumAggregatePathBytes = 4L * 1024L * 1024L,
+        )
+        val modeledPerUnit = 1_024L + 2L * lineLimits.maximumAggregatePathBytes +
+            128L * (lineLimits.maximumDirectories.toLong() + lineLimits.maximumFiles.toLong())
+        val controlLimits = FullTreeControlLimits()
+        val producerLimits = FullTreeFunctionObservationProducerLimits(
+            lineTableLimits = lineLimits,
+            maximumCachedCompilationUnits = 1,
+        )
+        StableControlFile.open(artifact, Files.size(artifact), "source identity line-table bound fixture").use { stableArtifact ->
+            FullTreeDwarfSections.open(
+                stableArtifact,
+                scratch,
+                controlLimits,
+                FullTreeDwarfSections.FUNCTION_OBSERVATION_SECTION_NAMES,
+            ).use { sections ->
+                val parseBudget = FullTreeDwarfParseBudget(controlLimits.maximumDwarfParseSteps)
+                val info = sections.required(".debug_info")
+                val headerIterator = FullTreeDwarfCompilationUnitHeaders(
+                    info,
+                    controlLimits.maximumCompilationUnits.toLong(),
+                    parseBudget,
+                )
+                val headers = buildList {
+                    while (headerIterator.hasNext()) add(headerIterator.next())
+                }
+                assertTrue(headers.size > producerLimits.maximumCachedCompilationUnits + 1)
+                val repository = FunctionDwarfUnitRepository(
+                    sections = sections,
+                    headers = headers,
+                    controlLimits = controlLimits,
+                    producerLimits = producerLimits,
+                    parseBudget = parseBudget,
+                    maximumRetainedWorkingSetBytes = 256L * 1024L * 1024L,
+                    maximumRetainedLineTableWorkingSetBytes = modeledPerUnit * 2L,
+                )
+                val root = repository.load(headers.first())
+                repository.withRetainedUnits(root) {
+                    checkNotNull(root.lineTable(lineLimits)) { "root CU fixture has no retained line table" }
+                    val second = repository.load(headers[1])
+                    checkNotNull(second.lineTable(lineLimits)) { "second CU fixture has no retained line table" }
+                    assertEquals(2, repository.peakRetainedLineTableUnits)
+                    assertFailsWith<FullTreeControlException> {
+                        repository.load(headers[2]).lineTable(lineLimits)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun verifyIdentityEdgeLimitAbort(
+        compiler: Path,
+        fixture: Path,
+        rowRoot: Path,
+        originalScope: AuthenticatedFullTreeScope,
+    ) {
+        val formalParameters = (0..32).joinToString(", ") { "int p$it" }
+        val source = rowRoot.resolve("edge-bound.cpp")
+        Files.writeString(
+            source,
+            "inline int edge_bound($formalParameters);\n" +
+                "int (*edge_bound_reference)($formalParameters) = &edge_bound;\n",
+            StandardCharsets.UTF_8,
+        )
+        val edgeObject = rowRoot.resolve("edge-bound.o")
+        runCommand(
+            listOf(
+                compiler.toString(), "-std=c++17", "-O2", "-g", "-gdwarf-5", "-fPIC",
+                "-fdebug-prefix-map=$fixture=/fixture/source-tree/clang/lib/InlineTemplate",
+                "-fdebug-prefix-map=$rowRoot=/fixture/source-tree/clang/lib/InlineTemplate",
+                source.toString(), "-c", "-o", edgeObject.toString(),
+            ),
+            rowRoot,
+            "edge-bound-compile.txt",
+        )
+        val objects = listOf("caller_one.o", "caller_two.o", "instantiate.o", "unique_pattern.o")
+            .map { rowRoot.resolve(it).toString() } + edgeObject.fileName.toString()
+        val artifact = rowRoot.resolve("edge-bound-fixture.so")
+        runCommand(
+            listOf(compiler.toString(), "-shared", "-Wl,--build-id=none") +
+                objects +
+                listOf("-o", artifact.toString()),
+            rowRoot,
+            "edge-bound-link.txt",
+        )
+        val dwarfShape = runCommand(
+            listOf("readelf", "--debug-dump=info", "--wide", artifact.toString()),
+            rowRoot,
+            "edge-bound-dwarf-shape.txt",
+        )
+        assertTrue(Regex("DW_AT_name.*edge_bound").containsMatchIn(dwarfShape), "33-parameter declaration DIE was not emitted")
+        assertTrue(dwarfShape.contains("DW_AT_declaration"), "declaration-only edge-bound shape was not emitted")
+        val scope = scopeForArtifact(originalScope, fixtureSha256(artifact), Files.size(artifact))
+        val inventoryPath = rowRoot.resolve("edge-bound-inventory.json")
+        val inventory = FullTreeInventoryControl.generateAndPublish(artifact, scope, inventoryPath, maximumWorkers = 1)
+        val shard = inventory.inventory.controlArray("shards").single() as JsonObject
+        val failure = assertFailsWith<FullTreeControlException> {
+            FullTreeSourceEntityIdentityProducer.scanShard(
+                artifact,
+                inventoryPath,
+                scope,
+                shard.controlString("id"),
+                rowRoot,
+            )
+        }
+        assertTrue(failure.message.orEmpty().contains("more than 32 edges"), failure.message.orEmpty())
     }
 
     private fun assertFixtureFacts(
@@ -229,7 +365,30 @@ class FullTreeSourceEntityIdentityProducerTest {
 
         val templateInstances = facts.filter { it.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE }
         assertTrue(templateInstances.isNotEmpty(), "template instance DIEs were not retained; $runDescription")
-        val intAndLongShapesPresent = dwarfShape.contains("template_pattern<int>") && dwarfShape.contains("template_pattern<long")
+        val packedTemplateShapePresent = dwarfShape.contains("packed_template<int, int>")
+        val packedTemplateInstances = templateInstances.filter {
+            it.semanticAnchorFields?.sourceName?.startsWith("packed_template<") == true
+        }
+        assertEquals(packedTemplateShapePresent, packedTemplateInstances.isNotEmpty(), runDescription)
+        if (packedTemplateShapePresent) {
+            assertTrue(packedTemplateInstances.any {
+                it.semanticAnchorFields?.templateActualArguments?.size == 2
+            }, "variadic template actuals were not flattened from emitted pack DIEs; $runDescription")
+            if (dwarfShape.contains("DW_TAG_GNU_template_parameter_pack")) {
+                assertTrue(packedTemplateInstances.any { fact ->
+                    fact.semanticAnchorFields?.templateActualArguments?.let { arguments ->
+                        arguments.size == 2 && arguments.all { it.startsWith("pack[") }
+                    } == true
+                }, "GNU template parameter pack paths were not retained; $runDescription")
+            }
+            if (dwarfShape.contains("DW_TAG_GNU_formal_parameter_pack")) {
+                assertTrue(packedTemplateInstances.any { fact ->
+                    fact.semanticAnchorFields?.signature.orEmpty().any { it.startsWith("pack[") }
+                }, "GNU formal parameter pack paths were not retained; $runDescription")
+            }
+        }
+        val intAndLongShapesPresent = hasDwarfName(dwarfShape, "template_pattern<int") &&
+            hasDwarfName(dwarfShape, "template_pattern<long")
         val intTemplateInstances = templateInstances.filter {
             it.semanticAnchorFields?.sourceName?.startsWith("template_pattern<int>") == true
         }
@@ -241,7 +400,14 @@ class FullTreeSourceEntityIdentityProducerTest {
             intTemplateInstances.any { it.denominatorDisposition == FullTreeDenominatorDisposition.EMITTED_RVA_LINK },
             "emitted int template instance did not link to its exact RVA; $runDescription",
         )
-        assertEquals(dwarfShape.contains("template_pattern<long"), longTemplateInstances.isNotEmpty(), runDescription)
+        val longTemplateShapePresent = hasDwarfName(dwarfShape, "template_pattern<long")
+        assertEquals(
+            longTemplateShapePresent,
+            longTemplateInstances.isNotEmpty(),
+            "$runDescription; long template rows=${longTemplateInstances.map {
+                Triple(it.semanticAnchorFields?.sourceName, it.physicalDie.locator(), it.edges.map { edge -> edge.kind to edge.target?.locator() })
+            }}",
+        )
         if (intAndLongShapesPresent) {
             val intArguments = intTemplateInstances.mapNotNull { it.semanticAnchorFields?.templateActualArguments }.distinct()
             val longArguments = longTemplateInstances.mapNotNull { it.semanticAnchorFields?.templateActualArguments }.distinct()
@@ -259,7 +425,7 @@ class FullTreeSourceEntityIdentityProducerTest {
             templateInstances.any { it.denominatorDisposition == FullTreeDenominatorDisposition.EMITTED_RVA_LINK },
             "emitted template instance did not link to its exact RVA; $runDescription",
         )
-        if (dwarfShape.contains("template_pattern<long")) {
+        if (longTemplateShapePresent) {
             assertTrue(
                 longTemplateInstances.any { it.denominatorDisposition == FullTreeDenominatorDisposition.NON_SCOREABLE },
                 "compiler-emitted no-range template instance was not kept non-scoreable; $runDescription",
@@ -276,6 +442,10 @@ class FullTreeSourceEntityIdentityProducerTest {
         if (optimization == 2) {
             assertTrue(valueTemplateArguments.size >= 2, "non-type template actual arguments were not retained; $runDescription")
             assertTrue(valueTemplateArguments.distinct().size >= 2, "different non-type template values collided; $runDescription")
+            assertTrue(
+                valueTemplateArguments.flatten().any { it.endsWith(":value=-1") },
+                "signed non-type template value was not sign-extended to its declared type width; $runDescription",
+            )
         }
 
         assertTrue(facts.filter { it.kind == FullTreeSourceEntityKind.INLINE_INSTANCE }.all {
@@ -286,6 +456,16 @@ class FullTreeSourceEntityIdentityProducerTest {
             it.kind == FullTreeSourceEntityKind.INLINE_INSTANCE && it.semanticAnchorFields?.sourceName == "shared_inline"
         }
         if (optimization == 2) {
+            val scopedTypeInstances = templateInstances.filter {
+                it.semanticAnchorFields?.sourceName?.startsWith("scoped_type_template<") == true
+            }
+            assertTrue(scopedTypeInstances.isNotEmpty(), "same-spelling namespace type template instances were not retained; $runDescription")
+            val scopedTypeArguments = scopedTypeInstances.mapNotNull {
+                it.semanticAnchorFields?.templateActualArguments?.singleOrNull()
+            }.distinct()
+            assertTrue(scopedTypeArguments.size >= 2, "same-spelling types from different namespaces collided; $runDescription")
+            assertTrue(scopedTypeArguments.all { "scope[" in it }, "named-type template descriptors omitted lexical scope; $runDescription")
+
             val overloadFacts = facts.filter { it.semanticAnchorFields?.sourceName == "overloaded" }
             val overloadedShapePresent = Regex("DW_AT_name.*overloaded").containsMatchIn(dwarfShape)
             assertEquals(overloadedShapePresent, overloadFacts.isNotEmpty(), runDescription)
@@ -317,20 +497,24 @@ class FullTreeSourceEntityIdentityProducerTest {
                 assertTrue(sharedInline.isEmpty(), "compiler-absent shared inline DIE was fabricated; $runDescription")
             }
 
-            val uniquePattern = facts.filter {
+            val uniqueInlineOrigin = facts.filter {
                 it.kind == FullTreeSourceEntityKind.INLINE_INSTANCE &&
                     it.semanticAnchorFields?.sourceName == "unique_source_pattern"
             }
             assertTrue(dwarfShape.contains("unique_source_pattern"), "positive source-pattern shape is absent; $runDescription")
             assertTrue(dwarfShape.contains("DW_TAG_inlined_subroutine"), "positive inline-instance shape is absent; $runDescription")
-            assertEquals(1, uniquePattern.size, "expected one physical positive pattern/instance relationship; $runDescription")
-            assertEquals(FullTreeIdentityObservability.OBSERVABLE, uniquePattern.single().identityObservability, runDescription)
-            assertTrue(uniquePattern.single().candidateCollisionSourceEntityIds.isEmpty(), runDescription)
-            assertTrue(uniquePattern.single().semanticAnchorFields?.inlineCalleeAnchorCandidateId != null, runDescription)
-            assertTrue(uniquePattern.single().edges.any {
+            assertEquals(1, uniqueInlineOrigin.size, "expected one physical positive inline-origin relationship; $runDescription")
+            assertEquals(FullTreeIdentityObservability.OBSERVABLE, uniqueInlineOrigin.single().identityObservability, runDescription)
+            assertTrue(uniqueInlineOrigin.single().candidateCollisionSourceEntityIds.isEmpty(), runDescription)
+            assertTrue(uniqueInlineOrigin.single().semanticAnchorFields?.inlineCalleeAnchorCandidateId != null, runDescription)
+            assertTrue(uniqueInlineOrigin.single().edges.any {
                 it.kind == FullTreeSourceIdentityEdgeKind.ABSTRACT_ORIGIN &&
                     it.state == FullTreeSourceIdentityEdgeState.RESOLVED && it.target != null
             }, runDescription)
+            assertTrue(uniqueInlineOrigin.single().edges.any {
+                it.kind == FullTreeSourceIdentityEdgeKind.TYPE &&
+                    it.state == FullTreeSourceIdentityEdgeState.RESOLVED && it.target != null
+            }, "cached inline-callee signature reference evidence was dropped; $runDescription")
         }
     }
 
@@ -399,6 +583,10 @@ class FullTreeSourceEntityIdentityProducerTest {
         }
         return text
     }
+
+    private fun hasDwarfName(dwarfShape: String, namePrefix: String): Boolean =
+        Regex("DW_AT_name\\s*:[^\\n]*:\\s*${Regex.escape(namePrefix)}(?:>|[ \\t]|$)")
+            .containsMatchIn(dwarfShape)
 
     private fun scopeForArtifact(
         original: AuthenticatedFullTreeScope,

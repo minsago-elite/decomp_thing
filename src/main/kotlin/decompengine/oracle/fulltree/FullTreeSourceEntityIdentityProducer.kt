@@ -18,6 +18,8 @@ internal data class FullTreeSourceEntityIdentityScan(
     val facts: List<FullTreeSourceEntityFact>,
     val canonicalSha256: String,
     val canonicalBytes: Long,
+    val peakRetainedLineTableBytes: Long,
+    val peakRetainedLineTableUnits: Int,
 )
 
 /** Additive extractor for source identities; it does not write or alter either frozen observation schema. */
@@ -53,8 +55,17 @@ internal object FullTreeSourceEntityIdentityProducer {
             perShard.controlLong("maximumResidentBytes") / 4L,
             maximumSerializedBytes,
             MAXIMUM_SOURCE_IDENTITY_BYTES,
+            MAXIMUM_SOURCE_IDENTITY_ROW_BYTES,
         )
-        val lineLimits = producerLimits.lineTableLimits
+        val maximumReferencedUnits = scope.document.controlObject("bounds").controlObject("wholeRun")
+            .controlLong("compilationUnits")
+        val lineWorkingSetBudget = perShard.controlLong("maximumResidentBytes") / 4L
+        val lineBytesPerUnit = lineWorkingSetBudget / maximumReferencedUnits
+        val boundedLineLimits = boundedSourceIdentityLineTableLimits(
+            producerLimits.lineTableLimits,
+            lineBytesPerUnit,
+        )
+        val lineLimits = boundedLineLimits
         val modeledLineBytesPerUnit = try {
             Math.addExact(
                 Math.addExact(
@@ -71,8 +82,11 @@ internal object FullTreeSourceEntityIdentityProducer {
         }
         val modeledLineBytes = Math.multiplyExact(
             modeledLineBytesPerUnit,
-            producerLimits.maximumCachedCompilationUnits.toLong(),
+            maximumReferencedUnits,
         )
+        if (modeledLineBytes > lineWorkingSetBudget) {
+            throw FullTreeControlException("source-identity line-table model exceeds its authenticated working-set share")
+        }
         val maximumRepositoryBytes = try {
             Math.subtractExact(
                 Math.subtractExact(
@@ -121,6 +135,8 @@ internal object FullTreeSourceEntityIdentityProducer {
             }
             val headerParseBudget = FullTreeDwarfParseBudget(controlLimits.maximumDwarfParseSteps, checkpoint)
             var scannedDies = 0L
+            var peakRetainedLineTableBytes = 0L
+            var peakRetainedLineTableUnits = 0
             val budget = SourceIdentityRetentionBudget(maximumFacts, maximumFactBytes)
             val anchorClaims = SourceIdentityAnchorClaims(budget)
             val facts = ArrayList<FullTreeSourceEntityFact>()
@@ -149,6 +165,7 @@ internal object FullTreeSourceEntityIdentityProducer {
                     throw FullTreeControlException("source-identity retained-unit budget is empty")
                 }
                 val boundedProducerLimits = producerLimits.copy(
+                    lineTableLimits = boundedLineLimits,
                     dieLimits = producerLimits.dieLimits.copy(maximumRetainedBytes = maximumRetainedBytes),
                 )
                 val repository = FunctionDwarfUnitRepository(
@@ -160,6 +177,7 @@ internal object FullTreeSourceEntityIdentityProducer {
                     retainedTags = retainedTags,
                     contextForAttribute = ::sourceIdentityAttributeContext,
                     maximumRetainedWorkingSetBytes = maximumRepositoryBytes,
+                    maximumRetainedLineTableWorkingSetBytes = modeledLineBytes,
                 )
                 val sourceRevision = scope.sourceLock.controlObject("revision").controlString("commit")
 
@@ -192,7 +210,7 @@ internal object FullTreeSourceEntityIdentityProducer {
                             executable = executable,
                             layout = layout,
                             controlLimits = controlLimits,
-                            producerLimits = producerLimits,
+                            producerLimits = boundedProducerLimits,
                             budget = budget,
                             anchorClaims = anchorClaims,
                         )
@@ -207,21 +225,27 @@ internal object FullTreeSourceEntityIdentityProducer {
                         }
                     }
                 }
+                peakRetainedLineTableBytes = repository.peakRetainedLineTableBytes
+                peakRetainedLineTableUnits = repository.peakRetainedLineTableUnits
             }
             artifact.verifyUnchanged("source-identity scan")
             val ordered = FullTreeSourceEntityFact.deterministicOrder(facts)
-            val maximumBaselineBytes = canonicalSourceEntityFactsByteLength(ordered)
+            val maximumBaselineBytes = canonicalSourceEntityFactsByteLength(ordered, maximumSerializedBytes)
             if (maximumBaselineBytes > maximumSerializedBytes) {
                 throw FullTreeControlException("canonical source-identity output exceeds its authenticated byte bound")
             }
             val collisionReport = anchorClaims.collisionReport()
-            val collisionExpansionBytes = sourceIdentityCollisionExpansionUpperBound(ordered, collisionReport.byCandidateId)
+            val collisionExpansionBytes = sourceIdentityCollisionExpansionUpperBound(
+                ordered,
+                collisionReport.byCandidateId,
+                maximumSerializedBytes,
+            )
             budget.charge(collisionExpansionBytes, "source-identity collision evidence")
             if (collisionExpansionBytes > maximumSerializedBytes - maximumBaselineBytes) {
                 throw FullTreeControlException("source-identity collision evidence exceeds its authenticated output bound")
             }
             val collisionAdjusted = markUnprovedAnchorCollisions(ordered, collisionReport)
-            val finalBytes = canonicalSourceEntityFacts(collisionAdjusted)
+            val finalBytes = canonicalSourceEntityFacts(collisionAdjusted, maximumSerializedBytes)
             if (finalBytes.size.toLong() > maximumSerializedBytes) {
                 throw FullTreeControlException("canonical source-identity output exceeds its authenticated byte bound")
             }
@@ -234,6 +258,8 @@ internal object FullTreeSourceEntityIdentityProducer {
                 facts = Collections.unmodifiableList(collisionAdjusted),
                 canonicalSha256 = OracleArtifacts.sha256(finalBytes),
                 canonicalBytes = finalBytes.size.toLong(),
+                peakRetainedLineTableBytes = peakRetainedLineTableBytes,
+                peakRetainedLineTableUnits = peakRetainedLineTableUnits,
             )
         }
     }
@@ -270,6 +296,32 @@ private data class SourceIdentityAnchorCollisionReport(
     val byCandidateId: Map<String, List<String>>,
 )
 
+/** Caps each lazy line table so even every authenticated CU being pinned fits its resident share. */
+internal fun boundedSourceIdentityLineTableLimits(
+    configured: FullTreeDwarfLineTableLimits,
+    maximumRetainedBytesPerUnit: Long,
+): FullTreeDwarfLineTableLimits {
+    val available = maximumRetainedBytesPerUnit - 1_024L
+    val maximumEntries = available / 256L
+    if (available < 512L || maximumEntries < 2L) {
+        throw FullTreeControlException("source-identity line-table bound cannot fit a minimal retained table")
+    }
+    val maximumDirectories = minOf(configured.maximumDirectories.toLong(), maxOf(1L, maximumEntries / 2L)).toInt()
+    val maximumFiles = minOf(
+        configured.maximumFiles.toLong(),
+        maxOf(1L, maximumEntries - maximumDirectories.toLong()),
+    ).toInt()
+    val maximumAggregatePathBytes = minOf(configured.maximumAggregatePathBytes, available / 4L)
+    if (maximumAggregatePathBytes <= 0L) {
+        throw FullTreeControlException("source-identity line-table path bound is empty")
+    }
+    return configured.copy(
+        maximumDirectories = maximumDirectories,
+        maximumFiles = maximumFiles,
+        maximumAggregatePathBytes = maximumAggregatePathBytes,
+    )
+}
+
 /** Includes anchors used only as inline callees/owners, not just census rows. */
 private class SourceIdentityAnchorClaims(
     private val budget: SourceIdentityRetentionBudget,
@@ -299,7 +351,9 @@ private class SourceIdentityAnchorClaims(
 internal fun sourceIdentityCollisionExpansionUpperBound(
     facts: List<FullTreeSourceEntityFact>,
     collisionSourceEntityIdsByCandidate: Map<String, List<String>>,
+    maximumCanonicalBytes: Long = MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES,
 ): Long {
+    canonicalSourceEntityFactsByteLength(facts, maximumCanonicalBytes)
     var total = 0L
     try {
         facts.forEach { fact ->
@@ -349,7 +403,7 @@ private class SourceIdentityRetentionBudget(
 
     fun retain(fact: FullTreeSourceEntityFact) {
         if (facts >= maximumFacts) throw FullTreeControlException("source-identity census exceeds its entity bound")
-        val serialized = canonicalSourceEntityFacts(listOf(fact)).size.toLong()
+        val serialized = canonicalSourceEntityFacts(listOf(fact), maximumBytes).size.toLong()
         charge(serialized, "source-identity fact")
         facts++
     }
@@ -372,8 +426,26 @@ private class SourceEntityIdentityReader(
     private val budget: SourceIdentityRetentionBudget,
     private val anchorClaims: SourceIdentityAnchorClaims,
 ) {
-    private val anchorCache = HashMap<String, FullTreeSourceAnchorFields?>()
+    private val anchorCache = HashMap<String, CachedAnchorEvidence>()
     private val anchorStack = LinkedHashSet<String>()
+    private val anchorEdgeCaptures = ArrayDeque<MutableList<FullTreeSourceIdentityEdge>>()
+
+    private data class CachedAnchorEvidence(
+        val fields: FullTreeSourceAnchorFields?,
+        val edges: List<FullTreeSourceIdentityEdge>,
+        val reasonCodes: List<String>,
+    )
+
+    private data class SourceAnchorProvider(
+        val unit: FunctionDwarfUnit,
+        val record: FullTreeDwarfDieRecord,
+        val score: Int,
+    )
+
+    private data class PackedSubprogramChild(
+        val record: FullTreeDwarfDieRecord,
+        val packPath: String?,
+    )
 
     fun fact(record: FullTreeDwarfDieRecord): FullTreeSourceEntityFact? {
         val physical = physical(owner, record)
@@ -381,12 +453,17 @@ private class SourceEntityIdentityReader(
         val reasonCodes = sortedSetOf<String>()
         collectReferenceGraph(owner, record, physical, edgeList, reasonCodes)
         if (edgeList.any { it.state == FullTreeSourceIdentityEdgeState.CYCLIC }) reasonCodes += "ambiguous-reference-cycle"
-        if (edgeList.any { it.state in setOf(FullTreeSourceIdentityEdgeState.MISSING_TARGET, FullTreeSourceIdentityEdgeState.MALFORMED, FullTreeSourceIdentityEdgeState.UNSUPPORTED, FullTreeSourceIdentityEdgeState.OVER_BOUND) }) {
+        if (edgeList.any { it.state in setOf(FullTreeSourceIdentityEdgeState.MISSING_TARGET, FullTreeSourceIdentityEdgeState.MALFORMED, FullTreeSourceIdentityEdgeState.UNSUPPORTED) }) {
             reasonCodes += "unknown-reference-edge"
         }
         val isInline = record.tag == DW_TAG_INLINED_SUBROUTINE
-        val directChildren = owner.directChildren(record)
-        val templateFormals = directChildren.filter { it.tag == DW_TAG_TEMPLATE_TYPE_PARAMETER || it.tag == DW_TAG_TEMPLATE_VALUE_PARAMETER }
+        val templateFormals = packedSubprogramChildren(
+            owner,
+            record,
+            setOf(DW_TAG_TEMPLATE_TYPE_PARAMETER, DW_TAG_TEMPLATE_VALUE_PARAMETER),
+            FullTreeSourceIdentityEdgeKind.TEMPLATE_ARGUMENT,
+            edgeList,
+        ).map(PackedSubprogramChild::record)
         val templateState = templateState(owner, templateFormals, edgeList, reasonCodes)
         val kind = when {
             isInline -> FullTreeSourceEntityKind.INLINE_INSTANCE
@@ -399,17 +476,21 @@ private class SourceEntityIdentityReader(
         }
         // Ordinary emitted functions are already represented by the emitted-RVA observation. The
         // census adds only source identities that otherwise disappear or need an explicit relation.
-        if (!isInline && kind == FullTreeSourceEntityKind.UNRESOLVED && templateFormals.isEmpty()) return null
+        if (!isInline && kind == FullTreeSourceEntityKind.UNRESOLVED && templateFormals.isEmpty()) {
+            // Emitted definitions remain represented by the existing RVA observation, but their
+            // source anchor still participates in unproved-collision detection when another row
+            // relates to that definition.
+            if (relatedSubprogramKind(owner, record, edgeList, reasonCodes) == FullTreeSourceAnchorKind.SOURCE_DEFINITION) {
+                anchorFields(owner, record, FullTreeSourceAnchorKind.SOURCE_DEFINITION, edgeList, reasonCodes, physical)
+            }
+            return null
+        }
         if (edgeList.any { it.state == FullTreeSourceIdentityEdgeState.CYCLIC }) reasonCodes += "ambiguous-reference-cycle"
-        if (edgeList.any { it.state in setOf(FullTreeSourceIdentityEdgeState.MISSING_TARGET, FullTreeSourceIdentityEdgeState.MALFORMED, FullTreeSourceIdentityEdgeState.UNSUPPORTED, FullTreeSourceIdentityEdgeState.OVER_BOUND) }) {
+        if (edgeList.any { it.state in setOf(FullTreeSourceIdentityEdgeState.MISSING_TARGET, FullTreeSourceIdentityEdgeState.MALFORMED, FullTreeSourceIdentityEdgeState.UNSUPPORTED) }) {
             reasonCodes += "unknown-reference-edge"
         }
         val fields = kind.anchorKind()?.let { anchorFields(owner, record, it, edgeList, reasonCodes, physical) }
-        val anchorId = kind.anchorKind()?.let { anchorKind -> fields?.let { candidate ->
-            val preimageBytes = OracleJson.canonicalBytes(candidate.canonicalJson())
-            budget.charge(preimageBytes.size.toLong(), "source-anchor preimage")
-            candidate.candidateId(anchorKind)
-        } }
+        val anchorId = kind.anchorKind()?.let { anchorKind -> fields?.candidateId(anchorKind) }
         val completeAnchor = anchorId != null
         if (!completeAnchor) reasonCodes += "source-anchor-incomplete"
         val declaration = record.truthy(DW_AT_DECLARATION, "DW_AT_declaration")
@@ -444,6 +525,37 @@ private class SourceEntityIdentityReader(
         )
     }
 
+    /** Flattens only the standard GNU parameter-pack wrapper while preserving its ordered group path. */
+    private fun packedSubprogramChildren(
+        unit: FunctionDwarfUnit,
+        subprogram: FullTreeDwarfDieRecord,
+        acceptedTags: Set<Long>,
+        structuralEdgeKind: FullTreeSourceIdentityEdgeKind,
+        edges: MutableList<FullTreeSourceIdentityEdge>,
+    ): List<PackedSubprogramChild> {
+        val result = ArrayList<PackedSubprogramChild>()
+        val pending = ArrayDeque<Triple<FullTreeDwarfDieRecord, FullTreeDwarfDieRecord, String?>>()
+        unit.directChildren(subprogram).asReversed().forEach { pending.addFirst(Triple(subprogram, it, null)) }
+        var nextPackOrdinal = 0
+        while (pending.isNotEmpty()) {
+            val (parent, child, parentPackPath) = pending.removeFirst()
+            if (child.tag == DW_TAG_GNU_TEMPLATE_PARAMETER_PACK || child.tag == DW_TAG_GNU_FORMAL_PARAMETER_PACK) {
+                val packPath = parentPackPath?.let { "$it.$nextPackOrdinal" } ?: nextPackOrdinal.toString()
+                nextPackOrdinal++
+                addStructuralEdge(physical(unit, parent), physical(unit, child), structuralEdgeKind, edges)
+                val nested = unit.directChildren(child)
+                if (nested.isEmpty()) result += PackedSubprogramChild(child, packPath)
+                else nested.asReversed().forEach { pending.addFirst(Triple(child, it, packPath)) }
+            } else if (child.tag in acceptedTags) {
+                if (parentPackPath != null) {
+                    addStructuralEdge(physical(unit, parent), physical(unit, child), structuralEdgeKind, edges)
+                }
+                result += PackedSubprogramChild(child, parentPackPath)
+            }
+        }
+        return result
+    }
+
     private fun anchorFields(
         dieUnit: FunctionDwarfUnit,
         record: FullTreeDwarfDieRecord,
@@ -453,13 +565,21 @@ private class SourceEntityIdentityReader(
         physical: FullTreeSourcePhysicalDie,
     ): FullTreeSourceAnchorFields? {
         val key = physical.locator() + ":" + kind.wireValue
-        if (anchorCache.containsKey(key)) return anchorCache[key]
+        anchorCache[key]?.let { cached ->
+            cached.edges.forEach { retainEdge(edges, it) }
+            reasons.addAll(cached.reasonCodes)
+            return cached.fields
+        }
         if (!anchorStack.add(key)) {
             reasons += "ambiguous-reference-cycle"
             return null
         }
+        val edgeCapture = ArrayList<FullTreeSourceIdentityEdge>()
+        anchorEdgeCaptures.addLast(edgeCapture)
+        val originalReasons = reasons.toSet()
+        var result: FullTreeSourceAnchorFields? = null
         try {
-            val baseRecord: FullTreeDwarfDieRecord? = if (record.tag == DW_TAG_INLINED_SUBROUTINE) {
+            val originRecord: FullTreeDwarfDieRecord? = if (record.tag == DW_TAG_INLINED_SUBROUTINE) {
                 val originAttr = sourceReferenceAttribute(
                     dieUnit, record, DW_AT_ABSTRACT_ORIGIN,
                     FullTreeSourceIdentityEdgeKind.ABSTRACT_ORIGIN, edges, reasons,
@@ -481,11 +601,19 @@ private class SourceEntityIdentityReader(
             } else {
                 record
             }
-            if (baseRecord == null) return null
-            val baseUnit = if (baseRecord === record) dieUnit else unitForRecord(baseRecord)
+            if (originRecord == null) return null
+            val originUnit = if (originRecord === record) dieUnit else unitForRecord(originRecord)
+            val provider = sourceAnchorProvider(originUnit, originRecord, edges, reasons)
+            val baseUnit = provider.unit
+            val baseRecord = provider.record
+            val templateSourceUnit = if (kind == FullTreeSourceAnchorKind.TEMPLATE_INSTANCE) originUnit else baseUnit
+            val templateSourceRecord = if (kind == FullTreeSourceAnchorKind.TEMPLATE_INSTANCE) originRecord else baseRecord
             val sourcePath = declarationPath(baseUnit, baseRecord, DW_AT_DECL_FILE, "DW_AT_decl_file")
             val declFile = baseRecord.optionalNonNegativeLong(DW_AT_DECL_FILE, "DW_AT_decl_file")
-            val declLine = baseRecord.optionalNonNegativeLong(DW_AT_DECL_LINE, "DW_AT_decl_line")
+            val declLine = baseRecord.optionalNonNegativeLong(DW_AT_DECL_LINE, "DW_AT_decl_line")?.takeIf { it > 0L }
+            if (baseRecord.attributesNamed(DW_AT_DECL_LINE).isNotEmpty() && declLine == null) {
+                reasons += "unknown-source-declaration-line"
+            }
             val declColumn = baseRecord.optionalNonNegativeLong(DW_AT_DECL_COLUMN, "DW_AT_decl_column")
             val sourceName = baseRecord.optionalUniqueAttribute(DW_AT_NAME, "DW_AT_name")?.let { attr ->
                 FullTreeDwarfForms.decodeString(attr.value, baseUnit.sections, baseUnit.stringOffsetsBase, baseUnit.header.offsetSize, controlLimits, "source identity DW_AT_name", 16_384)
@@ -500,28 +628,37 @@ private class SourceEntityIdentityReader(
             var patternAnchorId: String? = null
             var actualArguments: List<String>? = null
             if (kind == FullTreeSourceAnchorKind.TEMPLATE_PATTERN || kind == FullTreeSourceAnchorKind.TEMPLATE_INSTANCE) {
-                val formals = baseUnit.directChildren(baseRecord).filter { it.tag == DW_TAG_TEMPLATE_TYPE_PARAMETER || it.tag == DW_TAG_TEMPLATE_VALUE_PARAMETER }
+                val formalChildren = packedSubprogramChildren(
+                    templateSourceUnit,
+                    templateSourceRecord,
+                    setOf(DW_TAG_TEMPLATE_TYPE_PARAMETER, DW_TAG_TEMPLATE_VALUE_PARAMETER),
+                    if (kind == FullTreeSourceAnchorKind.TEMPLATE_PATTERN) FullTreeSourceIdentityEdgeKind.TEMPLATE_FORMAL
+                    else FullTreeSourceIdentityEdgeKind.TEMPLATE_ARGUMENT,
+                    edges,
+                )
+                val formals = formalChildren.map(PackedSubprogramChild::record)
                 if (formals.size > MAXIMUM_DWARF_TEMPLATE_PARAMETERS) {
                     throw FullTreeControlException("source-identity template parameters exceed their 1,024-entry bound")
                 }
                 if (kind == FullTreeSourceAnchorKind.TEMPLATE_PATTERN) {
-                    if (formals.isEmpty() || templateState(baseUnit, formals, edges, reasons) != TemplateParameterState.PATTERN) {
+                    if (formals.isEmpty() || templateState(templateSourceUnit, formals, edges, reasons) != TemplateParameterState.PATTERN) {
                         reasons += "unknown-template-pattern-formals"
                         return null
                     }
                     val values = arrayListOf<String>()
-                    formals.forEach { formal ->
-                        addStructuralEdge(physical(baseUnit, baseRecord), physical(baseUnit, formal), FullTreeSourceIdentityEdgeKind.TEMPLATE_FORMAL, edges)
+                    formalChildren.forEach { packedFormal ->
+                        val formal = packedFormal.record
+                        addStructuralEdge(physical(templateSourceUnit, templateSourceRecord), physical(templateSourceUnit, formal), FullTreeSourceIdentityEdgeKind.TEMPLATE_FORMAL, edges)
                         val name = formal.optionalUniqueAttribute(DW_AT_NAME, "DW_AT_name")?.let {
-                            FullTreeDwarfForms.decodeString(it.value, baseUnit.sections, baseUnit.stringOffsetsBase, baseUnit.header.offsetSize, controlLimits, "template formal name", 16_384)
+                            FullTreeDwarfForms.decodeString(it.value, templateSourceUnit.sections, templateSourceUnit.stringOffsetsBase, templateSourceUnit.header.offsetSize, controlLimits, "template formal name", 16_384)
                         }
                         val descriptor = if (formal.tag == DW_TAG_TEMPLATE_TYPE_PARAMETER) {
                             "type-formal:${name ?: "unnamed"}"
                         } else {
                             val declaredType = sourceReferenceAttribute(
-                                baseUnit, formal, DW_AT_TYPE,
+                                templateSourceUnit, formal, DW_AT_TYPE,
                                 FullTreeSourceIdentityEdgeKind.TEMPLATE_FORMAL, edges, reasons,
-                            )?.let { typeDescriptor(baseUnit, formal, it, edges, FullTreeSourceIdentityEdgeKind.TEMPLATE_FORMAL, reasons) }
+                            )?.let { typeDescriptor(templateSourceUnit, formal, it, edges, FullTreeSourceIdentityEdgeKind.TEMPLATE_FORMAL, reasons) }
                             if (declaredType == null) {
                                 reasons += "unknown-template-formal-type"
                                 return null
@@ -529,52 +666,70 @@ private class SourceEntityIdentityReader(
                             "value-formal:$declaredType:${name ?: "unnamed"}"
                         }
                         budget.charge(descriptor.toByteArray(StandardCharsets.UTF_8).size.toLong(), "template formal descriptor")
-                        values += descriptor
+                        values += packedFormal.packPath?.let { "pack[$it]:$descriptor" } ?: descriptor
                     }
                     templateFormalDescriptors = values
                 } else {
                     val args = arrayListOf<String>()
-                    formals.forEach { formal ->
+                    formalChildren.forEach { packedFormal ->
+                        val formal = packedFormal.record
                         val descriptor = when (formal.tag) {
                             DW_TAG_TEMPLATE_TYPE_PARAMETER -> sourceReferenceAttribute(
-                                baseUnit, formal, DW_AT_TYPE,
+                                templateSourceUnit, formal, DW_AT_TYPE,
                                 FullTreeSourceIdentityEdgeKind.TEMPLATE_ARGUMENT, edges, reasons,
                             )
-                                ?.let { typeDescriptor(baseUnit, formal, it, edges, FullTreeSourceIdentityEdgeKind.TEMPLATE_ARGUMENT, reasons) }
+                                ?.let { typeDescriptor(templateSourceUnit, formal, it, edges, FullTreeSourceIdentityEdgeKind.TEMPLATE_ARGUMENT, reasons) }
                                 ?.let { "type-argument:$it" }
                             DW_TAG_TEMPLATE_VALUE_PARAMETER -> {
-                                val type = sourceReferenceAttribute(
-                                    baseUnit, formal, DW_AT_TYPE,
+                                val typeAttribute = sourceReferenceAttribute(
+                                    templateSourceUnit, formal, DW_AT_TYPE,
                                     FullTreeSourceIdentityEdgeKind.TEMPLATE_ARGUMENT, edges, reasons,
                                 )
-                                    ?.let { typeDescriptor(baseUnit, formal, it, edges, FullTreeSourceIdentityEdgeKind.TEMPLATE_ARGUMENT, reasons) }
-                                val value = integralDescriptor(formal.optionalUniqueAttribute(DW_AT_CONST_VALUE, "DW_AT_const_value")?.value)
+                                val typeTarget = typeAttribute?.let {
+                                    referenceEdge(
+                                        templateSourceUnit, formal, it,
+                                        FullTreeSourceIdentityEdgeKind.TEMPLATE_ARGUMENT,
+                                        physical(templateSourceUnit, formal), edges,
+                                    )
+                                }
+                                val type = typeTarget?.let { describeType(it.first, it.second, HashSet(), 0, reasons, edges) }
+                                val constValues = formal.attributesNamed(DW_AT_CONST_VALUE)
+                                val value = if (constValues.size == 1 && typeTarget != null) {
+                                    typedIntegralDescriptor(constValues.single().value, typeTarget.first, typeTarget.second, edges, reasons)
+                                } else {
+                                    if (constValues.size > 1) reasons += "ambiguous-template-argument-value"
+                                    null
+                                }
                                 if (type == null || value == null) null else "value-argument:type=$type:value=$value"
                             }
                             else -> null
                         }
                         if (descriptor == null) reasons += "unknown-template-argument" else {
                             budget.charge(descriptor.toByteArray(StandardCharsets.UTF_8).size.toLong(), "template actual argument")
-                            args += descriptor
+                            args += packedFormal.packPath?.let { "pack[$it]:$descriptor" } ?: descriptor
                         }
                     }
                     actualArguments = args.takeIf { it.size == formals.size }
                     val patternAttr = listOf(DW_AT_SPECIFICATION, DW_AT_ABSTRACT_ORIGIN).mapNotNull { attrName ->
                         sourceReferenceAttribute(
-                            baseUnit, baseRecord, attrName,
+                            templateSourceUnit, templateSourceRecord, attrName,
                             if (attrName == DW_AT_SPECIFICATION) FullTreeSourceIdentityEdgeKind.SPECIFICATION
                             else FullTreeSourceIdentityEdgeKind.ABSTRACT_ORIGIN,
                             edges, reasons,
                         )
                     }
                     if (patternAttr.size == 1) {
-                        val target = referenceEdge(baseUnit, baseRecord, patternAttr.single(),
+                        val target = referenceEdge(templateSourceUnit, templateSourceRecord, patternAttr.single(),
                             if (patternAttr.single().name == DW_AT_SPECIFICATION) FullTreeSourceIdentityEdgeKind.SPECIFICATION else FullTreeSourceIdentityEdgeKind.ABSTRACT_ORIGIN,
-                            physical, edges)
+                            physical(templateSourceUnit, templateSourceRecord), edges)
                         if (target != null && target.second.tag == DW_TAG_SUBPROGRAM) {
-                            val patternFormals = target.first.directChildren(target.second).filter {
-                                it.tag == DW_TAG_TEMPLATE_TYPE_PARAMETER || it.tag == DW_TAG_TEMPLATE_VALUE_PARAMETER
-                            }
+                            val patternFormals = packedSubprogramChildren(
+                                target.first,
+                                target.second,
+                                setOf(DW_TAG_TEMPLATE_TYPE_PARAMETER, DW_TAG_TEMPLATE_VALUE_PARAMETER),
+                                FullTreeSourceIdentityEdgeKind.TEMPLATE_ARGUMENT,
+                                edges,
+                            ).map(PackedSubprogramChild::record)
                             val verifiedPattern = templateState(target.first, patternFormals, edges, reasons) ==
                                 TemplateParameterState.PATTERN
                             if (verifiedPattern) {
@@ -625,7 +780,7 @@ private class SourceEntityIdentityReader(
                 }
                 val callFileIndex = record.optionalNonNegativeLong(DW_AT_CALL_FILE, "DW_AT_call_file")
                 callFile = callFileIndex?.let { resolvePath(owner, it) }
-                callLine = record.optionalNonNegativeLong(DW_AT_CALL_LINE, "DW_AT_call_line")
+                callLine = record.optionalNonNegativeLong(DW_AT_CALL_LINE, "DW_AT_call_line")?.takeIf { it > 0L }
                 callColumn = record.optionalNonNegativeLong(DW_AT_CALL_COLUMN, "DW_AT_call_column")
                 if (callFile == null || callLine == null) reasons += "unknown-inline-callsite"
                 inlinePath = enclosingInlinePath(owner, record, reasons)
@@ -653,12 +808,179 @@ private class SourceEntityIdentityReader(
                 inlinePathAnchorCandidateIds = inlinePath,
                 authenticatedSourceRevision = sourceRevision,
             )
-            anchorCache[key] = fields
+            result = fields
+            budget.charge(OracleJson.canonicalBytes(fields.canonicalJson()).size.toLong(), "source-anchor fields")
             fields.candidateId(kind)?.let { anchorClaims.claim(kind, it, physical) }
             return fields
         } finally {
+            val reasonTranscript = reasons.filterNot(originalReasons::contains)
+            val transcriptBytes = try {
+                Math.addExact(
+                    Math.addExact(Math.multiplyExact(edgeCapture.size.toLong(), 24L), key.length.toLong() + 96L),
+                    reasonTranscript.sumOf { it.toByteArray(StandardCharsets.UTF_8).size.toLong() + 8L },
+                )
+            } catch (failure: ArithmeticException) {
+                throw FullTreeControlException("source-identity anchor transcript size overflows", failure)
+            }
+            budget.charge(transcriptBytes, "source-anchor evidence cache")
+            anchorCache[key] = CachedAnchorEvidence(
+                fields = result,
+                edges = Collections.unmodifiableList(ArrayList(edgeCapture)),
+                reasonCodes = Collections.unmodifiableList(ArrayList(reasonTranscript)),
+            )
+            anchorEdgeCaptures.removeLast()
             anchorStack.remove(key)
         }
+    }
+
+    /** Selects only an explicitly related specification/origin DIE when it supplies more source facts. */
+    private fun sourceAnchorProvider(
+        rootUnit: FunctionDwarfUnit,
+        root: FullTreeDwarfDieRecord,
+        edges: MutableList<FullTreeSourceIdentityEdge>,
+        reasons: MutableSet<String>,
+    ): SourceAnchorProvider {
+        fun score(unit: FunctionDwarfUnit, record: FullTreeDwarfDieRecord): Int {
+            val identityAttributes = listOf(DW_AT_NAME, DW_AT_DECL_FILE, DW_AT_DECL_LINE, DW_AT_DECL_COLUMN)
+            var result = identityAttributes.count { record.attributesNamed(it).isNotEmpty() }
+            if (record.attributesNamed(DW_AT_TYPE).isNotEmpty()) result++
+            val children = unit.directChildren(record)
+            if (children.any { it.tag in setOf(DW_TAG_FORMAL_PARAMETER, DW_TAG_UNSPECIFIED_PARAMETERS, DW_TAG_GNU_FORMAL_PARAMETER_PACK) }) result++
+            if (children.any { it.tag in setOf(DW_TAG_TEMPLATE_TYPE_PARAMETER, DW_TAG_TEMPLATE_VALUE_PARAMETER, DW_TAG_GNU_TEMPLATE_PARAMETER_PACK) }) result++
+            return result
+        }
+
+        val rootScore = score(rootUnit, root)
+        val providers = LinkedHashMap<String, SourceAnchorProvider>()
+        val pending = ArrayDeque<Triple<FunctionDwarfUnit, FullTreeDwarfDieRecord, Int>>()
+        pending += Triple(rootUnit, root, 1)
+        val visited = HashSet<String>()
+        while (pending.isNotEmpty()) {
+            val (unit, record, depth) = pending.removeFirst()
+            val source = physical(unit, record)
+            val sourceKey = source.locator()
+            if (!visited.add(sourceKey)) continue
+            providers[sourceKey] = SourceAnchorProvider(unit, record, score(unit, record))
+            for ((attributeName, edgeKind) in listOf(
+                DW_AT_SPECIFICATION to FullTreeSourceIdentityEdgeKind.SPECIFICATION,
+                DW_AT_ABSTRACT_ORIGIN to FullTreeSourceIdentityEdgeKind.ABSTRACT_ORIGIN,
+            )) {
+                val attribute = sourceReferenceAttribute(unit, record, attributeName, edgeKind, edges, reasons) ?: continue
+                val target = referenceEdge(unit, record, attribute, edgeKind, source, edges) ?: continue
+                if (target.second.tag != DW_TAG_SUBPROGRAM) {
+                    reasons += "ambiguous-source-anchor-reference-kind"
+                    continue
+                }
+                val targetPhysical = physical(target.first, target.second)
+                if (targetPhysical.locator() in visited) continue
+                if (depth >= producerLimits.maximumReferenceChainEntries) {
+                    throw FullTreeControlException(
+                        "source-identity source-anchor reference walk exceeds ${producerLimits.maximumReferenceChainEntries} DIE entries",
+                    )
+                }
+                pending += Triple(target.first, target.second, depth + 1)
+            }
+        }
+        val bestScore = providers.values.maxOfOrNull(SourceAnchorProvider::score) ?: rootScore
+        if (bestScore <= rootScore) return providers.values.first { it.record === root }
+        val best = providers.values.filter { it.score == bestScore }
+        if (best.size != 1) {
+            reasons += "ambiguous-source-anchor-reference"
+            return providers.values.first { it.record === root }
+        }
+        return best.single()
+    }
+
+    private data class IntegralTypeShape(val signed: Boolean, val bits: Int)
+
+    private fun typedIntegralDescriptor(
+        value: FullTreeDwarfFormValue,
+        typeUnit: FunctionDwarfUnit,
+        typeRecord: FullTreeDwarfDieRecord,
+        edges: MutableList<FullTreeSourceIdentityEdge>,
+        reasons: MutableSet<String>,
+    ): String? {
+        val shape = integralTypeShape(typeUnit, typeRecord, edges, reasons, HashSet(), 0) ?: return null
+        val mask = if (shape.bits == 64) ULong.MAX_VALUE else (1UL shl shape.bits) - 1UL
+        return when (value) {
+            is FullTreeDwarfUnsignedConstantValue -> {
+                if (value.rawValue > mask) return null
+                if (!shape.signed) value.rawValue.toString()
+                else {
+                    val signBit = 1UL shl (shape.bits - 1)
+                    val normalized = if (value.rawValue and signBit != 0UL) {
+                        if (shape.bits == 64) value.rawValue.toLong()
+                        else (value.rawValue or mask.inv()).toLong()
+                    } else value.rawValue.toLong()
+                    normalized.toString()
+                }
+            }
+            is FullTreeDwarfSignedConstantValue -> {
+                if (shape.signed) {
+                    val minimum = if (shape.bits == 64) Long.MIN_VALUE else -(1L shl (shape.bits - 1))
+                    val maximum = if (shape.bits == 64) Long.MAX_VALUE else (1L shl (shape.bits - 1)) - 1L
+                    value.rawValue.takeIf { it in minimum..maximum }?.toString()
+                } else {
+                    value.rawValue.takeIf { it >= 0L && it.toULong() <= mask }?.toString()
+                }
+            }
+            is FullTreeDwarfNumericValue -> {
+                if (shape.signed) {
+                    val minimum = if (shape.bits == 64) Long.MIN_VALUE else -(1L shl (shape.bits - 1))
+                    val maximum = if (shape.bits == 64) Long.MAX_VALUE else (1L shl (shape.bits - 1)) - 1L
+                    value.value.takeIf { it in minimum..maximum }?.toString()
+                } else {
+                    value.value.takeIf { it >= 0L && it.toULong() <= mask }?.toString()
+                }
+            }
+            else -> null
+        }.also { if (it == null) reasons += "unknown-template-argument-value" }
+    }
+
+    private fun integralTypeShape(
+        unit: FunctionDwarfUnit,
+        record: FullTreeDwarfDieRecord,
+        edges: MutableList<FullTreeSourceIdentityEdge>,
+        reasons: MutableSet<String>,
+        visited: MutableSet<String>,
+        depth: Int,
+    ): IntegralTypeShape? {
+        if (depth >= producerLimits.maximumReferenceChainEntries || !visited.add(physical(unit, record).locator())) {
+            reasons += "unknown-template-argument-type"
+            return null
+        }
+        if (record.tag == DW_TAG_BASE_TYPE) {
+            val encoding = record.optionalNonNegativeLong(DW_AT_ENCODING, "DW_AT_encoding")
+            val bytes = record.optionalNonNegativeLong(DW_AT_BYTE_SIZE, "DW_AT_byte_size")
+            if (bytes == null || bytes !in 1L..8L) {
+                reasons += "unknown-template-argument-type"
+                return null
+            }
+            val signed = when (encoding) {
+                DW_ATE_SIGNED, DW_ATE_SIGNED_CHAR -> true
+                DW_ATE_UNSIGNED, DW_ATE_UNSIGNED_CHAR -> false
+                else -> {
+                    reasons += "unsupported-template-argument-type-encoding"
+                    return null
+                }
+            }
+            return IntegralTypeShape(signed, (bytes * 8L).toInt())
+        }
+        if (record.tag !in setOf(DW_TAG_TYPEDEF, DW_TAG_CONST_TYPE, DW_TAG_VOLATILE_TYPE, DW_TAG_RESTRICT_TYPE)) {
+            reasons += "unsupported-template-argument-type"
+            return null
+        }
+        val attribute = sourceReferenceAttribute(unit, record, DW_AT_TYPE, FullTreeSourceIdentityEdgeKind.TYPE, edges, reasons)
+            ?: run {
+                reasons += "unknown-template-argument-type"
+                return null
+            }
+        val target = referenceEdge(unit, record, attribute, FullTreeSourceIdentityEdgeKind.TYPE, physical(unit, record), edges)
+            ?: run {
+                reasons += "unknown-template-argument-type"
+                return null
+            }
+        return integralTypeShape(target.first, target.second, edges, reasons, visited, depth + 1)
     }
 
     private fun signature(
@@ -683,13 +1005,21 @@ private class SourceEntityIdentityReader(
                 ?: return null
             result += "return:$value"
         }
-        val parameters = unit.directChildren(record).filter { it.tag == DW_TAG_FORMAL_PARAMETER || it.tag == DW_TAG_UNSPECIFIED_PARAMETERS }
+        val parameterChildren = packedSubprogramChildren(
+            unit,
+            record,
+            setOf(DW_TAG_FORMAL_PARAMETER, DW_TAG_UNSPECIFIED_PARAMETERS),
+            FullTreeSourceIdentityEdgeKind.TYPE,
+            edges,
+        )
+        val parameters = parameterChildren.map(PackedSubprogramChild::record)
         if (parameters.size > MAXIMUM_DWARF_PARAMETERS) {
             throw FullTreeControlException("source-identity function parameters exceed their 1,024-entry bound")
         }
-        parameters.forEach { parameter ->
+        parameterChildren.forEach { packedParameter ->
+            val parameter = packedParameter.record
             if (parameter.tag == DW_TAG_UNSPECIFIED_PARAMETERS) {
-                result += "varargs"
+                result += packedParameter.packPath?.let { "pack[$it]:varargs" } ?: "varargs"
             } else {
                 val type = sourceReferenceAttribute(
                     unit, parameter, DW_AT_TYPE, FullTreeSourceIdentityEdgeKind.TYPE, edges, reasons,
@@ -700,7 +1030,7 @@ private class SourceEntityIdentityReader(
                 }
                 val descriptor = typeDescriptor(unit, parameter, type, edges, FullTreeSourceIdentityEdgeKind.TYPE, reasons)
                     ?: return null
-                result += "parameter:$descriptor"
+                result += packedParameter.packPath?.let { "pack[$it]:parameter:$descriptor" } ?: "parameter:$descriptor"
             }
         }
         return result
@@ -805,9 +1135,13 @@ private class SourceEntityIdentityReader(
         reasons: MutableSet<String>,
     ): FullTreeSourceAnchorKind? {
         if (record.tag != DW_TAG_SUBPROGRAM) return null
-        val formals = unit.directChildren(record).filter {
-            it.tag == DW_TAG_TEMPLATE_TYPE_PARAMETER || it.tag == DW_TAG_TEMPLATE_VALUE_PARAMETER
-        }
+        val formals = packedSubprogramChildren(
+            unit,
+            record,
+            setOf(DW_TAG_TEMPLATE_TYPE_PARAMETER, DW_TAG_TEMPLATE_VALUE_PARAMETER),
+            FullTreeSourceIdentityEdgeKind.TEMPLATE_ARGUMENT,
+            edges,
+        ).map(PackedSubprogramChild::record)
         return when (templateState(unit, formals, edges, reasons)) {
             TemplateParameterState.INSTANCE -> FullTreeSourceAnchorKind.TEMPLATE_INSTANCE
             TemplateParameterState.PATTERN -> FullTreeSourceAnchorKind.TEMPLATE_PATTERN
@@ -854,7 +1188,7 @@ private class SourceEntityIdentityReader(
                 val bytes = record.optionalNonNegativeLong(DW_AT_BYTE_SIZE, "DW_AT_byte_size") ?: return null
                 name?.let { "base:${canonicalBuiltinName(it)}:encoding=$encoding:bytes=$bytes" }
             }
-            DW_TAG_POINTER_TYPE -> nested("pointer")
+            DW_TAG_POINTER_TYPE -> if (record.attributesNamed(DW_AT_TYPE).isEmpty()) "pointer<void>" else nested("pointer")
             DW_TAG_LVALUE_REFERENCE_TYPE -> nested("lvalue-reference")
             DW_TAG_RVALUE_REFERENCE_TYPE -> nested("rvalue-reference")
             DW_TAG_CONST_TYPE -> nested("const")
@@ -868,7 +1202,16 @@ private class SourceEntityIdentityReader(
                     DW_TAG_UNION_TYPE -> "union"
                     else -> "enum"
                 }
-                name?.let { "$tag:$it:${typeDeclPath(unit, record)}:${record.optionalNonNegativeLong(DW_AT_DECL_LINE, "DW_AT_decl_line") ?: "?"}" }
+                val sourcePath = typeDeclPath(unit, record)
+                val declarationLine = record.optionalNonNegativeLong(DW_AT_DECL_LINE, "DW_AT_decl_line")?.takeIf { it > 0L }
+                if (name == null || sourcePath == null || declarationLine == null) {
+                    reasons += "unknown-named-type-declaration-identity"
+                    null
+                } else {
+                    val scope = lexicalContext(unit, record)
+                    val encodedScope = scope.joinToString(separator = "") { component -> "${component.length}:$component" }
+                    "$tag:${name.length}:$name:${sourcePath.length}:$sourcePath:$declarationLine:scope[${scope.size}:$encodedScope]"
+                }
             }
             DW_TAG_UNSPECIFIED_TYPE -> "void"
             DW_TAG_TEMPLATE_TYPE_PARAMETER -> name?.let { "template-type-parameter:$it" }
@@ -954,6 +1297,9 @@ private class SourceEntityIdentityReader(
     }
 
     private fun retainEdge(edges: MutableList<FullTreeSourceIdentityEdge>, edge: FullTreeSourceIdentityEdge) {
+        anchorEdgeCaptures.forEach { capture ->
+            if (edge !in capture) capture += edge
+        }
         if (edge in edges) return
         if (edges.size >= MAXIMUM_IDENTITY_EDGES_PER_ENTITY) {
             throw FullTreeControlException("source identity has more than 32 edges")
@@ -1033,14 +1379,21 @@ private class SourceEntityIdentityReader(
                     }
                     if (matchingIndex >= 0) {
                         val prior = edges.removeAt(matchingIndex)
-                        retainEdge(
-                            edges,
-                            prior.copy(
-                                target = null,
-                                state = FullTreeSourceIdentityEdgeState.CYCLIC,
-                                reasonCode = "reference-cycle",
-                            ),
+                        val cyclic = prior.copy(
+                            target = null,
+                            state = FullTreeSourceIdentityEdgeState.CYCLIC,
+                            reasonCode = "reference-cycle",
                         )
+                        anchorEdgeCaptures.forEach { capture -> capture.remove(prior) }
+                        anchorCache.replaceAll { _, cached ->
+                            if (prior in cached.edges) {
+                                budget.charge(cached.edges.size.toLong() * 8L + 64L, "source-anchor cycle cache update")
+                                cached.copy(
+                                    edges = Collections.unmodifiableList(cached.edges.map { if (it == prior) cyclic else it }),
+                                )
+                            } else cached
+                        }
+                        retainEdge(edges, cyclic)
                     }
                     reasons += "ambiguous-reference-cycle"
                     continue
@@ -1152,8 +1505,8 @@ private class SourceEntityIdentityReader(
         return result
     }
 
-    private fun typeDeclPath(unit: FunctionDwarfUnit, record: FullTreeDwarfDieRecord): String =
-        declarationPath(unit, record, DW_AT_DECL_FILE, "DW_AT_decl_file") ?: "?"
+    private fun typeDeclPath(unit: FunctionDwarfUnit, record: FullTreeDwarfDieRecord): String? =
+        declarationPath(unit, record, DW_AT_DECL_FILE, "DW_AT_decl_file")
 
     private fun unitForRecord(record: FullTreeDwarfDieRecord): FunctionDwarfUnit {
         val header = findHeader(record.offset)
@@ -1194,6 +1547,8 @@ private fun sourceIdentityRetainedTags(): Set<Long> = setOf(
     DW_TAG_INLINED_SUBROUTINE,
     DW_TAG_FORMAL_PARAMETER,
     DW_TAG_UNSPECIFIED_PARAMETERS,
+    DW_TAG_GNU_TEMPLATE_PARAMETER_PACK,
+    DW_TAG_GNU_FORMAL_PARAMETER_PACK,
     DW_TAG_TEMPLATE_TYPE_PARAMETER,
     DW_TAG_TEMPLATE_VALUE_PARAMETER,
     DW_TAG_NAMESPACE,
@@ -1234,13 +1589,6 @@ private fun sourceIdentityAttributeContext(attribute: FullTreeDwarfAbbreviationA
 
 private fun canonicalUnsignedHex(value: ULong): String = "0x" + value.toString(16)
 
-private fun integralDescriptor(value: FullTreeDwarfFormValue?): String? = when (value) {
-    is FullTreeDwarfNumericValue -> value.value.toString()
-    is FullTreeDwarfUnsignedConstantValue -> value.rawValue.toString()
-    is FullTreeDwarfSignedConstantValue -> value.rawValue.toString()
-    else -> null
-}
-
 private fun dwarfAttributeLabel(name: Long): String = when (name) {
     DW_AT_TYPE -> "DW_AT_type"
     DW_AT_SPECIFICATION -> "DW_AT_specification"
@@ -1259,13 +1607,15 @@ private fun canonicalBuiltinName(name: String): String = when (name) {
     else -> name
 }
 
-private const val MAXIMUM_SOURCE_IDENTITY_BYTES = 256L * 1024L * 1024L
+private const val MAXIMUM_SOURCE_IDENTITY_BYTES = MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES
 private const val MAXIMUM_SOURCE_IDENTITY_CONTEXT_DEPTH = 256
 private const val MAXIMUM_DWARF_PARAMETERS = 1_024
 private const val MAXIMUM_DWARF_TEMPLATE_PARAMETERS = 1_024
 private const val DW_TAG_INLINED_SUBROUTINE = 0x1dL
 private const val DW_TAG_FORMAL_PARAMETER = 0x05L
 private const val DW_TAG_UNSPECIFIED_PARAMETERS = 0x18L
+private const val DW_TAG_GNU_TEMPLATE_PARAMETER_PACK = 0x4107L
+private const val DW_TAG_GNU_FORMAL_PARAMETER_PACK = 0x4108L
 private const val DW_TAG_TEMPLATE_TYPE_PARAMETER = 0x2fL
 private const val DW_TAG_TEMPLATE_VALUE_PARAMETER = 0x30L
 private const val DW_TAG_NAMESPACE = 0x39L
@@ -1274,6 +1624,10 @@ private const val DW_TAG_STRUCTURE_TYPE = 0x13L
 private const val DW_TAG_UNION_TYPE = 0x17L
 private const val DW_TAG_ENUMERATION_TYPE = 0x04L
 private const val DW_TAG_BASE_TYPE = 0x24L
+private const val DW_ATE_SIGNED = 0x05L
+private const val DW_ATE_SIGNED_CHAR = 0x06L
+private const val DW_ATE_UNSIGNED = 0x07L
+private const val DW_ATE_UNSIGNED_CHAR = 0x08L
 private const val DW_TAG_POINTER_TYPE = 0x0fL
 private const val DW_TAG_LVALUE_REFERENCE_TYPE = 0x10L
 private const val DW_TAG_RVALUE_REFERENCE_TYPE = 0x42L

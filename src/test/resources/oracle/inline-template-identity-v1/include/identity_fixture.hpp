@@ -1,5 +1,9 @@
 #pragma once
 
+#define DECLARE_SAME_LINE_TYPE(NS) namespace NS { struct SameLineType { int value; }; }
+DECLARE_SAME_LINE_TYPE(scope_left) DECLARE_SAME_LINE_TYPE(scope_right)
+#undef DECLARE_SAME_LINE_TYPE
+
 inline int declaration_only_inline(int value);
 template <typename T>
 inline T pattern_only(T value);
@@ -21,11 +25,28 @@ inline T template_pattern(T value) {
     return value + static_cast<T>(1);
 }
 
+template <typename T>
+__attribute__((noinline)) inline T unique_template_pattern(T value) {
+    return value + static_cast<T>(2);
+}
+
 template <int Offset, typename T>
 __attribute__((noinline)) inline T value_template(T value) {
     return value + static_cast<T>(Offset);
 }
 
+template <typename... Values>
+__attribute__((noinline)) inline int packed_template(Values... values) {
+    return (0 + ... + static_cast<int>(values));
+}
+
+template <typename T>
+__attribute__((noinline)) inline T scoped_type_template(T value) {
+    return value;
+}
+
 extern template int template_pattern<int>(int);
 extern template long template_pattern<long>(long);
+extern template int unique_template_pattern<int>(int);
+extern template long unique_template_pattern<long>(long);
 extern template int pattern_only<int>(int);

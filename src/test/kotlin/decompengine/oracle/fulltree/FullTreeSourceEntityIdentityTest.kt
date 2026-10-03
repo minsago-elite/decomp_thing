@@ -1,5 +1,8 @@
 package decompengine.oracle.fulltree
 
+import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonException
+import decompengine.oracle.core.StrictJsonLimits
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -7,6 +10,8 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+
+import kotlinx.serialization.json.JsonArray
 
 class FullTreeSourceEntityIdentityTest {
     @Test
@@ -182,7 +187,6 @@ class FullTreeSourceEntityIdentityTest {
             FullTreeSourceIdentityEdgeState.MALFORMED,
             FullTreeSourceIdentityEdgeState.UNSUPPORTED,
             FullTreeSourceIdentityEdgeState.CYCLIC,
-            FullTreeSourceIdentityEdgeState.OVER_BOUND,
         )
         val facts = unresolvedStates.mapIndexed { index, state ->
             val factKind = FullTreeSourceEntityKind.NO_RANGE_DEFINITION
@@ -199,6 +203,102 @@ class FullTreeSourceEntityIdentityTest {
         }
         assertEquals(unresolvedStates.map { it.wireValue }, facts.map { it.edges.single().state.wireValue })
         assertContentEquals(canonicalSourceEntityFacts(facts), canonicalSourceEntityFacts(facts.reversed()))
+    }
+
+    @Test
+    fun `source facts defensively freeze nested caller lists`() {
+        val lexical = mutableListOf("namespace:before")
+        val signature = mutableListOf("return:base:int")
+        val arguments = mutableListOf("value-argument:type=base:int:value=-1")
+        val fields = FullTreeSourceAnchorFields(
+            sourcePath = "source/fixture.cpp",
+            declarationFileIndex = 1L,
+            declarationLine = 10L,
+            declarationColumn = null,
+            language = 33L,
+            lexicalContext = lexical,
+            sourceName = "signed_value",
+            signature = signature,
+            templateActualArguments = arguments,
+        )
+        val candidateId = fields.candidateId(FullTreeSourceEntityKind.TEMPLATE_INSTANCE)
+        val reasonCodes = mutableListOf("source-anchor-incomplete")
+        val collisionIds = mutableListOf("a".repeat(64))
+        val edges = mutableListOf<FullTreeSourceIdentityEdge>()
+        val source = physical("0x40")
+        val fact = FullTreeSourceEntityFact(
+            sourceEntityId = source.sourceEntityId(FullTreeSourceEntityKind.TEMPLATE_INSTANCE),
+            physicalDie = source,
+            kind = FullTreeSourceEntityKind.TEMPLATE_INSTANCE,
+            identityObservability = FullTreeIdentityObservability.UNKNOWN,
+            denominatorDisposition = FullTreeDenominatorDisposition.NON_SCOREABLE,
+            semanticAnchorFields = fields,
+            semanticAnchorCandidateId = candidateId,
+            resolvedSemanticIdentityId = null,
+            candidateCollisionSourceEntityIds = collisionIds,
+            linkedEmittedRva = null,
+            reasonCodes = reasonCodes,
+            edges = edges,
+        )
+        val frozen = canonicalSourceEntityFacts(listOf(fact))
+
+        lexical += "namespace:after"
+        signature[0] = "return:base:long"
+        arguments += "type-argument:base:int"
+        reasonCodes.clear()
+        collisionIds.clear()
+        edges += FullTreeSourceIdentityEdge(
+            kind = FullTreeSourceIdentityEdgeKind.SPECIFICATION,
+            source = source,
+            target = null,
+            referenceForm = "0x11",
+            rawReference = "0x1",
+            state = FullTreeSourceIdentityEdgeState.MISSING_TARGET,
+            reasonCode = "target-not-found",
+        )
+
+        assertEquals(listOf("namespace:before"), fields.lexicalContext)
+        assertEquals(listOf("return:base:int"), fields.signature)
+        assertEquals(listOf("value-argument:type=base:int:value=-1"), fields.templateActualArguments)
+        assertEquals(listOf("source-anchor-incomplete"), fact.reasonCodes)
+        assertEquals(listOf("a".repeat(64)), fact.candidateCollisionSourceEntityIds)
+        assertTrue(fact.edges.isEmpty())
+        assertContentEquals(frozen, canonicalSourceEntityFacts(listOf(fact)))
+        assertFailsWith<UnsupportedOperationException> { (fields.lexicalContext as MutableList<String>).add("mutation") }
+        assertFailsWith<UnsupportedOperationException> { (fact.reasonCodes as MutableList<String>).clear() }
+    }
+
+    @Test
+    fun `canonical source census streams beyond the legacy four mebibyte ceiling`() {
+        val wideFields = fields(sourceName = "wide_identity_" + "x".repeat(6_000))
+        val facts = (0 until 1_000).map { index ->
+            fact("0x${(0x1_000 + index).toString(16)}", FullTreeSourceEntityKind.NO_RANGE_DEFINITION, wideFields)
+        }
+        val bytes = canonicalSourceEntityFacts(facts)
+        assertTrue(bytes.size > 4 * 1024 * 1024)
+        assertEquals(bytes.size.toLong(), canonicalSourceEntityFactsByteLength(facts))
+        assertContentEquals(bytes, canonicalSourceEntityFacts(facts, bytes.size.toLong()))
+        assertFailsWith<IllegalArgumentException> {
+            canonicalSourceEntityFacts(facts, bytes.size.toLong() - 1L)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            canonicalSourceEntityFactsByteLength(facts, bytes.size.toLong() - 1L)
+        }
+        assertFailsWith<StrictJsonException> {
+            canonicalSourceEntityFacts(listOf(facts.first()), maximumCanonicalBytes = 4_096L)
+        }
+        val limits = StrictJsonLimits(
+            maximumInputBytes = 16 * 1024 * 1024,
+            maximumCanonicalBytes = 16 * 1024 * 1024,
+            maximumNodes = 100_000,
+            maximumStringBytes = 16 * 1024 * 1024,
+            maximumTotalStringBytes = 16 * 1024 * 1024,
+        )
+        val expected = JsonArray(facts.map { it.canonicalJson() })
+        val reference = OracleJson.canonicalBytes(expected, limits)
+        assertContentEquals(reference, bytes)
+        assertEquals(expected, OracleJson.parseCanonical(bytes, limits))
+        assertFailsWith<StrictJsonException> { OracleJson.canonicalBytes(expected) }
     }
 
     @Test

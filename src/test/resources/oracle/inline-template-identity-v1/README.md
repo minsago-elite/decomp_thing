@@ -12,11 +12,15 @@ rejects a fabricated census row in those cases. GCC emits more template instance
 for this fixture. Missing template-pattern references remain unknown, even when the displayed DIE
 names look related; the extractor does not infer a relationship from names.
 
-`unique_pattern.cpp` supplies a positive compiler-emitted pattern/instance edge: each compiler's
-optimized DWARF contains one `DW_TAG_inlined_subroutine` with a resolved `DW_AT_abstract_origin`
-targeting `unique_source_pattern`. The test requires exactly one observable inline fact with no
-candidate collision for this relationship. This is fixture evidence only; it does not qualify
-production behavior.
+`unique_pattern.cpp` supplies a positive ordinary inline-origin edge: each compiler's optimized
+DWARF contains one `DW_TAG_inlined_subroutine` with a resolved `DW_AT_abstract_origin` targeting
+`unique_source_pattern`. This validates the inline reference path only; it is not a template
+pattern-to-instance relation. GCC 14.2 and Clang 19.1 emit concrete function-template instances for
+the primary-template fixture but no validated DWARF reference from those instances to an emitted
+generic function-template pattern. The extractor therefore leaves the template pattern candidate
+unknown, even when displayed names appear related. This fixture does not yet satisfy the separate
+positive template-pattern/instance relation acceptance criterion; no relation is inferred from
+names. All artifact evidence is fixture-only and does not qualify production behavior.
 
 `value_template` is marked `noinline` so both non-type actual values remain represented by concrete
 template DIEs at `-O2`. The test checks that the values remain distinct and validates unknown,

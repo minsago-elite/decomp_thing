@@ -2,6 +2,7 @@ package decompengine.oracle.fulltree
 
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
 import java.nio.charset.StandardCharsets
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
@@ -66,7 +67,6 @@ internal enum class FullTreeSourceIdentityEdgeState(val wireValue: String) {
     MALFORMED("malformed"),
     UNSUPPORTED("unsupported"),
     CYCLIC("cyclic"),
-    OVER_BOUND("over-bound"),
 }
 
 /** Artifact-local physical address of one retained DWARF DIE. */
@@ -143,27 +143,33 @@ internal data class FullTreeSourceIdentityEdge(
 }
 
 /** Source-aligned tuple used to derive a semantic ID; compiler DIE offsets are excluded. */
-internal data class FullTreeSourceAnchorFields(
+internal class FullTreeSourceAnchorFields(
     val sourcePath: String?,
     val declarationFileIndex: Long?,
     val declarationLine: Long?,
     val declarationColumn: Long?,
     val language: Long?,
-    val lexicalContext: List<String>,
+    lexicalContext: List<String>,
     val sourceName: String?,
-    val signature: List<String>?,
-    val templateFormalParameters: List<String>? = null,
+    signature: List<String>?,
+    templateFormalParameters: List<String>? = null,
     val templatePatternAnchorCandidateId: String? = null,
-    val templateActualArguments: List<String>? = null,
+    templateActualArguments: List<String>? = null,
     val inlineCalleeAnchorCandidateId: String? = null,
     val inlineOwnerAnchorCandidateId: String? = null,
     val inlineCallFile: String? = null,
     val inlineCallLine: Long? = null,
     val inlineCallColumn: Long? = null,
-    val inlinePathAnchorCandidateIds: List<String>? = null,
+    inlinePathAnchorCandidateIds: List<String>? = null,
     val authenticatedSourceRevision: String? = null,
     val authenticatedSourceFileSha256: String? = null,
 ) {
+    val lexicalContext: List<String> = immutableSourceList(lexicalContext)
+    val signature: List<String>? = signature?.let(::immutableSourceList)
+    val templateFormalParameters: List<String>? = templateFormalParameters?.let(::immutableSourceList)
+    val templateActualArguments: List<String>? = templateActualArguments?.let(::immutableSourceList)
+    val inlinePathAnchorCandidateIds: List<String>? = inlinePathAnchorCandidateIds?.let(::immutableSourceList)
+
     init {
         require(sourcePath == null || isNormalizedSourcePath(sourcePath))
         require(declarationFileIndex == null || declarationFileIndex >= 0L)
@@ -255,10 +261,14 @@ internal data class FullTreeSourceAnchorFields(
     }
 
     fun candidateId(kind: FullTreeSourceEntityKind): String? = kind.anchorKind()?.let(::candidateId)
+
+    override fun equals(other: Any?): Boolean = other is FullTreeSourceAnchorFields && canonicalJson() == other.canonicalJson()
+
+    override fun hashCode(): Int = canonicalJson().hashCode()
 }
 
 /** One source-entity observation; it never is an emitted-function score row. */
-internal data class FullTreeSourceEntityFact(
+internal class FullTreeSourceEntityFact(
     val sourceEntityId: String,
     val physicalDie: FullTreeSourcePhysicalDie,
     val kind: FullTreeSourceEntityKind,
@@ -267,11 +277,15 @@ internal data class FullTreeSourceEntityFact(
     val semanticAnchorFields: FullTreeSourceAnchorFields?,
     val semanticAnchorCandidateId: String?,
     val resolvedSemanticIdentityId: String?,
-    val candidateCollisionSourceEntityIds: List<String>,
+    candidateCollisionSourceEntityIds: List<String>,
     val linkedEmittedRva: String?,
-    val reasonCodes: List<String>,
-    val edges: List<FullTreeSourceIdentityEdge>,
+    reasonCodes: List<String>,
+    edges: List<FullTreeSourceIdentityEdge>,
 ) {
+    val candidateCollisionSourceEntityIds: List<String> = immutableSourceList(candidateCollisionSourceEntityIds)
+    val reasonCodes: List<String> = immutableSourceList(reasonCodes)
+    val edges: List<FullTreeSourceIdentityEdge> = immutableSourceList(edges)
+
     init {
         require(linkedEmittedRva == null || linkedEmittedRva.matches(Regex("0x(?:0|[1-9a-f][0-9a-f]{0,15})")))
         require((denominatorDisposition == FullTreeDenominatorDisposition.EMITTED_RVA_LINK) ==
@@ -333,6 +347,25 @@ internal data class FullTreeSourceEntityFact(
         ),
     )
 
+    fun copy(
+        sourceEntityId: String = this.sourceEntityId,
+        physicalDie: FullTreeSourcePhysicalDie = this.physicalDie,
+        kind: FullTreeSourceEntityKind = this.kind,
+        identityObservability: FullTreeIdentityObservability = this.identityObservability,
+        denominatorDisposition: FullTreeDenominatorDisposition = this.denominatorDisposition,
+        semanticAnchorFields: FullTreeSourceAnchorFields? = this.semanticAnchorFields,
+        semanticAnchorCandidateId: String? = this.semanticAnchorCandidateId,
+        resolvedSemanticIdentityId: String? = this.resolvedSemanticIdentityId,
+        candidateCollisionSourceEntityIds: List<String> = this.candidateCollisionSourceEntityIds,
+        linkedEmittedRva: String? = this.linkedEmittedRva,
+        reasonCodes: List<String> = this.reasonCodes,
+        edges: List<FullTreeSourceIdentityEdge> = this.edges,
+    ): FullTreeSourceEntityFact = FullTreeSourceEntityFact(
+        sourceEntityId, physicalDie, kind, identityObservability, denominatorDisposition,
+        semanticAnchorFields, semanticAnchorCandidateId, resolvedSemanticIdentityId,
+        candidateCollisionSourceEntityIds, linkedEmittedRva, reasonCodes, edges,
+    )
+
     companion object {
         fun deterministicOrder(facts: Iterable<FullTreeSourceEntityFact>): List<FullTreeSourceEntityFact> =
             facts.sortedWith(
@@ -343,27 +376,76 @@ internal data class FullTreeSourceEntityFact(
                     .thenBy { it.physicalDie.dieOffset },
             )
     }
+
+    override fun equals(other: Any?): Boolean = other is FullTreeSourceEntityFact && canonicalJson() == other.canonicalJson()
+
+    override fun hashCode(): Int = canonicalJson().hashCode()
 }
 
 /** Canonical bytes for test evidence and later observation-v2 sinks. */
-internal fun canonicalSourceEntityFacts(facts: Iterable<FullTreeSourceEntityFact>): ByteArray =
+internal fun canonicalSourceEntityFacts(
+    facts: Iterable<FullTreeSourceEntityFact>,
+    maximumCanonicalBytes: Long = MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES,
+): ByteArray =
     FullTreeSourceEntityFact.deterministicOrder(facts).let { ordered ->
         require(ordered.map { it.sourceEntityId }.distinct().size == ordered.size) {
             "source-identity census repeats a physical sourceEntityId"
         }
-        OracleJson.canonicalBytes(JsonArray(ordered.map { it.canonicalJson() }))
+        require(maximumCanonicalBytes in 1L..MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES)
+        val expectedBytes = canonicalSourceEntityFactsByteLength(ordered, maximumCanonicalBytes)
+        require(expectedBytes <= maximumCanonicalBytes) {
+            "canonical source-identity output exceeds its implementation byte bound"
+        }
+        val output = ByteArray(expectedBytes.toInt())
+        var position = 0
+        fun write(value: Byte) {
+            check(position < output.size) { "canonical source-identity writer exceeded its preflight" }
+            output[position++] = value
+        }
+        fun writeAscii(value: String) = value.toByteArray(StandardCharsets.US_ASCII).forEach(::write)
+        if (ordered.isEmpty()) {
+            writeAscii("[]\n")
+        } else {
+            writeAscii("[\n")
+            ordered.forEachIndexed { index, fact ->
+                writeAscii("  ")
+                val row = OracleJson.canonicalBytes(fact.canonicalJson(), sourceIdentityRowJsonLimits(maximumCanonicalBytes))
+                check(row.isNotEmpty() && row.last() == '\n'.code.toByte()) {
+                    "canonical source-identity row has no final newline"
+                }
+                for (rowIndex in 0 until row.lastIndex) {
+                    val byte = row[rowIndex]
+                    write(byte)
+                    if (byte == '\n'.code.toByte()) writeAscii("  ")
+                }
+                if (index != ordered.lastIndex) write(','.code.toByte())
+                write('\n'.code.toByte())
+            }
+            writeAscii("]\n")
+        }
+        check(position == output.size) {
+            "canonical source-identity byte preflight mismatch: expected ${output.size}, wrote $position"
+        }
+        output
     }
 
 /** Computes canonical output size without materializing a shard-wide output buffer. */
-internal fun canonicalSourceEntityFactsByteLength(facts: Iterable<FullTreeSourceEntityFact>): Long =
+internal fun canonicalSourceEntityFactsByteLength(
+    facts: Iterable<FullTreeSourceEntityFact>,
+    maximumCanonicalBytes: Long = MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES,
+): Long =
     FullTreeSourceEntityFact.deterministicOrder(facts).let { ordered ->
         require(ordered.map { it.sourceEntityId }.distinct().size == ordered.size) {
             "source-identity census repeats a physical sourceEntityId"
         }
-        if (ordered.isEmpty()) return@let 3L // [] plus the canonical encoder's final newline
+        require(maximumCanonicalBytes in 1L..MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES)
+        if (ordered.isEmpty()) {
+            require(3L <= maximumCanonicalBytes) { "canonical source-identity output exceeds its authenticated byte bound" }
+            return@let 3L // [] plus the canonical encoder's final newline
+        }
         var size = 4L // opening [\n and closing ] plus the final newline
         ordered.forEachIndexed { index, fact ->
-            val bytes = OracleJson.canonicalBytes(fact.canonicalJson())
+            val bytes = OracleJson.canonicalBytes(fact.canonicalJson(), sourceIdentityRowJsonLimits(maximumCanonicalBytes))
             val lineBreaks = bytes.count { it == '\n'.code.toByte() }
             check(lineBreaks > 0) { "canonical source-identity row has no final newline" }
             val internalLineBreaks = lineBreaks - 1
@@ -373,12 +455,27 @@ internal fun canonicalSourceEntityFactsByteLength(facts: Iterable<FullTreeSource
             size = Math.addExact(size, 1L) // newline after this array element
             if (index != ordered.lastIndex) size = Math.addExact(size, 1L) // array comma
         }
+        require(size <= maximumCanonicalBytes) { "canonical source-identity output exceeds its authenticated byte bound" }
         size
     }
 
 internal fun sourceIdentitySha256(bytes: ByteArray): String = OracleArtifacts.sha256(bytes)
 
 internal const val MAXIMUM_IDENTITY_EDGES_PER_ENTITY = 32
+internal const val MAXIMUM_SOURCE_IDENTITY_ROW_BYTES = 64L * 1024L * 1024L
+internal const val MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES = 256 * 1024 * 1024L
+
+private fun sourceIdentityRowJsonLimits(maximumCanonicalBytes: Long): StrictJsonLimits {
+    val rowLimit = minOf(maximumCanonicalBytes, MAXIMUM_SOURCE_IDENTITY_ROW_BYTES).toInt()
+    require(rowLimit > 0)
+    return StrictJsonLimits(
+        maximumInputBytes = rowLimit,
+        maximumCanonicalBytes = rowLimit,
+        maximumNodes = 1_000_000,
+        maximumStringBytes = rowLimit,
+        maximumTotalStringBytes = rowLimit,
+    )
+}
 
 private val ANCHOR_DOMAIN = "decomp-thing:full-tree-source-anchor-v1\u0000".toByteArray(StandardCharsets.UTF_8)
 private val SOURCE_ENTITY_DOMAIN = "decomp-thing:full-tree-source-entity-v1\u0000".toByteArray(StandardCharsets.UTF_8)
@@ -388,6 +485,9 @@ private val SOURCE_EDGE_ORDER = compareBy<FullTreeSourceIdentityEdge> { it.kind.
     .thenBy { it.target?.locator() ?: "~" }
     .thenBy { it.state.wireValue }
     .thenBy { it.rawReference ?: "~" }
+
+private fun <T> immutableSourceList(values: List<T>): List<T> =
+    java.util.Collections.unmodifiableList(ArrayList(values))
 
 private fun isNormalizedSourcePath(value: String): Boolean =
     value.isNotEmpty() && !value.startsWith('/') && '\\' !in value && '\u0000' !in value &&
