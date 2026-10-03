@@ -24,6 +24,7 @@ class FullTreeSourceEntityIdentityTest {
         val bytesA = canonicalSourceEntityFacts(listOf(declaration, definition))
         val bytesB = canonicalSourceEntityFacts(listOf(definition, declaration))
         assertContentEquals(bytesA, bytesB)
+        assertEquals(bytesA.size.toLong(), canonicalSourceEntityFactsByteLength(listOf(declaration, definition)))
         assertTrue(sourceIdentitySha256(bytesA).matches(Regex("[0-9a-f]{64}")))
     }
 
@@ -49,6 +50,19 @@ class FullTreeSourceEntityIdentityTest {
             canonicalSourceEntityFacts(listOf(ambiguous, second)),
             canonicalSourceEntityFacts(listOf(second, ambiguous)),
         )
+        val ambiguousSecond = second.copy(
+            identityObservability = FullTreeIdentityObservability.AMBIGUOUS,
+            candidateCollisionSourceEntityIds = listOf(first.sourceEntityId, second.sourceEntityId).sorted(),
+            reasonCodes = listOf("duplicate-source-anchor-unproven"),
+        )
+        val baseBytes = canonicalSourceEntityFactsByteLength(listOf(first, second))
+        val expandedBytes = canonicalSourceEntityFactsByteLength(listOf(ambiguous, ambiguousSecond))
+        val candidate = checkNotNull(first.semanticAnchorCandidateId)
+        val expansionUpperBound = sourceIdentityCollisionExpansionUpperBound(
+            listOf(first, second),
+            mapOf(candidate to listOf(first.sourceEntityId, second.sourceEntityId).sorted()),
+        )
+        assertTrue(expansionUpperBound >= expandedBytes - baseBytes)
         assertFailsWith<IllegalArgumentException> {
             canonicalSourceEntityFacts(listOf(first, first))
         }

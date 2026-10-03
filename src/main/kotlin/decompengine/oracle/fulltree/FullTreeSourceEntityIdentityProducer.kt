@@ -74,7 +74,13 @@ internal object FullTreeSourceEntityIdentityProducer {
             producerLimits.maximumCachedCompilationUnits.toLong(),
         )
         val maximumRepositoryBytes = try {
-            perShard.controlLong("maximumResidentBytes") - modeledLineBytes - maximumFactBytes
+            Math.subtractExact(
+                Math.subtractExact(
+                    Math.subtractExact(perShard.controlLong("maximumResidentBytes"), modeledLineBytes),
+                    maximumFactBytes,
+                ),
+                maximumSerializedBytes,
+            )
         } catch (failure: ArithmeticException) {
             throw FullTreeControlException("source-identity working-set model overflows", failure)
         }
@@ -116,7 +122,7 @@ internal object FullTreeSourceEntityIdentityProducer {
             val headerParseBudget = FullTreeDwarfParseBudget(controlLimits.maximumDwarfParseSteps, checkpoint)
             var scannedDies = 0L
             val budget = SourceIdentityRetentionBudget(maximumFacts, maximumFactBytes)
-            val anchorClaims = SourceIdentityAnchorClaims()
+            val anchorClaims = SourceIdentityAnchorClaims(budget)
             val facts = ArrayList<FullTreeSourceEntityFact>()
             val layout = FullTreeElfLayout.scanLayout(artifact, "rich artifact", producerLimits.elfLayoutLimits, checkpoint)
             val executable = FullTreeElfExecutableMembership.fromSorted(layout.executableRanges)
@@ -204,11 +210,17 @@ internal object FullTreeSourceEntityIdentityProducer {
             }
             artifact.verifyUnchanged("source-identity scan")
             val ordered = FullTreeSourceEntityFact.deterministicOrder(facts)
-            val bytes = canonicalSourceEntityFacts(ordered)
-            if (bytes.size.toLong() > maximumSerializedBytes) {
+            val maximumBaselineBytes = canonicalSourceEntityFactsByteLength(ordered)
+            if (maximumBaselineBytes > maximumSerializedBytes) {
                 throw FullTreeControlException("canonical source-identity output exceeds its authenticated byte bound")
             }
-            val collisionAdjusted = markUnprovedAnchorCollisions(ordered, anchorClaims.collisionReport())
+            val collisionReport = anchorClaims.collisionReport()
+            val collisionExpansionBytes = sourceIdentityCollisionExpansionUpperBound(ordered, collisionReport.byCandidateId)
+            budget.charge(collisionExpansionBytes, "source-identity collision evidence")
+            if (collisionExpansionBytes > maximumSerializedBytes - maximumBaselineBytes) {
+                throw FullTreeControlException("source-identity collision evidence exceeds its authenticated output bound")
+            }
+            val collisionAdjusted = markUnprovedAnchorCollisions(ordered, collisionReport)
             val finalBytes = canonicalSourceEntityFacts(collisionAdjusted)
             if (finalBytes.size.toLong() > maximumSerializedBytes) {
                 throw FullTreeControlException("canonical source-identity output exceeds its authenticated byte bound")
@@ -259,18 +271,63 @@ private data class SourceIdentityAnchorCollisionReport(
 )
 
 /** Includes anchors used only as inline callees/owners, not just census rows. */
-private class SourceIdentityAnchorClaims {
+private class SourceIdentityAnchorClaims(
+    private val budget: SourceIdentityRetentionBudget,
+) {
     private val claims = HashMap<String, MutableSet<String>>()
 
     fun claim(kind: FullTreeSourceAnchorKind, candidateId: String, physical: FullTreeSourcePhysicalDie) {
-        claims.getOrPut(candidateId) { sortedSetOf() } += physical.sourceEntityId(kind)
+        val sourceEntityId = physical.sourceEntityId(kind)
+        val prior = claims[candidateId]
+        if (prior?.contains(sourceEntityId) == true) return
+        budget.charge(candidateId.length.toLong() + sourceEntityId.length.toLong() + 128L, "source-anchor collision index")
+        claims.getOrPut(candidateId) { sortedSetOf() } += sourceEntityId
     }
 
     fun collisionReport(): SourceIdentityAnchorCollisionReport {
+        val collisions = claims.filterValues { it.size > 1 }
+        collisions.values.forEach { sourceEntityIds ->
+            budget.charge(sourceEntityIds.size.toLong() * 16L + 64L, "source-anchor collision report")
+        }
         return SourceIdentityAnchorCollisionReport(
-            byCandidateId = claims.filterValues { it.size > 1 }.mapValues { (_, sourceEntityIds) -> sourceEntityIds.toList() },
+            byCandidateId = collisions.mapValues { (_, sourceEntityIds) -> sourceEntityIds.toList() },
         )
     }
+}
+
+/** Conservative preflight for per-row copies of collision IDs and their ambiguity reason. */
+internal fun sourceIdentityCollisionExpansionUpperBound(
+    facts: List<FullTreeSourceEntityFact>,
+    collisionSourceEntityIdsByCandidate: Map<String, List<String>>,
+): Long {
+    var total = 0L
+    try {
+        facts.forEach { fact ->
+            val fields = fact.semanticAnchorFields
+            val candidateIds = listOfNotNull(
+                fact.semanticAnchorCandidateId,
+                fields?.inlineCalleeAnchorCandidateId,
+                fields?.inlineOwnerAnchorCandidateId,
+                fields?.templatePatternAnchorCandidateId,
+            ).distinct()
+            var copiedIds = 0L
+            candidateIds.forEach { candidateId ->
+                copiedIds = Math.addExact(
+                    copiedIds,
+                    collisionSourceEntityIdsByCandidate[candidateId]?.size?.toLong() ?: 0L,
+                )
+            }
+            if (copiedIds > 0L) {
+                // A JSON ID costs 66 bytes plus a possible comma. An extra 128 bytes per affected
+                // row bounds the state and reason-code replacement too. Duplicate related IDs are
+                // deliberately over-counted so this estimate is safe before list materialization.
+                total = Math.addExact(total, Math.addExact(Math.multiplyExact(copiedIds, 67L), 128L))
+            }
+        }
+    } catch (failure: ArithmeticException) {
+        throw FullTreeControlException("source-identity collision evidence size overflows", failure)
+    }
+    return total
 }
 
 private class SourceIdentityRetentionBudget(

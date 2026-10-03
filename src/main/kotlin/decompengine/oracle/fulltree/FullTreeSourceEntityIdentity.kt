@@ -354,6 +354,28 @@ internal fun canonicalSourceEntityFacts(facts: Iterable<FullTreeSourceEntityFact
         OracleJson.canonicalBytes(JsonArray(ordered.map { it.canonicalJson() }))
     }
 
+/** Computes canonical output size without materializing a shard-wide output buffer. */
+internal fun canonicalSourceEntityFactsByteLength(facts: Iterable<FullTreeSourceEntityFact>): Long =
+    FullTreeSourceEntityFact.deterministicOrder(facts).let { ordered ->
+        require(ordered.map { it.sourceEntityId }.distinct().size == ordered.size) {
+            "source-identity census repeats a physical sourceEntityId"
+        }
+        if (ordered.isEmpty()) return@let 3L // [] plus the canonical encoder's final newline
+        var size = 4L // opening [\n and closing ] plus the final newline
+        ordered.forEachIndexed { index, fact ->
+            val bytes = OracleJson.canonicalBytes(fact.canonicalJson())
+            val lineBreaks = bytes.count { it == '\n'.code.toByte() }
+            check(lineBreaks > 0) { "canonical source-identity row has no final newline" }
+            val internalLineBreaks = lineBreaks - 1
+            size = Math.addExact(size, bytes.size.toLong() - 1L) // omit the row encoder's final newline
+            size = Math.addExact(size, 2L) // array element indentation
+            size = Math.addExact(size, Math.multiplyExact(internalLineBreaks.toLong(), 2L)) // nested indentation
+            size = Math.addExact(size, 1L) // newline after this array element
+            if (index != ordered.lastIndex) size = Math.addExact(size, 1L) // array comma
+        }
+        size
+    }
+
 internal fun sourceIdentitySha256(bytes: ByteArray): String = OracleArtifacts.sha256(bytes)
 
 internal const val MAXIMUM_IDENTITY_EDGES_PER_ENTITY = 32
