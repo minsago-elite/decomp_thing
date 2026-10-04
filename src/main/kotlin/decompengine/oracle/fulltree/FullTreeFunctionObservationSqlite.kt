@@ -53,6 +53,7 @@ internal data class FullTreeFunctionObservationSqliteLimits(
     val maximumCacheBytes: Int = 8 * 1024 * 1024,
     val databaseCheckpointRows: Int = 4096,
     val checkpoint: FullTreeFunctionObservationSqliteCheckpoint,
+    val maximumV2JsonNodes: Int = FullTreeFunctionObservationsV2.MAXIMUM_JSON_NODES,
     val maximumScratchBytes: Long? = null,
     val additionalScratchBytes: Long = 0L,
 ) {
@@ -61,6 +62,7 @@ internal data class FullTreeFunctionObservationSqliteLimits(
         require(maximumOutputBytes in 1L..16L * 1024L * 1024L * 1024L)
         require(maximumCacheBytes in 1024..64 * 1024 * 1024)
         require(databaseCheckpointRows in 1..1_000_000)
+        require(maximumV2JsonNodes in 1..FullTreeFunctionObservationsV2.MAXIMUM_JSON_NODES)
         require(additionalScratchBytes >= 0L)
         require(maximumScratchBytes == null ||
             (maximumScratchBytes >= SQLITE_PAGE_BYTES && additionalScratchBytes <= maximumScratchBytes))
@@ -381,7 +383,8 @@ private class FunctionObservationSqliteSink private constructor(
                     workspace.checkProjectionScratchBound(committedDatabaseBytes, outputBytes, label)
                 },
             )
-            FunctionObservationCanonicalWriter(connection, bounded, includeV2 = true).use { writer ->
+            val nodeLimited = FunctionObservationJsonNodeLimitOutputStream(bounded, limits.maximumV2JsonNodes)
+            FunctionObservationCanonicalWriter(connection, nodeLimited, includeV2 = true).use { writer ->
                 writer.writeV2(
                     shard = shard,
                     bindings = bindings,
@@ -1648,6 +1651,123 @@ private class FunctionObservationDigestingOutputStream(
         finished = true
         return FunctionObservationStreamDigest(digest.digest().hex(), count)
     }
+}
+
+/** Counts JSON values as they stream, matching the in-memory canonicalizer without retaining a tree. */
+private class FunctionObservationJsonNodeLimitOutputStream(
+    output: OutputStream,
+    private val maximumNodes: Int,
+) : FilterOutputStream(output) {
+    private enum class Kind { OBJECT, ARRAY }
+    private enum class State { KEY_OR_END, COLON, VALUE, VALUE_OR_END, COMMA_OR_END }
+    private data class Frame(val kind: Kind, var state: State)
+
+    private val stack = ArrayDeque<Frame>()
+    private var nodes = 0
+    private var rootStarted = false
+    private var inString = false
+    private var stringIsKey = false
+    private var escaped = false
+    private var inPrimitive = false
+
+    override fun write(value: Int) = write(byteArrayOf(value.toByte()), 0, 1)
+
+    override fun write(bytes: ByteArray, offset: Int, length: Int) {
+        if (offset < 0 || length < 0 || offset > bytes.size - length) throw IndexOutOfBoundsException()
+        for (index in offset until offset + length) consume(bytes[index].toInt() and 0xff)
+        out.write(bytes, offset, length)
+    }
+
+    private fun consume(value: Int) {
+        if (inString) {
+            if (escaped) {
+                escaped = false
+            } else if (value == '\\'.code) {
+                escaped = true
+            } else if (value == '"'.code) {
+                inString = false
+                if (stringIsKey) stack.last().state = State.COLON
+            }
+            return
+        }
+        if (inPrimitive) {
+            if (isDelimiter(value)) inPrimitive = false else return
+        }
+        when (value) {
+            ' '.code, '\n'.code, '\r'.code, '\t'.code -> Unit
+            '"'.code -> {
+                val frame = stack.lastOrNull()
+                stringIsKey = frame?.kind == Kind.OBJECT && frame.state == State.KEY_OR_END
+                if (!stringIsKey) beginValue()
+                inString = true
+                escaped = false
+            }
+            '{'.code -> {
+                beginValue()
+                countNode()
+                stack.addLast(Frame(Kind.OBJECT, State.KEY_OR_END))
+            }
+            '['.code -> {
+                beginValue()
+                countNode()
+                stack.addLast(Frame(Kind.ARRAY, State.VALUE_OR_END))
+            }
+            '}'.code -> {
+                val frame = stack.removeLastOrNull() ?: sqliteFail("v2 JSON projection has an unmatched object end")
+                if (frame.kind != Kind.OBJECT ||
+                    (frame.state != State.KEY_OR_END && frame.state != State.COMMA_OR_END)
+                ) {
+                    sqliteFail("v2 JSON projection has an invalid object end")
+                }
+            }
+            ']'.code -> {
+                val frame = stack.removeLastOrNull() ?: sqliteFail("v2 JSON projection has an unmatched array end")
+                if (frame.kind != Kind.ARRAY ||
+                    (frame.state != State.VALUE_OR_END && frame.state != State.COMMA_OR_END)
+                ) {
+                    sqliteFail("v2 JSON projection has an invalid array end")
+                }
+            }
+            ','.code -> {
+                val frame = stack.lastOrNull() ?: sqliteFail("v2 JSON projection has a top-level comma")
+                if (frame.state != State.COMMA_OR_END) sqliteFail("v2 JSON projection has an invalid comma")
+                frame.state = if (frame.kind == Kind.OBJECT) State.KEY_OR_END else State.VALUE_OR_END
+            }
+            ':'.code -> {
+                val frame = stack.lastOrNull() ?: sqliteFail("v2 JSON projection has a top-level colon")
+                if (frame.kind != Kind.OBJECT || frame.state != State.COLON) {
+                    sqliteFail("v2 JSON projection has an invalid colon")
+                }
+                frame.state = State.VALUE
+            }
+            else -> {
+                beginValue()
+                countNode()
+                inPrimitive = true
+            }
+        }
+    }
+
+    private fun beginValue() {
+        val frame = stack.lastOrNull()
+        when {
+            frame == null -> {
+                if (rootStarted) sqliteFail("v2 JSON projection has multiple roots")
+                rootStarted = true
+            }
+            frame.kind == Kind.OBJECT && frame.state == State.VALUE -> frame.state = State.COMMA_OR_END
+            frame.kind == Kind.ARRAY && frame.state == State.VALUE_OR_END -> frame.state = State.COMMA_OR_END
+            else -> sqliteFail("v2 JSON projection has a value in an invalid position")
+        }
+    }
+
+    private fun countNode() {
+        nodes++
+        if (nodes > maximumNodes) sqliteFail("function-observation-v2 JSON node count exceeds its bound")
+    }
+
+    private fun isDelimiter(value: Int): Boolean = value == ' '.code || value == '\n'.code || value == '\r'.code ||
+        value == '\t'.code || value == ','.code || value == ']'.code || value == '}'.code
 }
 
 private data class SqliteFunctionAlias(val name: String, val evidence: List<ByteArray>)

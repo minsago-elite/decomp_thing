@@ -33,6 +33,7 @@ internal data class FullTreeFunctionObservationV2StreamResult(
 internal object FullTreeFunctionObservationsV2 {
     const val SCHEMA_NAME = "full-tree-function-observations-v2"
     const val MAXIMUM_CANONICAL_BYTES = 64L * 1024L * 1024L
+    const val MAXIMUM_JSON_NODES = 1_000_000
 
     val producerPolicy: JsonObject = JsonObject(
         mapOf(
@@ -44,6 +45,7 @@ internal object FullTreeFunctionObservationsV2 {
             "candidateHashesProveIdentity" to JsonPrimitive(false),
             "legacySourceEntityCoverage" to JsonPrimitive(false),
             "maximumCanonicalBytes" to JsonPrimitive(MAXIMUM_CANONICAL_BYTES),
+            "maximumJsonNodes" to JsonPrimitive(MAXIMUM_JSON_NODES),
         ),
     )
 
@@ -103,7 +105,7 @@ internal object FullTreeFunctionObservationsV2 {
                 maximumInputBytes = boundedBytes,
                 maximumCanonicalBytes = boundedBytes,
                 maximumDepth = 128,
-                maximumNodes = 1_000_000,
+                maximumNodes = MAXIMUM_JSON_NODES,
                 maximumStringBytes = MAXIMUM_SOURCE_IDENTITY_ROW_BYTES.toInt(),
                 maximumTotalStringBytes = boundedBytes,
             ),
@@ -320,13 +322,20 @@ internal object FullTreeFunctionObservationsV2 {
                 // against the complete inventory; only the census row itself is shard-local.
                 validate(edge.source, false)
                 edge.target?.let { validate(it, false) }
-                if (edge.state == FullTreeSourceIdentityEdgeState.RESOLVED &&
-                    (edge.referenceForm != null || edge.rawReference != null)
-                ) {
-                    val target = edge.target ?: v2Fail("resolved typed reference has no target locator")
-                    if (edge.referenceForm == null || edge.rawReference == null) {
+                if (edge.state == FullTreeSourceIdentityEdgeState.RESOLVED) {
+                    val hasForm = edge.referenceForm != null
+                    val hasRawValue = edge.rawReference != null
+                    val isStructuralKind = edge.kind == FullTreeSourceIdentityEdgeKind.TEMPLATE_FORMAL ||
+                        edge.kind == FullTreeSourceIdentityEdgeKind.TEMPLATE_ARGUMENT ||
+                        edge.kind == FullTreeSourceIdentityEdgeKind.INLINE_OWNER
+                    if (hasForm != hasRawValue ||
+                        (!hasForm && !isStructuralKind)
+                    ) {
                         v2Fail("resolved typed reference omits its form or raw offset")
                     }
+                }
+                if (edge.state == FullTreeSourceIdentityEdgeState.RESOLVED && edge.referenceForm != null) {
+                    val target = edge.target ?: v2Fail("resolved typed reference has no target locator")
                     val form = edge.referenceForm?.removePrefix("0x")?.toULongOrNull(16)
                         ?: v2Fail("typed reference form is malformed")
                     val raw = edge.rawReference?.removePrefix("0x")?.toULongOrNull(16)
@@ -382,7 +391,10 @@ internal object FullTreeFunctionObservationsV2 {
                 val units = inventory.v2Array("units").map { it as JsonObject }
                 val allUnits = units.associateBy { it.v2String("id") }
                 val unitOffsets = units.map { unit ->
-                    unit.v2String("id") to parseDwarfOffset(unit.v2String("dwarfOffset"), "observation-v2 locator")
+                    unit.v2String("id") to parseDwarfOffset(
+                        unit.v2String("dwarfOffset"),
+                        "observation-v2 locator",
+                    ).toULong()
                 }.sortedBy { it.second }
                 return V2ArtifactLocatorIndex(
                     allUnits = allUnits,

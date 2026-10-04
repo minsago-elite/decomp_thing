@@ -38,6 +38,8 @@ internal object FullTreeSourceEntityIdentityProducer {
         anchorClaim: ((candidateId: String, physicalClaimId: String) -> Unit)? = null,
         /** Admits each canonical census row against the caller's aggregate run budget before retention. */
         factAdmission: ((fact: FullTreeSourceEntityFact, canonicalRowBytes: Long) -> Unit)? = null,
+        /** Optional run-level resident allowance after reserving co-resident full-run state. */
+        residentBudgetBytes: Long? = null,
     ): FullTreeSourceEntityIdentityScan {
         FullTreeScopeControl.validate(scope, controlLimits)
         requireStableDirectory(scratchParent, "source-identity scratch parent")
@@ -45,12 +47,19 @@ internal object FullTreeSourceEntityIdentityProducer {
         // The authenticated per-shard entity ceiling applies to this census. The separate
         // 20,000-function limit belongs to function projection and is not a census cap.
         val maximumFacts = perShard.controlLong("entities")
+        val maximumResidentBytes = minOf(
+            perShard.controlLong("maximumResidentBytes"),
+            residentBudgetBytes ?: Long.MAX_VALUE,
+        )
+        if (maximumResidentBytes <= 0L) {
+            throw FullTreeControlException("source-identity run resident-byte allowance is empty")
+        }
         val maximumSerializedBytes = minOf(
             perShard.controlLong("serializedBytes"),
             MAXIMUM_SOURCE_IDENTITY_BYTES,
         )
         val memoryBounds = sourceIdentityMemoryBounds(
-            perShard.controlLong("maximumResidentBytes"),
+            maximumResidentBytes,
             maximumSerializedBytes,
         )
         val maximumCanonicalRowBytes = memoryBounds.maximumCanonicalRowBytes
@@ -58,7 +67,7 @@ internal object FullTreeSourceEntityIdentityProducer {
         val maximumModeledRetainedBytes = memoryBounds.maximumModeledRetainedBytes
         val maximumReferencedUnits = scope.document.controlObject("bounds").controlObject("wholeRun")
             .controlLong("compilationUnits")
-        val lineWorkingSetBudget = perShard.controlLong("maximumResidentBytes") / 4L
+        val lineWorkingSetBudget = maximumResidentBytes / 4L
         val lineBytesPerUnit = lineWorkingSetBudget / maximumReferencedUnits
         val boundedLineLimits = boundedSourceIdentityLineTableLimits(
             producerLimits.lineTableLimits,
@@ -111,7 +120,7 @@ internal object FullTreeSourceEntityIdentityProducer {
             modeledObservedUnitMetadataBytes = 0L,
         )
         sourceIdentityAvailableRepositoryWorkingSetBytes(
-            authenticatedMaximumResidentBytes = perShard.controlLong("maximumResidentBytes"),
+            authenticatedMaximumResidentBytes = maximumResidentBytes,
             modeledLineTableBytes = modeledLineBytes,
             modeledRetainedFactBytes = maximumModeledRetainedBytes,
             maximumSerializedOutputBytes = maximumSerializedBytes,
@@ -140,7 +149,7 @@ internal object FullTreeSourceEntityIdentityProducer {
                     modeledObservedUnitMetadataBytes = 0L,
                 )
                 val availableForUnitMetadata = sourceIdentityAvailableRepositoryWorkingSetBytes(
-                    authenticatedMaximumResidentBytes = perShard.controlLong("maximumResidentBytes"),
+                    authenticatedMaximumResidentBytes = maximumResidentBytes,
                     modeledLineTableBytes = modeledLineBytes,
                     modeledRetainedFactBytes = maximumModeledRetainedBytes,
                     maximumSerializedOutputBytes = maximumSerializedBytes,
@@ -166,7 +175,7 @@ internal object FullTreeSourceEntityIdentityProducer {
                     modeledObservedUnitMetadataBytes = modeledUnitMetadataBytes,
                 )
                 val maximumRepositoryBytes = sourceIdentityAvailableRepositoryWorkingSetBytes(
-                    authenticatedMaximumResidentBytes = perShard.controlLong("maximumResidentBytes"),
+                    authenticatedMaximumResidentBytes = maximumResidentBytes,
                     modeledLineTableBytes = modeledLineBytes,
                     modeledRetainedFactBytes = maximumModeledRetainedBytes,
                     maximumSerializedOutputBytes = maximumSerializedBytes,

@@ -600,6 +600,7 @@ internal fun deriveAuthenticatedLimits(
     scope: AuthenticatedFullTreeScope,
     inputs: FullTreeFunctionObservationAuthenticatedInputs,
     limits: FullTreeFunctionObservationShardPublisherLimits,
+    residentBudgetBytes: Long? = null,
 ): AuthenticatedFunctionObservationLimits {
     val perShard = scope.document.controlObject("bounds").controlObject("perShard")
     val authenticatedUnits = perShard.controlLong("compilationUnits")
@@ -673,8 +674,12 @@ internal fun deriveAuthenticatedLimits(
         sqliteResidentBytes,
         "function-observation total resident model",
     )
-    if (modeledResidentBytes > perShard.controlLong("maximumResidentBytes")) {
-        publicationFail("modeled function-observation working set exceeds its authenticated resident-byte bound")
+    val residentBound = minOf(
+        perShard.controlLong("maximumResidentBytes"),
+        residentBudgetBytes ?: Long.MAX_VALUE,
+    )
+    if (modeledResidentBytes > residentBound) {
+        publicationFail("modeled function-observation working set exceeds its remaining resident-byte allowance")
     }
 
     val authenticatedOutputBytes = perShard.controlLong("serializedBytes")

@@ -434,6 +434,24 @@ internal class FullTreeSourceEntityFact(
             require(semanticAnchorCandidateId.matches(Regex("[0-9a-f]{64}")))
             require(expectedAnchor == semanticAnchorCandidateId)
         }
+        val collisionReasons = setOf("duplicate-source-anchor-unproven", "ambiguous-related-source-anchor")
+        val ambiguousEdgeState = edges.any { it.state == FullTreeSourceIdentityEdgeState.CYCLIC }
+        val unknownEdgeState = edges.any {
+            it.state == FullTreeSourceIdentityEdgeState.MISSING_TARGET ||
+                it.state == FullTreeSourceIdentityEdgeState.MALFORMED ||
+                it.state == FullTreeSourceIdentityEdgeState.UNSUPPORTED
+        }
+        val expectedObservability = when {
+            candidateCollisionSourceEntityIds.isNotEmpty() || reasonCodes.any {
+                it.startsWith("ambiguous-") || it in collisionReasons
+            } || ambiguousEdgeState -> FullTreeIdentityObservability.AMBIGUOUS
+            kind == FullTreeSourceEntityKind.DECLARATION_ONLY ||
+                "declaration-only-no-definition" in reasonCodes -> FullTreeIdentityObservability.UNOBSERVABLE
+            reasonCodes.any { it.startsWith("unknown-") } || unknownEdgeState -> FullTreeIdentityObservability.UNKNOWN
+            semanticAnchorCandidateId != null -> FullTreeIdentityObservability.OBSERVABLE
+            else -> FullTreeIdentityObservability.UNKNOWN
+        }
+        require(identityObservability == expectedObservability)
         if (kind == FullTreeSourceEntityKind.INLINE_INSTANCE) {
             require(denominatorDisposition != FullTreeDenominatorDisposition.EMITTED_RVA_LINK)
             require(linkedEmittedRva == null)

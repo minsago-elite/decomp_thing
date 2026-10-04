@@ -8,7 +8,7 @@ Output: fixture-only-output.json
 Output SHA-256: 47cc1310f7c2fedc8fd69b43e6e1f44ce8afd4e77d9ac5ab67379aaddc8c24a9
 Output bytes: 2557
 Schema SHA-256: c068ed200c8493acbe830ba4e4d8390e8a30499b3d866c43646ff802ff645d89
-Producer configuration SHA-256: 0a2942329a1e483216cf428590d338128882cec2b91d9a8957589874073d1fe9
+Producer configuration SHA-256: 5a4b9dc9015fb64ebb8ec038c8ceefa394b1eaaabfbaf0cf9bc3349497e7e116
 Source-entity ID: 0fc67883fb421eabb1e41bdf8718868234d7c9738d4a59182907644096052c46
 
 The source-entity row is physically keyed by a synthetic artifact hash, unit, section, CU offset,

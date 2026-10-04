@@ -38,6 +38,23 @@ internal data class FullTreeFunctionObservationV2RetainedBudget(
     val sourceFactsBytes: Long,
 )
 
+internal fun fullTreeFunctionObservationV2AvailableResidentBytes(
+    wholeRunMaximumResidentBytes: Long,
+    anchorIndexRetainedBytes: Long,
+    sourceFactsRetainedBytes: Long,
+): Long {
+    require(wholeRunMaximumResidentBytes > 0L && anchorIndexRetainedBytes >= 0L && sourceFactsRetainedBytes >= 0L)
+    val retained = try {
+        Math.addExact(anchorIndexRetainedBytes, sourceFactsRetainedBytes)
+    } catch (failure: ArithmeticException) {
+        throw FullTreeFunctionObservationV2RunException("observation-v2 retained resident model overflows", failure)
+    }
+    if (retained >= wholeRunMaximumResidentBytes) {
+        v2RunFail("observation-v2 retained run state leaves no shard resident-byte allowance")
+    }
+    return wholeRunMaximumResidentBytes - retained
+}
+
 internal data class FullTreeFunctionObservationV2ShardScratchBudget(
     val dwarfScratchBytes: Long,
     val outputBytes: Long,
@@ -58,18 +75,20 @@ internal fun fullTreeFunctionObservationV2RetainedBudget(
 }
 
 internal fun fullTreeFunctionObservationV2AnchorClaimBound(
-    wholeRunEntities: Long,
+    maximumPhysicalRecordsPerShard: Long,
+    shardCount: Int,
     maximumAnchorClaims: Long,
     maximumRunRetainedBytes: Long,
 ): Long {
-    require(wholeRunEntities > 0L && maximumAnchorClaims > 0L && maximumRunRetainedBytes > 0L)
-    val entityClaimBound = if (wholeRunEntities > Long.MAX_VALUE / 64L) {
-        Long.MAX_VALUE
-    } else {
-        wholeRunEntities * 64L
-    }
-    return minOf(maximumAnchorClaims, minOf(entityClaimBound, maximumRunRetainedBytes / 256L)).coerceAtLeast(1L)
+    require(maximumPhysicalRecordsPerShard > 0L && shardCount > 0 && maximumAnchorClaims > 0L && maximumRunRetainedBytes > 0L)
+    val physicalPopulation = saturatingMultiply(maximumPhysicalRecordsPerShard, shardCount.toLong())
+    val claimsPerPhysicalDie = MAXIMUM_IDENTITY_EDGES_PER_ENTITY.toLong() + 1L
+    val scanClaimBound = saturatingMultiply(physicalPopulation, claimsPerPhysicalDie)
+    return minOf(maximumAnchorClaims, minOf(scanClaimBound, maximumRunRetainedBytes / 256L)).coerceAtLeast(1L)
 }
+
+private fun saturatingMultiply(left: Long, right: Long): Long =
+    if (left != 0L && right > Long.MAX_VALUE / left) Long.MAX_VALUE else left * right
 
 internal fun fullTreeFunctionObservationV2ShardScratchBudget(
     maximumScratchBytes: Long,
@@ -198,7 +217,8 @@ internal object FullTreeFunctionObservationV2RunPublisher {
 
                 val anchorIndex = FullTreeFunctionObservationV2AnchorIndex(
                     maximumClaims = fullTreeFunctionObservationV2AnchorClaimBound(
-                        wholeRunEntities = wholeRun.controlLong("entities"),
+                        maximumPhysicalRecordsPerShard = limits.shard.producer.dieLimits.maximumPhysicalRecords,
+                        shardCount = shards.size,
                         maximumAnchorClaims = limits.maximumAnchorClaims,
                         maximumRunRetainedBytes = limits.maximumRunRetainedBytes,
                     ),
@@ -213,6 +233,11 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                 var sourceFactCanonicalBytes = 0L
                 var modeledRetainedBytes = 0L
                 val retainedAdmission = retainedBudget.sourceFactsBytes
+                val sourcePassResidentBytes = fullTreeFunctionObservationV2AvailableResidentBytes(
+                    wholeRun.controlLong("maximumResidentBytes"),
+                    retainedBudget.anchorIndexBytes,
+                    retainedAdmission,
+                )
                 val sourcePassControlLimits = limits.shard.control.copy(
                     maximumDwarfScratchBytes = minOf(
                         limits.shard.control.maximumDwarfScratchBytes,
@@ -253,6 +278,7 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                             sourceFactAdmissionBytes = nextAdmissionBytes
                             modeledRetainedBytes = nextRetained
                         },
+                        residentBudgetBytes = sourcePassResidentBytes,
                     )
                     if (scan.inventoryArtifactSha256 != inventorySha256 || scan.richArtifactSha256 != richSha256) {
                         v2RunFail("source-identity scan inputs differ from the authenticated run")
@@ -315,7 +341,17 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                             inventorySha256,
                             shard,
                         )
-                        val effective = deriveAuthenticatedLimits(scope, inputs, limits.shard)
+                        val residentBudgetBytes = fullTreeFunctionObservationV2AvailableResidentBytes(
+                            wholeRun.controlLong("maximumResidentBytes"),
+                            retainedBudget.anchorIndexBytes,
+                            modeledRetainedBytes,
+                        )
+                        val effective = deriveAuthenticatedLimits(
+                            scope,
+                            inputs,
+                            limits.shard,
+                            residentBudgetBytes,
+                        )
                         val scratchBudget = fullTreeFunctionObservationV2ShardScratchBudget(
                             maximumScratchBytes = limits.maximumScratchBytes,
                             preparedOutputBytes = preparedBytes,
@@ -352,6 +388,7 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                                     reconciliation = reconciliation,
                                     output = output,
                                     checkpoint = shardCheckpoint,
+                                    residentBudgetBytes = residentBudgetBytes,
                                 )
                                 scanResult = pair.first
                                 result = pair.second

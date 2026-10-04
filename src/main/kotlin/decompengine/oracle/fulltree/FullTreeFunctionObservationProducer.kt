@@ -212,10 +212,11 @@ internal object FullTreeFunctionObservationProducer {
         checkpoint: (String) -> Unit = {},
         recordScannedDies: (Long) -> Unit,
         accept: (FullTreeObservedSubprogram) -> Unit,
+        residentBudgetBytes: Long? = null,
     ): FullTreeFunctionObservationArtifactScan {
         FullTreeScopeControl.validate(scope, controlLimits)
         requireStableDirectory(scratchParent, "function-observation scratch parent")
-        requireScannerResidentBudget(scope.document, producerLimits)
+        requireScannerResidentBudget(scope.document, producerLimits, residentBudgetBytes)
         val authenticatedShard = FullTreeFunctionObservations.shardInputs(
             inputs.inventory,
             inputs.inventoryArtifactSha256,
@@ -299,6 +300,7 @@ internal object FullTreeFunctionObservationProducer {
         reconciliation: FullTreeFunctionObservationV2IdentityReconciliation,
         output: java.io.OutputStream,
         checkpoint: (String) -> Unit = {},
+        residentBudgetBytes: Long? = null,
     ): Pair<FullTreeFunctionObservationArtifactScan, FullTreeFunctionObservationV2StreamResult> {
         val scan = scanAuthenticatedShardWithLimits(
             richArtifact = richArtifact,
@@ -310,6 +312,7 @@ internal object FullTreeFunctionObservationProducer {
             checkpoint = checkpoint,
             recordScannedDies = sink::recordScannedDies,
             accept = sink::accept,
+            residentBudgetBytes = residentBudgetBytes,
         )
         FullTreeSourceEntityFact.deterministicOrder(sourceFacts).forEach { fact ->
             checkpoint("before accepting observation-v2 source entity")
@@ -597,6 +600,7 @@ internal object FullTreeFunctionObservationProducer {
     private fun requireScannerResidentBudget(
         scope: JsonObject,
         producerLimits: FullTreeFunctionObservationProducerLimits,
+        residentBudgetBytes: Long? = null,
     ): Long {
         val cachedUnits = producerLimits.maximumCachedCompilationUnits.toLong()
         val modeledReferenceBytes = Math.addExact(
@@ -612,12 +616,12 @@ internal object FullTreeFunctionObservationProducer {
                 cachedUnits,
             ),
         )
-        if (
-            modeledReferenceBytes > scope.controlObject("bounds").controlObject("perShard")
-                .controlLong("maximumResidentBytes")
-        ) {
+        val authenticatedResidentBytes = scope.controlObject("bounds").controlObject("perShard")
+            .controlLong("maximumResidentBytes")
+        val effectiveResidentBytes = minOf(authenticatedResidentBytes, residentBudgetBytes ?: Long.MAX_VALUE)
+        if (modeledReferenceBytes > effectiveResidentBytes) {
             throw FullTreeControlException(
-                "function-observation DIE/reference cache model exceeds the authenticated resident-byte bound",
+                "function-observation DIE/reference cache model exceeds its remaining resident-byte allowance",
             )
         }
         return modeledReferenceBytes
