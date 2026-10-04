@@ -247,6 +247,9 @@ private class FunctionObservationSqliteSink private constructor(
         if (unitsById[fact.physicalDie.unitId] == null) {
             sqliteFail("source entity owner is outside its authenticated shard")
         }
+        FullTreeFunctionObservationsV2.validateSourceEntityEmittedRvaLink(fact) { linkedRva ->
+            linkedRva.removePrefix("0x").toULongOrNull(16)?.let(statements::containsEmittedRva) == true
+        }
         val v2OutputByteLimit = fullTreeFunctionObservationV2OutputByteLimit(limits.maximumOutputBytes)
         val maximumRowBytes = minOf(v2OutputByteLimit, MAXIMUM_SOURCE_IDENTITY_ROW_BYTES).coerceAtLeast(1L)
         val canonical = try {
@@ -904,6 +907,7 @@ private class FunctionObservationSqliteSink private constructor(
 private class FunctionObservationSqliteStatements(connection: Connection, supportsV2: Boolean) : AutoCloseable {
     val insertObservedDie = connection.prepareStatement("INSERT OR IGNORE INTO observed_die(die_offset) VALUES(?)")
     val insertEmittedRva = connection.prepareStatement("INSERT OR IGNORE INTO emitted_rva(rva) VALUES(?)")
+    private val selectEmittedRva = connection.prepareStatement("SELECT 1 FROM emitted_rva WHERE rva=?")
     val insertEmittedOwner = connection.prepareStatement(
         "INSERT OR IGNORE INTO emitted_owner(rva,unit_id) VALUES(?,?)",
     )
@@ -977,11 +981,17 @@ private class FunctionObservationSqliteStatements(connection: Connection, suppor
             "WHERE group_key=? AND owner_count<?",
     )
 
+    fun containsEmittedRva(rva: ULong): Boolean {
+        selectEmittedRva.setBytes(1, unsignedKey(rva))
+        return selectEmittedRva.executeQuery().use { rows -> rows.next() }
+    }
+
     override fun close() {
         var failure: Throwable? = null
         listOfNotNull(
             insertObservedDie,
             insertEmittedRva,
+            selectEmittedRva,
             insertEmittedOwner,
             insertEmittedDeclaration,
             insertEmittedAlias,

@@ -202,7 +202,7 @@ class FullTreeFunctionObservationsV2Test {
     }
 
     @Test
-    fun `in-memory and SQLite v2 sinks preserve full-run collision census without changing RVA denominators`() =
+    fun `in-memory and SQLite v2 sinks preserve collision census and declaration-range template denominator parity`() =
         inControlTemporaryDirectory { root ->
             val fixture = createFullTreeControlFixture(root.resolve("control"))
             val scope = fixture.authenticatedScope()
@@ -379,6 +379,48 @@ class FullTreeFunctionObservationsV2Test {
                 templateInt.copy(denominatorDisposition = FullTreeDenominatorDisposition.AMBIGUOUS)
             }
 
+            // Model a declaration template DIE that carries an executable range. The source
+            // extractor must retain the template census row but must not link it to a score row.
+            var resolvedDeclarationRange = false
+            val declarationRangeLink = sourceIdentityEmittedRvaLink(
+                declaration = true,
+                functionStart = { resolvedDeclarationRange = true; 0x410040UL },
+                imageBase = 0x410000UL,
+                executable = FullTreeElfExecutableMembership.fromSorted(
+                    listOf(FullTreeElfExecutableRange(0x40UL, 0x50UL)),
+                ),
+            )
+            assertEquals(FullTreeDenominatorDisposition.NON_SCOREABLE to null, declarationRangeLink)
+            assertEquals(false, resolvedDeclarationRange, "declaration ranges must not be considered emitted links")
+            val declaredTemplate = fact(
+                physical(firstUnit, "0x26"),
+                FullTreeSourceEntityKind.TEMPLATE_INSTANCE,
+                FullTreeIdentityObservability.UNOBSERVABLE,
+                declarationRangeLink.first,
+                anchorFields(
+                    sourceName = "declared_template<int>",
+                    line = 89L,
+                    signature = listOf("void (int)"),
+                    templateActuals = listOf("type:int"),
+                ),
+                reasons = listOf("declaration-only-no-definition", "unknown-template-pattern-reference"),
+                linkedEmittedRva = declarationRangeLink.second,
+            )
+            val linkedTemplate = fact(
+                physical(firstUnit, "0x28"),
+                FullTreeSourceEntityKind.TEMPLATE_INSTANCE,
+                FullTreeIdentityObservability.UNKNOWN,
+                FullTreeDenominatorDisposition.EMITTED_RVA_LINK,
+                anchorFields(
+                    sourceName = "emitted_template<int>",
+                    line = 90L,
+                    signature = listOf("void (int)"),
+                    templateActuals = listOf("type:int"),
+                ),
+                reasons = listOf("unknown-template-pattern-reference"),
+                linkedEmittedRva = "0x40",
+            )
+
             val ownerFields = anchorFields("inline_owner", line = 105L)
             val ownerCandidate = requireNotNull(ownerFields.candidateId(FullTreeSourceAnchorKind.SOURCE_DEFINITION))
             val calleeFields = anchorFields("inline_callee", line = 106L)
@@ -435,7 +477,17 @@ class FullTreeFunctionObservationsV2Test {
             )
 
             val shardFacts = mapOf(
-                firstShard.identifier to listOf(declarationA, declarationA2, noRange, unresolved, templateInt, templateLong, locallyMarkedInlineFact),
+                firstShard.identifier to listOf(
+                    declarationA,
+                    declarationA2,
+                    noRange,
+                    unresolved,
+                    templateInt,
+                    templateLong,
+                    declaredTemplate,
+                    linkedTemplate,
+                    locallyMarkedInlineFact,
+                ),
                 secondShard.identifier to listOf(declarationB),
             )
             val anchorIndex = FullTreeFunctionObservationV2AnchorIndex(
@@ -483,8 +535,8 @@ class FullTreeFunctionObservationsV2Test {
                 OracleArtifacts.sha256(OracleJson.canonicalBytes(canonicalClaims)),
                 reconciliation.populationSha256,
             )
-            assertEquals(11L, reconciliation.claimCount)
-            assertEquals(7L, reconciliation.candidateCount)
+            assertEquals(13L, reconciliation.claimCount)
+            assertEquals(9L, reconciliation.candidateCount)
             assertEquals(allAnchorClaims.map { it.first }.distinct().size.toLong(), reconciliation.candidateCount)
             assertEquals(3L, reconciliation.collisionCandidateCount)
             val reconciledByShard = shardFacts.mapValues { (_, rows) -> reconcileObservationV2Facts(rows, reconciliation) }
@@ -515,6 +567,37 @@ class FullTreeFunctionObservationsV2Test {
                         inlineWithoutEmittedRange = false,
                     )
                 }.reversed()
+                val sqliteLimits = FullTreeFunctionObservationSqliteLimits(
+                    maximumDatabaseBytes = 4L * 1024L * 1024L,
+                    maximumOutputBytes = 8L * 1024L * 1024L,
+                    observations = observationLimits,
+                    maximumCacheBytes = 64 * 1024,
+                    databaseCheckpointRows = 2,
+                    checkpoint = FullTreeFunctionObservationSqliteCheckpoint {},
+                )
+                if (shard.identifier == firstShard.identifier) {
+                    val forgedLink = linkedTemplate.copy(linkedEmittedRva = "0x41")
+                    val rejectingMemory = FullTreeFunctionObservationAccumulatorV2(
+                        shard,
+                        FullTreeFunctionObservationV2AccumulatorLimits(
+                            observations = observationLimits,
+                            maximumOutputBytes = 8L * 1024L * 1024L,
+                            maximumRetainedBytes = 8L * 1024L * 1024L,
+                        ),
+                    )
+                    rejectingMemory.recordScannedDies(3L)
+                    observations.forEach(rejectingMemory::accept)
+                    assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                        rejectingMemory.acceptSourceEntity(forgedLink)
+                    }
+                    FullTreeFunctionObservationSqlite.openV2(root, shard, sqliteLimits).use { rejectingSqlite ->
+                        rejectingSqlite.recordScannedDies(3L)
+                        observations.forEach(rejectingSqlite::accept)
+                        assertFailsWith<FullTreeFunctionObservationSqliteException> {
+                            rejectingSqlite.acceptSourceEntity(forgedLink)
+                        }
+                    }
+                }
                 val memory = FullTreeFunctionObservationAccumulatorV2(
                     shard,
                     FullTreeFunctionObservationV2AccumulatorLimits(
@@ -557,14 +640,6 @@ class FullTreeFunctionObservationsV2Test {
                 )
 
                 val sqliteOutput = ByteArrayOutputStream()
-                val sqliteLimits = FullTreeFunctionObservationSqliteLimits(
-                    maximumDatabaseBytes = 4L * 1024L * 1024L,
-                    maximumOutputBytes = 8L * 1024L * 1024L,
-                    observations = observationLimits,
-                    maximumCacheBytes = 64 * 1024,
-                    databaseCheckpointRows = 2,
-                    checkpoint = FullTreeFunctionObservationSqliteCheckpoint {},
-                )
                 val sqliteReceipt = FullTreeFunctionObservationSqlite.openV2(root, shard, sqliteLimits).use { sink ->
                     sink.recordScannedDies(3L)
                     observations.forEach(sink::accept)
@@ -674,7 +749,7 @@ class FullTreeFunctionObservationsV2Test {
 
             val allRows = outputs.values.flatMap { it.getValue("sourceEntities").jsonArray }
                 .map { FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject) }
-            assertEquals(8, allRows.size)
+            assertEquals(10, allRows.size)
             val admittedArrayBytes = Math.addExact(
                 Math.addExact(
                     4L,
@@ -687,12 +762,12 @@ class FullTreeFunctionObservationsV2Test {
             assertEquals(3, allRows.count { it.kind == FullTreeSourceEntityKind.DECLARATION_ONLY })
             assertEquals(1, allRows.count { it.kind == FullTreeSourceEntityKind.NO_RANGE_DEFINITION })
             assertEquals(0, allRows.count { it.kind == FullTreeSourceEntityKind.TEMPLATE_PATTERN })
-            assertEquals(2, allRows.count { it.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE })
+            assertEquals(4, allRows.count { it.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE })
             assertEquals(1, allRows.count { it.kind == FullTreeSourceEntityKind.INLINE_INSTANCE })
             assertEquals(1, allRows.count { it.kind == FullTreeSourceEntityKind.UNRESOLVED })
             assertEquals(4, allRows.count { it.identityObservability == FullTreeIdentityObservability.AMBIGUOUS })
-            assertEquals(4, allRows.count { it.identityObservability == FullTreeIdentityObservability.UNKNOWN })
-            assertEquals(0, allRows.count { it.identityObservability == FullTreeIdentityObservability.UNOBSERVABLE })
+            assertEquals(5, allRows.count { it.identityObservability == FullTreeIdentityObservability.UNKNOWN })
+            assertEquals(1, allRows.count { it.identityObservability == FullTreeIdentityObservability.UNOBSERVABLE })
             assertTrue(allRows.filter { it.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE }.all {
                 it.semanticAnchorFields?.templatePatternAnchorCandidateId == null &&
                     "unknown-template-pattern-reference" in it.reasonCodes && it.resolvedSemanticIdentityId == null
@@ -711,9 +786,10 @@ class FullTreeFunctionObservationsV2Test {
             assertTrue(allRows.filter { it.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE }.any { row ->
                 row.edges.any { it.state == FullTreeSourceIdentityEdgeState.RESOLVED && it.source.unitId != it.target?.unitId }
             })
-            assertEquals(7, allRows.count { it.denominatorDisposition == FullTreeDenominatorDisposition.NON_SCOREABLE })
+            assertEquals(8, allRows.count { it.denominatorDisposition == FullTreeDenominatorDisposition.NON_SCOREABLE })
             assertEquals(1, allRows.count { it.denominatorDisposition == FullTreeDenominatorDisposition.UNKNOWN })
-            assertEquals(11L, outputs.values.first().getValue("counts").jsonObject.getValue("anchorClaims").jsonPrimitive.long)
+            assertEquals(1, allRows.count { it.denominatorDisposition == FullTreeDenominatorDisposition.EMITTED_RVA_LINK })
+            assertEquals(13L, outputs.values.first().getValue("counts").jsonObject.getValue("anchorClaims").jsonPrimitive.long)
 
             val noRunCollisions = FullTreeFunctionObservationV2AnchorIndex(1L, 4096L).reconciliation()
             var sawNeutralizedCollision = false
@@ -746,12 +822,13 @@ class FullTreeFunctionObservationsV2Test {
             val forgedDirectCandidateFields = copyAnchorFields(
                 directCandidateFields,
                 authenticatedFileSha256 = directCandidateFields.authenticatedSourceFileSha256,
-                sourceName = "forged-template-instance",
+                sourceName = "forged-template-instance<int>",
             )
             val forgedDirectCandidate = directCandidateRow.copy(
                 semanticAnchorFields = forgedDirectCandidateFields,
                 semanticAnchorCandidateId = requireNotNull(
-                    forgedDirectCandidateFields.candidateId(FullTreeSourceAnchorKind.TEMPLATE_INSTANCE),
+                    forgedDirectCandidateFields.candidateId(FullTreeSourceAnchorKind.TEMPLATE_INSTANCE)
+                        ?: throw AssertionError("forged template mutation must keep its typed actual-argument suffix"),
                 ),
             )
             val forgedDirectCandidateFacts = valid.getValue("sourceEntities").jsonArray.map { row ->
@@ -1632,17 +1709,15 @@ class FullTreeFunctionObservationsV2Test {
             assertEquals(first.binding.runSha256, rederived.binding.runSha256)
             assertEquals(first.outputs, rederived.outputs)
 
-            val receipt = first.outputs.first { candidate ->
-                if (candidate.sourceEntities == 0L) return@first false
+            val receipt = first.outputs.firstOrNull { candidate ->
+                if (candidate.sourceEntities == 0L) return@firstOrNull false
                 val rows = OracleJson.parseCanonical(
                     Files.readAllBytes(firstRoot.resolve("outputs/${candidate.shardId}.json")),
                 ).jsonObject.getValue("sourceEntities").jsonArray.map {
                     FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
                 }
-                rows.any { it.semanticAnchorFields != null } && rows.any {
-                    it.semanticAnchorCandidateId != null && it.candidateCollisionSourceEntityIds.isEmpty()
-                }
-            }
+                rows.any { it.semanticAnchorFields != null && it.semanticAnchorCandidateId != null }
+            } ?: throw AssertionError("authenticated fixture must contain an anchored source row for mutation tests")
             val shard = firstInput.getValue(receipt.shardId)
             val document = OracleJson.parseCanonical(
                 Files.readAllBytes(firstRoot.resolve("outputs/${receipt.shardId}.json")),
@@ -1650,7 +1725,9 @@ class FullTreeFunctionObservationsV2Test {
             val originalRows = document.getValue("sourceEntities").jsonArray.map {
                 FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
             }
-            val source = originalRows.first { it.semanticAnchorFields != null }
+            val source = originalRows.firstOrNull {
+                it.semanticAnchorFields != null && it.semanticAnchorCandidateId != null
+            } ?: throw AssertionError("selected shard must contain an anchored candidate for mutation tests")
             val alternateKind = if (source.kind == FullTreeSourceEntityKind.NO_RANGE_DEFINITION) {
                 FullTreeSourceEntityKind.DECLARATION_ONLY
             } else {
@@ -1695,10 +1772,7 @@ class FullTreeFunctionObservationsV2Test {
             }
             assertTrue(duplicateFailure.message.orEmpty().contains("duplicate physical DIE locator"))
 
-            val digestSubject = originalRows.first {
-                it.semanticAnchorFields != null && it.semanticAnchorCandidateId != null &&
-                    it.candidateCollisionSourceEntityIds.isEmpty()
-            }
+            val digestSubject = source
             val digestFields = copyAnchorFields(
                 requireNotNull(digestSubject.semanticAnchorFields),
                 authenticatedFileSha256 = "d".repeat(64),
@@ -1725,9 +1799,7 @@ class FullTreeFunctionObservationsV2Test {
             }
             assertTrue(fileDigestFailure.message.orEmpty().contains("authenticated scan receipt"))
 
-            val offsetSource = originalRows.first {
-                it.semanticAnchorCandidateId != null && it.candidateCollisionSourceEntityIds.isEmpty()
-            }
+            val offsetSource = source
             val offsetSubject = offsetSource.copy(edges = emptyList())
             val movedDie = offsetSubject.physicalDie.copy(dieOffset = "0x7fffffffffffffff")
             val forgedOffsetFact = offsetSubject.copy(
@@ -1936,7 +2008,7 @@ class FullTreeFunctionObservationsV2Test {
                 linkedDocument, scope, inventory, inventorySha, shard, linkedReconciliation,
             )
             val structuralSubject = originalRows.firstOrNull { source ->
-                source.semanticAnchorCandidateId != null && source.candidateCollisionSourceEntityIds.isEmpty() &&
+                source.semanticAnchorCandidateId != null &&
                     originalRows.any { target ->
                         target.physicalDie.unitId == source.physicalDie.unitId &&
                             target.physicalDie.compilationUnitOffset == source.physicalDie.compilationUnitOffset &&
@@ -1944,7 +2016,7 @@ class FullTreeFunctionObservationsV2Test {
                             source.physicalDie.dieOffset.removePrefix("0x").toULong(16)
                     }
             }
-            assertTrue(structuralSubject != null, "fixture must contain two source DIEs in one CU")
+            assertTrue(structuralSubject != null, "fixture must contain an anchored source DIE with a later DIE in its CU")
             val structural = requireNotNull(structuralSubject)
             val unrelatedTarget = originalRows.first { target ->
                 target.physicalDie.unitId == structural.physicalDie.unitId &&
@@ -2055,7 +2127,7 @@ class FullTreeFunctionObservationsV2Test {
                 FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
             }
             val subject = originalFacts.firstOrNull {
-                it.semanticAnchorFields != null && it.candidateCollisionSourceEntityIds.isEmpty() &&
+                it.semanticAnchorFields != null && it.semanticAnchorCandidateId != null &&
                     (it.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE || originalFacts.none { other ->
                         other.physicalDie == it.physicalDie && other.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE
                     })
@@ -2448,6 +2520,7 @@ class FullTreeFunctionObservationsV2Test {
         fields: FullTreeSourceAnchorFields?,
         reasons: List<String> = emptyList(),
         edges: List<FullTreeSourceIdentityEdge> = emptyList(),
+        linkedEmittedRva: String? = null,
     ) = FullTreeSourceEntityFact(
         sourceEntityId = physical.sourceEntityId(kind),
         physicalDie = physical,
@@ -2458,7 +2531,7 @@ class FullTreeFunctionObservationsV2Test {
         semanticAnchorCandidateId = kind.anchorKind()?.let { fields?.candidateId(it) },
         resolvedSemanticIdentityId = null,
         candidateCollisionSourceEntityIds = emptyList(),
-        linkedEmittedRva = null,
+        linkedEmittedRva = linkedEmittedRva,
         reasonCodes = reasons.distinct().sorted(),
         edges = edges,
     )

@@ -29,6 +29,24 @@ internal fun requireSourceIdentityScannedDiesWithinBound(scannedDies: Long, maxi
     }
 }
 
+/**
+ * Derives the only source-census denominator link this producer may emit. Declarations stay
+ * non-scoreable even if malformed or unusual DWARF also gives them an executable range.
+ */
+internal fun sourceIdentityEmittedRvaLink(
+    declaration: Boolean,
+    functionStart: () -> ULong?,
+    imageBase: ULong,
+    executable: FullTreeElfExecutableMembership,
+): Pair<FullTreeDenominatorDisposition, String?> {
+    if (declaration) return FullTreeDenominatorDisposition.NON_SCOREABLE to null
+    val start = functionStart() ?: return FullTreeDenominatorDisposition.NON_SCOREABLE to null
+    if (start < imageBase) return FullTreeDenominatorDisposition.UNKNOWN to null
+    val rva = start - imageBase
+    if (!executable.contains(rva)) return FullTreeDenominatorDisposition.UNKNOWN to null
+    return FullTreeDenominatorDisposition.EMITTED_RVA_LINK to canonicalUnsignedHex(rva)
+}
+
 /** Additive extractor for source identities; it does not write or alter either frozen observation schema. */
 internal object FullTreeSourceEntityIdentityProducer {
     fun scanShard(
@@ -2248,12 +2266,12 @@ private class SourceEntityIdentityReader(
         unit: FunctionDwarfUnit,
         record: FullTreeDwarfDieRecord,
     ): Pair<FullTreeDenominatorDisposition, String?> {
-        val start = unit.functionStart(record)
-            ?: return FullTreeDenominatorDisposition.NON_SCOREABLE to null
-        if (start < layout.imageBase) return FullTreeDenominatorDisposition.UNKNOWN to null
-        val rva = start - layout.imageBase
-        if (!executable.contains(rva)) return FullTreeDenominatorDisposition.UNKNOWN to null
-        return FullTreeDenominatorDisposition.EMITTED_RVA_LINK to canonicalUnsignedHex(rva)
+        return sourceIdentityEmittedRvaLink(
+            declaration = record.truthy(DW_AT_DECLARATION, "DW_AT_declaration"),
+            functionStart = { unit.functionStart(record) },
+            imageBase = layout.imageBase,
+            executable = executable,
+        )
     }
 
     private fun declarationPath(unit: FunctionDwarfUnit, record: FullTreeDwarfDieRecord, attribute: Long, label: String): String? {

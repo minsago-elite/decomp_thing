@@ -37,6 +37,9 @@ internal class FullTreeFunctionObservationAccumulatorV2(
         if (shard.units.none { it.controlString("id") == fact.physicalDie.unitId }) {
             v2AccumulatorFail("source entity owner is outside its authenticated shard")
         }
+        FullTreeFunctionObservationsV2.validateSourceEntityEmittedRvaLink(fact) { linkedRva ->
+            linkedRva.removePrefix("0x").toULongOrNull(16)?.let(functions::containsEmittedRva) == true
+        }
         sourceEntitiesStarted = true
         if (fact.sourceEntityId in sourceIds) v2AccumulatorFail("duplicate sourceEntityId")
         if (fact.physicalDie in physicalDies) v2AccumulatorFail("duplicate physical DIE locator")

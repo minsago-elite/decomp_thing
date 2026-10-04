@@ -135,6 +135,21 @@ internal object FullTreeFunctionObservationsV2 {
         }
     }
 
+    /** Enforce that every claimed denominator link names an emitted row from this shard. */
+    internal fun validateSourceEntityEmittedRvaLink(
+        fact: FullTreeSourceEntityFact,
+        containsEmittedRva: (String) -> Boolean,
+    ) {
+        val linkedRva = fact.linkedEmittedRva
+        val isLinked = fact.denominatorDisposition == FullTreeDenominatorDisposition.EMITTED_RVA_LINK
+        if (isLinked != (linkedRva != null)) {
+            v2Fail("source entity emitted-RVA link and denominator disposition differ")
+        }
+        if (linkedRva != null && !containsEmittedRva(linkedRva)) {
+            v2Fail("source entity links to an absent emitted RVA")
+        }
+    }
+
     fun canonicalEnvelopeBytes(document: JsonObject, maximumBytes: Long = MAXIMUM_CANONICAL_BYTES): ByteArray = try {
         val boundedBytes = minOf(maximumBytes, MAXIMUM_CANONICAL_BYTES).toInt()
         OracleJson.canonicalBytes(
@@ -228,9 +243,7 @@ internal object FullTreeFunctionObservationsV2 {
         }
         val locatorIndex = V2ArtifactLocatorIndex.create(inventory, shard)
         facts.forEach { fact ->
-            fact.linkedEmittedRva?.let { rva ->
-                if (rva !in emittedRvas) v2Fail("source entity links to an absent emitted RVA")
-            }
+            validateSourceEntityEmittedRvaLink(fact, emittedRvas::contains)
             val sourceRevision = fact.semanticAnchorFields?.authenticatedSourceRevision
             val authenticatedRevision = scope.sourceLock.v2Object("revision").v2String("commit")
             if (fact.semanticAnchorFields != null && sourceRevision != authenticatedRevision) {
@@ -258,10 +271,11 @@ internal object FullTreeFunctionObservationsV2 {
             }
             if (fact.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE &&
                 fact.semanticAnchorFields?.templatePatternAnchorCandidateId == null &&
-                (fact.identityObservability !in setOf(
+                ((fact.identityObservability !in setOf(
                     FullTreeIdentityObservability.UNKNOWN,
                     FullTreeIdentityObservability.AMBIGUOUS,
-                ) || fact.reasonCodes.none {
+                ) && !(fact.identityObservability == FullTreeIdentityObservability.UNOBSERVABLE &&
+                    "declaration-only-no-definition" in fact.reasonCodes)) || fact.reasonCodes.none {
                     it == "unknown-template-pattern-reference" || it == "ambiguous-template-pattern-reference"
                 })
             ) {

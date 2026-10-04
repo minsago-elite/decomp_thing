@@ -417,7 +417,7 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                     anchorIndex.acceptSourceEntityPopulation(
                         shard.identifier,
                         scan.facts,
-                        deadline::checkpoint,
+                        shardCheckpoint,
                         minOf(perShard.controlLong("serializedBytes"), MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES),
                     )
                     sourceFactCanonicalBytes = Math.addExact(sourceFactCanonicalBytes, scan.canonicalBytes)

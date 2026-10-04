@@ -117,6 +117,9 @@ internal class FullTreeFunctionObservationAccumulator(
     /** Current unique emitted-RVA plus non-emitted population for the additive v2 wrapper. */
     internal fun projectedEntityCount(): Long = add(emitted.size.toLong(), nonEmitted.size.toLong(), "function-observation entity")
 
+    /** Used by the v2 sink before admitting a source row that claims an emitted denominator link. */
+    internal fun containsEmittedRva(rva: ULong): Boolean = rva in emitted
+
     /** Retained-byte charge for combining this frozen v1 projection with additive v2 source rows. */
     internal fun modeledRetainedBytes(): Long = modeledRetainedBytes
 
