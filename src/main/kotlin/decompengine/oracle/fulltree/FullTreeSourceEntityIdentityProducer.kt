@@ -75,39 +75,13 @@ internal object FullTreeSourceEntityIdentityProducer {
         val maximumModeledRetainedBytes = memoryBounds.maximumModeledRetainedBytes
         val maximumReferencedUnits = scope.document.controlObject("bounds").controlObject("wholeRun")
             .controlLong("compilationUnits")
-        val lineWorkingSetBudget = maximumResidentBytes / 4L
-        val lineBytesPerUnit = lineWorkingSetBudget / maximumReferencedUnits
-        val boundedLineLimits = boundedSourceIdentityLineTableLimits(
-            producerLimits.lineTableLimits,
-            lineBytesPerUnit,
-        )
-        val lineLimits = boundedLineLimits
-        val modeledLineBytesPerUnit = try {
-            Math.addExact(
-                Math.addExact(
-                    Math.multiplyExact(lineLimits.maximumAggregatePathBytes, 2L),
-                    Math.multiplyExact(
-                        Math.addExact(lineLimits.maximumDirectories.toLong(), lineLimits.maximumFiles.toLong()),
-                        128L,
-                    ),
-                ),
-                1_024L,
-            )
-        } catch (failure: ArithmeticException) {
-            throw FullTreeControlException("source-identity line-table working-set model overflows", failure)
-        }
-        val modeledLineBytes = Math.multiplyExact(
-            modeledLineBytesPerUnit,
-            maximumReferencedUnits,
-        )
-        if (modeledLineBytes > lineWorkingSetBudget) {
-            throw FullTreeControlException("source-identity line-table model exceeds its authenticated working-set share")
-        }
+        var admittedLineTableBudget: SourceIdentityLineTableBudget? = null
 
         // The parsed inventory tree coexists with source rows, output, and DWARF state. Reserve its
-        // serialized-input expansion before parsing it; later reserve the exact CU-index count
-        // before materializing unit/header lists and maps. The file-size cap is rechecked by the
-        // stable canonical-control reader, so a replaced larger file cannot evade this preflight.
+        // serialized-input expansion before parsing it; later use the admitted inventory's exact
+        // CU count to divide the remaining line-table share before any line tables are retained.
+        // The file-size cap is rechecked by the stable canonical-control reader, so a replaced
+        // larger file cannot evade this preflight.
         val inventoryBytes = try {
             Files.size(inventoryPath)
         } catch (failure: Exception) {
@@ -129,7 +103,7 @@ internal object FullTreeSourceEntityIdentityProducer {
         )
         sourceIdentityAvailableRepositoryWorkingSetBytes(
             authenticatedMaximumResidentBytes = maximumResidentBytes,
-            modeledLineTableBytes = modeledLineBytes,
+            modeledLineTableBytes = 0L,
             modeledRetainedFactBytes = maximumModeledRetainedBytes,
             maximumSerializedOutputBytes = maximumSerializedBytes,
             maximumRowScratchBytes = maximumRowScratchBytes,
@@ -146,9 +120,13 @@ internal object FullTreeSourceEntityIdentityProducer {
             checkpoint,
             beforeInventoryValidation = { inventory ->
                 val unitCount = inventory.controlArray("units").size
-                if (unitCount <= 0 || unitCount.toLong() > maximumReferencedUnits) {
-                    throw FullTreeControlException("source-identity inventory compilation-unit count exceeds its authenticated bound")
-                }
+                val lineTableBudget = sourceIdentityLineTableBudget(
+                    configured = producerLimits.lineTableLimits,
+                    maximumResidentBytes = maximumResidentBytes,
+                    admittedCompilationUnitCount = unitCount.toLong(),
+                    maximumAuthenticatedCompilationUnitCount = maximumReferencedUnits,
+                )
+                admittedLineTableBudget = lineTableBudget
                 val fixedStructureBytes = sourceIdentityFixedStructureResidentBytes(
                     authenticatedInventoryBytes = inventoryBytes,
                     modeledInventoryJsonNodes = maximumInventoryJsonNodes,
@@ -158,7 +136,7 @@ internal object FullTreeSourceEntityIdentityProducer {
                 )
                 val availableForUnitMetadata = sourceIdentityAvailableRepositoryWorkingSetBytes(
                     authenticatedMaximumResidentBytes = maximumResidentBytes,
-                    modeledLineTableBytes = modeledLineBytes,
+                    modeledLineTableBytes = lineTableBudget.modeledRetainedBytes,
                     modeledRetainedFactBytes = maximumModeledRetainedBytes,
                     maximumSerializedOutputBytes = maximumSerializedBytes,
                     maximumRowScratchBytes = maximumRowScratchBytes,
@@ -184,7 +162,7 @@ internal object FullTreeSourceEntityIdentityProducer {
                 )
                 val maximumRepositoryBytes = sourceIdentityAvailableRepositoryWorkingSetBytes(
                     authenticatedMaximumResidentBytes = maximumResidentBytes,
-                    modeledLineTableBytes = modeledLineBytes,
+                    modeledLineTableBytes = lineTableBudget.modeledRetainedBytes,
                     modeledRetainedFactBytes = maximumModeledRetainedBytes,
                     maximumSerializedOutputBytes = maximumSerializedBytes,
                     maximumRowScratchBytes = maximumRowScratchBytes,
@@ -204,6 +182,10 @@ internal object FullTreeSourceEntityIdentityProducer {
         )
         val inventoryUnitArray = inputs.inventory.controlArray("units")
         val admitted = admission ?: throw FullTreeControlException("source-identity inventory was not admitted")
+        val lineTableBudget = admittedLineTableBudget
+            ?: throw FullTreeControlException("source-identity line-table budget was not admitted")
+        val lineLimits = lineTableBudget.limits
+        val modeledLineBytes = lineTableBudget.modeledRetainedBytes
         if (inventoryUnitArray.size != admitted.compilationUnitCount) {
             throw FullTreeControlException("source-identity inventory unit count changed after admission")
         }
@@ -278,7 +260,7 @@ internal object FullTreeSourceEntityIdentityProducer {
                     throw FullTreeControlException("source-identity retained-unit budget is empty")
                 }
                 val boundedProducerLimits = producerLimits.copy(
-                    lineTableLimits = boundedLineLimits,
+                    lineTableLimits = lineLimits,
                     dieLimits = producerLimits.dieLimits.copy(maximumRetainedBytes = maximumRetainedBytes),
                 )
                 val repository = FunctionDwarfUnitRepository(
@@ -689,6 +671,55 @@ internal fun boundedSourceIdentityLineTableLimits(
         maximumFiles = maximumFiles,
         maximumAggregatePathBytes = maximumAggregatePathBytes,
     )
+}
+
+internal data class SourceIdentityLineTableBudget(
+    val limits: FullTreeDwarfLineTableLimits,
+    val perUnitRetainedBytes: Long,
+    val modeledRetainedBytes: Long,
+)
+
+/** Divides the reserved resident share by the actual, authenticated CU population. */
+internal fun sourceIdentityLineTableBudget(
+    configured: FullTreeDwarfLineTableLimits,
+    maximumResidentBytes: Long,
+    admittedCompilationUnitCount: Long,
+    maximumAuthenticatedCompilationUnitCount: Long,
+): SourceIdentityLineTableBudget {
+    if (maximumResidentBytes <= 0L || admittedCompilationUnitCount <= 0L ||
+        maximumAuthenticatedCompilationUnitCount <= 0L
+    ) {
+        throw FullTreeControlException("source-identity line-table budget has no resident space or admitted CUs")
+    }
+    if (admittedCompilationUnitCount > maximumAuthenticatedCompilationUnitCount) {
+        throw FullTreeControlException("source-identity inventory compilation-unit count exceeds its authenticated bound")
+    }
+    val lineWorkingSetBudget = maximumResidentBytes / 4L
+    val perUnitRetainedBytes = lineWorkingSetBudget / admittedCompilationUnitCount
+    val limits = boundedSourceIdentityLineTableLimits(configured, perUnitRetainedBytes)
+    val modeledPerUnitBytes = try {
+        Math.addExact(
+            Math.addExact(
+                Math.multiplyExact(limits.maximumAggregatePathBytes, 2L),
+                Math.multiplyExact(
+                    Math.addExact(limits.maximumDirectories.toLong(), limits.maximumFiles.toLong()),
+                    128L,
+                ),
+            ),
+            1_024L,
+        )
+    } catch (failure: ArithmeticException) {
+        throw FullTreeControlException("source-identity line-table working-set model overflows", failure)
+    }
+    val modeledRetainedBytes = try {
+        Math.multiplyExact(modeledPerUnitBytes, admittedCompilationUnitCount)
+    } catch (failure: ArithmeticException) {
+        throw FullTreeControlException("source-identity line-table working-set model overflows", failure)
+    }
+    if (modeledRetainedBytes > lineWorkingSetBudget) {
+        throw FullTreeControlException("source-identity line-table model exceeds its authenticated working-set share")
+    }
+    return SourceIdentityLineTableBudget(limits, perUnitRetainedBytes, modeledRetainedBytes)
 }
 
 /** Includes anchors used only as inline callees/owners, not just census rows. */

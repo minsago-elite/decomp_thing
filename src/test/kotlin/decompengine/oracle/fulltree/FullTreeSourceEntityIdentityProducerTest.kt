@@ -204,6 +204,44 @@ class FullTreeSourceEntityIdentityProducerTest {
     }
 
     @Test
+    fun `line table resident share uses admitted inventory count under a loose CU ceiling`() {
+        val maximumResidentBytes = 1L shl 30
+        val admittedCompilationUnits = 8L
+        val looseWholeRunCeiling = 120_000L
+        val configured = FullTreeDwarfLineTableLimits(
+            maximumDirectories = 512,
+            maximumFiles = 512,
+            maximumAggregatePathBytes = 4L * 1024L * 1024L,
+        )
+        val budget = sourceIdentityLineTableBudget(
+            configured = configured,
+            maximumResidentBytes = maximumResidentBytes,
+            admittedCompilationUnitCount = admittedCompilationUnits,
+            maximumAuthenticatedCompilationUnitCount = looseWholeRunCeiling,
+        )
+        assertEquals(maximumResidentBytes / 4L / admittedCompilationUnits, budget.perUnitRetainedBytes)
+        assertTrue(budget.modeledRetainedBytes <= maximumResidentBytes / 4L)
+        assertEquals(configured.maximumDirectories, budget.limits.maximumDirectories)
+        assertEquals(configured.maximumFiles, budget.limits.maximumFiles)
+        assertFailsWith<FullTreeControlException> {
+            sourceIdentityLineTableBudget(
+                configured,
+                maximumResidentBytes,
+                0L,
+                looseWholeRunCeiling,
+            )
+        }
+        assertFailsWith<FullTreeControlException> {
+            sourceIdentityLineTableBudget(
+                configured,
+                maximumResidentBytes,
+                admittedCompilationUnits,
+                admittedCompilationUnits - 1L,
+            )
+        }
+    }
+
+    @Test
     fun `available GCC and Clang DWARF5 fixture rows yield deterministic bounded facts`() {
         val root = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize()
         val fixture = root.resolve("src/test/resources/oracle/inline-template-identity-v1")
@@ -554,7 +592,9 @@ class FullTreeSourceEntityIdentityProducerTest {
             writer.append("struct Big {};\n")
             repeat(namespaces.size) { writer.append("}\n") }
             writer.append("using namespace ").append(namespaces.joinToString("::")).append(";\n")
-            val parameters = (0..31).joinToString(", ") { "Big p$it" }
+            // Keep the typed formals under the 32-edge limit so the enormous namespace descriptor
+            // reaches the row-scratch admission being tested instead of failing on edge count.
+            val parameters = (0..15).joinToString(", ") { "Big p$it" }
             writer.append("extern \"C\" void descriptor_bound($parameters) {}\n")
             writer.append("extern \"C\" void (*descriptor_bound_reference)($parameters) = &descriptor_bound;\n")
             writer.append("int main() { return descriptor_bound_reference == nullptr; }\n")
