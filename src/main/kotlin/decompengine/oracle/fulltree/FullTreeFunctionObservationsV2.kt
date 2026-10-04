@@ -748,13 +748,13 @@ internal class FullTreeFunctionObservationV2AnchorIndex(
                 v2Fail("inline $label candidate is not backed by a typed claim on a referenced DIE")
             }
             matching.forEach { claim ->
-                if (inlineRelatedClaims.add(claim)) {
+                if (claim !in inlineRelatedClaims) {
                     val nextBytes = Math.addExact(retainedBytes, INLINE_RELATED_CLAIM_INDEX_BYTES)
                     if (nextBytes > maximumRetainedBytes) {
-                        inlineRelatedClaims.remove(claim)
                         v2Fail("inline anchor claim subset exceeds its authenticated working-set bound")
                     }
                     retainedBytes = nextBytes
+                    inlineRelatedClaims.add(claim)
                 }
             }
         }

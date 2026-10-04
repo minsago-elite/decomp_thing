@@ -294,7 +294,12 @@ internal class StableControlFile private constructor(
     }
 
     @Synchronized
-    fun readExactly(offset: Long, length: Int, label: String): ByteArray {
+    fun readExactly(
+        offset: Long,
+        length: Int,
+        label: String,
+        checkpoint: (String) -> Unit = {},
+    ): ByteArray {
         if (offset < 0L || length < 0 || offset > size - length.toLong()) {
             throw FullTreeControlException("$label range exceeds its authenticated input")
         }
@@ -306,7 +311,9 @@ internal class StableControlFile private constructor(
             if (read <= 0) throw FullTreeControlException("$label ended during a bounded read")
             position = Math.addExact(position, read.toLong())
             destinationOffset += read
+            checkpoint("while reading $label")
         }
+        checkpoint("after reading $label")
         return result
     }
 

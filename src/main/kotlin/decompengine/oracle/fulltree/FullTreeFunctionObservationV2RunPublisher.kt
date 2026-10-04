@@ -267,11 +267,30 @@ internal object FullTreeFunctionObservationV2RunPublisher {
         val perShard = scope.document.controlObject("bounds").controlObject("perShard")
         val deadline = V2RunDeadline.start(scope, limits)
 
-        StableControlFile.open(inventoryPath, limits.shard.control.maximumInventoryBytes.toLong(), "full-tree inventory").use { inventoryGuard ->
-            StableControlFile.open(richArtifact, limits.shard.control.maximumRichArtifactBytes, "rich artifact").use { richGuard ->
-                val inventoryBytes = inventoryGuard.readExactly(0L, inventoryGuard.size.toInt(), "full-tree inventory")
+        StableControlFile.openWithCheckpoint(
+            inventoryPath,
+            limits.shard.control.maximumInventoryBytes.toLong(),
+            "full-tree inventory",
+            deadline::checkpoint,
+        ).use { inventoryGuard ->
+            StableControlFile.openWithCheckpoint(
+                richArtifact,
+                limits.shard.control.maximumRichArtifactBytes,
+                "rich artifact",
+                deadline::checkpoint,
+            ).use { richGuard ->
+                val inventoryBytes = inventoryGuard.readExactly(
+                    0L,
+                    inventoryGuard.size.toInt(),
+                    "full-tree inventory",
+                    deadline::checkpoint,
+                )
                 val inventory = try {
-                    OracleJson.parseCanonical(inventoryBytes, controlJsonLimits(limits.shard.control.maximumInventoryBytes)) as? JsonObject
+                    OracleJson.parseCanonical(
+                        inventoryBytes,
+                        controlJsonLimits(limits.shard.control.maximumInventoryBytes),
+                        deadline::checkpoint,
+                    ) as? JsonObject
                         ?: v2RunFail("full-tree inventory root is not an object")
                 } catch (failure: FullTreeFunctionObservationV2RunException) {
                     throw failure
