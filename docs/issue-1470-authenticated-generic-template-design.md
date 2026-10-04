@@ -382,7 +382,7 @@ These are drafts for independent review, not created issues. Assign IDs and nati
 
 **Outcome:** Add a separately named observation-v3 path with in-memory/SQLite byte parity, full-run collision reconciliation, and a distinct non-scoreable `genericTemplates` collection.
 
-**Dependencies:** B and merged #1467. If #1467 is still open, this is sequenced after its v2 contract is accepted and must not edit its owned files.
+**Dependencies:** B and merged #1467. The unit remains sequenced after #1467's merged v2 contract and must not edit any #1467-owned files.
 
 **Ownership:** C exclusively owns the new v3 schema/policy/config digest, producer/validator, in-memory and SQLite sinks, publisher/receipt/validator, bounded raw-input ordinary emitted-anchor claim adapter, tests under `src/test/kotlin/decompengine/oracle/fulltree/observationsv3/`, and fixtures under `src/test/resources/oracle/full-tree-function-observations-v3/`. Exact implementation/schema paths include `src/main/kotlin/decompengine/oracle/fulltree/FullTreeFunctionObservationsV3.kt` and `oracle/full-tree-function-observations-v3.schema.json`. C receives the third serial edit to `src/main/kotlin/decompengine/oracle/core/OracleSchemas.kt` and `oracle/kotlin-schema-inventory-v1.json` only after B and #1467 merge, adding only observation-v3 entries. The v3 path consumes authenticated v2 observation facts plus raw-rederivable frontend-evidence-v1 facts; it may read #1467-owned contracts but must not edit #1467-owned files. V2 entrypoints remain frozen.
 
