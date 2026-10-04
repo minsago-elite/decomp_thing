@@ -416,7 +416,6 @@ internal class FullTreeSourceEntityFact(
         require(reasonCodes == reasonCodes.distinct().sorted())
         reasonCodes.forEach { require(it.matches(REASON_CODE)) }
         require(edges.size <= MAXIMUM_IDENTITY_EDGES_PER_ENTITY)
-        require(edges.all { it.source == physicalDie })
         require(sourceEntityId.matches(Regex("[0-9a-f]{64}")))
         require(sourceEntityId == physicalDie.sourceEntityId(kind))
         require(resolvedSemanticIdentityId == null || resolvedSemanticIdentityId.matches(Regex("[0-9a-f]{64}")))

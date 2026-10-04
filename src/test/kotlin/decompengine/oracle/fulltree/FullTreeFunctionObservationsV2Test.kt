@@ -439,8 +439,15 @@ class FullTreeFunctionObservationsV2Test {
                 row.jsonObject.getValue("entityKind").jsonPrimitive.content == "inline-instance"
             }
             val inlineRow = valid.getValue("sourceEntities").jsonArray[inlineIndex].jsonObject
+            val detachedSource = FullTreeSourcePhysicalDie(
+                richArtifactSha256 = richSha,
+                unitId = "cu-${"f".repeat(32)}",
+                section = ".debug_info",
+                compilationUnitOffset = "0x0",
+                dieOffset = "0x200",
+            )
             val detachedEdge = JsonObject(inlineRow.getValue("edges").jsonArray.single().jsonObject.toMutableMap().apply {
-                this["source"] = JsonPrimitive(ownerA.locator())
+                this["source"] = JsonPrimitive(detachedSource.locator())
             })
             val detached = replaceSourceRow(valid, inlineIndex, JsonObject(inlineRow.toMutableMap().apply {
                 this["edges"] = JsonArray(listOf(detachedEdge))
@@ -620,11 +627,20 @@ class FullTreeFunctionObservationsV2Test {
                 reasonCode = null,
             )
             assertFailsWith<IllegalArgumentException> { row.copy(edges = List(33) { edge }) }
-            val changedEdge = JsonObject(edge.canonicalJson().toMutableMap().apply {
+            val relatedSourceEdge = JsonObject(edge.canonicalJson().toMutableMap().apply {
                 this["source"] = JsonPrimitive(other.locator())
             })
+            assertEquals(
+                other,
+                FullTreeSourceEntityFact.fromCanonicalJson(
+                    mutatedRow("edges" to JsonArray(listOf(relatedSourceEdge))),
+                ).edges.single().source,
+            )
+            val malformedEdge = JsonObject(edge.canonicalJson().toMutableMap().apply {
+                this["source"] = JsonPrimitive("detached")
+            })
             assertFailsWith<IllegalArgumentException> {
-                FullTreeSourceEntityFact.fromCanonicalJson(mutatedRow("edges" to JsonArray(listOf(changedEdge))))
+                FullTreeSourceEntityFact.fromCanonicalJson(mutatedRow("edges" to JsonArray(listOf(malformedEdge))))
             }
         } finally {
             val paths = Files.walk(fixture.root).use { it.toList() }

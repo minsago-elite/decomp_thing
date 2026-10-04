@@ -263,8 +263,10 @@ internal object FullTreeFunctionObservationsV2 {
         }
         validate(fact.physicalDie, true)
         fact.edges.forEach { edge ->
-            if (edge.source != fact.physicalDie) v2Fail("source edge owner differs from its source entity")
-            validate(edge.source, true)
+            // The bounded #1466 reference graph can retain edges whose source is a traversed
+            // related DIE, including a unit outside this row's shard. Authenticate every locator
+            // against the complete inventory; only the census row itself is shard-local.
+            validate(edge.source, false)
             edge.target?.let { validate(it, false) }
             if (edge.referenceForm != null || edge.rawReference != null) {
                 val target = edge.target ?: v2Fail("resolved typed reference has no target locator")
