@@ -48,6 +48,11 @@ __attribute__((noinline)) inline T value_template(T value) {
     return value + static_cast<T>(Offset);
 }
 
+template <bool Enabled, typename T>
+__attribute__((noinline)) inline T boolean_template(T value) {
+    return Enabled ? value + static_cast<T>(1) : value - static_cast<T>(1);
+}
+
 template <typename... Values>
 __attribute__((noinline)) inline int packed_template(Values... values) {
     return (0 + ... + static_cast<int>(values));

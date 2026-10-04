@@ -480,6 +480,19 @@ class FullTreeSourceEntityIdentityProducerTest {
                 valueTemplateArguments.flatten().any { it.endsWith(":value=-1") },
                 "signed non-type template value was not sign-extended to its declared type width; $runDescription",
             )
+            val booleanTemplateInstances = templateInstances.filter {
+                it.semanticAnchorFields?.sourceName?.startsWith("boolean_template<") == true
+            }
+            assertTrue(booleanTemplateInstances.isNotEmpty(), "bool template instantiations were not retained; $runDescription")
+            val booleanArguments = booleanTemplateInstances.mapNotNull {
+                it.semanticAnchorFields?.templateActualArguments
+            }.flatten().filter { it.startsWith("value-argument:") }
+            assertTrue(booleanArguments.any { it.endsWith(":value=0") }, "false template argument was not decoded; $runDescription")
+            assertTrue(booleanArguments.any { it.endsWith(":value=1") }, "true template argument was not decoded; $runDescription")
+            assertTrue(
+                booleanTemplateInstances.mapNotNull { it.semanticAnchorCandidateId }.distinct().size >= 2,
+                "boolean false/true template instance candidates collided; $runDescription",
+            )
         }
 
         assertTrue(facts.filter { it.kind == FullTreeSourceEntityKind.INLINE_INSTANCE }.all {

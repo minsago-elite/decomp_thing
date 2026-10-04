@@ -150,6 +150,299 @@ class FullTreeSourceEntityIdentityTest {
     }
 
     @Test
+    fun `inline candidates require call columns to distinguish same-line call sites`() {
+        val callee = fields(sourceName = "inline_callee").candidateId(FullTreeSourceEntityKind.NO_RANGE_DEFINITION)
+        val owner = fields(sourceName = "inline_owner").candidateId(FullTreeSourceEntityKind.NO_RANGE_DEFINITION)
+        val withoutColumn = fields(
+            inlineCalleeAnchorCandidateId = callee,
+            inlineOwnerAnchorCandidateId = owner,
+            inlineCallFile = "source/clang/lib/inline-template/caller.cpp",
+            inlineCallLine = 42,
+            inlineCallColumn = null,
+            inlinePathAnchorCandidateIds = listOf(checkNotNull(callee)),
+        )
+        val withColumn = fields(
+            inlineCalleeAnchorCandidateId = callee,
+            inlineOwnerAnchorCandidateId = owner,
+            inlineCallFile = "source/clang/lib/inline-template/caller.cpp",
+            inlineCallLine = 42,
+            inlineCallColumn = 19,
+            inlinePathAnchorCandidateIds = listOf(checkNotNull(callee)),
+        )
+        assertNotEquals(withoutColumn.canonicalJson(), withColumn.canonicalJson())
+        assertNull(withoutColumn.candidateId(FullTreeSourceEntityKind.INLINE_INSTANCE))
+        assertNotNull(withColumn.candidateId(FullTreeSourceEntityKind.INLINE_INSTANCE))
+    }
+
+    @Test
+    fun `conflicting lower ranked source branch makes the merged anchor ambiguous`() {
+        val sourceName = mergeValidatedSourceAnchorBranches(
+            listOf(
+                SourceAnchorBranchValue(score = 7, value = "plain"),
+                SourceAnchorBranchValue(score = 2, value = "other"),
+            ),
+        )
+        assertTrue(sourceName.ambiguous)
+        assertNull(sourceName.value)
+
+        val parameterSet = mergeValidatedSourceAnchorBranches(
+            listOf(
+                SourceAnchorBranchValue(score = 7, value = listOf("return:base:int", "parameter:base:long")),
+                SourceAnchorBranchValue(score = 2, value = listOf("return:base:int", "parameter:base:short")),
+            ),
+        )
+        assertTrue(parameterSet.ambiguous)
+        assertNull(parameterSet.value)
+
+        val sourcePath = mergeValidatedSourceAnchorBranches(
+            listOf(
+                SourceAnchorBranchValue(score = 7, value = "source/fixture.cpp"),
+                SourceAnchorBranchValue(score = 2, value = "source/fixture.cpp"),
+            ),
+        )
+        val sourceLine = mergeValidatedSourceAnchorBranches(
+            listOf(
+                SourceAnchorBranchValue(score = 7, value = 11L),
+                SourceAnchorBranchValue(score = 2, value = 11L),
+            ),
+        )
+        val anchor = fields(
+            sourcePath = sourcePath.value,
+            declarationLine = sourceLine.value,
+            sourceName = sourceName.value,
+        )
+        assertNull(anchor.candidateId(FullTreeSourceEntityKind.NO_RANGE_DEFINITION))
+    }
+
+    @Test
+    fun `consistent partial source branches merge into a complete anchor`() {
+        val path = mergeValidatedSourceAnchorBranches(
+            listOf(
+                SourceAnchorBranchValue(score = 8, value = "source/fixture.cpp"),
+                SourceAnchorBranchValue<String>(score = 3, value = null),
+            ),
+        )
+        val line = mergeValidatedSourceAnchorBranches(
+            listOf(
+                SourceAnchorBranchValue<Long>(score = 8, value = null),
+                SourceAnchorBranchValue(score = 3, value = 27L),
+            ),
+        )
+        val name = mergeValidatedSourceAnchorBranches(
+            listOf(
+                SourceAnchorBranchValue<String>(score = 8, value = null),
+                SourceAnchorBranchValue(score = 3, value = "split_source"),
+            ),
+        )
+        val signature = mergeValidatedSourceAnchorBranches(
+            listOf(
+                SourceAnchorBranchValue(score = 8, value = listOf("return:base:int", "parameter:base:long")),
+                SourceAnchorBranchValue<List<String>>(score = 3, value = null),
+            ),
+        )
+        assertEquals(false, path.ambiguous || line.ambiguous || name.ambiguous || signature.ambiguous)
+        val anchor = fields(
+            sourcePath = path.value,
+            declarationLine = line.value,
+            sourceName = name.value,
+            signature = signature.value,
+        )
+        assertNotNull(anchor.candidateId(FullTreeSourceEntityKind.NO_RANGE_DEFINITION))
+    }
+
+    @Test
+    fun `anchor preimage accepts data above legacy json string defaults within row bound`() {
+        val wide = fields(signature = listOf("parameter:" + "x".repeat(3 * 1024 * 1024)))
+        assertNotNull(wide.candidateId(FullTreeSourceEntityKind.NO_RANGE_DEFINITION))
+    }
+
+    @Test
+    fun `source memory policy separates row retained and serialized ceilings`() {
+        val generous = sourceIdentityMemoryBounds(
+            authenticatedMaximumResidentBytes = 512L * 1024L * 1024L,
+            authenticatedMaximumSerializedBytes = 256L * 1024L * 1024L,
+        )
+        assertEquals(64L * 1024L * 1024L, generous.maximumCanonicalRowBytes)
+        assertEquals(128L * 1024L * 1024L, generous.maximumRowScratchBytes)
+        assertEquals(64L * 1024L * 1024L, generous.maximumModeledRetainedBytes)
+
+        val residentConstrained = sourceIdentityMemoryBounds(
+            authenticatedMaximumResidentBytes = 32L * 1024L * 1024L,
+            authenticatedMaximumSerializedBytes = 256L * 1024L * 1024L,
+        )
+        assertEquals(64L * 1024L * 1024L, residentConstrained.maximumCanonicalRowBytes)
+        assertEquals(128L * 1024L * 1024L, residentConstrained.maximumRowScratchBytes)
+        assertEquals(8L * 1024L * 1024L, residentConstrained.maximumModeledRetainedBytes)
+
+        val outputConstrained = sourceIdentityMemoryBounds(
+            authenticatedMaximumResidentBytes = 512L * 1024L * 1024L,
+            authenticatedMaximumSerializedBytes = 32L * 1024L * 1024L,
+        )
+        assertEquals(32L * 1024L * 1024L, outputConstrained.maximumCanonicalRowBytes)
+        assertEquals(64L * 1024L * 1024L, outputConstrained.maximumRowScratchBytes)
+        assertEquals(64L * 1024L * 1024L, outputConstrained.maximumModeledRetainedBytes)
+        val compactOutput = sourceIdentityMemoryBounds(
+            authenticatedMaximumResidentBytes = 4L * 1024L * 1024L * 1024L,
+            authenticatedMaximumSerializedBytes = 1024L * 1024L,
+        )
+        assertEquals(3L * 1024L * 1024L, compactOutput.maximumModeledRetainedBytes)
+
+        val available = sourceIdentityAvailableRepositoryWorkingSetBytes(
+            authenticatedMaximumResidentBytes = 4L * 1024L * 1024L * 1024L,
+            modeledLineTableBytes = 1L * 1024L * 1024L * 1024L,
+            modeledRetainedFactBytes = generous.maximumModeledRetainedBytes,
+            maximumSerializedOutputBytes = 256L * 1024L * 1024L,
+            maximumRowScratchBytes = generous.maximumRowScratchBytes,
+        )
+        assertEquals(2_624L * 1024L * 1024L, available)
+        assertFailsWith<FullTreeControlException> {
+            sourceIdentityAvailableRepositoryWorkingSetBytes(
+                authenticatedMaximumResidentBytes = 512L * 1024L * 1024L,
+                modeledLineTableBytes = 128L * 1024L * 1024L,
+                modeledRetainedFactBytes = 64L * 1024L * 1024L,
+                maximumSerializedOutputBytes = 256L * 1024L * 1024L,
+                maximumRowScratchBytes = 128L * 1024L * 1024L,
+            )
+        }
+    }
+
+    @Test
+    fun `retained model charges include configured content expansion and allocation overhead`() {
+        assertEquals(64L, sourceIdentityModeledRetainedChargeBytes(0L))
+        assertEquals(
+            3L * 1024L + 64L,
+            sourceIdentityModeledRetainedChargeBytes(1024L),
+        )
+        assertFailsWith<FullTreeControlException> {
+            sourceIdentityModeledRetainedChargeBytes(Long.MAX_VALUE)
+        }
+    }
+
+    @Test
+    fun `fixed unsigned dwarf forms do not guess sign extension across widths`() {
+        assertEquals(
+            "127",
+            sourceIdentityIntegralValueDescriptor(
+                FullTreeDwarfUnsignedConstantValue(FULL_TREE_DW_FORM_DATA1, 0x7fUL, 0),
+                signed = true,
+                bits = 32,
+            ),
+        )
+        assertNull(
+            sourceIdentityIntegralValueDescriptor(
+                FullTreeDwarfUnsignedConstantValue(FULL_TREE_DW_FORM_DATA1, 0xffUL, 0),
+                signed = true,
+                bits = 32,
+            ),
+        )
+        assertNull(
+            sourceIdentityIntegralValueDescriptor(
+                FullTreeDwarfUnsignedConstantValue(FULL_TREE_DW_FORM_DATA2, 0xffffUL, 0),
+                signed = true,
+                bits = 64,
+            ),
+        )
+        assertNull(
+            sourceIdentityIntegralValueDescriptor(
+                FullTreeDwarfUnsignedConstantValue(FULL_TREE_DW_FORM_DATA4, 0x80000000UL, 0),
+                signed = true,
+                bits = 64,
+            ),
+        )
+        assertEquals(
+            "-2147483648",
+            sourceIdentityIntegralValueDescriptor(
+                FullTreeDwarfUnsignedConstantValue(FULL_TREE_DW_FORM_DATA4, 0x80000000UL, 0),
+                signed = true,
+                bits = 32,
+            ),
+        )
+        assertEquals(
+            "-1",
+            sourceIdentityIntegralValueDescriptor(
+                FullTreeDwarfUnsignedConstantValue(FULL_TREE_DW_FORM_DATA1, 0xffUL, 0),
+                signed = true,
+                bits = 8,
+            ),
+        )
+    }
+
+    @Test
+    fun `explicit signed and unsigned dwarf constant controls retain their declared values`() {
+        assertEquals(
+            "-1",
+            sourceIdentityIntegralValueDescriptor(
+                FullTreeDwarfSignedConstantValue(FULL_TREE_DW_FORM_SDATA, -1, 0),
+                signed = true,
+                bits = 32,
+            ),
+        )
+        assertEquals(
+            "-2",
+            sourceIdentityIntegralValueDescriptor(
+                FullTreeDwarfSignedConstantValue(FULL_TREE_DW_FORM_IMPLICIT_CONST, -2, 0),
+                signed = true,
+                bits = 32,
+            ),
+        )
+        assertEquals(
+            "255",
+            sourceIdentityIntegralValueDescriptor(
+                FullTreeDwarfUnsignedConstantValue(FULL_TREE_DW_FORM_DATA1, 0xffUL, 0),
+                signed = false,
+                bits = 32,
+            ),
+        )
+        assertEquals(
+            "255",
+            sourceIdentityIntegralValueDescriptor(
+                FullTreeDwarfUnsignedConstantValue(FULL_TREE_DW_FORM_UDATA, 255UL, 0),
+                signed = true,
+                bits = 32,
+            ),
+        )
+        assertNull(
+            sourceIdentityIntegralValueDescriptor(
+                FullTreeDwarfUnsignedConstantValue(FULL_TREE_DW_FORM_UDATA, 0xffffffffUL, 0),
+                signed = true,
+                bits = 32,
+            ),
+        )
+    }
+
+    @Test
+    fun `boolean template actuals accept only the two boolean values`() {
+        assertEquals(
+            "0",
+            sourceIdentityBooleanValueDescriptor(
+                FullTreeDwarfUnsignedConstantValue(FULL_TREE_DW_FORM_DATA1, 0UL, 0),
+            ),
+        )
+        assertEquals(
+            "1",
+            sourceIdentityBooleanValueDescriptor(
+                FullTreeDwarfUnsignedConstantValue(FULL_TREE_DW_FORM_UDATA, 1UL, 0),
+            ),
+        )
+        assertEquals(
+            "1",
+            sourceIdentityBooleanValueDescriptor(
+                FullTreeDwarfSignedConstantValue(FULL_TREE_DW_FORM_IMPLICIT_CONST, 1L, 0),
+            ),
+        )
+        assertNull(
+            sourceIdentityBooleanValueDescriptor(
+                FullTreeDwarfUnsignedConstantValue(FULL_TREE_DW_FORM_DATA1, 2UL, 0),
+            ),
+        )
+        assertNull(
+            sourceIdentityBooleanValueDescriptor(
+                FullTreeDwarfSignedConstantValue(FULL_TREE_DW_FORM_SDATA, -1L, 0),
+            ),
+        )
+    }
+
+    @Test
     fun `common compiler builtin spellings normalize without merging distinct C++ types`() {
         assertEquals("unsigned long", canonicalSourceIdentityBuiltinName("unsigned long"))
         assertEquals("unsigned long", canonicalSourceIdentityBuiltinName("long unsigned int"))
@@ -218,6 +511,7 @@ class FullTreeSourceEntityIdentityTest {
             inlineOwnerAnchorCandidateId = fields(sourceName = "caller_one").candidateId(FullTreeSourceEntityKind.NO_RANGE_DEFINITION),
             inlineCallFile = "source/clang/lib/inline-template/caller_one.cpp",
             inlineCallLine = 17,
+            inlineCallColumn = 9,
             inlinePathAnchorCandidateIds = listOf("a".repeat(64)),
         ).candidateId(FullTreeSourceEntityKind.INLINE_INSTANCE)
         val inlineAtCallTwo = fields(
@@ -225,6 +519,7 @@ class FullTreeSourceEntityIdentityTest {
             inlineOwnerAnchorCandidateId = fields(sourceName = "caller_two").candidateId(FullTreeSourceEntityKind.NO_RANGE_DEFINITION),
             inlineCallFile = "source/clang/lib/inline-template/caller_two.cpp",
             inlineCallLine = 23,
+            inlineCallColumn = 14,
             inlinePathAnchorCandidateIds = listOf("c".repeat(64)),
         ).candidateId(FullTreeSourceEntityKind.INLINE_INSTANCE)
         assertNotEquals(inlineAtCallOne, inlineAtCallTwo)

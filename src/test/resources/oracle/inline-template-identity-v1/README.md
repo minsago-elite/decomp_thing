@@ -29,3 +29,10 @@ not qualify production behavior.
 template DIEs at `-O2`. The test checks that the values remain distinct and validates unknown,
 ambiguous, non-scoreable, and emitted-RVA-linked cases without adding source rows to the RVA
 denominator.
+
+`boolean_template` adds a positive `bool` non-type actual control. Both `false` and `true` concrete
+instances must retain ordered typed arguments and distinct candidate hashes. This compiler fixture
+backs the boolean form decoder; its type/value decoding is still bounded source evidence, not
+production qualification. Cross-CU `DW_FORM_ref_addr` acceptance and invalid target-boundary
+rejection are also tested with a separate handcrafted two-CU DWARF byte stream. That parser control
+is explicitly synthetic and is not described as compiler-emitted cross-CU evidence.

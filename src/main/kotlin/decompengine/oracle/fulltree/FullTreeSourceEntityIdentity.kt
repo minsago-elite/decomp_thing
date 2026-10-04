@@ -234,7 +234,8 @@ internal class FullTreeSourceAnchorFields(
                     templateActualArguments != null
                 FullTreeSourceAnchorKind.INLINE_INSTANCE ->
                     inlineCalleeAnchorCandidateId != null && inlineOwnerAnchorCandidateId != null &&
-                        inlineCallFile != null && inlineCallLine != null && inlinePathAnchorCandidateIds != null
+                        inlineCallFile != null && inlineCallLine != null && inlineCallColumn != null &&
+                        inlinePathAnchorCandidateIds != null
                 FullTreeSourceAnchorKind.SOURCE_DEFINITION,
                 FullTreeSourceAnchorKind.DECLARATION_ONLY,
                 FullTreeSourceAnchorKind.NO_RANGE_DEFINITION,
@@ -248,7 +249,9 @@ internal class FullTreeSourceAnchorFields(
         val semanticFields = JsonObject(canonicalJson().toMutableMap().apply {
             // The line-table file index is artifact-local. The column is retained as raw fact
             // evidence, but some compilers omit it for the same declaration, so it is not part of
-            // the cross-compiler semantic tuple.
+            // the cross-compiler semantic tuple. Inline call columns are retained in the semantic
+            // tuple because distinct calls on one source line need that discriminator; an absent
+            // call column leaves the inline candidate unknown rather than merging those calls.
             remove("declarationFileIndex")
             remove("declarationColumn")
             // A concrete instance candidate describes its own complete source tuple and typed
@@ -261,10 +264,10 @@ internal class FullTreeSourceAnchorFields(
             mapOf(
                 "fields" to semanticFields,
                 "kind" to JsonPrimitive(kind.wireValue),
-                "version" to JsonPrimitive(2),
+                "version" to JsonPrimitive(4),
             ),
         )
-        val bytes = OracleJson.canonicalBytes(preimage)
+        val bytes = OracleJson.canonicalBytes(preimage, sourceIdentityRowJsonLimits(MAXIMUM_SOURCE_IDENTITY_ROW_BYTES))
         val digest = java.security.MessageDigest.getInstance("SHA-256")
         digest.update(ANCHOR_DOMAIN)
         digest.update(bytes)
@@ -474,9 +477,13 @@ internal fun sourceIdentitySha256(bytes: ByteArray): String = OracleArtifacts.sh
 
 internal const val MAXIMUM_IDENTITY_EDGES_PER_ENTITY = 32
 internal const val MAXIMUM_SOURCE_IDENTITY_ROW_BYTES = 64L * 1024L * 1024L
+internal const val MAXIMUM_SOURCE_IDENTITY_RETAINED_BYTES = 64L * 1024L * 1024L
+internal const val MAXIMUM_SOURCE_IDENTITY_ROW_SCRATCH_FACTOR = 2L
+internal const val SOURCE_IDENTITY_RETAINED_CONTENT_EXPANSION_FACTOR = 3L
+internal const val SOURCE_IDENTITY_RETAINED_CHARGE_OVERHEAD_BYTES = 64L
 internal const val MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES = 256 * 1024 * 1024L
 
-private fun sourceIdentityRowJsonLimits(maximumCanonicalBytes: Long): StrictJsonLimits {
+internal fun sourceIdentityRowJsonLimits(maximumCanonicalBytes: Long): StrictJsonLimits {
     val rowLimit = minOf(maximumCanonicalBytes, MAXIMUM_SOURCE_IDENTITY_ROW_BYTES).toInt()
     require(rowLimit > 0)
     return StrictJsonLimits(
