@@ -390,6 +390,10 @@ internal object FullTreeFunctionObservationsV2 {
                         ?: v2Fail("typed reference form is malformed")
                     val raw = edge.rawReference?.removePrefix("0x")?.toULongOrNull(16)
                         ?: v2Fail("typed reference raw value is malformed")
+                    val maximumRawValue = fullTreeDwarfReferenceFormMaximumRawValue(form)
+                    if (maximumRawValue != null && raw > maximumRawValue) {
+                        v2Fail("typed reference raw value exceeds its fixed-width DWARF form")
+                    }
                     val sourceCu = edge.source.compilationUnitOffset.removePrefix("0x").toULong(16)
                     val targetOffset = target.dieOffset.removePrefix("0x").toULong(16)
                     when (form) {
@@ -498,6 +502,13 @@ internal object FullTreeFunctionObservationsV2 {
 
 private fun sourceIdentityJsonCodePointLength(value: String): Int = value.codePointCount(0, value.length)
 
+internal fun fullTreeDwarfReferenceFormMaximumRawValue(form: ULong): ULong? = when (form) {
+    FULL_TREE_DW_FORM_REF1.toULong() -> 0xffuL
+    FULL_TREE_DW_FORM_REF2.toULong() -> 0xffffuL
+    FULL_TREE_DW_FORM_REF4.toULong() -> 0xffff_ffffuL
+    else -> null
+}
+
 internal const val MAXIMUM_SOURCE_IDENTITY_DESCRIPTOR_CHARACTERS = 16_384
 private const val MAXIMUM_SOURCE_IDENTITY_LEXICAL_CONTEXT_ITEMS = 256
 private const val MAXIMUM_SOURCE_IDENTITY_SIGNATURE_ITEMS = 1_025
@@ -544,8 +555,11 @@ internal class FullTreeFunctionObservationV2AnchorIndex(
         if (patternClaim && !patternClaimExists) templatePatternClaims.add(candidateId to physicalClaimId)
     }
 
-    fun reconciliation(): FullTreeFunctionObservationV2IdentityReconciliation {
+    fun reconciliation(
+        checkpoint: (String) -> Unit = {},
+    ): FullTreeFunctionObservationV2IdentityReconciliation {
         frozenReconciliation?.let { return it }
+        checkpoint("before full-run anchor population hashing")
         val digest = MessageDigest.getInstance("SHA-256")
         var populationBytes = 3L
         fun update(value: String) = digest.update(value.toByteArray(StandardCharsets.UTF_8))
@@ -555,6 +569,9 @@ internal class FullTreeFunctionObservationV2AnchorIndex(
             update("[\n")
             var row = 0L
             claims.forEach { (candidate, ids) -> ids.forEach { id ->
+                if (row % FULL_RUN_RECONCILIATION_CHECKPOINT_INTERVAL == 0L) {
+                    checkpoint("while hashing full-run anchor claims")
+                }
                 if (row++ > 0L) update(",\n")
                 update("  {\n    \"candidateId\": ")
                 val candidateBytes = OracleJson.canonicalBytes(JsonPrimitive(candidate))
@@ -567,25 +584,46 @@ internal class FullTreeFunctionObservationV2AnchorIndex(
             } }
             update("\n]\n")
         }
+        checkpoint("after hashing full-run anchor claims")
         if (populationBytes > maximumRetainedBytes) {
             v2Fail("full-run anchor population digest exceeds its bounded canonical-byte budget")
         }
-        val collisions = claims.filterValues { it.size > 1 }
         var reportCharge = 0L
-        collisions.forEach { (candidate, ids) ->
-            reportCharge = Math.addExact(reportCharge, 64L + candidate.length + ids.size.toLong() * 8L)
+        var collisionCount = 0L
+        var candidateIndex = 0L
+        claims.forEach { (candidate, ids) ->
+            if (candidateIndex++ % FULL_RUN_RECONCILIATION_CHECKPOINT_INTERVAL == 0L) {
+                checkpoint("while sizing the full-run collision report")
+            }
+            if (ids.size > 1) {
+                collisionCount = Math.addExact(collisionCount, 1L)
+                reportCharge = Math.addExact(reportCharge, 64L + candidate.length + ids.size.toLong() * 8L)
+            }
         }
         if (Math.addExact(retainedBytes, reportCharge) > maximumRetainedBytes) {
             v2Fail("full-run collision report exceeds its bounded retained-working-set budget")
         }
         retainedBytes = Math.addExact(retainedBytes, reportCharge)
         val immutableCollisions = LinkedHashMap<String, List<String>>()
-        collisions.forEach { (candidate, ids) -> immutableCollisions[candidate] = Collections.unmodifiableList(ids.toList()) }
+        var copiedIds = 0L
+        claims.forEach { (candidate, ids) ->
+            if (ids.size > 1) {
+                val retainedIds = ArrayList<String>(ids.size)
+                ids.forEach { id ->
+                    if (copiedIds++ % FULL_RUN_RECONCILIATION_CHECKPOINT_INTERVAL == 0L) {
+                        checkpoint("while materializing full-run collision IDs")
+                    }
+                    retainedIds += id
+                }
+                immutableCollisions[candidate] = Collections.unmodifiableList(retainedIds)
+            }
+        }
+        checkpoint("after materializing the full-run collision report")
         val result = FullTreeFunctionObservationV2IdentityReconciliation(
             populationSha256 = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) },
             claimCount = claimCount,
             candidateCount = claims.size.toLong(),
-            collisionCandidateCount = immutableCollisions.size.toLong(),
+            collisionCandidateCount = collisionCount,
             collisionIdsByCandidate = Collections.unmodifiableMap(immutableCollisions),
         )
         // The immutable, bounded subset lets envelope validation bind a pattern candidate to its
@@ -633,13 +671,18 @@ internal data class FullTreeFunctionObservationV2IdentityReconciliation(
 }
 
 private const val TEMPLATE_PATTERN_CLAIM_INDEX_BYTES = 96L
+private const val FULL_RUN_RECONCILIATION_CHECKPOINT_INTERVAL = 4_096L
 
 internal fun reconcileObservationV2Facts(
     facts: List<FullTreeSourceEntityFact>,
     reconciliation: FullTreeFunctionObservationV2IdentityReconciliation,
+    checkpoint: ((String) -> Unit)? = null,
 ): List<FullTreeSourceEntityFact> {
     val collisionReasons = setOf("duplicate-source-anchor-unproven", "ambiguous-related-source-anchor")
-    val normalized = facts.map { fact ->
+    val normalized = facts.mapIndexed { index, fact ->
+        if (index.toLong() % FULL_RUN_RECONCILIATION_CHECKPOINT_INTERVAL == 0L) {
+            checkpoint?.invoke("while normalizing shard source-anchor collision evidence")
+        }
         val retainedReasons = fact.reasonCodes.filterNot { it in collisionReasons }
         if (retainedReasons == fact.reasonCodes && fact.candidateCollisionSourceEntityIds.isEmpty()) {
             fact
@@ -652,8 +695,9 @@ internal fun reconcileObservationV2Facts(
         }
     }
     return FullTreeSourceEntityIdentityProducer.markUnprovedAnchorCollisions(
-        FullTreeSourceEntityFact.deterministicOrder(normalized),
+        FullTreeSourceEntityFact.deterministicOrder(normalized, checkpoint),
         SourceIdentityAnchorCollisionReport(reconciliation.collisionIdsByCandidate),
+        checkpoint,
     )
 }
 

@@ -686,14 +686,35 @@ internal class FullTreeSourceEntityFact(
             )
         }
 
-        fun deterministicOrder(facts: Iterable<FullTreeSourceEntityFact>): List<FullTreeSourceEntityFact> =
-            facts.sortedWith(
-                compareBy<FullTreeSourceEntityFact> { it.kind.wireValue }
-                    .thenBy { it.semanticAnchorCandidateId ?: "~" }
-                    .thenBy { it.physicalDie.unitId }
-                    .thenBy { it.physicalDie.compilationUnitOffset }
-                    .thenBy { it.physicalDie.dieOffset },
-            )
+        fun deterministicOrder(
+            facts: Iterable<FullTreeSourceEntityFact>,
+            checkpoint: ((String) -> Unit)? = null,
+        ): List<FullTreeSourceEntityFact> {
+            val comparator = compareBy<FullTreeSourceEntityFact> { it.kind.wireValue }
+                .thenBy { it.semanticAnchorCandidateId ?: "~" }
+                .thenBy { it.physicalDie.unitId }
+                .thenBy { it.physicalDie.compilationUnitOffset }
+                .thenBy { it.physicalDie.dieOffset }
+            if (checkpoint == null) return facts.sortedWith(comparator)
+
+            val ordered = ArrayList<FullTreeSourceEntityFact>()
+            var copied = 0L
+            facts.forEach { fact ->
+                if (copied++ % SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL == 0L) {
+                    checkpoint("while preparing source-entity ordering for reconciliation")
+                }
+                ordered += fact
+            }
+            var comparisons = 0L
+            ordered.sortWith { left, right ->
+                if (comparisons++ % SOURCE_IDENTITY_SORT_CHECKPOINT_INTERVAL == 0L) {
+                    checkpoint("while sorting source entities for reconciliation")
+                }
+                comparator.compare(left, right)
+            }
+            checkpoint("after sorting source entities for reconciliation")
+            return ordered
+        }
     }
 
     override fun equals(other: Any?): Boolean = other is FullTreeSourceEntityFact && canonicalJson() == other.canonicalJson()
@@ -752,10 +773,17 @@ internal fun canonicalSourceEntityFacts(
 internal fun canonicalSourceEntityFactsByteLength(
     facts: Iterable<FullTreeSourceEntityFact>,
     maximumCanonicalBytes: Long = MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES,
+    checkpoint: ((String) -> Unit)? = null,
 ): Long =
-    FullTreeSourceEntityFact.deterministicOrder(facts).let { ordered ->
-        require(ordered.map { it.sourceEntityId }.distinct().size == ordered.size) {
-            "source-identity census repeats a physical sourceEntityId"
+    FullTreeSourceEntityFact.deterministicOrder(facts, checkpoint).let { ordered ->
+        val sourceIds = HashSet<String>()
+        ordered.forEachIndexed { index, fact ->
+            if (index.toLong() % SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL == 0L) {
+                checkpoint?.invoke("while validating source-entity IDs for reconciliation")
+            }
+            require(sourceIds.add(fact.sourceEntityId)) {
+                "source-identity census repeats a physical sourceEntityId"
+            }
         }
         require(maximumCanonicalBytes in 1L..MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES)
         if (ordered.isEmpty()) {
@@ -764,6 +792,9 @@ internal fun canonicalSourceEntityFactsByteLength(
         }
         var size = 4L // opening [\n and closing ] plus the final newline
         ordered.forEachIndexed { index, fact ->
+            if (index.toLong() % SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL == 0L) {
+                checkpoint?.invoke("while preflighting canonical source-entity output")
+            }
             val bytes = OracleJson.canonicalBytes(fact.canonicalJson(), sourceIdentityRowJsonLimits(maximumCanonicalBytes))
             val lineBreaks = bytes.count { it == '\n'.code.toByte() }
             check(lineBreaks > 0) { "canonical source-identity row has no final newline" }
@@ -777,6 +808,9 @@ internal fun canonicalSourceEntityFactsByteLength(
         require(size <= maximumCanonicalBytes) { "canonical source-identity output exceeds its authenticated byte bound" }
         size
     }
+
+private const val SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL = 4_096L
+private const val SOURCE_IDENTITY_SORT_CHECKPOINT_INTERVAL = 16_384L
 
 internal fun sourceIdentitySha256(bytes: ByteArray): String = OracleArtifacts.sha256(bytes)
 

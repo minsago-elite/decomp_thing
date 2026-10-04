@@ -73,6 +73,33 @@ class FullTreeFunctionObservationsV2Test {
     }
 
     @Test
+    fun `resolved reference forms enforce their fixed offset widths`() {
+        assertEquals(0xffuL, fullTreeDwarfReferenceFormMaximumRawValue(FULL_TREE_DW_FORM_REF1.toULong()))
+        assertEquals(0xffffuL, fullTreeDwarfReferenceFormMaximumRawValue(FULL_TREE_DW_FORM_REF2.toULong()))
+        assertEquals(0xffff_ffffuL, fullTreeDwarfReferenceFormMaximumRawValue(FULL_TREE_DW_FORM_REF4.toULong()))
+        assertTrue(fullTreeDwarfReferenceFormMaximumRawValue(FULL_TREE_DW_FORM_REF8.toULong()) == null)
+        assertTrue(fullTreeDwarfReferenceFormMaximumRawValue(FULL_TREE_DW_FORM_REF_UDATA.toULong()) == null)
+    }
+
+    @Test
+    fun `full-run anchor reconciliation invokes bounded progress checkpoints`() {
+        val index = FullTreeFunctionObservationV2AnchorIndex(9_000L, 8L * 1024L * 1024L)
+        repeat(8_192) { ordinal ->
+            index.accept(
+                OracleArtifacts.sha256("candidate-$ordinal".toByteArray()),
+                OracleArtifacts.sha256("physical-$ordinal".toByteArray()),
+            )
+        }
+        var checkpoints = 0
+        assertFailsWith<IllegalStateException> {
+            index.reconciliation {
+                if (++checkpoints == 3) throw IllegalStateException("deadline checkpoint")
+            }
+        }
+        assertEquals(3, checkpoints)
+    }
+
+    @Test
     fun `v2 shard resident allowance subtracts co-resident run state`() {
         assertEquals(700L, fullTreeFunctionObservationV2AvailableResidentBytes(1_000L, 100L, 200L))
         assertEquals(650L, fullTreeFunctionObservationV2AvailableResidentBytes(1_000L, 100L, 200L, 50L))
@@ -766,6 +793,38 @@ class FullTreeFunctionObservationsV2Test {
             assertFailsWith<FullTreeFunctionObservationV2Exception> {
                 FullTreeFunctionObservationsV2.validateEnvelope(
                     repointed, scope, inventory, inventorySha256, firstShard, reconciliation,
+                )
+            }
+
+            val inlineFact = FullTreeSourceEntityFact.fromCanonicalJson(inlineRow)
+            val sourceCuOffset = inlineFact.physicalDie.compilationUnitOffset.removePrefix("0x").toULong(16)
+            val sourceDieOffset = inlineFact.physicalDie.dieOffset.removePrefix("0x").toULong(16)
+            val targetDieOffset = sourceDieOffset + 0x100uL
+            val rawReferenceOffset = targetDieOffset - sourceCuOffset
+            assertTrue(rawReferenceOffset > 0xffuL)
+            val overWidthEdge = FullTreeSourceIdentityEdge(
+                kind = FullTreeSourceIdentityEdgeKind.TYPE,
+                source = inlineFact.physicalDie,
+                target = inlineFact.physicalDie.copy(dieOffset = "0x${targetDieOffset.toString(16)}"),
+                referenceForm = "0x${FULL_TREE_DW_FORM_REF1.toString(16)}",
+                rawReference = "0x${rawReferenceOffset.toString(16)}",
+                state = FullTreeSourceIdentityEdgeState.RESOLVED,
+                reasonCode = null,
+            )
+            val forgedWidthFact = inlineFact.copy(edges = listOf(overWidthEdge))
+            val forgedWidthRows = valid.getValue("sourceEntities").jsonArray.map { row ->
+                val fact = FullTreeSourceEntityFact.fromCanonicalJson(row.jsonObject)
+                if (fact.sourceEntityId == inlineFact.sourceEntityId) forgedWidthFact else fact
+            }
+            val forgedWidthDocument = FullTreeFunctionObservationsV2.composeEnvelope(
+                v1ProjectionForCompose(valid),
+                forgedWidthRows,
+                reconciliation,
+                8L * 1024L * 1024L,
+            )
+            assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                FullTreeFunctionObservationsV2.validateEnvelope(
+                    forgedWidthDocument, scope, inventory, inventorySha256, firstShard, reconciliation,
                 )
             }
             val masqueradingTypedEdge = JsonObject(inlineRow.getValue("edges").jsonArray.single().jsonObject.toMutableMap().apply {

@@ -339,18 +339,31 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                     richGuard.verifyUnchanged("rich artifact after source-identity extraction")
                     shardDeadline.endPhase("after source-identity extraction for ${shard.identifier}")
                 }
-                val reconciliation = anchorIndex.reconciliation()
+                deadline.checkpoint("before reconciling full-run observation-v2 anchor claims")
+                val reconciliation = anchorIndex.reconciliation(deadline::checkpoint)
                 shards.forEach { shard ->
+                    deadline.checkpoint("before reconciling source entities for ${shard.identifier}")
                     val original = sourceFactsByShard.getValue(shard.identifier)
                     val perShardBytes = minOf(perShard.controlLong("serializedBytes"), MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES)
-                    val expansion = sourceIdentityCollisionExpansionUpperBound(original, reconciliation.collisionIdsByCandidate, perShardBytes)
-                    if (expansion > perShardBytes - canonicalSourceEntityFactsByteLength(original, perShardBytes)) {
+                    val expansion = sourceIdentityCollisionExpansionUpperBound(
+                        original,
+                        reconciliation.collisionIdsByCandidate,
+                        perShardBytes,
+                        deadline::checkpoint,
+                    )
+                    val baselineBytes = canonicalSourceEntityFactsByteLength(
+                        original,
+                        perShardBytes,
+                        deadline::checkpoint,
+                    )
+                    if (expansion > perShardBytes - baselineBytes) {
                         v2RunFail("full-run collision evidence exceeds the authenticated per-shard output bound")
                     }
                     val copyCharge = sourceIdentityCollisionAdjustedFactCopyUpperBound(
                         original,
                         reconciliation.collisionIdsByCandidate,
                         perShardBytes,
+                        deadline::checkpoint,
                     )
                     val copiedRetainedUpperBound = Math.addExact(copyCharge, expansion)
                     val copyModeled = sourceIdentityModeledRetainedChargeBytes(copiedRetainedUpperBound)
@@ -364,12 +377,17 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                     }
                     modeledRetainedBytes = peakRetained
                     sourceFactCanonicalBytes = reconciledRunBytes
-                    val adjusted = reconcileObservationV2Facts(original, reconciliation)
-                    val adjustedBytes = canonicalSourceEntityFactsByteLength(adjusted, perShardBytes)
+                    val adjusted = reconcileObservationV2Facts(original, reconciliation, deadline::checkpoint)
+                    val adjustedBytes = canonicalSourceEntityFactsByteLength(
+                        adjusted,
+                        perShardBytes,
+                        deadline::checkpoint,
+                    )
                     if (adjustedBytes > perShardBytes) {
                         v2RunFail("reconciled source entities exceed the authenticated per-shard byte bound")
                     }
                     sourceFactsByShard[shard.identifier] = adjusted
+                    deadline.checkpoint("after reconciling source entities for ${shard.identifier}")
                 }
                 inventoryGuard.verifyUnchanged("full-tree inventory before observation-v2 production")
                 richGuard.verifyUnchanged("rich artifact before observation-v2 production")

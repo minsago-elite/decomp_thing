@@ -367,9 +367,13 @@ internal object FullTreeSourceEntityIdentityProducer {
     internal fun markUnprovedAnchorCollisions(
         ordered: List<FullTreeSourceEntityFact>,
         report: SourceIdentityAnchorCollisionReport,
+        checkpoint: ((String) -> Unit)? = null,
     ): List<FullTreeSourceEntityFact> {
         if (report.byCandidateId.isEmpty()) return ordered
-        return ordered.map { fact ->
+        return ordered.mapIndexed { index, fact ->
+            if (index.toLong() % SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL == 0L) {
+                checkpoint?.invoke("while applying full-run source-anchor collisions")
+            }
             val fields = fact.semanticAnchorFields
             val relatedCandidateIds = listOfNotNull(
                 fields?.inlineCalleeAnchorCandidateId,
@@ -756,11 +760,15 @@ internal fun sourceIdentityCollisionExpansionUpperBound(
     facts: List<FullTreeSourceEntityFact>,
     collisionSourceEntityIdsByCandidate: Map<String, List<String>>,
     maximumCanonicalBytes: Long = MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES,
+    checkpoint: ((String) -> Unit)? = null,
 ): Long {
-    canonicalSourceEntityFactsByteLength(facts, maximumCanonicalBytes)
+    canonicalSourceEntityFactsByteLength(facts, maximumCanonicalBytes, checkpoint)
     var total = 0L
     try {
-        facts.forEach { fact ->
+        facts.forEachIndexed { index, fact ->
+            if (index.toLong() % SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL == 0L) {
+                checkpoint?.invoke("while sizing full-run collision evidence")
+            }
             val fields = fact.semanticAnchorFields
             val candidateIds = listOfNotNull(
                 fact.semanticAnchorCandidateId,
@@ -794,6 +802,7 @@ internal fun sourceIdentityCollisionAdjustedFactCopyUpperBound(
     facts: List<FullTreeSourceEntityFact>,
     collisionSourceEntityIdsByCandidate: Map<String, List<String>>,
     maximumCanonicalBytes: Long = MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES,
+    checkpoint: ((String) -> Unit)? = null,
 ): Long {
     if (collisionSourceEntityIdsByCandidate.isEmpty()) return 0L
     var total = 0L
@@ -801,7 +810,10 @@ internal fun sourceIdentityCollisionAdjustedFactCopyUpperBound(
         // markUnprovedAnchorCollisions returns a new list when a collision exists, even when a
         // particular row is reused. Model those references separately from changed fact objects.
         total = Math.addExact(64L, Math.multiplyExact(facts.size.toLong(), 8L))
-        facts.forEach { fact ->
+        facts.forEachIndexed { index, fact ->
+            if (index.toLong() % SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL == 0L) {
+                checkpoint?.invoke("while sizing full-run collision-adjusted copies")
+            }
             val fields = fact.semanticAnchorFields
             val candidateIds = listOfNotNull(
                 fact.semanticAnchorCandidateId,
@@ -819,6 +831,8 @@ internal fun sourceIdentityCollisionAdjustedFactCopyUpperBound(
     }
     return total
 }
+
+private const val SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL = 4_096L
 
 /** Admission for transient and accumulating text built while one source row is being derived. */
 private class SourceIdentityRowScratchBudget(
