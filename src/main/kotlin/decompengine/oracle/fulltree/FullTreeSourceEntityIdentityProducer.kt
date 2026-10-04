@@ -340,16 +340,17 @@ internal object FullTreeSourceEntityIdentityProducer {
                 peakRetainedLineTableUnits = repository.peakRetainedLineTableUnits
             }
             artifact.verifyUnchanged("source-identity scan")
-            val ordered = FullTreeSourceEntityFact.deterministicOrder(facts)
-            val maximumBaselineBytes = canonicalSourceEntityFactsByteLength(ordered, maximumSerializedBytes)
+            val ordered = FullTreeSourceEntityFact.deterministicOrder(facts, checkpoint)
+            val maximumBaselineBytes = canonicalSourceEntityFactsByteLength(ordered, maximumSerializedBytes, checkpoint)
             if (maximumBaselineBytes > maximumSerializedBytes) {
                 throw FullTreeControlException("canonical source-identity output exceeds its authenticated byte bound")
             }
-            val collisionReport = anchorClaims.collisionReport()
+            val collisionReport = anchorClaims.collisionReport(checkpoint)
             val collisionExpansionBytes = sourceIdentityCollisionExpansionUpperBound(
                 ordered,
                 collisionReport.byCandidateId,
                 maximumSerializedBytes,
+                checkpoint,
             )
             budget.charge(collisionExpansionBytes, "source-identity collision evidence")
             if (collisionExpansionBytes > maximumSerializedBytes - maximumBaselineBytes) {
@@ -359,11 +360,12 @@ internal object FullTreeSourceEntityIdentityProducer {
                 ordered,
                 collisionReport.byCandidateId,
                 maximumSerializedBytes,
+                checkpoint,
             )
             factAdjustmentAdmission?.invoke(collisionCopyBytes, collisionExpansionBytes)
             budget.charge(collisionCopyBytes, "source-identity collision-adjusted fact copies")
-            val collisionAdjusted = markUnprovedAnchorCollisions(ordered, collisionReport)
-            val finalBytes = canonicalSourceEntityFacts(collisionAdjusted, maximumSerializedBytes)
+            val collisionAdjusted = markUnprovedAnchorCollisions(ordered, collisionReport, checkpoint)
+            val finalBytes = canonicalSourceEntityFacts(collisionAdjusted, maximumSerializedBytes, checkpoint)
             if (finalBytes.size.toLong() > maximumSerializedBytes) {
                 throw FullTreeControlException("canonical source-identity output exceeds its authenticated byte bound")
             }
@@ -762,14 +764,19 @@ private class SourceIdentityAnchorClaims(
         claims.getOrPut(candidateId) { sortedSetOf() } += sourceEntityId
     }
 
-    fun collisionReport(): SourceIdentityAnchorCollisionReport {
-        val collisions = claims.filterValues { it.size > 1 }
-        collisions.values.forEach { sourceEntityIds ->
-            budget.charge(sourceEntityIds.size.toLong() * 16L + 64L, "source-anchor collision report")
+    fun collisionReport(checkpoint: ((String) -> Unit)? = null): SourceIdentityAnchorCollisionReport {
+        val collisions = HashMap<String, List<String>>()
+        claims.entries.forEachIndexed { index, (candidateId, sourceEntityIds) ->
+            if (index.toLong() % SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL == 0L) {
+                checkpoint?.invoke("while reconciling source-anchor collisions")
+            }
+            if (sourceEntityIds.size > 1) {
+                budget.charge(sourceEntityIds.size.toLong() * 16L + 64L, "source-anchor collision report")
+                collisions[candidateId] = sourceEntityIds.toList()
+            }
         }
-        return SourceIdentityAnchorCollisionReport(
-            byCandidateId = collisions.mapValues { (_, sourceEntityIds) -> sourceEntityIds.toList() },
-        )
+        checkpoint?.invoke("after reconciling source-anchor collisions")
+        return SourceIdentityAnchorCollisionReport(byCandidateId = collisions)
     }
 }
 
@@ -840,7 +847,7 @@ internal fun sourceIdentityCollisionAdjustedFactCopyUpperBound(
                 fields?.templatePatternAnchorCandidateId,
             ) + fields?.inlinePathAnchorCandidateIds.orEmpty()
             if (candidateIds.any { collisionSourceEntityIdsByCandidate[it].orEmpty().isNotEmpty() }) {
-                val factBytes = canonicalSourceEntityFacts(listOf(fact), maximumCanonicalBytes).size.toLong()
+                val factBytes = canonicalSourceEntityFacts(listOf(fact), maximumCanonicalBytes, checkpoint).size.toLong()
                 total = Math.addExact(total, Math.addExact(factBytes, SOURCE_IDENTITY_RETAINED_CHARGE_OVERHEAD_BYTES))
             }
         }
@@ -1091,10 +1098,13 @@ private class SourceEntityIdentityReader(
                 if (nested.isEmpty()) result += PackedSubprogramChild(child, packPath)
                 else nested.asReversed().forEach { pending.addFirst(Triple(child, it, packPath)) }
             } else if (child.tag in acceptedTags) {
-                // Typed evidence starts at the actual parameter/formal DIE. Preserve its bounded
-                // parent-child path so the v2 envelope can check graph connectivity without
-                // inferring ancestry from DIE offset ordering.
-                if (parentPackPath != null || child.attributesNamed(DW_AT_TYPE).isNotEmpty()) {
+                // Preserve structural paths through pack wrappers. Direct typed formals keep
+                // their raw DW_AT_type reference without a duplicate parent edge.
+                val compactTypedFormal = structuralEdgeKind == FullTreeSourceIdentityEdgeKind.TYPE &&
+                    child.tag == DW_TAG_FORMAL_PARAMETER && child.attributesNamed(DW_AT_TYPE).isNotEmpty()
+                if (!compactTypedFormal &&
+                    (parentPackPath != null || child.attributesNamed(DW_AT_TYPE).isNotEmpty())
+                ) {
                     addStructuralEdge(physical(unit, parent), physical(unit, child), structuralEdgeKind, edges)
                 }
                 result += PackedSubprogramChild(child, parentPackPath)

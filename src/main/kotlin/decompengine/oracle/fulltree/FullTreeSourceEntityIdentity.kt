@@ -729,13 +729,14 @@ internal class FullTreeSourceEntityFact(
 internal fun canonicalSourceEntityFacts(
     facts: Iterable<FullTreeSourceEntityFact>,
     maximumCanonicalBytes: Long = MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES,
+    checkpoint: ((String) -> Unit)? = null,
 ): ByteArray =
-    FullTreeSourceEntityFact.deterministicOrder(facts).let { ordered ->
+    FullTreeSourceEntityFact.deterministicOrder(facts, checkpoint).let { ordered ->
         require(ordered.map { it.sourceEntityId }.distinct().size == ordered.size) {
             "source-identity census repeats a physical sourceEntityId"
         }
         require(maximumCanonicalBytes in 1L..MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES)
-        val expectedBytes = canonicalSourceEntityFactsByteLength(ordered, maximumCanonicalBytes)
+        val expectedBytes = canonicalSourceEntityFactsByteLength(ordered, maximumCanonicalBytes, checkpoint)
         require(expectedBytes <= maximumCanonicalBytes) {
             "canonical source-identity output exceeds its implementation byte bound"
         }
@@ -751,6 +752,9 @@ internal fun canonicalSourceEntityFacts(
         } else {
             writeAscii("[\n")
             ordered.forEachIndexed { index, fact ->
+                if (index.toLong() % SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL == 0L) {
+                    checkpoint?.invoke("while serializing canonical source-entity output")
+                }
                 writeAscii("  ")
                 val row = OracleJson.canonicalBytes(fact.canonicalJson(), sourceIdentityRowJsonLimits(maximumCanonicalBytes))
                 check(row.isNotEmpty() && row.last() == '\n'.code.toByte()) {
@@ -766,6 +770,7 @@ internal fun canonicalSourceEntityFacts(
             }
             writeAscii("]\n")
         }
+        checkpoint?.invoke("after serializing canonical source-entity output")
         check(position == output.size) {
             "canonical source-identity byte preflight mismatch: expected ${output.size}, wrote $position"
         }
@@ -812,6 +817,7 @@ internal fun canonicalSourceEntityFactsByteLength(
         require(maximumCanonicalBytes in 1L..MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES)
         if (ordered.isEmpty()) {
             require(3L <= maximumCanonicalBytes) { "canonical source-identity output exceeds its authenticated byte bound" }
+            checkpoint?.invoke("after preflighting canonical source-entity output")
             return@let 3L // [] plus the canonical encoder's final newline
         }
         var size = 4L // opening [\n and closing ] plus the final newline
@@ -830,6 +836,7 @@ internal fun canonicalSourceEntityFactsByteLength(
             if (index != ordered.lastIndex) size = Math.addExact(size, 1L) // array comma
         }
         require(size <= maximumCanonicalBytes) { "canonical source-identity output exceeds its authenticated byte bound" }
+        checkpoint?.invoke("after preflighting canonical source-entity output")
         size
     }
 

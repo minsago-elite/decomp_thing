@@ -558,9 +558,12 @@ internal object FullTreeFunctionObservationsV2 {
                     }
                 }
             }
-            // This checks that the supplied edge graph is internally rooted at its census DIE.
             // The run publisher re-executes source extraction against the authenticated artifact
             // to verify every structural and typed edge against raw DWARF ancestry and references.
+            // Direct DW_AT_type edges from signature formals are kept without a redundant
+            // parent-to-formal edge to stay within the per-entity edge bound. Those edges may be
+            // disconnected in this transport graph, but only typed TYPE references qualify and
+            // the authenticated publisher must rederive their formal ancestry from raw DWARF.
             val edgesBySource = fact.edges.groupBy { it.source }
             val reachable = HashSet<FullTreeSourcePhysicalDie>()
             val pending = ArrayDeque<FullTreeSourcePhysicalDie>()
@@ -575,7 +578,12 @@ internal object FullTreeFunctionObservationsV2 {
                     }
                 }
             }
-            if (fact.edges.any { it.source !in reachable }) {
+            if (fact.edges.any { edge ->
+                    edge.source !in reachable &&
+                        (edge.kind != FullTreeSourceIdentityEdgeKind.TYPE ||
+                            edge.referenceForm == null || edge.rawReference == null)
+                }
+            ) {
                 v2Fail("source-identity edge graph is detached from its source entity DIE")
             }
         }

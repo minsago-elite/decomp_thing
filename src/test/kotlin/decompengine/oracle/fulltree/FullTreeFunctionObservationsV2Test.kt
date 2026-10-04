@@ -918,6 +918,35 @@ class FullTreeFunctionObservationsV2Test {
             assertTrue(sawNeutralizedCollision, "fixture must exercise collision-neutral byte preflight")
 
             val valid = outputs.getValue(firstShard.identifier)
+            val validSourceRows = valid.getValue("sourceEntities").jsonArray.map {
+                FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
+            }
+            fun isolatedReconciliation(
+                firstShardPopulation: List<FullTreeSourceEntityFact> = validSourceRows,
+                inlineEvidenceFacts: List<FullTreeSourceEntityFact> = outputs.values.flatMap { document ->
+                    document.getValue("sourceEntities").jsonArray.map {
+                        FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
+                    }
+                }.filter { it.kind == FullTreeSourceEntityKind.INLINE_INSTANCE },
+                additionalClaims: List<Pair<String, String>> = emptyList(),
+            ): FullTreeFunctionObservationV2IdentityReconciliation {
+                val isolated = FullTreeFunctionObservationV2AnchorIndex(128L, 8L * 1024L * 1024L)
+                allAnchorClaims.forEach { (candidate, physicalClaim) -> isolated.accept(candidate, physicalClaim) }
+                additionalClaims.forEach { (candidate, physicalClaim) -> isolated.accept(candidate, physicalClaim) }
+                inlineEvidenceFacts.forEach(isolated::acceptInlineRelatedClaims)
+                outputs.forEach { (shardId, document) ->
+                    val population = if (shardId == firstShard.identifier) {
+                        firstShardPopulation
+                    } else {
+                        document.getValue("sourceEntities").jsonArray.map {
+                            FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
+                        }
+                    }
+                    isolated.acceptSourceEntityPopulation(shardId, population)
+                }
+                return isolated.reconciliation()
+            }
+
             val directCandidateRow = valid.getValue("sourceEntities").jsonArray
                 .map { FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject) }
                 .first { it.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE && it.semanticAnchorCandidateId != null }
@@ -1025,21 +1054,30 @@ class FullTreeFunctionObservationsV2Test {
                 val parsed = FullTreeSourceEntityFact.fromCanonicalJson(row.jsonObject)
                 if (parsed.sourceEntityId == originalInlineFact.sourceEntityId) forgedCalleeFact else parsed
             }
+            val forgedCalleeCandidate = requireNotNull(forgedCalleeFact.semanticAnchorCandidateId)
+            val forgedCalleeReconciliation = isolatedReconciliation(
+                firstShardPopulation = forgedCalleeFacts,
+                additionalClaims = listOf(forgedCalleeCandidate to forgedCalleeFact.sourceEntityId),
+            )
             val forgedCalleeFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
                 FullTreeFunctionObservationsV2.composeEnvelope(
                     v1ProjectionForCompose(valid),
                     forgedCalleeFacts,
-                    reconciliation,
+                    forgedCalleeReconciliation,
                     8L * 1024L * 1024L,
                 )
             }
-            assertTrue(forgedCalleeFailure.message.orEmpty().contains("inline callee candidate"))
+            assertTrue(
+                forgedCalleeFailure.message.orEmpty().contains("inline callee candidate"),
+                "the isolated receipt should reach typed inline-callee validation: ${forgedCalleeFailure.message}",
+            )
             val nestedOwnerA = physical(firstUnit, "0x18")
             val nestedOwnerB = ownerB
             val nestedFormal = physical(firstUnit, "0x48")
             val nestedTypeTarget = physical(secondUnit, absoluteOffset(secondUnit, 0x55uL))
             val inlineFactPhysical = FullTreeSourceEntityFact.fromCanonicalJson(inlineRow).physicalDie
             val nestedOwnerPath = listOf(
+                originalInlineFact.edges.single { it.kind == FullTreeSourceIdentityEdgeKind.ABSTRACT_ORIGIN },
                 FullTreeSourceIdentityEdge(
                     kind = FullTreeSourceIdentityEdgeKind.INLINE_OWNER,
                     source = inlineFactPhysical,
@@ -1082,14 +1120,18 @@ class FullTreeFunctionObservationsV2Test {
                 val fact = FullTreeSourceEntityFact.fromCanonicalJson(row.jsonObject)
                 if (fact.sourceEntityId == nestedOwnerFact.sourceEntityId) nestedOwnerFact else fact
             }
+            val nestedOwnerReconciliation = isolatedReconciliation(
+                firstShardPopulation = nestedOwnerFacts,
+                inlineEvidenceFacts = nestedOwnerFacts.filter { it.kind == FullTreeSourceEntityKind.INLINE_INSTANCE },
+            )
             val nestedOwnerDocument = FullTreeFunctionObservationsV2.composeEnvelope(
                 v1ProjectionForCompose(valid),
                 nestedOwnerFacts,
-                reconciliation,
+                nestedOwnerReconciliation,
                 8L * 1024L * 1024L,
             )
             FullTreeFunctionObservationsV2.validateEnvelope(
-                nestedOwnerDocument, scope, inventory, inventorySha256, firstShard, reconciliation,
+                nestedOwnerDocument, scope, inventory, inventorySha256, firstShard, nestedOwnerReconciliation,
             )
 
             val detachedSource = physical(firstUnit, "0x58")
@@ -1101,11 +1143,22 @@ class FullTreeFunctionObservationsV2Test {
                     if (edge.jsonObject.getValue("kind").jsonPrimitive.content == "inline-owner") detachedEdge else edge
                 })
             }))
-            assertFailsWith<FullTreeFunctionObservationV2Exception> {
+            val detachedFacts = detached.getValue("sourceEntities").jsonArray.map {
+                FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
+            }
+            val detachedReconciliation = isolatedReconciliation(
+                firstShardPopulation = detachedFacts,
+                inlineEvidenceFacts = detachedFacts.filter { it.kind == FullTreeSourceEntityKind.INLINE_INSTANCE },
+            )
+            val detachedDocument = FullTreeFunctionObservationsV2.composeEnvelope(
+                v1ProjectionForCompose(valid), detachedFacts, detachedReconciliation, 8L * 1024L * 1024L,
+            )
+            val detachedFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
                 FullTreeFunctionObservationsV2.validateEnvelope(
-                    detached, scope, inventory, inventorySha256, firstShard, reconciliation,
+                    detachedDocument, scope, inventory, inventorySha256, firstShard, detachedReconciliation,
                 )
             }
+            assertTrue(detachedFailure.message.orEmpty().contains("edge graph is detached"))
 
             val repointedEdge = JsonObject(inlineOwnerEdge(inlineRow).toMutableMap().apply {
                 this["target"] = JsonPrimitive(ownerA.locator())
@@ -1115,11 +1168,22 @@ class FullTreeFunctionObservationsV2Test {
                     if (edge.jsonObject.getValue("kind").jsonPrimitive.content == "inline-owner") repointedEdge else edge
                 })
             }))
-            assertFailsWith<FullTreeFunctionObservationV2Exception> {
+            val repointedFacts = repointed.getValue("sourceEntities").jsonArray.map {
+                FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
+            }
+            val repointedReconciliation = isolatedReconciliation(
+                firstShardPopulation = repointedFacts,
+                inlineEvidenceFacts = repointedFacts.filter { it.kind == FullTreeSourceEntityKind.INLINE_INSTANCE },
+            )
+            val repointedDocument = FullTreeFunctionObservationsV2.composeEnvelope(
+                v1ProjectionForCompose(valid), repointedFacts, repointedReconciliation, 8L * 1024L * 1024L,
+            )
+            val repointedFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
                 FullTreeFunctionObservationsV2.validateEnvelope(
-                    repointed, scope, inventory, inventorySha256, firstShard, reconciliation,
+                    repointedDocument, scope, inventory, inventorySha256, firstShard, repointedReconciliation,
                 )
             }
+            assertTrue(repointedFailure.message.orEmpty().contains("reference target differs from its raw offset"))
 
             val parsedInlineFact = FullTreeSourceEntityFact.fromCanonicalJson(inlineRow)
             val sourceCuOffset = parsedInlineFact.physicalDie.compilationUnitOffset.removePrefix("0x").toULong(16)
@@ -1141,28 +1205,36 @@ class FullTreeFunctionObservationsV2Test {
                 val fact = FullTreeSourceEntityFact.fromCanonicalJson(row.jsonObject)
                 if (fact.sourceEntityId == parsedInlineFact.sourceEntityId) forgedWidthFact else fact
             }
+            val forgedWidthReconciliation = isolatedReconciliation(firstShardPopulation = forgedWidthRows)
             val forgedWidthDocument = FullTreeFunctionObservationsV2.composeEnvelope(
                 v1ProjectionForCompose(valid),
                 forgedWidthRows,
-                reconciliation,
+                forgedWidthReconciliation,
                 8L * 1024L * 1024L,
             )
-            assertFailsWith<FullTreeFunctionObservationV2Exception> {
+            val forgedWidthFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
                 FullTreeFunctionObservationsV2.validateEnvelope(
-                    forgedWidthDocument, scope, inventory, inventorySha256, firstShard, reconciliation,
+                    forgedWidthDocument, scope, inventory, inventorySha256, firstShard, forgedWidthReconciliation,
                 )
             }
+            assertTrue(forgedWidthFailure.message.orEmpty().contains("fixed-width DWARF form"))
             val masqueradingTypedEdge = JsonObject(inlineOwnerEdge(inlineRow).toMutableMap().apply {
                 this["kind"] = JsonPrimitive("type")
             })
             val missingTypedEvidence = replaceSourceRow(valid, inlineIndex, JsonObject(inlineRow.toMutableMap().apply {
                 this["edges"] = JsonArray(listOf(masqueradingTypedEdge))
             }))
-            assertFailsWith<FullTreeFunctionObservationV2Exception> {
-                FullTreeFunctionObservationsV2.validateEnvelope(
-                    missingTypedEvidence, scope, inventory, inventorySha256, firstShard, reconciliation,
+            val missingTypedFacts = missingTypedEvidence.getValue("sourceEntities").jsonArray.map {
+                FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
+            }
+            val missingTypedReconciliation = isolatedReconciliation(firstShardPopulation = missingTypedFacts)
+            val missingTypedFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                FullTreeFunctionObservationsV2.composeEnvelope(
+                    v1ProjectionForCompose(valid), missingTypedFacts, missingTypedReconciliation,
+                    8L * 1024L * 1024L,
                 )
             }
+            assertTrue(missingTypedFailure.message.orEmpty().contains("inline callee candidate"))
 
             val collidingIndex = valid.getValue("sourceEntities").jsonArray.indexOfFirst { row ->
                 row.jsonObject.getValue("candidateCollisionSourceEntityIds").jsonArray.isNotEmpty()

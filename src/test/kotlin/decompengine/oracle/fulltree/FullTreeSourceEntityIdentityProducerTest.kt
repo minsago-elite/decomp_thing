@@ -23,6 +23,124 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class FullTreeSourceEntityIdentityProducerTest {
     @Test
+    fun `sixteen long typed parameters publish within the identity edge bound and finalize cancellably`() =
+        inControlTemporaryDirectory { root ->
+            val controls = createFullTreeControlFixture(root.resolve("control"))
+            val originalScope = controls.authenticatedScope()
+            val rowRoot = Files.createDirectories(root.resolve("signature-fixture"))
+            val compiler = resolveCompiler("GXX", listOf("g++", "g++-14", "g++-13"))
+            val outerNamespace = "outer_${"a".repeat(220)}"
+            val innerNamespace = "inner_${"b".repeat(220)}"
+            val typeName = "Record${"r".repeat(120)}"
+            val qualifiedType = "::$outerNamespace::$innerNamespace::$typeName"
+            val parameters = (0 until 16).joinToString(", ") { "$qualifiedType p$it" }
+            val pointerParameters = (0 until 16).joinToString(", ") { qualifiedType }
+            val sourceText = """
+                #line 1 "/fixture/source-tree/clang/lib/InlineTemplate/compact-signature.cpp"
+                namespace $outerNamespace { namespace $innerNamespace { struct $typeName { long value; }; } }
+                extern "C" long compact_signature($parameters);
+                using CompactSignaturePointer = long (*)($pointerParameters);
+                static CompactSignaturePointer compact_signature_reference = &compact_signature;
+            """.trimIndent() + "\n"
+            val objects = (0..1).map { index ->
+                val source = rowRoot.resolve("compact-signature-$index.cpp")
+                Files.writeString(source, sourceText, StandardCharsets.UTF_8)
+                val objectFile = rowRoot.resolve("compact-signature-$index.o")
+                runCommand(
+                    listOf(
+                        compiler.toString(), "-std=c++17", "-O0", "-g", "-gdwarf-5", "-fPIC",
+                        "-fdebug-prefix-map=$rowRoot=/fixture/source-tree/clang/lib/InlineTemplate",
+                        source.toString(), "-c", "-o", objectFile.toString(),
+                    ),
+                    rowRoot,
+                    "compact-signature-$index-compile.txt",
+                )
+                objectFile
+            }
+            val artifact = rowRoot.resolve("compact-signature.so")
+            runCommand(
+                listOf(compiler.toString(), "-shared", "-Wl,--build-id=none") +
+                    objects.map(Path::toString) + listOf("-o", artifact.toString()),
+                rowRoot,
+                "compact-signature-link.txt",
+            )
+            val scope = scopeForArtifact(originalScope, fixtureSha256(artifact), Files.size(artifact))
+            val inventoryPath = rowRoot.resolve("compact-signature-inventory.json")
+            FullTreeInventoryControl.generateAndPublish(artifact, scope, inventoryPath, maximumWorkers = 1)
+            val inventory = parseControlObject(inventoryPath)
+            val inventorySha256 = fixtureSha256(inventoryPath)
+            val shardId = inventory.controlArray("shards").single().jsonObject.controlString("id")
+            val cancellationScratch = privateDirectory(root.resolve("cancellation-scratch"))
+            val finalizationStages = mutableListOf<String>()
+            var serializedChecks = 0
+            val cancellation = assertFailsWith<FullTreeControlException> {
+                FullTreeSourceEntityIdentityProducer.scanShard(
+                    artifact,
+                    inventoryPath,
+                    scope,
+                    shardId,
+                    cancellationScratch,
+                    checkpoint = { stage ->
+                        finalizationStages += stage
+                        if (stage == "after serializing canonical source-entity output" && ++serializedChecks == 3) {
+                            throw FullTreeControlException("test cancellation during source-identity finalization")
+                        }
+                    },
+                )
+            }
+            assertTrue(cancellation.message.orEmpty().contains("test cancellation"))
+            assertEquals(3, serializedChecks, "cancellation should arrive after adjusted copies and final serialization")
+            assertTrue("while reconciling source-anchor collisions" in finalizationStages)
+            assertTrue("while sizing full-run collision evidence" in finalizationStages)
+            assertTrue("while sizing full-run collision-adjusted copies" in finalizationStages)
+            assertTrue("while applying full-run source-anchor collisions" in finalizationStages)
+            assertTrue("while serializing canonical source-entity output" in finalizationStages)
+
+            val scratch = privateDirectory(root.resolve("publisher-scratch"))
+            val outputParent = privateDirectory(root.resolve("published-output"))
+            val publication = FullTreeFunctionObservationV2RunPublisher.generateAndPublish(
+                richArtifact = artifact,
+                inventoryPath = inventoryPath,
+                scope = scope,
+                scratchParent = scratch,
+                outputRoot = outputParent.resolve("run"),
+                maximumWorkers = 1,
+            )
+            FullTreeFunctionObservationV2RunPublisher.loadAndValidate(
+                candidateRoot = publication.binding.root,
+                expectedIndexArtifactSha256 = publication.binding.indexArtifactSha256,
+                richArtifact = artifact,
+                inventoryPath = inventoryPath,
+                scope = scope,
+                scratchParent = scratch,
+            )
+            val facts = publication.outputs.flatMap { receipt ->
+                val bytes = Files.readAllBytes(publication.binding.root.resolve("outputs/${receipt.shardId}.json"))
+                val document = OracleJson.parseCanonical(bytes) as JsonObject
+                document.getValue("sourceEntities").jsonArray.map {
+                    FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
+                }
+            }.filter { it.semanticAnchorFields?.sourceName == "compact_signature" }
+            assertEquals(2, facts.size, "both physical declaration rows must be retained")
+            assertTrue(facts.all { it.identityObservability == FullTreeIdentityObservability.AMBIGUOUS })
+            assertEquals(1, facts.map { it.semanticAnchorCandidateId }.distinct().size)
+            assertTrue(facts.all { it.candidateCollisionSourceEntityIds.size == 2 })
+            facts.forEach { fact ->
+                val signature = fact.semanticAnchorFields?.signature.orEmpty()
+                assertEquals(16, signature.count { it.startsWith("parameter:") })
+                assertTrue(signature.joinToString("|").toByteArray(StandardCharsets.UTF_8).size > 8_192)
+                assertTrue(fact.edges.size <= MAXIMUM_IDENTITY_EDGES_PER_ENTITY)
+                assertTrue(
+                    fact.edges.none { it.kind == FullTreeSourceIdentityEdgeKind.TYPE && it.referenceForm == null },
+                    "typed signature formals should not retain duplicate structural TYPE edges",
+                )
+                assertTrue(fact.edges.count {
+                    it.kind == FullTreeSourceIdentityEdgeKind.TYPE && it.referenceForm != null
+                } >= 17, "direct formal and nonvoid return type references must remain present")
+            }
+        }
+
+    @Test
     fun `observation v2 run validator rejects a self-consistent forged template RVA link`() =
         inControlTemporaryDirectory { root ->
             val sourceFixture = Path.of(System.getProperty("user.dir"))
