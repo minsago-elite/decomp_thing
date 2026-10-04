@@ -55,6 +55,7 @@ class FullTreeSourceEntityIdentityProducerTest {
             assertTrue(clang != null, "DECOMP_REQUIRE_CLANG_TESTS=1 requires a Clang executable")
         }
         val compilers = listOfNotNull(gcc, clang)
+        val packedTemplateSemanticsByCompilerOptimization = mutableMapOf<String, List<Pair<String, List<String>>>>()
 
         compilers.forEach { compiler ->
             val compilerIdentity = runCommand(listOf(compiler.toString(), "--version"), evidence, "compiler-version.txt")
@@ -132,6 +133,22 @@ class FullTreeSourceEntityIdentityProducerTest {
                     declarationShapePresent = Regex("DW_AT_name.*declaration_only_inline").containsMatchIn(dwarfShape),
                     dwarfShape = dwarfShape,
                 )
+                val compilerFamily = if (compiler.toRealPath() == gcc.toRealPath()) "gcc" else "clang"
+                val packedTemplateRows = first.facts.asSequence()
+                    .filter { it.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE }
+                    .filter { it.semanticAnchorFields?.sourceName?.startsWith("packed_template<") == true }
+                    .mapNotNull { fact ->
+                        val candidate = fact.semanticAnchorCandidateId ?: return@mapNotNull null
+                        val arguments = fact.semanticAnchorFields?.templateActualArguments ?: return@mapNotNull null
+                        candidate to arguments
+                    }
+                    .distinct()
+                    .sortedWith(compareBy<Pair<String, List<String>>>({ it.first }, { it.second.joinToString("\u0000") }))
+                    .toList()
+                if (dwarfShape.contains("packed_template<int, int>")) {
+                    assertTrue(packedTemplateRows.isNotEmpty(), "packed template has no complete semantic candidate; $runDescription")
+                    packedTemplateSemanticsByCompilerOptimization["$compilerFamily-O$optimization"] = packedTemplateRows
+                }
                 if (optimization == 2) {
                     val nestedLeaves = first.facts.filter {
                         it.kind == FullTreeSourceEntityKind.INLINE_INSTANCE &&
@@ -215,6 +232,19 @@ class FullTreeSourceEntityIdentityProducerTest {
                     evidence.resolve("compiler-matrix.tsv"),
                     compilerRows.joinToString("\n", postfix = "\n"),
                     StandardCharsets.UTF_8,
+                )
+            }
+        }
+        if (clang != null) {
+            listOf(0, 2).forEach { optimization ->
+                val gccRows = packedTemplateSemanticsByCompilerOptimization["gcc-O$optimization"]
+                val clangRows = packedTemplateSemanticsByCompilerOptimization["clang-O$optimization"]
+                assertTrue(gccRows != null, "GCC packed-template facts missing at -O$optimization")
+                assertTrue(clangRows != null, "Clang packed-template facts missing at -O$optimization")
+                assertEquals(
+                    gccRows,
+                    clangRows,
+                    "packed-template semantic candidates and ordered actuals differ across GCC/Clang at -O$optimization",
                 )
             }
         }
@@ -386,14 +416,19 @@ class FullTreeSourceEntityIdentityProducerTest {
         assertEquals(packedTemplateShapePresent, packedTemplateInstances.isNotEmpty(), runDescription)
         if (packedTemplateShapePresent) {
             assertTrue(packedTemplateInstances.any {
-                it.semanticAnchorFields?.templateActualArguments?.size == 2
+                it.semanticAnchorFields?.templateActualArguments?.let { arguments ->
+                    arguments.size == 2 && arguments.none { argument -> argument.startsWith("pack[") }
+                } == true
             }, "variadic template actuals were not flattened from emitted pack DIEs; $runDescription")
             if (dwarfShape.contains("DW_TAG_GNU_template_parameter_pack")) {
                 assertTrue(packedTemplateInstances.any { fact ->
-                    fact.semanticAnchorFields?.templateActualArguments?.let { arguments ->
-                        arguments.size == 2 && arguments.all { it.startsWith("pack[") }
-                    } == true
-                }, "GNU template parameter pack paths were not retained; $runDescription")
+                    fact.edges.any { edge ->
+                        edge.kind == FullTreeSourceIdentityEdgeKind.TEMPLATE_ARGUMENT &&
+                            edge.rawReference == null &&
+                            edge.state == FullTreeSourceIdentityEdgeState.RESOLVED &&
+                            edge.target != null
+                    }
+                }, "GNU template parameter pack structure was not retained as typed edge evidence; $runDescription")
             }
             if (dwarfShape.contains("DW_TAG_GNU_formal_parameter_pack")) {
                 assertTrue(packedTemplateInstances.any { fact ->

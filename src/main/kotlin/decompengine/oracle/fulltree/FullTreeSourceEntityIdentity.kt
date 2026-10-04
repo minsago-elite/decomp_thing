@@ -371,7 +371,7 @@ internal class FullTreeSourceAnchorFields(
             mapOf(
                 "fields" to semanticFields,
                 "kind" to JsonPrimitive(kind.wireValue),
-                "version" to JsonPrimitive(5),
+                "version" to JsonPrimitive(6),
             ),
         )
         val bytes = OracleJson.canonicalBytes(preimage, sourceIdentityRowJsonLimits(MAXIMUM_SOURCE_IDENTITY_ROW_BYTES))

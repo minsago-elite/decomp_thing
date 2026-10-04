@@ -1163,7 +1163,11 @@ private class SourceEntityIdentityReader(
                         }
                         if (descriptor == null) reasons += "unknown-template-argument" else {
                             budget.charge(descriptor.toByteArray(StandardCharsets.UTF_8).size.toLong(), "template actual argument")
-                            args += packedFormal.packPath?.let { "pack[$it]:$descriptor" } ?: descriptor
+                            // Actual template arguments are an ordered semantic tuple. GNU's
+                            // wrapper-group path is artifact/compiler structure, retained by the
+                            // typed TEMPLATE_ARGUMENT structural edges above rather than hashed
+                            // into the cross-compiler candidate.
+                            args += descriptor
                         }
                     }
                     actualArguments = args.takeIf { it.size == formals.size }

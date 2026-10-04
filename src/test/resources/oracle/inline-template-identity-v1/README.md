@@ -35,8 +35,10 @@ candidates by hashing validated typed actuals with the base name only when the r
 template-id is balanced and its top-level argument count matches those typed DIE facts. Malformed,
 unbalanced, or mismatched suffixes remain unknown, and the original `DW_AT_name` is retained in the
 census. `packed_template` checks that GNU formal-parameter pack
-wrappers are flattened to the same ordered signature shape as direct parameters while template
-actual pack paths remain evidence. `callback_signature` exercises bounded return/parameter and
+wrappers are flattened to the same ordered signature shape as direct parameters. Ordered typed
+template actuals omit compiler-specific pack paths from semantic candidates; resolved
+`TEMPLATE_ARGUMENT` structural edges retain GNU pack wrappers as artifact-bound evidence.
+`callback_signature` exercises bounded return/parameter and
 variadic descriptions of `DW_TAG_subroutine_type`. Same-line `Payload` types nested in distinct
 unions ensure union lexical scopes remain part of typed source descriptors and instance candidates.
 
