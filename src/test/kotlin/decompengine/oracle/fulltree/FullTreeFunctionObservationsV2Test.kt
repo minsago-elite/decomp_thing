@@ -652,11 +652,11 @@ class FullTreeFunctionObservationsV2Test {
             val inlineRow = valid.getValue("sourceEntities").jsonArray[inlineIndex].jsonObject
             val nestedOwnerA = physical(firstUnit, "0x300")
             val nestedOwnerB = physical(secondUnit, "0x400")
-            val inlinePhysical = FullTreeSourceEntityFact.fromCanonicalJson(inlineRow).physicalDie
+            val inlineFactPhysical = FullTreeSourceEntityFact.fromCanonicalJson(inlineRow).physicalDie
             val nestedOwnerPath = listOf(
                 FullTreeSourceIdentityEdge(
                     kind = FullTreeSourceIdentityEdgeKind.INLINE_OWNER,
-                    source = inlinePhysical,
+                    source = inlineFactPhysical,
                     target = nestedOwnerA,
                     referenceForm = null,
                     rawReference = null,

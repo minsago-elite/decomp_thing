@@ -999,4 +999,8 @@ class FullTreeSourceEntityIdentityProducerTest {
             stream.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
         }
     }
+
+    private fun privateDirectory(path: Path): Path = Files.createDirectory(path).also {
+        Files.setPosixFilePermissions(it, PosixFilePermissions.fromString("rwx------"))
+    }
 }
