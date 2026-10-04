@@ -1183,7 +1183,7 @@ class FullTreeFunctionObservationsV2Test {
                     repointedDocument, scope, inventory, inventorySha256, firstShard, repointedReconciliation,
                 )
             }
-            assertTrue(repointedFailure.message.orEmpty().contains("reference target differs from its raw offset"))
+            assertTrue(repointedFailure.message.orEmpty().contains("reference target differs from its raw absolute offset"))
 
             val parsedInlineFact = FullTreeSourceEntityFact.fromCanonicalJson(inlineRow)
             val sourceCuOffset = parsedInlineFact.physicalDie.compilationUnitOffset.removePrefix("0x").toULong(16)

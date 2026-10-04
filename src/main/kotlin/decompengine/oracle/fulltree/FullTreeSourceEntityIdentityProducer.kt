@@ -390,6 +390,7 @@ internal object FullTreeSourceEntityIdentityProducer {
         checkpoint: ((String) -> Unit)? = null,
     ): List<FullTreeSourceEntityFact> {
         if (report.byCandidateId.isEmpty()) return ordered
+        var copiedCollisionIds = 0L
         return ordered.mapIndexed { index, fact ->
             if (index.toLong() % SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL == 0L) {
                 checkpoint?.invoke("while applying full-run source-anchor collisions")
@@ -401,8 +402,27 @@ internal object FullTreeSourceEntityIdentityProducer {
                 fields?.templatePatternAnchorCandidateId,
             ) + fields?.inlinePathAnchorCandidateIds.orEmpty()
             val directCollisionIds = fact.semanticAnchorCandidateId?.let(report.byCandidateId::get).orEmpty()
-            val relatedCollisionIds = relatedCandidateIds.flatMap { report.byCandidateId[it].orEmpty() }
-            val collisionIds = (directCollisionIds + relatedCollisionIds).distinct().sorted()
+            val collisionIdSet = HashSet<String>()
+            fun retainCollisionIds(values: Iterable<String>) {
+                values.forEach { sourceEntityId ->
+                    if (copiedCollisionIds++ % SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL == 0L) {
+                        checkpoint?.invoke("while copying full-run collision IDs onto source entities")
+                    }
+                    collisionIdSet += sourceEntityId
+                }
+            }
+            retainCollisionIds(directCollisionIds)
+            relatedCandidateIds.forEach { candidateId ->
+                retainCollisionIds(report.byCandidateId[candidateId].orEmpty())
+            }
+            val collisionIds = ArrayList(collisionIdSet)
+            var comparisons = 0L
+            collisionIds.sortWith { left, right ->
+                if (comparisons++ % SOURCE_IDENTITY_SORT_CHECKPOINT_INTERVAL == 0L) {
+                    checkpoint?.invoke("while sorting full-run collision IDs")
+                }
+                left.compareTo(right)
+            }
             if (collisionIds.isEmpty()) fact else fact.copy(
                 identityObservability = FullTreeIdentityObservability.AMBIGUOUS,
                 candidateCollisionSourceEntityIds = collisionIds,
@@ -766,13 +786,21 @@ private class SourceIdentityAnchorClaims(
 
     fun collisionReport(checkpoint: ((String) -> Unit)? = null): SourceIdentityAnchorCollisionReport {
         val collisions = HashMap<String, List<String>>()
+        var copiedCollisionIds = 0L
         claims.entries.forEachIndexed { index, (candidateId, sourceEntityIds) ->
             if (index.toLong() % SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL == 0L) {
                 checkpoint?.invoke("while reconciling source-anchor collisions")
             }
             if (sourceEntityIds.size > 1) {
                 budget.charge(sourceEntityIds.size.toLong() * 16L + 64L, "source-anchor collision report")
-                collisions[candidateId] = sourceEntityIds.toList()
+                val retainedIds = ArrayList<String>(sourceEntityIds.size)
+                sourceEntityIds.forEach { sourceEntityId ->
+                    if (copiedCollisionIds++ % SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL == 0L) {
+                        checkpoint?.invoke("while copying shard collision IDs")
+                    }
+                    retainedIds += sourceEntityId
+                }
+                collisions[candidateId] = retainedIds
             }
         }
         checkpoint?.invoke("after reconciling source-anchor collisions")
