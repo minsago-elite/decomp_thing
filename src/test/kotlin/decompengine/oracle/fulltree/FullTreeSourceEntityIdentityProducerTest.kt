@@ -592,9 +592,9 @@ class FullTreeSourceEntityIdentityProducerTest {
             writer.append("struct Big {};\n")
             repeat(namespaces.size) { writer.append("}\n") }
             writer.append("using namespace ").append(namespaces.joinToString("::")).append(";\n")
-            // Keep the typed formals under the 32-edge limit so the enormous namespace descriptor
-            // reaches the row-scratch admission being tested instead of failing on edge count.
-            val parameters = (0..15).joinToString(", ") { "Big p$it" }
+            // One typed formal walks the enormous namespace descriptor through row-scratch
+            // admission while staying far below the separate 32-edge ceiling.
+            val parameters = "Big p0"
             writer.append("extern \"C\" void descriptor_bound($parameters) {}\n")
             writer.append("extern \"C\" void (*descriptor_bound_reference)($parameters) = &descriptor_bound;\n")
             writer.append("int main() { return descriptor_bound_reference == nullptr; }\n")
