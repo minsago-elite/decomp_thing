@@ -464,16 +464,24 @@ internal object FullTreeFunctionObservationsV2 {
                         v2Fail("resolved typed reference omits its form or raw offset")
                     }
                 }
+                if (edge.referenceForm != null && edge.rawReference != null) {
+                    val form = edge.referenceForm.removePrefix("0x").toULongOrNull(16)
+                        ?: v2Fail("typed reference form is malformed")
+                    val maximumRawValue = fullTreeDwarfReferenceFormMaximumRawValue(form)
+                    if (maximumRawValue != null) {
+                        val raw = edge.rawReference.removePrefix("0x").toULongOrNull(16)
+                            ?: v2Fail("typed reference raw value exceeds its fixed-width DWARF form")
+                        if (raw > maximumRawValue) {
+                            v2Fail("typed reference raw value exceeds its fixed-width DWARF form")
+                        }
+                    }
+                }
                 if (edge.state == FullTreeSourceIdentityEdgeState.RESOLVED && edge.referenceForm != null) {
                     val target = edge.target ?: v2Fail("resolved typed reference has no target locator")
                     val form = edge.referenceForm?.removePrefix("0x")?.toULongOrNull(16)
                         ?: v2Fail("typed reference form is malformed")
                     val raw = edge.rawReference?.removePrefix("0x")?.toULongOrNull(16)
                         ?: v2Fail("typed reference raw value is malformed")
-                    val maximumRawValue = fullTreeDwarfReferenceFormMaximumRawValue(form)
-                    if (maximumRawValue != null && raw > maximumRawValue) {
-                        v2Fail("typed reference raw value exceeds its fixed-width DWARF form")
-                    }
                     val sourceCu = edge.source.compilationUnitOffset.removePrefix("0x").toULong(16)
                     val targetOffset = target.dieOffset.removePrefix("0x").toULong(16)
                     when (form) {

@@ -1298,6 +1298,46 @@ class FullTreeFunctionObservationsV2Test {
                 shard,
                 validReconciliation,
             )
+            val validFact = FullTreeSourceEntityFact.fromCanonicalJson(
+                valid.getValue("sourceEntities").jsonArray.single().jsonObject,
+            )
+            for ((state, observability) in listOf(
+                FullTreeSourceIdentityEdgeState.MISSING_TARGET to FullTreeIdentityObservability.UNOBSERVABLE,
+                FullTreeSourceIdentityEdgeState.CYCLIC to FullTreeIdentityObservability.AMBIGUOUS,
+            )) {
+                val unresolvedEdge = FullTreeSourceIdentityEdge(
+                    kind = FullTreeSourceIdentityEdgeKind.SPECIFICATION,
+                    source = validFact.physicalDie,
+                    target = null,
+                    referenceForm = "0x${FULL_TREE_DW_FORM_REF1.toString(16)}",
+                    rawReference = "0x100",
+                    state = state,
+                    reasonCode = when (state) {
+                        FullTreeSourceIdentityEdgeState.MISSING_TARGET ->
+                            "target-not-retained-or-not-a-die-boundary"
+                        FullTreeSourceIdentityEdgeState.CYCLIC -> "reference-cycle"
+                        else -> error("unexpected unresolved edge state")
+                    },
+                )
+                val forgedFact = validFact.copy(identityObservability = observability, edges = listOf(unresolvedEdge))
+                val forgedDocument = FullTreeFunctionObservationsV2.composeEnvelope(
+                    v1ProjectionForCompose(valid),
+                    listOf(forgedFact),
+                    validReconciliation,
+                    8L * 1024L * 1024L,
+                )
+                val failure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                    FullTreeFunctionObservationsV2.validateEnvelope(
+                        forgedDocument,
+                        scope,
+                        inventory,
+                        inventorySha,
+                        shard,
+                        validReconciliation,
+                    )
+                }
+                assertTrue(failure.message.orEmpty().contains("fixed-width DWARF form"))
+            }
 
             val (missingRevision, missingRevisionReconciliation) = boundDocument(null)
             val missingRevisionFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
@@ -1356,7 +1396,6 @@ class FullTreeFunctionObservationsV2Test {
             assertTrue(incompleteRevisionFailure.message.orEmpty().contains("revision"))
 
             val (forged, forgedReconciliation) = boundDocument("forged-revision")
-            val validFact = FullTreeSourceEntityFact.fromCanonicalJson(valid.getValue("sourceEntities").jsonArray.single().jsonObject)
             val forgedFact = FullTreeSourceEntityFact.fromCanonicalJson(forged.getValue("sourceEntities").jsonArray.single().jsonObject)
             assertNotEquals(validFact.semanticAnchorCandidateId, forgedFact.semanticAnchorCandidateId)
             assertFailsWith<FullTreeFunctionObservationV2Exception> {
@@ -1720,7 +1759,7 @@ class FullTreeFunctionObservationsV2Test {
             )
             val linkedClaims = FullTreeFunctionObservationV2AnchorIndex(2L, 4096L)
             linkedClaims.accept(requireNotNull(linked.semanticAnchorCandidateId), linked.sourceEntityId)
-            linkedClaims.acceptSourceEntityPopulation(firstShard.identifier, listOf(linked))
+            linkedClaims.acceptSourceEntityPopulation(shard.identifier, listOf(linked))
             val linkedReconciliation = linkedClaims.reconciliation()
             val linkedDocument = FullTreeFunctionObservationsV2.composeEnvelope(
                 v1ProjectionForCompose(document), listOf(linked), linkedReconciliation, 8L * 1024L * 1024L,
