@@ -12,6 +12,7 @@ internal class FullTreeFunctionObservationAccumulatorV2(
     private val functions = FullTreeFunctionObservationAccumulator(shard, limits.observations)
     private val sourceFacts = ArrayList<FullTreeSourceEntityFact>()
     private val sourceIds = HashSet<String>()
+    private val physicalDies = HashSet<FullTreeSourcePhysicalDie>()
     private var sourceCanonicalBytes = 0L
     private var sourceRetainedBytes = 0L
     private var acceptedSourceCount = 0L
@@ -37,6 +38,7 @@ internal class FullTreeFunctionObservationAccumulatorV2(
         }
         sourceEntitiesStarted = true
         if (fact.sourceEntityId in sourceIds) v2AccumulatorFail("duplicate sourceEntityId")
+        if (fact.physicalDie in physicalDies) v2AccumulatorFail("duplicate physical DIE locator")
         val row = try {
             OracleJson.canonicalBytes(fact.canonicalJson(), sourceIdentityRowJsonLimits(limits.maximumOutputBytes))
         } catch (failure: Exception) {
@@ -61,6 +63,7 @@ internal class FullTreeFunctionObservationAccumulatorV2(
         sourceRetainedBytes = totalRetained
         acceptedSourceCount = nextCount
         sourceIds += fact.sourceEntityId
+        physicalDies += fact.physicalDie
         sourceFacts += fact
     }
 

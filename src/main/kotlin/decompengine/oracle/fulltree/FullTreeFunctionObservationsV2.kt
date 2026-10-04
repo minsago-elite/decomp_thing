@@ -63,6 +63,9 @@ internal object FullTreeFunctionObservationsV2 {
         if (facts.map { it.sourceEntityId }.toSet().size != facts.size) {
             v2Fail("observation-v2 sourceEntityIds are not unique")
         }
+        if (facts.map { it.physicalDie }.toSet().size != facts.size) {
+            v2Fail("observation-v2 physical DIE locators are not unique")
+        }
         val baseCounts = v1.v2Object("counts")
         val counts = JsonObject(
             baseCounts.toMutableMap().apply {
@@ -145,6 +148,8 @@ internal object FullTreeFunctionObservationsV2 {
         }
         val ids = HashSet<String>()
         facts.forEach { if (!ids.add(it.sourceEntityId)) v2Fail("duplicate sourceEntityId") }
+        val physicalDies = HashSet<FullTreeSourcePhysicalDie>()
+        facts.forEach { if (!physicalDies.add(it.physicalDie)) v2Fail("duplicate physical DIE locator") }
         if (facts != FullTreeSourceEntityFact.deterministicOrder(facts)) {
             v2Fail("observation-v2 source entities are not canonically ordered")
         }
@@ -389,7 +394,7 @@ internal class FullTreeFunctionObservationV2AnchorIndex(
     }
 
     fun accept(candidateId: String, physicalClaimId: String) {
-        if (!candidateId.matches(Regex("[0-9a-f]{64}")) || !physicalClaimId.matches(Regex("[0-9a-f]{64}"))) {
+        if (!V2_SHA256.matches(candidateId) || !V2_SHA256.matches(physicalClaimId)) {
             v2Fail("full-run anchor claim is malformed")
         }
         val prior = claims[candidateId]
@@ -451,6 +456,8 @@ internal class FullTreeFunctionObservationV2AnchorIndex(
         )
     }
 }
+
+private val V2_SHA256 = Regex("[0-9a-f]{64}")
 
 internal data class FullTreeFunctionObservationV2IdentityReconciliation(
     val populationSha256: String,

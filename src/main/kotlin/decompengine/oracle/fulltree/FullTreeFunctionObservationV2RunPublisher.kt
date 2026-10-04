@@ -38,6 +38,13 @@ internal data class FullTreeFunctionObservationV2RetainedBudget(
     val sourceFactsBytes: Long,
 )
 
+internal data class FullTreeFunctionObservationV2ShardScratchBudget(
+    val dwarfScratchBytes: Long,
+    val outputBytes: Long,
+    val databaseBytes: Long,
+    val additionalScratchBytes: Long,
+)
+
 internal fun fullTreeFunctionObservationV2RetainedBudget(
     maximumRunRetainedBytes: Long,
     maximumResidentBytes: Long,
@@ -47,6 +54,37 @@ internal fun fullTreeFunctionObservationV2RetainedBudget(
     return FullTreeFunctionObservationV2RetainedBudget(
         anchorIndexBytes = anchorIndexBytes,
         sourceFactsBytes = minOf(maximumRunRetainedBytes - anchorIndexBytes, maximumResidentBytes / 4L),
+    )
+}
+
+internal fun fullTreeFunctionObservationV2ShardScratchBudget(
+    maximumScratchBytes: Long,
+    preparedOutputBytes: Long,
+    configuredDwarfScratchBytes: Long,
+    configuredOutputBytes: Long,
+    configuredDatabaseBytes: Long,
+    sqlitePageBytes: Long = FULL_TREE_FUNCTION_OBSERVATION_SQLITE_PAGE_BYTES,
+): FullTreeFunctionObservationV2ShardScratchBudget {
+    require(
+        maximumScratchBytes > 0L && preparedOutputBytes >= 0L && configuredDwarfScratchBytes > 0L &&
+            configuredOutputBytes > 0L && configuredDatabaseBytes > 0L && sqlitePageBytes > 0L,
+    )
+    val outputBytes = minOf(configuredOutputBytes, FullTreeFunctionObservationsV2.MAXIMUM_CANONICAL_BYTES)
+    val dwarfAllowance = maximumScratchBytes - preparedOutputBytes - outputBytes - sqlitePageBytes
+    if (dwarfAllowance <= 0L) {
+        v2RunFail("prepared observation-v2 outputs leave no decompression scratch and SQLite page budget")
+    }
+    val dwarfScratchBytes = minOf(configuredDwarfScratchBytes, dwarfAllowance)
+    val databaseAllowance = maximumScratchBytes - preparedOutputBytes - dwarfScratchBytes - outputBytes
+    val databaseBytes = minOf(configuredDatabaseBytes, databaseAllowance)
+    if (databaseBytes < sqlitePageBytes) {
+        v2RunFail("observation-v2 concurrent scratch leaves no SQLite database page")
+    }
+    return FullTreeFunctionObservationV2ShardScratchBudget(
+        dwarfScratchBytes = dwarfScratchBytes,
+        outputBytes = outputBytes,
+        databaseBytes = databaseBytes,
+        additionalScratchBytes = Math.addExact(preparedOutputBytes, dwarfScratchBytes),
     )
 }
 
@@ -160,6 +198,12 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                 var sourceFactCanonicalBytes = 0L
                 var modeledRetainedBytes = 0L
                 val retainedAdmission = retainedBudget.sourceFactsBytes
+                val sourcePassControlLimits = limits.shard.control.copy(
+                    maximumDwarfScratchBytes = minOf(
+                        limits.shard.control.maximumDwarfScratchBytes,
+                        limits.maximumScratchBytes,
+                    ),
+                )
                 shards.forEach { shard ->
                     deadline.checkpoint("before extracting observation-v2 source entities")
                     val shardDeadline = shardDeadlines.getValue(shard.identifier)
@@ -171,7 +215,7 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                         scope = scope,
                         shardId = shard.identifier,
                         scratchParent = scratchParent,
-                        controlLimits = limits.shard.control,
+                        controlLimits = sourcePassControlLimits,
                         producerLimits = limits.shard.producer,
                         checkpoint = shardCheckpoint,
                         anchorClaim = anchorIndex::accept,
@@ -257,12 +301,21 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                             shard,
                         )
                         val effective = deriveAuthenticatedLimits(scope, inputs, limits.shard)
+                        val scratchBudget = fullTreeFunctionObservationV2ShardScratchBudget(
+                            maximumScratchBytes = limits.maximumScratchBytes,
+                            preparedOutputBytes = preparedBytes,
+                            configuredDwarfScratchBytes = limits.shard.control.maximumDwarfScratchBytes,
+                            configuredOutputBytes = effective.maximumOutputBytes,
+                            configuredDatabaseBytes = effective.maximumDatabaseBytes,
+                        )
                         val perShardLimits = authenticatedV2SqliteLimits(
-                            scope,
                             limits,
                             effective,
                             shardCheckpoint,
-                            preparedBytes,
+                            scratchBudget,
+                        )
+                        val producerControlLimits = limits.shard.control.copy(
+                            maximumDwarfScratchBytes = scratchBudget.dwarfScratchBytes,
                         )
                         val shardFile = prepared.output(shard.identifier)
                         val streamResult: FullTreeFunctionObservationV2StreamResult
@@ -277,7 +330,7 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                                     scope = scope,
                                     inputs = inputs,
                                     scratchParent = scratchParent,
-                                    controlLimits = limits.shard.control,
+                                    controlLimits = producerControlLimits,
                                     producerLimits = effective.producer,
                                     sink = sink,
                                     sourceFacts = sourceFactsByShard.getValue(shard.identifier),
@@ -309,9 +362,12 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                         ) {
                             v2RunFail("observation-v2 run exceeds its authenticated whole-run bounds")
                         }
-                        val scratchUse = Math.addExact(preparedBytes, streamResult.databaseHighWaterBytes)
+                        val scratchUse = Math.addExact(
+                            Math.addExact(preparedBytes, streamResult.databaseHighWaterBytes),
+                            scratchBudget.dwarfScratchBytes,
+                        )
                         if (scratchUse > limits.maximumScratchBytes) {
-                            v2RunFail("observation-v2 prepared outputs and database exceed the scratch bound")
+                            v2RunFail("observation-v2 outputs, database, and decompression scratch exceed the scratch bound")
                         }
                         val receipt = FullTreeFunctionObservationV2ShardReceipt(
                             shardId = shard.identifier,
@@ -415,6 +471,7 @@ internal object FullTreeFunctionObservationV2RunPublisher {
         scratchParent: Path,
         limits: FullTreeFunctionObservationV2RunLimits = FullTreeFunctionObservationV2RunLimits(),
     ): FullTreeFunctionObservationV2RunPublication = translateV2RunFailure {
+        requireStableDirectory(scratchParent, "observation-v2 rederivation scratch parent")
         val candidate = BoundedShardRunVerifier.verify(candidateRoot, expectedIndexArtifactSha256, limits.run)
         val workers = candidate.maximumWorkers
         val expected = V2PreparedWorkspace.create(scratchParent)
@@ -453,28 +510,20 @@ internal object FullTreeFunctionObservationV2RunPublisher {
 }
 
 private fun authenticatedV2SqliteLimits(
-    scope: AuthenticatedFullTreeScope,
     limits: FullTreeFunctionObservationV2RunLimits,
     effective: AuthenticatedFunctionObservationLimits,
     checkpoint: (String) -> Unit,
-    preparedBytes: Long,
+    scratchBudget: FullTreeFunctionObservationV2ShardScratchBudget,
 ): FullTreeFunctionObservationSqliteLimits {
-    val databaseScratchBytes = limits.maximumScratchBytes - preparedBytes
-    if (databaseScratchBytes < FULL_TREE_FUNCTION_OBSERVATION_SQLITE_PAGE_BYTES) {
-        v2RunFail("prepared observation-v2 outputs leave no SQLite scratch page within the aggregate bound")
-    }
     return FullTreeFunctionObservationSqliteLimits(
-        maximumDatabaseBytes = minOf(effective.maximumDatabaseBytes, databaseScratchBytes),
-        maximumOutputBytes = minOf(
-            effective.maximumOutputBytes,
-            FullTreeFunctionObservationsV2.MAXIMUM_CANONICAL_BYTES,
-        ),
+        maximumDatabaseBytes = minOf(effective.maximumDatabaseBytes, scratchBudget.databaseBytes),
+        maximumOutputBytes = scratchBudget.outputBytes,
         observations = effective.producer.accumulatorLimits,
         maximumCacheBytes = limits.shard.maximumSqliteCacheBytes,
         databaseCheckpointRows = limits.shard.databaseCheckpointRows,
         checkpoint = FullTreeFunctionObservationSqliteCheckpoint(checkpoint::invoke),
         maximumScratchBytes = limits.maximumScratchBytes,
-        additionalScratchBytes = preparedBytes,
+        additionalScratchBytes = scratchBudget.additionalScratchBytes,
     )
 }
 

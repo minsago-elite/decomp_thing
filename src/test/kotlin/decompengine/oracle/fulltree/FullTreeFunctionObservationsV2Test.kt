@@ -5,8 +5,10 @@ import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.OracleSchemaException
 import decompengine.oracle.core.OracleSchemas
 import java.io.ByteArrayOutputStream
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.attribute.PosixFilePermissions
+import java.security.MessageDigest
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -23,6 +25,33 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 class FullTreeFunctionObservationsV2Test {
+    @Test
+    fun `v2 concurrent scratch budget accounts for prepared outputs sqlite and dwarf decompression`() {
+        val budget = fullTreeFunctionObservationV2ShardScratchBudget(
+            maximumScratchBytes = 1_000L,
+            preparedOutputBytes = 100L,
+            configuredDwarfScratchBytes = 800L,
+            configuredOutputBytes = 300L,
+            configuredDatabaseBytes = 500L,
+            sqlitePageBytes = 64L,
+        )
+        assertEquals(536L, budget.dwarfScratchBytes)
+        assertEquals(300L, budget.outputBytes)
+        assertEquals(64L, budget.databaseBytes)
+        assertEquals(636L, budget.additionalScratchBytes)
+        assertEquals(1_000L, budget.additionalScratchBytes + budget.databaseBytes + budget.outputBytes)
+        assertFailsWith<FullTreeFunctionObservationV2RunException> {
+            fullTreeFunctionObservationV2ShardScratchBudget(
+                maximumScratchBytes = 463L,
+                preparedOutputBytes = 100L,
+                configuredDwarfScratchBytes = 800L,
+                configuredOutputBytes = 300L,
+                configuredDatabaseBytes = 500L,
+                sqlitePageBytes = 64L,
+            )
+        }
+    }
+
     @Test
     fun `v2 schema policy digest is pinned and compact fixture output stays canonical`() {
         assertEquals("c068ed200c8493acbe830ba4e4d8390e8a30499b3d866c43646ff802ff645d89", OracleSchemas.identity(
@@ -813,6 +842,73 @@ class FullTreeFunctionObservationsV2Test {
             )
             assertEquals(first.binding.runSha256, rederived.binding.runSha256)
             assertEquals(first.outputs, rederived.outputs)
+
+            val receipt = first.outputs.first { it.sourceEntities > 0L }
+            val shard = firstInput.getValue(receipt.shardId)
+            val document = OracleJson.parseCanonical(
+                Files.readAllBytes(firstRoot.resolve("outputs/${receipt.shardId}.json")),
+            ) as JsonObject
+            val originalRows = document.getValue("sourceEntities").jsonArray.map {
+                FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
+            }
+            val source = originalRows.first { it.semanticAnchorFields != null }
+            val alternateKind = if (source.kind == FullTreeSourceEntityKind.NO_RANGE_DEFINITION) {
+                FullTreeSourceEntityKind.DECLARATION_ONLY
+            } else {
+                FullTreeSourceEntityKind.NO_RANGE_DEFINITION
+            }
+            val alternate = source.copy(
+                sourceEntityId = source.physicalDie.sourceEntityId(alternateKind),
+                kind = alternateKind,
+                denominatorDisposition = FullTreeDenominatorDisposition.NON_SCOREABLE,
+                semanticAnchorCandidateId = source.semanticAnchorFields?.candidateId(
+                    requireNotNull(alternateKind.anchorKind()),
+                ),
+            )
+            assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                FullTreeFunctionObservationsV2.composeEnvelope(
+                    v1ProjectionForCompose(document),
+                    listOf(source, alternate),
+                    first.reconciliation,
+                    8L * 1024L * 1024L,
+                )
+            }
+            val duplicatedRows = originalRows + alternate
+            val duplicatedCounts = JsonObject(document.controlObject("counts").toMutableMap().apply {
+                put("sourceEntities", JsonPrimitive(duplicatedRows.size))
+                put("sourceEntitiesByKind", sourceKindCounts(duplicatedRows))
+                put("sourceEntitiesByObservability", sourceObservabilityCounts(duplicatedRows))
+                put("sourceEntitiesByDenominatorDisposition", sourceDispositionCounts(duplicatedRows))
+            })
+            val duplicatedDocument = JsonObject(document.toMutableMap().apply {
+                put("sourceEntities", JsonArray(duplicatedRows.map(FullTreeSourceEntityFact::canonicalJson)))
+                put("counts", duplicatedCounts)
+            })
+            val duplicateFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                FullTreeFunctionObservationsV2.validateEnvelope(
+                    duplicatedDocument,
+                    scope,
+                    inventory,
+                    inventorySha,
+                    shard,
+                    first.reconciliation,
+                )
+            }
+            assertTrue(duplicateFailure.message.orEmpty().contains("duplicate physical DIE locator"))
+
+            val unsafeScratch = Files.createDirectory(root.resolve("unsafe-scratch"))
+            Files.setPosixFilePermissions(unsafeScratch, PosixFilePermissions.fromString("rwxrwxrwx"))
+            assertFailsWith<FullTreeFunctionObservationV2RunException> {
+                FullTreeFunctionObservationV2RunPublisher.loadAndValidate(
+                    candidateRoot = firstRoot,
+                    expectedIndexArtifactSha256 = first.binding.indexArtifactSha256,
+                    richArtifact = fixture.richArtifact,
+                    inventoryPath = fixture.inventory,
+                    scope = scope,
+                    scratchParent = unsafeScratch,
+                )
+            }
+            assertTrue(Files.list(unsafeScratch).use { paths -> paths.findAny().isEmpty })
             assertTrue(Files.list(scratch).use { paths -> paths.findAny().isEmpty })
         }
 
@@ -858,6 +954,41 @@ class FullTreeFunctionObservationsV2Test {
             val accumulator = FullTreeFunctionObservationAccumulatorV2(shard)
             accumulator.acceptSourceEntity(row)
             assertFailsWith<FullTreeFunctionObservationV2Exception> { accumulator.acceptSourceEntity(row) }
+            val alternateKind = FullTreeSourceEntityKind.NO_RANGE_DEFINITION
+            val sameDieOtherKind = row.copy(
+                sourceEntityId = physical.sourceEntityId(alternateKind),
+                kind = alternateKind,
+                denominatorDisposition = FullTreeDenominatorDisposition.NON_SCOREABLE,
+                semanticAnchorCandidateId = fields.candidateId(requireNotNull(alternateKind.anchorKind())),
+            )
+            assertNotEquals(row.sourceEntityId, sameDieOtherKind.sourceEntityId)
+            assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                accumulator.acceptSourceEntity(sameDieOtherKind)
+            }
+
+            val sqliteScratch = privateDirectory(root.resolve("sqlite-scratch"))
+            FullTreeFunctionObservationSqlite.openV2(
+                sqliteScratch,
+                shard,
+                FullTreeFunctionObservationSqliteLimits(
+                    maximumDatabaseBytes = 4L * 1024L * 1024L,
+                    maximumOutputBytes = 8L * 1024L * 1024L,
+                    observations = FullTreeFunctionObservationAccumulatorLimits(
+                        maximumEntities = 100,
+                        maximumEmittedRvas = 100,
+                        maximumNonEmittedGroups = 100,
+                        maximumRetainedBytes = 8L * 1024L * 1024L,
+                    ),
+                    maximumCacheBytes = 64 * 1024,
+                    databaseCheckpointRows = 2,
+                    checkpoint = FullTreeFunctionObservationSqliteCheckpoint {},
+                ),
+            ).use { sink ->
+                sink.acceptSourceEntity(row)
+                assertFailsWith<FullTreeFunctionObservationSqliteException> {
+                    sink.acceptSourceEntity(sameDieOtherKind)
+                }
+            }
 
             fun mutatedRow(vararg changes: Pair<String, kotlinx.serialization.json.JsonElement>) = JsonObject(
                 row.canonicalJson().toMutableMap().apply { changes.forEach { (key, value) -> put(key, value) } },
@@ -904,6 +1035,90 @@ class FullTreeFunctionObservationsV2Test {
             })
             assertFailsWith<IllegalArgumentException> {
                 FullTreeSourceEntityFact.fromCanonicalJson(mutatedRow("edges" to JsonArray(listOf(malformedEdge))))
+            }
+
+            val inlineFields = FullTreeSourceAnchorFields(
+                sourcePath = "source/caller.cpp",
+                declarationFileIndex = 1L,
+                declarationLine = 11L,
+                declarationColumn = 4L,
+                language = 33L,
+                lexicalContext = listOf("caller"),
+                sourceName = "callee",
+                signature = listOf("void ()"),
+                inlineCalleeAnchorCandidateId = "a".repeat(64),
+                inlineOwnerAnchorCandidateId = "b".repeat(64),
+                inlineCallFile = "source/caller.cpp",
+                inlineCallLine = 12L,
+                inlineCallColumn = 5L,
+                inlinePathAnchorCandidateIds = emptyList(),
+            )
+            assertFailsWith<IllegalArgumentException> {
+                FullTreeSourceAnchorFields(
+                    sourcePath = "source/caller.cpp",
+                    declarationFileIndex = 1L,
+                    declarationLine = 11L,
+                    declarationColumn = 4L,
+                    language = 33L,
+                    lexicalContext = listOf("caller"),
+                    sourceName = "callee",
+                    signature = listOf("void ()"),
+                    inlineCalleeAnchorCandidateId = "a".repeat(64),
+                    inlineOwnerAnchorCandidateId = "b".repeat(64),
+                    inlineCallFile = "/outside.cpp",
+                    inlineCallLine = 12L,
+                    inlineCallColumn = 5L,
+                    inlinePathAnchorCandidateIds = emptyList(),
+                )
+            }
+            assertFailsWith<IllegalArgumentException> {
+                FullTreeSourceAnchorFields(
+                    sourcePath = "source/caller.cpp",
+                    declarationFileIndex = 1L,
+                    declarationLine = 11L,
+                    declarationColumn = 4L,
+                    language = 33L,
+                    lexicalContext = listOf("caller"),
+                    sourceName = "callee",
+                    signature = listOf("void ()"),
+                    inlineCalleeAnchorCandidateId = "a".repeat(64),
+                    inlineOwnerAnchorCandidateId = "b".repeat(64),
+                    inlineCallFile = "../outside.cpp",
+                    inlineCallLine = 12L,
+                    inlineCallColumn = 5L,
+                    inlinePathAnchorCandidateIds = emptyList(),
+                )
+            }
+            val inlineRow = fact(
+                physical,
+                FullTreeSourceEntityKind.INLINE_INSTANCE,
+                FullTreeIdentityObservability.OBSERVABLE,
+                FullTreeDenominatorDisposition.NON_SCOREABLE,
+                inlineFields,
+            )
+            val forgedInlineFields = JsonObject(inlineFields.canonicalJson().toMutableMap().apply {
+                put("inlineCallFile", JsonPrimitive("../outside.cpp"))
+            })
+            val forgedAnchorPreimage = JsonObject(
+                mapOf(
+                    "fields" to JsonObject(forgedInlineFields.toMutableMap().apply {
+                        remove("declarationFileIndex")
+                        remove("declarationColumn")
+                    }),
+                    "kind" to JsonPrimitive(FullTreeSourceAnchorKind.INLINE_INSTANCE.wireValue),
+                    "version" to JsonPrimitive(6),
+                ),
+            )
+            val forgedDigest = MessageDigest.getInstance("SHA-256").apply {
+                update("decomp-thing:full-tree-source-anchor-v1\u0000".toByteArray(StandardCharsets.UTF_8))
+                update(OracleJson.canonicalBytes(forgedAnchorPreimage))
+            }.digest().joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+            val forgedInlineRow = JsonObject(inlineRow.canonicalJson().toMutableMap().apply {
+                put("semanticAnchorFields", forgedInlineFields)
+                put("semanticAnchorCandidateId", JsonPrimitive(forgedDigest))
+            })
+            assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                FullTreeSourceEntityFact.fromCanonicalJson(forgedInlineRow)
             }
             Unit
         }
@@ -955,6 +1170,46 @@ class FullTreeFunctionObservationsV2Test {
                 this[index] = row
             })
         },
+    )
+
+    private fun v1ProjectionForCompose(document: JsonObject): JsonObject {
+        val counts = JsonObject(document.controlObject("counts").toMutableMap().apply {
+            remove("sourceEntities")
+            remove("sourceEntitiesByKind")
+            remove("sourceEntitiesByObservability")
+            remove("sourceEntitiesByDenominatorDisposition")
+            remove("anchorClaims")
+            remove("anchorCandidateCount")
+            remove("anchorCollisionCandidateCount")
+        })
+        val oracle = JsonObject(document.controlObject("oracle").toMutableMap().apply {
+            put("configurationSha256", JsonPrimitive(FullTreeFunctionObservations.configurationSha256))
+        })
+        return JsonObject(document.toMutableMap().apply {
+            remove("sourceEntities")
+            remove("identityReconciliation")
+            put("counts", counts)
+            put("oracle", oracle)
+            put("schemaVersion", JsonPrimitive(1))
+        })
+    }
+
+    private fun sourceKindCounts(facts: List<FullTreeSourceEntityFact>) = JsonObject(
+        FullTreeSourceEntityKind.entries.associate { kind ->
+            kind.wireValue to JsonPrimitive(facts.count { it.kind == kind })
+        }.toSortedMap(),
+    )
+
+    private fun sourceObservabilityCounts(facts: List<FullTreeSourceEntityFact>) = JsonObject(
+        FullTreeIdentityObservability.entries.associate { state ->
+            state.wireValue to JsonPrimitive(facts.count { it.identityObservability == state })
+        }.toSortedMap(),
+    )
+
+    private fun sourceDispositionCounts(facts: List<FullTreeSourceEntityFact>) = JsonObject(
+        FullTreeDenominatorDisposition.entries.associate { disposition ->
+            disposition.wireValue to JsonPrimitive(facts.count { it.denominatorDisposition == disposition })
+        }.toSortedMap(),
     )
 
     private fun privateDirectory(path: java.nio.file.Path): java.nio.file.Path =

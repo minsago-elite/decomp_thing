@@ -283,6 +283,7 @@ internal class FullTreeSourceAnchorFields(
         require(language == null || language >= 0L)
         require(inlineCallLine == null || inlineCallLine > 0L)
         require(inlineCallColumn == null || inlineCallColumn >= 0L)
+        require(inlineCallFile == null || isNormalizedSourcePath(inlineCallFile))
         require(authenticatedSourceFileSha256 == null || authenticatedSourceFileSha256.matches(Regex("[0-9a-f]{64}")))
         listOfNotNull(
             sourceName,

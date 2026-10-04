@@ -260,17 +260,19 @@ private class FunctionObservationSqliteSink private constructor(
             sqliteFail("source-entity canonical rows exceed the authenticated output budget")
         }
         statements.insertSourceEntity.setString(1, fact.sourceEntityId)
-        statements.insertSourceEntity.setString(2, fact.kind.wireValue)
-        statements.insertSourceEntity.setString(3, fact.semanticAnchorCandidateId ?: "~")
-        statements.insertSourceEntity.setString(4, fact.physicalDie.unitId)
+        statements.insertSourceEntity.setString(2, fact.physicalDie.richArtifactSha256)
+        statements.insertSourceEntity.setString(3, fact.physicalDie.section)
+        statements.insertSourceEntity.setString(4, fact.kind.wireValue)
+        statements.insertSourceEntity.setString(5, fact.semanticAnchorCandidateId ?: "~")
+        statements.insertSourceEntity.setString(6, fact.physicalDie.unitId)
         statements.insertSourceEntity.setString(
-            5,
+            7,
             fact.physicalDie.compilationUnitOffset,
         )
-        statements.insertSourceEntity.setString(6, fact.physicalDie.dieOffset)
-        statements.insertSourceEntity.setBytes(7, canonical)
+        statements.insertSourceEntity.setString(8, fact.physicalDie.dieOffset)
+        statements.insertSourceEntity.setBytes(9, canonical)
         if (statements.insertSourceEntity.executeUpdate() != 1) {
-            sqliteFail("observation-v2 sourceEntityId is duplicated")
+            sqliteFail("observation-v2 sourceEntityId or physical DIE locator is duplicated")
         }
         rowInserted()
         sourceEntityCount = nextSourceCount
@@ -933,8 +935,8 @@ private class FunctionObservationSqliteStatements(connection: Connection) : Auto
     )
     val insertSourceEntity = connection.prepareStatement(
         "INSERT OR IGNORE INTO source_entity(" +
-            "source_entity_id,entity_kind,candidate_key,unit_id,cu_offset,die_offset,canonical) " +
-            "VALUES(?,?,?,?,?,?,?)",
+            "source_entity_id,rich_artifact_sha256,section,entity_kind,candidate_key," +
+            "unit_id,cu_offset,die_offset,canonical) VALUES(?,?,?,?,?,?,?,?,?)",
     )
     val incrementNonEmittedAliases = connection.prepareStatement(
         "UPDATE non_emitted_group SET alias_count=alias_count+1 " +
@@ -1782,9 +1784,11 @@ private val SCHEMA = listOf(
         "FOREIGN KEY(group_key) REFERENCES non_emitted_group(group_key)) WITHOUT ROWID",
     "CREATE TABLE source_entity(" +
         "source_entity_id TEXT PRIMARY KEY COLLATE BINARY," +
+        "rich_artifact_sha256 TEXT NOT NULL COLLATE BINARY,section TEXT NOT NULL COLLATE BINARY," +
         "entity_kind TEXT NOT NULL COLLATE BINARY,candidate_key TEXT NOT NULL COLLATE BINARY," +
         "unit_id TEXT NOT NULL COLLATE BINARY,cu_offset TEXT NOT NULL COLLATE BINARY," +
-            "die_offset TEXT NOT NULL COLLATE BINARY,canonical BLOB NOT NULL) WITHOUT ROWID",
+        "die_offset TEXT NOT NULL COLLATE BINARY,canonical BLOB NOT NULL," +
+        "UNIQUE(rich_artifact_sha256,section,unit_id,cu_offset,die_offset)) WITHOUT ROWID",
     "CREATE INDEX source_entity_projection ON source_entity(" +
         "entity_kind,candidate_key,unit_id,cu_offset,die_offset)",
 )
