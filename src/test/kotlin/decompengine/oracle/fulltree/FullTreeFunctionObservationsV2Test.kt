@@ -353,6 +353,7 @@ class FullTreeFunctionObservationsV2Test {
                 sourcePath = "source/large-row.hpp",
                 declarationFileIndex = 1L,
                 declarationLine = 1L,
+                declarationColumn = null,
                 language = 33L,
                 lexicalContext = listOf(descriptor),
                 sourceName = descriptor,
