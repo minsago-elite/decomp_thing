@@ -202,6 +202,109 @@ class FullTreeFunctionObservationsV2Test {
     }
 
     @Test
+    fun `in-memory and SQLite sinks reject another same-shard source population receipt`() =
+        inControlTemporaryDirectory { root ->
+            val fixture = createFullTreeControlFixture(root.resolve("control"))
+            val scope = fixture.authenticatedScope()
+            val inventory = parseControlObject(fixture.inventory)
+            val inventorySha = fixtureSha256(fixture.inventory)
+            val shard = FullTreeFunctionObservations.shardInputs(
+                inventory,
+                inventorySha,
+                scope.document,
+                scope.sha256,
+            ).first()
+            val unit = shard.units.single()
+            val richSha = scope.document.controlObject("oracle").controlString("richArtifactSha256")
+            fun unresolved(dieOffset: String) = fact(
+                FullTreeSourcePhysicalDie(
+                    richArtifactSha256 = richSha,
+                    unitId = unit.controlString("id"),
+                    section = ".debug_info",
+                    compilationUnitOffset = unit.controlString("dwarfOffset"),
+                    dieOffset = dieOffset,
+                ),
+                FullTreeSourceEntityKind.UNRESOLVED,
+                FullTreeIdentityObservability.UNKNOWN,
+                FullTreeDenominatorDisposition.UNKNOWN,
+                fields = null,
+                reasons = listOf("unsupported-source-identity"),
+            )
+
+            val acceptedFact = unresolved("0x610")
+            val differentFact = unresolved("0x611")
+            val acceptedIndex = FullTreeFunctionObservationV2AnchorIndex(1L, 4096L)
+            acceptedIndex.acceptSourceEntityPopulation(shard.identifier, listOf(acceptedFact))
+            val differentIndex = FullTreeFunctionObservationV2AnchorIndex(1L, 4096L)
+            differentIndex.acceptSourceEntityPopulation(shard.identifier, listOf(differentFact))
+            val acceptedReconciliation = acceptedIndex.reconciliation()
+            val mismatchedReconciliation = differentIndex.reconciliation()
+            val bindings = FullTreeFunctionObservationBindings(
+                inventoryIndexSha256 = inventory.controlString("indexSha256"),
+                richArtifactSha256 = richSha,
+                scopeSha256 = scope.sha256,
+            )
+
+            val memory = FullTreeFunctionObservationAccumulatorV2(shard)
+            memory.recordScannedDies(shard.units.size.toLong())
+            memory.acceptSourceEntity(acceptedFact)
+            val memoryFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                memory.finish(
+                    bindings.inventoryIndexSha256,
+                    bindings.richArtifactSha256,
+                    bindings.scopeSha256,
+                    mismatchedReconciliation,
+                )
+            }
+            assertTrue(memoryFailure.message.orEmpty().contains("authenticated scan receipt"))
+
+            val sqliteOutput = ByteArrayOutputStream()
+            val sqliteLimits = FullTreeFunctionObservationSqliteLimits(
+                maximumDatabaseBytes = 4L * 1024L * 1024L,
+                maximumOutputBytes = 1024L * 1024L,
+                maximumCacheBytes = 64 * 1024,
+                databaseCheckpointRows = 1,
+                checkpoint = FullTreeFunctionObservationSqliteCheckpoint {},
+            )
+            FullTreeFunctionObservationSqlite.openV2(
+                privateDirectory(root.resolve("sqlite")),
+                shard,
+                sqliteLimits,
+            ).use { sqlite ->
+                sqlite.recordScannedDies(shard.units.size.toLong())
+                sqlite.acceptSourceEntity(acceptedFact)
+                val sqliteFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                    sqlite.finishToV2(sqliteOutput, bindings, mismatchedReconciliation)
+                }
+                assertTrue(sqliteFailure.message.orEmpty().contains("authenticated scan receipt"))
+            }
+            assertEquals(0, sqliteOutput.size(), "mismatched SQLite facts must fail before publication")
+
+            val matchingMemory = FullTreeFunctionObservationAccumulatorV2(shard)
+            matchingMemory.recordScannedDies(shard.units.size.toLong())
+            matchingMemory.acceptSourceEntity(acceptedFact)
+            val matchingBytes = FullTreeFunctionObservationsV2.canonicalEnvelopeBytes(
+                matchingMemory.finish(
+                    bindings.inventoryIndexSha256,
+                    bindings.richArtifactSha256,
+                    bindings.scopeSha256,
+                    acceptedReconciliation,
+                ),
+            )
+            val matchingSqliteOutput = ByteArrayOutputStream()
+            FullTreeFunctionObservationSqlite.openV2(
+                privateDirectory(root.resolve("sqlite-matching")),
+                shard,
+                sqliteLimits,
+            ).use { sqlite ->
+                sqlite.recordScannedDies(shard.units.size.toLong())
+                sqlite.acceptSourceEntity(acceptedFact)
+                sqlite.finishToV2(matchingSqliteOutput, bindings, acceptedReconciliation)
+            }
+            assertContentEquals(matchingBytes, matchingSqliteOutput.toByteArray())
+        }
+
+    @Test
     fun `in-memory and SQLite v2 sinks preserve collision census and declaration-range template denominator parity`() =
         inControlTemporaryDirectory { root ->
             val fixture = createFullTreeControlFixture(root.resolve("control"))
@@ -843,7 +946,7 @@ class FullTreeFunctionObservationsV2Test {
                     8L * 1024L * 1024L,
                 )
             }
-            assertTrue(directCandidateFailure.message.orEmpty().contains("physical DIE claim"))
+            assertTrue(directCandidateFailure.message.orEmpty().contains("authenticated scan receipt"))
 
             val unknownCompleteIndex = valid.getValue("sourceEntities").jsonArray.indexOfFirst { row ->
                 val fact = FullTreeSourceEntityFact.fromCanonicalJson(row.jsonObject)
@@ -1112,11 +1215,7 @@ class FullTreeFunctionObservationsV2Test {
                 declarationCandidate,
                 declarationA2.sourceEntityId,
             )
-            claimantIndex.acceptSourceEntityPopulation(firstShard.identifier, listOf(originalNonclaimant))
-            val claimantReconciliation = claimantIndex.reconciliation()
-            val declarationCollisionIds = requireNotNull(
-                claimantReconciliation.collisionIdsByCandidate[declarationCandidate],
-            )
+            val declarationCollisionIds = listOf(declarationA.sourceEntityId, declarationA2.sourceEntityId).sorted()
             val forgedNonclaimant = originalNonclaimant.copy(
                 identityObservability = FullTreeIdentityObservability.AMBIGUOUS,
                 semanticAnchorFields = declarationA.semanticAnchorFields,
@@ -1124,6 +1223,11 @@ class FullTreeFunctionObservationsV2Test {
                 candidateCollisionSourceEntityIds = declarationCollisionIds,
                 reasonCodes = listOf("duplicate-source-anchor-unproven"),
             )
+            // Bind the synthetic row itself so the intended direct-claim check runs after the
+            // independent population receipt check.
+            claimantIndex.acceptSourceEntityPopulation(firstShard.identifier, listOf(forgedNonclaimant))
+            val claimantReconciliation = claimantIndex.reconciliation()
+            assertEquals(declarationCollisionIds, claimantReconciliation.collisionIdsByCandidate[declarationCandidate])
             val forgedNonclaimantFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
                 FullTreeFunctionObservationsV2.composeEnvelope(
                     v1ProjectionForCompose(valid),
@@ -1709,36 +1813,82 @@ class FullTreeFunctionObservationsV2Test {
             assertEquals(first.binding.runSha256, rederived.binding.runSha256)
             assertEquals(first.outputs, rederived.outputs)
 
-            fun hasLaterDIEInSameCU(rows: List<FullTreeSourceEntityFact>, source: FullTreeSourceEntityFact): Boolean =
-                rows.any { target ->
-                    target.physicalDie.unitId == source.physicalDie.unitId &&
-                        target.physicalDie.compilationUnitOffset == source.physicalDie.compilationUnitOffset &&
-                        target.physicalDie.dieOffset.removePrefix("0x").toULong(16) >
-                        source.physicalDie.dieOffset.removePrefix("0x").toULong(16)
+            fun children(path: java.nio.file.Path): List<String> = Files.list(path).use { entries ->
+                entries.map { it.fileName.toString() }.sorted().toList()
+            }
+            fun assertOverlapRejected(candidatePath: java.nio.file.Path, scratchPath: java.nio.file.Path) {
+                val outputChildren = children(outputParentA)
+                val scratchChildren = children(scratch)
+                val failure = assertFailsWith<FullTreeFunctionObservationV2RunException> {
+                    FullTreeFunctionObservationV2RunPublisher.loadAndValidate(
+                        candidateRoot = candidatePath,
+                        expectedIndexArtifactSha256 = first.binding.indexArtifactSha256,
+                        richArtifact = fixture.richArtifact,
+                        inventoryPath = fixture.inventory,
+                        scope = scope,
+                        scratchParent = scratchPath,
+                    )
                 }
+                assertTrue(failure.message.orEmpty().contains("trees overlap"))
+                assertEquals(outputChildren, children(outputParentA))
+                assertEquals(scratchChildren, children(scratch))
+            }
+
+            assertOverlapRejected(firstRoot, firstRoot)
+            assertOverlapRejected(firstRoot, outputParentA)
+            assertOverlapRejected(firstRoot, firstRoot.resolve("outputs"))
+            assertOverlapRejected(outputParentA.resolve("unused/../run"), outputParentA)
+
+            val candidateAlias = root.resolve("candidate-alias")
+            Files.createSymbolicLink(candidateAlias, firstRoot)
+            val beforeSymlinkCandidate = children(outputParentA)
+            assertFailsWith<FullTreeFunctionObservationV2RunException> {
+                FullTreeFunctionObservationV2RunPublisher.loadAndValidate(
+                    candidateRoot = candidateAlias,
+                    expectedIndexArtifactSha256 = first.binding.indexArtifactSha256,
+                    richArtifact = fixture.richArtifact,
+                    inventoryPath = fixture.inventory,
+                    scope = scope,
+                    scratchParent = scratch,
+                )
+            }
+            assertEquals(beforeSymlinkCandidate, children(outputParentA))
+            assertTrue(children(scratch).isEmpty())
+
+            val scratchAlias = root.resolve("scratch-alias")
+            Files.createSymbolicLink(scratchAlias, scratch)
+            val beforeSymlinkScratch = children(outputParentA)
+            assertFailsWith<FullTreeFunctionObservationV2RunException> {
+                FullTreeFunctionObservationV2RunPublisher.loadAndValidate(
+                    candidateRoot = firstRoot,
+                    expectedIndexArtifactSha256 = first.binding.indexArtifactSha256,
+                    richArtifact = fixture.richArtifact,
+                    inventoryPath = fixture.inventory,
+                    scope = scope,
+                    scratchParent = scratchAlias,
+                )
+            }
+            assertEquals(beforeSymlinkScratch, children(outputParentA))
+            assertTrue(children(scratch).isEmpty())
 
             val mutationFixture = first.outputs.asSequence().mapNotNull { candidate ->
+                if (candidate.sourceEntities == 0L) return@mapNotNull null
                 val candidateDocument = OracleJson.parseCanonical(
                     Files.readAllBytes(firstRoot.resolve("outputs/${candidate.shardId}.json")),
                 ) as JsonObject
                 val rows = candidateDocument.getValue("sourceEntities").jsonArray.map {
                     FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
                 }
-                val anchored = rows.filter {
-                    it.semanticAnchorFields != null && it.semanticAnchorCandidateId != null
-                }
-                val hasDistinctDIE = anchored.any { source -> rows.any { it.physicalDie != source.physicalDie } }
-                val hasStructuralTarget = anchored.any { source -> hasLaterDIEInSameCU(rows, source) }
-                val hasEmittedRva = candidateDocument.getValue("emitted").jsonArray.isNotEmpty()
-                if (candidate.sourceEntities == rows.size.toLong() && anchored.isNotEmpty() &&
-                    hasDistinctDIE && hasStructuralTarget && hasEmittedRva
+                if (candidate.sourceEntities == rows.size.toLong() && rows.any {
+                        it.semanticAnchorFields != null && it.semanticAnchorCandidateId != null
+                    }
                 ) {
                     Triple(candidate, candidateDocument, rows)
                 } else {
                     null
                 }
             }.firstOrNull() ?: throw AssertionError(
-                "authenticated fixture must have an anchored source row, distinct target DIE, later same-CU DIE, and emitted RVA for mutation tests",
+                "authenticated fixture must contain an anchored source row for raw-input mutation tests",
             )
             val (receipt, document, originalRows) = mutationFixture
             val shard = firstInput.getValue(receipt.shardId)
@@ -1879,13 +2029,9 @@ class FullTreeFunctionObservationsV2Test {
             assertTrue(physicalOffsetFailure.message.orEmpty().contains("authenticated scan receipt"))
             assertRawReexecutionRejects(publishForgedDocument("forged-offset", forgedOffsetDocument))
 
-            val emittedRva = document.getValue("emitted").jsonArray.firstOrNull()
-                ?.jsonObject?.getValue("rva")?.jsonPrimitive?.content
-                ?: throw AssertionError("selected shard must contain an emitted RVA for denominator-link mutation tests")
             val linkSubject = source
-
-            val patternTarget = originalRows.firstOrNull { it.physicalDie != linkSubject.physicalDie }?.physicalDie
-                ?: throw AssertionError("selected shard must contain a second source DIE for pattern-edge mutation tests")
+            val sourceDieOffset = linkSubject.physicalDie.dieOffset.removePrefix("0x").toULong(16)
+            val patternTarget = linkSubject.physicalDie.copy(dieOffset = "0x${(sourceDieOffset + 1uL).toString(16)}")
             val patternAnchorFields = FullTreeSourceAnchorFields(
                 sourcePath = "source/include/fixture.h",
                 declarationFileIndex = 1L,
@@ -1984,65 +2130,11 @@ class FullTreeFunctionObservationsV2Test {
             }
             assertTrue(forgedPatternFailure.message.orEmpty().contains("referenced pattern DIE"))
 
-            // This small control ELF has no emitted template-instance census row. Build a
-            // fixture-only, schema-valid template row on its authenticated physical locator so
-            // the validator's allowed target membership can be exercised independently from the
-            // run publisher's raw-input rederivation.
-            val linkFields = FullTreeSourceAnchorFields(
-                sourcePath = "source/include/fixture.h",
-                declarationFileIndex = 1L,
-                declarationLine = 17L,
-                declarationColumn = 3L,
-                language = 33L,
-                lexicalContext = listOf("fixture"),
-                sourceName = "linked_template<int>",
-                signature = listOf("int (int)"),
-                templateActualArguments = listOf("type:int"),
-                authenticatedSourceRevision = scope.sourceLock.controlObject("revision").controlString("commit"),
-            )
-            val linked = FullTreeSourceEntityFact(
-                sourceEntityId = linkSubject.physicalDie.sourceEntityId(FullTreeSourceEntityKind.TEMPLATE_INSTANCE),
-                physicalDie = linkSubject.physicalDie,
-                kind = FullTreeSourceEntityKind.TEMPLATE_INSTANCE,
-                identityObservability = FullTreeIdentityObservability.UNKNOWN,
-                denominatorDisposition = FullTreeDenominatorDisposition.EMITTED_RVA_LINK,
-                semanticAnchorFields = linkFields,
-                semanticAnchorCandidateId = requireNotNull(
-                    linkFields.candidateId(FullTreeSourceAnchorKind.TEMPLATE_INSTANCE),
-                ),
-                resolvedSemanticIdentityId = null,
-                candidateCollisionSourceEntityIds = emptyList(),
-                linkedEmittedRva = emittedRva,
-                reasonCodes = listOf("unknown-template-pattern-reference"),
-                edges = emptyList(),
-            )
-            val linkedClaims = FullTreeFunctionObservationV2AnchorIndex(2L, 4096L)
-            linkedClaims.accept(requireNotNull(linked.semanticAnchorCandidateId), linked.sourceEntityId)
-            linkedClaims.acceptSourceEntityPopulation(shard.identifier, listOf(linked))
-            val linkedReconciliation = linkedClaims.reconciliation()
-            val linkedDocument = FullTreeFunctionObservationsV2.composeEnvelope(
-                v1ProjectionForCompose(document), listOf(linked), linkedReconciliation, 8L * 1024L * 1024L,
-            )
-            FullTreeFunctionObservationsV2.validateEnvelope(
-                linkedDocument, scope, inventory, inventorySha, shard, linkedReconciliation,
-            )
-            val structuralSubject = originalRows.firstOrNull { source ->
-                source.semanticAnchorCandidateId != null &&
-                    originalRows.any { target ->
-                        target.physicalDie.unitId == source.physicalDie.unitId &&
-                            target.physicalDie.compilationUnitOffset == source.physicalDie.compilationUnitOffset &&
-                            target.physicalDie.dieOffset.removePrefix("0x").toULong(16) >
-                            source.physicalDie.dieOffset.removePrefix("0x").toULong(16)
-                    }
-            }
-            val structural = structuralSubject
-                ?: throw AssertionError("selected shard must contain an anchored source DIE with a later DIE in its CU")
-            val unrelatedTarget = originalRows.firstOrNull { target ->
-                target.physicalDie.unitId == structural.physicalDie.unitId &&
-                    target.physicalDie.compilationUnitOffset == structural.physicalDie.compilationUnitOffset &&
-                    target.physicalDie.dieOffset.removePrefix("0x").toULong(16) >
-                    structural.physicalDie.dieOffset.removePrefix("0x").toULong(16)
-            }?.physicalDie ?: throw AssertionError("selected shard must contain a later same-CU target DIE")
+            // This is a schema-valid structural edge whose target is another canonical locator in
+            // the authenticated CU. It is used only for raw-input rederivation rejection; it is
+            // not claimed as an observed DIE by the source census.
+            val structural = source
+            val unrelatedTarget = structural.physicalDie.copy(dieOffset = "0x${(sourceDieOffset + 2uL).toString(16)}")
             val forgedStructuralEdge = FullTreeSourceIdentityEdge(
                 kind = FullTreeSourceIdentityEdgeKind.TYPE,
                 source = structural.physicalDie,

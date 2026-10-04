@@ -378,6 +378,7 @@ private class FunctionObservationSqliteSink private constructor(
             val committedDatabaseBytes = workspace.checkDatabaseBound("before function-observation-v2 projection")
             requireCommittedDatabaseLayout(committedDatabaseBytes)
             assertIndexedProjectionPlans(includeV2 = true)
+            validateV2SourceEntityPopulation(reconciliation)
             state = SinkState.PROJECTING
             val bounded = FunctionObservationDigestingOutputStream(
                 output,
@@ -422,6 +423,82 @@ private class FunctionObservationSqliteSink private constructor(
             state = SinkState.FAILED
             throw translateFunctionObservationSqliteFailure("cannot project function-observation-v2 SQLite state", failure)
         }
+    }
+
+    /** Reconciles the indexed SQLite fact stream before any v2 bytes are published. */
+    private fun validateV2SourceEntityPopulation(
+        reconciliation: FullTreeFunctionObservationV2IdentityReconciliation,
+    ) {
+        val maximumCanonicalBytes = minOf(
+            fullTreeFunctionObservationV2OutputByteLimit(limits.maximumOutputBytes),
+            MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES,
+        )
+        val maximumRowBytes = minOf(maximumCanonicalBytes, MAXIMUM_SOURCE_IDENTITY_ROW_BYTES)
+        val validator = reconciliation.newSourceEntityPopulationStreamValidator(
+            shard.identifier,
+            maximumCanonicalBytes,
+            limits.checkpoint::checkpoint,
+        )
+        val query = connection.prepareStatement(
+            "SELECT entity_kind,candidate_key,unit_id,cu_offset,die_offset,canonical " +
+                "FROM source_entity ORDER BY entity_kind,candidate_key,unit_id,cu_offset,die_offset",
+        )
+        var rowsRead = 0L
+        query.use { statement ->
+            statement.executeQuery().use { rows ->
+                while (rows.next()) {
+                    val canonical = rows.getBytes(6)
+                        ?: throw FullTreeFunctionObservationV2Exception("SQLite source entity has no canonical row")
+                    if (canonical.size.toLong() > maximumRowBytes) {
+                        throw FullTreeFunctionObservationV2Exception(
+                            "SQLite source entity exceeds its authenticated canonical-row bound",
+                        )
+                    }
+                    val fact = try {
+                        val value = OracleJson.parseCanonical(
+                            canonical,
+                            sourceIdentityRowJsonLimits(maximumRowBytes),
+                        ) as? kotlinx.serialization.json.JsonObject
+                            ?: throw FullTreeFunctionObservationV2Exception("SQLite source entity root is not an object")
+                        FullTreeSourceEntityFact.fromCanonicalJson(value, "SQLite source entity")
+                    } catch (failure: FullTreeFunctionObservationV2Exception) {
+                        throw failure
+                    } catch (failure: Exception) {
+                        throw FullTreeFunctionObservationV2Exception("SQLite source entity is not canonical", failure)
+                    }
+                    if (rows.getString(1) != fact.kind.wireValue ||
+                        rows.getString(2) != (fact.semanticAnchorCandidateId ?: "~") ||
+                        rows.getString(3) != fact.physicalDie.unitId ||
+                        rows.getString(4) != fact.physicalDie.compilationUnitOffset ||
+                        rows.getString(5) != fact.physicalDie.dieOffset
+                    ) {
+                        throw FullTreeFunctionObservationV2Exception(
+                            "SQLite source-entity projection key differs from its canonical fact",
+                        )
+                    }
+                    val canonicalFact = OracleJson.canonicalBytes(
+                        fact.canonicalJson(),
+                        sourceIdentityRowJsonLimits(maximumRowBytes),
+                    )
+                    if (!canonical.contentEquals(canonicalFact)) {
+                        throw FullTreeFunctionObservationV2Exception(
+                            "SQLite source-entity bytes differ from their canonical fact",
+                        )
+                    }
+                    validator.accept(fact)
+                    rowsRead = Math.addExact(rowsRead, 1L)
+                    if (rowsRead % 4_096L == 0L) {
+                        limits.checkpoint.checkpoint("while reconciling SQLite source-entity rows")
+                    }
+                }
+            }
+        }
+        if (rowsRead != sourceEntityCount) {
+            throw FullTreeFunctionObservationV2Exception(
+                "SQLite source-entity row count differs from accepted facts",
+            )
+        }
+        validator.finish()
     }
 
     private fun acceptEmitted(

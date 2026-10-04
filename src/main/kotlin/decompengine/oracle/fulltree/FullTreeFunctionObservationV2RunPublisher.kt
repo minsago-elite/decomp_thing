@@ -756,10 +756,36 @@ internal object FullTreeFunctionObservationV2RunPublisher {
         scratchParent: Path,
         limits: FullTreeFunctionObservationV2RunLimits = FullTreeFunctionObservationV2RunLimits(),
     ): FullTreeFunctionObservationV2RunPublication = translateV2RunFailure {
-        requireStableDirectory(scratchParent, "observation-v2 rederivation scratch parent")
-        val candidate = BoundedShardRunVerifier.verify(candidateRoot, expectedIndexArtifactSha256, limits.run)
+        val (stableScratchParent, scratchIdentity) = requireStableDirectory(
+            scratchParent,
+            "observation-v2 rederivation scratch parent",
+        )
+        val (stableCandidateRoot, candidateIdentity) = requireStableDirectory(
+            candidateRoot,
+            "observation-v2 candidate run root",
+        )
+        requireDisjointRederivationTrees(stableCandidateRoot, stableScratchParent)
+        val candidate = BoundedShardRunVerifier.verify(
+            stableCandidateRoot,
+            expectedIndexArtifactSha256,
+            limits.run,
+        )
+        val (currentScratchParent, currentScratchIdentity) = requireStableDirectory(
+            stableScratchParent,
+            "observation-v2 rederivation scratch parent after candidate verification",
+        )
+        val (currentCandidateRoot, currentCandidateIdentity) = requireStableDirectory(
+            stableCandidateRoot,
+            "observation-v2 candidate run root after verification",
+        )
+        if (currentScratchIdentity != scratchIdentity || currentCandidateIdentity != candidateIdentity ||
+            currentCandidateRoot != stableCandidateRoot || candidate.root != stableCandidateRoot
+        ) {
+            v2RunFail("observation-v2 candidate or scratch directory changed identity during verification")
+        }
+        requireDisjointRederivationTrees(currentCandidateRoot, currentScratchParent)
         val workers = candidate.maximumWorkers
-        val expected = V2PreparedWorkspace.create(scratchParent)
+        val expected = V2PreparedWorkspace.create(currentScratchParent)
         try {
             val regeneratedRoot = expected.directory.resolve("rederived-run")
             val regenerated = generateAndPublish(
@@ -992,6 +1018,17 @@ private fun translateV2RunFailure(block: () -> FullTreeFunctionObservationV2RunP
     }
 
 private fun v2RunFail(message: String): Nothing = throw FullTreeFunctionObservationV2RunException(message)
+
+private fun requireDisjointRederivationTrees(candidateRoot: Path, scratchParent: Path) {
+    if (candidateRoot == scratchParent || candidateRoot.startsWith(scratchParent) ||
+        scratchParent.startsWith(candidateRoot)
+    ) {
+        v2RunFail("observation-v2 candidate run and rederivation scratch trees overlap")
+    }
+    if (Files.isSameFile(candidateRoot, scratchParent)) {
+        v2RunFail("observation-v2 candidate run and rederivation scratch trees overlap")
+    }
+}
 
 private val PRIVATE_DIRECTORY_PERMISSIONS = PosixFilePermissions.fromString("rwx------")
 private val PRIVATE_OUTPUT_PERMISSIONS = PosixFilePermissions.fromString("rw-------")

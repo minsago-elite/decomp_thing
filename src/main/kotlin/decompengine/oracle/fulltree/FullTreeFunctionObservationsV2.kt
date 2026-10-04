@@ -302,43 +302,58 @@ internal object FullTreeFunctionObservationsV2 {
         facts: List<FullTreeSourceEntityFact>,
         reconciliation: FullTreeFunctionObservationV2IdentityReconciliation,
     ) {
+        facts.forEach { fact -> validateCollisionEvidence(fact, reconciliation) }
+    }
+
+    internal fun validateSourceEntityEvidence(
+        fact: FullTreeSourceEntityFact,
+        reconciliation: FullTreeFunctionObservationV2IdentityReconciliation,
+    ) {
+        validateSourceEntityForV2(fact)
+        validateDirectAnchorEvidence(fact, reconciliation)
+        validateInlineAnchorEvidence(fact, reconciliation)
+        validateCollisionEvidence(fact, reconciliation)
+    }
+
+    private fun validateCollisionEvidence(
+        fact: FullTreeSourceEntityFact,
+        reconciliation: FullTreeFunctionObservationV2IdentityReconciliation,
+    ) {
         val collisionReasons = setOf("duplicate-source-anchor-unproven", "ambiguous-related-source-anchor")
-        facts.forEach { fact ->
-            val fields = fact.semanticAnchorFields
-            val directIds = fact.semanticAnchorCandidateId
-                ?.let(reconciliation.collisionIdsByCandidate::get)
-                .orEmpty()
-            val relatedCandidateIds = listOfNotNull(
-                fields?.inlineCalleeAnchorCandidateId,
-                fields?.inlineOwnerAnchorCandidateId,
-                fields?.templatePatternAnchorCandidateId,
-            ) + fields?.inlinePathAnchorCandidateIds.orEmpty()
-            val relatedIds = relatedCandidateIds.flatMap { candidate ->
-                reconciliation.collisionIdsByCandidate[candidate].orEmpty()
+        val fields = fact.semanticAnchorFields
+        val directIds = fact.semanticAnchorCandidateId
+            ?.let(reconciliation.collisionIdsByCandidate::get)
+            .orEmpty()
+        val relatedCandidateIds = listOfNotNull(
+            fields?.inlineCalleeAnchorCandidateId,
+            fields?.inlineOwnerAnchorCandidateId,
+            fields?.templatePatternAnchorCandidateId,
+        ) + fields?.inlinePathAnchorCandidateIds.orEmpty()
+        val relatedIds = relatedCandidateIds.flatMap { candidate ->
+            reconciliation.collisionIdsByCandidate[candidate].orEmpty()
+        }
+        val expectedIds = (directIds + relatedIds).distinct().sorted()
+        if (fact.candidateCollisionSourceEntityIds != expectedIds) {
+            v2Fail("source anchor collision IDs do not match the authenticated full-run anchor claims")
+        }
+        if (directIds.isNotEmpty() && fact.sourceEntityId !in directIds) {
+            v2Fail("colliding source row is not an authenticated direct anchor claimant")
+        }
+        if (expectedIds.isEmpty()) {
+            if (fact.reasonCodes.any { it in collisionReasons }) {
+                v2Fail("source entity claims collision evidence absent from the authenticated full-run claims")
             }
-            val expectedIds = (directIds + relatedIds).distinct().sorted()
-            if (fact.candidateCollisionSourceEntityIds != expectedIds) {
-                v2Fail("source anchor collision IDs do not match the authenticated full-run anchor claims")
-            }
-            if (directIds.isNotEmpty() && fact.sourceEntityId !in directIds) {
-                v2Fail("colliding source row is not an authenticated direct anchor claimant")
-            }
-            if (expectedIds.isEmpty()) {
-                if (fact.reasonCodes.any { it in collisionReasons }) {
-                    v2Fail("source entity claims collision evidence absent from the authenticated full-run claims")
-                }
+        } else {
+            val expectedReason = if (directIds.isNotEmpty()) {
+                "duplicate-source-anchor-unproven"
             } else {
-                val expectedReason = if (directIds.isNotEmpty()) {
-                    "duplicate-source-anchor-unproven"
-                } else {
-                    "ambiguous-related-source-anchor"
-                }
-                if (fact.identityObservability != FullTreeIdentityObservability.AMBIGUOUS ||
-                    expectedReason !in fact.reasonCodes ||
-                    fact.reasonCodes.any { it in collisionReasons && it != expectedReason }
-                ) {
-                    v2Fail("source anchor collision is not retained as the exact ambiguous evidence")
-                }
+                "ambiguous-related-source-anchor"
+            }
+            if (fact.identityObservability != FullTreeIdentityObservability.AMBIGUOUS ||
+                expectedReason !in fact.reasonCodes ||
+                fact.reasonCodes.any { it in collisionReasons && it != expectedReason }
+            ) {
+                v2Fail("source anchor collision is not retained as the exact ambiguous evidence")
             }
         }
     }
@@ -347,11 +362,16 @@ internal object FullTreeFunctionObservationsV2 {
         facts: List<FullTreeSourceEntityFact>,
         reconciliation: FullTreeFunctionObservationV2IdentityReconciliation,
     ) {
-        facts.forEach { fact ->
-            val candidateId = fact.semanticAnchorCandidateId ?: return@forEach
-            if (!reconciliation.hasAnchorClaim(candidateId, fact.sourceEntityId)) {
-                v2Fail("source anchor candidate is not an authenticated direct anchor claimant for this physical DIE claim")
-            }
+        facts.forEach { fact -> validateDirectAnchorEvidence(fact, reconciliation) }
+    }
+
+    private fun validateDirectAnchorEvidence(
+        fact: FullTreeSourceEntityFact,
+        reconciliation: FullTreeFunctionObservationV2IdentityReconciliation,
+    ) {
+        val candidateId = fact.semanticAnchorCandidateId ?: return
+        if (!reconciliation.hasAnchorClaim(candidateId, fact.sourceEntityId)) {
+            v2Fail("source anchor candidate is not an authenticated direct anchor claimant for this physical DIE claim")
         }
     }
 
@@ -364,50 +384,55 @@ internal object FullTreeFunctionObservationsV2 {
         facts: List<FullTreeSourceEntityFact>,
         reconciliation: FullTreeFunctionObservationV2IdentityReconciliation,
     ) {
-        facts.forEach { fact ->
-            if (fact.kind != FullTreeSourceEntityKind.INLINE_INSTANCE) return@forEach
-            val fields = fact.semanticAnchorFields ?: return@forEach
-            val resolvedEdges = fact.edges.filter {
-                it.state == FullTreeSourceIdentityEdgeState.RESOLVED && it.target != null
-            }
-            val referenceEdges = resolvedEdges.filter {
-                it.kind == FullTreeSourceIdentityEdgeKind.SPECIFICATION ||
-                    it.kind == FullTreeSourceIdentityEdgeKind.ABSTRACT_ORIGIN
-            }
-            val ownerEdges = resolvedEdges.filter { it.kind == FullTreeSourceIdentityEdgeKind.INLINE_OWNER }
+        facts.forEach { fact -> validateInlineAnchorEvidence(fact, reconciliation) }
+    }
 
-            fun hasClaim(
-                candidateId: String,
-                edges: List<FullTreeSourceIdentityEdge>,
-                allowedKinds: List<FullTreeSourceAnchorKind>,
-            ): Boolean = edges.any { edge ->
-                val target = edge.target ?: return@any false
-                allowedKinds.any { kind ->
-                    reconciliation.hasInlineRelatedAnchorClaim(
-                        candidateId,
-                        target.sourceEntityId(kind),
-                        kind,
-                    )
-                }
-            }
+    private fun validateInlineAnchorEvidence(
+        fact: FullTreeSourceEntityFact,
+        reconciliation: FullTreeFunctionObservationV2IdentityReconciliation,
+    ) {
+        if (fact.kind != FullTreeSourceEntityKind.INLINE_INSTANCE) return
+        val fields = fact.semanticAnchorFields ?: return
+        val resolvedEdges = fact.edges.filter {
+            it.state == FullTreeSourceIdentityEdgeState.RESOLVED && it.target != null
+        }
+        val referenceEdges = resolvedEdges.filter {
+            it.kind == FullTreeSourceIdentityEdgeKind.SPECIFICATION ||
+                it.kind == FullTreeSourceIdentityEdgeKind.ABSTRACT_ORIGIN
+        }
+        val ownerEdges = resolvedEdges.filter { it.kind == FullTreeSourceIdentityEdgeKind.INLINE_OWNER }
 
-            fields.inlineCalleeAnchorCandidateId?.let { candidate ->
-                if (!hasClaim(candidate, referenceEdges, FullTreeSourceAnchorKind.entries)) {
-                    v2Fail("inline callee candidate is not bound to a referenced DIE anchor claim")
-                }
+        fun hasClaim(
+            candidateId: String,
+            edges: List<FullTreeSourceIdentityEdge>,
+            allowedKinds: List<FullTreeSourceAnchorKind>,
+        ): Boolean = edges.any { edge ->
+            val target = edge.target ?: return@any false
+            allowedKinds.any { kind ->
+                reconciliation.hasInlineRelatedAnchorClaim(
+                    candidateId,
+                    target.sourceEntityId(kind),
+                    kind,
+                )
             }
-            fields.inlineOwnerAnchorCandidateId?.let { candidate ->
-                val ownerKinds = FullTreeSourceAnchorKind.entries.filter {
-                    it != FullTreeSourceAnchorKind.INLINE_INSTANCE
-                }
-                if (!hasClaim(candidate, ownerEdges, ownerKinds)) {
-                    v2Fail("inline owner candidate is not bound to a referenced DIE anchor claim")
-                }
+        }
+
+        fields.inlineCalleeAnchorCandidateId?.let { candidate ->
+            if (!hasClaim(candidate, referenceEdges, FullTreeSourceAnchorKind.entries)) {
+                v2Fail("inline callee candidate is not bound to a referenced DIE anchor claim")
             }
-            fields.inlinePathAnchorCandidateIds.orEmpty().forEach { candidate ->
-                if (!hasClaim(candidate, ownerEdges, listOf(FullTreeSourceAnchorKind.INLINE_INSTANCE))) {
-                    v2Fail("inline path candidate is not bound to a referenced inline DIE anchor claim")
-                }
+        }
+        fields.inlineOwnerAnchorCandidateId?.let { candidate ->
+            val ownerKinds = FullTreeSourceAnchorKind.entries.filter {
+                it != FullTreeSourceAnchorKind.INLINE_INSTANCE
+            }
+            if (!hasClaim(candidate, ownerEdges, ownerKinds)) {
+                v2Fail("inline owner candidate is not bound to a referenced DIE anchor claim")
+            }
+        }
+        fields.inlinePathAnchorCandidateIds.orEmpty().forEach { candidate ->
+            if (!hasClaim(candidate, ownerEdges, listOf(FullTreeSourceAnchorKind.INLINE_INSTANCE))) {
+                v2Fail("inline path candidate is not bound to a referenced inline DIE anchor claim")
             }
         }
     }
@@ -935,6 +960,126 @@ internal data class FullTreeFunctionObservationV2IdentityReconciliation(
         if (sourceEntityPopulationClaim(facts, maximumCanonicalBytes, checkpoint) != expected) {
             v2Fail("source-entity canonical facts differ from the authenticated scan receipt")
         }
+    }
+
+    internal fun newSourceEntityPopulationStreamValidator(
+        shardId: String,
+        maximumCanonicalBytes: Long,
+        checkpoint: (String) -> Unit = {},
+    ): FullTreeFunctionObservationV2SourceEntityPopulationStreamValidator {
+        require(maximumCanonicalBytes in 1L..MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES)
+        val expected = sourceEntityPopulations[shardId]
+            ?: v2Fail("source-entity physical DIE population has no authenticated scan receipt")
+        return FullTreeFunctionObservationV2SourceEntityPopulationStreamValidator(
+            expected,
+            maximumCanonicalBytes,
+            checkpoint,
+            this,
+        )
+    }
+}
+
+/** Validates SQLite's indexed row stream and authenticated population receipt without retaining rows. */
+internal class FullTreeFunctionObservationV2SourceEntityPopulationStreamValidator internal constructor(
+    private val expected: FullTreeFunctionObservationV2SourceEntityPopulationClaim,
+    private val maximumCanonicalBytes: Long,
+    private val checkpoint: (String) -> Unit,
+    private val reconciliation: FullTreeFunctionObservationV2IdentityReconciliation,
+) {
+    private val digest = MessageDigest.getInstance("SHA-256")
+    private var canonicalBytes = 0L
+    private var count = 0L
+    private var finished = false
+    private var lastSortKey: List<String>? = null
+
+    fun accept(fact: FullTreeSourceEntityFact) {
+        check(!finished) { "source-entity receipt stream is already finished" }
+        FullTreeFunctionObservationsV2.validateSourceEntityEvidence(fact, reconciliation)
+        val sortKey = listOf(
+            fact.kind.wireValue,
+            fact.semanticAnchorCandidateId ?: "~",
+            fact.physicalDie.unitId,
+            fact.physicalDie.compilationUnitOffset,
+            fact.physicalDie.dieOffset,
+        )
+        val previous = lastSortKey
+        if (previous != null && compareSourceEntitySortKeys(previous, sortKey) >= 0) {
+            v2Fail("SQLite source entities are not in canonical observation-v2 order")
+        }
+        lastSortKey = sortKey
+
+        if (count == 0L) {
+            write("[\n".toByteArray(StandardCharsets.US_ASCII))
+        } else {
+            write(",\n".toByteArray(StandardCharsets.US_ASCII))
+        }
+        val neutral = observationV2CollisionNeutralFact(fact)
+        val row = OracleJson.canonicalBytes(
+            neutral.canonicalJson(),
+            sourceIdentityRowJsonLimits(maximumCanonicalBytes),
+        )
+        if (row.isEmpty() || row.last() != '\n'.code.toByte()) {
+            v2Fail("canonical source-entity scan-receipt row has no final newline")
+        }
+        write("  ".toByteArray(StandardCharsets.US_ASCII))
+        var segmentStart = 0
+        for (index in 0 until row.lastIndex) {
+            if (row[index] == '\n'.code.toByte()) {
+                write(row, segmentStart, index + 1 - segmentStart)
+                write("  ".toByteArray(StandardCharsets.US_ASCII))
+                segmentStart = index + 1
+            }
+        }
+        write(row, segmentStart, row.lastIndex - segmentStart)
+        count = Math.addExact(count, 1L)
+        if (count % FULL_RUN_RECONCILIATION_CHECKPOINT_INTERVAL == 0L) {
+            checkpoint("while validating SQLite source-entity scan receipts")
+        }
+    }
+
+    fun finish() {
+        check(!finished) { "source-entity receipt stream is already finished" }
+        finished = true
+        if (count == 0L) {
+            write("[]\n".toByteArray(StandardCharsets.US_ASCII))
+        } else {
+            write("\n]\n".toByteArray(StandardCharsets.US_ASCII))
+        }
+        if (count != expected.sourceEntityCount) {
+            v2Fail("SQLite source-entity count differs from the authenticated scan receipt")
+        }
+        val innerSha256 = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        val populationDigest = MessageDigest.getInstance("SHA-256")
+        populationDigest.update("full-run-observation-v2-source-entities-v2\n".toByteArray(StandardCharsets.US_ASCII))
+        populationDigest.update(count.toString().toByteArray(StandardCharsets.US_ASCII))
+        populationDigest.update('\n'.code.toByte())
+        populationDigest.update(innerSha256.toByteArray(StandardCharsets.US_ASCII))
+        val populationSha256 = populationDigest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        if (populationSha256 != expected.populationSha256) {
+            v2Fail("source-entity canonical facts differ from the authenticated scan receipt")
+        }
+    }
+
+    private fun write(bytes: ByteArray, offset: Int = 0, length: Int = bytes.size) {
+        if (length <= 0) return
+        val next = try {
+            Math.addExact(canonicalBytes, length.toLong())
+        } catch (failure: ArithmeticException) {
+            throw FullTreeFunctionObservationV2Exception("collision-neutral source entities byte count overflows", failure)
+        }
+        if (next > maximumCanonicalBytes) {
+            v2Fail("collision-neutral source entities exceed the authenticated scan-receipt byte bound")
+        }
+        digest.update(bytes, offset, length)
+        canonicalBytes = next
+    }
+
+    private fun compareSourceEntitySortKeys(left: List<String>, right: List<String>): Int {
+        for (index in left.indices) {
+            val result = left[index].compareTo(right[index])
+            if (result != 0) return result
+        }
+        return 0
     }
 }
 
