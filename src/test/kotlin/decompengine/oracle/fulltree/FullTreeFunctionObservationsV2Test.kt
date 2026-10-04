@@ -704,7 +704,7 @@ class FullTreeFunctionObservationsV2Test {
             val valid = outputs.getValue(firstShard.identifier)
             val directCandidateRow = valid.getValue("sourceEntities").jsonArray
                 .map { FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject) }
-                .single { it.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE && it.semanticAnchorCandidateId != null }
+                .first { it.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE && it.semanticAnchorCandidateId != null }
             val directCandidateFields = requireNotNull(directCandidateRow.semanticAnchorFields)
             val forgedDirectCandidateFields = copyAnchorFields(
                 directCandidateFields,
