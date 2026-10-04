@@ -9,6 +9,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.longOrNull
 
 /** Separate source census kinds. RVA links in this census never add denominator rows. */
 internal enum class FullTreeSourceEntityKind(val wireValue: String) {

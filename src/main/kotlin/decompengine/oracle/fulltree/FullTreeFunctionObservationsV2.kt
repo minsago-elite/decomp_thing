@@ -255,7 +255,7 @@ internal object FullTreeFunctionObservationsV2 {
             if (die.richArtifactSha256 != richArtifactSha256) v2Fail("source DIE belongs to another artifact")
             val unit = allUnits[die.unitId] ?: v2Fail("source DIE unit is outside the authenticated inventory")
             if (parseDwarfOffset(unit.v2String("dwarfOffset"), "observation-v2 locator") !=
-                die.compilationUnitOffset.removePrefix("0x").toULong(16)
+                parseDwarfOffset(die.compilationUnitOffset, "observation-v2 locator")
             ) v2Fail("source DIE CU offset differs from its authenticated unit")
             if (mustBeInShard && shard.units.none { it.v2String("id") == die.unitId }) {
                 v2Fail("source entity is outside its authenticated shard")
