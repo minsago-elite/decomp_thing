@@ -271,6 +271,7 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                     val shardDeadline = shardDeadlines.getValue(shard.identifier)
                     val shardCheckpoint = shardDeadline.beginPhase()
                     val sourceCountBeforeShard = sourceFactCount
+                    var sourceFactsAdmittedForShard = 0L
                     val scan = FullTreeSourceEntityIdentityProducer.scanShard(
                         richArtifact = richArtifact,
                         inventoryPath = inventoryPath,
@@ -283,13 +284,17 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                         anchorClaim = { kind, candidateId, physicalClaimId ->
                             anchorIndex.accept(kind, candidateId, physicalClaimId)
                         },
-                        factAdmission = { fact, canonicalRowBytes ->
+                        factAdmission = { fact, canonicalArrayContributionBytes ->
                             FullTreeFunctionObservationsV2.validateSourceEntityForV2(fact)
                             anchorIndex.acceptInlineRelatedClaims(fact)
                             val nextCount = Math.addExact(sourceFactCount, 1L)
-                            val nextAdmissionBytes = Math.addExact(sourceFactAdmissionBytes, canonicalRowBytes)
+                            val arrayFramingBytes = if (sourceFactsAdmittedForShard == 0L) 4L else 1L
+                            val nextAdmissionBytes = Math.addExact(
+                                sourceFactAdmissionBytes,
+                                Math.addExact(canonicalArrayContributionBytes, arrayFramingBytes),
+                            )
                             val modeledRowBytes = sourceIdentityModeledRetainedChargeBytes(
-                                Math.addExact(canonicalRowBytes, 64L),
+                                Math.addExact(canonicalArrayContributionBytes, 64L),
                             )
                             val nextRetained = Math.addExact(modeledRetainedBytes, modeledRowBytes)
                             if (nextCount > wholeRun.controlLong("entities") ||
@@ -302,6 +307,7 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                             }
                             sourceFactCount = nextCount
                             sourceFactAdmissionBytes = nextAdmissionBytes
+                            sourceFactsAdmittedForShard = Math.addExact(sourceFactsAdmittedForShard, 1L)
                             modeledRetainedBytes = nextRetained
                         },
                         residentBudgetBytes = sourcePassResidentBytes,
@@ -329,6 +335,12 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                     }
                     if (Math.subtractExact(sourceFactCount, sourceCountBeforeShard) != scan.facts.size.toLong()) {
                         v2RunFail("source-identity run admission count differs from the accepted shard facts")
+                    }
+                    if (sourceFactsAdmittedForShard == 0L) {
+                        sourceFactAdmissionBytes = Math.addExact(sourceFactAdmissionBytes, 3L)
+                        if (sourceFactAdmissionBytes > wholeRun.controlLong("serializedBytes")) {
+                            v2RunFail("full-run source census exceeds its authenticated serialized-byte bound")
+                        }
                     }
                     anchorIndex.acceptSourceEntityPopulation(shard.identifier, scan.facts, deadline::checkpoint)
                     sourceFactCanonicalBytes = Math.addExact(sourceFactCanonicalBytes, scan.canonicalBytes)

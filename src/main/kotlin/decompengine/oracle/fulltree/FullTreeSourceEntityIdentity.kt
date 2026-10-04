@@ -772,6 +772,27 @@ internal fun canonicalSourceEntityFacts(
         output
     }
 
+/** Exact additive byte contribution of one row to a canonical source-entity array. */
+internal data class FullTreeSourceEntityCanonicalContribution(
+    val arrayContributionBytes: Long,
+    val singletonArrayBytes: Long,
+)
+
+internal fun fullTreeSourceEntityCanonicalContribution(
+    fact: FullTreeSourceEntityFact,
+    maximumCanonicalBytes: Long = MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES,
+): FullTreeSourceEntityCanonicalContribution {
+    require(maximumCanonicalBytes in 1L..MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES)
+    val row = OracleJson.canonicalBytes(fact.canonicalJson(), sourceIdentityRowJsonLimits(maximumCanonicalBytes))
+    val lineBreaks = row.count { it == '\n'.code.toByte() }
+    check(lineBreaks > 0) { "canonical source-identity row has no final newline" }
+    val contribution = Math.addExact(row.size.toLong(), Math.multiplyExact(lineBreaks.toLong(), 2L))
+    return FullTreeSourceEntityCanonicalContribution(
+        arrayContributionBytes = contribution,
+        singletonArrayBytes = Math.addExact(4L, contribution),
+    )
+}
+
 /** Computes canonical output size without materializing a shard-wide output buffer. */
 internal fun canonicalSourceEntityFactsByteLength(
     facts: Iterable<FullTreeSourceEntityFact>,

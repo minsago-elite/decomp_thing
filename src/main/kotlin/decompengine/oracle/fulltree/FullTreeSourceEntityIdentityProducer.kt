@@ -906,9 +906,9 @@ private class SourceIdentityRetentionBudget(
 
     fun retain(fact: FullTreeSourceEntityFact) {
         if (facts >= maximumFacts) throw FullTreeControlException("source-identity census exceeds its entity bound")
-        val serialized = canonicalSourceEntityFacts(listOf(fact), maximumCanonicalRowBytes).size.toLong()
-        factAdmission?.invoke(fact, serialized)
-        charge(serialized, "source-identity fact")
+        val canonicalSize = fullTreeSourceEntityCanonicalContribution(fact, maximumCanonicalRowBytes)
+        factAdmission?.invoke(fact, canonicalSize.arrayContributionBytes)
+        charge(canonicalSize.singletonArrayBytes, "source-identity fact")
         facts++
     }
 }

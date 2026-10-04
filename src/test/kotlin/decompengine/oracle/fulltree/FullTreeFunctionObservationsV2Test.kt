@@ -647,6 +647,15 @@ class FullTreeFunctionObservationsV2Test {
             val allRows = outputs.values.flatMap { it.getValue("sourceEntities").jsonArray }
                 .map { FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject) }
             assertEquals(8, allRows.size)
+            val admittedArrayBytes = Math.addExact(
+                Math.addExact(
+                    4L,
+                    allRows.sumOf { fullTreeSourceEntityCanonicalContribution(it).arrayContributionBytes },
+                ),
+                allRows.size.toLong() - 1L,
+            )
+            assertEquals(canonicalSourceEntityFacts(allRows).size.toLong(), admittedArrayBytes)
+            assertEquals(3L, canonicalSourceEntityFacts(emptyList()).size.toLong())
             assertEquals(3, allRows.count { it.kind == FullTreeSourceEntityKind.DECLARATION_ONLY })
             assertEquals(1, allRows.count { it.kind == FullTreeSourceEntityKind.NO_RANGE_DEFINITION })
             assertEquals(0, allRows.count { it.kind == FullTreeSourceEntityKind.TEMPLATE_PATTERN })
