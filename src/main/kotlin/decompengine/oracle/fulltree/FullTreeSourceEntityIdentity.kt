@@ -425,6 +425,7 @@ internal class FullTreeSourceEntityFact(
         require(resolvedSemanticIdentityId == null)
         require(candidateCollisionSourceEntityIds == candidateCollisionSourceEntityIds.distinct().sorted())
         candidateCollisionSourceEntityIds.forEach { require(it.matches(Regex("[0-9a-f]{64}"))) }
+        require(edges == edges.distinct())
         val expectedAnchor = kind.anchorKind()?.let { semanticAnchorFields?.candidateId(it) }
         if (identityObservability == FullTreeIdentityObservability.OBSERVABLE) {
             require(semanticAnchorCandidateId != null && semanticAnchorCandidateId == expectedAnchor)

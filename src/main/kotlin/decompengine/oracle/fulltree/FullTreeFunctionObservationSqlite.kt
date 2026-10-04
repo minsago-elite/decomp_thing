@@ -118,7 +118,23 @@ internal object FullTreeFunctionObservationSqlite {
         scratchParent: Path,
         shard: FullTreeFunctionObservationShardInput,
         limits: FullTreeFunctionObservationSqliteLimits,
-    ): FullTreeFunctionObservationSink {
+    ): FullTreeFunctionObservationSink = openSink(scratchParent, shard, limits, supportsV2 = false)
+
+    fun openV2(
+        scratchParent: Path,
+        shard: FullTreeFunctionObservationShardInput,
+        limits: FullTreeFunctionObservationSqliteLimits,
+    ): FullTreeFunctionObservationV2Sink {
+        requireFunctionObservationV2OutputByteLimit(limits.maximumOutputBytes)
+        return openSink(scratchParent, shard, limits, supportsV2 = true)
+    }
+
+    private fun openSink(
+        scratchParent: Path,
+        shard: FullTreeFunctionObservationShardInput,
+        limits: FullTreeFunctionObservationSqliteLimits,
+        supportsV2: Boolean,
+    ): FunctionObservationSqliteSink {
         requireStableDirectory(scratchParent, "function-observation SQLite scratch parent")
         val workspace = FunctionObservationSqliteWorkspace.create(
             scratchParent,
@@ -127,7 +143,7 @@ internal object FullTreeFunctionObservationSqlite {
             limits.additionalScratchBytes,
         )
         return try {
-            FunctionObservationSqliteSink.open(workspace, shard, limits)
+            FunctionObservationSqliteSink.open(workspace, shard, limits, supportsV2)
         } catch (failure: Throwable) {
             try {
                 workspace.close()
@@ -135,19 +151,6 @@ internal object FullTreeFunctionObservationSqlite {
                 failure.addSuppressed(cleanupFailure)
             }
             throw translateFunctionObservationSqliteFailure("cannot open function-observation SQLite state", failure)
-        }
-    }
-
-    fun openV2(
-        scratchParent: Path,
-        shard: FullTreeFunctionObservationShardInput,
-        limits: FullTreeFunctionObservationSqliteLimits,
-    ): FullTreeFunctionObservationV2Sink {
-        requireFunctionObservationV2OutputByteLimit(limits.maximumOutputBytes)
-        val sink = open(scratchParent, shard, limits)
-        return sink as? FullTreeFunctionObservationV2Sink ?: run {
-            sink.close()
-            sqliteFail("function-observation SQLite sink does not support schema v2")
         }
     }
 }
@@ -158,6 +161,7 @@ private class FunctionObservationSqliteSink private constructor(
     private val limits: FullTreeFunctionObservationSqliteLimits,
     private val connection: Connection,
     private val statements: FunctionObservationSqliteStatements,
+    private val supportsV2: Boolean,
 ) : FullTreeFunctionObservationV2Sink {
     private val unitsById: Map<String, JsonObject> = Collections.unmodifiableMap(
         shard.units.associateBy { it.controlString("id") },
@@ -234,6 +238,7 @@ private class FunctionObservationSqliteSink private constructor(
     }
 
     override fun acceptSourceEntity(fact: FullTreeSourceEntityFact) = mutate("accept a source entity") {
+        if (!supportsV2) sqliteFail("legacy function-observation SQLite sink does not support source entities")
         sourceEntitiesStarted = true
         limits.checkpoint.checkpoint("before accepting a source entity")
         if (unitsById[fact.physicalDie.unitId] == null) {
@@ -259,19 +264,21 @@ private class FunctionObservationSqliteSink private constructor(
         if (nextBytes > v2OutputByteLimit) {
             sqliteFail("source-entity canonical rows exceed the authenticated output budget")
         }
-        statements.insertSourceEntity.setString(1, fact.sourceEntityId)
-        statements.insertSourceEntity.setString(2, fact.physicalDie.richArtifactSha256)
-        statements.insertSourceEntity.setString(3, fact.physicalDie.section)
-        statements.insertSourceEntity.setString(4, fact.kind.wireValue)
-        statements.insertSourceEntity.setString(5, fact.semanticAnchorCandidateId ?: "~")
-        statements.insertSourceEntity.setString(6, fact.physicalDie.unitId)
-        statements.insertSourceEntity.setString(
+        val insertSourceEntity = statements.insertSourceEntity
+            ?: sqliteFail("observation-v2 source-entity table is unavailable")
+        insertSourceEntity.setString(1, fact.sourceEntityId)
+        insertSourceEntity.setString(2, fact.physicalDie.richArtifactSha256)
+        insertSourceEntity.setString(3, fact.physicalDie.section)
+        insertSourceEntity.setString(4, fact.kind.wireValue)
+        insertSourceEntity.setString(5, fact.semanticAnchorCandidateId ?: "~")
+        insertSourceEntity.setString(6, fact.physicalDie.unitId)
+        insertSourceEntity.setString(
             7,
             fact.physicalDie.compilationUnitOffset,
         )
-        statements.insertSourceEntity.setString(8, fact.physicalDie.dieOffset)
-        statements.insertSourceEntity.setBytes(9, canonical)
-        if (statements.insertSourceEntity.executeUpdate() != 1) {
+        insertSourceEntity.setString(8, fact.physicalDie.dieOffset)
+        insertSourceEntity.setBytes(9, canonical)
+        if (insertSourceEntity.executeUpdate() != 1) {
             sqliteFail("observation-v2 sourceEntityId or physical DIE locator is duplicated")
         }
         rowInserted()
@@ -350,6 +357,7 @@ private class FunctionObservationSqliteSink private constructor(
         reconciliation: FullTreeFunctionObservationV2IdentityReconciliation,
     ): FullTreeFunctionObservationV2StreamResult {
         requireOpen()
+        if (!supportsV2) sqliteFail("legacy function-observation SQLite sink does not support schema v2")
         state = SinkState.FINISHING
         try {
             requireSha256(bindings.inventoryIndexSha256, "inventory index")
@@ -363,15 +371,17 @@ private class FunctionObservationSqliteSink private constructor(
             connection.commit()
             val committedDatabaseBytes = workspace.checkDatabaseBound("before function-observation-v2 projection")
             requireCommittedDatabaseLayout(committedDatabaseBytes)
-            assertIndexedProjectionPlans()
+            assertIndexedProjectionPlans(includeV2 = true)
             state = SinkState.PROJECTING
             val bounded = FunctionObservationDigestingOutputStream(
                 output,
                 fullTreeFunctionObservationV2OutputByteLimit(limits.maximumOutputBytes),
                 limits.checkpoint,
-                workspace::checkCombinedScratchBound,
+                { outputBytes, label ->
+                    workspace.checkProjectionScratchBound(committedDatabaseBytes, outputBytes, label)
+                },
             )
-            FunctionObservationCanonicalWriter(connection, bounded).use { writer ->
+            FunctionObservationCanonicalWriter(connection, bounded, includeV2 = true).use { writer ->
                 writer.writeV2(
                     shard = shard,
                     bindings = bindings,
@@ -388,6 +398,9 @@ private class FunctionObservationSqliteSink private constructor(
             }
             val digest = bounded.finish()
             limits.checkpoint.checkpoint("after projecting function-observation-v2 output")
+            if (workspace.checkDatabaseBound("after function-observation-v2 projection") != committedDatabaseBytes) {
+                sqliteFail("function-observation SQLite database changed during v2 projection")
+            }
             state = SinkState.FINISHED
             return FullTreeFunctionObservationV2StreamResult(
                 outputSha256 = digest.sha256,
@@ -723,8 +736,9 @@ private class FunctionObservationSqliteSink private constructor(
         }
     }
 
-    private fun assertIndexedProjectionPlans() {
-        PROJECTION_QUERIES.forEach { sql ->
+    private fun assertIndexedProjectionPlans(includeV2: Boolean = false) {
+        val queries = if (includeV2) PROJECTION_QUERIES + V2_PROJECTION_QUERIES else PROJECTION_QUERIES
+        queries.forEach { sql ->
             connection.createStatement().use { statement ->
                 statement.executeQuery("EXPLAIN QUERY PLAN $sql").use { rows ->
                     while (rows.next()) {
@@ -811,13 +825,14 @@ private class FunctionObservationSqliteSink private constructor(
             workspace: FunctionObservationSqliteWorkspace,
             shard: FullTreeFunctionObservationShardInput,
             limits: FullTreeFunctionObservationSqliteLimits,
+            supportsV2: Boolean,
         ): FunctionObservationSqliteSink {
             val connection = DriverManager.getConnection(SqliteJdbcPaths.create(workspace.database))
             try {
-                configure(connection, workspace, limits)
-                val statements = FunctionObservationSqliteStatements(connection)
+                configure(connection, workspace, limits, supportsV2)
+                val statements = FunctionObservationSqliteStatements(connection, supportsV2)
                 connection.autoCommit = false
-                return FunctionObservationSqliteSink(workspace, shard, limits, connection, statements)
+                return FunctionObservationSqliteSink(workspace, shard, limits, connection, statements, supportsV2)
             } catch (failure: Throwable) {
                 try {
                     connection.close()
@@ -832,8 +847,10 @@ private class FunctionObservationSqliteSink private constructor(
             connection: Connection,
             workspace: FunctionObservationSqliteWorkspace,
             limits: FullTreeFunctionObservationSqliteLimits,
+            supportsV2: Boolean,
         ) {
             val maximumPages = limits.maximumDatabaseBytes / SQLITE_PAGE_BYTES
+            val schemaVersion = if (supportsV2) SQLITE_V2_SCHEMA_VERSION else SQLITE_SCHEMA_VERSION
             connection.createStatement().use { statement ->
                 statement.execute("PRAGMA page_size=$SQLITE_PAGE_BYTES")
                 statement.execute("PRAGMA journal_mode=OFF")
@@ -847,9 +864,10 @@ private class FunctionObservationSqliteSink private constructor(
                 statement.execute("PRAGMA auto_vacuum=NONE")
                 statement.execute("PRAGMA threads=1")
                 statement.execute("PRAGMA application_id=$SQLITE_APPLICATION_ID")
-                statement.execute("PRAGMA user_version=$SQLITE_SCHEMA_VERSION")
+                statement.execute("PRAGMA user_version=$schemaVersion")
                 statement.execute("PRAGMA max_page_count=$maximumPages")
                 SCHEMA.forEach(statement::execute)
+                if (supportsV2) V2_SCHEMA.forEach(statement::execute)
             }
             Files.setPosixFilePermissions(workspace.database, SQLITE_PRIVATE_FILE_PERMISSIONS)
             workspace.verifyDatabaseIdentity()
@@ -862,7 +880,7 @@ private class FunctionObservationSqliteSink private constructor(
                 pragmaLong(connection, "automatic_index") != 0L ||
                 pragmaLong(connection, "auto_vacuum") != 0L ||
                 pragmaLong(connection, "application_id") != SQLITE_APPLICATION_ID.toLong() ||
-                pragmaLong(connection, "user_version") != SQLITE_SCHEMA_VERSION.toLong()
+                pragmaLong(connection, "user_version") != schemaVersion.toLong()
             ) {
                 sqliteFail("function-observation SQLite safety configuration differs")
             }
@@ -879,7 +897,7 @@ private class FunctionObservationSqliteSink private constructor(
     }
 }
 
-private class FunctionObservationSqliteStatements(connection: Connection) : AutoCloseable {
+private class FunctionObservationSqliteStatements(connection: Connection, supportsV2: Boolean) : AutoCloseable {
     val insertObservedDie = connection.prepareStatement("INSERT OR IGNORE INTO observed_die(die_offset) VALUES(?)")
     val insertEmittedRva = connection.prepareStatement("INSERT OR IGNORE INTO emitted_rva(rva) VALUES(?)")
     val insertEmittedOwner = connection.prepareStatement(
@@ -933,11 +951,15 @@ private class FunctionObservationSqliteStatements(connection: Connection) : Auto
     val insertNonEmittedReason = connection.prepareStatement(
         "INSERT OR IGNORE INTO non_emitted_reason(group_key,reason) VALUES(?,?)",
     )
-    val insertSourceEntity = connection.prepareStatement(
-        "INSERT OR IGNORE INTO source_entity(" +
-            "source_entity_id,rich_artifact_sha256,section,entity_kind,candidate_key," +
-            "unit_id,cu_offset,die_offset,canonical) VALUES(?,?,?,?,?,?,?,?,?)",
-    )
+    val insertSourceEntity = if (supportsV2) {
+        connection.prepareStatement(
+            "INSERT OR IGNORE INTO source_entity(" +
+                "source_entity_id,rich_artifact_sha256,section,entity_kind,candidate_key," +
+                "unit_id,cu_offset,die_offset,canonical) VALUES(?,?,?,?,?,?,?,?,?)",
+        )
+    } else {
+        null
+    }
     val incrementNonEmittedAliases = connection.prepareStatement(
         "UPDATE non_emitted_group SET alias_count=alias_count+1 " +
             "WHERE group_key=? AND alias_count<?",
@@ -953,7 +975,7 @@ private class FunctionObservationSqliteStatements(connection: Connection) : Auto
 
     override fun close() {
         var failure: Throwable? = null
-        listOf(
+        listOfNotNull(
             insertObservedDie,
             insertEmittedRva,
             insertEmittedOwner,
@@ -991,6 +1013,7 @@ private class FunctionObservationSqliteStatements(connection: Connection) : Auto
 private class FunctionObservationCanonicalWriter(
     private val connection: Connection,
     private val output: OutputStream,
+    includeV2: Boolean = false,
 ) : AutoCloseable {
     private val emittedRows = connection.prepareStatement("SELECT rva FROM emitted_rva ORDER BY rva")
     private val emittedAliases =
@@ -1019,9 +1042,13 @@ private class FunctionObservationCanonicalWriter(
     private val nonEmittedOwners = connection.prepareStatement(
         "SELECT unit_id FROM non_emitted_owner WHERE group_key=? ORDER BY unit_id",
     )
-    private val sourceEntityRows = connection.prepareStatement(
-        "SELECT canonical FROM source_entity ORDER BY entity_kind,candidate_key,unit_id,cu_offset,die_offset",
-    )
+    private val sourceEntityRows = if (includeV2) {
+        connection.prepareStatement(
+            "SELECT canonical FROM source_entity ORDER BY entity_kind,candidate_key,unit_id,cu_offset,die_offset",
+        )
+    } else {
+        null
+    }
 
     fun write(
         shard: FullTreeFunctionObservationShardInput,
@@ -1150,7 +1177,7 @@ private class FunctionObservationCanonicalWriter(
     private fun writeSourceEntities(): Long {
         var index = 0L
         ascii("  \"sourceEntities\": ")
-        sourceEntityRows.executeQuery().use { rows ->
+        (sourceEntityRows ?: sqliteFail("observation-v2 source-entity table is unavailable")).executeQuery().use { rows ->
             while (rows.next()) {
                 if (index++ == 0L) ascii("[\n") else ascii(",\n")
                 writeIndentedCanonical(rows.getBytes(1), 4)
@@ -1354,7 +1381,7 @@ private class FunctionObservationCanonicalWriter(
 
     override fun close() {
         var failure: Throwable? = null
-        listOf(
+        listOfNotNull(
             emittedRows,
             emittedAliases,
             emittedEvidence,
@@ -1429,10 +1456,9 @@ private class FunctionObservationSqliteWorkspace private constructor(
         return attributes.size()
     }
 
-    fun checkCombinedScratchBound(outputBytes: Long, checkpoint: String) {
-        require(outputBytes >= 0L)
-        val databaseBytes = checkDatabaseBound(checkpoint)
-        enforceScratchBound(databaseBytes, outputBytes, checkpoint)
+    fun checkProjectionScratchBound(committedDatabaseBytes: Long, outputBytes: Long, checkpoint: String) {
+        require(committedDatabaseBytes in SQLITE_PAGE_BYTES.toLong()..maximumDatabaseBytes && outputBytes >= 0L)
+        enforceScratchBound(committedDatabaseBytes, outputBytes, checkpoint)
     }
 
     private fun enforceScratchBound(databaseBytes: Long, outputBytes: Long, checkpoint: String) {
@@ -1728,6 +1754,7 @@ private const val SQLITE_PAGE_BYTES = 4096
 private const val SQLITE_TEMP_STORE_FILE = 1
 private const val SQLITE_APPLICATION_ID = 0x46544f46
 private const val SQLITE_SCHEMA_VERSION = 1
+private const val SQLITE_V2_SCHEMA_VERSION = 2
 private const val OUTPUT_CHECKPOINT_BYTES = 1024L * 1024L
 private val SHA256 = Regex("[0-9a-f]{64}")
 private val SQLITE_PRIVATE_DIRECTORY_PERMISSIONS = PosixFilePermissions.fromString("rwx------")
@@ -1782,6 +1809,9 @@ private val SCHEMA = listOf(
         "group_key BLOB NOT NULL,reason TEXT NOT NULL COLLATE BINARY," +
         "PRIMARY KEY(group_key,reason)," +
         "FOREIGN KEY(group_key) REFERENCES non_emitted_group(group_key)) WITHOUT ROWID",
+)
+
+private val V2_SCHEMA = listOf(
     "CREATE TABLE source_entity(" +
         "source_entity_id TEXT PRIMARY KEY COLLATE BINARY," +
         "rich_artifact_sha256 TEXT NOT NULL COLLATE BINARY,section TEXT NOT NULL COLLATE BINARY," +
@@ -1810,6 +1840,9 @@ private val PROJECTION_QUERIES = listOf(
         "WHERE group_key=x'00000000000000000000000000000000' ORDER BY reason",
     "SELECT unit_id FROM non_emitted_owner " +
         "WHERE group_key=x'00000000000000000000000000000000' ORDER BY unit_id",
+)
+
+private val V2_PROJECTION_QUERIES = listOf(
     "SELECT canonical FROM source_entity " +
         "ORDER BY entity_kind,candidate_key,unit_id,cu_offset,die_offset",
 )

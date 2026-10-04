@@ -57,6 +57,20 @@ internal fun fullTreeFunctionObservationV2RetainedBudget(
     )
 }
 
+internal fun fullTreeFunctionObservationV2AnchorClaimBound(
+    wholeRunEntities: Long,
+    maximumAnchorClaims: Long,
+    maximumRunRetainedBytes: Long,
+): Long {
+    require(wholeRunEntities > 0L && maximumAnchorClaims > 0L && maximumRunRetainedBytes > 0L)
+    val entityClaimBound = if (wholeRunEntities > Long.MAX_VALUE / 64L) {
+        Long.MAX_VALUE
+    } else {
+        wholeRunEntities * 64L
+    }
+    return minOf(maximumAnchorClaims, minOf(entityClaimBound, maximumRunRetainedBytes / 256L)).coerceAtLeast(1L)
+}
+
 internal fun fullTreeFunctionObservationV2ShardScratchBudget(
     maximumScratchBytes: Long,
     preparedOutputBytes: Long,
@@ -183,10 +197,11 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                 )
 
                 val anchorIndex = FullTreeFunctionObservationV2AnchorIndex(
-                    maximumClaims = minOf(
-                        limits.maximumAnchorClaims,
-                        minOf(wholeRun.controlLong("entities") * 64L, limits.maximumRunRetainedBytes / 256L),
-                    ).coerceAtLeast(1L),
+                    maximumClaims = fullTreeFunctionObservationV2AnchorClaimBound(
+                        wholeRunEntities = wholeRun.controlLong("entities"),
+                        maximumAnchorClaims = limits.maximumAnchorClaims,
+                        maximumRunRetainedBytes = limits.maximumRunRetainedBytes,
+                    ),
                     maximumRetainedBytes = retainedBudget.anchorIndexBytes,
                 )
                 val sourceFactsByShard = LinkedHashMap<String, List<FullTreeSourceEntityFact>>()

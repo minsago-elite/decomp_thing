@@ -53,6 +53,11 @@ class FullTreeFunctionObservationsV2Test {
     }
 
     @Test
+    fun `v2 anchor claim cap saturates at a large authenticated entity bound`() {
+        assertEquals(100L, fullTreeFunctionObservationV2AnchorClaimBound(Long.MAX_VALUE, 100L, 1_000_000L))
+    }
+
+    @Test
     fun `v2 schema policy digest is pinned and compact fixture output stays canonical`() {
         assertEquals("c068ed200c8493acbe830ba4e4d8390e8a30499b3d866c43646ff802ff645d89", OracleSchemas.identity(
             FullTreeFunctionObservationsV2.SCHEMA_NAME,
@@ -896,6 +901,101 @@ class FullTreeFunctionObservationsV2Test {
             }
             assertTrue(duplicateFailure.message.orEmpty().contains("duplicate physical DIE locator"))
 
+            val digestSubject = originalRows.first {
+                it.semanticAnchorFields != null && it.semanticAnchorCandidateId != null &&
+                    it.candidateCollisionSourceEntityIds.isEmpty()
+            }
+            val digestFields = copyAnchorFields(
+                requireNotNull(digestSubject.semanticAnchorFields),
+                authenticatedFileSha256 = "d".repeat(64),
+            )
+            val forgedDigestFact = digestSubject.copy(
+                semanticAnchorFields = digestFields,
+                semanticAnchorCandidateId = digestFields.candidateId(requireNotNull(digestSubject.kind.anchorKind())),
+            )
+            val forgedDigestRows = originalRows.map { fact ->
+                if (fact.sourceEntityId == digestSubject.sourceEntityId) forgedDigestFact else fact
+            }
+            val forgedDigestDocument = JsonObject(document.toMutableMap().apply {
+                put("sourceEntities", JsonArray(forgedDigestRows.map(FullTreeSourceEntityFact::canonicalJson)))
+            })
+            val fileDigestFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                FullTreeFunctionObservationsV2.validateEnvelope(
+                    forgedDigestDocument,
+                    scope,
+                    inventory,
+                    inventorySha,
+                    shard,
+                    first.reconciliation,
+                )
+            }
+            assertTrue(fileDigestFailure.message.orEmpty().contains("no authenticated per-file evidence"))
+
+            val offsetSubject = originalRows.first {
+                it.edges.isEmpty() && it.semanticAnchorCandidateId != null &&
+                    it.candidateCollisionSourceEntityIds.isEmpty()
+            }
+            val movedDie = offsetSubject.physicalDie.copy(dieOffset = "0x7fffffffffffffff")
+            val forgedOffsetFact = offsetSubject.copy(
+                sourceEntityId = movedDie.sourceEntityId(offsetSubject.kind),
+                physicalDie = movedDie,
+            )
+            val offsetFacts = originalRows.map { fact ->
+                if (fact.sourceEntityId == offsetSubject.sourceEntityId) forgedOffsetFact else fact
+            }
+            val forgedOffsetDocument = FullTreeFunctionObservationsV2.composeEnvelope(
+                v1ProjectionForCompose(document),
+                offsetFacts,
+                first.reconciliation,
+                8L * 1024L * 1024L,
+            )
+            FullTreeFunctionObservationsV2.validateEnvelope(
+                forgedOffsetDocument,
+                scope,
+                inventory,
+                inventorySha,
+                shard,
+                first.reconciliation,
+            )
+            val offsetPrepared = privateDirectory(root.resolve("offset-prepared"))
+            val offsetPreparedOutputs = first.binding.outputs.map { outputBinding ->
+                val bytes = if (outputBinding.shardId == receipt.shardId) {
+                    FullTreeFunctionObservationsV2.canonicalEnvelopeBytes(forgedOffsetDocument)
+                } else {
+                    Files.readAllBytes(firstRoot.resolve("outputs/${outputBinding.shardId}.json"))
+                }
+                val path = offsetPrepared.resolve("${outputBinding.shardId}.json")
+                Files.write(path, bytes)
+                Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("r--------"))
+                BoundedShardPreparedOutput(
+                    shardId = outputBinding.shardId,
+                    inputSha256 = outputBinding.inputSha256,
+                    output = path,
+                    outputSha256 = OracleArtifacts.sha256(bytes),
+                    outputBytes = bytes.size.toLong(),
+                    entities = outputBinding.entities,
+                )
+            }
+            val forgedRunParent = privateDirectory(root.resolve("forged-offset-run"))
+            val forgedRun = BoundedShardRunPublisher.publish(
+                target = forgedRunParent.resolve("run"),
+                runId = first.binding.run.controlString("id"),
+                preparedOutputs = offsetPreparedOutputs,
+                bounds = boundedRunBounds(first.binding.run.controlObject("bounds")),
+                semanticValidator = BoundedShardOutputSemanticValidator {},
+            )
+            val rawOffsetFailure = assertFailsWith<FullTreeFunctionObservationV2RunException> {
+                FullTreeFunctionObservationV2RunPublisher.loadAndValidate(
+                    candidateRoot = forgedRun.root,
+                    expectedIndexArtifactSha256 = forgedRun.indexArtifactSha256,
+                    richArtifact = fixture.richArtifact,
+                    inventoryPath = fixture.inventory,
+                    scope = scope,
+                    scratchParent = scratch,
+                )
+            }
+            assertTrue(rawOffsetFailure.message.orEmpty().contains("raw-input rederivation"))
+
             val unsafeScratch = Files.createDirectory(root.resolve("unsafe-scratch"))
             Files.setPosixFilePermissions(unsafeScratch, PosixFilePermissions.fromString("rwxrwxrwx"))
             assertFailsWith<FullTreeFunctionObservationV2RunException> {
@@ -1021,6 +1121,7 @@ class FullTreeFunctionObservationsV2Test {
                 reasonCode = null,
             )
             assertFailsWith<IllegalArgumentException> { row.copy(edges = List(33) { edge }) }
+            assertFailsWith<IllegalArgumentException> { row.copy(edges = listOf(edge, edge)) }
             val relatedSourceEdge = JsonObject(edge.canonicalJson().toMutableMap().apply {
                 this["source"] = JsonPrimitive(other.locator())
             })
@@ -1210,6 +1311,45 @@ class FullTreeFunctionObservationsV2Test {
         FullTreeDenominatorDisposition.entries.associate { disposition ->
             disposition.wireValue to JsonPrimitive(facts.count { it.denominatorDisposition == disposition })
         }.toSortedMap(),
+    )
+
+    private fun boundedRunBounds(bounds: JsonObject) = BoundedShardRunPublicationBounds(
+        maximumShards = bounds.controlLong("maximumShards").toInt(),
+        perShardEntities = bounds.controlLong("perShardEntities"),
+        wholeRunEntities = bounds.controlLong("wholeRunEntities"),
+        perShardBytes = bounds.controlLong("perShardBytes"),
+        wholeRunBytes = bounds.controlLong("wholeRunBytes"),
+        perShardSeconds = bounds.getValue("perShardSeconds").jsonPrimitive.content.toDouble(),
+        wholeRunSeconds = bounds.getValue("wholeRunSeconds").jsonPrimitive.content.toDouble(),
+        perShardCpuSeconds = bounds.getValue("perShardCpuSeconds").jsonPrimitive.content.toDouble(),
+        wholeRunCpuSeconds = bounds.getValue("wholeRunCpuSeconds").jsonPrimitive.content.toDouble(),
+        maximumResidentBytes = bounds.controlLong("maximumResidentBytes"),
+        maximumWorkers = bounds.controlLong("maximumWorkers").toInt(),
+    )
+
+    private fun copyAnchorFields(
+        fields: FullTreeSourceAnchorFields,
+        authenticatedFileSha256: String?,
+    ) = FullTreeSourceAnchorFields(
+        sourcePath = fields.sourcePath,
+        declarationFileIndex = fields.declarationFileIndex,
+        declarationLine = fields.declarationLine,
+        declarationColumn = fields.declarationColumn,
+        language = fields.language,
+        lexicalContext = fields.lexicalContext,
+        sourceName = fields.sourceName,
+        signature = fields.signature,
+        templateFormalParameters = fields.templateFormalParameters,
+        templatePatternAnchorCandidateId = fields.templatePatternAnchorCandidateId,
+        templateActualArguments = fields.templateActualArguments,
+        inlineCalleeAnchorCandidateId = fields.inlineCalleeAnchorCandidateId,
+        inlineOwnerAnchorCandidateId = fields.inlineOwnerAnchorCandidateId,
+        inlineCallFile = fields.inlineCallFile,
+        inlineCallLine = fields.inlineCallLine,
+        inlineCallColumn = fields.inlineCallColumn,
+        inlinePathAnchorCandidateIds = fields.inlinePathAnchorCandidateIds,
+        authenticatedSourceRevision = fields.authenticatedSourceRevision,
+        authenticatedSourceFileSha256 = authenticatedFileSha256,
     )
 
     private fun privateDirectory(path: java.nio.file.Path): java.nio.file.Path =

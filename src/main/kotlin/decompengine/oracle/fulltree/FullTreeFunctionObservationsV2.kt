@@ -177,17 +177,21 @@ internal object FullTreeFunctionObservationsV2 {
         if (emittedRvas.size != document.v2Array("emitted").size) {
             v2Fail("observation-v2 emitted RVA population contains duplicates")
         }
+        val locatorIndex = V2ArtifactLocatorIndex.create(inventory, shard)
         facts.forEach { fact ->
             fact.linkedEmittedRva?.let { rva ->
                 if (rva !in emittedRvas) v2Fail("source entity links to an absent emitted RVA")
             }
-            validateArtifactLocators(fact, inventory, oracle.v2String("richArtifactSha256"), shard)
             val sourceRevision = fact.semanticAnchorFields?.authenticatedSourceRevision
             if (sourceRevision != null &&
                 sourceRevision != scope.sourceLock.v2Object("revision").v2String("commit")
             ) {
                 v2Fail("source anchor revision differs from the authenticated source lock")
             }
+            if (fact.semanticAnchorFields?.authenticatedSourceFileSha256 != null) {
+                v2Fail("source anchor file digest has no authenticated per-file evidence")
+            }
+            locatorIndex.validate(fact, oracle.v2String("richArtifactSha256"))
             if (fact.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE &&
                 fact.semanticAnchorFields?.templatePatternAnchorCandidateId == null &&
                 (fact.identityObservability !in setOf(
@@ -293,68 +297,98 @@ internal object FullTreeFunctionObservationsV2 {
         )
     }
 
-    private fun validateArtifactLocators(
-        fact: FullTreeSourceEntityFact,
-        inventory: JsonObject,
-        richArtifactSha256: String,
-        shard: FullTreeFunctionObservationShardInput,
+    private class V2ArtifactLocatorIndex private constructor(
+        private val allUnits: Map<String, JsonObject>,
+        private val unitOffsets: List<Pair<String, ULong>>,
+        private val shardUnitIds: Set<String>,
     ) {
-        val allUnits = inventory.v2Array("units").map { it as JsonObject }.associateBy { it.v2String("id") }
-        val unitOffsets = allUnits.values.map { unit ->
-            unit.v2String("id") to unit.v2String("dwarfOffset").removePrefix("0x").toULong(16)
-        }
-        fun validate(die: FullTreeSourcePhysicalDie, mustBeInShard: Boolean) {
-            if (die.richArtifactSha256 != richArtifactSha256) v2Fail("source DIE belongs to another artifact")
-            val unit = allUnits[die.unitId] ?: v2Fail("source DIE unit is outside the authenticated inventory")
-            if (parseDwarfOffset(unit.v2String("dwarfOffset"), "observation-v2 locator") !=
-                parseDwarfOffset(die.compilationUnitOffset, "observation-v2 locator")
-            ) v2Fail("source DIE CU offset differs from its authenticated unit")
-            if (mustBeInShard && shard.units.none { it.v2String("id") == die.unitId }) {
-                v2Fail("source entity is outside its authenticated shard")
+        fun validate(fact: FullTreeSourceEntityFact, richArtifactSha256: String) {
+            fun validate(die: FullTreeSourcePhysicalDie, mustBeInShard: Boolean) {
+                if (die.richArtifactSha256 != richArtifactSha256) v2Fail("source DIE belongs to another artifact")
+                val unit = allUnits[die.unitId] ?: v2Fail("source DIE unit is outside the authenticated inventory")
+                if (parseDwarfOffset(unit.v2String("dwarfOffset"), "observation-v2 locator") !=
+                    parseDwarfOffset(die.compilationUnitOffset, "observation-v2 locator")
+                ) v2Fail("source DIE CU offset differs from its authenticated unit")
+                if (mustBeInShard && die.unitId !in shardUnitIds) {
+                    v2Fail("source entity is outside its authenticated shard")
+                }
+            }
+            validate(fact.physicalDie, true)
+            fact.edges.forEach { edge ->
+                // The bounded #1466 reference graph can retain edges whose source is a traversed
+                // related DIE, including a unit outside this row's shard. Authenticate every locator
+                // against the complete inventory; only the census row itself is shard-local.
+                validate(edge.source, false)
+                edge.target?.let { validate(it, false) }
+                if (edge.state == FullTreeSourceIdentityEdgeState.RESOLVED &&
+                    (edge.referenceForm != null || edge.rawReference != null)
+                ) {
+                    val target = edge.target ?: v2Fail("resolved typed reference has no target locator")
+                    if (edge.referenceForm == null || edge.rawReference == null) {
+                        v2Fail("resolved typed reference omits its form or raw offset")
+                    }
+                    val form = edge.referenceForm?.removePrefix("0x")?.toULongOrNull(16)
+                        ?: v2Fail("typed reference form is malformed")
+                    val raw = edge.rawReference?.removePrefix("0x")?.toULongOrNull(16)
+                        ?: v2Fail("typed reference raw value is malformed")
+                    val sourceCu = edge.source.compilationUnitOffset.removePrefix("0x").toULong(16)
+                    val targetOffset = target.dieOffset.removePrefix("0x").toULong(16)
+                    when (form) {
+                        FULL_TREE_DW_FORM_REF1.toULong(),
+                        FULL_TREE_DW_FORM_REF2.toULong(),
+                        FULL_TREE_DW_FORM_REF4.toULong(),
+                        FULL_TREE_DW_FORM_REF8.toULong(),
+                        FULL_TREE_DW_FORM_REF_UDATA.toULong(),
+                        -> {
+                            if (raw > ULong.MAX_VALUE - sourceCu || target.unitId != edge.source.unitId ||
+                                targetOffset != sourceCu + raw
+                            ) {
+                                v2Fail("compilation-unit reference target differs from its raw offset")
+                            }
+                        }
+                        FULL_TREE_DW_FORM_REF_ADDR.toULong() -> {
+                            val expectedUnit = unitAtOrBefore(raw)
+                            if (targetOffset != raw || target.unitId != expectedUnit) {
+                                v2Fail(".debug_info reference target differs from its raw absolute offset")
+                            }
+                        }
+                        else -> v2Fail("resolved typed reference uses an unsupported DWARF reference form")
+                    }
+                }
             }
         }
-        validate(fact.physicalDie, true)
-        fact.edges.forEach { edge ->
-            // The bounded #1466 reference graph can retain edges whose source is a traversed
-            // related DIE, including a unit outside this row's shard. Authenticate every locator
-            // against the complete inventory; only the census row itself is shard-local.
-            validate(edge.source, false)
-            edge.target?.let { validate(it, false) }
-            if (edge.state == FullTreeSourceIdentityEdgeState.RESOLVED &&
-                (edge.referenceForm != null || edge.rawReference != null)
-            ) {
-                val target = edge.target ?: v2Fail("resolved typed reference has no target locator")
-                if (edge.referenceForm == null || edge.rawReference == null) {
-                    v2Fail("resolved typed reference omits its form or raw offset")
-                }
-                val form = edge.referenceForm?.removePrefix("0x")?.toULongOrNull(16)
-                    ?: v2Fail("typed reference form is malformed")
-                val raw = edge.rawReference?.removePrefix("0x")?.toULongOrNull(16)
-                    ?: v2Fail("typed reference raw value is malformed")
-                val sourceCu = edge.source.compilationUnitOffset.removePrefix("0x").toULong(16)
-                val targetOffset = target.dieOffset.removePrefix("0x").toULong(16)
-                when (form) {
-                    FULL_TREE_DW_FORM_REF1.toULong(),
-                    FULL_TREE_DW_FORM_REF2.toULong(),
-                    FULL_TREE_DW_FORM_REF4.toULong(),
-                    FULL_TREE_DW_FORM_REF8.toULong(),
-                    FULL_TREE_DW_FORM_REF_UDATA.toULong(),
-                    -> {
-                        if (raw > ULong.MAX_VALUE - sourceCu || target.unitId != edge.source.unitId ||
-                            targetOffset != sourceCu + raw
-                        ) {
-                            v2Fail("compilation-unit reference target differs from its raw offset")
-                        }
-                    }
-                    FULL_TREE_DW_FORM_REF_ADDR.toULong() -> {
-                        val expectedUnit = unitOffsets.filter { (_, offset) -> offset <= raw }
-                            .maxByOrNull { it.second }?.first
-                        if (targetOffset != raw || target.unitId != expectedUnit) {
-                            v2Fail(".debug_info reference target differs from its raw absolute offset")
-                        }
-                    }
-                    else -> v2Fail("resolved typed reference uses an unsupported DWARF reference form")
-                }
+
+        private fun unitAtOrBefore(offset: ULong): String? {
+            var lower = 0
+            var upper = unitOffsets.size
+            while (lower < upper) {
+                val middle = (lower + upper) ushr 1
+                if (unitOffsets[middle].second <= offset) lower = middle + 1 else upper = middle
+            }
+            if (lower == 0) return null
+            val selectedOffset = unitOffsets[lower - 1].second
+            var firstEqualLower = 0
+            var firstEqualUpper = lower
+            while (firstEqualLower < firstEqualUpper) {
+                val middle = (firstEqualLower + firstEqualUpper) ushr 1
+                if (unitOffsets[middle].second < selectedOffset) firstEqualLower = middle + 1
+                else firstEqualUpper = middle
+            }
+            return unitOffsets[firstEqualLower].first
+        }
+
+        companion object {
+            fun create(inventory: JsonObject, shard: FullTreeFunctionObservationShardInput): V2ArtifactLocatorIndex {
+                val units = inventory.v2Array("units").map { it as JsonObject }
+                val allUnits = units.associateBy { it.v2String("id") }
+                val unitOffsets = units.map { unit ->
+                    unit.v2String("id") to parseDwarfOffset(unit.v2String("dwarfOffset"), "observation-v2 locator")
+                }.sortedBy { it.second }
+                return V2ArtifactLocatorIndex(
+                    allUnits = allUnits,
+                    unitOffsets = unitOffsets,
+                    shardUnitIds = shard.units.map { it.v2String("id") }.toSet(),
+                )
             }
         }
     }
