@@ -325,7 +325,8 @@ internal object FullTreeFunctionObservationsV2 {
                 if (edge.state == FullTreeSourceIdentityEdgeState.RESOLVED) {
                     val hasForm = edge.referenceForm != null
                     val hasRawValue = edge.rawReference != null
-                    val isStructuralKind = edge.kind == FullTreeSourceIdentityEdgeKind.TEMPLATE_FORMAL ||
+                    val isStructuralKind = edge.kind == FullTreeSourceIdentityEdgeKind.TYPE ||
+                        edge.kind == FullTreeSourceIdentityEdgeKind.TEMPLATE_FORMAL ||
                         edge.kind == FullTreeSourceIdentityEdgeKind.TEMPLATE_ARGUMENT ||
                         edge.kind == FullTreeSourceIdentityEdgeKind.INLINE_OWNER
                     if (hasForm != hasRawValue ||
