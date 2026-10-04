@@ -30,8 +30,12 @@ internal class FullTreeFunctionObservationShardInput internal constructor(
     val identifier: String,
     val inputSha256: String,
     units: List<JsonObject>,
+    checkpoint: (String) -> Unit = {},
 ) {
-    val units: List<JsonObject> = Collections.unmodifiableList(units.map(::snapshotUnit))
+    val units: List<JsonObject> = Collections.unmodifiableList(units.mapIndexed { index, unit ->
+        if (index % 4_096 == 0) checkpoint("while snapshotting function-observation shard units")
+        snapshotUnit(unit, checkpoint)
+    })
 
     init {
         if (!identifier.matches(SHARD_IDENTIFIER)) {
@@ -66,9 +70,10 @@ internal object FullTreeFunctionObservations {
         inventoryArtifactSha256: String,
         scope: JsonObject,
         scopeSha256: String,
+        checkpoint: (String) -> Unit = {},
     ): List<FullTreeFunctionObservationShardInput> {
-        val controls = authenticateControls(inventory, inventoryArtifactSha256, scope, scopeSha256)
-        return Collections.unmodifiableList(buildShardInputs(controls))
+        val controls = authenticateControls(inventory, inventoryArtifactSha256, scope, scopeSha256, checkpoint)
+        return Collections.unmodifiableList(buildShardInputs(controls, checkpoint))
     }
 
     /** Encodes one already validated in-memory envelope under this contract's 64 MiB hard ceiling. */
@@ -83,22 +88,29 @@ internal object FullTreeFunctionObservations {
         inventory: JsonObject,
         inventoryArtifactSha256: String,
         shard: FullTreeFunctionObservationShardInput,
+        checkpoint: (String) -> Unit = {},
     ) {
         val (document, _) = snapshotAndValidate(
             documentValue,
             SCHEMA_NAME,
             "function observation shard",
+            checkpoint,
         )
-        val controls = authenticateControls(inventory, inventoryArtifactSha256, scope, scopeSha256)
-        val authenticatedShard = buildShardInputs(controls)
+        checkpoint("before authenticating function-observation controls")
+        val controls = authenticateControls(inventory, inventoryArtifactSha256, scope, scopeSha256, checkpoint)
+        val authenticatedShard = buildShardInputs(controls, checkpoint)
             .singleOrNull { it.identifier == shard.identifier }
             ?: throw FullTreeFunctionObservationException(
                 "function observation shard is outside the authenticated inventory",
             )
-        if (
-            shard.inputSha256 != authenticatedShard.inputSha256 ||
-            shard.units != authenticatedShard.units
-        ) {
+        var shardUnitsMatch = shard.units.size == authenticatedShard.units.size
+        if (shardUnitsMatch) {
+            shard.units.indices.forEach { index ->
+                if (index % 4_096 == 0) checkpoint("while comparing authenticated function-observation shard units")
+                if (shard.units[index] != authenticatedShard.units[index]) shardUnitsMatch = false
+            }
+        }
+        if (shard.inputSha256 != authenticatedShard.inputSha256 || !shardUnitsMatch) {
             throw FullTreeFunctionObservationException(
                 "function observation shard input is not authenticated",
             )
@@ -125,11 +137,13 @@ internal object FullTreeFunctionObservations {
             throw FullTreeFunctionObservationException("function observation shard bindings do not match")
         }
 
-        val semantics = FunctionObservationSemantics(authenticatedShard, controls.unitsById)
+        val semantics = FunctionObservationSemantics(authenticatedShard, controls.unitsById, checkpoint)
         document.functionArray("emitted").forEachIndexed { index, value ->
+            if (index % 4_096 == 0) checkpoint("while validating legacy emitted observations")
             semantics.acceptEmitted(value.functionObject("emitted observation $index"))
         }
         document.functionArray("nonEmitted").forEachIndexed { index, value ->
+            if (index % 4_096 == 0) checkpoint("while validating legacy non-emitted observations")
             semantics.acceptNonEmitted(value.functionObject("non-emitted observation $index"))
         }
         val counts = document.functionObject("counts")
@@ -145,7 +159,7 @@ internal object FullTreeFunctionObservations {
                 "function observation shard exceeds its authenticated entity bound",
             )
         }
-        val canonicalSize = canonicalJsonByteSize(document)
+        val canonicalSize = canonicalJsonByteSize(document, checkpoint)
         if (canonicalSize > perShard.functionLong("serializedBytes")) {
             throw FullTreeFunctionObservationException(
                 "function observation shard exceeds its authenticated serialized-byte bound",
@@ -158,10 +172,11 @@ internal object FullTreeFunctionObservations {
         inventoryArtifactSha256: String,
         scopeValue: JsonObject,
         scopeSha256: String,
+        checkpoint: (String) -> Unit = {},
     ): AuthenticatedFunctionObservationControls {
         requireSha256(scopeSha256, "scope")
         requireSha256(inventoryArtifactSha256, "inventory artifact")
-        val (scope, scopeBytes) = snapshotAndValidate(scopeValue, "full-tree-scope", "full-tree scope")
+        val (scope, scopeBytes) = snapshotAndValidate(scopeValue, "full-tree-scope", "full-tree scope", checkpoint)
         if (OracleArtifacts.sha256(scopeBytes) != scopeSha256) {
             throw FullTreeFunctionObservationException(
                 "full-tree scope snapshot differs from its authenticated digest",
@@ -171,6 +186,7 @@ internal object FullTreeFunctionObservations {
             inventoryValue,
             "full-tree-inventory",
             "full-tree inventory",
+            checkpoint,
         )
         if (OracleArtifacts.sha256(inventoryBytes) != inventoryArtifactSha256) {
             throw FullTreeFunctionObservationException(
@@ -199,6 +215,7 @@ internal object FullTreeFunctionObservations {
         val perShard = scope.functionObject("bounds").functionObject("perShard")
         val wholeRun = scope.functionObject("bounds").functionObject("wholeRun")
         BOUND_NAMES.forEach { name ->
+            checkpoint("while checking authenticated function-observation bounds")
             if (perShard.functionLong(name) > wholeRun.functionLong(name)) {
                 throw FullTreeFunctionObservationException(
                     "authenticated per-shard $name bound exceeds the whole-run bound",
@@ -207,20 +224,30 @@ internal object FullTreeFunctionObservations {
         }
 
         val units = inventory.functionArray("units").mapIndexed { index, value ->
+            if (index % 4_096 == 0) checkpoint("while reading function-observation inventory units")
             value.functionObject("inventory unit $index")
         }
         if (units.isEmpty()) {
             throw FullTreeFunctionObservationException("full-tree inventory has no compilation units")
         }
-        val expectedUnitOrder = units.sortedWith(INVENTORY_UNIT_ORDER)
-        if (units != expectedUnitOrder) {
+        var comparisons = 0
+        val expectedUnitOrder = units.sortedWith { left, right ->
+            if (++comparisons % 4_096 == 0) checkpoint("while sorting function-observation inventory units")
+            INVENTORY_UNIT_ORDER.compare(left, right)
+        }
+        if (units.indices.any { index ->
+                if (index % 4_096 == 0) checkpoint("while checking function-observation inventory order")
+                units[index] !== expectedUnitOrder[index]
+            }
+        ) {
             throw FullTreeFunctionObservationException("inventory units are not canonically ordered")
         }
         val unitsById = LinkedHashMap<String, JsonObject>()
         val sourcePaths = HashSet<String>()
         val dwarfOffsets = HashSet<ULong>()
         val unitsByShard = TreeMap<String, MutableList<String>>(FULL_TREE_CODE_POINT_ORDER)
-        units.forEach { unit ->
+        units.forEachIndexed { index, unit ->
+            if (index % 4_096 == 0) checkpoint("while reconciling function-observation inventory units")
             val id = unit.functionString("id")
             val sourcePath = unit.functionString("sourcePath")
             if (unitsById.put(id, unit) != null || !sourcePaths.add(sourcePath)) {
@@ -263,23 +290,36 @@ internal object FullTreeFunctionObservations {
         }
 
         val expectedShards = JsonArray(
-            unitsByShard.map { (identifier, unitIds) ->
+            unitsByShard.entries.mapIndexed { shardIndex, (identifier, unitIds) ->
+                if (shardIndex % 4_096 == 0) checkpoint("while constructing function-observation inventory shards")
+                var ownerComparisons = 0
+                val sortedUnitIds = unitIds.sortedWith { left, right ->
+                    if (++ownerComparisons % 4_096 == 0) checkpoint("while sorting function-observation shard owners")
+                    FULL_TREE_CODE_POINT_ORDER.compare(left, right)
+                }
                 JsonObject(
                     mapOf(
                         "id" to JsonPrimitive(identifier),
                         "unitIds" to JsonArray(
-                            unitIds.sortedWith(FULL_TREE_CODE_POINT_ORDER).map(::JsonPrimitive),
+                            sortedUnitIds.mapIndexed { index, unitId ->
+                                if (index % 4_096 == 0) checkpoint("while serializing function-observation shard owners")
+                                JsonPrimitive(unitId)
+                            },
                         ),
                     ),
                 )
             },
         )
-        if (inventory.functionArray("shards") != expectedShards) {
+        if (!controlShardsMatch(inventory.functionArray("shards"), expectedShards, checkpoint)) {
             throw FullTreeFunctionObservationException(
                 "inventory shard ownership does not reconcile exactly",
             )
         }
-        if (unitsByShard.values.any { it.size.toLong() > perShard.functionLong("compilationUnits") }) {
+        if (unitsByShard.values.withIndex().any { (index, ids) ->
+                if (index % 4_096 == 0) checkpoint("while checking function-observation shard bounds")
+                ids.size.toLong() > perShard.functionLong("compilationUnits")
+            }
+        ) {
             throw FullTreeFunctionObservationException(
                 "inventory shard exceeds its authenticated compilation-unit bound",
             )
@@ -295,7 +335,11 @@ internal object FullTreeFunctionObservations {
             )
         }
 
-        val generated = units.count { it.functionString("sourceKind") == "generated" }.toLong()
+        var generated = 0L
+        units.forEachIndexed { index, unit ->
+            if (index % 4_096 == 0) checkpoint("while counting function-observation inventory kinds")
+            if (unit.functionString("sourceKind") == "generated") generated++
+        }
         val expectedCounts = JsonObject(
             mapOf(
                 "compilationUnits" to JsonPrimitive(units.size.toLong()),
@@ -310,7 +354,7 @@ internal object FullTreeFunctionObservations {
 
         val inventoryIndexSha256 = inventory.functionString("indexSha256")
         requireSha256(inventoryIndexSha256, "inventory index")
-        if (inventoryIndexSha256 != inventoryIndexSha256(units)) {
+        if (inventoryIndexSha256 != inventoryIndexSha256(units, checkpoint)) {
             throw FullTreeFunctionObservationException("inventory index digest does not reconcile")
         }
         return AuthenticatedFunctionObservationControls(
@@ -325,13 +369,16 @@ internal object FullTreeFunctionObservations {
 
     private fun buildShardInputs(
         controls: AuthenticatedFunctionObservationControls,
+        checkpoint: (String) -> Unit = {},
     ): List<FullTreeFunctionObservationShardInput> = controls.inventory.functionArray("shards").mapIndexed {
             index,
             value,
         ->
+        if (index % 4_096 == 0) checkpoint("while deriving function-observation shard inputs")
         val shard = value.functionObject("inventory shard $index")
         val identifier = shard.functionString("id")
-        val records = shard.functionArray("unitIds").map { rawId ->
+        val records = shard.functionArray("unitIds").mapIndexed { unitIndex, rawId ->
+            if (unitIndex % 4_096 == 0) checkpoint("while deriving function-observation shard units")
             val unitId = rawId.functionString("inventory shard unit ID")
             controls.unitsById[unitId] ?: throw FullTreeFunctionObservationException(
                 "inventory shard $identifier references unknown unit $unitId",
@@ -349,8 +396,9 @@ internal object FullTreeFunctionObservations {
         )
         FullTreeFunctionObservationShardInput(
             identifier,
-            sha256(canonicalBytes(payload, "function observation shard input")),
+            sha256(canonicalBytes(payload, "function observation shard input", checkpoint)),
             records,
+            checkpoint,
         )
     }
 
@@ -358,10 +406,11 @@ internal object FullTreeFunctionObservations {
         value: JsonObject,
         schemaName: String,
         label: String,
+        checkpoint: (String) -> Unit = {},
     ): Pair<JsonObject, ByteArray> {
-        val bytes = canonicalBytes(value, label)
+        val bytes = canonicalBytes(value, label, checkpoint)
         val snapshot = try {
-            OracleJson.parseCanonical(bytes, CONTROL_JSON_LIMITS) as? JsonObject
+            OracleJson.parseCanonical(bytes, CONTROL_JSON_LIMITS, checkpoint) as? JsonObject
                 ?: throw FullTreeFunctionObservationException("$label root is not an object")
         } catch (failure: FullTreeFunctionObservationException) {
             throw failure
@@ -369,20 +418,45 @@ internal object FullTreeFunctionObservations {
             throw FullTreeFunctionObservationException("$label cannot be snapshotted", failure)
         }
         try {
+            checkpoint("before validating $label schema")
             OracleSchemas.validate(schemaName, snapshot)
+            checkpoint("after validating $label schema")
         } catch (failure: Exception) {
             throw FullTreeFunctionObservationException("$label fails bundled schema validation", failure)
         }
         return snapshot to bytes
     }
 
-    private fun inventoryIndexSha256(units: List<JsonObject>): String {
+    private fun inventoryIndexSha256(units: List<JsonObject>, checkpoint: (String) -> Unit = {}): String {
         val digest = MessageDigest.getInstance("SHA-256")
         digest.update(INVENTORY_INDEX_DOMAIN)
-        units.forEach { unit ->
-            digest.update(MessageDigest.getInstance("SHA-256").digest(canonicalBytes(unit, "inventory unit")))
+        units.forEachIndexed { index, unit ->
+            if (index % 4_096 == 0) checkpoint("while hashing function-observation inventory units")
+            digest.update(MessageDigest.getInstance("SHA-256").digest(canonicalBytes(unit, "inventory unit", checkpoint)))
         }
+        checkpoint("after hashing function-observation inventory units")
         return digest.digest().hexString()
+    }
+
+    private fun controlShardsMatch(actual: JsonArray, expected: JsonArray, checkpoint: (String) -> Unit): Boolean {
+        if (actual.size != expected.size) return false
+        actual.forEachIndexed { shardIndex, rawActual ->
+            if (shardIndex % 4_096 == 0) checkpoint("while comparing function-observation inventory shards")
+            val actualShard = rawActual as? JsonObject ?: return false
+            val expectedShard = expected[shardIndex] as? JsonObject ?: return false
+            if (actualShard.functionString("id") != expectedShard.functionString("id")) return false
+            val actualIds = actualShard.functionArray("unitIds")
+            val expectedIds = expectedShard.functionArray("unitIds")
+            if (actualIds.size != expectedIds.size) return false
+            actualIds.forEachIndexed { index, rawId ->
+                if (index % 4_096 == 0) checkpoint("while comparing function-observation shard unit IDs")
+                if (rawId.functionString("inventory shard unit ID") !=
+                    expectedIds[index].functionString("expected inventory shard unit ID")
+                ) return false
+            }
+        }
+        checkpoint("after comparing function-observation inventory shards")
+        return true
     }
 
     private val PRODUCER_POLICY = JsonObject(
@@ -417,11 +491,22 @@ private data class DwarfUnitBounds(val start: ULong, val endExclusive: ULong?)
 private class FunctionObservationSemantics(
     shard: FullTreeFunctionObservationShardInput,
     allUnitsById: Map<String, JsonObject>,
+    private val checkpoint: (String) -> Unit,
 ) {
     private val shardIdentifier = shard.identifier
-    private val unitsById = shard.units.associateBy { it.functionString("id") }
-    private val unitPaths = unitsById.mapValues { (_, unit) -> unit.functionString("sourcePath") }
-    private val unitBounds = buildUnitBounds(allUnitsById.values)
+    private val unitsById = LinkedHashMap<String, JsonObject>().apply {
+        shard.units.forEachIndexed { index, unit ->
+            if (index % 4_096 == 0) checkpoint("while indexing function-observation shard units")
+            put(unit.functionString("id"), unit)
+        }
+    }
+    private val unitPaths = LinkedHashMap<String, String>().apply {
+        unitsById.entries.forEachIndexed { index, (id, unit) ->
+            if (index % 4_096 == 0) checkpoint("while indexing function-observation source paths")
+            put(id, unit.functionString("sourcePath"))
+        }
+    }
+    private val unitBounds = buildUnitBounds(allUnitsById.values, checkpoint)
     private val observedNonEmittedDieOffsets = HashSet<ULong>()
     private var previousRva: ULong? = null
     private var previousNonEmittedId: String? = null
@@ -447,22 +532,33 @@ private class FunctionObservationSemantics(
             throw FullTreeFunctionObservationException("emitted function identity does not match its RVA")
         }
 
-        val ownerIds = record.functionArray("ownerUnitIds").strings("emitted owner unit ID")
-        requireStrictCodePointOrder(ownerIds, "emitted owner unit IDs")
-        if (ownerIds.any { it !in unitsById }) {
+        val ownerIds = record.functionArray("ownerUnitIds").strings("emitted owner unit ID", checkpoint)
+        requireStrictCodePointOrder(ownerIds, "emitted owner unit IDs", checkpoint)
+        if (ownerIds.withIndex().any { (index, id) ->
+                if (index % 4_096 == 0) checkpoint("while checking emitted function owners")
+                id !in unitsById
+            }
+        ) {
             throw FullTreeFunctionObservationException("emitted function owner is outside its shard")
         }
 
-        val aliases = record.functionArray("aliases").objects("emitted alias")
-        validateAliases(aliases, ownerIds.toSet(), "emitted")
+        val aliases = record.functionArray("aliases").objects("emitted alias", checkpoint)
+        val ownerSet = checkpointedStringSet(ownerIds, "emitted owner IDs", checkpoint)
+        validateAliases(aliases, ownerSet, "emitted", checkpoint)
 
-        val declarations = record.functionArray("declarations").objects("emitted declaration")
-        requireStrictCanonicalByteOrder(declarations, "emitted declarations")
-        declarations.forEach { declaration -> validateDeclaration(declaration, ownerIds.toSet()) }
-        val declarationOwnerPaths = declarations.mapTo(hashSetOf()) {
-            it.functionString("unitSourcePath")
+        val declarations = record.functionArray("declarations").objects("emitted declaration", checkpoint)
+        requireStrictCanonicalByteOrder(declarations, "emitted declarations", checkpoint)
+        val declarationOwnerPaths = HashSet<String>()
+        declarations.forEachIndexed { index, declaration ->
+            if (index % 4_096 == 0) checkpoint("while validating emitted declarations")
+            validateDeclaration(declaration, ownerSet, checkpoint)
+            declarationOwnerPaths.add(declaration.functionString("unitSourcePath"))
         }
-        val expectedOwnerPaths = ownerIds.mapTo(hashSetOf()) { unitPaths.getValue(it) }
+        val expectedOwnerPaths = HashSet<String>()
+        ownerIds.forEachIndexed { index, unitId ->
+            if (index % 4_096 == 0) checkpoint("while deriving emitted owner paths")
+            expectedOwnerPaths.add(unitPaths.getValue(unitId))
+        }
         if (declarationOwnerPaths != expectedOwnerPaths) {
             throw FullTreeFunctionObservationException(
                 "emitted declarations do not cover their exact compilation-unit ownership",
@@ -485,15 +581,19 @@ private class FunctionObservationSemantics(
         }
         previousNonEmittedId = identifier
 
-        val unitIds = record.functionArray("unitIds").strings("non-emitted unit ID")
-        requireStrictCodePointOrder(unitIds, "non-emitted unit IDs")
-        if (unitIds.any { it !in unitsById }) {
+        val unitIds = record.functionArray("unitIds").strings("non-emitted unit ID", checkpoint)
+        requireStrictCodePointOrder(unitIds, "non-emitted unit IDs", checkpoint)
+        if (unitIds.withIndex().any { (index, unitId) ->
+                if (index % 4_096 == 0) checkpoint("while checking non-emitted function owners")
+                unitId !in unitsById
+            }
+        ) {
             throw FullTreeFunctionObservationException("non-emitted function owner is outside its shard")
         }
-        val unitSet = unitIds.toSet()
+        val unitSet = checkpointedStringSet(unitIds, "non-emitted owner IDs", checkpoint)
 
-        val aliases = record.functionArray("aliases").objects("non-emitted alias")
-        val evidenceUnits = validateAliases(aliases, unitSet, "non-emitted")
+        val aliases = record.functionArray("aliases").objects("non-emitted alias", checkpoint)
+        val evidenceUnits = validateAliases(aliases, unitSet, "non-emitted", checkpoint)
         if (evidenceUnits != unitSet) {
             throw FullTreeFunctionObservationException(
                 "non-emitted alias evidence does not cover exact ownership",
@@ -501,12 +601,22 @@ private class FunctionObservationSemantics(
         }
 
         val declaration = record.functionObject("declaration")
-        validateDeclaration(declaration, unitSet)
-        val selectedDeclaration = unitIds.map { unitId ->
+        validateDeclaration(declaration, unitSet, checkpoint)
+        val selectedDeclarations = unitIds.mapIndexed { index, unitId ->
+            if (index % 4_096 == 0) checkpoint("while selecting canonical non-emitted declaration")
             JsonObject(declaration.toMutableMap().apply {
                 this["unitSourcePath"] = JsonPrimitive(unitPaths.getValue(unitId))
             })
-        }.minWithOrNull(CANONICAL_OBJECT_ORDER)
+        }
+        var declarationComparisons = 0
+        val selectedDeclaration = selectedDeclarations.minWithOrNull { left, right ->
+            if (++declarationComparisons % 256 == 0) checkpoint("while comparing non-emitted declaration owners")
+            compareUnsignedBytes(
+                canonicalBytes(left, "canonical function observation object", checkpoint),
+                canonicalBytes(right, "canonical function observation object", checkpoint),
+                checkpoint,
+            )
+        }
             ?: throw FullTreeFunctionObservationException("non-emitted function has no owner")
         if (declaration != selectedDeclaration) {
             throw FullTreeFunctionObservationException(
@@ -514,11 +624,12 @@ private class FunctionObservationSemantics(
             )
         }
 
-        val dieOffsets = record.functionArray("dieOffsets").objects("non-emitted DIE offset")
+        val dieOffsets = record.functionArray("dieOffsets").objects("non-emitted DIE offset", checkpoint)
         var previousDieUnit: String? = null
         var previousDieOffset: ULong? = null
         val dieUnits = HashSet<String>()
-        dieOffsets.forEach { evidence ->
+        dieOffsets.forEachIndexed { index, evidence ->
+            if (index % 4_096 == 0) checkpoint("while validating non-emitted DIE evidence")
             val unitId = evidence.functionString("unitId")
             val dieOffset = parseAddress(evidence.functionString("dieOffset"), "non-emitted DIE offset")
             if (unitId !in unitSet) {
@@ -559,9 +670,9 @@ private class FunctionObservationSemantics(
             )
         }
 
-        val reasonCodes = record.functionArray("reasonCodes").strings("non-emission reason code")
-        requireStrictCodePointOrder(reasonCodes, "non-emission reason codes")
-        val expectedId = nonEmittedIdentity(aliases, declaration, shardIdentifier)
+        val reasonCodes = record.functionArray("reasonCodes").strings("non-emission reason code", checkpoint)
+        requireStrictCodePointOrder(reasonCodes, "non-emission reason codes", checkpoint)
+        val expectedId = nonEmittedIdentity(aliases, declaration, shardIdentifier, checkpoint)
         if (identifier != expectedId) {
             throw FullTreeFunctionObservationException(
                 "non-emitted function identity does not match canonical evidence",
@@ -593,30 +704,49 @@ private class FunctionObservationSemantics(
         }
     }
 
-    private fun buildUnitBounds(units: Collection<JsonObject>): Map<String, DwarfUnitBounds> {
-        val ordered = units.map { unit ->
+    private fun buildUnitBounds(
+        units: Collection<JsonObject>,
+        checkpoint: (String) -> Unit,
+    ): Map<String, DwarfUnitBounds> {
+        val located = units.mapIndexed { index, unit ->
+            if (index % 4_096 == 0) checkpoint("while indexing authenticated DWARF unit bounds")
             unit.functionString("id") to parseAddress(
                 unit.functionString("dwarfOffset"),
                 "inventory DWARF offset",
             )
-        }.sortedBy { it.second }
-        return ordered.mapIndexed { index, (unitId, start) ->
-            unitId to DwarfUnitBounds(start, ordered.getOrNull(index + 1)?.second)
-        }.toMap()
+        }
+        var comparisons = 0
+        val ordered = located.sortedWith { left, right ->
+            if (++comparisons % 4_096 == 0) checkpoint("while sorting authenticated DWARF unit bounds")
+            left.second.compareTo(right.second)
+        }
+        checkpoint("after sorting authenticated DWARF unit bounds")
+        val result = LinkedHashMap<String, DwarfUnitBounds>(ordered.size)
+        ordered.forEachIndexed { index, (unitId, start) ->
+            if (index % 4_096 == 0) checkpoint("while finalizing authenticated DWARF unit bounds")
+            result[unitId] = DwarfUnitBounds(start, ordered.getOrNull(index + 1)?.second)
+        }
+        return result
     }
 
     private fun validateAliases(
         aliases: List<JsonObject>,
         owners: Set<String>,
         label: String,
+        checkpoint: (String) -> Unit,
     ): Set<String> {
-        val names = aliases.map { it.functionString("name") }
-        requireStrictCodePointOrder(names, "$label alias names")
+        val names = aliases.mapIndexed { index, alias ->
+            if (index % 4_096 == 0) checkpoint("while reading $label alias names")
+            alias.functionString("name")
+        }
+        requireStrictCodePointOrder(names, "$label alias names", checkpoint)
         val observedOwners = HashSet<String>()
-        aliases.forEach { alias ->
-            val evidence = alias.functionArray("evidence").objects("$label alias evidence")
-            requireStrictCanonicalByteOrder(evidence, "$label alias evidence")
-            evidence.forEach { item ->
+        aliases.forEachIndexed { aliasIndex, alias ->
+            if (aliasIndex % 4_096 == 0) checkpoint("while validating $label aliases")
+            val evidence = alias.functionArray("evidence").objects("$label alias evidence", checkpoint)
+            requireStrictCanonicalByteOrder(evidence, "$label alias evidence", checkpoint)
+            evidence.forEachIndexed { evidenceIndex, item ->
+                if (evidenceIndex % 4_096 == 0) checkpoint("while validating $label alias evidence")
                 if (item.functionString("kind") != "dwarf-subprogram") {
                     throw FullTreeFunctionObservationException("$label alias evidence kind is invalid")
                 }
@@ -630,9 +760,17 @@ private class FunctionObservationSemantics(
         return observedOwners
     }
 
-    private fun validateDeclaration(declaration: JsonObject, owners: Set<String>) {
+    private fun validateDeclaration(
+        declaration: JsonObject,
+        owners: Set<String>,
+        checkpoint: (String) -> Unit,
+    ) {
         val unitSourcePath = declaration.functionString("unitSourcePath")
-        if (owners.none { unitPaths.getValue(it) == unitSourcePath }) {
+        if (owners.withIndex().none { (index, owner) ->
+                if (index % 4_096 == 0) checkpoint("while validating declaration ownership")
+                unitPaths.getValue(owner) == unitSourcePath
+            }
+        ) {
             throw FullTreeFunctionObservationException(
                 "function declaration unit source path is outside ownership",
             )
@@ -659,22 +797,29 @@ private fun nonEmittedIdentity(
     aliases: List<JsonObject>,
     declaration: JsonObject,
     shardIdentifier: String,
+    checkpoint: (String) -> Unit = {},
 ): String {
+    checkpoint("before hashing non-emitted function identity")
     val declarationIdentity = JsonObject(declaration.filterKeys { it != "unitSourcePath" })
     val identityDocument = JsonObject(
         mapOf(
-            "aliasNames" to JsonArray(aliases.map { JsonPrimitive(it.functionString("name")) }),
+            "aliasNames" to JsonArray(aliases.mapIndexed { index, alias ->
+                if (index % 4_096 == 0) checkpoint("while hashing non-emitted alias names")
+                JsonPrimitive(alias.functionString("name"))
+            }),
             "declaration" to declarationIdentity,
         ),
     )
-    val identity = sha256(canonicalBytes(identityDocument, "non-emitted function identity")).take(32)
+    val identity = sha256(canonicalBytes(identityDocument, "non-emitted function identity", checkpoint)).take(32)
     val shardIdentity = sha256("$shardIdentifier:$identity".toByteArray(StandardCharsets.UTF_8)).take(32)
+    checkpoint("after hashing non-emitted function identity")
     return "non-emitted-observation-$shardIdentity"
 }
 
-private fun requireStrictCodePointOrder(values: List<String>, label: String) {
+private fun requireStrictCodePointOrder(values: List<String>, label: String, checkpoint: (String) -> Unit = {}) {
     var previous: String? = null
-    values.forEach { current ->
+    values.forEachIndexed { index, current ->
+        if (index % 4_096 == 0) checkpoint("while checking $label ordering")
         val prior = previous
         if (prior != null && FULL_TREE_CODE_POINT_ORDER.compare(prior, current) >= 0) {
             throw FullTreeFunctionObservationException(
@@ -685,47 +830,68 @@ private fun requireStrictCodePointOrder(values: List<String>, label: String) {
     }
 }
 
-private fun requireStrictCanonicalByteOrder(values: List<JsonObject>, label: String) {
+private fun checkpointedStringSet(
+    values: Iterable<String>,
+    label: String,
+    checkpoint: (String) -> Unit,
+): Set<String> {
+    val result = HashSet<String>()
+    values.forEachIndexed { index, value ->
+        if (index % 4_096 == 0) checkpoint("while indexing $label")
+        result += value
+    }
+    return result
+}
+
+private fun requireStrictCanonicalByteOrder(
+    values: List<JsonObject>,
+    label: String,
+    checkpoint: (String) -> Unit = {},
+) {
     var previous: ByteArray? = null
-    values.forEach { value ->
-        val current = canonicalBytes(value, label)
+    values.forEachIndexed { index, value ->
+        if (index % 256 == 0) checkpoint("while canonicalizing $label")
+        val current = canonicalBytes(value, label, checkpoint)
         val prior = previous
-        if (prior != null && compareUnsignedBytes(prior, current) >= 0) {
+        val comparison = prior?.let { compareUnsignedBytes(it, current, checkpoint) } ?: -1
+        if (prior != null && comparison >= 0) {
             throw FullTreeFunctionObservationException(
-                if (prior.contentEquals(current)) "$label contain a duplicate" else "$label are not canonically ordered",
+                if (comparison == 0) "$label contain a duplicate" else "$label are not canonically ordered",
             )
         }
         previous = current
     }
 }
 
-private fun compareUnsignedBytes(left: ByteArray, right: ByteArray): Int {
+private fun compareUnsignedBytes(
+    left: ByteArray,
+    right: ByteArray,
+    checkpoint: (String) -> Unit = {},
+): Int {
     val common = minOf(left.size, right.size)
     for (index in 0 until common) {
+        if (index % (64 * 1024) == 0) checkpoint("while comparing canonical function-observation bytes")
         val comparison = (left[index].toInt() and 0xff).compareTo(right[index].toInt() and 0xff)
         if (comparison != 0) return comparison
     }
     return left.size.compareTo(right.size)
 }
 
-private val CANONICAL_OBJECT_ORDER = Comparator<JsonObject> { left, right ->
-    compareUnsignedBytes(
-        canonicalBytes(left, "canonical function observation object"),
-        canonicalBytes(right, "canonical function observation object"),
-    )
-}
-
-private fun snapshotUnit(unit: JsonObject): JsonObject {
-    val bytes = canonicalBytes(unit, "function observation unit snapshot")
+private fun snapshotUnit(unit: JsonObject, checkpoint: (String) -> Unit = {}): JsonObject {
+    val bytes = canonicalBytes(unit, "function observation unit snapshot", checkpoint)
     return try {
-        OracleJson.parseCanonical(bytes, CONTROL_JSON_LIMITS) as JsonObject
+        OracleJson.parseCanonical(bytes, CONTROL_JSON_LIMITS, checkpoint) as JsonObject
     } catch (failure: Exception) {
         throw FullTreeFunctionObservationException("function observation unit cannot be snapshotted", failure)
     }
 }
 
-private fun canonicalBytes(value: JsonElement, label: String): ByteArray = try {
-    OracleJson.canonicalBytes(value, CONTROL_JSON_LIMITS)
+private fun canonicalBytes(
+    value: JsonElement,
+    label: String,
+    checkpoint: (String) -> Unit = {},
+): ByteArray = try {
+    OracleJson.canonicalBytes(value, CONTROL_JSON_LIMITS, checkpoint)
 } catch (failure: Exception) {
     throw FullTreeFunctionObservationException("$label exceeds strict canonical JSON limits", failure)
 }
@@ -778,8 +944,14 @@ private fun JsonObject.nullableNonNegativeLong(name: String): Long? {
         ?: throw FullTreeFunctionObservationException("function declaration $name exceeds Long")
 }
 
-private fun JsonArray.strings(label: String): List<String> = mapIndexed { index, value ->
+private fun JsonArray.strings(label: String, checkpoint: (String) -> Unit = {}): List<String> = mapIndexed { index, value ->
+    if (index % 4_096 == 0) checkpoint("while reading $label values")
     value.functionString("$label $index")
+}
+
+private fun JsonArray.objects(label: String, checkpoint: (String) -> Unit = {}): List<JsonObject> = mapIndexed { index, value ->
+    if (index % 4_096 == 0) checkpoint("while reading $label objects")
+    value.functionObject("$label $index")
 }
 
 private fun parseAddress(value: String, label: String): ULong {
@@ -818,9 +990,19 @@ private fun add(left: Long, right: Long, label: String): Long = try {
 }
 
 /** Exact size of OracleJson's two-space, UTF-8 canonical encoding, including its final newline. */
-private fun canonicalJsonByteSize(value: JsonElement): Long = add(canonicalValueByteSize(value, 0), 1L, "JSON byte")
+private fun canonicalJsonByteSize(value: JsonElement, checkpoint: (String) -> Unit = {}): Long {
+    return add(canonicalValueByteSize(value, 0, checkpoint, intArrayOf(0)), 1L, "JSON byte")
+}
 
-private fun canonicalValueByteSize(value: JsonElement, indentation: Int): Long = when (value) {
+private fun canonicalValueByteSize(
+    value: JsonElement,
+    indentation: Int,
+    checkpoint: (String) -> Unit,
+    visited: IntArray,
+): Long {
+    visited[0]++
+    if (visited[0] % 1_024 == 0) checkpoint("while measuring canonical function-observation bytes")
+    return when (value) {
     JsonNull -> 4L
     is JsonObject -> {
         if (value.isEmpty()) {
@@ -831,7 +1013,7 @@ private fun canonicalValueByteSize(value: JsonElement, indentation: Int): Long =
                 size = add(size, Math.multiplyExact((indentation + 1).toLong(), 2L), "JSON byte")
                 size = add(size, canonicalStringByteSize(entry.key), "JSON byte")
                 size = add(size, 2L, "JSON byte") // ": "
-                size = add(size, canonicalValueByteSize(entry.value, indentation + 1), "JSON byte")
+                size = add(size, canonicalValueByteSize(entry.value, indentation + 1, checkpoint, visited), "JSON byte")
                 if (index != value.size - 1) size = add(size, 1L, "JSON byte")
                 size = add(size, 1L, "JSON byte") // newline
             }
@@ -846,7 +1028,7 @@ private fun canonicalValueByteSize(value: JsonElement, indentation: Int): Long =
             var size = 2L // "[\n"
             value.forEachIndexed { index, element ->
                 size = add(size, Math.multiplyExact((indentation + 1).toLong(), 2L), "JSON byte")
-                size = add(size, canonicalValueByteSize(element, indentation + 1), "JSON byte")
+                size = add(size, canonicalValueByteSize(element, indentation + 1, checkpoint, visited), "JSON byte")
                 if (index != value.size - 1) size = add(size, 1L, "JSON byte")
                 size = add(size, 1L, "JSON byte") // newline
             }
@@ -855,16 +1037,17 @@ private fun canonicalValueByteSize(value: JsonElement, indentation: Int): Long =
         }
     }
     is JsonPrimitive -> if (value.isString) {
-        canonicalStringByteSize(value.content)
+        canonicalStringByteSize(value.content, checkpoint)
     } else {
-        (OracleJson.canonicalBytes(value).size - 1).toLong()
+        (OracleJson.canonicalBytes(value, CONTROL_JSON_LIMITS, checkpoint).size - 1).toLong()
     }
 }
 
-private fun canonicalStringByteSize(value: String): Long {
+private fun canonicalStringByteSize(value: String, checkpoint: (String) -> Unit = {}): Long {
     var size = 2L
     var index = 0
     while (index < value.length) {
+        if (index % (64 * 1024) == 0) checkpoint("while measuring canonical function-observation string bytes")
         val character = value[index]
         val bytes = when (character) {
             '"', '\\', '\b', '\u000c', '\n', '\r', '\t' -> 2

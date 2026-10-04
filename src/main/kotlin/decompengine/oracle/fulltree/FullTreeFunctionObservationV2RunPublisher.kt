@@ -298,7 +298,12 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                     throw FullTreeFunctionObservationV2RunException("full-tree inventory is not strict canonical JSON", failure)
                 }
                 val inventorySha256 = OracleArtifacts.sha256(inventoryBytes)
-                FullTreeInventoryControl.validate(inventory, scope, limits.shard.control)
+                FullTreeInventoryControl.validate(
+                    inventory,
+                    scope,
+                    limits.shard.control,
+                    deadline::checkpoint,
+                )
                 val richSha256 = richGuard.sha256(deadline::checkpoint, "rich artifact")
                 if (richSha256 != scope.document.controlObject("oracle").controlString("richArtifactSha256")) {
                     v2RunFail("rich artifact does not match the authenticated scope")
@@ -308,6 +313,7 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                     inventorySha256,
                     scope.document,
                     scope.sha256,
+                    deadline::checkpoint,
                 )
                 if (shards.size > limits.run.maximumShards) v2RunFail("observation-v2 shard count exceeds its bound")
                 if (shards.isEmpty()) v2RunFail("observation-v2 run has no authenticated shards")
@@ -376,8 +382,8 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                             anchorIndex.accept(kind, candidateId, physicalClaimId)
                         },
                         factAdmission = { fact, canonicalArrayContributionBytes ->
-                            FullTreeFunctionObservationsV2.validateSourceEntityForV2(fact)
-                            anchorIndex.acceptInlineRelatedClaims(fact)
+                            FullTreeFunctionObservationsV2.validateSourceEntityForV2(fact, shardCheckpoint)
+                            anchorIndex.acceptInlineRelatedClaims(fact, shardCheckpoint)
                             val nextCount = Math.addExact(sourceFactCount, 1L)
                             val arrayFramingBytes = if (sourceFactsAdmittedForShard == 0L) 4L else 1L
                             val nextAdmissionBytes = Math.addExact(

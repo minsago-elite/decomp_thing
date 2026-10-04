@@ -33,7 +33,8 @@ internal class FullTreeFunctionObservationAccumulatorV2(
 
     fun acceptSourceEntity(fact: FullTreeSourceEntityFact) {
         requireMutable()
-        FullTreeFunctionObservationsV2.validateSourceEntityForV2(fact)
+        limits.checkpoint("before accepting an in-memory source entity")
+        FullTreeFunctionObservationsV2.validateSourceEntityForV2(fact, limits.checkpoint)
         if (shard.units.none { it.controlString("id") == fact.physicalDie.unitId }) {
             v2AccumulatorFail("source entity owner is outside its authenticated shard")
         }
@@ -44,7 +45,11 @@ internal class FullTreeFunctionObservationAccumulatorV2(
         if (fact.sourceEntityId in sourceIds) v2AccumulatorFail("duplicate sourceEntityId")
         if (fact.physicalDie in physicalDies) v2AccumulatorFail("duplicate physical DIE locator")
         val row = try {
-            OracleJson.canonicalBytes(fact.canonicalJson(), sourceIdentityRowJsonLimits(limits.maximumOutputBytes))
+            OracleJson.canonicalBytes(
+                fact.canonicalJson(limits.checkpoint),
+                sourceIdentityRowJsonLimits(limits.maximumOutputBytes),
+                limits.checkpoint,
+            )
         } catch (failure: Exception) {
             throw FullTreeFunctionObservationV2Exception("source entity cannot be canonicalized", failure)
         }
@@ -69,6 +74,7 @@ internal class FullTreeFunctionObservationAccumulatorV2(
         sourceIds += fact.sourceEntityId
         physicalDies += fact.physicalDie
         sourceFacts += fact
+        limits.checkpoint("after accepting an in-memory source entity")
     }
 
     fun finish(
@@ -85,6 +91,7 @@ internal class FullTreeFunctionObservationAccumulatorV2(
             sourceFacts = sourceFacts,
             reconciliation = reconciliation,
             maximumBytes = limits.maximumOutputBytes,
+            checkpoint = limits.checkpoint,
         )
     }
 
@@ -97,6 +104,7 @@ internal data class FullTreeFunctionObservationV2AccumulatorLimits(
     val observations: FullTreeFunctionObservationAccumulatorLimits = FullTreeFunctionObservationAccumulatorLimits(),
     val maximumOutputBytes: Long = 16L * 1024L * 1024L,
     val maximumRetainedBytes: Long = 1024L * 1024L * 1024L,
+    val checkpoint: (String) -> Unit = {},
 ) {
     init {
         require(maximumOutputBytes in 1L..FullTreeFunctionObservationsV2.MAXIMUM_CANONICAL_BYTES)

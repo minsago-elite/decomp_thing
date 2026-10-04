@@ -327,6 +327,95 @@ class FullTreeFunctionObservationsV2Test {
         }
 
     @Test
+    fun `SQLite source population validator checks cancellation within one large canonical row`() =
+        inControlTemporaryDirectory { root ->
+            val fixture = createFullTreeControlFixture(root.resolve("control"))
+            val scope = fixture.authenticatedScope()
+            val inventory = parseControlObject(fixture.inventory)
+            val inventorySha = fixtureSha256(fixture.inventory)
+            val shard = FullTreeFunctionObservations.shardInputs(
+                inventory,
+                inventorySha,
+                scope.document,
+                scope.sha256,
+            ).first()
+            val unit = shard.units.single()
+            val richSha = scope.document.controlObject("oracle").controlString("richArtifactSha256")
+            val physical = FullTreeSourcePhysicalDie(
+                richArtifactSha256 = richSha,
+                unitId = unit.controlString("id"),
+                section = ".debug_info",
+                compilationUnitOffset = unit.controlString("dwarfOffset"),
+                dieOffset = "0x612",
+            )
+            val descriptor = "x".repeat(MAXIMUM_SOURCE_IDENTITY_DESCRIPTOR_CHARACTERS)
+            val fields = FullTreeSourceAnchorFields(
+                sourcePath = "source/large-row.hpp",
+                declarationFileIndex = 1L,
+                declarationLine = 1L,
+                language = 33L,
+                lexicalContext = listOf(descriptor),
+                sourceName = descriptor,
+                signature = listOf(descriptor),
+                templateFormalParameters = listOf(descriptor),
+                templateActualArguments = listOf(descriptor),
+            )
+            val largeFact = fact(
+                physical,
+                FullTreeSourceEntityKind.DECLARATION_ONLY,
+                FullTreeIdentityObservability.UNOBSERVABLE,
+                FullTreeDenominatorDisposition.NON_SCOREABLE,
+                fields,
+                reasons = listOf("declaration-only-no-definition"),
+            )
+            val candidate = requireNotNull(largeFact.semanticAnchorCandidateId)
+            val index = FullTreeFunctionObservationV2AnchorIndex(1L, 256L * 1024L)
+            index.accept(FullTreeSourceAnchorKind.DECLARATION_ONLY, candidate, largeFact.sourceEntityId)
+            index.acceptSourceEntityPopulation(shard.identifier, listOf(largeFact))
+            val reconciliation = index.reconciliation()
+            val bindings = FullTreeFunctionObservationBindings(
+                inventoryIndexSha256 = inventory.controlString("indexSha256"),
+                richArtifactSha256 = richSha,
+                scopeSha256 = scope.sha256,
+            )
+            var parsingLargeString = false
+            val limits = FullTreeFunctionObservationSqliteLimits(
+                maximumDatabaseBytes = 4L * 1024L * 1024L,
+                maximumOutputBytes = 1024L * 1024L,
+                maximumCacheBytes = 64 * 1024,
+                databaseCheckpointRows = 1,
+                checkpoint = FullTreeFunctionObservationSqliteCheckpoint { label ->
+                    if (label == "while parsing strict JSON string") {
+                        parsingLargeString = true
+                        throw IllegalStateException("large SQLite source row parsing cancelled")
+                    }
+                },
+            )
+            val output = ByteArrayOutputStream()
+
+            FullTreeFunctionObservationSqlite.openV2(
+                privateDirectory(root.resolve("sqlite-large-row")),
+                shard,
+                limits,
+            ).use { sqlite ->
+                sqlite.recordScannedDies(shard.units.size.toLong())
+                sqlite.acceptSourceEntity(largeFact)
+                val failure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                    sqlite.finishToV2(output, bindings, reconciliation)
+                }
+                assertTrue(
+                    generateSequence<Throwable>(failure) { it.cause }.any {
+                        it.message == "large SQLite source row parsing cancelled"
+                    },
+                    "source-row cancellation must remain visible in the validation cause chain",
+                )
+            }
+
+            assertTrue(parsingLargeString, "cancellation must be observed while parsing the single row")
+            assertEquals(0, output.size(), "a cancelled source-row validation must publish no envelope bytes")
+        }
+
+    @Test
     fun `in-memory and SQLite v2 sinks preserve collision census and declaration-range template denominator parity`() =
         inControlTemporaryDirectory { root ->
             val fixture = createFullTreeControlFixture(root.resolve("control"))

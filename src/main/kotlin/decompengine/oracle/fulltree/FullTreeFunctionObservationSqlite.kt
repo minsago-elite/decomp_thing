@@ -253,10 +253,16 @@ private class FunctionObservationSqliteSink private constructor(
         val v2OutputByteLimit = fullTreeFunctionObservationV2OutputByteLimit(limits.maximumOutputBytes)
         val maximumRowBytes = minOf(v2OutputByteLimit, MAXIMUM_SOURCE_IDENTITY_ROW_BYTES).coerceAtLeast(1L)
         val canonical = try {
-            OracleJson.canonicalBytes(fact.canonicalJson(), sourceIdentityRowJsonLimits(maximumRowBytes))
+            limits.checkpoint.checkpoint("before canonicalizing a SQLite source entity")
+            OracleJson.canonicalBytes(
+                fact.canonicalJson(limits.checkpoint::checkpoint),
+                sourceIdentityRowJsonLimits(maximumRowBytes),
+                limits.checkpoint::checkpoint,
+            )
         } catch (failure: Exception) {
             throw FullTreeFunctionObservationSqliteException("source entity cannot be canonicalized", failure)
         }
+        limits.checkpoint.checkpoint("after canonicalizing a SQLite source entity")
         if (canonical.size.toLong() > maximumRowBytes) {
             sqliteFail("source entity exceeds its authenticated canonical-row bound")
         }
@@ -447,8 +453,10 @@ private class FunctionObservationSqliteSink private constructor(
         query.use { statement ->
             statement.executeQuery().use { rows ->
                 while (rows.next()) {
+                    limits.checkpoint.checkpoint("before loading a SQLite source-entity row")
                     val canonical = rows.getBytes(6)
                         ?: throw FullTreeFunctionObservationV2Exception("SQLite source entity has no canonical row")
+                    limits.checkpoint.checkpoint("after loading a SQLite source-entity row")
                     if (canonical.size.toLong() > maximumRowBytes) {
                         throw FullTreeFunctionObservationV2Exception(
                             "SQLite source entity exceeds its authenticated canonical-row bound",
@@ -458,9 +466,14 @@ private class FunctionObservationSqliteSink private constructor(
                         val value = OracleJson.parseCanonical(
                             canonical,
                             sourceIdentityRowJsonLimits(maximumRowBytes),
+                            limits.checkpoint::checkpoint,
                         ) as? kotlinx.serialization.json.JsonObject
                             ?: throw FullTreeFunctionObservationV2Exception("SQLite source entity root is not an object")
-                        FullTreeSourceEntityFact.fromCanonicalJson(value, "SQLite source entity")
+                        FullTreeSourceEntityFact.fromCanonicalJson(
+                            value,
+                            "SQLite source entity",
+                            limits.checkpoint::checkpoint,
+                        )
                     } catch (failure: FullTreeFunctionObservationV2Exception) {
                         throw failure
                     } catch (failure: Exception) {
@@ -477,10 +490,11 @@ private class FunctionObservationSqliteSink private constructor(
                         )
                     }
                     val canonicalFact = OracleJson.canonicalBytes(
-                        fact.canonicalJson(),
+                        fact.canonicalJson(limits.checkpoint::checkpoint),
                         sourceIdentityRowJsonLimits(maximumRowBytes),
+                        limits.checkpoint::checkpoint,
                     )
-                    if (!canonical.contentEquals(canonicalFact)) {
+                    if (!canonical.contentEqualsCheckpointed(canonicalFact, limits.checkpoint::checkpoint)) {
                         throw FullTreeFunctionObservationV2Exception(
                             "SQLite source-entity bytes differ from their canonical fact",
                         )
@@ -1960,6 +1974,21 @@ private fun translateFunctionObservationSqliteFailure(message: String, failure: 
     }
 
 private fun sqliteFail(message: String): Nothing = throw FullTreeFunctionObservationSqliteException(message)
+
+private fun ByteArray.contentEqualsCheckpointed(other: ByteArray, checkpoint: (String) -> Unit): Boolean {
+    if (size != other.size) return false
+    var offset = 0
+    while (offset < size) {
+        val end = minOf(size, offset + 64 * 1024)
+        while (offset < end) {
+            if (this[offset] != other[offset]) return false
+            offset++
+        }
+        checkpoint("while comparing SQLite source-entity canonical bytes")
+    }
+    checkpoint("after comparing SQLite source-entity canonical bytes")
+    return true
+}
 
 private const val SQLITE_PAGE_BYTES = 4096
 private const val SQLITE_TEMP_STORE_FILE = 1

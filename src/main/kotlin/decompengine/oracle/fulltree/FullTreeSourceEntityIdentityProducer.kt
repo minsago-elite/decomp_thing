@@ -249,6 +249,7 @@ internal object FullTreeSourceEntityIdentityProducer {
                 maximumModeledRetainedBytes,
                 maximumCanonicalRowBytes,
                 maximumRowScratchBytes,
+                checkpoint,
                 factAdmission,
             )
             val anchorClaims = SourceIdentityAnchorClaims(budget, anchorClaim)
@@ -324,6 +325,7 @@ internal object FullTreeSourceEntityIdentityProducer {
                             producerLimits = boundedProducerLimits,
                             budget = budget,
                             anchorClaims = anchorClaims,
+                            checkpoint = checkpoint,
                         )
                         owner.index.recordsInPhysicalOrder.forEach { record ->
                             if (record.tag in SOURCE_ENTITY_TAGS) {
@@ -431,6 +433,7 @@ internal object FullTreeSourceEntityIdentityProducer {
                 } else {
                     "ambiguous-related-source-anchor"
                 }).distinct().sorted(),
+                checkpoint = checkpoint ?: {},
             )
         }
     }
@@ -930,6 +933,7 @@ private class SourceIdentityRetentionBudget(
     private val maximumBytes: Long,
     private val maximumCanonicalRowBytes: Long,
     val maximumRowScratchBytes: Long,
+    private val checkpoint: (String) -> Unit,
     private val factAdmission: ((fact: FullTreeSourceEntityFact, canonicalArrayContributionBytes: Long) -> Unit)?,
 ) {
     private var facts = 0L
@@ -959,7 +963,7 @@ private class SourceIdentityRetentionBudget(
 
     fun retain(fact: FullTreeSourceEntityFact) {
         if (facts >= maximumFacts) throw FullTreeControlException("source-identity census exceeds its entity bound")
-        val canonicalSize = fullTreeSourceEntityCanonicalContribution(fact, maximumCanonicalRowBytes)
+        val canonicalSize = fullTreeSourceEntityCanonicalContribution(fact, maximumCanonicalRowBytes, checkpoint)
         factAdmission?.invoke(fact, canonicalSize.arrayContributionBytes)
         charge(canonicalSize.singletonArrayBytes, "source-identity fact")
         facts++
@@ -982,6 +986,7 @@ private class SourceEntityIdentityReader(
     private val producerLimits: FullTreeFunctionObservationProducerLimits,
     private val budget: SourceIdentityRetentionBudget,
     private val anchorClaims: SourceIdentityAnchorClaims,
+    private val checkpoint: (String) -> Unit,
 ) {
     private val anchorCache = HashMap<String, CachedAnchorEvidence>()
     private val anchorStack = LinkedHashSet<String>()
@@ -1069,7 +1074,7 @@ private class SourceEntityIdentityReader(
             reasonCodes += "unknown-reference-edge"
         }
         val fields = kind.anchorKind()?.let { anchorFields(owner, record, it, edgeList, reasonCodes, physical) }
-        val anchorId = kind.anchorKind()?.let { anchorKind -> fields?.candidateId(anchorKind) }
+        val anchorId = kind.anchorKind()?.let { anchorKind -> fields?.candidateId(anchorKind, checkpoint) }
         val completeAnchor = anchorId != null
         if (!completeAnchor) reasonCodes += "source-anchor-incomplete"
         val declaration = record.truthy(DW_AT_DECLARATION, "DW_AT_declaration")
@@ -1101,6 +1106,7 @@ private class SourceEntityIdentityReader(
             linkedEmittedRva = emittedRva,
             reasonCodes = reasonCodes.toList(),
             edges = edgeList.sortedWith(compareBy({ it.kind.wireValue }, { it.source.locator() }, { it.target?.locator() ?: "~" }, { it.state.wireValue }, { it.rawReference ?: "~" })),
+            checkpoint = checkpoint,
         )
     }
 
@@ -1443,7 +1449,7 @@ private class SourceEntityIdentityReader(
                                     reasons,
                                     physical(target.first, target.second),
                                 )
-                                patternAnchorId = patternFields?.candidateId(FullTreeSourceAnchorKind.TEMPLATE_PATTERN)
+                                patternAnchorId = patternFields?.candidateId(FullTreeSourceAnchorKind.TEMPLATE_PATTERN, checkpoint)
                             } else reasons += "unknown-template-pattern-reference"
                         } else reasons += "unknown-template-pattern-reference"
                     } else {
@@ -1463,7 +1469,7 @@ private class SourceEntityIdentityReader(
                         val calleeKind = relatedSubprogramKind(baseUnit, callee, edges, reasons)
                         calleeKind?.let {
                             anchorFields(baseUnit, callee, it, edges, reasons, physical(baseUnit, callee))
-                                ?.candidateId(it)
+                                ?.candidateId(it, checkpoint)
                         }
                     }
                 if (inlineCallee == null) reasons += "unknown-inline-callee-anchor"
@@ -1476,7 +1482,7 @@ private class SourceEntityIdentityReader(
                     addStructuralEdge(physical, containingPhysical, FullTreeSourceIdentityEdgeKind.INLINE_OWNER, edges)
                     val ownerKind = relatedSubprogramKind(owner, containing, edges, reasons)
                     inlineOwner = ownerKind?.let {
-                        anchorFields(owner, containing, it, edges, reasons, containingPhysical)?.candidateId(it)
+                        anchorFields(owner, containing, it, edges, reasons, containingPhysical)?.candidateId(it, checkpoint)
                     }
                     if (inlineOwner == null) reasons += "unknown-inline-owner-anchor"
                 }
@@ -1514,13 +1520,18 @@ private class SourceEntityIdentityReader(
                 inlineCallColumn = callColumn,
                 inlinePathAnchorCandidateIds = inlinePath,
                 authenticatedSourceRevision = sourceRevision,
+                checkpoint = checkpoint,
             )
             result = fields
             budget.charge(
-                OracleJson.canonicalBytes(fields.canonicalJson(), sourceIdentityRowJsonLimits(MAXIMUM_SOURCE_IDENTITY_ROW_BYTES)).size.toLong(),
+                OracleJson.canonicalBytes(
+                    fields.canonicalJson(checkpoint),
+                    sourceIdentityRowJsonLimits(MAXIMUM_SOURCE_IDENTITY_ROW_BYTES),
+                    checkpoint,
+                ).size.toLong(),
                 "source-anchor fields",
             )
-            fields.candidateId(kind)?.let { anchorClaims.claim(kind, it, physical) }
+            fields.candidateId(kind, checkpoint)?.let { anchorClaims.claim(kind, it, physical) }
             return fields
         } finally {
             val reasonTranscript = reasons.filterNot(originalReasons::contains)
@@ -2398,7 +2409,7 @@ private class SourceEntityIdentityReader(
                     edges,
                     reasons,
                     physical(unit, parent),
-                )?.candidateId(FullTreeSourceAnchorKind.INLINE_INSTANCE)
+                )?.candidateId(FullTreeSourceAnchorKind.INLINE_INSTANCE, checkpoint)
                 if (anchor == null) return null
                 result.add(0, anchor)
             }

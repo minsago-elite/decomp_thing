@@ -286,12 +286,13 @@ internal class FullTreeSourceAnchorFields(
     inlinePathAnchorCandidateIds: List<String>? = null,
     val authenticatedSourceRevision: String? = null,
     val authenticatedSourceFileSha256: String? = null,
+    checkpoint: (String) -> Unit = {},
 ) {
-    val lexicalContext: List<String> = immutableSourceList(lexicalContext)
-    val signature: List<String>? = signature?.let(::immutableSourceList)
-    val templateFormalParameters: List<String>? = templateFormalParameters?.let(::immutableSourceList)
-    val templateActualArguments: List<String>? = templateActualArguments?.let(::immutableSourceList)
-    val inlinePathAnchorCandidateIds: List<String>? = inlinePathAnchorCandidateIds?.let(::immutableSourceList)
+    val lexicalContext: List<String> = immutableSourceList(lexicalContext, checkpoint)
+    val signature: List<String>? = signature?.let { immutableSourceList(it, checkpoint) }
+    val templateFormalParameters: List<String>? = templateFormalParameters?.let { immutableSourceList(it, checkpoint) }
+    val templateActualArguments: List<String>? = templateActualArguments?.let { immutableSourceList(it, checkpoint) }
+    val inlinePathAnchorCandidateIds: List<String>? = inlinePathAnchorCandidateIds?.let { immutableSourceList(it, checkpoint) }
 
     init {
         require(sourcePath == null || isNormalizedSourcePath(sourcePath))
@@ -310,19 +311,30 @@ internal class FullTreeSourceAnchorFields(
             inlineCalleeAnchorCandidateId,
             inlineOwnerAnchorCandidateId,
             inlineCallFile,
-        ).forEach { require(it.isNotEmpty()) }
+        ).forEachIndexed { index, value ->
+            if (index % 64 == 0) checkpoint("while validating source-anchor scalar descriptors")
+            require(value.isNotEmpty())
+        }
         require(templatePatternAnchorCandidateId == null || templatePatternAnchorCandidateId.matches(Regex("[0-9a-f]{64}")))
         require(inlineCalleeAnchorCandidateId == null || inlineCalleeAnchorCandidateId.matches(Regex("[0-9a-f]{64}")))
         require(inlineOwnerAnchorCandidateId == null || inlineOwnerAnchorCandidateId.matches(Regex("[0-9a-f]{64}")))
-        require(lexicalContext.none(String::isEmpty))
-        require(signature?.any(String::isEmpty) != true)
-        require(templateFormalParameters?.any(String::isEmpty) != true)
-        require(templateActualArguments?.any(String::isEmpty) != true)
-        require(inlinePathAnchorCandidateIds?.any(String::isEmpty) != true)
-        inlinePathAnchorCandidateIds?.forEach { require(it.matches(Regex("[0-9a-f]{64}"))) }
+        lexicalContext.forEachIndexed { index, value ->
+            if (index % 64 == 0) checkpoint("while validating source lexical context")
+            require(value.isNotEmpty())
+        }
+        listOfNotNull(signature, templateFormalParameters, templateActualArguments).forEach { descriptors ->
+            descriptors.forEachIndexed { index, value ->
+                if (index % 64 == 0) checkpoint("while validating source-anchor descriptor lists")
+                require(value.isNotEmpty())
+            }
+        }
+        inlinePathAnchorCandidateIds?.forEachIndexed { index, id ->
+            if (index % 64 == 0) checkpoint("while validating inline path candidate IDs")
+            require(id.isNotEmpty() && id.matches(Regex("[0-9a-f]{64}")))
+        }
     }
 
-    fun canonicalJson(): JsonObject = JsonObject(
+    fun canonicalJson(checkpoint: (String) -> Unit = {}): JsonObject = JsonObject(
         mapOf(
             "authenticatedSourceFileSha256" to (authenticatedSourceFileSha256?.let(::JsonPrimitive) ?: JsonNull),
             "authenticatedSourceRevision" to (authenticatedSourceRevision?.let(::JsonPrimitive) ?: JsonNull),
@@ -335,16 +347,31 @@ internal class FullTreeSourceAnchorFields(
             "inlineCalleeAnchorCandidateId" to (inlineCalleeAnchorCandidateId?.let(::JsonPrimitive) ?: JsonNull),
             "inlineOwnerAnchorCandidateId" to (inlineOwnerAnchorCandidateId?.let(::JsonPrimitive) ?: JsonNull),
             "inlinePathAnchorCandidateIds" to
-                (inlinePathAnchorCandidateIds?.let { JsonArray(it.map(::JsonPrimitive)) } ?: JsonNull),
+                (inlinePathAnchorCandidateIds?.let { values -> JsonArray(values.mapIndexed { index, value ->
+                    if (index % 64 == 0) checkpoint("while encoding inline path candidate IDs")
+                    JsonPrimitive(value)
+                }) } ?: JsonNull),
             "language" to (language?.let(::JsonPrimitive) ?: JsonNull),
-            "lexicalContext" to JsonArray(lexicalContext.map(::JsonPrimitive)),
-            "signature" to (signature?.let { JsonArray(it.map(::JsonPrimitive)) } ?: JsonNull),
+            "lexicalContext" to JsonArray(lexicalContext.mapIndexed { index, value ->
+                if (index % 64 == 0) checkpoint("while encoding source lexical context")
+                JsonPrimitive(value)
+            }),
+            "signature" to (signature?.let { values -> JsonArray(values.mapIndexed { index, value ->
+                if (index % 64 == 0) checkpoint("while encoding source signature")
+                JsonPrimitive(value)
+            }) } ?: JsonNull),
             "sourceName" to (sourceName?.let(::JsonPrimitive) ?: JsonNull),
             "sourcePath" to (sourcePath?.let(::JsonPrimitive) ?: JsonNull),
             "templateActualArguments" to
-                (templateActualArguments?.let { JsonArray(it.map(::JsonPrimitive)) } ?: JsonNull),
+                (templateActualArguments?.let { values -> JsonArray(values.mapIndexed { index, value ->
+                    if (index % 64 == 0) checkpoint("while encoding template actual arguments")
+                    JsonPrimitive(value)
+                }) } ?: JsonNull),
             "templateFormalParameters" to
-                (templateFormalParameters?.let { JsonArray(it.map(::JsonPrimitive)) } ?: JsonNull),
+                (templateFormalParameters?.let { values -> JsonArray(values.mapIndexed { index, value ->
+                    if (index % 64 == 0) checkpoint("while encoding template formal parameters")
+                    JsonPrimitive(value)
+                }) } ?: JsonNull),
             "templatePatternAnchorCandidateId" to (templatePatternAnchorCandidateId?.let(::JsonPrimitive) ?: JsonNull),
         ),
     )
@@ -366,11 +393,12 @@ internal class FullTreeSourceAnchorFields(
                 -> true
             }
 
-    fun candidateId(kind: FullTreeSourceAnchorKind): String? {
+    fun candidateId(kind: FullTreeSourceAnchorKind, checkpoint: (String) -> Unit = {}): String? {
         if (!isComplete(kind)) return null
+        checkpoint("before hashing source-anchor candidate")
         // declarationFileIndex preserves the raw DW_AT_decl_file line-table index in the fact. That
         // index is compiler-local; sourcePath is its authenticated, normalized source identity.
-        val semanticFields = JsonObject(canonicalJson().toMutableMap().apply {
+        val semanticFields = JsonObject(canonicalJson(checkpoint).toMutableMap().apply {
             // The line-table file index is artifact-local. The column is retained as raw fact
             // evidence, but some compilers omit it for the same declaration, so it is not part of
             // the cross-compiler semantic tuple. Inline call columns are retained in the semantic
@@ -395,14 +423,20 @@ internal class FullTreeSourceAnchorFields(
                 "version" to JsonPrimitive(6),
             ),
         )
-        val bytes = OracleJson.canonicalBytes(preimage, sourceIdentityRowJsonLimits(MAXIMUM_SOURCE_IDENTITY_ROW_BYTES))
+        val bytes = OracleJson.canonicalBytes(
+            preimage,
+            sourceIdentityRowJsonLimits(MAXIMUM_SOURCE_IDENTITY_ROW_BYTES),
+            checkpoint,
+        )
         val digest = java.security.MessageDigest.getInstance("SHA-256")
         digest.update(ANCHOR_DOMAIN)
         digest.update(bytes)
+        checkpoint("after hashing source-anchor candidate")
         return digest.digest().joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
     }
 
-    fun candidateId(kind: FullTreeSourceEntityKind): String? = kind.anchorKind()?.let(::candidateId)
+    fun candidateId(kind: FullTreeSourceEntityKind, checkpoint: (String) -> Unit = {}): String? =
+        kind.anchorKind()?.let { candidateId(it, checkpoint) }
 
     override fun equals(other: Any?): Boolean = other is FullTreeSourceAnchorFields && canonicalJson() == other.canonicalJson()
 
@@ -423,17 +457,24 @@ internal class FullTreeSourceEntityFact(
     val linkedEmittedRva: String?,
     reasonCodes: List<String>,
     edges: List<FullTreeSourceIdentityEdge>,
+    checkpoint: (String) -> Unit = {},
 ) {
-    val candidateCollisionSourceEntityIds: List<String> = immutableSourceList(candidateCollisionSourceEntityIds)
-    val reasonCodes: List<String> = immutableSourceList(reasonCodes)
-    val edges: List<FullTreeSourceIdentityEdge> = immutableSourceList(edges)
+    val candidateCollisionSourceEntityIds: List<String> = immutableSourceList(candidateCollisionSourceEntityIds, checkpoint)
+    val reasonCodes: List<String> = immutableSourceList(reasonCodes, checkpoint)
+    val edges: List<FullTreeSourceIdentityEdge> = immutableSourceList(edges, checkpoint)
 
     init {
         require(linkedEmittedRva == null || linkedEmittedRva.matches(Regex("0x(?:0|[1-9a-f][0-9a-f]{0,15})")))
         require((denominatorDisposition == FullTreeDenominatorDisposition.EMITTED_RVA_LINK) ==
             (linkedEmittedRva != null))
-        require(reasonCodes == reasonCodes.distinct().sorted())
-        reasonCodes.forEach { require(it.matches(REASON_CODE)) }
+        reasonCodes.forEachIndexed { index, reason ->
+            if (index % 64 == 0) checkpoint("while checking source-entity reason-code order")
+            if (index > 0) require(reasonCodes[index - 1] < reason)
+        }
+        reasonCodes.forEachIndexed { index, reason ->
+            if (index % 64 == 0) checkpoint("while validating source-entity reason codes")
+            require(reason.matches(REASON_CODE))
+        }
         require(edges.size <= MAXIMUM_IDENTITY_EDGES_PER_ENTITY)
         require(sourceEntityId.matches(Regex("[0-9a-f]{64}")))
         require(sourceEntityId == physicalDie.sourceEntityId(kind))
@@ -441,10 +482,20 @@ internal class FullTreeSourceEntityFact(
         // This extractor records candidates and raw relation evidence only; it has no validated
         // cross-build semantic-resolution rule that can populate a resolved identity.
         require(resolvedSemanticIdentityId == null)
-        require(candidateCollisionSourceEntityIds == candidateCollisionSourceEntityIds.distinct().sorted())
-        candidateCollisionSourceEntityIds.forEach { require(it.matches(Regex("[0-9a-f]{64}"))) }
-        require(edges == edges.distinct())
-        val expectedAnchor = kind.anchorKind()?.let { semanticAnchorFields?.candidateId(it) }
+        candidateCollisionSourceEntityIds.forEachIndexed { index, id ->
+            if (index % 64 == 0) checkpoint("while checking source-entity collision-ID order")
+            if (index > 0) require(candidateCollisionSourceEntityIds[index - 1] < id)
+        }
+        candidateCollisionSourceEntityIds.forEachIndexed { index, id ->
+            if (index % 64 == 0) checkpoint("while validating source-entity collision IDs")
+            require(id.matches(Regex("[0-9a-f]{64}")))
+        }
+        val edgeSet = HashSet<FullTreeSourceIdentityEdge>()
+        edges.forEachIndexed { index, edge ->
+            if (index % 32 == 0) checkpoint("while checking source-entity edge uniqueness")
+            require(edgeSet.add(edge))
+        }
+        val expectedAnchor = kind.anchorKind()?.let { semanticAnchorFields?.candidateId(it, checkpoint) }
         if (expectedAnchor == null && kind.anchorKind() == null) {
             require(semanticAnchorFields == null && semanticAnchorCandidateId == null)
         }
@@ -457,19 +508,28 @@ internal class FullTreeSourceEntityFact(
             require(expectedAnchor == semanticAnchorCandidateId)
         }
         val collisionReasons = setOf("duplicate-source-anchor-unproven", "ambiguous-related-source-anchor")
-        val ambiguousEdgeState = edges.any { it.state == FullTreeSourceIdentityEdgeState.CYCLIC }
-        val unknownEdgeState = edges.any {
-            it.state == FullTreeSourceIdentityEdgeState.MISSING_TARGET ||
-                it.state == FullTreeSourceIdentityEdgeState.MALFORMED ||
-                it.state == FullTreeSourceIdentityEdgeState.UNSUPPORTED
+        var ambiguousEdgeState = false
+        var unknownEdgeState = false
+        edges.forEachIndexed { index, edge ->
+            if (index % 32 == 0) checkpoint("while reconciling source-entity observability")
+            if (edge.state == FullTreeSourceIdentityEdgeState.CYCLIC) ambiguousEdgeState = true
+            if (edge.state == FullTreeSourceIdentityEdgeState.MISSING_TARGET ||
+                edge.state == FullTreeSourceIdentityEdgeState.MALFORMED ||
+                edge.state == FullTreeSourceIdentityEdgeState.UNSUPPORTED
+            ) unknownEdgeState = true
+        }
+        var collisionEvidence = false
+        var unknownEvidence = false
+        reasonCodes.forEachIndexed { index, reason ->
+            if (index % 64 == 0) checkpoint("while reconciling source-entity reason observability")
+            if (reason.startsWith("ambiguous-") || reason in collisionReasons) collisionEvidence = true
+            if (reason.startsWith("unknown-")) unknownEvidence = true
         }
         val expectedObservability = when {
-            candidateCollisionSourceEntityIds.isNotEmpty() || reasonCodes.any {
-                it.startsWith("ambiguous-") || it in collisionReasons
-            } || ambiguousEdgeState -> FullTreeIdentityObservability.AMBIGUOUS
+            candidateCollisionSourceEntityIds.isNotEmpty() || collisionEvidence || ambiguousEdgeState -> FullTreeIdentityObservability.AMBIGUOUS
             kind == FullTreeSourceEntityKind.DECLARATION_ONLY ||
                 "declaration-only-no-definition" in reasonCodes -> FullTreeIdentityObservability.UNOBSERVABLE
-            reasonCodes.any { it.startsWith("unknown-") } || unknownEdgeState -> FullTreeIdentityObservability.UNKNOWN
+            unknownEvidence || unknownEdgeState -> FullTreeIdentityObservability.UNKNOWN
             semanticAnchorCandidateId != null -> FullTreeIdentityObservability.OBSERVABLE
             else -> FullTreeIdentityObservability.UNKNOWN
         }
@@ -497,10 +557,20 @@ internal class FullTreeSourceEntityFact(
         }
     }
 
-    fun canonicalJson(): JsonObject = JsonObject(
+    fun canonicalJson(checkpoint: (String) -> Unit = {}) {
+        checkpoint("before encoding canonical source-entity JSON")
+        var comparisons = 0
+        val orderedEdges = edges.sortedWith { left, right ->
+            if (++comparisons % 256 == 0) checkpoint("while sorting canonical source-entity edges")
+            SOURCE_EDGE_ORDER.compare(left, right)
+        }
+        val result = JsonObject(
         mapOf(
             "denominatorDisposition" to JsonPrimitive(denominatorDisposition.wireValue),
-            "edges" to JsonArray(edges.sortedWith(SOURCE_EDGE_ORDER).map(FullTreeSourceIdentityEdge::canonicalJson)),
+            "edges" to JsonArray(orderedEdges.mapIndexed { index, edge ->
+                if (index % 32 == 0) checkpoint("while encoding canonical source-entity edges")
+                edge.canonicalJson()
+            }),
             "entityKind" to JsonPrimitive(kind.wireValue),
             "identityObservability" to JsonPrimitive(identityObservability.wireValue),
             "linkedEmittedRva" to (linkedEmittedRva?.let(::JsonPrimitive) ?: JsonNull),
@@ -514,14 +584,23 @@ internal class FullTreeSourceEntityFact(
                     "unitId" to JsonPrimitive(physicalDie.unitId),
                 ),
             ),
-            "reasonCodes" to JsonArray(reasonCodes.map(::JsonPrimitive)),
+            "reasonCodes" to JsonArray(reasonCodes.mapIndexed { index, reason ->
+                if (index % 64 == 0) checkpoint("while encoding source-entity reason codes")
+                JsonPrimitive(reason)
+            }),
             "sourceEntityId" to JsonPrimitive(sourceEntityId),
-            "semanticAnchorFields" to (semanticAnchorFields?.canonicalJson() ?: JsonNull),
+            "semanticAnchorFields" to (semanticAnchorFields?.canonicalJson(checkpoint) ?: JsonNull),
             "semanticAnchorCandidateId" to (semanticAnchorCandidateId?.let(::JsonPrimitive) ?: JsonNull),
             "resolvedSemanticIdentityId" to (resolvedSemanticIdentityId?.let(::JsonPrimitive) ?: JsonNull),
-            "candidateCollisionSourceEntityIds" to JsonArray(candidateCollisionSourceEntityIds.map(::JsonPrimitive)),
+            "candidateCollisionSourceEntityIds" to JsonArray(candidateCollisionSourceEntityIds.mapIndexed { index, id ->
+                if (index % 64 == 0) checkpoint("while encoding source-entity collision IDs")
+                JsonPrimitive(id)
+            }),
         ),
-    )
+        )
+        checkpoint("after encoding canonical source-entity JSON")
+        return result
+    }
 
     fun copy(
         sourceEntityId: String = this.sourceEntityId,
@@ -536,23 +615,33 @@ internal class FullTreeSourceEntityFact(
         linkedEmittedRva: String? = this.linkedEmittedRva,
         reasonCodes: List<String> = this.reasonCodes,
         edges: List<FullTreeSourceIdentityEdge> = this.edges,
+        checkpoint: (String) -> Unit = {},
     ): FullTreeSourceEntityFact = FullTreeSourceEntityFact(
         sourceEntityId, physicalDie, kind, identityObservability, denominatorDisposition,
         semanticAnchorFields, semanticAnchorCandidateId, resolvedSemanticIdentityId,
-        candidateCollisionSourceEntityIds, linkedEmittedRva, reasonCodes, edges,
+        candidateCollisionSourceEntityIds, linkedEmittedRva, reasonCodes, edges, checkpoint,
     )
 
     companion object {
         /** Strictly decodes the new observation-v2 source row and rechecks every derived ID. */
-        fun fromCanonicalJson(value: JsonObject, label: String = "source entity"): FullTreeSourceEntityFact = try {
-            decodeCanonicalJson(value, label)
+        fun fromCanonicalJson(
+            value: JsonObject,
+            label: String = "source entity",
+            checkpoint: (String) -> Unit = {},
+        ): FullTreeSourceEntityFact = try {
+            checkpoint("before decoding $label")
+            decodeCanonicalJson(value, label, checkpoint).also { checkpoint("after decoding $label") }
         } catch (failure: FullTreeFunctionObservationV2Exception) {
             throw failure
         } catch (failure: IllegalArgumentException) {
             throw FullTreeFunctionObservationV2Exception("$label is invalid", failure)
         }
 
-        private fun decodeCanonicalJson(value: JsonObject, label: String): FullTreeSourceEntityFact {
+        private fun decodeCanonicalJson(
+            value: JsonObject,
+            label: String,
+            checkpoint: (String) -> Unit,
+        ): FullTreeSourceEntityFact {
             fun fail(detail: String): Nothing = throw FullTreeFunctionObservationV2Exception("$label $detail")
             fun obj(element: JsonElement?, name: String): JsonObject = element as? JsonObject ?: fail("$name is not an object")
             fun str(element: JsonElement?, name: String): String =
@@ -569,11 +658,17 @@ internal class FullTreeSourceEntityFact(
             fun array(element: JsonElement?, name: String): JsonArray = element as? JsonArray ?: fail("$name is not an array")
             fun nullableStringList(element: JsonElement?, name: String): List<String>? = when (element) {
                 JsonNull -> null
-                is JsonArray -> element.mapIndexed { index, item -> str(item, "$name[$index]") }
+                is JsonArray -> element.mapIndexed { index, item ->
+                    if (index % 64 == 0) checkpoint("while decoding $label $name")
+                    str(item, "$name[$index]")
+                }
                 else -> fail("$name is not an array or null")
             }
             fun stringList(element: JsonElement?, name: String): List<String> =
-                array(element, name).mapIndexed { index, item -> str(item, "$name[$index]") }
+                array(element, name).mapIndexed { index, item ->
+                    if (index % 64 == 0) checkpoint("while decoding $label $name")
+                    str(item, "$name[$index]")
+                }
             fun <T> enumValue(values: Array<T>, wire: String, wireValue: (T) -> String, name: String): T =
                 values.singleOrNull { wireValue(it) == wire } ?: fail("$name has an unknown enum value")
             fun physical(document: JsonObject, name: String): FullTreeSourcePhysicalDie {
@@ -610,6 +705,7 @@ internal class FullTreeSourceEntityFact(
                     inlinePathAnchorCandidateIds = nullableStringList(fields["inlinePathAnchorCandidateIds"], "inlinePathAnchorCandidateIds"),
                     authenticatedSourceRevision = nullableString(fields["authenticatedSourceRevision"], "authenticatedSourceRevision"),
                     authenticatedSourceFileSha256 = nullableString(fields["authenticatedSourceFileSha256"], "authenticatedSourceFileSha256"),
+                    checkpoint = checkpoint,
                 )
             }
 
@@ -629,6 +725,7 @@ internal class FullTreeSourceEntityFact(
                 "denominatorDisposition",
             )
             val edges = array(value["edges"], "$label.edges").mapIndexed { index, raw ->
+                if (index % 32 == 0) checkpoint("while decoding $label edges")
                 val edge = obj(raw, "edge $index")
                 val edgeKind = enumValue(
                     FullTreeSourceIdentityEdgeKind.entries.toTypedArray(),
@@ -668,8 +765,23 @@ internal class FullTreeSourceEntityFact(
                 linkedEmittedRva = nullableString(value["linkedEmittedRva"], "$label.linkedEmittedRva"),
                 reasonCodes = stringList(value["reasonCodes"], "$label.reasonCodes"),
                 edges = edges,
+                checkpoint = checkpoint,
             )
-            if (fact.canonicalJson() != value) fail("is not the canonical source fact for its derived identities")
+            checkpoint("before checking decoded $label canonical identities")
+            val supplied = OracleJson.canonicalBytes(
+                value,
+                sourceIdentityRowJsonLimits(MAXIMUM_SOURCE_IDENTITY_ROW_BYTES),
+                checkpoint,
+            )
+            val derived = OracleJson.canonicalBytes(
+                fact.canonicalJson(checkpoint),
+                sourceIdentityRowJsonLimits(MAXIMUM_SOURCE_IDENTITY_ROW_BYTES),
+                checkpoint,
+            )
+            if (!sourceEntityBytesEqualCheckpointed(supplied, derived, checkpoint)) {
+                fail("is not the canonical source fact for its derived identities")
+            }
+            checkpoint("after checking decoded $label canonical identities")
             return fact
         }
 
@@ -732,8 +844,14 @@ internal fun canonicalSourceEntityFacts(
     checkpoint: ((String) -> Unit)? = null,
 ): ByteArray =
     FullTreeSourceEntityFact.deterministicOrder(facts, checkpoint).let { ordered ->
-        require(ordered.map { it.sourceEntityId }.distinct().size == ordered.size) {
-            "source-identity census repeats a physical sourceEntityId"
+        val sourceIds = HashSet<String>()
+        ordered.forEachIndexed { index, fact ->
+            if (index.toLong() % SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL == 0L) {
+                checkpoint?.invoke("while validating source-entity IDs for serialization")
+            }
+            require(sourceIds.add(fact.sourceEntityId)) {
+                "source-identity census repeats a physical sourceEntityId"
+            }
         }
         require(maximumCanonicalBytes in 1L..MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES)
         val expectedBytes = canonicalSourceEntityFactsByteLength(ordered, maximumCanonicalBytes, checkpoint)
@@ -756,11 +874,18 @@ internal fun canonicalSourceEntityFacts(
                     checkpoint?.invoke("while serializing canonical source-entity output")
                 }
                 writeAscii("  ")
-                val row = OracleJson.canonicalBytes(fact.canonicalJson(), sourceIdentityRowJsonLimits(maximumCanonicalBytes))
+                val row = OracleJson.canonicalBytes(
+                    fact.canonicalJson(checkpoint ?: {}),
+                    sourceIdentityRowJsonLimits(maximumCanonicalBytes),
+                    checkpoint ?: {},
+                )
                 check(row.isNotEmpty() && row.last() == '\n'.code.toByte()) {
                     "canonical source-identity row has no final newline"
                 }
                 for (rowIndex in 0 until row.lastIndex) {
+                    if (rowIndex % SOURCE_IDENTITY_ROW_CHECKPOINT_BYTES == 0) {
+                        checkpoint?.invoke("while serializing a canonical source-entity row")
+                    }
                     val byte = row[rowIndex]
                     write(byte)
                     if (byte == '\n'.code.toByte()) writeAscii("  ")
@@ -786,10 +911,15 @@ internal data class FullTreeSourceEntityCanonicalContribution(
 internal fun fullTreeSourceEntityCanonicalContribution(
     fact: FullTreeSourceEntityFact,
     maximumCanonicalBytes: Long = MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES,
+    checkpoint: (String) -> Unit = {},
 ): FullTreeSourceEntityCanonicalContribution {
     require(maximumCanonicalBytes in 1L..MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES)
-    val row = OracleJson.canonicalBytes(fact.canonicalJson(), sourceIdentityRowJsonLimits(maximumCanonicalBytes))
-    val lineBreaks = row.count { it == '\n'.code.toByte() }
+    val row = OracleJson.canonicalBytes(
+        fact.canonicalJson(checkpoint),
+        sourceIdentityRowJsonLimits(maximumCanonicalBytes),
+        checkpoint,
+    )
+    val lineBreaks = countCanonicalLineBreaks(row, checkpoint, "while measuring source-entity row bytes")
     check(lineBreaks > 0) { "canonical source-identity row has no final newline" }
     val contribution = Math.addExact(row.size.toLong(), Math.multiplyExact(lineBreaks.toLong(), 2L))
     return FullTreeSourceEntityCanonicalContribution(
@@ -825,8 +955,16 @@ internal fun canonicalSourceEntityFactsByteLength(
             if (index.toLong() % SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL == 0L) {
                 checkpoint?.invoke("while preflighting canonical source-entity output")
             }
-            val bytes = OracleJson.canonicalBytes(fact.canonicalJson(), sourceIdentityRowJsonLimits(maximumCanonicalBytes))
-            val lineBreaks = bytes.count { it == '\n'.code.toByte() }
+            val bytes = OracleJson.canonicalBytes(
+                fact.canonicalJson(checkpoint ?: {}),
+                sourceIdentityRowJsonLimits(maximumCanonicalBytes),
+                checkpoint ?: {},
+            )
+            val lineBreaks = countCanonicalLineBreaks(
+                bytes,
+                checkpoint,
+                "while measuring canonical source-entity row size",
+            )
             check(lineBreaks > 0) { "canonical source-identity row has no final newline" }
             val internalLineBreaks = lineBreaks - 1
             size = Math.addExact(size, bytes.size.toLong() - 1L) // omit the row encoder's final newline
@@ -842,6 +980,39 @@ internal fun canonicalSourceEntityFactsByteLength(
 
 private const val SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL = 4_096L
 private const val SOURCE_IDENTITY_SORT_CHECKPOINT_INTERVAL = 16_384L
+private const val SOURCE_IDENTITY_ROW_CHECKPOINT_BYTES = 64 * 1024
+
+private fun sourceEntityBytesEqualCheckpointed(
+    left: ByteArray,
+    right: ByteArray,
+    checkpoint: (String) -> Unit,
+): Boolean {
+    if (left.size != right.size) return false
+    var offset = 0
+    while (offset < left.size) {
+        val end = minOf(left.size, offset + SOURCE_IDENTITY_ROW_CHECKPOINT_BYTES)
+        while (offset < end) {
+            if (left[offset] != right[offset]) return false
+            offset++
+        }
+        checkpoint("while comparing canonical source-entity row bytes")
+    }
+    return true
+}
+
+internal fun countCanonicalLineBreaks(
+    bytes: ByteArray,
+    checkpoint: ((String) -> Unit)?,
+    label: String,
+): Int {
+    var count = 0
+    bytes.forEachIndexed { index, byte ->
+        if (index % SOURCE_IDENTITY_ROW_CHECKPOINT_BYTES == 0) checkpoint?.invoke(label)
+        if (byte == '\n'.code.toByte()) count++
+    }
+    checkpoint?.invoke("after $label")
+    return count
+}
 
 internal fun sourceIdentitySha256(bytes: ByteArray): String = OracleArtifacts.sha256(bytes)
 
@@ -882,8 +1053,14 @@ private val SOURCE_EDGE_ORDER = compareBy<FullTreeSourceIdentityEdge> { it.kind.
     .thenBy { it.referenceForm ?: "~" }
     .thenBy { it.reasonCode ?: "~" }
 
-private fun <T> immutableSourceList(values: List<T>): List<T> =
-    java.util.Collections.unmodifiableList(ArrayList(values))
+private fun <T> immutableSourceList(values: List<T>, checkpoint: (String) -> Unit = {}): List<T> {
+    val result = ArrayList<T>(values.size)
+    values.forEachIndexed { index, value ->
+        if (index % 4_096 == 0) checkpoint("while copying source-identity row values")
+        result += value
+    }
+    return java.util.Collections.unmodifiableList(result)
+}
 
 private fun isNormalizedSourcePath(value: String): Boolean =
     value.isNotEmpty() && !value.startsWith('/') && '\\' !in value && '\u0000' !in value &&

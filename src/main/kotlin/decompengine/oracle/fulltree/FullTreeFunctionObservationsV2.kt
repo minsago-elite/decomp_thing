@@ -62,27 +62,32 @@ internal object FullTreeFunctionObservationsV2 {
         sourceFacts: List<FullTreeSourceEntityFact>,
         reconciliation: FullTreeFunctionObservationV2IdentityReconciliation,
         maximumBytes: Long,
+        checkpoint: (String) -> Unit = {},
     ): JsonObject {
         require(maximumBytes in 1L..16L * 1024L * 1024L * 1024L)
-        val facts = FullTreeSourceEntityFact.deterministicOrder(sourceFacts)
-        facts.forEach(::validateSourceEntityForV2)
-        reconciliation.validateSourceEntityPopulation(v1.v2Object("shard").v2String("id"), facts)
-        validateDirectAnchorEvidence(facts, reconciliation)
-        validateInlineAnchorEvidence(facts, reconciliation)
-        validateCollisionEvidence(facts, reconciliation)
-        if (facts.map { it.sourceEntityId }.toSet().size != facts.size) {
-            v2Fail("observation-v2 sourceEntityIds are not unique")
+        val facts = FullTreeSourceEntityFact.deterministicOrder(sourceFacts, checkpoint)
+        facts.forEachIndexed { index, fact ->
+            if (index % 4_096 == 0) checkpoint("while validating source facts for envelope composition")
+            validateSourceEntityForV2(fact, checkpoint)
         }
-        if (facts.map { it.physicalDie }.toSet().size != facts.size) {
-            v2Fail("observation-v2 physical DIE locators are not unique")
+        reconciliation.validateSourceEntityPopulation(v1.v2Object("shard").v2String("id"), facts, checkpoint)
+        validateDirectAnchorEvidence(facts, reconciliation, checkpoint)
+        validateInlineAnchorEvidence(facts, reconciliation, checkpoint)
+        validateCollisionEvidence(facts, reconciliation, checkpoint)
+        val sourceIds = HashSet<String>()
+        val physicalDies = HashSet<FullTreeSourcePhysicalDie>()
+        facts.forEachIndexed { index, fact ->
+            if (index % 4_096 == 0) checkpoint("while checking source-fact uniqueness")
+            if (!sourceIds.add(fact.sourceEntityId)) v2Fail("observation-v2 sourceEntityIds are not unique")
+            if (!physicalDies.add(fact.physicalDie)) v2Fail("observation-v2 physical DIE locators are not unique")
         }
         val baseCounts = v1.v2Object("counts")
         val counts = JsonObject(
             baseCounts.toMutableMap().apply {
                 put("sourceEntities", JsonPrimitive(facts.size))
-                put("sourceEntitiesByKind", countKinds(facts))
-                put("sourceEntitiesByObservability", countObservability(facts))
-                put("sourceEntitiesByDenominatorDisposition", countDisposition(facts))
+                put("sourceEntitiesByKind", countKinds(facts, checkpoint))
+                put("sourceEntitiesByObservability", countObservability(facts, checkpoint))
+                put("sourceEntitiesByDenominatorDisposition", countDisposition(facts, checkpoint))
                 put("anchorClaims", JsonPrimitive(reconciliation.claimCount))
                 put("anchorCandidateCount", JsonPrimitive(reconciliation.candidateCount))
                 put("anchorCollisionCandidateCount", JsonPrimitive(reconciliation.collisionCandidateCount))
@@ -96,23 +101,31 @@ internal object FullTreeFunctionObservationsV2 {
                 put("counts", counts)
                 put("oracle", oracle)
                 put("schemaVersion", JsonPrimitive(2))
-                put("sourceEntities", JsonArray(facts.map(FullTreeSourceEntityFact::canonicalJson)))
+                put("sourceEntities", JsonArray(facts.mapIndexed { index, fact ->
+                    if (index % 4_096 == 0) checkpoint("while serializing source facts for envelope composition")
+                    fact.canonicalJson(checkpoint)
+                }))
                 put("identityReconciliation", reconciliation.canonicalJson())
             },
         )
-        val bytes = canonicalEnvelopeBytes(result, maximumBytes)
+        val bytes = canonicalEnvelopeBytes(result, maximumBytes, checkpoint)
         if (bytes.size.toLong() > maximumBytes) v2Fail("observation-v2 exceeds its authenticated byte bound")
         return result
     }
 
     /** Keep producer and both sinks within the exact per-string bounds in the v2 schema. */
-    fun validateSourceEntityForV2(fact: FullTreeSourceEntityFact) {
+    fun validateSourceEntityForV2(
+        fact: FullTreeSourceEntityFact,
+        checkpoint: (String) -> Unit = {},
+    ) {
         val fields = fact.semanticAnchorFields ?: return
+        checkpoint("before validating source-entity descriptors")
         if (fields.sourcePath?.let(::sourceIdentityJsonCodePointLength)?.let { it > 4_096 } == true) {
             v2Fail("source path exceeds the observation-v2 schema character bound")
         }
         listOfNotNull(fields.sourceName, fields.authenticatedSourceRevision, fields.inlineCallFile)
-            .forEach { value ->
+            .forEachIndexed { index, value ->
+                if (index % 64 == 0) checkpoint("while validating source-entity descriptors")
                 if (sourceIdentityJsonCodePointLength(value) > MAXIMUM_SOURCE_IDENTITY_DESCRIPTOR_CHARACTERS) {
                     v2Fail("completed source-identity descriptor exceeds the observation-v2 schema character bound")
                 }
@@ -123,8 +136,11 @@ internal object FullTreeFunctionObservationsV2 {
             fields.templateFormalParameters.orEmpty().asSequence(),
             fields.templateActualArguments.orEmpty().asSequence(),
         ).flatten()
-        if (descriptors.any { sourceIdentityJsonCodePointLength(it) > MAXIMUM_SOURCE_IDENTITY_DESCRIPTOR_CHARACTERS }) {
-            v2Fail("completed source-identity descriptor exceeds the observation-v2 schema character bound")
+        descriptors.forEachIndexed { index, descriptor ->
+            if (index % 64 == 0) checkpoint("while validating source-identity descriptor lists")
+            if (sourceIdentityJsonCodePointLength(descriptor) > MAXIMUM_SOURCE_IDENTITY_DESCRIPTOR_CHARACTERS) {
+                v2Fail("completed source-identity descriptor exceeds the observation-v2 schema character bound")
+            }
         }
         if (fields.lexicalContext.size > MAXIMUM_SOURCE_IDENTITY_LEXICAL_CONTEXT_ITEMS ||
             (fields.signature?.size ?: 0) > MAXIMUM_SOURCE_IDENTITY_SIGNATURE_ITEMS ||
@@ -133,6 +149,7 @@ internal object FullTreeFunctionObservationsV2 {
         ) {
             v2Fail("source-identity descriptor list exceeds the observation-v2 schema item bound")
         }
+        checkpoint("after validating source-entity descriptors")
     }
 
     /** Enforce that every claimed denominator link names an emitted row from this shard. */
@@ -150,7 +167,11 @@ internal object FullTreeFunctionObservationsV2 {
         }
     }
 
-    fun canonicalEnvelopeBytes(document: JsonObject, maximumBytes: Long = MAXIMUM_CANONICAL_BYTES): ByteArray = try {
+    fun canonicalEnvelopeBytes(
+        document: JsonObject,
+        maximumBytes: Long = MAXIMUM_CANONICAL_BYTES,
+        checkpoint: (String) -> Unit = {},
+    ): ByteArray = try {
         val boundedBytes = minOf(maximumBytes, MAXIMUM_CANONICAL_BYTES).toInt()
         OracleJson.canonicalBytes(
             document,
@@ -162,6 +183,7 @@ internal object FullTreeFunctionObservationsV2 {
                 maximumStringBytes = MAXIMUM_SOURCE_IDENTITY_ROW_BYTES.toInt(),
                 maximumTotalStringBytes = boundedBytes,
             ),
+            checkpoint,
         )
     } catch (failure: Exception) {
         throw FullTreeFunctionObservationV2Exception("function observation-v2 cannot be canonicalized", failure)
@@ -185,17 +207,20 @@ internal object FullTreeFunctionObservationsV2 {
         }
         val scopeDocument = scope.document
         try {
+            checkpoint("before validating observation-v2 JSON schema")
             OracleSchemas.validate(SCHEMA_NAME, document)
+            checkpoint("after validating observation-v2 JSON schema")
         } catch (failure: Exception) {
             throw FullTreeFunctionObservationV2Exception("function observation-v2 schema validation failed", failure)
         }
         val counts = document.v2Object("counts")
-        val sourceRows = document.v2Array("sourceEntities").mapIndexed { index, element ->
-            element as? JsonObject ?: v2Fail("source entity $index is not an object")
-        }
-        val facts = sourceRows.mapIndexed { index, row ->
+        val sourceRows = document.v2Array("sourceEntities")
+        val facts = ArrayList<FullTreeSourceEntityFact>(sourceRows.size)
+        sourceRows.forEachIndexed { index, element ->
+            if (index % 4_096 == 0) checkpoint("while decoding observation-v2 source entities")
+            val row = element as? JsonObject ?: v2Fail("source entity $index is not an object")
             try {
-                FullTreeSourceEntityFact.fromCanonicalJson(row, "source entity $index")
+                facts += FullTreeSourceEntityFact.fromCanonicalJson(row, "source entity $index", checkpoint)
             } catch (failure: FullTreeFunctionObservationV2Exception) {
                 throw failure
             } catch (failure: Exception) {
@@ -203,10 +228,21 @@ internal object FullTreeFunctionObservationsV2 {
             }
         }
         val ids = HashSet<String>()
-        facts.forEach { if (!ids.add(it.sourceEntityId)) v2Fail("duplicate sourceEntityId") }
+        facts.forEachIndexed { index, fact ->
+            if (index % 4_096 == 0) checkpoint("while checking observation-v2 source entity IDs")
+            if (!ids.add(fact.sourceEntityId)) v2Fail("duplicate sourceEntityId")
+        }
         val physicalDies = HashSet<FullTreeSourcePhysicalDie>()
-        facts.forEach { if (!physicalDies.add(it.physicalDie)) v2Fail("duplicate physical DIE locator") }
-        if (facts != FullTreeSourceEntityFact.deterministicOrder(facts)) {
+        facts.forEachIndexed { index, fact ->
+            if (index % 4_096 == 0) checkpoint("while checking observation-v2 physical DIE locators")
+            if (!physicalDies.add(fact.physicalDie)) v2Fail("duplicate physical DIE locator")
+        }
+        val orderedFacts = FullTreeSourceEntityFact.deterministicOrder(facts, checkpoint)
+        if (facts.indices.any { index ->
+                if (index % 4_096 == 0) checkpoint("while checking observation-v2 source ordering")
+                facts[index] !== orderedFacts[index]
+            }
+        ) {
             v2Fail("observation-v2 source entities are not canonically ordered")
         }
         reconciliation.validateSourceEntityPopulation(
@@ -215,13 +251,13 @@ internal object FullTreeFunctionObservationsV2 {
             checkpoint,
             scopeDocument.v2Object("bounds").v2Object("perShard").v2Long("serializedBytes"),
         )
-        validateDirectAnchorEvidence(facts, reconciliation)
-        validateInlineAnchorEvidence(facts, reconciliation)
-        validateCollisionEvidence(facts, reconciliation)
+        validateDirectAnchorEvidence(facts, reconciliation, checkpoint)
+        validateInlineAnchorEvidence(facts, reconciliation, checkpoint)
+        validateCollisionEvidence(facts, reconciliation, checkpoint)
         if (counts.v2Long("sourceEntities") != facts.size.toLong() ||
-            counts.v2Object("sourceEntitiesByKind") != countKinds(facts) ||
-            counts.v2Object("sourceEntitiesByObservability") != countObservability(facts) ||
-            counts.v2Object("sourceEntitiesByDenominatorDisposition") != countDisposition(facts)
+            counts.v2Object("sourceEntitiesByKind") != countKinds(facts, checkpoint) ||
+            counts.v2Object("sourceEntitiesByObservability") != countObservability(facts, checkpoint) ||
+            counts.v2Object("sourceEntitiesByDenominatorDisposition") != countDisposition(facts, checkpoint)
         ) {
             v2Fail("observation-v2 source entity counts do not reconcile")
         }
@@ -237,12 +273,21 @@ internal object FullTreeFunctionObservationsV2 {
         if (oracle.v2String("configurationSha256") != configurationSha256) {
             v2Fail("observation-v2 configuration digest differs")
         }
-        val emittedRvas = document.v2Array("emitted").map { (it as JsonObject).v2String("rva") }.toSet()
-        if (emittedRvas.size != document.v2Array("emitted").size) {
+        val emittedRows = document.v2Array("emitted")
+        val emittedRvas = HashSet<String>()
+        emittedRows.forEachIndexed { index, row ->
+            if (index % 4_096 == 0) checkpoint("while indexing observation-v2 emitted RVAs")
+            if (!emittedRvas.add((row as JsonObject).v2String("rva"))) {
+                v2Fail("observation-v2 emitted RVA population contains duplicates")
+            }
+        }
+        if (emittedRvas.size != emittedRows.size) {
             v2Fail("observation-v2 emitted RVA population contains duplicates")
         }
-        val locatorIndex = V2ArtifactLocatorIndex.create(inventory, shard)
-        facts.forEach { fact ->
+        val locatorIndex = V2ArtifactLocatorIndex.create(inventory, shard, checkpoint)
+        facts.forEachIndexed { index, fact ->
+            if (index % 4_096 == 0) checkpoint("while validating observation-v2 source entities")
+            validateSourceEntityForV2(fact, checkpoint)
             validateSourceEntityEmittedRvaLink(fact, emittedRvas::contains)
             val sourceRevision = fact.semanticAnchorFields?.authenticatedSourceRevision
             val authenticatedRevision = scope.sourceLock.v2Object("revision").v2String("commit")
@@ -252,10 +297,12 @@ internal object FullTreeFunctionObservationsV2 {
             if (fact.semanticAnchorFields?.authenticatedSourceFileSha256 != null) {
                 v2Fail("source anchor file digest has no authenticated per-file evidence")
             }
-            locatorIndex.validate(fact, oracle.v2String("richArtifactSha256"))
+            locatorIndex.validate(fact, oracle.v2String("richArtifactSha256"), checkpoint)
             fact.semanticAnchorFields?.templatePatternAnchorCandidateId?.let { patternCandidateId ->
-                val boundToReferencedPattern = fact.edges.any { edge ->
-                    edge.kind in setOf(
+                var boundToReferencedPattern = false
+                fact.edges.forEachIndexed { edgeIndex, edge ->
+                    if (edgeIndex % 16 == 0) checkpoint("while binding source pattern candidates to typed edges")
+                    if (!boundToReferencedPattern && edge.kind in setOf(
                         FullTreeSourceIdentityEdgeKind.SPECIFICATION,
                         FullTreeSourceIdentityEdgeKind.ABSTRACT_ORIGIN,
                     ) && edge.target?.let { target ->
@@ -264,6 +311,7 @@ internal object FullTreeFunctionObservationsV2 {
                             target.sourceEntityId(FullTreeSourceAnchorKind.TEMPLATE_PATTERN),
                         )
                     } == true
+                    ) boundToReferencedPattern = true
                 }
                 if (!boundToReferencedPattern) {
                     v2Fail("template-pattern candidate is not bound to a referenced pattern DIE")
@@ -282,7 +330,15 @@ internal object FullTreeFunctionObservationsV2 {
                 v2Fail("missing generic-pattern relation is not preserved as unknown or ambiguous evidence")
             }
         }
-        validateLegacyProjection(document, scopeDocument, scope.sha256, inventory, inventoryArtifactSha256, shard)
+        validateLegacyProjection(
+            document,
+            scopeDocument,
+            scope.sha256,
+            inventory,
+            inventoryArtifactSha256,
+            shard,
+            checkpoint,
+        )
         val perShard = scopeDocument.v2Object("bounds").v2Object("perShard")
         val projectedEntities = Math.addExact(
             Math.addExact(counts.v2Long("emittedRvas"), counts.v2Long("nonEmitted")),
@@ -291,7 +347,7 @@ internal object FullTreeFunctionObservationsV2 {
         if (projectedEntities > perShard.v2Long("entities")) {
             v2Fail("observation-v2 exceeds its authenticated per-shard entity bound")
         }
-        if (canonicalEnvelopeBytes(document, perShard.v2Long("serializedBytes")).size.toLong() >
+        if (canonicalEnvelopeBytes(document, perShard.v2Long("serializedBytes"), checkpoint).size.toLong() >
             perShard.v2Long("serializedBytes")
         ) {
             v2Fail("observation-v2 exceeds its authenticated serialized-byte bound")
@@ -301,46 +357,65 @@ internal object FullTreeFunctionObservationsV2 {
     private fun validateCollisionEvidence(
         facts: List<FullTreeSourceEntityFact>,
         reconciliation: FullTreeFunctionObservationV2IdentityReconciliation,
+        checkpoint: (String) -> Unit,
     ) {
-        facts.forEach { fact -> validateCollisionEvidence(fact, reconciliation) }
+        facts.forEachIndexed { index, fact ->
+            if (index % 4_096 == 0) checkpoint("while validating source collision evidence")
+            validateCollisionEvidence(fact, reconciliation, checkpoint)
+        }
     }
 
     internal fun validateSourceEntityEvidence(
         fact: FullTreeSourceEntityFact,
         reconciliation: FullTreeFunctionObservationV2IdentityReconciliation,
+        checkpoint: (String) -> Unit = {},
     ) {
-        validateSourceEntityForV2(fact)
+        validateSourceEntityForV2(fact, checkpoint)
         validateDirectAnchorEvidence(fact, reconciliation)
-        validateInlineAnchorEvidence(fact, reconciliation)
-        validateCollisionEvidence(fact, reconciliation)
+        validateInlineAnchorEvidence(fact, reconciliation, checkpoint)
+        validateCollisionEvidence(fact, reconciliation, checkpoint)
     }
 
     private fun validateCollisionEvidence(
         fact: FullTreeSourceEntityFact,
         reconciliation: FullTreeFunctionObservationV2IdentityReconciliation,
+        checkpoint: (String) -> Unit,
     ) {
+        checkpoint("before validating source collision evidence")
         val collisionReasons = setOf("duplicate-source-anchor-unproven", "ambiguous-related-source-anchor")
         val fields = fact.semanticAnchorFields
         val directIds = fact.semanticAnchorCandidateId
             ?.let(reconciliation.collisionIdsByCandidate::get)
             .orEmpty()
-        val relatedCandidateIds = listOfNotNull(
-            fields?.inlineCalleeAnchorCandidateId,
-            fields?.inlineOwnerAnchorCandidateId,
-            fields?.templatePatternAnchorCandidateId,
-        ) + fields?.inlinePathAnchorCandidateIds.orEmpty()
-        val relatedIds = relatedCandidateIds.flatMap { candidate ->
-            reconciliation.collisionIdsByCandidate[candidate].orEmpty()
+        val relatedCandidateIds = sequenceOf(
+            sequenceOf(fields?.inlineCalleeAnchorCandidateId, fields?.inlineOwnerAnchorCandidateId,
+                fields?.templatePatternAnchorCandidateId).filterNotNull(),
+            fields?.inlinePathAnchorCandidateIds.orEmpty().asSequence(),
+        ).flatten()
+        val relatedIds = ArrayList<String>()
+        relatedCandidateIds.forEachIndexed { index, candidate ->
+            if (index % 64 == 0) checkpoint("while validating related collision candidates")
+            reconciliation.collisionIdsByCandidate[candidate].orEmpty().forEachIndexed { idIndex, id ->
+                if (idIndex % 4_096 == 0) checkpoint("while collecting related collision claimants")
+                relatedIds += id
+            }
         }
-        val expectedIds = (directIds + relatedIds).distinct().sorted()
+        val expectedIds = sortedUniqueSourceIds(
+            sequenceOf(directIds.asSequence(), relatedIds.asSequence()).flatten(),
+            checkpoint,
+        )
         if (fact.candidateCollisionSourceEntityIds != expectedIds) {
             v2Fail("source anchor collision IDs do not match the authenticated full-run anchor claims")
         }
-        if (directIds.isNotEmpty() && fact.sourceEntityId !in directIds) {
+        if (directIds.isNotEmpty() && !sourceIdContains(directIds, fact.sourceEntityId, checkpoint)) {
             v2Fail("colliding source row is not an authenticated direct anchor claimant")
         }
         if (expectedIds.isEmpty()) {
-            if (fact.reasonCodes.any { it in collisionReasons }) {
+            if (fact.reasonCodes.withIndex().any { (index, reason) ->
+                    if (index % 64 == 0) checkpoint("while checking source collision reasons")
+                    reason in collisionReasons
+                }
+            ) {
                 v2Fail("source entity claims collision evidence absent from the authenticated full-run claims")
             }
         } else {
@@ -349,20 +424,57 @@ internal object FullTreeFunctionObservationsV2 {
             } else {
                 "ambiguous-related-source-anchor"
             }
+            var containsExpected = false
+            var containsUnexpectedCollisionReason = false
+            fact.reasonCodes.forEachIndexed { index, reason ->
+                if (index % 64 == 0) checkpoint("while validating source collision reason details")
+                if (reason == expectedReason) containsExpected = true
+                if (reason in collisionReasons && reason != expectedReason) containsUnexpectedCollisionReason = true
+            }
             if (fact.identityObservability != FullTreeIdentityObservability.AMBIGUOUS ||
-                expectedReason !in fact.reasonCodes ||
-                fact.reasonCodes.any { it in collisionReasons && it != expectedReason }
+                !containsExpected || containsUnexpectedCollisionReason
             ) {
                 v2Fail("source anchor collision is not retained as the exact ambiguous evidence")
             }
         }
+        checkpoint("after validating source collision evidence")
     }
 
     private fun validateDirectAnchorEvidence(
         facts: List<FullTreeSourceEntityFact>,
         reconciliation: FullTreeFunctionObservationV2IdentityReconciliation,
+        checkpoint: (String) -> Unit,
     ) {
-        facts.forEach { fact -> validateDirectAnchorEvidence(fact, reconciliation) }
+        facts.forEachIndexed { index, fact ->
+            if (index % 4_096 == 0) checkpoint("while validating direct source-anchor claims")
+            validateDirectAnchorEvidence(fact, reconciliation)
+        }
+    }
+
+    private fun sortedUniqueSourceIds(values: Sequence<String>, checkpoint: (String) -> Unit): List<String> {
+        val sorted = TreeSet(FULL_TREE_CODE_POINT_ORDER)
+        values.forEachIndexed { index, value ->
+            if (index % 4_096 == 0) checkpoint("while reconciling source collision claimant IDs")
+            sorted.add(value)
+        }
+        val result = ArrayList<String>(sorted.size)
+        sorted.forEachIndexed { index, value ->
+            if (index % 4_096 == 0) checkpoint("while ordering source collision claimant IDs")
+            result += value
+        }
+        return result
+    }
+
+    private fun sourceIdContains(
+        values: List<String>,
+        expected: String,
+        checkpoint: (String) -> Unit,
+    ): Boolean {
+        values.forEachIndexed { index, value ->
+            if (index % 4_096 == 0) checkpoint("while checking direct collision claimant membership")
+            if (value == expected) return true
+        }
+        return false
     }
 
     private fun validateDirectAnchorEvidence(
@@ -383,38 +495,50 @@ internal object FullTreeFunctionObservationsV2 {
     private fun validateInlineAnchorEvidence(
         facts: List<FullTreeSourceEntityFact>,
         reconciliation: FullTreeFunctionObservationV2IdentityReconciliation,
+        checkpoint: (String) -> Unit,
     ) {
-        facts.forEach { fact -> validateInlineAnchorEvidence(fact, reconciliation) }
+        facts.forEachIndexed { index, fact ->
+            if (index % 4_096 == 0) checkpoint("while validating inline source-anchor claims")
+            validateInlineAnchorEvidence(fact, reconciliation, checkpoint)
+        }
     }
 
     private fun validateInlineAnchorEvidence(
         fact: FullTreeSourceEntityFact,
         reconciliation: FullTreeFunctionObservationV2IdentityReconciliation,
+        checkpoint: (String) -> Unit,
     ) {
+        checkpoint("before validating inline source-anchor claims")
         if (fact.kind != FullTreeSourceEntityKind.INLINE_INSTANCE) return
         val fields = fact.semanticAnchorFields ?: return
-        val resolvedEdges = fact.edges.filter {
-            it.state == FullTreeSourceIdentityEdgeState.RESOLVED && it.target != null
+        val referenceEdges = ArrayList<FullTreeSourceIdentityEdge>()
+        val ownerEdges = ArrayList<FullTreeSourceIdentityEdge>()
+        fact.edges.forEachIndexed { index, edge ->
+            if (index % 16 == 0) checkpoint("while indexing inline source-anchor edges")
+            if (edge.state != FullTreeSourceIdentityEdgeState.RESOLVED || edge.target == null) return@forEachIndexed
+            if (edge.kind == FullTreeSourceIdentityEdgeKind.SPECIFICATION ||
+                edge.kind == FullTreeSourceIdentityEdgeKind.ABSTRACT_ORIGIN
+            ) referenceEdges += edge
+            if (edge.kind == FullTreeSourceIdentityEdgeKind.INLINE_OWNER) ownerEdges += edge
         }
-        val referenceEdges = resolvedEdges.filter {
-            it.kind == FullTreeSourceIdentityEdgeKind.SPECIFICATION ||
-                it.kind == FullTreeSourceIdentityEdgeKind.ABSTRACT_ORIGIN
-        }
-        val ownerEdges = resolvedEdges.filter { it.kind == FullTreeSourceIdentityEdgeKind.INLINE_OWNER }
 
         fun hasClaim(
             candidateId: String,
             edges: List<FullTreeSourceIdentityEdge>,
             allowedKinds: List<FullTreeSourceAnchorKind>,
-        ): Boolean = edges.any { edge ->
-            val target = edge.target ?: return@any false
-            allowedKinds.any { kind ->
-                reconciliation.hasInlineRelatedAnchorClaim(
-                    candidateId,
-                    target.sourceEntityId(kind),
-                    kind,
-                )
+        ): Boolean {
+            edges.forEachIndexed { index, edge ->
+                if (index % 16 == 0) checkpoint("while matching inline candidate to typed claims")
+                val target = edge.target ?: return@forEachIndexed
+                allowedKinds.forEach { kind ->
+                    if (reconciliation.hasInlineRelatedAnchorClaim(
+                            candidateId,
+                            target.sourceEntityId(kind),
+                            kind,
+                    )) return true
+                }
             }
+            return false
         }
 
         fields.inlineCalleeAnchorCandidateId?.let { candidate ->
@@ -430,11 +554,13 @@ internal object FullTreeFunctionObservationsV2 {
                 v2Fail("inline owner candidate is not bound to a referenced DIE anchor claim")
             }
         }
-        fields.inlinePathAnchorCandidateIds.orEmpty().forEach { candidate ->
+        fields.inlinePathAnchorCandidateIds.orEmpty().forEachIndexed { index, candidate ->
+            if (index % 64 == 0) checkpoint("while validating inline path anchor claims")
             if (!hasClaim(candidate, ownerEdges, listOf(FullTreeSourceAnchorKind.INLINE_INSTANCE))) {
                 v2Fail("inline path candidate is not bound to a referenced inline DIE anchor claim")
             }
         }
+        checkpoint("after validating inline source-anchor claims")
     }
 
     private fun validateLegacyProjection(
@@ -444,6 +570,7 @@ internal object FullTreeFunctionObservationsV2 {
         inventory: JsonObject,
         inventoryArtifactSha256: String,
         shard: FullTreeFunctionObservationShardInput,
+        checkpoint: (String) -> Unit,
     ) {
         val originalCounts = document.v2Object("counts")
         val legacyCounts = JsonObject(originalCounts.filterKeys {
@@ -469,6 +596,7 @@ internal object FullTreeFunctionObservationsV2 {
             inventory,
             inventoryArtifactSha256,
             shard,
+            checkpoint,
         )
     }
 
@@ -477,7 +605,11 @@ internal object FullTreeFunctionObservationsV2 {
         private val unitOffsets: List<Pair<String, ULong>>,
         private val shardUnitIds: Set<String>,
     ) {
-        fun validate(fact: FullTreeSourceEntityFact, richArtifactSha256: String) {
+        fun validate(
+            fact: FullTreeSourceEntityFact,
+            richArtifactSha256: String,
+            checkpoint: (String) -> Unit,
+        ) {
             fun validate(die: FullTreeSourcePhysicalDie, mustBeInShard: Boolean) {
                 if (die.richArtifactSha256 != richArtifactSha256) v2Fail("source DIE belongs to another artifact")
                 val unit = allUnits[die.unitId] ?: v2Fail("source DIE unit is outside the authenticated inventory")
@@ -489,7 +621,8 @@ internal object FullTreeFunctionObservationsV2 {
                 }
             }
             validate(fact.physicalDie, true)
-            fact.edges.forEach { edge ->
+            fact.edges.forEachIndexed { index, edge ->
+                if (index % 16 == 0) checkpoint("while validating typed source-entity locators")
                 // The bounded #1466 reference graph can retain edges whose source is a traversed
                 // related DIE, including a unit outside this row's shard. Authenticate every locator
                 // against the complete inventory; only the census row itself is shard-local.
@@ -570,15 +703,18 @@ internal object FullTreeFunctionObservationsV2 {
             reachable += fact.physicalDie
             pending.addLast(fact.physicalDie)
             while (pending.isNotEmpty()) {
+                if (reachable.size % 16 == 0) checkpoint("while checking source-entity edge reachability")
                 val source = pending.removeFirst()
-                edgesBySource[source].orEmpty().forEach { edge ->
+                edgesBySource[source].orEmpty().forEachIndexed { edgeIndex, edge ->
+                    if (edgeIndex % 16 == 0) checkpoint("while checking source-entity edge reachability")
                     if (edge.state == FullTreeSourceIdentityEdgeState.RESOLVED) {
                         val target = edge.target ?: v2Fail("resolved typed reference has no target locator")
                         if (reachable.add(target)) pending.addLast(target)
                     }
                 }
             }
-            if (fact.edges.any { edge ->
+            if (fact.edges.withIndex().any { (index, edge) ->
+                    if (index % 16 == 0) checkpoint("while checking source-entity edge connectivity")
                     edge.source !in reachable &&
                         (edge.kind != FullTreeSourceIdentityEdgeKind.TYPE ||
                             edge.referenceForm == null || edge.rawReference == null)
@@ -608,39 +744,78 @@ internal object FullTreeFunctionObservationsV2 {
         }
 
         companion object {
-            fun create(inventory: JsonObject, shard: FullTreeFunctionObservationShardInput): V2ArtifactLocatorIndex {
-                val units = inventory.v2Array("units").map { it as JsonObject }
-                val allUnits = units.associateBy { it.v2String("id") }
-                val unitOffsets = units.map { unit ->
-                    unit.v2String("id") to parseDwarfOffset(
+            fun create(
+                inventory: JsonObject,
+                shard: FullTreeFunctionObservationShardInput,
+                checkpoint: (String) -> Unit,
+            ): V2ArtifactLocatorIndex {
+                val rawUnits = inventory.v2Array("units")
+                val units = ArrayList<JsonObject>(rawUnits.size)
+                rawUnits.forEachIndexed { index, value ->
+                    if (index % 4_096 == 0) checkpoint("while indexing inventory units for locators")
+                    units += value as JsonObject
+                }
+                val allUnits = HashMap<String, JsonObject>(units.size)
+                val unitOffsets = ArrayList<Pair<String, ULong>>(units.size)
+                units.forEachIndexed { index, unit ->
+                    if (index % 4_096 == 0) checkpoint("while binding inventory locator units")
+                    allUnits[unit.v2String("id")] = unit
+                    unitOffsets += unit.v2String("id") to parseDwarfOffset(
                         unit.v2String("dwarfOffset"),
                         "observation-v2 locator",
                     ).toULong()
-                }.sortedBy { it.second }
+                }
+                var comparisons = 0
+                unitOffsets.sortWith { left, right ->
+                    if (++comparisons % 4_096 == 0) checkpoint("while sorting inventory locator offsets")
+                    left.second.compareTo(right.second)
+                }
+                val shardUnitIds = HashSet<String>(shard.units.size)
+                shard.units.forEachIndexed { index, unit ->
+                    if (index % 4_096 == 0) checkpoint("while binding shard locator units")
+                    shardUnitIds += unit.v2String("id")
+                }
                 return V2ArtifactLocatorIndex(
                     allUnits = allUnits,
                     unitOffsets = unitOffsets,
-                    shardUnitIds = shard.units.map { it.v2String("id") }.toSet(),
+                    shardUnitIds = shardUnitIds,
                 )
             }
         }
     }
 
-    private fun countKinds(facts: List<FullTreeSourceEntityFact>): JsonObject = countObject(
-        FullTreeSourceEntityKind.entries.map { it.wireValue to facts.count { fact -> fact.kind == it }.toLong() },
-    )
+    private fun countKinds(facts: List<FullTreeSourceEntityFact>, checkpoint: (String) -> Unit): JsonObject {
+        val counts = FullTreeSourceEntityKind.entries.associateWith { 0L }.toMutableMap()
+        facts.forEachIndexed { index, fact ->
+            if (index % 4_096 == 0) checkpoint("while counting source entities by kind")
+            counts[fact.kind] = Math.addExact(counts.getValue(fact.kind), 1L)
+        }
+        return countObject(counts.map { (kind, count) -> kind.wireValue to count })
+    }
 
-    private fun countObservability(facts: List<FullTreeSourceEntityFact>): JsonObject = countObject(
-        FullTreeIdentityObservability.entries.map { state ->
-            state.wireValue to facts.count { it.identityObservability == state }.toLong()
-        },
-    )
+    private fun countObservability(
+        facts: List<FullTreeSourceEntityFact>,
+        checkpoint: (String) -> Unit,
+    ): JsonObject {
+        val counts = FullTreeIdentityObservability.entries.associateWith { 0L }.toMutableMap()
+        facts.forEachIndexed { index, fact ->
+            if (index % 4_096 == 0) checkpoint("while counting source entities by observability")
+            counts[fact.identityObservability] = Math.addExact(counts.getValue(fact.identityObservability), 1L)
+        }
+        return countObject(counts.map { (state, count) -> state.wireValue to count })
+    }
 
-    private fun countDisposition(facts: List<FullTreeSourceEntityFact>): JsonObject = countObject(
-        FullTreeDenominatorDisposition.entries.map { disposition ->
-            disposition.wireValue to facts.count { it.denominatorDisposition == disposition }.toLong()
-        },
-    )
+    private fun countDisposition(
+        facts: List<FullTreeSourceEntityFact>,
+        checkpoint: (String) -> Unit,
+    ): JsonObject {
+        val counts = FullTreeDenominatorDisposition.entries.associateWith { 0L }.toMutableMap()
+        facts.forEachIndexed { index, fact ->
+            if (index % 4_096 == 0) checkpoint("while counting source entities by disposition")
+            counts[fact.denominatorDisposition] = Math.addExact(counts.getValue(fact.denominatorDisposition), 1L)
+        }
+        return countObject(counts.map { (disposition, count) -> disposition.wireValue to count })
+    }
 
     private fun countObject(values: List<Pair<String, Long>>): JsonObject = JsonObject(
         values.sortedBy { it.first }.associate { (key, value) -> key to JsonPrimitive(value) },
@@ -714,18 +889,20 @@ internal class FullTreeFunctionObservationV2AnchorIndex(
     }
 
     /** Retain only typed anchor claims actually named by this scanner-owned inline fact. */
-    fun acceptInlineRelatedClaims(fact: FullTreeSourceEntityFact) {
+    fun acceptInlineRelatedClaims(fact: FullTreeSourceEntityFact, checkpoint: (String) -> Unit = {}) {
         if (frozenReconciliation != null) v2Fail("full-run anchor claims are already reconciled")
         if (fact.kind != FullTreeSourceEntityKind.INLINE_INSTANCE) return
         val fields = fact.semanticAnchorFields ?: return
-        val resolvedEdges = fact.edges.filter {
-            it.state == FullTreeSourceIdentityEdgeState.RESOLVED && it.target != null
+        val referenceEdges = ArrayList<FullTreeSourceIdentityEdge>()
+        val ownerEdges = ArrayList<FullTreeSourceIdentityEdge>()
+        fact.edges.forEachIndexed { index, edge ->
+            if (index % 16 == 0) checkpoint("while indexing full-run inline anchor edges")
+            if (edge.state != FullTreeSourceIdentityEdgeState.RESOLVED || edge.target == null) return@forEachIndexed
+            if (edge.kind == FullTreeSourceIdentityEdgeKind.SPECIFICATION ||
+                edge.kind == FullTreeSourceIdentityEdgeKind.ABSTRACT_ORIGIN
+            ) referenceEdges += edge
+            if (edge.kind == FullTreeSourceIdentityEdgeKind.INLINE_OWNER) ownerEdges += edge
         }
-        val referenceEdges = resolvedEdges.filter {
-            it.kind == FullTreeSourceIdentityEdgeKind.SPECIFICATION ||
-                it.kind == FullTreeSourceIdentityEdgeKind.ABSTRACT_ORIGIN
-        }
-        val ownerEdges = resolvedEdges.filter { it.kind == FullTreeSourceIdentityEdgeKind.INLINE_OWNER }
 
         fun acceptReferencedClaim(
             candidateId: String,
@@ -733,21 +910,23 @@ internal class FullTreeFunctionObservationV2AnchorIndex(
             allowedKinds: List<FullTreeSourceAnchorKind>,
             label: String,
         ) {
-            val matching = edges.flatMap { edge ->
-                val target = edge.target ?: return@flatMap emptyList()
-                allowedKinds.mapNotNull { kind ->
+            val matching = LinkedHashSet<FullTreeFunctionObservationV2TypedAnchorClaim>()
+            edges.forEachIndexed { edgeIndex, edge ->
+                if (edgeIndex % 16 == 0) checkpoint("while matching full-run inline anchor references")
+                val target = edge.target ?: return@forEachIndexed
+                allowedKinds.forEachIndexed { kindIndex, kind ->
+                    if (kindIndex % 4 == 0) checkpoint("while checking full-run inline anchor kinds")
                     val physicalClaimId = target.sourceEntityId(kind)
                     if (claims[candidateId]?.contains(physicalClaimId) == true) {
-                        FullTreeFunctionObservationV2TypedAnchorClaim(candidateId, physicalClaimId, kind)
-                    } else {
-                        null
+                        matching += FullTreeFunctionObservationV2TypedAnchorClaim(candidateId, physicalClaimId, kind)
                     }
                 }
-            }.toSet()
+            }
             if (matching.isEmpty()) {
                 v2Fail("inline $label candidate is not backed by a typed claim on a referenced DIE")
             }
-            matching.forEach { claim ->
+            matching.forEachIndexed { index, claim ->
+                if (index % 64 == 0) checkpoint("while retaining full-run inline related claims")
                 if (claim !in inlineRelatedClaims) {
                     val nextBytes = Math.addExact(retainedBytes, INLINE_RELATED_CLAIM_INDEX_BYTES)
                     if (nextBytes > maximumRetainedBytes) {
@@ -770,9 +949,10 @@ internal class FullTreeFunctionObservationV2AnchorIndex(
                 "owner",
             )
         }
-        fields.inlinePathAnchorCandidateIds.orEmpty().forEach {
+        fields.inlinePathAnchorCandidateIds.orEmpty().forEachIndexed { index, candidate ->
+            if (index % 64 == 0) checkpoint("while accepting full-run inline path claims")
             acceptReferencedClaim(
-                it,
+                candidate,
                 ownerEdges,
                 listOf(FullTreeSourceAnchorKind.INLINE_INSTANCE),
                 "path",
@@ -996,13 +1176,15 @@ internal class FullTreeFunctionObservationV2SourceEntityPopulationStreamValidato
 ) {
     private val digest = MessageDigest.getInstance("SHA-256")
     private var canonicalBytes = 0L
+    private var bytesSinceCheckpoint = 0
     private var count = 0L
     private var finished = false
     private var lastSortKey: List<String>? = null
 
     fun accept(fact: FullTreeSourceEntityFact) {
         check(!finished) { "source-entity receipt stream is already finished" }
-        FullTreeFunctionObservationsV2.validateSourceEntityEvidence(fact, reconciliation)
+        checkpoint("before validating a SQLite source-entity receipt row")
+        FullTreeFunctionObservationsV2.validateSourceEntityEvidence(fact, reconciliation, checkpoint)
         val sortKey = listOf(
             fact.kind.wireValue,
             fact.semanticAnchorCandidateId ?: "~",
@@ -1021,10 +1203,11 @@ internal class FullTreeFunctionObservationV2SourceEntityPopulationStreamValidato
         } else {
             write(",\n".toByteArray(StandardCharsets.US_ASCII))
         }
-        val neutral = observationV2CollisionNeutralFact(fact)
+        val neutral = observationV2CollisionNeutralFact(fact, checkpoint)
         val row = OracleJson.canonicalBytes(
-            neutral.canonicalJson(),
+            neutral.canonicalJson(checkpoint),
             sourceIdentityRowJsonLimits(maximumCanonicalBytes),
+            checkpoint,
         )
         if (row.isEmpty() || row.last() != '\n'.code.toByte()) {
             v2Fail("canonical source-entity scan-receipt row has no final newline")
@@ -1032,6 +1215,7 @@ internal class FullTreeFunctionObservationV2SourceEntityPopulationStreamValidato
         write("  ".toByteArray(StandardCharsets.US_ASCII))
         var segmentStart = 0
         for (index in 0 until row.lastIndex) {
+            if (index % (64 * 1024) == 0) checkpoint("while streaming a SQLite source-entity receipt row")
             if (row[index] == '\n'.code.toByte()) {
                 write(row, segmentStart, index + 1 - segmentStart)
                 write("  ".toByteArray(StandardCharsets.US_ASCII))
@@ -1078,7 +1262,17 @@ internal class FullTreeFunctionObservationV2SourceEntityPopulationStreamValidato
         if (next > maximumCanonicalBytes) {
             v2Fail("collision-neutral source entities exceed the authenticated scan-receipt byte bound")
         }
-        digest.update(bytes, offset, length)
+        var written = 0
+        while (written < length) {
+            val chunk = minOf(64 * 1024 - bytesSinceCheckpoint, length - written)
+            digest.update(bytes, offset + written, chunk)
+            written += chunk
+            bytesSinceCheckpoint += chunk
+            if (bytesSinceCheckpoint == 64 * 1024) {
+                checkpoint("while hashing SQLite source-entity receipt bytes")
+                bytesSinceCheckpoint = 0
+            }
+        }
         canonicalBytes = next
     }
 
@@ -1138,7 +1332,13 @@ internal fun observationV2CollisionNeutralSourceEntitiesSha256(
         if (next > maximumCanonicalBytes) {
             v2Fail("collision-neutral source entities exceed the authenticated scan-receipt byte bound")
         }
-        digest.update(bytes, offset, length)
+        var written = 0
+        while (written < length) {
+            val count = minOf(64 * 1024, length - written)
+            digest.update(bytes, offset + written, count)
+            written += count
+            checkpoint("while hashing collision-neutral source-entity bytes")
+        }
         canonicalBytes = next
     }
 
@@ -1151,10 +1351,11 @@ internal fun observationV2CollisionNeutralSourceEntitiesSha256(
             if (index.toLong() % FULL_RUN_RECONCILIATION_CHECKPOINT_INTERVAL == 0L) {
                 checkpoint("while hashing collision-neutral source-entity scan receipts")
             }
-            val neutral = observationV2CollisionNeutralFact(fact)
+            val neutral = observationV2CollisionNeutralFact(fact, checkpoint)
             val row = OracleJson.canonicalBytes(
-                neutral.canonicalJson(),
+                neutral.canonicalJson(checkpoint),
                 sourceIdentityRowJsonLimits(maximumCanonicalBytes),
+                checkpoint,
             )
             if (row.isEmpty() || row.last() != '\n'.code.toByte()) {
                 v2Fail("canonical source-entity scan-receipt row has no final newline")
@@ -1162,6 +1363,9 @@ internal fun observationV2CollisionNeutralSourceEntitiesSha256(
             writeAscii("  ")
             var segmentStart = 0
             for (rowIndex in 0 until row.lastIndex) {
+                if (rowIndex % (64 * 1024) == 0) {
+                    checkpoint("while streaming collision-neutral source-entity receipt bytes")
+                }
                 if (row[rowIndex] == '\n'.code.toByte()) {
                     write(row, segmentStart, rowIndex + 1 - segmentStart)
                     writeAscii("  ")
@@ -1186,7 +1390,7 @@ internal fun reconcileObservationV2Facts(
         if (index.toLong() % FULL_RUN_RECONCILIATION_CHECKPOINT_INTERVAL == 0L) {
             checkpoint?.invoke("while normalizing shard source-anchor collision evidence")
         }
-        observationV2CollisionNeutralFact(fact)
+        observationV2CollisionNeutralFact(fact, checkpoint)
     }
     return FullTreeSourceEntityIdentityProducer.markUnprovedAnchorCollisions(
         FullTreeSourceEntityFact.deterministicOrder(normalized, checkpoint),
@@ -1211,12 +1415,17 @@ internal fun observationV2CollisionNeutralSourceEntityFactsByteLength(
         if (index.toLong() % FULL_RUN_RECONCILIATION_CHECKPOINT_INTERVAL == 0L) {
             checkpoint?.invoke("while preflighting collision-neutral source entities")
         }
-        val neutral = observationV2CollisionNeutralFact(fact)
+        val neutral = observationV2CollisionNeutralFact(fact, checkpoint)
         val bytes = OracleJson.canonicalBytes(
-            neutral.canonicalJson(),
+            neutral.canonicalJson(checkpoint ?: {}),
             sourceIdentityRowJsonLimits(maximumCanonicalBytes),
+            checkpoint ?: {},
         )
-        val lineBreaks = bytes.count { it == '\n'.code.toByte() }
+        val lineBreaks = countCanonicalLineBreaks(
+            bytes,
+            checkpoint,
+            "while measuring collision-neutral source-entity row bytes",
+        )
         check(lineBreaks > 0) { "canonical source-identity row has no final newline" }
         size = Math.addExact(size, bytes.size.toLong() - 1L)
         size = Math.addExact(size, 2L)
@@ -1230,15 +1439,30 @@ internal fun observationV2CollisionNeutralSourceEntityFactsByteLength(
     return size
 }
 
-private fun observationV2CollisionNeutralFact(fact: FullTreeSourceEntityFact): FullTreeSourceEntityFact {
+private fun observationV2CollisionNeutralFact(
+    fact: FullTreeSourceEntityFact,
+    checkpoint: ((String) -> Unit)? = null,
+): FullTreeSourceEntityFact {
+    checkpoint?.invoke("before neutralizing source-entity collision fields")
     val collisionReasons = setOf("duplicate-source-anchor-unproven", "ambiguous-related-source-anchor")
-    val retainedReasons = fact.reasonCodes.filterNot { it in collisionReasons }
-    if (retainedReasons == fact.reasonCodes && fact.candidateCollisionSourceEntityIds.isEmpty()) return fact
-    return fact.copy(
-        identityObservability = observationV2BaseObservability(fact, retainedReasons),
+    val retainedReasons = ArrayList<String>(fact.reasonCodes.size)
+    var removedCollisionReason = false
+    fact.reasonCodes.forEachIndexed { index, reason ->
+        if (index % 64 == 0) checkpoint?.invoke("while removing collision reason codes")
+        if (reason !in collisionReasons) retainedReasons += reason else removedCollisionReason = true
+    }
+    if (!removedCollisionReason && fact.candidateCollisionSourceEntityIds.isEmpty()) {
+        checkpoint?.invoke("after neutralizing source-entity collision fields")
+        return fact
+    }
+    val result = fact.copy(
+        identityObservability = observationV2BaseObservability(fact, retainedReasons, checkpoint ?: {}),
         candidateCollisionSourceEntityIds = emptyList(),
         reasonCodes = retainedReasons,
+        checkpoint = checkpoint ?: {},
     )
+    checkpoint?.invoke("after neutralizing source-entity collision fields")
+    return result
 }
 
 /** Bounds the temporary neutralized row list retained while full-run collisions are reapplied. */
@@ -1252,7 +1476,7 @@ internal fun observationV2CollisionNeutralFactCopyUpperBound(
         if (index.toLong() % FULL_RUN_RECONCILIATION_CHECKPOINT_INTERVAL == 0L) {
             checkpoint?.invoke("while sizing collision-neutral source entity copies")
         }
-        val neutral = observationV2CollisionNeutralFact(fact)
+        val neutral = observationV2CollisionNeutralFact(fact, checkpoint)
         if (neutral !== fact) {
             val rowBytes = canonicalSourceEntityFactsByteLength(listOf(fact), maximumCanonicalBytes, checkpoint)
             total = Math.addExact(
@@ -1267,18 +1491,32 @@ internal fun observationV2CollisionNeutralFactCopyUpperBound(
 private fun observationV2BaseObservability(
     fact: FullTreeSourceEntityFact,
     reasonCodes: List<String>,
+    checkpoint: (String) -> Unit,
 ): FullTreeIdentityObservability {
-    val ambiguousEdges = fact.edges.any { it.state == FullTreeSourceIdentityEdgeState.CYCLIC }
-    val unknownEdges = fact.edges.any {
-        it.state == FullTreeSourceIdentityEdgeState.MISSING_TARGET ||
-            it.state == FullTreeSourceIdentityEdgeState.MALFORMED ||
-            it.state == FullTreeSourceIdentityEdgeState.UNSUPPORTED
+    var ambiguousEdges = false
+    var unknownEdges = false
+    fact.edges.forEachIndexed { index, edge ->
+        if (index % 16 == 0) checkpoint("while reconciling collision-neutral source observability")
+        if (edge.state == FullTreeSourceIdentityEdgeState.CYCLIC) ambiguousEdges = true
+        if (edge.state == FullTreeSourceIdentityEdgeState.MISSING_TARGET ||
+            edge.state == FullTreeSourceIdentityEdgeState.MALFORMED ||
+            edge.state == FullTreeSourceIdentityEdgeState.UNSUPPORTED
+        ) unknownEdges = true
+    }
+    var ambiguousReasons = false
+    var unknownReasons = false
+    var declarationReason = false
+    reasonCodes.forEachIndexed { index, reason ->
+        if (index % 64 == 0) checkpoint("while checking collision-neutral source reasons")
+        if (reason.startsWith("ambiguous-")) ambiguousReasons = true
+        if (reason.startsWith("unknown-")) unknownReasons = true
+        if (reason == "declaration-only-no-definition") declarationReason = true
     }
     return when {
-        reasonCodes.any { it.startsWith("ambiguous-") } || ambiguousEdges -> FullTreeIdentityObservability.AMBIGUOUS
+        ambiguousReasons || ambiguousEdges -> FullTreeIdentityObservability.AMBIGUOUS
         fact.kind == FullTreeSourceEntityKind.DECLARATION_ONLY ||
-            "declaration-only-no-definition" in reasonCodes -> FullTreeIdentityObservability.UNOBSERVABLE
-        reasonCodes.any { it.startsWith("unknown-") } || unknownEdges -> FullTreeIdentityObservability.UNKNOWN
+            declarationReason -> FullTreeIdentityObservability.UNOBSERVABLE
+        unknownReasons || unknownEdges -> FullTreeIdentityObservability.UNKNOWN
         fact.semanticAnchorCandidateId != null -> FullTreeIdentityObservability.OBSERVABLE
         else -> FullTreeIdentityObservability.UNKNOWN
     }
