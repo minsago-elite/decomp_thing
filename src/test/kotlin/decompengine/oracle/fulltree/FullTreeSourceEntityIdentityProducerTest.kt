@@ -129,4 +129,534 @@ class FullTreeSourceEntityIdentityProducerTest {
                     first.facts,
                     optimization,
                     runDescription,
-                    declarationShapePre
+                    declarationShapePresent = Regex("DW_AT_name.*declaration_only_inline").containsMatchIn(dwarfShape),
+                    dwarfShape = dwarfShape,
+                )
+                if (optimization == 2) {
+                    val nestedLeaves = first.facts.filter {
+                        it.kind == FullTreeSourceEntityKind.INLINE_INSTANCE &&
+                            it.semanticAnchorFields?.sourceName == "nested_leaf"
+                    }
+                    assertTrue(nestedLeaves.isNotEmpty(), "nested inline fixture did not emit its leaf instances; $runDescription")
+                    assertTrue(nestedLeaves.all { fact ->
+                        fact.semanticAnchorFields?.inlinePathAnchorCandidateIds?.size == 2 &&
+                            fact.edges.count {
+                                it.kind == FullTreeSourceIdentityEdgeKind.ABSTRACT_ORIGIN &&
+                                    it.state == FullTreeSourceIdentityEdgeState.RESOLVED
+                            } >= 3
+                    }, "nested inline ancestry or ancestor reference evidence was lost; $runDescription")
+                }
+
+                if (optimization == 2) {
+                    val overBound = assertFailsWith<FullTreeControlException>(runDescription) {
+                        FullTreeSourceEntityIdentityProducer.scanShard(
+                            artifact,
+                            inventoryPath,
+                            scope,
+                            shardId,
+                            rowRoot,
+                            producerLimits = FullTreeFunctionObservationProducerLimits(
+                                maximumReferenceChainEntries = 1,
+                            ),
+                        )
+                    }
+                    assertTrue(overBound.message.orEmpty().contains("exceeds"), runDescription)
+
+                    if (compiler.toRealPath() == gcc.toRealPath()) {
+                        verifyPinnedLineTableAccounting(artifact, rowRoot)
+
+                        val dieBoundFailure = assertFailsWith<FullTreeControlException>(runDescription) {
+                            FullTreeSourceEntityIdentityProducer.scanShard(
+                                artifact,
+                                inventoryPath,
+                                scope,
+                                shardId,
+                                rowRoot,
+                                producerLimits = FullTreeFunctionObservationProducerLimits(
+                                    dieLimits = FullTreeDwarfDieLimits(
+                                        maximumPhysicalRecords = 1,
+                                        maximumNonNullRecords = 1,
+                                        maximumAttributes = 1,
+                                        maximumTreeDepth = 1,
+                                        maximumRetainedBytes = 1,
+                                    ),
+                                ),
+                            )
+                        }
+                        assertTrue(dieBoundFailure.message.orEmpty().contains("bound"), runDescription)
+
+                        val mutatingArtifact = rowRoot.resolve("mutating-fixture.so")
+                        Files.copy(artifact, mutatingArtifact)
+                        var mutatedDuringScan = false
+                        assertFailsWith<FullTreeControlException>(runDescription) {
+                            FullTreeSourceEntityIdentityProducer.scanShard(
+                                mutatingArtifact,
+                                inventoryPath,
+                                scope,
+                                shardId,
+                                rowRoot,
+                                checkpoint = { stage ->
+                                    if (!mutatedDuringScan && stage == "while hashing source-identity rich artifact") {
+                                        val contents = Files.readAllBytes(mutatingArtifact)
+                                        contents[contents.lastIndex] = (contents.last().toInt() xor 1).toByte()
+                                        Files.write(mutatingArtifact, contents)
+                                        mutatedDuringScan = true
+                                    }
+                                },
+                            )
+                        }
+                        assertTrue(mutatedDuringScan, "artifact mutation checkpoint was not reached; $runDescription")
+                        verifyIdentityEdgeLimitAbort(compiler, fixture, rowRoot, scope)
+                    }
+                }
+
+                compilerRows += "$compilerIdentity\t-O$optimization\t$artifactSha256\t${first.canonicalSha256}\t${first.facts.size}"
+                Files.writeString(
+                    evidence.resolve("compiler-matrix.tsv"),
+                    compilerRows.joinToString("\n", postfix = "\n"),
+                    StandardCharsets.UTF_8,
+                )
+            }
+        }
+    }
+
+    private fun verifyPinnedLineTableAccounting(artifact: Path, scratch: Path) {
+        val lineLimits = FullTreeDwarfLineTableLimits(
+            maximumDirectories = 512,
+            maximumFiles = 512,
+            maximumAggregatePathBytes = 4L * 1024L * 1024L,
+        )
+        val modeledPerUnit = 1_024L + 2L * lineLimits.maximumAggregatePathBytes +
+            128L * (lineLimits.maximumDirectories.toLong() + lineLimits.maximumFiles.toLong())
+        val controlLimits = FullTreeControlLimits()
+        val producerLimits = FullTreeFunctionObservationProducerLimits(
+            lineTableLimits = lineLimits,
+            maximumCachedCompilationUnits = 1,
+        )
+        StableControlFile.open(artifact, Files.size(artifact), "source identity line-table bound fixture").use { stableArtifact ->
+            FullTreeDwarfSections.open(
+                stableArtifact,
+                scratch,
+                controlLimits,
+                FullTreeDwarfSections.FUNCTION_OBSERVATION_SECTION_NAMES,
+            ).use { sections ->
+                val parseBudget = FullTreeDwarfParseBudget(controlLimits.maximumDwarfParseSteps)
+                val info = sections.required(".debug_info")
+                val headerIterator = FullTreeDwarfCompilationUnitHeaders(
+                    info,
+                    controlLimits.maximumCompilationUnits.toLong(),
+                    parseBudget,
+                )
+                val headers = buildList {
+                    while (headerIterator.hasNext()) add(headerIterator.next())
+                }
+                assertTrue(headers.size > producerLimits.maximumCachedCompilationUnits + 1)
+                val repository = FunctionDwarfUnitRepository(
+                    sections = sections,
+                    headers = headers,
+                    controlLimits = controlLimits,
+                    producerLimits = producerLimits,
+                    parseBudget = parseBudget,
+                    maximumRetainedWorkingSetBytes = 256L * 1024L * 1024L,
+                    maximumRetainedLineTableWorkingSetBytes = modeledPerUnit * 2L,
+                )
+                val root = repository.load(headers.first())
+                repository.withRetainedUnits(root) {
+                    checkNotNull(root.lineTable(lineLimits)) { "root CU fixture has no retained line table" }
+                    val second = repository.load(headers[1])
+                    checkNotNull(second.lineTable(lineLimits)) { "second CU fixture has no retained line table" }
+                    assertEquals(2, repository.peakRetainedLineTableUnits)
+                    assertFailsWith<FullTreeControlException> {
+                        repository.load(headers[2]).lineTable(lineLimits)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun verifyIdentityEdgeLimitAbort(
+        compiler: Path,
+        fixture: Path,
+        rowRoot: Path,
+        originalScope: AuthenticatedFullTreeScope,
+    ) {
+        val formalParameters = (0..32).joinToString(", ") { "int p$it" }
+        val source = rowRoot.resolve("edge-bound.cpp")
+        Files.writeString(
+            source,
+            "inline int edge_bound($formalParameters);\n" +
+                "int (*edge_bound_reference)($formalParameters) = &edge_bound;\n",
+            StandardCharsets.UTF_8,
+        )
+        val edgeObject = rowRoot.resolve("edge-bound.o")
+        runCommand(
+            listOf(
+                compiler.toString(), "-std=c++17", "-O2", "-g", "-gdwarf-5", "-fPIC",
+                "-fdebug-prefix-map=$fixture=/fixture/source-tree/clang/lib/InlineTemplate",
+                "-fdebug-prefix-map=$rowRoot=/fixture/source-tree/clang/lib/InlineTemplate",
+                source.toString(), "-c", "-o", edgeObject.toString(),
+            ),
+            rowRoot,
+            "edge-bound-compile.txt",
+        )
+        val objects = listOf("caller_one.o", "caller_two.o", "instantiate.o", "unique_pattern.o")
+            .map { rowRoot.resolve(it).toString() } + edgeObject.fileName.toString()
+        val artifact = rowRoot.resolve("edge-bound-fixture.so")
+        runCommand(
+            listOf(compiler.toString(), "-shared", "-Wl,--build-id=none") +
+                objects +
+                listOf("-o", artifact.toString()),
+            rowRoot,
+            "edge-bound-link.txt",
+        )
+        val dwarfShape = runCommand(
+            listOf("readelf", "--debug-dump=info", "--wide", artifact.toString()),
+            rowRoot,
+            "edge-bound-dwarf-shape.txt",
+        )
+        assertTrue(Regex("DW_AT_name.*edge_bound").containsMatchIn(dwarfShape), "33-parameter declaration DIE was not emitted")
+        assertTrue(dwarfShape.contains("DW_AT_declaration"), "declaration-only edge-bound shape was not emitted")
+        val scope = scopeForArtifact(originalScope, fixtureSha256(artifact), Files.size(artifact))
+        val inventoryPath = rowRoot.resolve("edge-bound-inventory.json")
+        val inventory = FullTreeInventoryControl.generateAndPublish(artifact, scope, inventoryPath, maximumWorkers = 1)
+        val shard = inventory.inventory.controlArray("shards").single() as JsonObject
+        val failure = assertFailsWith<FullTreeControlException> {
+            FullTreeSourceEntityIdentityProducer.scanShard(
+                artifact,
+                inventoryPath,
+                scope,
+                shard.controlString("id"),
+                rowRoot,
+            )
+        }
+        assertTrue(failure.message.orEmpty().contains("more than 32 edges"), failure.message.orEmpty())
+    }
+
+    private fun assertFixtureFacts(
+        facts: List<FullTreeSourceEntityFact>,
+        optimization: Int,
+        runDescription: String,
+        declarationShapePresent: Boolean,
+        dwarfShape: String,
+    ) {
+        val declaration = facts.filter { it.semanticAnchorFields?.sourceName == "declaration_only_inline" }
+        assertEquals(
+            declarationShapePresent,
+            declaration.isNotEmpty(),
+            "declaration-only observation must follow the compiler-emitted DIE shape; $runDescription",
+        )
+        if (!declarationShapePresent) {
+            assertTrue(declaration.isEmpty(), "compiler-absent declaration-only DIE was fabricated; $runDescription")
+        } else {
+            val declarationsByCandidate = declaration.groupBy { it.semanticAnchorCandidateId }
+            declaration.forEach { fact ->
+                val candidateRows = declarationsByCandidate[fact.semanticAnchorCandidateId].orEmpty()
+                if (fact.semanticAnchorCandidateId != null && candidateRows.size > 1) {
+                    assertEquals(FullTreeIdentityObservability.AMBIGUOUS, fact.identityObservability, runDescription)
+                    assertEquals(candidateRows.map { it.sourceEntityId }.sorted(), fact.candidateCollisionSourceEntityIds, runDescription)
+                } else {
+                    assertEquals(FullTreeIdentityObservability.UNOBSERVABLE, fact.identityObservability, runDescription)
+                    assertTrue(fact.candidateCollisionSourceEntityIds.isEmpty(), runDescription)
+                }
+            }
+        }
+        assertTrue(declaration.all { it.kind == FullTreeSourceEntityKind.DECLARATION_ONLY }, runDescription)
+        assertTrue(declaration.all { it.denominatorDisposition == FullTreeDenominatorDisposition.NON_SCOREABLE }, runDescription)
+        assertTrue(declaration.all { it.linkedEmittedRva == null }, runDescription)
+
+        val patterns = facts.filter { it.kind == FullTreeSourceEntityKind.TEMPLATE_PATTERN }
+        assertTrue(patterns.all { it.denominatorDisposition == FullTreeDenominatorDisposition.NON_SCOREABLE }, runDescription)
+        assertTrue(patterns.all { it.linkedEmittedRva == null }, runDescription)
+        assertTrue(patterns.all { it.semanticAnchorFields?.templateFormalParameters?.isNotEmpty() == true }, runDescription)
+
+        val uninstantiatedPattern = facts.filter { it.semanticAnchorFields?.sourceName == "pattern_only" }
+        val uninstantiatedPatternShapePresent = Regex("DW_AT_name\\s*:.*pattern_only").containsMatchIn(dwarfShape)
+        assertEquals(uninstantiatedPatternShapePresent, uninstantiatedPattern.isNotEmpty(), runDescription)
+        assertTrue(uninstantiatedPattern.all {
+            it.kind in setOf(FullTreeSourceEntityKind.TEMPLATE_PATTERN, FullTreeSourceEntityKind.UNRESOLVED) &&
+                it.denominatorDisposition == FullTreeDenominatorDisposition.NON_SCOREABLE
+        }, runDescription)
+
+        val templateInstances = facts.filter { it.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE }
+        assertTrue(templateInstances.isNotEmpty(), "template instance DIEs were not retained; $runDescription")
+        val packedTemplateShapePresent = dwarfShape.contains("packed_template<int, int>")
+        val packedTemplateInstances = templateInstances.filter {
+            it.semanticAnchorFields?.sourceName?.startsWith("packed_template<") == true
+        }
+        assertEquals(packedTemplateShapePresent, packedTemplateInstances.isNotEmpty(), runDescription)
+        if (packedTemplateShapePresent) {
+            assertTrue(packedTemplateInstances.any {
+                it.semanticAnchorFields?.templateActualArguments?.size == 2
+            }, "variadic template actuals were not flattened from emitted pack DIEs; $runDescription")
+            if (dwarfShape.contains("DW_TAG_GNU_template_parameter_pack")) {
+                assertTrue(packedTemplateInstances.any { fact ->
+                    fact.semanticAnchorFields?.templateActualArguments?.let { arguments ->
+                        arguments.size == 2 && arguments.all { it.startsWith("pack[") }
+                    } == true
+                }, "GNU template parameter pack paths were not retained; $runDescription")
+            }
+            if (dwarfShape.contains("DW_TAG_GNU_formal_parameter_pack")) {
+                assertTrue(packedTemplateInstances.any { fact ->
+                    fact.semanticAnchorFields?.signature.orEmpty().any { it.startsWith("pack[") }
+                }, "GNU formal parameter pack paths were not retained; $runDescription")
+            }
+        }
+        val intAndLongShapesPresent = hasDwarfName(dwarfShape, "template_pattern<int") &&
+            hasDwarfName(dwarfShape, "template_pattern<long")
+        val intTemplateInstances = templateInstances.filter {
+            it.semanticAnchorFields?.sourceName?.startsWith("template_pattern<int>") == true
+        }
+        val longTemplateInstances = templateInstances.filter {
+            it.semanticAnchorFields?.sourceName?.startsWith("template_pattern<long") == true
+        }
+        assertTrue(intTemplateInstances.isNotEmpty(), "int template instance DIE was not classified; $runDescription")
+        assertTrue(
+            intTemplateInstances.any { it.denominatorDisposition == FullTreeDenominatorDisposition.EMITTED_RVA_LINK },
+            "emitted int template instance did not link to its exact RVA; $runDescription",
+        )
+        val longTemplateShapePresent = hasDwarfName(dwarfShape, "template_pattern<long")
+        assertEquals(
+            longTemplateShapePresent,
+            longTemplateInstances.isNotEmpty(),
+            "$runDescription; long template rows=${longTemplateInstances.map {
+                Triple(it.semanticAnchorFields?.sourceName, it.physicalDie.locator(), it.edges.map { edge -> edge.kind to edge.target?.locator() })
+            }}",
+        )
+        if (intAndLongShapesPresent) {
+            val intArguments = intTemplateInstances.mapNotNull { it.semanticAnchorFields?.templateActualArguments }.distinct()
+            val longArguments = longTemplateInstances.mapNotNull { it.semanticAnchorFields?.templateActualArguments }.distinct()
+            assertTrue(intArguments.isNotEmpty() && longArguments.isNotEmpty() && intArguments != longArguments, runDescription)
+            val intCandidates = intTemplateInstances.mapNotNull { it.semanticAnchorCandidateId }.distinct()
+            val longCandidates = longTemplateInstances.mapNotNull { it.semanticAnchorCandidateId }.distinct()
+            assertTrue(intCandidates.isNotEmpty(), "complete int instance tuple has no candidate; $runDescription")
+            assertTrue(longCandidates.isNotEmpty(), "complete long instance tuple has no candidate; $runDescription")
+            assertTrue(intCandidates.intersect(longCandidates.toSet()).isEmpty(), "int/long instance candidates collided; $runDescription")
+            val missingPatternRelation = (intTemplateInstances + longTemplateInstances).filter {
+                it.semanticAnchorFields?.templatePatternAnchorCandidateId == null
+            }
+            assertTrue(missingPatternRelation.isNotEmpty(), "compiler emitted no explicitly unlinked int/long instance; $runDescription")
+            assertTrue(missingPatternRelation.all {
+                it.identityObservability in setOf(FullTreeIdentityObservability.UNKNOWN, FullTreeIdentityObservability.AMBIGUOUS) &&
+                    it.resolvedSemanticIdentityId == null &&
+                    "unknown-template-pattern-reference" in it.reasonCodes
+            }, "missing generic-pattern relation must remain explicitly unknown/ambiguous; $runDescription")
+            assertTrue(missingPatternRelation.filter { it.semanticAnchorCandidateId != null }.all {
+                it.resolvedSemanticIdentityId == null
+            }, "a candidate hash must not assert a resolved identity; $runDescription")
+            assertTrue(
+                longTemplateInstances.any { it.denominatorDisposition == FullTreeDenominatorDisposition.NON_SCOREABLE },
+                "compiler-emitted no-range long template instance was not kept non-scoreable; $runDescription",
+            )
+        }
+        templateInstances.filter { it.semanticAnchorFields?.templatePatternAnchorCandidateId == null }.forEach { fact ->
+            assertTrue(
+                fact.identityObservability in setOf(FullTreeIdentityObservability.UNKNOWN, FullTreeIdentityObservability.AMBIGUOUS),
+                runDescription,
+            )
+            assertTrue("unknown-template-pattern-reference" in fact.reasonCodes, runDescription)
+        }
+        assertTrue(
+            templateInstances.any { it.denominatorDisposition == FullTreeDenominatorDisposition.EMITTED_RVA_LINK },
+            "emitted template instance did not link to its exact RVA; $runDescription",
+        )
+        if (longTemplateShapePresent) {
+            assertTrue(
+                longTemplateInstances.any { it.denominatorDisposition == FullTreeDenominatorDisposition.NON_SCOREABLE },
+                "compiler-emitted no-range template instance was not kept non-scoreable; $runDescription",
+            )
+        } else {
+            assertTrue(
+                longTemplateInstances.isEmpty(),
+                "compiler-absent no-range template instance was fabricated; $runDescription",
+            )
+        }
+        val valueTemplateArguments = templateInstances.filter { fact ->
+            fact.semanticAnchorFields?.templateActualArguments?.any { it.startsWith("value-argument:") } == true
+        }.mapNotNull { it.semanticAnchorFields?.templateActualArguments }
+        if (optimization == 2) {
+            assertTrue(valueTemplateArguments.size >= 2, "non-type template actual arguments were not retained; $runDescription")
+            assertTrue(valueTemplateArguments.distinct().size >= 2, "different non-type template values collided; $runDescription")
+            assertTrue(
+                valueTemplateArguments.flatten().any { it.endsWith(":value=-1") },
+                "signed non-type template value was not sign-extended to its declared type width; $runDescription",
+            )
+        }
+
+        assertTrue(facts.filter { it.kind == FullTreeSourceEntityKind.INLINE_INSTANCE }.all {
+            it.denominatorDisposition == FullTreeDenominatorDisposition.NON_SCOREABLE && it.linkedEmittedRva == null
+        }, runDescription)
+
+        val sharedInline = facts.filter {
+            it.kind == FullTreeSourceEntityKind.INLINE_INSTANCE && it.semanticAnchorFields?.sourceName == "shared_inline"
+        }
+        if (optimization == 2) {
+            val scopedTypeInstances = templateInstances.filter {
+                it.semanticAnchorFields?.sourceName?.startsWith("scoped_type_template<") == true
+            }
+            assertTrue(scopedTypeInstances.isNotEmpty(), "same-spelling namespace type template instances were not retained; $runDescription")
+            val scopedTypeArguments = scopedTypeInstances.mapNotNull {
+                it.semanticAnchorFields?.templateActualArguments?.singleOrNull()
+            }.distinct()
+            assertTrue(scopedTypeArguments.size >= 2, "same-spelling types from different namespaces collided; $runDescription")
+            assertTrue(scopedTypeArguments.all { "scope[" in it }, "named-type template descriptors omitted lexical scope; $runDescription")
+
+            val overloadFacts = facts.filter { it.semanticAnchorFields?.sourceName == "overloaded" }
+            val overloadedShapePresent = Regex("DW_AT_name.*overloaded").containsMatchIn(dwarfShape)
+            assertEquals(overloadedShapePresent, overloadFacts.isNotEmpty(), runDescription)
+            if (overloadedShapePresent) {
+                assertTrue(overloadFacts.mapNotNull { it.semanticAnchorFields?.signature }.distinct().size >= 2, runDescription)
+            }
+            val overloadInlineFacts = overloadFacts.filter { it.kind == FullTreeSourceEntityKind.INLINE_INSTANCE }
+            if (overloadedShapePresent) {
+                assertTrue(overloadInlineFacts.isNotEmpty(), "no overloaded inline observation was retained; $runDescription")
+                assertTrue(overloadInlineFacts.all { it.semanticAnchorFields?.signature != null }, runDescription)
+            } else {
+                assertTrue(overloadInlineFacts.isEmpty(), "compiler-absent overload DIE was fabricated; $runDescription")
+            }
+
+            val sharedShapePresent = Regex("DW_AT_name.*shared_inline").containsMatchIn(dwarfShape)
+            assertEquals(sharedShapePresent, sharedInline.isNotEmpty(), runDescription)
+            if (sharedShapePresent) {
+                assertEquals(2, sharedInline.size, "expected two concrete shared_inline call sites; $runDescription")
+                assertEquals(2, sharedInline.mapNotNull { it.semanticAnchorCandidateId }.distinct().size, runDescription)
+                assertEquals(1, sharedInline.mapNotNull { it.semanticAnchorFields?.inlineCalleeAnchorCandidateId }.distinct().size, runDescription)
+                assertEquals(1, sharedInline.mapNotNull { it.semanticAnchorFields?.inlineOwnerAnchorCandidateId }.distinct().size, runDescription)
+                assertEquals(2, sharedInline.mapNotNull { it.semanticAnchorFields?.inlineCallColumn }.distinct().size, runDescription)
+                assertTrue(sharedInline.all { fact ->
+                    fact.edges.any { it.kind == FullTreeSourceIdentityEdgeKind.ABSTRACT_ORIGIN &&
+                        it.state == FullTreeSourceIdentityEdgeState.RESOLVED && it.target != null
+                    }
+                }, runDescription)
+            } else {
+                assertTrue(sharedInline.isEmpty(), "compiler-absent shared inline DIE was fabricated; $runDescription")
+            }
+
+            val uniqueInlineOrigin = facts.filter {
+                it.kind == FullTreeSourceEntityKind.INLINE_INSTANCE &&
+                    it.semanticAnchorFields?.sourceName == "unique_source_pattern"
+            }
+            assertTrue(dwarfShape.contains("unique_source_pattern"), "positive source-pattern shape is absent; $runDescription")
+            assertTrue(dwarfShape.contains("DW_TAG_inlined_subroutine"), "positive inline-instance shape is absent; $runDescription")
+            assertEquals(1, uniqueInlineOrigin.size, "expected one physical positive inline-origin relationship; $runDescription")
+            assertEquals(FullTreeIdentityObservability.OBSERVABLE, uniqueInlineOrigin.single().identityObservability, runDescription)
+            assertTrue(uniqueInlineOrigin.single().candidateCollisionSourceEntityIds.isEmpty(), runDescription)
+            assertTrue(uniqueInlineOrigin.single().semanticAnchorFields?.inlineCalleeAnchorCandidateId != null, runDescription)
+            assertTrue(uniqueInlineOrigin.single().edges.any {
+                it.kind == FullTreeSourceIdentityEdgeKind.ABSTRACT_ORIGIN &&
+                    it.state == FullTreeSourceIdentityEdgeState.RESOLVED && it.target != null
+            }, runDescription)
+            assertTrue(uniqueInlineOrigin.single().edges.any {
+                it.kind == FullTreeSourceIdentityEdgeKind.TYPE &&
+                    it.state == FullTreeSourceIdentityEdgeState.RESOLVED && it.target != null
+            }, "cached inline-callee signature reference evidence was dropped; $runDescription")
+        }
+    }
+
+    private fun compileFixture(compiler: Path, fixture: Path, output: Path, optimization: Int): Path {
+        val objects = listOf("caller_one", "caller_two", "instantiate", "unique_pattern").map { name ->
+            val target = output.resolve("$name.o")
+            runCommand(
+                listOf(
+                    compiler.toString(),
+                    "-std=c++17",
+                    "-O$optimization",
+                    "-g",
+                    "-gdwarf-5",
+                    "-fPIC",
+                    "-fdebug-prefix-map=$fixture=/fixture/source-tree/clang/lib/InlineTemplate",
+                    "-I${fixture.resolve("include")}",
+                    fixture.resolve("$name.cpp").toString(),
+                    "-c",
+                    "-o",
+                    target.toString(),
+                ),
+                output,
+                "$name-compile.txt",
+            )
+            target
+        }
+        val artifact = output.resolve("fixture.so")
+        runCommand(
+            listOf(compiler.toString(), "-shared", "-Wl,--build-id=none") + objects.map(Path::toString) + listOf("-o", artifact.toString()),
+            output,
+            "link.txt",
+        )
+        return artifact
+    }
+
+    private fun resolveCompiler(environmentName: String, candidates: List<String>): Path =
+        resolveCompilerOrNull(System.getenv(environmentName)?.takeIf(String::isNotBlank)?.let(::listOf) ?: candidates)
+            ?: throw AssertionError("required fixture compiler $environmentName is unavailable; tried ${candidates.joinToString()}")
+
+    private fun resolveCompilerOrNull(names: List<String>): Path? {
+        val searchPath = System.getenv("PATH").orEmpty().split(File.pathSeparator).filter(String::isNotBlank)
+        names.forEach { name ->
+            val direct = Path.of(name)
+            val choices = if (direct.isAbsolute || name.contains('/')) listOf(direct) else searchPath.map { Path.of(it).resolve(name) }
+            choices.firstOrNull { Files.isRegularFile(it) && Files.isExecutable(it) }?.let { return it.toAbsolutePath().normalize() }
+        }
+        return null
+    }
+
+    private fun runCommand(command: List<String>, directory: Path, outputName: String): String {
+        val output = directory.resolve(outputName)
+        val process = ProcessBuilder(command)
+            .directory(directory.toFile())
+            .redirectErrorStream(true)
+            .redirectOutput(output.toFile())
+            .start()
+        if (!process.waitFor(2, TimeUnit.MINUTES)) {
+            process.destroyForcibly()
+            throw AssertionError("fixture command timed out: ${command.joinToString(" ")}")
+        }
+        val bytes = Files.readAllBytes(output)
+        if (bytes.size > 256 * 1024) throw AssertionError("fixture command output exceeds its diagnostic bound")
+        val text = bytes.toString(StandardCharsets.UTF_8)
+        if (process.exitValue() != 0) {
+            throw AssertionError("fixture command failed (${process.exitValue()}): ${command.joinToString(" ")}\n$text")
+        }
+        return text
+    }
+
+    private fun hasDwarfName(dwarfShape: String, namePrefix: String): Boolean =
+        Regex("DW_AT_name\\s*:[^\\n]*:\\s*${Regex.escape(namePrefix)}(?:>|[ \\t]|$)")
+            .containsMatchIn(dwarfShape)
+
+    private fun scopeForArtifact(
+        original: AuthenticatedFullTreeScope,
+        artifactSha256: String,
+        artifactBytes: Long,
+    ): AuthenticatedFullTreeScope {
+        val originalArtifacts = original.artifactManifest.controlObject("artifacts")
+        val full = JsonObject(originalArtifacts.controlObject("full").toMutableMap().apply {
+            this["bytes"] = JsonPrimitive(artifactBytes)
+            this["sha256"] = JsonPrimitive(artifactSha256)
+        })
+        val manifest = JsonObject(original.artifactManifest.toMutableMap().apply {
+            this["artifacts"] = JsonObject(originalArtifacts.toMutableMap().apply { this["full"] = full })
+        })
+        val manifestSha256 = OracleArtifacts.sha256(OracleJson.canonicalBytes(manifest))
+        val oracle = original.document.controlObject("oracle")
+        val document = JsonObject(original.document.toMutableMap().apply {
+            this["oracle"] = JsonObject(oracle.toMutableMap().apply {
+                this["artifactManifestSha256"] = JsonPrimitive(manifestSha256)
+                this["richArtifactSha256"] = JsonPrimitive(artifactSha256)
+            })
+        })
+        return AuthenticatedFullTreeScope(
+            document = document,
+            sha256 = OracleArtifacts.sha256(OracleJson.canonicalBytes(document)),
+            sourceLock = original.sourceLock,
+            sourceLockSha256 = original.sourceLockSha256,
+            artifactManifest = manifest,
+            artifactManifestSha256 = manifestSha256,
+        )
+    }
+
+    private fun deleteTree(path: Path) {
+        if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) return
+        Files.walk(path).use { stream ->
+            stream.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+        }
+    }
+}
