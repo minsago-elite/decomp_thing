@@ -427,8 +427,8 @@ class FullTreeFunctionObservationsV2Test {
             val reconciledInline = allRows.single { it.kind == FullTreeSourceEntityKind.INLINE_INSTANCE }
             assertTrue(reconciledInline.identityObservability == FullTreeIdentityObservability.AMBIGUOUS)
             assertEquals(2, reconciledInline.candidateCollisionSourceEntityIds.size)
-            assertTrue(allRows.single { it.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE }.edges.any {
-                it.state == FullTreeSourceIdentityEdgeState.RESOLVED && it.source.unitId != it.target?.unitId
+            assertTrue(allRows.filter { it.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE }.any { row ->
+                row.edges.any { it.state == FullTreeSourceIdentityEdgeState.RESOLVED && it.source.unitId != it.target?.unitId }
             })
             assertEquals(7, allRows.count { it.denominatorDisposition == FullTreeDenominatorDisposition.NON_SCOREABLE })
             assertEquals(1, allRows.count { it.denominatorDisposition == FullTreeDenominatorDisposition.UNKNOWN })

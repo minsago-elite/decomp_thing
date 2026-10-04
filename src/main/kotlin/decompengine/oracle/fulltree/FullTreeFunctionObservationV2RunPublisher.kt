@@ -504,6 +504,17 @@ private class V2PreparedWorkspace private constructor(val directory: Path, priva
 
 private fun deleteV2Tree(root: Path) {
     Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
+        override fun preVisitDirectory(directory: Path, attrs: BasicFileAttributes): FileVisitResult {
+            if (attrs.isSymbolicLink || !attrs.isDirectory) {
+                v2RunFail("unsafe directory in observation-v2 prepared workspace")
+            }
+            // Published subtrees are made read-only before the rederivation workspace is
+            // removed. Restore owner-only write/search permission before descending so their
+            // verified regular files can be unlinked safely.
+            Files.setPosixFilePermissions(directory, PRIVATE_DIRECTORY_PERMISSIONS)
+            return FileVisitResult.CONTINUE
+        }
+
         override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
             if (attrs.isSymbolicLink || !attrs.isRegularFile) v2RunFail("unsafe entry in observation-v2 prepared workspace")
             Files.delete(file)
