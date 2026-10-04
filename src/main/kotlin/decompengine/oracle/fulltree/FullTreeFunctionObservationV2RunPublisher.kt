@@ -342,7 +342,12 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                             v2RunFail("full-run source census exceeds its authenticated serialized-byte bound")
                         }
                     }
-                    anchorIndex.acceptSourceEntityPopulation(shard.identifier, scan.facts, deadline::checkpoint)
+                    anchorIndex.acceptSourceEntityPopulation(
+                        shard.identifier,
+                        scan.facts,
+                        deadline::checkpoint,
+                        minOf(perShard.controlLong("serializedBytes"), MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES),
+                    )
                     sourceFactCanonicalBytes = Math.addExact(sourceFactCanonicalBytes, scan.canonicalBytes)
                     if (sourceFactCanonicalBytes > wholeRun.controlLong("serializedBytes")) {
                         v2RunFail("full-run source census exceeds its authenticated entity or byte bound")

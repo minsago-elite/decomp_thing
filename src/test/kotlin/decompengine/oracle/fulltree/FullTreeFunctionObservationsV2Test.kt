@@ -153,6 +153,13 @@ class FullTreeFunctionObservationsV2Test {
             fields = null,
             reasons = listOf("unsupported-source-identity"),
         )
+        assertEquals(
+            OracleArtifacts.sha256(canonicalSourceEntityFacts(listOf(sourceRow))),
+            observationV2CollisionNeutralSourceEntitiesSha256(
+                listOf(sourceRow),
+                MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES,
+            ),
+        )
         val index = FullTreeFunctionObservationV2AnchorIndex(1L, 4096L)
         index.acceptSourceEntityPopulation(shard.identifier, listOf(sourceRow))
         val reconciliation = index.reconciliation()
@@ -1268,8 +1275,8 @@ class FullTreeFunctionObservationsV2Test {
                 )
                 val row = fact(
                     physical,
-                    FullTreeSourceEntityKind.DECLARATION_ONLY,
-                    FullTreeIdentityObservability.UNOBSERVABLE,
+                    FullTreeSourceEntityKind.NO_RANGE_DEFINITION,
+                    FullTreeIdentityObservability.OBSERVABLE,
                     FullTreeDenominatorDisposition.NON_SCOREABLE,
                     fields,
                 )
@@ -1301,8 +1308,60 @@ class FullTreeFunctionObservationsV2Test {
             val validFact = FullTreeSourceEntityFact.fromCanonicalJson(
                 valid.getValue("sourceEntities").jsonArray.single().jsonObject,
             )
+            val changedCoordinates = JsonObject(
+                requireNotNull(validFact.semanticAnchorFields).canonicalJson().toMutableMap().apply {
+                    put("declarationFileIndex", JsonPrimitive(9))
+                    put("declarationColumn", JsonPrimitive(13))
+                },
+            )
+            val changedCoordinatesFact = FullTreeSourceEntityFact.fromCanonicalJson(
+                JsonObject(validFact.canonicalJson().toMutableMap().apply {
+                    put("semanticAnchorFields", changedCoordinates)
+                }),
+            )
+            assertEquals(validFact.semanticAnchorCandidateId, changedCoordinatesFact.semanticAnchorCandidateId)
+            val changedCoordinatesDocument = FullTreeFunctionObservationsV2.composeEnvelope(
+                v1ProjectionForCompose(valid),
+                listOf(changedCoordinatesFact),
+                validReconciliation,
+                8L * 1024L * 1024L,
+            )
+            val changedCoordinatesFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                FullTreeFunctionObservationsV2.validateEnvelope(
+                    changedCoordinatesDocument,
+                    scope,
+                    inventory,
+                    inventorySha,
+                    shard,
+                    validReconciliation,
+                )
+            }
+            assertTrue(changedCoordinatesFailure.message.orEmpty().contains("scan receipt"))
+
+            val fabricatedUnknownReason = validFact.copy(
+                identityObservability = FullTreeIdentityObservability.UNKNOWN,
+                reasonCodes = listOf("unknown-reference-edge"),
+            )
+            val fabricatedUnknownReasonDocument = FullTreeFunctionObservationsV2.composeEnvelope(
+                v1ProjectionForCompose(valid),
+                listOf(fabricatedUnknownReason),
+                validReconciliation,
+                8L * 1024L * 1024L,
+            )
+            val fabricatedUnknownReasonFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                FullTreeFunctionObservationsV2.validateEnvelope(
+                    fabricatedUnknownReasonDocument,
+                    scope,
+                    inventory,
+                    inventorySha,
+                    shard,
+                    validReconciliation,
+                )
+            }
+            assertTrue(fabricatedUnknownReasonFailure.message.orEmpty().contains("scan receipt"))
+
             for ((state, observability) in listOf(
-                FullTreeSourceIdentityEdgeState.MISSING_TARGET to FullTreeIdentityObservability.UNOBSERVABLE,
+                FullTreeSourceIdentityEdgeState.MISSING_TARGET to FullTreeIdentityObservability.UNKNOWN,
                 FullTreeSourceIdentityEdgeState.CYCLIC to FullTreeIdentityObservability.AMBIGUOUS,
             )) {
                 val unresolvedEdge = FullTreeSourceIdentityEdge(
@@ -1320,10 +1379,19 @@ class FullTreeFunctionObservationsV2Test {
                     },
                 )
                 val forgedFact = validFact.copy(identityObservability = observability, edges = listOf(unresolvedEdge))
+                val forgedIndex = FullTreeFunctionObservationV2AnchorIndex(4L, 4096L)
+                forgedIndex.accept(requireNotNull(forgedFact.semanticAnchorCandidateId), forgedFact.sourceEntityId)
+                forgedIndex.acceptSourceEntityPopulation(
+                    shard.identifier,
+                    listOf(forgedFact),
+                    maximumCanonicalBytes = scope.document.controlObject("bounds")
+                        .controlObject("perShard").controlLong("serializedBytes"),
+                )
+                val forgedReconciliation = forgedIndex.reconciliation()
                 val forgedDocument = FullTreeFunctionObservationsV2.composeEnvelope(
                     v1ProjectionForCompose(valid),
                     listOf(forgedFact),
-                    validReconciliation,
+                    forgedReconciliation,
                     8L * 1024L * 1024L,
                 )
                 val failure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
@@ -1333,7 +1401,7 @@ class FullTreeFunctionObservationsV2Test {
                         inventory,
                         inventorySha,
                         shard,
-                        validReconciliation,
+                        forgedReconciliation,
                     )
                 }
                 assertTrue(failure.message.orEmpty().contains("fixed-width DWARF form"))

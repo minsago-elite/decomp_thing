@@ -194,7 +194,12 @@ internal object FullTreeFunctionObservationsV2 {
         if (facts != FullTreeSourceEntityFact.deterministicOrder(facts)) {
             v2Fail("observation-v2 source entities are not canonically ordered")
         }
-        reconciliation.validateSourceEntityPopulation(shard.identifier, facts, checkpoint)
+        reconciliation.validateSourceEntityPopulation(
+            shard.identifier,
+            facts,
+            checkpoint,
+            scopeDocument.v2Object("bounds").v2Object("perShard").v2Long("serializedBytes"),
+        )
         validateDirectAnchorEvidence(facts, reconciliation)
         validateInlineAnchorEvidence(facts, reconciliation)
         validateCollisionEvidence(facts, reconciliation)
@@ -719,6 +724,7 @@ internal class FullTreeFunctionObservationV2AnchorIndex(
         shardId: String,
         facts: List<FullTreeSourceEntityFact>,
         checkpoint: (String) -> Unit = {},
+        maximumCanonicalBytes: Long = MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES,
     ) {
         if (frozenReconciliation != null) v2Fail("full-run anchor claims are already reconciled")
         if (shardId.isBlank() || shardId in sourceEntityPopulations) {
@@ -728,7 +734,7 @@ internal class FullTreeFunctionObservationV2AnchorIndex(
         if (nextBytes > maximumRetainedBytes) {
             v2Fail("full-run source-entity population proofs exceed their authenticated working-set bound")
         }
-        val claim = sourceEntityPopulationClaim(facts, checkpoint)
+        val claim = sourceEntityPopulationClaim(facts, maximumCanonicalBytes, checkpoint)
         retainedBytes = nextBytes
         sourceEntityPopulations[shardId] = claim
     }
@@ -894,11 +900,12 @@ internal data class FullTreeFunctionObservationV2IdentityReconciliation(
         shardId: String,
         facts: List<FullTreeSourceEntityFact>,
         checkpoint: (String) -> Unit = {},
+        maximumCanonicalBytes: Long = MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES,
     ) {
         val expected = sourceEntityPopulations[shardId]
             ?: v2Fail("source-entity physical DIE population has no authenticated scan receipt")
-        if (sourceEntityPopulationClaim(facts, checkpoint) != expected) {
-            v2Fail("source-entity physical DIE locators differ from the authenticated scan receipt")
+        if (sourceEntityPopulationClaim(facts, maximumCanonicalBytes, checkpoint) != expected) {
+            v2Fail("source-entity canonical facts differ from the authenticated scan receipt")
         }
     }
 }
@@ -910,21 +917,83 @@ private const val FULL_RUN_RECONCILIATION_CHECKPOINT_INTERVAL = 4_096L
 
 private fun sourceEntityPopulationClaim(
     facts: List<FullTreeSourceEntityFact>,
+    maximumCanonicalBytes: Long,
     checkpoint: (String) -> Unit = {},
 ): FullTreeFunctionObservationV2SourceEntityPopulationClaim {
+    val canonicalFactsSha256 = observationV2CollisionNeutralSourceEntitiesSha256(
+        facts,
+        maximumCanonicalBytes,
+        checkpoint,
+    )
     val digest = MessageDigest.getInstance("SHA-256")
-    digest.update("full-run-observation-v2-source-entities-v1\n".toByteArray(StandardCharsets.US_ASCII))
-    facts.forEachIndexed { index, fact ->
-        if (index.toLong() % FULL_RUN_RECONCILIATION_CHECKPOINT_INTERVAL == 0L) {
-            checkpoint("while hashing authenticated source-entity physical locators")
-        }
-        digest.update(fact.sourceEntityId.toByteArray(StandardCharsets.US_ASCII))
-        digest.update('\n'.code.toByte())
-    }
+    digest.update("full-run-observation-v2-source-entities-v2\n".toByteArray(StandardCharsets.US_ASCII))
+    digest.update(facts.size.toString().toByteArray(StandardCharsets.US_ASCII))
+    digest.update('\n'.code.toByte())
+    digest.update(canonicalFactsSha256.toByteArray(StandardCharsets.US_ASCII))
     return FullTreeFunctionObservationV2SourceEntityPopulationClaim(
         sourceEntityCount = facts.size.toLong(),
         populationSha256 = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) },
     )
+}
+
+/**
+ * Hash the canonical, collision-neutral source facts without retaining a whole shard byte array.
+ * Collision evidence is independently derived from authenticated full-run anchor claims; this
+ * receipt binds the remaining extracted row fields and does not use candidate hashes as identity.
+ */
+internal fun observationV2CollisionNeutralSourceEntitiesSha256(
+    facts: List<FullTreeSourceEntityFact>,
+    maximumCanonicalBytes: Long,
+    checkpoint: (String) -> Unit = {},
+): String {
+    require(maximumCanonicalBytes in 1L..MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES)
+    val ordered = FullTreeSourceEntityFact.deterministicOrder(facts, checkpoint)
+    val digest = MessageDigest.getInstance("SHA-256")
+    var canonicalBytes = 0L
+
+    fun write(bytes: ByteArray, offset: Int = 0, length: Int = bytes.size) {
+        if (length <= 0) return
+        val next = Math.addExact(canonicalBytes, length.toLong())
+        if (next > maximumCanonicalBytes) {
+            v2Fail("collision-neutral source entities exceed the authenticated scan-receipt byte bound")
+        }
+        digest.update(bytes, offset, length)
+        canonicalBytes = next
+    }
+
+    fun writeAscii(value: String) = write(value.toByteArray(StandardCharsets.US_ASCII))
+    if (ordered.isEmpty()) {
+        writeAscii("[]\n")
+    } else {
+        writeAscii("[\n")
+        ordered.forEachIndexed { index, fact ->
+            if (index.toLong() % FULL_RUN_RECONCILIATION_CHECKPOINT_INTERVAL == 0L) {
+                checkpoint("while hashing collision-neutral source-entity scan receipts")
+            }
+            val neutral = observationV2CollisionNeutralFact(fact)
+            val row = OracleJson.canonicalBytes(
+                neutral.canonicalJson(),
+                sourceIdentityRowJsonLimits(maximumCanonicalBytes),
+            )
+            if (row.isEmpty() || row.last() != '\n'.code.toByte()) {
+                v2Fail("canonical source-entity scan-receipt row has no final newline")
+            }
+            writeAscii("  ")
+            var segmentStart = 0
+            for (rowIndex in 0 until row.lastIndex) {
+                if (row[rowIndex] == '\n'.code.toByte()) {
+                    write(row, segmentStart, rowIndex + 1 - segmentStart)
+                    writeAscii("  ")
+                    segmentStart = rowIndex + 1
+                }
+            }
+            write(row, segmentStart, row.lastIndex - segmentStart)
+            if (index != ordered.lastIndex) write(byteArrayOf(','.code.toByte()))
+            writeAscii("\n")
+        }
+        writeAscii("]\n")
+    }
+    return digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
 }
 
 internal fun reconcileObservationV2Facts(
