@@ -70,8 +70,20 @@ class FullTreeFunctionObservationsV2Test {
     @Test
     fun `v2 shard resident allowance subtracts co-resident run state`() {
         assertEquals(700L, fullTreeFunctionObservationV2AvailableResidentBytes(1_000L, 100L, 200L))
+        assertEquals(650L, fullTreeFunctionObservationV2AvailableResidentBytes(1_000L, 100L, 200L, 50L))
+        assertEquals(
+            200L,
+            fullTreeFunctionObservationV2SourceRowCanonicalizationScratchBytes(100L),
+        )
+        assertEquals(
+            MAXIMUM_SOURCE_IDENTITY_ROW_BYTES * MAXIMUM_SOURCE_IDENTITY_SINK_CANONICALIZATION_FACTOR,
+            fullTreeFunctionObservationV2SourceRowCanonicalizationScratchBytes(MAXIMUM_SOURCE_IDENTITY_ROW_BYTES + 1L),
+        )
         assertFailsWith<FullTreeFunctionObservationV2RunException> {
             fullTreeFunctionObservationV2AvailableResidentBytes(1_000L, 400L, 600L)
+        }
+        assertFailsWith<FullTreeFunctionObservationV2RunException> {
+            fullTreeFunctionObservationV2AvailableResidentBytes(1_000L, 100L, 200L, 700L)
         }
     }
 
@@ -1232,6 +1244,91 @@ class FullTreeFunctionObservationsV2Test {
             }.distinct()
             assertTrue(emittedRvas.size >= 2, "fixture must contain two emitted RVAs")
             val linkSubject = originalRows.first { it.semanticAnchorFields != null }
+
+            val patternTarget = linkSubject.physicalDie.copy(
+                dieOffset = if (linkSubject.physicalDie.dieOffset == "0x777") "0x778" else "0x777",
+            )
+            val patternAnchorFields = FullTreeSourceAnchorFields(
+                sourcePath = "source/include/fixture.h",
+                declarationFileIndex = 1L,
+                declarationLine = 17L,
+                declarationColumn = 3L,
+                language = 33L,
+                lexicalContext = listOf("fixture"),
+                sourceName = "linked_template",
+                signature = listOf("int (int)"),
+                templateFormalParameters = listOf("type:T"),
+                authenticatedSourceRevision = scope.sourceLock.controlObject("revision").controlString("commit"),
+            )
+            val patternCandidateId = requireNotNull(
+                patternAnchorFields.candidateId(FullTreeSourceAnchorKind.TEMPLATE_PATTERN),
+            )
+            val patternClaims = FullTreeFunctionObservationV2AnchorIndex(4L, 4096L)
+            patternClaims.accept(
+                FullTreeSourceAnchorKind.TEMPLATE_PATTERN,
+                patternCandidateId,
+                patternTarget.sourceEntityId(FullTreeSourceAnchorKind.TEMPLATE_PATTERN),
+            )
+            val patternReconciliation = patternClaims.reconciliation()
+            fun templateInstanceFields(patternCandidate: String) = FullTreeSourceAnchorFields(
+                sourcePath = "source/include/fixture.h",
+                declarationFileIndex = 1L,
+                declarationLine = 17L,
+                declarationColumn = 3L,
+                language = 33L,
+                lexicalContext = listOf("fixture"),
+                sourceName = "linked_template<int>",
+                signature = listOf("int (int)"),
+                templatePatternAnchorCandidateId = patternCandidate,
+                templateActualArguments = listOf("type:int"),
+                authenticatedSourceRevision = scope.sourceLock.controlObject("revision").controlString("commit"),
+            )
+            val patternEdge = FullTreeSourceIdentityEdge(
+                kind = FullTreeSourceIdentityEdgeKind.SPECIFICATION,
+                source = linkSubject.physicalDie,
+                target = patternTarget,
+                referenceForm = "0x10",
+                rawReference = patternTarget.dieOffset,
+                state = FullTreeSourceIdentityEdgeState.RESOLVED,
+                reasonCode = null,
+            )
+            val validPatternInstanceFields = templateInstanceFields(patternCandidateId)
+            val validPatternInstance = FullTreeSourceEntityFact(
+                sourceEntityId = linkSubject.physicalDie.sourceEntityId(FullTreeSourceEntityKind.TEMPLATE_INSTANCE),
+                physicalDie = linkSubject.physicalDie,
+                kind = FullTreeSourceEntityKind.TEMPLATE_INSTANCE,
+                identityObservability = FullTreeIdentityObservability.UNKNOWN,
+                denominatorDisposition = FullTreeDenominatorDisposition.NON_SCOREABLE,
+                semanticAnchorFields = validPatternInstanceFields,
+                semanticAnchorCandidateId = requireNotNull(
+                    validPatternInstanceFields.candidateId(FullTreeSourceAnchorKind.TEMPLATE_INSTANCE),
+                ),
+                resolvedSemanticIdentityId = null,
+                candidateCollisionSourceEntityIds = emptyList(),
+                linkedEmittedRva = null,
+                reasonCodes = listOf("unknown-template-pattern-reference"),
+                edges = listOf(patternEdge),
+            )
+            val validPatternDocument = FullTreeFunctionObservationsV2.composeEnvelope(
+                v1ProjectionForCompose(document), listOf(validPatternInstance), patternReconciliation,
+                8L * 1024L * 1024L,
+            )
+            FullTreeFunctionObservationsV2.validateEnvelope(
+                validPatternDocument, scope, inventory, inventorySha, shard, patternReconciliation,
+            )
+            val forgedPatternFields = templateInstanceFields("d".repeat(64))
+            val forgedPatternInstance = validPatternInstance.copy(semanticAnchorFields = forgedPatternFields)
+            val forgedPatternDocument = FullTreeFunctionObservationsV2.composeEnvelope(
+                v1ProjectionForCompose(document), listOf(forgedPatternInstance), patternReconciliation,
+                8L * 1024L * 1024L,
+            )
+            val forgedPatternFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                FullTreeFunctionObservationsV2.validateEnvelope(
+                    forgedPatternDocument, scope, inventory, inventorySha, shard, patternReconciliation,
+                )
+            }
+            assertTrue(forgedPatternFailure.message.orEmpty().contains("referenced pattern DIE"))
+
             // This small control ELF has no emitted template-instance census row. Build a
             // fixture-only, schema-valid template row on its authenticated physical locator so
             // the validator's allowed target membership can be exercised independently from the
@@ -1584,6 +1681,31 @@ class FullTreeFunctionObservationsV2Test {
                 assertFailsWith<FullTreeFunctionObservationV2Exception> {
                     FullTreeSourceEntityFact.fromCanonicalJson(invalidDisposition)
                 }
+            }
+            val templateFields = FullTreeSourceAnchorFields(
+                sourcePath = "source/template.h",
+                declarationFileIndex = 1L,
+                declarationLine = 24L,
+                declarationColumn = null,
+                language = 33L,
+                lexicalContext = listOf("fixture"),
+                sourceName = "mutated_template<int>",
+                signature = listOf("int (int)"),
+                templateActualArguments = listOf("type:int"),
+            )
+            val templateRow = fact(
+                physical.copy(dieOffset = "0x408"),
+                FullTreeSourceEntityKind.TEMPLATE_INSTANCE,
+                FullTreeIdentityObservability.UNKNOWN,
+                FullTreeDenominatorDisposition.NON_SCOREABLE,
+                templateFields,
+                reasons = listOf("unknown-template-pattern-reference"),
+            )
+            val ambiguousTemplateDisposition = JsonObject(templateRow.canonicalJson().toMutableMap().apply {
+                put("denominatorDisposition", JsonPrimitive("ambiguous"))
+            })
+            assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                FullTreeSourceEntityFact.fromCanonicalJson(ambiguousTemplateDisposition)
             }
             val forgedInlineFields = JsonObject(inlineFields.canonicalJson().toMutableMap().apply {
                 put("inlineCallFile", JsonPrimitive("../outside.cpp"))

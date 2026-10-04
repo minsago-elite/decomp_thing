@@ -298,7 +298,7 @@ class FullTreeSourceEntityIdentityProducerTest {
                     scope,
                     shardId,
                     rowRoot,
-                    anchorClaim = { candidate, physicalClaim -> fullRunClaims += candidate to physicalClaim },
+                    anchorClaim = { _, candidate, physicalClaim -> fullRunClaims += candidate to physicalClaim },
                 )
                 val second = FullTreeSourceEntityIdentityProducer.scanShard(
                     artifact,

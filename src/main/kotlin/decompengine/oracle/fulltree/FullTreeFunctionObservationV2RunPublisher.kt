@@ -38,21 +38,39 @@ internal data class FullTreeFunctionObservationV2RetainedBudget(
     val sourceFactsBytes: Long,
 )
 
+/** Scratch for the SQLite sink's row JsonObject and canonical bytes while the source fact remains retained. */
+internal fun fullTreeFunctionObservationV2SourceRowCanonicalizationScratchBytes(
+    authenticatedMaximumSerializedBytes: Long,
+): Long {
+    require(authenticatedMaximumSerializedBytes > 0L)
+    return Math.multiplyExact(
+        minOf(authenticatedMaximumSerializedBytes, MAXIMUM_SOURCE_IDENTITY_ROW_BYTES),
+        MAXIMUM_SOURCE_IDENTITY_SINK_CANONICALIZATION_FACTOR,
+    )
+}
+
 internal fun fullTreeFunctionObservationV2AvailableResidentBytes(
     wholeRunMaximumResidentBytes: Long,
     anchorIndexRetainedBytes: Long,
     sourceFactsRetainedBytes: Long,
+    sourceRowCanonicalizationScratchBytes: Long = 0L,
 ): Long {
-    require(wholeRunMaximumResidentBytes > 0L && anchorIndexRetainedBytes >= 0L && sourceFactsRetainedBytes >= 0L)
-    val retained = try {
-        Math.addExact(anchorIndexRetainedBytes, sourceFactsRetainedBytes)
+    require(
+        wholeRunMaximumResidentBytes > 0L && anchorIndexRetainedBytes >= 0L && sourceFactsRetainedBytes >= 0L &&
+            sourceRowCanonicalizationScratchBytes >= 0L,
+    )
+    val reserved = try {
+        Math.addExact(
+            Math.addExact(anchorIndexRetainedBytes, sourceFactsRetainedBytes),
+            sourceRowCanonicalizationScratchBytes,
+        )
     } catch (failure: ArithmeticException) {
-        throw FullTreeFunctionObservationV2RunException("observation-v2 retained resident model overflows", failure)
+        throw FullTreeFunctionObservationV2RunException("observation-v2 resident reservation overflows", failure)
     }
-    if (retained >= wholeRunMaximumResidentBytes) {
-        v2RunFail("observation-v2 retained run state leaves no shard resident-byte allowance")
+    if (reserved >= wholeRunMaximumResidentBytes) {
+        v2RunFail("observation-v2 retained run state and source-row scratch leave no shard resident-byte allowance")
     }
-    return wholeRunMaximumResidentBytes - retained
+    return wholeRunMaximumResidentBytes - reserved
 }
 
 internal data class FullTreeFunctionObservationV2ShardScratchBudget(
@@ -258,7 +276,9 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                         controlLimits = sourcePassControlLimits,
                         producerLimits = limits.shard.producer,
                         checkpoint = shardCheckpoint,
-                        anchorClaim = anchorIndex::accept,
+                        anchorClaim = { kind, candidateId, physicalClaimId ->
+                            anchorIndex.accept(kind, candidateId, physicalClaimId)
+                        },
                         factAdmission = { _, canonicalRowBytes ->
                             val nextCount = Math.addExact(sourceFactCount, 1L)
                             val nextAdmissionBytes = Math.addExact(sourceFactAdmissionBytes, canonicalRowBytes)
@@ -364,10 +384,15 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                             inventorySha256,
                             shard,
                         )
+                        val sourceRowCanonicalizationScratchBytes =
+                            fullTreeFunctionObservationV2SourceRowCanonicalizationScratchBytes(
+                                perShard.controlLong("serializedBytes"),
+                            )
                         val residentBudgetBytes = fullTreeFunctionObservationV2AvailableResidentBytes(
                             wholeRun.controlLong("maximumResidentBytes"),
                             retainedBudget.anchorIndexBytes,
                             modeledRetainedBytes,
+                            sourceRowCanonicalizationScratchBytes,
                         )
                         val effective = deriveAuthenticatedLimits(
                             scope,

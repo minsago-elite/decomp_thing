@@ -479,6 +479,13 @@ internal class FullTreeSourceEntityFact(
             require(denominatorDisposition == FullTreeDenominatorDisposition.UNKNOWN)
             require(linkedEmittedRva == null)
         }
+        if (kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE) {
+            require(denominatorDisposition in setOf(
+                FullTreeDenominatorDisposition.NON_SCOREABLE,
+                FullTreeDenominatorDisposition.UNKNOWN,
+                FullTreeDenominatorDisposition.EMITTED_RVA_LINK,
+            ))
+        }
         if (kind == FullTreeSourceEntityKind.DECLARATION_ONLY || kind == FullTreeSourceEntityKind.NO_RANGE_DEFINITION ||
             kind == FullTreeSourceEntityKind.TEMPLATE_PATTERN
         ) {
@@ -777,6 +784,7 @@ internal const val MAXIMUM_IDENTITY_EDGES_PER_ENTITY = 32
 internal const val MAXIMUM_SOURCE_IDENTITY_ROW_BYTES = 64L * 1024L * 1024L
 internal const val MAXIMUM_SOURCE_IDENTITY_RETAINED_BYTES = 64L * 1024L * 1024L
 internal const val MAXIMUM_SOURCE_IDENTITY_ROW_SCRATCH_FACTOR = 2L
+internal const val MAXIMUM_SOURCE_IDENTITY_SINK_CANONICALIZATION_FACTOR = 2L
 internal const val SOURCE_IDENTITY_RETAINED_CONTENT_EXPANSION_FACTOR = 3L
 internal const val SOURCE_IDENTITY_RETAINED_CHARGE_OVERHEAD_BYTES = 64L
 internal const val SOURCE_IDENTITY_INVENTORY_EXPANSION_FACTOR = 8L

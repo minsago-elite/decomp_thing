@@ -41,7 +41,7 @@ internal object FullTreeSourceEntityIdentityProducer {
         producerLimits: FullTreeFunctionObservationProducerLimits = FullTreeFunctionObservationProducerLimits(),
         checkpoint: (String) -> Unit = {},
         /** Receives bounded candidate-to-physical claims, including ordinary emitted definitions. */
-        anchorClaim: ((candidateId: String, physicalClaimId: String) -> Unit)? = null,
+        anchorClaim: ((kind: FullTreeSourceAnchorKind, candidateId: String, physicalClaimId: String) -> Unit)? = null,
         /** Admits each canonical census row against the caller's aggregate run budget before retention. */
         factAdmission: ((fact: FullTreeSourceEntityFact, canonicalRowBytes: Long) -> Unit)? = null,
         /** Optional run-level resident allowance after reserving co-resident full-run state. */
@@ -725,7 +725,7 @@ internal fun sourceIdentityLineTableBudget(
 /** Includes anchors used only as inline callees/owners, not just census rows. */
 private class SourceIdentityAnchorClaims(
     private val budget: SourceIdentityRetentionBudget,
-    private val externalClaim: ((candidateId: String, physicalClaimId: String) -> Unit)?,
+    private val externalClaim: ((kind: FullTreeSourceAnchorKind, candidateId: String, physicalClaimId: String) -> Unit)?,
 ) {
     private val claims = HashMap<String, MutableSet<String>>()
 
@@ -736,7 +736,7 @@ private class SourceIdentityAnchorClaims(
         budget.charge(candidateId.length.toLong() + sourceEntityId.length.toLong() + 128L, "source-anchor collision index")
         // The additive run publisher admits this claim in its own bounded index before the
         // shard-local index retains it. Failed scans never publish a partial observation.
-        externalClaim?.invoke(candidateId, sourceEntityId)
+        externalClaim?.invoke(kind, candidateId, sourceEntityId)
         claims.getOrPut(candidateId) { sortedSetOf() } += sourceEntityId
     }
 

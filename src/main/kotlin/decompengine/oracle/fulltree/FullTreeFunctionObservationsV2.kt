@@ -196,6 +196,22 @@ internal object FullTreeFunctionObservationsV2 {
                 v2Fail("source anchor file digest has no authenticated per-file evidence")
             }
             locatorIndex.validate(fact, oracle.v2String("richArtifactSha256"))
+            fact.semanticAnchorFields?.templatePatternAnchorCandidateId?.let { patternCandidateId ->
+                val boundToReferencedPattern = fact.edges.any { edge ->
+                    edge.kind in setOf(
+                        FullTreeSourceIdentityEdgeKind.SPECIFICATION,
+                        FullTreeSourceIdentityEdgeKind.ABSTRACT_ORIGIN,
+                    ) && edge.target?.let { target ->
+                        reconciliation.hasTemplatePatternClaim(
+                            patternCandidateId,
+                            target.sourceEntityId(FullTreeSourceAnchorKind.TEMPLATE_PATTERN),
+                        )
+                    } == true
+                }
+                if (!boundToReferencedPattern) {
+                    v2Fail("template-pattern candidate is not bound to a referenced pattern DIE")
+                }
+            }
             if (fact.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE &&
                 fact.semanticAnchorFields?.templatePatternAnchorCandidateId == null &&
                 (fact.identityObservability !in setOf(
@@ -455,21 +471,31 @@ internal class FullTreeFunctionObservationV2AnchorIndex(
     private val maximumRetainedBytes: Long,
 ) {
     private val claims = TreeMap<String, TreeSet<String>>(FULL_TREE_CODE_POINT_ORDER)
+    private val templatePatternClaims = HashSet<Pair<String, String>>()
     private var claimCount = 0L
     private var retainedBytes = 0L
+    private var frozenReconciliation: FullTreeFunctionObservationV2IdentityReconciliation? = null
 
     init {
         require(maximumClaims > 0L && maximumRetainedBytes > 0L)
     }
 
-    fun accept(candidateId: String, physicalClaimId: String) {
+    fun accept(candidateId: String, physicalClaimId: String) = accept(null, candidateId, physicalClaimId)
+
+    fun accept(kind: FullTreeSourceAnchorKind?, candidateId: String, physicalClaimId: String) {
+        if (frozenReconciliation != null) v2Fail("full-run anchor claims are already reconciled")
         if (!V2_SHA256.matches(candidateId) || !V2_SHA256.matches(physicalClaimId)) {
             v2Fail("full-run anchor claim is malformed")
         }
         val prior = claims[candidateId]
-        if (prior?.contains(physicalClaimId) == true) return
-        val charge = 64L + candidateId.length + physicalClaimId.length + 96L
-        val nextCount = Math.addExact(claimCount, 1L)
+        val claimExists = prior?.contains(physicalClaimId) == true
+        val patternClaim = kind == FullTreeSourceAnchorKind.TEMPLATE_PATTERN
+        val patternClaimExists = !patternClaim || (candidateId to physicalClaimId) in templatePatternClaims
+        if (claimExists && patternClaimExists) return
+        val claimCharge = if (claimExists) 0L else 64L + candidateId.length + physicalClaimId.length + 96L
+        val patternClaimCharge = if (patternClaim && !patternClaimExists) TEMPLATE_PATTERN_CLAIM_INDEX_BYTES else 0L
+        val charge = Math.addExact(claimCharge, patternClaimCharge)
+        val nextCount = if (claimExists) claimCount else Math.addExact(claimCount, 1L)
         val nextBytes = Math.addExact(retainedBytes, charge)
         if (nextCount > maximumClaims || nextBytes > maximumRetainedBytes) {
             v2Fail("full-run anchor claim population exceeds its authenticated working-set bound")
@@ -477,10 +503,12 @@ internal class FullTreeFunctionObservationV2AnchorIndex(
         // Admission precedes any new key, set, or ID insertion.
         retainedBytes = nextBytes
         claimCount = nextCount
-        claims.getOrPut(candidateId) { TreeSet(FULL_TREE_CODE_POINT_ORDER) }.add(physicalClaimId)
+        if (!claimExists) claims.getOrPut(candidateId) { TreeSet(FULL_TREE_CODE_POINT_ORDER) }.add(physicalClaimId)
+        if (patternClaim && !patternClaimExists) templatePatternClaims.add(candidateId to physicalClaimId)
     }
 
     fun reconciliation(): FullTreeFunctionObservationV2IdentityReconciliation {
+        frozenReconciliation?.let { return it }
         val digest = MessageDigest.getInstance("SHA-256")
         var populationBytes = 3L
         fun update(value: String) = digest.update(value.toByteArray(StandardCharsets.UTF_8))
@@ -516,13 +544,18 @@ internal class FullTreeFunctionObservationV2AnchorIndex(
         retainedBytes = Math.addExact(retainedBytes, reportCharge)
         val immutableCollisions = LinkedHashMap<String, List<String>>()
         collisions.forEach { (candidate, ids) -> immutableCollisions[candidate] = Collections.unmodifiableList(ids.toList()) }
-        return FullTreeFunctionObservationV2IdentityReconciliation(
+        val result = FullTreeFunctionObservationV2IdentityReconciliation(
             populationSha256 = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) },
             claimCount = claimCount,
             candidateCount = claims.size.toLong(),
             collisionCandidateCount = immutableCollisions.size.toLong(),
             collisionIdsByCandidate = Collections.unmodifiableMap(immutableCollisions),
         )
+        // The immutable, bounded subset lets envelope validation bind a pattern candidate to its
+        // exact referenced DIE without retaining the full collision index in the returned receipt.
+        result.bindTemplatePatternClaims(Collections.unmodifiableSet(templatePatternClaims))
+        frozenReconciliation = result
+        return result
     }
 }
 
@@ -535,6 +568,8 @@ internal data class FullTreeFunctionObservationV2IdentityReconciliation(
     val collisionCandidateCount: Long,
     val collisionIdsByCandidate: Map<String, List<String>>,
 ) {
+    private var templatePatternClaims: Set<Pair<String, String>> = emptySet()
+
     init {
         require(populationSha256.matches(Regex("[0-9a-f]{64}")))
         require(claimCount >= 0L && candidateCount >= 0L && collisionCandidateCount >= 0L)
@@ -550,7 +585,17 @@ internal data class FullTreeFunctionObservationV2IdentityReconciliation(
             "collisionCandidateCount" to JsonPrimitive(collisionCandidateCount),
         ),
     )
+
+    internal fun hasTemplatePatternClaim(candidateId: String, physicalClaimId: String): Boolean =
+        (candidateId to physicalClaimId) in templatePatternClaims
+
+    internal fun bindTemplatePatternClaims(claims: Set<Pair<String, String>>) {
+        check(templatePatternClaims.isEmpty())
+        templatePatternClaims = claims
+    }
 }
+
+private const val TEMPLATE_PATTERN_CLAIM_INDEX_BYTES = 96L
 
 internal fun reconcileObservationV2Facts(
     facts: List<FullTreeSourceEntityFact>,
