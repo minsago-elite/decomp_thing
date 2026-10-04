@@ -127,6 +127,9 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                     ).coerceAtLeast(1L),
                 )
                 val sourceFactsByShard = LinkedHashMap<String, List<FullTreeSourceEntityFact>>()
+                val shardDeadlines = shards.associate { shard ->
+                    shard.identifier to deadline.newShardBudget(scope)
+                }
                 var sourceFactCount = 0L
                 var sourceFactAdmissionBytes = 0L
                 var sourceFactCanonicalBytes = 0L
@@ -137,7 +140,8 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                 )
                 shards.forEach { shard ->
                     deadline.checkpoint("before extracting observation-v2 source entities")
-                    val shardCheckpoint = deadline.checkpointForShard(scope)
+                    val shardDeadline = shardDeadlines.getValue(shard.identifier)
+                    val shardCheckpoint = shardDeadline.beginPhase()
                     val sourceCountBeforeShard = sourceFactCount
                     val scan = FullTreeSourceEntityIdentityProducer.scanShard(
                         richArtifact = richArtifact,
@@ -183,9 +187,9 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                     deadline.sampleWholeRun("after extracting source entities for ${shard.identifier}")
                     inventoryGuard.verifyUnchanged("full-tree inventory after source-identity extraction")
                     richGuard.verifyUnchanged("rich artifact after source-identity extraction")
+                    shardDeadline.endPhase("after source-identity extraction for ${shard.identifier}")
                 }
                 val reconciliation = anchorIndex.reconciliation()
-                val sourceReport = SourceIdentityAnchorCollisionReport(reconciliation.collisionIdsByCandidate)
                 shards.forEach { shard ->
                     val original = sourceFactsByShard.getValue(shard.identifier)
                     val perShardBytes = minOf(perShard.controlLong("serializedBytes"), MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES)
@@ -198,13 +202,14 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                         reconciliation.collisionIdsByCandidate,
                         perShardBytes,
                     )
-                    val copyModeled = sourceIdentityModeledRetainedChargeBytes(copyCharge)
+                    val copiedRetainedUpperBound = Math.addExact(copyCharge, expansion)
+                    val copyModeled = sourceIdentityModeledRetainedChargeBytes(copiedRetainedUpperBound)
                     val peakRetained = Math.addExact(modeledRetainedBytes, copyModeled)
                     if (peakRetained > retainedAdmission) {
                         v2RunFail("full-run collision reconciliation exceeds the retained-working-set budget")
                     }
                     modeledRetainedBytes = peakRetained
-                    val adjusted = FullTreeFunctionSourceEntityIdentityProducerForV2.mark(original, sourceReport)
+                    val adjusted = reconcileObservationV2Facts(original, reconciliation)
                     val adjustedBytes = canonicalSourceEntityFactsByteLength(adjusted, perShardBytes)
                     if (adjustedBytes > perShardBytes) {
                         v2RunFail("reconciled source entities exceed the authenticated per-shard byte bound")
@@ -222,14 +227,21 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                     var preparedEntities = 0L
                     for (shard in shards) {
                         deadline.checkpoint("before producing observation-v2 shard ${shard.identifier}")
+                        val shardDeadline = shardDeadlines.getValue(shard.identifier)
+                        val shardCheckpoint = shardDeadline.beginPhase()
                         val inputs = FullTreeFunctionObservationAuthenticatedInputs(
                             inventory,
                             inventorySha256,
                             shard,
                         )
                         val effective = deriveAuthenticatedLimits(scope, inputs, limits.shard)
-                        val shardCheckpoint = deadline.checkpointForShard(scope)
-                        val perShardLimits = authenticatedV2SqliteLimits(scope, limits, effective, shardCheckpoint)
+                        val perShardLimits = authenticatedV2SqliteLimits(
+                            scope,
+                            limits,
+                            effective,
+                            shardCheckpoint,
+                            preparedBytes,
+                        )
                         val shardFile = prepared.output(shard.identifier)
                         val streamResult: FullTreeFunctionObservationV2StreamResult
                         var scanResult: FullTreeFunctionObservationArtifactScan? = null
@@ -303,6 +315,7 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                         deadline.sampleWholeRun("after producing observation-v2 shard ${shard.identifier}")
                         inventoryGuard.verifyUnchanged("full-tree inventory after observation-v2 shard")
                         richGuard.verifyUnchanged("rich artifact after observation-v2 shard")
+                        shardDeadline.endPhase("after observation-v2 shard ${shard.identifier}")
                     }
 
                     val runBounds = BoundedShardRunPublicationBounds(
@@ -320,7 +333,7 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                     )
                     val receiptsByShard = receipts.associateBy { it.shardId }
                     val runId = "observation-v2-${OracleArtifacts.sha256("${scope.sha256}:$richSha256".toByteArray()).take(32)}"
-                    val binding = BoundedShardRunPublisher.publish(
+                    val binding = BoundedShardRunPublisher.publishWithCheckpoint(
                         target = target,
                         runId = runId,
                         preparedOutputs = boundedOutputs,
@@ -339,9 +352,11 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                                 v2RunFail("staged observation-v2 bytes differ from their authenticated receipt")
                             }
                         },
+                        checkpoint = deadline::checkpoint,
                     )
                     inventoryGuard.verifyUnchanged("before observation-v2 run return")
                     richGuard.verifyUnchanged("before observation-v2 run return")
+                    deadline.sampleWholeRun("before returning authenticated observation-v2 run")
                     return@translateV2RunFailure FullTreeFunctionObservationV2RunPublication(
                         binding = binding,
                         scopeSha256 = scope.sha256,
@@ -410,14 +425,24 @@ private fun authenticatedV2SqliteLimits(
     limits: FullTreeFunctionObservationV2RunLimits,
     effective: AuthenticatedFunctionObservationLimits,
     checkpoint: (String) -> Unit,
+    preparedBytes: Long,
 ): FullTreeFunctionObservationSqliteLimits {
+    val databaseScratchBytes = limits.maximumScratchBytes - preparedBytes
+    if (databaseScratchBytes < SQLITE_PAGE_BYTES) {
+        v2RunFail("prepared observation-v2 outputs leave no SQLite scratch page within the aggregate bound")
+    }
     return FullTreeFunctionObservationSqliteLimits(
-        maximumDatabaseBytes = effective.maximumDatabaseBytes,
-        maximumOutputBytes = effective.maximumOutputBytes,
+        maximumDatabaseBytes = minOf(effective.maximumDatabaseBytes, databaseScratchBytes),
+        maximumOutputBytes = minOf(
+            effective.maximumOutputBytes,
+            FullTreeFunctionObservationsV2.MAXIMUM_CANONICAL_BYTES,
+        ),
         observations = effective.producer.accumulatorLimits,
         maximumCacheBytes = limits.shard.maximumSqliteCacheBytes,
         databaseCheckpointRows = limits.shard.databaseCheckpointRows,
         checkpoint = FullTreeFunctionObservationSqliteCheckpoint(checkpoint::invoke),
+        maximumScratchBytes = limits.maximumScratchBytes,
+        additionalScratchBytes = preparedBytes,
     )
 }
 
@@ -446,20 +471,11 @@ private class V2RunDeadline private constructor(
         if (resident > maximumResidentBytes) v2RunFail("observation-v2 run exceeded its authenticated resident-memory bound at $label")
     }
 
-    fun checkpointForShard(scope: AuthenticatedFullTreeScope): (String) -> Unit {
+    fun newShardBudget(scope: AuthenticatedFullTreeScope): V2ShardDeadline {
         val perShard = scope.document.controlObject("bounds").controlObject("perShard")
-        val wallStart = System.nanoTime()
-        val cpuStart = processCpuNanos()
         val maximumWall = Math.multiplyExact(perShard.controlLong("wallClockSeconds"), 1_000_000_000L)
         val maximumCpu = Math.multiplyExact(perShard.controlLong("cpuSeconds"), 1_000_000_000L)
-        return { label ->
-            checkpoint(label)
-            if (elapsed(wallStart, System.nanoTime(), "per-shard wall-clock") > maximumWall ||
-                elapsed(cpuStart, processCpuNanos(), "per-shard CPU") > maximumCpu
-            ) {
-                v2RunFail("observation-v2 shard exceeded its authenticated time budget at $label")
-            }
-        }
+        return V2ShardDeadline(::checkpoint, maximumWall, maximumCpu)
     }
 
     companion object {
@@ -474,6 +490,51 @@ private class V2RunDeadline private constructor(
                 Math.multiplyExact(cpuSeconds, 1_000_000_000L),
                 wholeRun.controlLong("maximumResidentBytes"),
             )
+        }
+    }
+}
+
+/** Cumulative budget across this shard's census and observation-production phases. */
+internal class V2ShardDeadline internal constructor(
+    private val runCheckpoint: (String) -> Unit,
+    private val maximumWall: Long,
+    private val maximumCpu: Long,
+    private val wallClock: () -> Long = System::nanoTime,
+    private val cpuClock: () -> Long = ::processCpuNanos,
+) {
+    private var activeWallStart: Long? = null
+    private var activeCpuStart: Long? = null
+    private var accumulatedWall = 0L
+    private var accumulatedCpu = 0L
+
+    fun beginPhase(): (String) -> Unit {
+        check(activeWallStart == null && activeCpuStart == null)
+        activeWallStart = wallClock()
+        activeCpuStart = cpuClock()
+        return ::checkpoint
+    }
+
+    fun endPhase(label: String) {
+        checkpoint(label)
+        val wallStart = activeWallStart ?: v2RunFail("observation-v2 shard deadline has no active phase")
+        val cpuStart = activeCpuStart ?: v2RunFail("observation-v2 shard deadline has no active phase")
+        accumulatedWall = Math.addExact(accumulatedWall, elapsed(wallStart, wallClock(), "per-shard wall-clock"))
+        accumulatedCpu = Math.addExact(accumulatedCpu, elapsed(cpuStart, cpuClock(), "per-shard CPU"))
+        activeWallStart = null
+        activeCpuStart = null
+        if (accumulatedWall > maximumWall || accumulatedCpu > maximumCpu) {
+            v2RunFail("observation-v2 shard exceeded its authenticated cumulative time budget at $label")
+        }
+    }
+
+    private fun checkpoint(label: String) {
+        runCheckpoint(label)
+        val wallStart = activeWallStart ?: v2RunFail("observation-v2 shard deadline has no active phase")
+        val cpuStart = activeCpuStart ?: v2RunFail("observation-v2 shard deadline has no active phase")
+        if (Math.addExact(accumulatedWall, elapsed(wallStart, wallClock(), "per-shard wall-clock")) > maximumWall ||
+            Math.addExact(accumulatedCpu, elapsed(cpuStart, cpuClock(), "per-shard CPU")) > maximumCpu
+        ) {
+            v2RunFail("observation-v2 shard exceeded its authenticated cumulative time budget at $label")
         }
     }
 }
@@ -569,11 +630,3 @@ private fun v2RunFail(message: String): Nothing = throw FullTreeFunctionObservat
 private val PRIVATE_DIRECTORY_PERMISSIONS = PosixFilePermissions.fromString("rwx------")
 private val PRIVATE_OUTPUT_PERMISSIONS = PosixFilePermissions.fromString("rw-------")
 private val READ_ONLY_OUTPUT_PERMISSIONS = PosixFilePermissions.fromString("r--------")
-
-/** Access to the existing deterministic collision semantics without widening extractor ownership. */
-private object FullTreeFunctionSourceEntityIdentityProducerForV2 {
-    fun mark(
-        facts: List<FullTreeSourceEntityFact>,
-        report: SourceIdentityAnchorCollisionReport,
-    ): List<FullTreeSourceEntityFact> = FullTreeSourceEntityIdentityProducer.markUnprovedAnchorCollisions(facts, report)
-}

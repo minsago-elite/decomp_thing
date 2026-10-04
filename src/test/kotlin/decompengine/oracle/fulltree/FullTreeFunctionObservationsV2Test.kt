@@ -28,7 +28,7 @@ class FullTreeFunctionObservationsV2Test {
         assertEquals("c068ed200c8493acbe830ba4e4d8390e8a30499b3d866c43646ff802ff645d89", OracleSchemas.identity(
             FullTreeFunctionObservationsV2.SCHEMA_NAME,
         ).sha256)
-        assertEquals("3d7eaee21d39f524fd5b934548a923fe2405abb289c6845ed92004d53b14561e", FullTreeFunctionObservationsV2.configurationSha256)
+        assertEquals("0a2942329a1e483216cf428590d338128882cec2b91d9a8957589874073d1fe9", FullTreeFunctionObservationsV2.configurationSha256)
         assertEquals("dffe8bad65e82b46150cd1f5368925ae10709fd01adf905d27f1e8784634a86e", FullTreeFunctionObservations.configurationSha256)
 
         val unit = JsonObject(
@@ -116,6 +116,7 @@ class FullTreeFunctionObservationsV2Test {
                 templateActuals: List<String>? = null,
                 inlineCallee: String? = null,
                 inlineOwner: String? = null,
+                authenticatedSourceRevision: String? = null,
                 callFile: String? = null,
                 callLine: Long? = null,
                 callColumn: Long? = null,
@@ -136,6 +137,7 @@ class FullTreeFunctionObservationsV2Test {
                 inlineCallLine = callLine,
                 inlineCallColumn = callColumn,
                 inlinePathAnchorCandidateIds = inlinePath,
+                authenticatedSourceRevision = authenticatedSourceRevision,
             )
 
             val declarationFieldsA = anchorFields("shared_declaration", fileIndex = 1L, column = 4L)
@@ -231,6 +233,17 @@ class FullTreeFunctionObservationsV2Test {
                 FullTreeDenominatorDisposition.NON_SCOREABLE,
                 templateLongFields,
                 reasons = listOf("unknown-template-pattern-reference"),
+                edges = listOf(
+                    FullTreeSourceIdentityEdge(
+                        kind = FullTreeSourceIdentityEdgeKind.TEMPLATE_ARGUMENT,
+                        source = physical(firstUnit, "0x140"),
+                        target = null,
+                        referenceForm = "0x10",
+                        rawReference = "0x80",
+                        state = FullTreeSourceIdentityEdgeState.MISSING_TARGET,
+                        reasonCode = "missing-reference-target",
+                    ),
+                ),
             )
             assertNotEquals(templateInt.semanticAnchorCandidateId, templateLong.semanticAnchorCandidateId)
             assertEquals(null, templateInt.linkedEmittedRva)
@@ -272,9 +285,18 @@ class FullTreeFunctionObservationsV2Test {
                     ),
                 ),
             )
+            val inlineOwnerClaimIds = listOf(
+                ownerA.sourceEntityId(FullTreeSourceAnchorKind.SOURCE_DEFINITION),
+                ownerB.sourceEntityId(FullTreeSourceAnchorKind.SOURCE_DEFINITION),
+            ).sorted()
+            val locallyMarkedInlineFact = inlineFact.copy(
+                identityObservability = FullTreeIdentityObservability.AMBIGUOUS,
+                candidateCollisionSourceEntityIds = inlineOwnerClaimIds,
+                reasonCodes = (inlineFact.reasonCodes + "ambiguous-related-source-anchor").distinct().sorted(),
+            )
 
             val shardFacts = mapOf(
-                firstShard.identifier to listOf(declarationA, declarationA2, noRange, unresolved, templateInt, templateLong, inlineFact),
+                firstShard.identifier to listOf(declarationA, declarationA2, noRange, unresolved, templateInt, templateLong, locallyMarkedInlineFact),
                 secondShard.identifier to listOf(declarationB),
             )
             val anchorIndex = FullTreeFunctionObservationV2AnchorIndex(
@@ -295,6 +317,11 @@ class FullTreeFunctionObservationsV2Test {
             admitAnchor(ownerCandidate, ownerA.sourceEntityId(FullTreeSourceAnchorKind.SOURCE_DEFINITION))
             admitAnchor(ownerCandidate, ownerB.sourceEntityId(FullTreeSourceAnchorKind.SOURCE_DEFINITION))
             admitAnchor(calleeCandidate, callee.sourceEntityId(FullTreeSourceAnchorKind.SOURCE_DEFINITION))
+            val inlineCandidate = requireNotNull(inlineFields.candidateId(FullTreeSourceAnchorKind.INLINE_INSTANCE))
+            admitAnchor(
+                inlineCandidate,
+                physical(secondUnit, "0x220").sourceEntityId(FullTreeSourceAnchorKind.SOURCE_DEFINITION),
+            )
             val reconciliation = anchorIndex.reconciliation()
             val canonicalClaims = JsonArray(allAnchorClaims.sortedWith(
                 compareBy<Pair<String, String>> { it.first }.thenBy { it.second },
@@ -308,9 +335,9 @@ class FullTreeFunctionObservationsV2Test {
                 OracleArtifacts.sha256(OracleJson.canonicalBytes(canonicalClaims)),
                 reconciliation.populationSha256,
             )
-            assertEquals(10L, reconciliation.claimCount)
-            assertEquals(7L, reconciliation.candidateCount)
-            assertEquals(2L, reconciliation.collisionCandidateCount)
+            assertEquals(11L, reconciliation.claimCount)
+            assertEquals(8L, reconciliation.candidateCount)
+            assertEquals(3L, reconciliation.collisionCandidateCount)
             val reconciledByShard = shardFacts.mapValues { (_, rows) -> reconcileObservationV2Facts(rows, reconciliation) }
 
             val observationLimits = FullTreeFunctionObservationAccumulatorLimits(
@@ -347,6 +374,27 @@ class FullTreeFunctionObservationsV2Test {
                         maximumRetainedBytes = 8L * 1024L * 1024L,
                     ),
                 )
+                if (shard.identifier == firstShard.identifier) {
+                    assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                        memory.acceptSourceEntity(declarationB)
+                    }
+                    FullTreeFunctionObservationSqlite.openV2(
+                        root,
+                        shard,
+                        FullTreeFunctionObservationSqliteLimits(
+                            maximumDatabaseBytes = 4L * 1024L * 1024L,
+                            maximumOutputBytes = 8L * 1024L * 1024L,
+                            observations = observationLimits,
+                            maximumCacheBytes = 64 * 1024,
+                            databaseCheckpointRows = 2,
+                            checkpoint = FullTreeFunctionObservationSqliteCheckpoint {},
+                        ),
+                    ).use { outOfShardSink ->
+                        assertFailsWith<FullTreeFunctionObservationSqliteException> {
+                            outOfShardSink.acceptSourceEntity(declarationB)
+                        }
+                    }
+                }
                 memory.recordScannedDies(3L)
                 observations.forEach(memory::accept)
                 reconciledByShard.getValue(shard.identifier).asReversed().forEach(memory::acceptSourceEntity)
@@ -380,6 +428,39 @@ class FullTreeFunctionObservationsV2Test {
                 assertEquals(reconciledByShard.getValue(shard.identifier).size.toLong(), sqliteReceipt.sourceEntities)
                 assertEquals(OracleArtifacts.sha256(memoryBytes), sqliteReceipt.outputSha256)
 
+                if (shard.identifier == firstShard.identifier) {
+                    val requiredScratchBytes = Math.addExact(
+                        sqliteReceipt.outputBytes,
+                        sqliteReceipt.databaseHighWaterBytes,
+                    )
+                    val tightScratchBytes = requiredScratchBytes - 1L
+                    assertTrue(tightScratchBytes >= SQLITE_PAGE_BYTES.toLong())
+                    assertFailsWith<FullTreeFunctionObservationSqliteException> {
+                        FullTreeFunctionObservationSqlite.openV2(
+                            root,
+                            shard,
+                            FullTreeFunctionObservationSqliteLimits(
+                                maximumDatabaseBytes = minOf(4L * 1024L * 1024L, tightScratchBytes),
+                                maximumOutputBytes = 8L * 1024L * 1024L,
+                                observations = observationLimits,
+                                maximumCacheBytes = 64 * 1024,
+                                databaseCheckpointRows = 1,
+                                checkpoint = FullTreeFunctionObservationSqliteCheckpoint {},
+                                maximumScratchBytes = tightScratchBytes,
+                            ),
+                        ).use { boundedSink ->
+                            boundedSink.recordScannedDies(3L)
+                            observations.forEach(boundedSink::accept)
+                            reconciledByShard.getValue(shard.identifier).forEach(boundedSink::acceptSourceEntity)
+                            boundedSink.finishToV2(
+                                ByteArrayOutputStream(),
+                                bindings,
+                                reconciliation,
+                            )
+                        }
+                    }
+                }
+
                 val document = OracleJson.parseCanonical(memoryBytes) as JsonObject
                 OracleSchemas.validate(FullTreeFunctionObservationsV2.SCHEMA_NAME, document)
                 assertFailsWith<OracleSchemaException> {
@@ -390,8 +471,7 @@ class FullTreeFunctionObservationsV2Test {
                 }
                 FullTreeFunctionObservationsV2.validateEnvelope(
                     document,
-                    scope.document,
-                    scope.sha256,
+                    scope,
                     inventory,
                     inventorySha256,
                     shard,
@@ -426,13 +506,15 @@ class FullTreeFunctionObservationsV2Test {
             })
             val reconciledInline = allRows.single { it.kind == FullTreeSourceEntityKind.INLINE_INSTANCE }
             assertTrue(reconciledInline.identityObservability == FullTreeIdentityObservability.AMBIGUOUS)
-            assertEquals(2, reconciledInline.candidateCollisionSourceEntityIds.size)
+            assertEquals(4, reconciledInline.candidateCollisionSourceEntityIds.size)
+            assertTrue("duplicate-source-anchor-unproven" in reconciledInline.reasonCodes)
+            assertTrue("ambiguous-related-source-anchor" !in reconciledInline.reasonCodes)
             assertTrue(allRows.filter { it.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE }.any { row ->
                 row.edges.any { it.state == FullTreeSourceIdentityEdgeState.RESOLVED && it.source.unitId != it.target?.unitId }
             })
             assertEquals(7, allRows.count { it.denominatorDisposition == FullTreeDenominatorDisposition.NON_SCOREABLE })
             assertEquals(1, allRows.count { it.denominatorDisposition == FullTreeDenominatorDisposition.UNKNOWN })
-            assertEquals(10L, outputs.values.first().getValue("counts").jsonObject.getValue("anchorClaims").jsonPrimitive.long)
+            assertEquals(11L, outputs.values.first().getValue("counts").jsonObject.getValue("anchorClaims").jsonPrimitive.long)
 
             val valid = outputs.getValue(firstShard.identifier)
             val inlineIndex = valid.getValue("sourceEntities").jsonArray.indexOfFirst { row ->
@@ -454,7 +536,7 @@ class FullTreeFunctionObservationsV2Test {
             }))
             assertFailsWith<FullTreeFunctionObservationV2Exception> {
                 FullTreeFunctionObservationsV2.validateEnvelope(
-                    detached, scope.document, scope.sha256, inventory, inventorySha256, firstShard, reconciliation,
+                    detached, scope, inventory, inventorySha256, firstShard, reconciliation,
                 )
             }
 
@@ -466,7 +548,7 @@ class FullTreeFunctionObservationsV2Test {
             }))
             assertFailsWith<FullTreeFunctionObservationV2Exception> {
                 FullTreeFunctionObservationsV2.validateEnvelope(
-                    repointed, scope.document, scope.sha256, inventory, inventorySha256, firstShard, reconciliation,
+                    repointed, scope, inventory, inventorySha256, firstShard, reconciliation,
                 )
             }
 
@@ -477,10 +559,231 @@ class FullTreeFunctionObservationsV2Test {
             ))
             assertFailsWith<FullTreeFunctionObservationV2Exception> {
                 FullTreeFunctionObservationsV2.validateEnvelope(
-                    changedCollision, scope.document, scope.sha256, inventory, inventorySha256, firstShard, reconciliation,
+                    changedCollision, scope, inventory, inventorySha256, firstShard, reconciliation,
+                )
+            }
+            val nonCollidingIndex = valid.getValue("sourceEntities").jsonArray.indexOfFirst { row ->
+                row.jsonObject.getValue("entityKind").jsonPrimitive.content == "no-range-definition"
+            }
+            val nonCollidingRow = valid.getValue("sourceEntities").jsonArray[nonCollidingIndex].jsonObject
+            val fabricatedCollisionIds = replaceSourceRow(valid, nonCollidingIndex, JsonObject(
+                nonCollidingRow.toMutableMap().apply {
+                    this["identityObservability"] = JsonPrimitive("ambiguous")
+                    this["candidateCollisionSourceEntityIds"] = JsonArray(listOf(JsonPrimitive("f".repeat(64))))
+                    this["reasonCodes"] = JsonArray(
+                        (nonCollidingRow.getValue("reasonCodes").jsonArray.map { it.jsonPrimitive.content } +
+                            "ambiguous-related-source-anchor").distinct().sorted().map(::JsonPrimitive),
+                    )
+                },
+            ))
+            assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                FullTreeFunctionObservationsV2.validateEnvelope(
+                    fabricatedCollisionIds, scope, inventory, inventorySha256, firstShard, reconciliation,
+                )
+            }
+            val fabricatedCollisionReason = replaceSourceRow(valid, nonCollidingIndex, JsonObject(
+                nonCollidingRow.toMutableMap().apply {
+                    this["identityObservability"] = JsonPrimitive("ambiguous")
+                    this["reasonCodes"] = JsonArray(
+                        (nonCollidingRow.getValue("reasonCodes").jsonArray.map { it.jsonPrimitive.content } +
+                            "ambiguous-related-source-anchor").distinct().sorted().map(::JsonPrimitive),
+                    )
+                },
+            ))
+            assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                FullTreeFunctionObservationsV2.validateEnvelope(
+                    fabricatedCollisionReason, scope, inventory, inventorySha256, firstShard, reconciliation,
                 )
             }
             assertTrue(Files.list(root).use { paths -> paths.noneMatch { it.fileName.toString().startsWith(".function-observation-sqlite-") } })
+        }
+
+    @Test
+    fun `per-shard deadline accumulates source census and output phases`() {
+        var wall = 0L
+        var cpu = 0L
+        val budget = V2ShardDeadline(
+            runCheckpoint = {},
+            maximumWall = 10L,
+            maximumCpu = 10L,
+            wallClock = { wall },
+            cpuClock = { cpu },
+        )
+        budget.beginPhase()
+        wall = 6L
+        cpu = 6L
+        budget.endPhase("after source census")
+
+        budget.beginPhase()
+        wall = 11L
+        cpu = 11L
+        assertFailsWith<FullTreeFunctionObservationV2RunException> {
+            budget.endPhase("after observation output")
+        }
+    }
+
+    @Test
+    fun `v2 validator binds candidate source revision to authenticated source lock`() =
+        inControlTemporaryDirectory { root ->
+            val fixture = createFullTreeControlFixture(root.resolve("control"))
+            val scope = fixture.authenticatedScope()
+            val inventory = parseControlObject(fixture.inventory)
+            val inventorySha = fixtureSha256(fixture.inventory)
+            val shard = FullTreeFunctionObservations.shardInputs(
+                inventory,
+                inventorySha,
+                scope.document,
+                scope.sha256,
+            ).first()
+            val unit = shard.units.single()
+            val richSha = scope.document.controlObject("oracle").controlString("richArtifactSha256")
+            val physical = FullTreeSourcePhysicalDie(
+                richArtifactSha256 = richSha,
+                unitId = unit.controlString("id"),
+                section = ".debug_info",
+                compilationUnitOffset = unit.controlString("dwarfOffset"),
+                dieOffset = "0x456",
+            )
+            fun boundDocument(revision: String): Pair<JsonObject, FullTreeFunctionObservationV2IdentityReconciliation> {
+                val fields = FullTreeSourceAnchorFields(
+                    sourcePath = "source/revision-bound.h",
+                    declarationFileIndex = 1L,
+                    declarationLine = 24L,
+                    declarationColumn = null,
+                    language = 33L,
+                    lexicalContext = listOf("sample"),
+                    sourceName = "revision_bound",
+                    signature = listOf("void ()"),
+                    authenticatedSourceRevision = revision,
+                )
+                val row = fact(
+                    physical,
+                    FullTreeSourceEntityKind.DECLARATION_ONLY,
+                    FullTreeIdentityObservability.OBSERVABLE,
+                    FullTreeDenominatorDisposition.NON_SCOREABLE,
+                    fields,
+                )
+                val anchorIndex = FullTreeFunctionObservationV2AnchorIndex(4L, 4096L)
+                anchorIndex.accept(requireNotNull(row.semanticAnchorCandidateId), row.sourceEntityId)
+                val reconciliation = anchorIndex.reconciliation()
+                val accumulator = FullTreeFunctionObservationAccumulatorV2(shard)
+                accumulator.recordScannedDies(shard.units.size.toLong())
+                accumulator.acceptSourceEntity(row)
+                return accumulator.finish(
+                    inventoryIndexSha256 = inventory.controlString("indexSha256"),
+                    richArtifactSha256 = richSha,
+                    scopeSha256 = scope.sha256,
+                    reconciliation = reconciliation,
+                ) to reconciliation
+            }
+
+            val authenticatedRevision = scope.sourceLock.controlObject("revision").controlString("commit")
+            val (valid, validReconciliation) = boundDocument(authenticatedRevision)
+            FullTreeFunctionObservationsV2.validateEnvelope(
+                valid,
+                scope,
+                inventory,
+                inventorySha,
+                shard,
+                validReconciliation,
+            )
+
+            val (forged, forgedReconciliation) = boundDocument("forged-revision")
+            val validFact = FullTreeSourceEntityFact.fromCanonicalJson(valid.getValue("sourceEntities").jsonArray.single().jsonObject)
+            val forgedFact = FullTreeSourceEntityFact.fromCanonicalJson(forged.getValue("sourceEntities").jsonArray.single().jsonObject)
+            assertNotEquals(validFact.semanticAnchorCandidateId, forgedFact.semanticAnchorCandidateId)
+            assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                FullTreeFunctionObservationsV2.validateEnvelope(
+                    forged,
+                    scope,
+                    inventory,
+                    inventorySha,
+                    shard,
+                    forgedReconciliation,
+                )
+            }
+        }
+
+    @Test
+    fun `v2 validator binds candidate source revision to authenticated source lock`() =
+        inControlTemporaryDirectory { root ->
+            val fixture = createFullTreeControlFixture(root.resolve("control"))
+            val scope = fixture.authenticatedScope()
+            val inventory = parseControlObject(fixture.inventory)
+            val inventorySha = fixtureSha256(fixture.inventory)
+            val shard = FullTreeFunctionObservations.shardInputs(
+                inventory,
+                inventorySha,
+                scope.document,
+                scope.sha256,
+            ).first()
+            val unit = shard.units.single()
+            val richSha = scope.document.controlObject("oracle").controlString("richArtifactSha256")
+            val physical = FullTreeSourcePhysicalDie(
+                richArtifactSha256 = richSha,
+                unitId = unit.controlString("id"),
+                section = ".debug_info",
+                compilationUnitOffset = unit.controlString("dwarfOffset"),
+                dieOffset = "0x456",
+            )
+            fun boundDocument(revision: String): Pair<JsonObject, FullTreeFunctionObservationV2IdentityReconciliation> {
+                val fields = FullTreeSourceAnchorFields(
+                    sourcePath = "source/revision-bound.h",
+                    declarationFileIndex = 1L,
+                    declarationLine = 24L,
+                    declarationColumn = null,
+                    language = 33L,
+                    lexicalContext = listOf("sample"),
+                    sourceName = "revision_bound",
+                    signature = listOf("void ()"),
+                    authenticatedSourceRevision = revision,
+                )
+                val row = fact(
+                    physical,
+                    FullTreeSourceEntityKind.DECLARATION_ONLY,
+                    FullTreeIdentityObservability.OBSERVABLE,
+                    FullTreeDenominatorDisposition.NON_SCOREABLE,
+                    fields,
+                )
+                val anchorIndex = FullTreeFunctionObservationV2AnchorIndex(4L, 4096L)
+                anchorIndex.accept(requireNotNull(row.semanticAnchorCandidateId), row.sourceEntityId)
+                val reconciliation = anchorIndex.reconciliation()
+                val accumulator = FullTreeFunctionObservationAccumulatorV2(shard)
+                accumulator.recordScannedDies(shard.units.size.toLong())
+                accumulator.acceptSourceEntity(row)
+                return accumulator.finish(
+                    inventoryIndexSha256 = inventory.controlString("indexSha256"),
+                    richArtifactSha256 = richSha,
+                    scopeSha256 = scope.sha256,
+                    reconciliation = reconciliation,
+                ) to reconciliation
+            }
+
+            val authenticatedRevision = scope.sourceLock.controlObject("revision").controlString("commit")
+            val (valid, validReconciliation) = boundDocument(authenticatedRevision)
+            FullTreeFunctionObservationsV2.validateEnvelope(
+                valid,
+                scope,
+                inventory,
+                inventorySha,
+                shard,
+                validReconciliation,
+            )
+
+            val (forged, forgedReconciliation) = boundDocument("forged-revision")
+            val validFact = FullTreeSourceEntityFact.fromCanonicalJson(valid.getValue("sourceEntities").jsonArray.single().jsonObject)
+            val forgedFact = FullTreeSourceEntityFact.fromCanonicalJson(forged.getValue("sourceEntities").jsonArray.single().jsonObject)
+            assertNotEquals(validFact.semanticAnchorCandidateId, forgedFact.semanticAnchorCandidateId)
+            assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                FullTreeFunctionObservationsV2.validateEnvelope(
+                    forged,
+                    scope,
+                    inventory,
+                    inventorySha,
+                    shard,
+                    forgedReconciliation,
+                )
+            }
         }
 
     @Test
@@ -532,8 +835,7 @@ class FullTreeFunctionObservationsV2Test {
                 OracleSchemas.validate(FullTreeFunctionObservationsV2.SCHEMA_NAME, document)
                 FullTreeFunctionObservationsV2.validateEnvelope(
                     document,
-                    scope.document,
-                    scope.sha256,
+                    scope,
                     inventory,
                     inventorySha,
                     firstInput.getValue(receipt.shardId),

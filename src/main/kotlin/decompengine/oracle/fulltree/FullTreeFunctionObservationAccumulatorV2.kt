@@ -32,6 +32,9 @@ internal class FullTreeFunctionObservationAccumulatorV2(
 
     fun acceptSourceEntity(fact: FullTreeSourceEntityFact) {
         requireMutable()
+        if (shard.units.none { it.controlString("id") == fact.physicalDie.unitId }) {
+            v2AccumulatorFail("source entity owner is outside its authenticated shard")
+        }
         sourceEntitiesStarted = true
         if (fact.sourceEntityId in sourceIds) v2AccumulatorFail("duplicate sourceEntityId")
         val row = try {
@@ -89,7 +92,7 @@ internal data class FullTreeFunctionObservationV2AccumulatorLimits(
     val maximumRetainedBytes: Long = 1024L * 1024L * 1024L,
 ) {
     init {
-        require(maximumOutputBytes in 1L..16L * 1024L * 1024L * 1024L)
+        require(maximumOutputBytes in 1L..FullTreeFunctionObservationsV2.MAXIMUM_CANONICAL_BYTES)
         require(maximumRetainedBytes in 1L..16L * 1024L * 1024L * 1024L)
     }
 }

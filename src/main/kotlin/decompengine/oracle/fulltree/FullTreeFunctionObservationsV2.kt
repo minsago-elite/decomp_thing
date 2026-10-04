@@ -32,7 +32,7 @@ internal data class FullTreeFunctionObservationV2StreamResult(
 /** Identity of the additive observation contract. The v1 schema and policy stay frozen. */
 internal object FullTreeFunctionObservationsV2 {
     const val SCHEMA_NAME = "full-tree-function-observations-v2"
-    private const val MAXIMUM_CANONICAL_BYTES = 64L * 1024L * 1024L
+    const val MAXIMUM_CANONICAL_BYTES = 64L * 1024L * 1024L
 
     val producerPolicy: JsonObject = JsonObject(
         mapOf(
@@ -43,6 +43,7 @@ internal object FullTreeFunctionObservationsV2 {
             "semanticAnchorCandidate" to JsonPrimitive("typed-source-tuple-v2-column-excluded"),
             "candidateHashesProveIdentity" to JsonPrimitive(false),
             "legacySourceEntityCoverage" to JsonPrimitive(false),
+            "maximumCanonicalBytes" to JsonPrimitive(MAXIMUM_CANONICAL_BYTES),
         ),
     )
 
@@ -111,13 +112,19 @@ internal object FullTreeFunctionObservationsV2 {
     /** Strictly validates the schema, old emitted projection, source-fact semantics and run binding. */
     fun validateEnvelope(
         document: JsonObject,
-        scope: JsonObject,
-        scopeSha256: String,
+        scope: AuthenticatedFullTreeScope,
         inventory: JsonObject,
         inventoryArtifactSha256: String,
         shard: FullTreeFunctionObservationShardInput,
         reconciliation: FullTreeFunctionObservationV2IdentityReconciliation,
+        controlLimits: FullTreeControlLimits = FullTreeControlLimits(),
     ) {
+        try {
+            FullTreeScopeControl.validate(scope, controlLimits)
+        } catch (failure: Exception) {
+            throw FullTreeFunctionObservationV2Exception("observation-v2 scope authentication failed", failure)
+        }
+        val scopeDocument = scope.document
         try {
             OracleSchemas.validate(SCHEMA_NAME, document)
         } catch (failure: Exception) {
@@ -141,9 +148,7 @@ internal object FullTreeFunctionObservationsV2 {
         if (facts != FullTreeSourceEntityFact.deterministicOrder(facts)) {
             v2Fail("observation-v2 source entities are not canonically ordered")
         }
-        if (reconcileObservationV2Facts(facts, reconciliation) != facts) {
-            v2Fail("observation-v2 collision states do not match the authenticated full-run anchor claims")
-        }
+        validateCollisionEvidence(facts, reconciliation)
         if (counts.v2Long("sourceEntities") != facts.size.toLong() ||
             counts.v2Object("sourceEntitiesByKind") != countKinds(facts) ||
             counts.v2Object("sourceEntitiesByObservability") != countObservability(facts) ||
@@ -172,11 +177,11 @@ internal object FullTreeFunctionObservationsV2 {
                 if (rva !in emittedRvas) v2Fail("source entity links to an absent emitted RVA")
             }
             validateArtifactLocators(fact, inventory, oracle.v2String("richArtifactSha256"), shard)
-            if (fact.candidateCollisionSourceEntityIds.isNotEmpty() &&
-                (fact.identityObservability != FullTreeIdentityObservability.AMBIGUOUS ||
-                    fact.reasonCodes.none { it in setOf("duplicate-source-anchor-unproven", "ambiguous-related-source-anchor") })
+            val sourceRevision = fact.semanticAnchorFields?.authenticatedSourceRevision
+            if (sourceRevision != null &&
+                sourceRevision != scope.sourceLock.v2Object("revision").v2String("commit")
             ) {
-                v2Fail("source anchor collision is not retained as ambiguous evidence")
+                v2Fail("source anchor revision differs from the authenticated source lock")
             }
             if (fact.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE &&
                 fact.semanticAnchorFields?.templatePatternAnchorCandidateId == null &&
@@ -190,8 +195,8 @@ internal object FullTreeFunctionObservationsV2 {
                 v2Fail("missing generic-pattern relation is not preserved as unknown or ambiguous evidence")
             }
         }
-        validateLegacyProjection(document, scope, scopeSha256, inventory, inventoryArtifactSha256, shard)
-        val perShard = scope.v2Object("bounds").v2Object("perShard")
+        validateLegacyProjection(document, scopeDocument, scope.sha256, inventory, inventoryArtifactSha256, shard)
+        val perShard = scopeDocument.v2Object("bounds").v2Object("perShard")
         val projectedEntities = Math.addExact(
             Math.addExact(counts.v2Long("emittedRvas"), counts.v2Long("nonEmitted")),
             facts.size.toLong(),
@@ -203,6 +208,48 @@ internal object FullTreeFunctionObservationsV2 {
             perShard.v2Long("serializedBytes")
         ) {
             v2Fail("observation-v2 exceeds its authenticated serialized-byte bound")
+        }
+    }
+
+    private fun validateCollisionEvidence(
+        facts: List<FullTreeSourceEntityFact>,
+        reconciliation: FullTreeFunctionObservationV2IdentityReconciliation,
+    ) {
+        val collisionReasons = setOf("duplicate-source-anchor-unproven", "ambiguous-related-source-anchor")
+        facts.forEach { fact ->
+            val fields = fact.semanticAnchorFields
+            val directIds = fact.semanticAnchorCandidateId
+                ?.let(reconciliation.collisionIdsByCandidate::get)
+                .orEmpty()
+            val relatedCandidateIds = listOfNotNull(
+                fields?.inlineCalleeAnchorCandidateId,
+                fields?.inlineOwnerAnchorCandidateId,
+                fields?.templatePatternAnchorCandidateId,
+            ) + fields?.inlinePathAnchorCandidateIds.orEmpty()
+            val relatedIds = relatedCandidateIds.flatMap { candidate ->
+                reconciliation.collisionIdsByCandidate[candidate].orEmpty()
+            }
+            val expectedIds = (directIds + relatedIds).distinct().sorted()
+            if (fact.candidateCollisionSourceEntityIds != expectedIds) {
+                v2Fail("source anchor collision IDs do not match the authenticated full-run anchor claims")
+            }
+            if (expectedIds.isEmpty()) {
+                if (fact.reasonCodes.any { it in collisionReasons }) {
+                    v2Fail("source entity claims collision evidence absent from the authenticated full-run claims")
+                }
+            } else {
+                val expectedReason = if (directIds.isNotEmpty()) {
+                    "duplicate-source-anchor-unproven"
+                } else {
+                    "ambiguous-related-source-anchor"
+                }
+                if (fact.identityObservability != FullTreeIdentityObservability.AMBIGUOUS ||
+                    expectedReason !in fact.reasonCodes ||
+                    fact.reasonCodes.any { it in collisionReasons && it != expectedReason }
+                ) {
+                    v2Fail("source anchor collision is not retained as the exact ambiguous evidence")
+                }
+            }
         }
     }
 
@@ -268,8 +315,13 @@ internal object FullTreeFunctionObservationsV2 {
             // against the complete inventory; only the census row itself is shard-local.
             validate(edge.source, false)
             edge.target?.let { validate(it, false) }
-            if (edge.referenceForm != null || edge.rawReference != null) {
+            if (edge.state == FullTreeSourceIdentityEdgeState.RESOLVED &&
+                (edge.referenceForm != null || edge.rawReference != null)
+            ) {
                 val target = edge.target ?: v2Fail("resolved typed reference has no target locator")
+                if (edge.referenceForm == null || edge.rawReference == null) {
+                    v2Fail("resolved typed reference omits its form or raw offset")
+                }
                 val form = edge.referenceForm?.removePrefix("0x")?.toULongOrNull(16)
                     ?: v2Fail("typed reference form is malformed")
                 val raw = edge.rawReference?.removePrefix("0x")?.toULongOrNull(16)
@@ -427,10 +479,24 @@ internal data class FullTreeFunctionObservationV2IdentityReconciliation(
 internal fun reconcileObservationV2Facts(
     facts: List<FullTreeSourceEntityFact>,
     reconciliation: FullTreeFunctionObservationV2IdentityReconciliation,
-): List<FullTreeSourceEntityFact> = FullTreeSourceEntityIdentityProducer.markUnprovedAnchorCollisions(
-    FullTreeSourceEntityFact.deterministicOrder(facts),
-    SourceIdentityAnchorCollisionReport(reconciliation.collisionIdsByCandidate),
-)
+): List<FullTreeSourceEntityFact> {
+    val collisionReasons = setOf("duplicate-source-anchor-unproven", "ambiguous-related-source-anchor")
+    val normalized = facts.map { fact ->
+        val retainedReasons = fact.reasonCodes.filterNot { it in collisionReasons }
+        if (retainedReasons == fact.reasonCodes && fact.candidateCollisionSourceEntityIds.isEmpty()) {
+            fact
+        } else {
+            fact.copy(
+                candidateCollisionSourceEntityIds = emptyList(),
+                reasonCodes = retainedReasons,
+            )
+        }
+    }
+    return FullTreeSourceEntityIdentityProducer.markUnprovedAnchorCollisions(
+        FullTreeSourceEntityFact.deterministicOrder(normalized),
+        SourceIdentityAnchorCollisionReport(reconciliation.collisionIdsByCandidate),
+    )
+}
 
 private fun JsonObject.v2Element(name: String): JsonElement = get(name) ?: v2Fail("missing field $name")
 private fun JsonObject.v2Object(name: String): JsonObject = v2Element(name) as? JsonObject ?: v2Fail("$name is not an object")

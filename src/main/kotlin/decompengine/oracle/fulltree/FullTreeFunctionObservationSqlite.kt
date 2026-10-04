@@ -37,12 +37,20 @@ internal data class FullTreeFunctionObservationSqliteLimits(
     val maximumCacheBytes: Int = 8 * 1024 * 1024,
     val databaseCheckpointRows: Int = 4096,
     val checkpoint: FullTreeFunctionObservationSqliteCheckpoint,
+    val maximumScratchBytes: Long? = null,
+    val additionalScratchBytes: Long = 0L,
 ) {
     init {
         require(maximumDatabaseBytes in SQLITE_PAGE_BYTES.toLong()..16L * 1024L * 1024L * 1024L)
         require(maximumOutputBytes in 1L..16L * 1024L * 1024L * 1024L)
         require(maximumCacheBytes in 1024..64 * 1024 * 1024)
         require(databaseCheckpointRows in 1..1_000_000)
+        require(additionalScratchBytes >= 0L)
+        require(maximumScratchBytes == null ||
+            (maximumScratchBytes >= SQLITE_PAGE_BYTES && additionalScratchBytes <= maximumScratchBytes))
+        require(maximumScratchBytes == null ||
+            maximumDatabaseBytes <= maximumScratchBytes - additionalScratchBytes)
+        require(maximumScratchBytes != null || additionalScratchBytes == 0L)
     }
 }
 
@@ -96,7 +104,12 @@ internal object FullTreeFunctionObservationSqlite {
         limits: FullTreeFunctionObservationSqliteLimits,
     ): FullTreeFunctionObservationSink {
         requireStableDirectory(scratchParent, "function-observation SQLite scratch parent")
-        val workspace = FunctionObservationSqliteWorkspace.create(scratchParent, limits.maximumDatabaseBytes)
+        val workspace = FunctionObservationSqliteWorkspace.create(
+            scratchParent,
+            limits.maximumDatabaseBytes,
+            limits.maximumScratchBytes,
+            limits.additionalScratchBytes,
+        )
         return try {
             FunctionObservationSqliteSink.open(workspace, shard, limits)
         } catch (failure: Throwable) {
@@ -114,6 +127,9 @@ internal object FullTreeFunctionObservationSqlite {
         shard: FullTreeFunctionObservationShardInput,
         limits: FullTreeFunctionObservationSqliteLimits,
     ): FullTreeFunctionObservationV2Sink {
+        if (limits.maximumOutputBytes > FullTreeFunctionObservationsV2.MAXIMUM_CANONICAL_BYTES) {
+            sqliteFail("observation-v2 output exceeds its canonical-wire byte limit")
+        }
         val sink = open(scratchParent, shard, limits)
         return sink as? FullTreeFunctionObservationV2Sink ?: run {
             sink.close()
@@ -332,7 +348,12 @@ private class FunctionObservationSqliteSink private constructor(
             requireCommittedDatabaseLayout(committedDatabaseBytes)
             assertIndexedProjectionPlans()
             state = SinkState.PROJECTING
-            val bounded = FunctionObservationDigestingOutputStream(output, limits.maximumOutputBytes, limits.checkpoint)
+            val bounded = FunctionObservationDigestingOutputStream(
+                output,
+                limits.maximumOutputBytes,
+                limits.checkpoint,
+                workspace::checkCombinedScratchBound,
+            )
             FunctionObservationCanonicalWriter(connection, bounded).use { writer ->
                 writer.writeV2(
                     shard = shard,
@@ -1348,6 +1369,8 @@ private class FunctionObservationSqliteWorkspace private constructor(
     val database: Path,
     private val databaseIdentity: Any,
     private val maximumDatabaseBytes: Long,
+    private val maximumScratchBytes: Long?,
+    private val additionalScratchBytes: Long,
 ) : AutoCloseable {
     private var maximumObservedDatabaseBytes = 0L
 
@@ -1385,7 +1408,26 @@ private class FunctionObservationSqliteWorkspace private constructor(
         }
         maximumObservedDatabaseBytes = maxOf(maximumObservedDatabaseBytes, attributes.size())
         requireSoleDatabaseChild(checkpoint)
+        enforceScratchBound(attributes.size(), 0L, checkpoint)
         return attributes.size()
+    }
+
+    fun checkCombinedScratchBound(outputBytes: Long, checkpoint: String) {
+        require(outputBytes >= 0L)
+        val databaseBytes = checkDatabaseBound(checkpoint)
+        enforceScratchBound(databaseBytes, outputBytes, checkpoint)
+    }
+
+    private fun enforceScratchBound(databaseBytes: Long, outputBytes: Long, checkpoint: String) {
+        val maximum = maximumScratchBytes ?: return
+        val used = try {
+            Math.addExact(Math.addExact(additionalScratchBytes, databaseBytes), outputBytes)
+        } catch (failure: ArithmeticException) {
+            throw FullTreeFunctionObservationSqliteException("function-observation aggregate scratch size overflows", failure)
+        }
+        if (used > maximum) {
+            sqliteFail("function-observation aggregate scratch exceeds its authenticated byte bound $checkpoint")
+        }
     }
 
     fun databaseHighWaterBytes(): Long {
@@ -1442,7 +1484,12 @@ private class FunctionObservationSqliteWorkspace private constructor(
     }
 
     companion object {
-        fun create(parent: Path, maximumDatabaseBytes: Long): FunctionObservationSqliteWorkspace {
+        fun create(
+            parent: Path,
+            maximumDatabaseBytes: Long,
+            maximumScratchBytes: Long?,
+            additionalScratchBytes: Long,
+        ): FunctionObservationSqliteWorkspace {
             val (trustedParent, parentIdentity) = requireStableDirectory(
                 parent,
                 "function-observation SQLite scratch parent",
@@ -1498,6 +1545,8 @@ private class FunctionObservationSqliteWorkspace private constructor(
                     database,
                     checkNotNull(databaseAttributes.fileKey()),
                     maximumDatabaseBytes,
+                    maximumScratchBytes,
+                    additionalScratchBytes,
                 )
             } catch (failure: Throwable) {
                 try {
@@ -1516,6 +1565,7 @@ private class FunctionObservationDigestingOutputStream(
     output: OutputStream,
     private val maximumBytes: Long,
     private val checkpoint: FullTreeFunctionObservationSqliteCheckpoint,
+    private val checkScratch: (outputBytes: Long, label: String) -> Unit = { _, _ -> },
 ) : FilterOutputStream(output) {
     private val digest = MessageDigest.getInstance("SHA-256")
     private var count = 0L
@@ -1537,6 +1587,7 @@ private class FunctionObservationDigestingOutputStream(
         while (remaining > 0) {
             val untilCheckpoint = nextCheckpoint - count
             val chunk = minOf(remaining.toLong(), untilCheckpoint).toInt()
+            checkScratch(Math.addExact(count, chunk.toLong()), "before writing canonical output chunk")
             out.write(bytes, cursor, chunk)
             digest.update(bytes, cursor, chunk)
             count += chunk.toLong()

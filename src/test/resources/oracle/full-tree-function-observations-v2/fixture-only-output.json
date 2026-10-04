@@ -40,7 +40,7 @@
   },
   "nonEmitted": [],
   "oracle": {
-    "configurationSha256": "3d7eaee21d39f524fd5b934548a923fe2405abb289c6845ed92004d53b14561e",
+    "configurationSha256": "0a2942329a1e483216cf428590d338128882cec2b91d9a8957589874073d1fe9",
     "inventoryIndexSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "richArtifactSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     "scopeSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
