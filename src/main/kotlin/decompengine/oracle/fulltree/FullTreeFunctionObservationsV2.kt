@@ -365,6 +365,41 @@ internal object FullTreeFunctionObservationsV2 {
                     }
                 }
             }
+            val edgesBySource = fact.edges.groupBy { it.source }
+            val reachable = HashSet<FullTreeSourcePhysicalDie>()
+            val pending = ArrayDeque<FullTreeSourcePhysicalDie>()
+            reachable += fact.physicalDie
+            pending.addLast(fact.physicalDie)
+            while (pending.isNotEmpty()) {
+                val source = pending.removeFirst()
+                edgesBySource[source].orEmpty().forEach { edge ->
+                    if (edge.state == FullTreeSourceIdentityEdgeState.RESOLVED) {
+                        val target = edge.target ?: v2Fail("resolved typed reference has no target locator")
+                        if (reachable.add(target)) pending.addLast(target)
+                    }
+                }
+            }
+            fun isNestedTypedSource(edge: FullTreeSourceIdentityEdge): Boolean {
+                // Signature and template edges may start at a nested parameter/formal DIE rather
+                // than redundantly carrying every parent-child DIE relation in the v2 envelope.
+                if (edge.kind !in setOf(
+                        FullTreeSourceIdentityEdgeKind.TYPE,
+                        FullTreeSourceIdentityEdgeKind.TEMPLATE_FORMAL,
+                        FullTreeSourceIdentityEdgeKind.TEMPLATE_ARGUMENT,
+                    )
+                ) return false
+                val source = edge.source
+                val sourceOffset = source.dieOffset.removePrefix("0x").toULong(16)
+                return reachable.any { ancestor ->
+                    source.richArtifactSha256 == ancestor.richArtifactSha256 &&
+                        source.unitId == ancestor.unitId &&
+                        source.compilationUnitOffset == ancestor.compilationUnitOffset &&
+                        sourceOffset > ancestor.dieOffset.removePrefix("0x").toULong(16)
+                }
+            }
+            if (fact.edges.any { it.source !in reachable && !isNestedTypedSource(it) }) {
+                v2Fail("source-identity edge graph is detached from its source entity DIE")
+            }
         }
 
         private fun unitAtOrBefore(offset: ULong): String? {

@@ -1698,7 +1698,10 @@ private class FunctionObservationJsonNodeLimitOutputStream(
             '"'.code -> {
                 val frame = stack.lastOrNull()
                 stringIsKey = frame?.kind == Kind.OBJECT && frame.state == State.KEY_OR_END
-                if (!stringIsKey) beginValue()
+                if (!stringIsKey) {
+                    beginValue()
+                    countNode()
+                }
                 inString = true
                 escaped = false
             }

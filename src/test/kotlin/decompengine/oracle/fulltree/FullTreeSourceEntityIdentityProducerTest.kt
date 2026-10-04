@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.attribute.PosixFilePermissions
 import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -16,8 +17,149 @@ import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 class FullTreeSourceEntityIdentityProducerTest {
+    @Test
+    fun `observation v2 run validator rejects a self-consistent forged template RVA link`() =
+        inControlTemporaryDirectory { root ->
+            val sourceFixture = Path.of(System.getProperty("user.dir"))
+                .resolve("src/test/resources/oracle/inline-template-identity-v1").toAbsolutePath().normalize()
+            val controls = createFullTreeControlFixture(root.resolve("control"))
+            val build = Files.createDirectories(root.resolve("compiled-fixture"))
+            val compiler = resolveCompiler("GXX", listOf("g++", "g++-14", "g++-13"))
+            val artifact = compileFixture(compiler, sourceFixture, build, optimization = 2)
+            val scope = scopeForArtifact(controls.authenticatedScope(), fixtureSha256(artifact), Files.size(artifact))
+            val inventoryPath = build.resolve("inventory.json")
+            FullTreeInventoryControl.generateAndPublish(artifact, scope, inventoryPath, maximumWorkers = 1)
+            val scratch = privateDirectory(root.resolve("scratch"))
+            val outputParent = privateDirectory(root.resolve("output"))
+            val publication = FullTreeFunctionObservationV2RunPublisher.generateAndPublish(
+                richArtifact = artifact,
+                inventoryPath = inventoryPath,
+                scope = scope,
+                scratchParent = scratch,
+                outputRoot = outputParent.resolve("run"),
+                maximumWorkers = 1,
+            )
+            val linkedOutput = publication.outputs.asSequence().mapNotNull { receipt ->
+                val bytes = Files.readAllBytes(publication.binding.root.resolve("outputs/${receipt.shardId}.json"))
+                val document = OracleJson.parseCanonical(bytes) as JsonObject
+                val rows = document.getValue("sourceEntities").jsonArray.map {
+                    FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
+                }
+                rows.firstOrNull { fact ->
+                    fact.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE &&
+                        fact.denominatorDisposition == FullTreeDenominatorDisposition.EMITTED_RVA_LINK
+                }?.let { Triple(receipt, document, it) }
+            }.firstOrNull() ?: throw AssertionError("compiler fixture emitted no linked template-instance census row")
+            val (receipt, document, linkedFact) = linkedOutput
+            val emittedRvas = document.getValue("emitted").jsonArray.map {
+                it.jsonObject.getValue("rva").jsonPrimitive.content
+            }
+            val forgedRva = emittedRvas.firstOrNull { it != linkedFact.linkedEmittedRva }
+                ?: throw AssertionError("compiler fixture needs a second emitted RVA for the repoint mutation")
+            val forgedRows = document.getValue("sourceEntities").jsonArray.map {
+                val fact = FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
+                if (fact.sourceEntityId == linkedFact.sourceEntityId) fact.copy(linkedEmittedRva = forgedRva) else fact
+            }
+            val v1Counts = JsonObject(document.controlObject("counts").toMutableMap().apply {
+                remove("sourceEntities")
+                remove("sourceEntitiesByKind")
+                remove("sourceEntitiesByObservability")
+                remove("sourceEntitiesByDenominatorDisposition")
+                remove("anchorClaims")
+                remove("anchorCandidateCount")
+                remove("anchorCollisionCandidateCount")
+            })
+            val v1Oracle = JsonObject(document.controlObject("oracle").toMutableMap().apply {
+                put("configurationSha256", JsonPrimitive(FullTreeFunctionObservations.configurationSha256))
+            })
+            val v1Projection = JsonObject(document.toMutableMap().apply {
+                remove("sourceEntities")
+                remove("identityReconciliation")
+                put("counts", v1Counts)
+                put("oracle", v1Oracle)
+                put("schemaVersion", JsonPrimitive(1))
+            })
+            val forgedDocument = FullTreeFunctionObservationsV2.composeEnvelope(
+                v1Projection,
+                forgedRows,
+                publication.reconciliation,
+                FullTreeFunctionObservationsV2.MAXIMUM_CANONICAL_BYTES,
+            )
+            val inventoryDocument = parseControlObject(inventoryPath)
+            val inventorySha256 = fixtureSha256(inventoryPath)
+            val shardInput = FullTreeFunctionObservations.shardInputs(
+                inventoryDocument,
+                inventorySha256,
+                scope.document,
+                scope.sha256,
+            ).associateBy { it.identifier }.getValue(receipt.shardId)
+            FullTreeFunctionObservationsV2.validateEnvelope(
+                forgedDocument,
+                scope,
+                inventoryDocument,
+                inventorySha256,
+                shardInput,
+                publication.reconciliation,
+            )
+
+            val preparedDirectory = privateDirectory(root.resolve("forged-prepared"))
+            val forgedOutputs = publication.binding.outputs.map { outputBinding ->
+                val bytes = if (outputBinding.shardId == receipt.shardId) {
+                    FullTreeFunctionObservationsV2.canonicalEnvelopeBytes(forgedDocument)
+                } else {
+                    Files.readAllBytes(publication.binding.root.resolve("outputs/${outputBinding.shardId}.json"))
+                }
+                val path = preparedDirectory.resolve("${outputBinding.shardId}.json")
+                Files.write(path, bytes)
+                Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("r--------"))
+                BoundedShardPreparedOutput(
+                    shardId = outputBinding.shardId,
+                    inputSha256 = outputBinding.inputSha256,
+                    output = path,
+                    outputSha256 = OracleArtifacts.sha256(bytes),
+                    outputBytes = bytes.size.toLong(),
+                    entities = outputBinding.entities,
+                )
+            }
+            val bounds = publication.binding.run.controlObject("bounds")
+            val boundedRunBounds = BoundedShardRunPublicationBounds(
+                maximumShards = bounds.controlLong("maximumShards").toInt(),
+                perShardEntities = bounds.controlLong("perShardEntities"),
+                wholeRunEntities = bounds.controlLong("wholeRunEntities"),
+                perShardBytes = bounds.controlLong("perShardBytes"),
+                wholeRunBytes = bounds.controlLong("wholeRunBytes"),
+                perShardSeconds = bounds.getValue("perShardSeconds").jsonPrimitive.content.toDouble(),
+                wholeRunSeconds = bounds.getValue("wholeRunSeconds").jsonPrimitive.content.toDouble(),
+                perShardCpuSeconds = bounds.getValue("perShardCpuSeconds").jsonPrimitive.content.toDouble(),
+                wholeRunCpuSeconds = bounds.getValue("wholeRunCpuSeconds").jsonPrimitive.content.toDouble(),
+                maximumResidentBytes = bounds.controlLong("maximumResidentBytes"),
+                maximumWorkers = bounds.controlLong("maximumWorkers").toInt(),
+            )
+            val forgedRun = BoundedShardRunPublisher.publish(
+                target = privateDirectory(root.resolve("forged-run-parent")).resolve("run"),
+                runId = publication.binding.run.controlString("id"),
+                preparedOutputs = forgedOutputs,
+                bounds = boundedRunBounds,
+                semanticValidator = BoundedShardOutputSemanticValidator {},
+            )
+            val failure = assertFailsWith<FullTreeFunctionObservationV2RunException> {
+                FullTreeFunctionObservationV2RunPublisher.loadAndValidate(
+                    candidateRoot = forgedRun.root,
+                    expectedIndexArtifactSha256 = forgedRun.indexArtifactSha256,
+                    richArtifact = artifact,
+                    inventoryPath = inventoryPath,
+                    scope = scope,
+                    scratchParent = scratch,
+                )
+            }
+            assertTrue(failure.message.orEmpty().contains("raw-input rederivation"))
+        }
+
     @Test
     fun `line table cache bounds cover every authenticated compilation unit`() {
         val perUnit = 16L * 1024L

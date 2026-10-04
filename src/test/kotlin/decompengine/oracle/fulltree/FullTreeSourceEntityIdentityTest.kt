@@ -749,7 +749,7 @@ class FullTreeSourceEntityIdentityTest {
             sourceEntityId = source.sourceEntityId(FullTreeSourceEntityKind.TEMPLATE_INSTANCE),
             physicalDie = source,
             kind = FullTreeSourceEntityKind.TEMPLATE_INSTANCE,
-            identityObservability = FullTreeIdentityObservability.UNKNOWN,
+            identityObservability = FullTreeIdentityObservability.AMBIGUOUS,
             denominatorDisposition = FullTreeDenominatorDisposition.NON_SCOREABLE,
             semanticAnchorFields = fields,
             semanticAnchorCandidateId = candidateId,
@@ -913,10 +913,18 @@ class FullTreeSourceEntityIdentityTest {
         sourceEntityId = physical(offset).sourceEntityId(kind),
         physicalDie = physical(offset),
         kind = kind,
-        identityObservability = if (fields.candidateId(kind) == null) {
-            FullTreeIdentityObservability.UNKNOWN
-        } else {
-            FullTreeIdentityObservability.OBSERVABLE
+        identityObservability = when {
+            edges.any { it.state == FullTreeSourceIdentityEdgeState.CYCLIC } ->
+                FullTreeIdentityObservability.AMBIGUOUS
+            kind == FullTreeSourceEntityKind.DECLARATION_ONLY ->
+                FullTreeIdentityObservability.UNOBSERVABLE
+            edges.any {
+                it.state == FullTreeSourceIdentityEdgeState.MISSING_TARGET ||
+                    it.state == FullTreeSourceIdentityEdgeState.MALFORMED ||
+                    it.state == FullTreeSourceIdentityEdgeState.UNSUPPORTED
+            } -> FullTreeIdentityObservability.UNKNOWN
+            fields.candidateId(kind) == null -> FullTreeIdentityObservability.UNKNOWN
+            else -> FullTreeIdentityObservability.OBSERVABLE
         },
         denominatorDisposition = FullTreeDenominatorDisposition.NON_SCOREABLE,
         semanticAnchorFields = fields,

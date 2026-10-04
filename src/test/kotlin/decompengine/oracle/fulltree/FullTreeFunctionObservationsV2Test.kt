@@ -104,7 +104,7 @@ class FullTreeFunctionObservationsV2Test {
         val sourceRow = fact(
             physical,
             FullTreeSourceEntityKind.UNRESOLVED,
-            FullTreeIdentityObservability.UNOBSERVABLE,
+            FullTreeIdentityObservability.UNKNOWN,
             FullTreeDenominatorDisposition.UNKNOWN,
             fields = null,
             reasons = listOf("unsupported-source-identity"),
@@ -202,21 +202,21 @@ class FullTreeFunctionObservationsV2Test {
             val declarationA = fact(
                 physical(firstUnit, "0x100"),
                 FullTreeSourceEntityKind.DECLARATION_ONLY,
-                FullTreeIdentityObservability.OBSERVABLE,
+                FullTreeIdentityObservability.UNOBSERVABLE,
                 FullTreeDenominatorDisposition.NON_SCOREABLE,
                 declarationFieldsA,
             )
             val declarationB = fact(
                 physical(secondUnit, "0x100"),
                 FullTreeSourceEntityKind.DECLARATION_ONLY,
-                FullTreeIdentityObservability.OBSERVABLE,
+                FullTreeIdentityObservability.UNOBSERVABLE,
                 FullTreeDenominatorDisposition.NON_SCOREABLE,
                 declarationFieldsB,
             )
             val declarationA2 = fact(
                 physical(firstUnit, absoluteOffset(firstUnit, 0x20UL)),
                 FullTreeSourceEntityKind.DECLARATION_ONLY,
-                FullTreeIdentityObservability.OBSERVABLE,
+                FullTreeIdentityObservability.UNOBSERVABLE,
                 FullTreeDenominatorDisposition.NON_SCOREABLE,
                 declarationFieldsC,
             )
@@ -239,7 +239,7 @@ class FullTreeFunctionObservationsV2Test {
             val unresolved = fact(
                 physical(firstUnit, "0x120"),
                 FullTreeSourceEntityKind.UNRESOLVED,
-                FullTreeIdentityObservability.UNOBSERVABLE,
+                FullTreeIdentityObservability.UNKNOWN,
                 FullTreeDenominatorDisposition.UNKNOWN,
                 fields = null,
                 reasons = listOf("unsupported-source-identity"),
@@ -481,11 +481,30 @@ class FullTreeFunctionObservationsV2Test {
                 assertEquals(OracleArtifacts.sha256(memoryBytes), sqliteReceipt.outputSha256)
 
                 if (shard.identifier == firstShard.identifier) {
+                    fun jsonNodeCount(element: kotlinx.serialization.json.JsonElement): Int = 1 + when (element) {
+                        is JsonObject -> element.values.sumOf(::jsonNodeCount)
+                        is JsonArray -> element.sumOf(::jsonNodeCount)
+                        else -> 0
+                    }
+                    val exactV2NodeCount = jsonNodeCount(OracleJson.parseCanonical(memoryBytes))
+                    assertTrue(exactV2NodeCount > 16)
+                    FullTreeFunctionObservationSqlite.openV2(
+                        root,
+                        shard,
+                        sqliteLimits.copy(maximumV2JsonNodes = exactV2NodeCount),
+                    ).use { exactNodeLimitSink ->
+                        exactNodeLimitSink.recordScannedDies(3L)
+                        observations.forEach(exactNodeLimitSink::accept)
+                        reconciledByShard.getValue(shard.identifier).forEach(exactNodeLimitSink::acceptSourceEntity)
+                        val exactNodeOutput = ByteArrayOutputStream()
+                        exactNodeLimitSink.finishToV2(exactNodeOutput, bindings, reconciliation)
+                        assertContentEquals(memoryBytes, exactNodeOutput.toByteArray())
+                    }
                     assertFailsWith<FullTreeFunctionObservationSqliteException> {
                         FullTreeFunctionObservationSqlite.openV2(
                             root,
                             shard,
-                            sqliteLimits.copy(maximumV2JsonNodes = 16),
+                            sqliteLimits.copy(maximumV2JsonNodes = exactV2NodeCount - 1),
                         ).use { nodeLimitedSink ->
                             nodeLimitedSink.recordScannedDies(3L)
                             observations.forEach(nodeLimitedSink::accept)
@@ -631,13 +650,50 @@ class FullTreeFunctionObservationsV2Test {
                 row.jsonObject.getValue("entityKind").jsonPrimitive.content == "inline-instance"
             }
             val inlineRow = valid.getValue("sourceEntities").jsonArray[inlineIndex].jsonObject
-            val detachedSource = FullTreeSourcePhysicalDie(
-                richArtifactSha256 = richSha256,
-                unitId = "cu-${"f".repeat(32)}",
-                section = ".debug_info",
-                compilationUnitOffset = "0x0",
-                dieOffset = "0x200",
+            val nestedOwnerA = physical(firstUnit, "0x300")
+            val nestedOwnerB = physical(secondUnit, "0x400")
+            val inlinePhysical = FullTreeSourceEntityFact.fromCanonicalJson(inlineRow).physicalDie
+            val nestedOwnerPath = listOf(
+                FullTreeSourceIdentityEdge(
+                    kind = FullTreeSourceIdentityEdgeKind.INLINE_OWNER,
+                    source = inlinePhysical,
+                    target = nestedOwnerA,
+                    referenceForm = null,
+                    rawReference = null,
+                    state = FullTreeSourceIdentityEdgeState.RESOLVED,
+                    reasonCode = null,
+                ),
+                FullTreeSourceIdentityEdge(
+                    kind = FullTreeSourceIdentityEdgeKind.INLINE_OWNER,
+                    source = nestedOwnerA,
+                    target = nestedOwnerB,
+                    referenceForm = null,
+                    rawReference = null,
+                    state = FullTreeSourceIdentityEdgeState.RESOLVED,
+                    reasonCode = null,
+                ),
             )
+            val nestedOwnerRow = JsonObject(inlineRow.toMutableMap().apply {
+                this["edges"] = JsonArray(nestedOwnerPath.map(FullTreeSourceIdentityEdge::canonicalJson))
+            })
+            val nestedOwnerFacts = valid.getValue("sourceEntities").jsonArray.map { row ->
+                val objectRow = row.jsonObject
+                if (objectRow.getValue("sourceEntityId").jsonPrimitive.content ==
+                    inlineRow.getValue("sourceEntityId").jsonPrimitive.content
+                ) FullTreeSourceEntityFact.fromCanonicalJson(nestedOwnerRow)
+                else FullTreeSourceEntityFact.fromCanonicalJson(objectRow)
+            }
+            val nestedOwnerDocument = FullTreeFunctionObservationsV2.composeEnvelope(
+                v1ProjectionForCompose(valid),
+                nestedOwnerFacts,
+                reconciliation,
+                8L * 1024L * 1024L,
+            )
+            FullTreeFunctionObservationsV2.validateEnvelope(
+                nestedOwnerDocument, scope, inventory, inventorySha256, firstShard, reconciliation,
+            )
+
+            val detachedSource = physical(firstUnit, "0x500")
             val detachedEdge = JsonObject(inlineRow.getValue("edges").jsonArray.single().jsonObject.toMutableMap().apply {
                 this["source"] = JsonPrimitive(detachedSource.locator())
             })
@@ -812,7 +868,7 @@ class FullTreeFunctionObservationsV2Test {
                 val row = fact(
                     physical,
                     FullTreeSourceEntityKind.DECLARATION_ONLY,
-                    FullTreeIdentityObservability.OBSERVABLE,
+                    FullTreeIdentityObservability.UNOBSERVABLE,
                     FullTreeDenominatorDisposition.NON_SCOREABLE,
                     fields,
                 )
@@ -926,12 +982,15 @@ class FullTreeFunctionObservationsV2Test {
             assertEquals(first.outputs, rederived.outputs)
 
             val receipt = first.outputs.first { candidate ->
-                candidate.sourceEntities > 0L && candidate.emittedRvas > 0L &&
-                    OracleJson.parseCanonical(
-                        Files.readAllBytes(firstRoot.resolve("outputs/${candidate.shardId}.json")),
-                    ).jsonObject.getValue("sourceEntities").jsonArray.any { row ->
-                        row.jsonObject.getValue("entityKind").jsonPrimitive.content == "template-instance"
-                    }
+                if (candidate.sourceEntities == 0L) return@first false
+                val rows = OracleJson.parseCanonical(
+                    Files.readAllBytes(firstRoot.resolve("outputs/${candidate.shardId}.json")),
+                ).jsonObject.getValue("sourceEntities").jsonArray.map {
+                    FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
+                }
+                rows.any { it.semanticAnchorFields != null } && rows.any {
+                    it.semanticAnchorCandidateId != null && it.candidateCollisionSourceEntityIds.isEmpty() && it.edges.isEmpty()
+                }
             }
             val shard = firstInput.getValue(receipt.shardId)
             val document = OracleJson.parseCanonical(
@@ -940,66 +999,6 @@ class FullTreeFunctionObservationsV2Test {
             val originalRows = document.getValue("sourceEntities").jsonArray.map {
                 FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
             }
-            val emittedRvas = document.getValue("emitted").jsonArray.map { it.jsonObject.getValue("rva").jsonPrimitive.content }
-            val templateFact = originalRows.first { it.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE }
-            val forgedLinkFact = templateFact.copy(
-                denominatorDisposition = FullTreeDenominatorDisposition.EMITTED_RVA_LINK,
-                linkedEmittedRva = emittedRvas.first(),
-            )
-            val forgedLinkRows = originalRows.map { if (it.sourceEntityId == templateFact.sourceEntityId) forgedLinkFact else it }
-            val forgedLinkDocument = FullTreeFunctionObservationsV2.composeEnvelope(
-                v1ProjectionForCompose(document),
-                forgedLinkRows,
-                first.reconciliation,
-                8L * 1024L * 1024L,
-            )
-            FullTreeFunctionObservationsV2.validateEnvelope(
-                forgedLinkDocument,
-                scope,
-                inventory,
-                inventorySha,
-                shard,
-                first.reconciliation,
-            )
-            val linkPrepared = privateDirectory(root.resolve("forged-link-prepared"))
-            val forgedLinkOutputs = first.binding.outputs.map { outputBinding ->
-                val bytes = if (outputBinding.shardId == receipt.shardId) {
-                    FullTreeFunctionObservationsV2.canonicalEnvelopeBytes(forgedLinkDocument)
-                } else {
-                    Files.readAllBytes(firstRoot.resolve("outputs/${outputBinding.shardId}.json"))
-                }
-                val path = linkPrepared.resolve("${outputBinding.shardId}.json")
-                Files.write(path, bytes)
-                Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("r--------"))
-                BoundedShardPreparedOutput(
-                    shardId = outputBinding.shardId,
-                    inputSha256 = outputBinding.inputSha256,
-                    output = path,
-                    outputSha256 = OracleArtifacts.sha256(bytes),
-                    outputBytes = bytes.size.toLong(),
-                    entities = outputBinding.entities,
-                )
-            }
-            val forgedLinkRunParent = privateDirectory(root.resolve("forged-link-run"))
-            val forgedLinkRun = BoundedShardRunPublisher.publish(
-                target = forgedLinkRunParent.resolve("run"),
-                runId = first.binding.run.controlString("id"),
-                preparedOutputs = forgedLinkOutputs,
-                bounds = boundedRunBounds(first.binding.run.controlObject("bounds")),
-                semanticValidator = BoundedShardOutputSemanticValidator {},
-            )
-            val rawLinkFailure = assertFailsWith<FullTreeFunctionObservationV2RunException> {
-                FullTreeFunctionObservationV2RunPublisher.loadAndValidate(
-                    candidateRoot = forgedLinkRun.root,
-                    expectedIndexArtifactSha256 = forgedLinkRun.indexArtifactSha256,
-                    richArtifact = fixture.richArtifact,
-                    inventoryPath = fixture.inventory,
-                    scope = scope,
-                    scratchParent = scratch,
-                )
-            }
-            assertTrue(rawLinkFailure.message.orEmpty().contains("raw-input rederivation"))
-
             val source = originalRows.first { it.semanticAnchorFields != null }
             val alternateKind = if (source.kind == FullTreeSourceEntityKind.NO_RANGE_DEFINITION) {
                 FullTreeSourceEntityKind.DECLARATION_ONLY
@@ -1191,10 +1190,19 @@ class FullTreeFunctionObservationsV2Test {
             val row = fact(
                 physical,
                 FullTreeSourceEntityKind.DECLARATION_ONLY,
-                FullTreeIdentityObservability.OBSERVABLE,
+                FullTreeIdentityObservability.UNOBSERVABLE,
                 FullTreeDenominatorDisposition.NON_SCOREABLE,
                 fields,
             )
+            assertFailsWith<IllegalArgumentException> {
+                fact(
+                    physical,
+                    FullTreeSourceEntityKind.UNRESOLVED,
+                    FullTreeIdentityObservability.UNKNOWN,
+                    FullTreeDenominatorDisposition.UNKNOWN,
+                    fields,
+                )
+            }
             val accumulator = FullTreeFunctionObservationAccumulatorV2(shard)
             accumulator.acceptSourceEntity(row)
             assertFailsWith<FullTreeFunctionObservationV2Exception> { accumulator.acceptSourceEntity(row) }
@@ -1341,6 +1349,14 @@ class FullTreeFunctionObservationsV2Test {
                 FullTreeDenominatorDisposition.NON_SCOREABLE,
                 inlineFields,
             )
+            for (disposition in listOf("unknown", "ambiguous")) {
+                val invalidDisposition = JsonObject(inlineRow.canonicalJson().toMutableMap().apply {
+                    put("denominatorDisposition", JsonPrimitive(disposition))
+                })
+                assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                    FullTreeSourceEntityFact.fromCanonicalJson(invalidDisposition)
+                }
+            }
             val forgedInlineFields = JsonObject(inlineFields.canonicalJson().toMutableMap().apply {
                 put("inlineCallFile", JsonPrimitive("../outside.cpp"))
             })

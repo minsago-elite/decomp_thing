@@ -427,6 +427,9 @@ internal class FullTreeSourceEntityFact(
         candidateCollisionSourceEntityIds.forEach { require(it.matches(Regex("[0-9a-f]{64}"))) }
         require(edges == edges.distinct())
         val expectedAnchor = kind.anchorKind()?.let { semanticAnchorFields?.candidateId(it) }
+        if (expectedAnchor == null && kind.anchorKind() == null) {
+            require(semanticAnchorFields == null && semanticAnchorCandidateId == null)
+        }
         if (identityObservability == FullTreeIdentityObservability.OBSERVABLE) {
             require(semanticAnchorCandidateId != null && semanticAnchorCandidateId == expectedAnchor)
         }
@@ -453,7 +456,7 @@ internal class FullTreeSourceEntityFact(
         }
         require(identityObservability == expectedObservability)
         if (kind == FullTreeSourceEntityKind.INLINE_INSTANCE) {
-            require(denominatorDisposition != FullTreeDenominatorDisposition.EMITTED_RVA_LINK)
+            require(denominatorDisposition == FullTreeDenominatorDisposition.NON_SCOREABLE)
             require(linkedEmittedRva == null)
         }
         if (kind == FullTreeSourceEntityKind.DECLARATION_ONLY || kind == FullTreeSourceEntityKind.NO_RANGE_DEFINITION ||
