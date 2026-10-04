@@ -946,6 +946,25 @@ class FullTreeFunctionObservationsV2Test {
                 }
                 return isolated.reconciliation()
             }
+            fun documentWithReconciledFacts(
+                facts: List<FullTreeSourceEntityFact>,
+                receipt: FullTreeFunctionObservationV2IdentityReconciliation,
+            ): JsonObject {
+                val counts = JsonObject(valid.controlObject("counts").toMutableMap().apply {
+                    put("sourceEntities", JsonPrimitive(facts.size))
+                    put("sourceEntitiesByKind", sourceKindCounts(facts))
+                    put("sourceEntitiesByObservability", sourceObservabilityCounts(facts))
+                    put("sourceEntitiesByDenominatorDisposition", sourceDispositionCounts(facts))
+                    put("anchorClaims", JsonPrimitive(receipt.claimCount))
+                    put("anchorCandidateCount", JsonPrimitive(receipt.candidateCount))
+                    put("anchorCollisionCandidateCount", JsonPrimitive(receipt.collisionCandidateCount))
+                })
+                return JsonObject(valid.toMutableMap().apply {
+                    put("sourceEntities", JsonArray(facts.map(FullTreeSourceEntityFact::canonicalJson)))
+                    put("counts", counts)
+                    put("identityReconciliation", receipt.canonicalJson())
+                })
+            }
 
             val directCandidateRow = valid.getValue("sourceEntities").jsonArray
                 .map { FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject) }
@@ -1240,33 +1259,37 @@ class FullTreeFunctionObservationsV2Test {
                 row.jsonObject.getValue("candidateCollisionSourceEntityIds").jsonArray.isNotEmpty()
             }
             assertTrue(collidingIndex >= 0, "fixture must contain a full-run collision claimant")
-            val collisionReasons = setOf("duplicate-source-anchor-unproven", "ambiguous-related-source-anchor")
             val changedCollisionRow = JsonObject(
                 valid.getValue("sourceEntities").jsonArray[collidingIndex].jsonObject.toMutableMap().apply {
-                    this["identityObservability"] = JsonPrimitive("observable")
                     this["candidateCollisionSourceEntityIds"] = JsonArray(emptyList())
-                    this["reasonCodes"] = JsonArray(
-                        getValue("reasonCodes").jsonArray.filterNot {
-                            it.jsonPrimitive.content in collisionReasons
-                        },
-                    )
                 },
             )
             val changedCollision = replaceSourceRow(valid, collidingIndex, changedCollisionRow)
             val changedCollisionFacts = changedCollision.getValue("sourceEntities").jsonArray.map {
                 FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
             }
-            val collisionCounts = JsonObject(changedCollision.getValue("counts").jsonObject.toMutableMap().apply {
-                put("sourceEntitiesByObservability", sourceObservabilityCounts(changedCollisionFacts))
-            })
-            val collisionDocumentWithRecount = JsonObject(changedCollision.toMutableMap().apply {
-                put("counts", collisionCounts)
-            })
-            assertFailsWith<FullTreeFunctionObservationV2Exception> {
+            val changedCollisionReconciliation = isolatedReconciliation(
+                firstShardPopulation = changedCollisionFacts,
+            )
+            val collisionDocumentWithReceipt = documentWithReconciledFacts(
+                changedCollisionFacts,
+                changedCollisionReconciliation,
+            )
+            val changedCollisionFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
                 FullTreeFunctionObservationsV2.validateEnvelope(
-                    collisionDocumentWithRecount, scope, inventory, inventorySha256, firstShard, reconciliation,
+                    collisionDocumentWithReceipt,
+                    scope,
+                    inventory,
+                    inventorySha256,
+                    firstShard,
+                    changedCollisionReconciliation,
                 )
             }
+            assertTrue(
+                changedCollisionFailure.message.orEmpty().contains(
+                    "source anchor collision IDs do not match the authenticated full-run anchor claims",
+                ),
+            )
             val declarationCandidate = requireNotNull(declarationA.semanticAnchorCandidateId)
             val forgedPhysical = physical(firstUnit, "0x68")
             val originalNonclaimant = fact(
@@ -1308,40 +1331,85 @@ class FullTreeFunctionObservationsV2Test {
                     8L * 1024L * 1024L,
                 )
             }
-            assertTrue(forgedNonclaimantFailure.message.orEmpty().contains("not an authenticated direct anchor claimant"))
-            val nonCollidingIndex = valid.getValue("sourceEntities").jsonArray.indexOfFirst { row ->
-                row.jsonObject.getValue("entityKind").jsonPrimitive.content == "no-range-definition"
+            assertTrue(
+                forgedNonclaimantFailure.message.orEmpty().contains(
+                    "source anchor candidate is not an authenticated direct anchor claimant for this physical DIE claim",
+                ),
+            )
+            val nonCollidingFact = validSourceRows.firstOrNull { candidate ->
+                if (candidate.kind != FullTreeSourceEntityKind.NO_RANGE_DEFINITION ||
+                    candidate.candidateCollisionSourceEntityIds.isNotEmpty()
+                ) {
+                    return@firstOrNull false
+                }
+                val fields = candidate.semanticAnchorFields
+                val directAndRelatedCandidates = listOfNotNull(
+                    candidate.semanticAnchorCandidateId,
+                    fields?.inlineCalleeAnchorCandidateId,
+                    fields?.inlineOwnerAnchorCandidateId,
+                    fields?.templatePatternAnchorCandidateId,
+                ) + fields?.inlinePathAnchorCandidateIds.orEmpty()
+                directAndRelatedCandidates.none { it in reconciliation.collisionIdsByCandidate }
+            } ?: throw AssertionError("fixture must contain a non-colliding no-range row for collision-evidence mutations")
+            val fabricatedCollisionFact = nonCollidingFact.copy(
+                identityObservability = FullTreeIdentityObservability.AMBIGUOUS,
+                candidateCollisionSourceEntityIds = listOf("f".repeat(64)),
+                reasonCodes = (nonCollidingFact.reasonCodes + "ambiguous-related-source-anchor").distinct().sorted(),
+            )
+            val fabricatedCollisionFacts = validSourceRows.map {
+                if (it.sourceEntityId == nonCollidingFact.sourceEntityId) fabricatedCollisionFact else it
             }
-            val nonCollidingRow = valid.getValue("sourceEntities").jsonArray[nonCollidingIndex].jsonObject
-            val fabricatedCollisionIds = replaceSourceRow(valid, nonCollidingIndex, JsonObject(
-                nonCollidingRow.toMutableMap().apply {
-                    this["identityObservability"] = JsonPrimitive("ambiguous")
-                    this["candidateCollisionSourceEntityIds"] = JsonArray(listOf(JsonPrimitive("f".repeat(64))))
-                    this["reasonCodes"] = JsonArray(
-                        (nonCollidingRow.getValue("reasonCodes").jsonArray.map { it.jsonPrimitive.content } +
-                            "ambiguous-related-source-anchor").distinct().sorted().map(::JsonPrimitive),
-                    )
-                },
-            ))
-            assertFailsWith<FullTreeFunctionObservationV2Exception> {
+            val fabricatedCollisionReconciliation = isolatedReconciliation(
+                firstShardPopulation = fabricatedCollisionFacts,
+            )
+            val fabricatedCollisionIds = documentWithReconciledFacts(
+                fabricatedCollisionFacts,
+                fabricatedCollisionReconciliation,
+            )
+            val fabricatedCollisionIdFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
                 FullTreeFunctionObservationsV2.validateEnvelope(
-                    fabricatedCollisionIds, scope, inventory, inventorySha256, firstShard, reconciliation,
+                    fabricatedCollisionIds,
+                    scope,
+                    inventory,
+                    inventorySha256,
+                    firstShard,
+                    fabricatedCollisionReconciliation,
                 )
             }
-            val fabricatedCollisionReason = replaceSourceRow(valid, nonCollidingIndex, JsonObject(
-                nonCollidingRow.toMutableMap().apply {
-                    this["identityObservability"] = JsonPrimitive("ambiguous")
-                    this["reasonCodes"] = JsonArray(
-                        (nonCollidingRow.getValue("reasonCodes").jsonArray.map { it.jsonPrimitive.content } +
-                            "ambiguous-related-source-anchor").distinct().sorted().map(::JsonPrimitive),
-                    )
-                },
-            ))
-            assertFailsWith<FullTreeFunctionObservationV2Exception> {
+            assertTrue(
+                fabricatedCollisionIdFailure.message.orEmpty().contains(
+                    "source anchor collision IDs do not match the authenticated full-run anchor claims",
+                ),
+            )
+            val fabricatedCollisionReasonFact = nonCollidingFact.copy(
+                identityObservability = FullTreeIdentityObservability.AMBIGUOUS,
+                reasonCodes = (nonCollidingFact.reasonCodes + "ambiguous-related-source-anchor").distinct().sorted(),
+            )
+            val fabricatedCollisionReasonFacts = validSourceRows.map {
+                if (it.sourceEntityId == nonCollidingFact.sourceEntityId) fabricatedCollisionReasonFact else it
+            }
+            val fabricatedCollisionReasonReconciliation = isolatedReconciliation(
+                firstShardPopulation = fabricatedCollisionReasonFacts,
+            )
+            val fabricatedCollisionReason = documentWithReconciledFacts(
+                fabricatedCollisionReasonFacts,
+                fabricatedCollisionReasonReconciliation,
+            )
+            val fabricatedCollisionReasonFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
                 FullTreeFunctionObservationsV2.validateEnvelope(
-                    fabricatedCollisionReason, scope, inventory, inventorySha256, firstShard, reconciliation,
+                    fabricatedCollisionReason,
+                    scope,
+                    inventory,
+                    inventorySha256,
+                    firstShard,
+                    fabricatedCollisionReasonReconciliation,
                 )
             }
+            assertTrue(
+                fabricatedCollisionReasonFailure.message.orEmpty().contains(
+                    "source entity claims collision evidence absent from the authenticated full-run claims",
+                ),
+            )
             assertTrue(Files.list(root).use { paths -> paths.noneMatch { it.fileName.toString().startsWith(".function-observation-sqlite-") } })
         }
 
