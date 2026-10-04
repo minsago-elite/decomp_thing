@@ -274,14 +274,14 @@ class FullTreeFunctionObservationsV2Test {
                 declarationFieldsC.candidateId(FullTreeSourceAnchorKind.DECLARATION_ONLY),
             )
             val declarationA = fact(
-                physical(firstUnit, "0x100"),
+                physical(firstUnit, "0x10"),
                 FullTreeSourceEntityKind.DECLARATION_ONLY,
                 FullTreeIdentityObservability.UNOBSERVABLE,
                 FullTreeDenominatorDisposition.NON_SCOREABLE,
                 declarationFieldsA,
             )
             val declarationB = fact(
-                physical(secondUnit, "0x100"),
+                physical(secondUnit, "0x80"),
                 FullTreeSourceEntityKind.DECLARATION_ONLY,
                 FullTreeIdentityObservability.UNOBSERVABLE,
                 FullTreeDenominatorDisposition.NON_SCOREABLE,
@@ -303,7 +303,7 @@ class FullTreeFunctionObservationsV2Test {
             assertEquals(null, declarationB.semanticAnchorFields?.declarationColumn)
 
             val noRange = fact(
-                physical(firstUnit, "0x110"),
+                physical(firstUnit, "0x30"),
                 FullTreeSourceEntityKind.NO_RANGE_DEFINITION,
                 FullTreeIdentityObservability.UNKNOWN,
                 FullTreeDenominatorDisposition.NON_SCOREABLE,
@@ -311,7 +311,7 @@ class FullTreeFunctionObservationsV2Test {
                 reasons = listOf("unknown-source-range"),
             )
             val unresolved = fact(
-                physical(firstUnit, "0x120"),
+                physical(firstUnit, "0x40"),
                 FullTreeSourceEntityKind.UNRESOLVED,
                 FullTreeIdentityObservability.UNKNOWN,
                 FullTreeDenominatorDisposition.UNKNOWN,
@@ -333,8 +333,8 @@ class FullTreeFunctionObservationsV2Test {
             )
             assertEquals(null, templateIntFields.templatePatternAnchorCandidateId)
             assertEquals(null, templateLongFields.templatePatternAnchorCandidateId)
-            val templateIntPhysical = physical(firstUnit, absoluteOffset(firstUnit, 0x130uL))
-            val templateIntTarget = physical(secondUnit, absoluteOffset(secondUnit, 0x80uL))
+            val templateIntPhysical = physical(firstUnit, absoluteOffset(firstUnit, 0x50uL))
+            val templateIntTarget = physical(secondUnit, absoluteOffset(secondUnit, 0x55uL))
             val templateIntToOtherCu = FullTreeSourceIdentityEdge(
                 kind = FullTreeSourceIdentityEdgeKind.TEMPLATE_ARGUMENT,
                 source = templateIntPhysical,
@@ -354,7 +354,7 @@ class FullTreeFunctionObservationsV2Test {
                 edges = listOf(templateIntToOtherCu),
             )
             val templateLong = fact(
-                physical(firstUnit, "0x140"),
+                physical(firstUnit, "0x60"),
                 FullTreeSourceEntityKind.TEMPLATE_INSTANCE,
                 FullTreeIdentityObservability.UNKNOWN,
                 FullTreeDenominatorDisposition.NON_SCOREABLE,
@@ -363,7 +363,7 @@ class FullTreeFunctionObservationsV2Test {
                 edges = listOf(
                     FullTreeSourceIdentityEdge(
                         kind = FullTreeSourceIdentityEdgeKind.TEMPLATE_ARGUMENT,
-                        source = physical(firstUnit, "0x140"),
+                        source = physical(firstUnit, "0x60"),
                         target = null,
                         referenceForm = "0x10",
                         rawReference = "0x80",
@@ -383,10 +383,10 @@ class FullTreeFunctionObservationsV2Test {
             val ownerCandidate = requireNotNull(ownerFields.candidateId(FullTreeSourceAnchorKind.SOURCE_DEFINITION))
             val calleeFields = anchorFields("inline_callee", line = 106L)
             val calleeCandidate = requireNotNull(calleeFields.candidateId(FullTreeSourceAnchorKind.SOURCE_DEFINITION))
-            val ownerA = physical(firstUnit, absoluteOffset(firstUnit, 0x200uL))
-            val ownerB = physical(secondUnit, absoluteOffset(secondUnit, 0x200uL))
-            val callee = physical(firstUnit, absoluteOffset(firstUnit, 0x210uL))
-            val inlinePhysical = physical(firstUnit, absoluteOffset(firstUnit, 0x150uL))
+            val ownerA = physical(firstUnit, "0x4a")
+            val ownerB = physical(secondUnit, "0x9c")
+            val callee = physical(firstUnit, "0x33")
+            val inlinePhysical = physical(firstUnit, "0x38")
             val inlineFields = anchorFields(
                 sourceName = "inline_call",
                 line = 107L,
@@ -459,7 +459,7 @@ class FullTreeFunctionObservationsV2Test {
             val inlineCandidate = requireNotNull(inlineFields.candidateId(FullTreeSourceAnchorKind.INLINE_INSTANCE))
             admitAnchor(
                 inlineCandidate,
-                physical(secondUnit, "0x220").sourceEntityId(FullTreeSourceAnchorKind.SOURCE_DEFINITION),
+                physical(secondUnit, "0xb0").sourceEntityId(FullTreeSourceAnchorKind.SOURCE_DEFINITION),
             )
             shardFacts.values.flatten()
                 .filter { it.kind == FullTreeSourceEntityKind.INLINE_INSTANCE }
@@ -854,10 +854,10 @@ class FullTreeFunctionObservationsV2Test {
                 )
             }
             assertTrue(forgedCalleeFailure.message.orEmpty().contains("inline callee candidate"))
-            val nestedOwnerA = physical(firstUnit, "0x103")
+            val nestedOwnerA = physical(firstUnit, "0x18")
             val nestedOwnerB = ownerB
-            val nestedFormal = physical(firstUnit, "0x102")
-            val nestedTypeTarget = physical(secondUnit, "0x80")
+            val nestedFormal = physical(firstUnit, "0x48")
+            val nestedTypeTarget = physical(secondUnit, absoluteOffset(secondUnit, 0x55uL))
             val inlineFactPhysical = FullTreeSourceEntityFact.fromCanonicalJson(inlineRow).physicalDie
             val nestedOwnerPath = listOf(
                 FullTreeSourceIdentityEdge(
@@ -912,7 +912,7 @@ class FullTreeFunctionObservationsV2Test {
                 nestedOwnerDocument, scope, inventory, inventorySha256, firstShard, reconciliation,
             )
 
-            val detachedSource = physical(firstUnit, "0x500")
+            val detachedSource = physical(firstUnit, "0x58")
             val detachedEdge = JsonObject(inlineOwnerEdge(inlineRow).toMutableMap().apply {
                 this["source"] = JsonPrimitive(detachedSource.locator())
             })
@@ -1016,7 +1016,7 @@ class FullTreeFunctionObservationsV2Test {
                 )
             }
             val declarationCandidate = requireNotNull(declarationA.semanticAnchorCandidateId)
-            val forgedPhysical = physical(firstUnit, "0x300")
+            val forgedPhysical = physical(firstUnit, "0x68")
             val originalNonclaimant = fact(
                 forgedPhysical,
                 FullTreeSourceEntityKind.DECLARATION_ONLY,
@@ -1360,20 +1360,12 @@ class FullTreeFunctionObservationsV2Test {
                 identityObservability = FullTreeIdentityObservability.UNKNOWN,
                 reasonCodes = listOf("unknown-reference-edge"),
             )
-            val fabricatedUnknownReasonDocument = FullTreeFunctionObservationsV2.composeEnvelope(
-                v1ProjectionForCompose(valid),
-                listOf(fabricatedUnknownReason),
-                validReconciliation,
-                8L * 1024L * 1024L,
-            )
             val fabricatedUnknownReasonFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
-                FullTreeFunctionObservationsV2.validateEnvelope(
-                    fabricatedUnknownReasonDocument,
-                    scope,
-                    inventory,
-                    inventorySha,
-                    shard,
+                FullTreeFunctionObservationsV2.composeEnvelope(
+                    v1ProjectionForCompose(valid),
+                    listOf(fabricatedUnknownReason),
                     validReconciliation,
+                    8L * 1024L * 1024L,
                 )
             }
             assertTrue(fabricatedUnknownReasonFailure.message.orEmpty().contains("scan receipt"))
@@ -1795,16 +1787,14 @@ class FullTreeFunctionObservationsV2Test {
                     forgedOffsetDocument, scope, inventory, inventorySha, shard, first.reconciliation,
                 )
             }
-            assertTrue(physicalOffsetFailure.message.orEmpty().contains("physical DIE locators"))
+            assertTrue(physicalOffsetFailure.message.orEmpty().contains("authenticated scan receipt"))
             assertRawReexecutionRejects(publishForgedDocument("forged-offset", forgedOffsetDocument))
 
             val emittedRva = document.getValue("emitted").jsonArray.single()
                 .jsonObject.getValue("rva").jsonPrimitive.content
             val linkSubject = originalRows.first { it.semanticAnchorFields != null }
 
-            val patternTarget = linkSubject.physicalDie.copy(
-                dieOffset = if (linkSubject.physicalDie.dieOffset == "0x777") "0x778" else "0x777",
-            )
+            val patternTarget = originalRows.first { it.physicalDie != linkSubject.physicalDie }.physicalDie
             val patternAnchorFields = FullTreeSourceAnchorFields(
                 sourcePath = "source/include/fixture.h",
                 declarationFileIndex = 1L,
@@ -1865,6 +1855,10 @@ class FullTreeFunctionObservationsV2Test {
                 reasonCodes = listOf("unknown-template-pattern-reference"),
                 edges = listOf(patternEdge),
             )
+            patternClaims.accept(
+                requireNotNull(validPatternInstance.semanticAnchorCandidateId),
+                validPatternInstance.sourceEntityId,
+            )
             patternClaims.acceptSourceEntityPopulation(shard.identifier, listOf(validPatternInstance))
             val patternReconciliation = patternClaims.reconciliation()
             val validPatternDocument = FullTreeFunctionObservationsV2.composeEnvelope(
@@ -1876,13 +1870,25 @@ class FullTreeFunctionObservationsV2Test {
             )
             val forgedPatternFields = templateInstanceFields("d".repeat(64))
             val forgedPatternInstance = validPatternInstance.copy(semanticAnchorFields = forgedPatternFields)
+            val forgedPatternClaims = FullTreeFunctionObservationV2AnchorIndex(4L, 4096L)
+            forgedPatternClaims.accept(
+                FullTreeSourceAnchorKind.TEMPLATE_PATTERN,
+                patternCandidateId,
+                patternTarget.sourceEntityId(FullTreeSourceAnchorKind.TEMPLATE_PATTERN),
+            )
+            forgedPatternClaims.accept(
+                requireNotNull(forgedPatternInstance.semanticAnchorCandidateId),
+                forgedPatternInstance.sourceEntityId,
+            )
+            forgedPatternClaims.acceptSourceEntityPopulation(shard.identifier, listOf(forgedPatternInstance))
+            val forgedPatternReconciliation = forgedPatternClaims.reconciliation()
             val forgedPatternDocument = FullTreeFunctionObservationsV2.composeEnvelope(
-                v1ProjectionForCompose(document), listOf(forgedPatternInstance), patternReconciliation,
+                v1ProjectionForCompose(document), listOf(forgedPatternInstance), forgedPatternReconciliation,
                 8L * 1024L * 1024L,
             )
             val forgedPatternFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
                 FullTreeFunctionObservationsV2.validateEnvelope(
-                    forgedPatternDocument, scope, inventory, inventorySha, shard, patternReconciliation,
+                    forgedPatternDocument, scope, inventory, inventorySha, shard, forgedPatternReconciliation,
                 )
             }
             assertTrue(forgedPatternFailure.message.orEmpty().contains("referenced pattern DIE"))
@@ -1959,12 +1965,11 @@ class FullTreeFunctionObservationsV2Test {
             val forgedStructuralRows = originalRows.map { fact ->
                 if (fact.sourceEntityId == structural.sourceEntityId) forgedStructuralFact else fact
             }
-            val forgedStructuralDocument = FullTreeFunctionObservationsV2.composeEnvelope(
-                v1ProjectionForCompose(document), forgedStructuralRows, first.reconciliation, 8L * 1024L * 1024L,
-            )
-            FullTreeFunctionObservationsV2.validateEnvelope(
-                forgedStructuralDocument, scope, inventory, inventorySha, shard, first.reconciliation,
-            )
+            val forgedStructuralDocument = JsonObject(document.toMutableMap().apply {
+                put("sourceEntities", JsonArray(forgedStructuralRows.map(FullTreeSourceEntityFact::canonicalJson)))
+            })
+            OracleSchemas.validate(FullTreeFunctionObservationsV2.SCHEMA_NAME, forgedStructuralDocument)
+            FullTreeFunctionObservationsV2.canonicalEnvelopeBytes(forgedStructuralDocument)
             assertRawReexecutionRejects(publishForgedDocument("forged-structural-edge", forgedStructuralDocument))
 
             val unsafeScratch = Files.createDirectory(root.resolve("unsafe-scratch"))
