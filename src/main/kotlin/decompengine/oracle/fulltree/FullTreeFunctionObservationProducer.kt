@@ -286,6 +286,50 @@ internal object FullTreeFunctionObservationProducer {
         }
     }
 
+    /** Additive observation-v2 route over the same artifact-accepted function stream as v1. */
+    internal fun scanAuthenticatedShardV2(
+        richArtifact: Path,
+        scope: AuthenticatedFullTreeScope,
+        inputs: FullTreeFunctionObservationAuthenticatedInputs,
+        scratchParent: Path,
+        controlLimits: FullTreeControlLimits,
+        producerLimits: FullTreeFunctionObservationProducerLimits,
+        sink: FullTreeFunctionObservationV2Sink,
+        sourceFacts: List<FullTreeSourceEntityFact>,
+        reconciliation: FullTreeFunctionObservationV2IdentityReconciliation,
+        output: java.io.OutputStream,
+        checkpoint: (String) -> Unit = {},
+    ): Pair<FullTreeFunctionObservationArtifactScan, FullTreeFunctionObservationV2StreamResult> {
+        val scan = scanAuthenticatedShardWithLimits(
+            richArtifact = richArtifact,
+            scope = scope,
+            inputs = inputs,
+            scratchParent = scratchParent,
+            controlLimits = controlLimits,
+            producerLimits = producerLimits,
+            checkpoint = checkpoint,
+            recordScannedDies = sink::recordScannedDies,
+            accept = sink::accept,
+        )
+        FullTreeSourceEntityFact.deterministicOrder(sourceFacts).forEach { fact ->
+            checkpoint("before accepting observation-v2 source entity")
+            sink.acceptSourceEntity(fact)
+        }
+        val result = sink.finishToV2(
+            output,
+            FullTreeFunctionObservationBindings(
+                inventoryIndexSha256 = inputs.inventory.controlString("indexSha256"),
+                richArtifactSha256 = scan.richArtifactSha256,
+                scopeSha256 = scope.sha256,
+            ),
+            reconciliation,
+        )
+        if (result.scannedDies != scan.scannedDies) {
+            throw FullTreeControlException("function-observation-v2 sink scanned-DIE count differs from its scanner")
+        }
+        return scan to result
+    }
+
     private fun scanSections(
         sections: FullTreeDwarfSections,
         layout: FullTreeElfCoreLayout,

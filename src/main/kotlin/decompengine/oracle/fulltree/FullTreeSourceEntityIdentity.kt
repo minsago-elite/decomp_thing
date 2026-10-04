@@ -5,6 +5,7 @@ import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import java.nio.charset.StandardCharsets
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -414,6 +415,7 @@ internal class FullTreeSourceEntityFact(
         require(reasonCodes == reasonCodes.distinct().sorted())
         reasonCodes.forEach { require(it.matches(REASON_CODE)) }
         require(edges.size <= MAXIMUM_IDENTITY_EDGES_PER_ENTITY)
+        require(edges.all { it.source == physicalDie })
         require(sourceEntityId.matches(Regex("[0-9a-f]{64}")))
         require(sourceEntityId == physicalDie.sourceEntityId(kind))
         require(resolvedSemanticIdentityId == null || resolvedSemanticIdentityId.matches(Regex("[0-9a-f]{64}")))
@@ -488,6 +490,144 @@ internal class FullTreeSourceEntityFact(
     )
 
     companion object {
+        /** Strictly decodes the new observation-v2 source row and rechecks every derived ID. */
+        fun fromCanonicalJson(value: JsonObject, label: String = "source entity"): FullTreeSourceEntityFact {
+            fun fail(detail: String): Nothing = throw FullTreeFunctionObservationV2Exception("$label $detail")
+            fun obj(element: JsonElement?, name: String): JsonObject = element as? JsonObject ?: fail("$name is not an object")
+            fun str(element: JsonElement?, name: String): String =
+                (element as? JsonPrimitive)?.takeIf { it.isString }?.content ?: fail("$name is not a string")
+            fun nullableString(element: JsonElement?, name: String): String? = when (element) {
+                JsonNull -> null
+                is JsonPrimitive -> if (element.isString) element.content else fail("$name is not a string or null")
+                else -> fail("$name is not a string or null")
+            }
+            fun long(element: JsonElement?, name: String): Long =
+                (element as? JsonPrimitive)?.takeIf { !it.isString }?.longOrNull ?: fail("$name is not an integer")
+            fun nullableLong(element: JsonElement?, name: String): Long? =
+                if (element == JsonNull) null else long(element, name)
+            fun array(element: JsonElement?, name: String): JsonArray = element as? JsonArray ?: fail("$name is not an array")
+            fun nullableStringList(element: JsonElement?, name: String): List<String>? = when (element) {
+                JsonNull -> null
+                is JsonArray -> element.mapIndexed { index, item -> str(item, "$name[$index]") }
+                else -> fail("$name is not an array or null")
+            }
+            fun stringList(element: JsonElement?, name: String): List<String> =
+                array(element, name).mapIndexed { index, item -> str(item, "$name[$index]") }
+            fun <T> enumValue(values: Array<T>, wire: String, wireValue: (T) -> String, name: String): T =
+                values.singleOrNull { wireValue(it) == wire } ?: fail("$name has an unknown enum value")
+            fun physical(document: JsonObject, name: String): FullTreeSourcePhysicalDie {
+                val die = FullTreeSourcePhysicalDie(
+                    richArtifactSha256 = str(document["richArtifactSha256"], "$name.richArtifactSha256"),
+                    unitId = str(document["unitId"], "$name.unitId"),
+                    section = str(document["section"], "$name.section"),
+                    compilationUnitOffset = str(document["compilationUnitOffset"], "$name.compilationUnitOffset"),
+                    dieOffset = str(document["dieOffset"], "$name.dieOffset"),
+                )
+                if (str(document["locator"], "$name.locator") != die.locator()) fail("$name locator differs from its fields")
+                return die
+            }
+            fun nullableFields(element: JsonElement?): FullTreeSourceAnchorFields? {
+                if (element == JsonNull) return null
+                val fields = obj(element, "semanticAnchorFields")
+                return FullTreeSourceAnchorFields(
+                    sourcePath = nullableString(fields["sourcePath"], "sourcePath"),
+                    declarationFileIndex = nullableLong(fields["declarationFileIndex"], "declarationFileIndex"),
+                    declarationLine = nullableLong(fields["declarationLine"], "declarationLine"),
+                    declarationColumn = nullableLong(fields["declarationColumn"], "declarationColumn"),
+                    language = nullableLong(fields["language"], "language"),
+                    lexicalContext = stringList(fields["lexicalContext"], "lexicalContext"),
+                    sourceName = nullableString(fields["sourceName"], "sourceName"),
+                    signature = nullableStringList(fields["signature"], "signature"),
+                    templateFormalParameters = nullableStringList(fields["templateFormalParameters"], "templateFormalParameters"),
+                    templatePatternAnchorCandidateId = nullableString(fields["templatePatternAnchorCandidateId"], "templatePatternAnchorCandidateId"),
+                    templateActualArguments = nullableStringList(fields["templateActualArguments"], "templateActualArguments"),
+                    inlineCalleeAnchorCandidateId = nullableString(fields["inlineCalleeAnchorCandidateId"], "inlineCalleeAnchorCandidateId"),
+                    inlineOwnerAnchorCandidateId = nullableString(fields["inlineOwnerAnchorCandidateId"], "inlineOwnerAnchorCandidateId"),
+                    inlineCallFile = nullableString(fields["inlineCallFile"], "inlineCallFile"),
+                    inlineCallLine = nullableLong(fields["inlineCallLine"], "inlineCallLine"),
+                    inlineCallColumn = nullableLong(fields["inlineCallColumn"], "inlineCallColumn"),
+                    inlinePathAnchorCandidateIds = nullableStringList(fields["inlinePathAnchorCandidateIds"], "inlinePathAnchorCandidateIds"),
+                    authenticatedSourceRevision = nullableString(fields["authenticatedSourceRevision"], "authenticatedSourceRevision"),
+                    authenticatedSourceFileSha256 = nullableString(fields["authenticatedSourceFileSha256"], "authenticatedSourceFileSha256"),
+                )
+            }
+
+            val physical = physical(obj(value["physicalDie"], "$label.physicalDie"), "$label.physicalDie")
+            val kindWire = str(value["entityKind"], "$label.entityKind")
+            val kind = enumValue(FullTreeSourceEntityKind.entries.toTypedArray(), kindWire, { it.wireValue }, "entityKind")
+            val observability = enumValue(
+                FullTreeIdentityObservability.entries.toTypedArray(),
+                str(value["identityObservability"], "$label.identityObservability"),
+                { it.wireValue },
+                "identityObservability",
+            )
+            val disposition = enumValue(
+                FullTreeDenominatorDisposition.entries.toTypedArray(),
+                str(value["denominatorDisposition"], "$label.denominatorDisposition"),
+                { it.wireValue },
+                "denominatorDisposition",
+            )
+            val edges = array(value["edges"], "$label.edges").mapIndexed { index, raw ->
+                val edge = obj(raw, "edge $index")
+                val edgeKind = enumValue(
+                    FullTreeSourceIdentityEdgeKind.entries.toTypedArray(),
+                    str(edge["kind"], "edge.kind"),
+                    { it.wireValue },
+                    "edge.kind",
+                )
+                val state = enumValue(
+                    FullTreeSourceIdentityEdgeState.entries.toTypedArray(),
+                    str(edge["state"], "edge.state"),
+                    { it.wireValue },
+                    "edge.state",
+                )
+                FullTreeSourceIdentityEdge(
+                    kind = edgeKind,
+                    source = physicalFromLocator(str(edge["source"], "edge.source"), physical.richArtifactSha256),
+                    target = if (edge["target"] == JsonNull) null else physicalFromLocator(
+                        str(edge["target"], "edge.target"),
+                        physical.richArtifactSha256,
+                    ),
+                    referenceForm = nullableString(edge["referenceForm"], "edge.referenceForm"),
+                    rawReference = nullableString(edge["rawReference"], "edge.rawReference"),
+                    state = state,
+                    reasonCode = nullableString(edge["reasonCode"], "edge.reasonCode"),
+                )
+            }
+            val fact = FullTreeSourceEntityFact(
+                sourceEntityId = str(value["sourceEntityId"], "$label.sourceEntityId"),
+                physicalDie = physical,
+                kind = kind,
+                identityObservability = observability,
+                denominatorDisposition = disposition,
+                semanticAnchorFields = nullableFields(value["semanticAnchorFields"]),
+                semanticAnchorCandidateId = nullableString(value["semanticAnchorCandidateId"], "$label.semanticAnchorCandidateId"),
+                resolvedSemanticIdentityId = nullableString(value["resolvedSemanticIdentityId"], "$label.resolvedSemanticIdentityId"),
+                candidateCollisionSourceEntityIds = stringList(value["candidateCollisionSourceEntityIds"], "$label.candidateCollisionSourceEntityIds"),
+                linkedEmittedRva = nullableString(value["linkedEmittedRva"], "$label.linkedEmittedRva"),
+                reasonCodes = stringList(value["reasonCodes"], "$label.reasonCodes"),
+                edges = edges,
+            )
+            if (fact.canonicalJson() != value) fail("is not the canonical source fact for its derived identities")
+            return fact
+        }
+
+        private fun physicalFromLocator(locator: String, artifactSha256: String): FullTreeSourcePhysicalDie {
+            val match = Regex("^([0-9a-f]{64}):\\.debug_info:unit=(cu-[0-9a-f]{32}):cu=(0x(?:0|[1-9a-f][0-9a-f]*)):die=(0x(?:0|[1-9a-f][0-9a-f]*))$")
+                .matchEntire(locator)
+                ?: throw FullTreeFunctionObservationV2Exception("source identity edge locator is malformed")
+            if (match.groupValues[1] != artifactSha256) {
+                throw FullTreeFunctionObservationV2Exception("source identity edge locator belongs to another artifact")
+            }
+            return FullTreeSourcePhysicalDie(
+                richArtifactSha256 = match.groupValues[1],
+                unitId = match.groupValues[2],
+                section = ".debug_info",
+                compilationUnitOffset = match.groupValues[3],
+                dieOffset = match.groupValues[4],
+            )
+        }
+
         fun deterministicOrder(facts: Iterable<FullTreeSourceEntityFact>): List<FullTreeSourceEntityFact> =
             facts.sortedWith(
                 compareBy<FullTreeSourceEntityFact> { it.kind.wireValue }
@@ -615,6 +755,8 @@ private val SOURCE_EDGE_ORDER = compareBy<FullTreeSourceIdentityEdge> { it.kind.
     .thenBy { it.target?.locator() ?: "~" }
     .thenBy { it.state.wireValue }
     .thenBy { it.rawReference ?: "~" }
+    .thenBy { it.referenceForm ?: "~" }
+    .thenBy { it.reasonCode ?: "~" }
 
 private fun <T> immutableSourceList(values: List<T>): List<T> =
     java.util.Collections.unmodifiableList(ArrayList(values))

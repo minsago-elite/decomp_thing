@@ -324,6 +324,7 @@ object OracleSchemas {
         "full-tree-function-baseline",
         "full-tree-function-exclusions",
         "full-tree-function-observations",
+        "full-tree-function-observations-v2",
         "full-tree-function-truth",
         "full-tree-function-truth-index",
         "full-tree-generated-file-inventory",

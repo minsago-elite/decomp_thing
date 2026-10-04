@@ -89,12 +89,14 @@ class FullTreeSourceEntityIdentityProducerTest {
                 )
                 val shard = inventory.inventory.controlArray("shards").single() as JsonObject
                 val shardId = shard.controlString("id")
+                val fullRunClaims = mutableListOf<Pair<String, String>>()
                 val first = FullTreeSourceEntityIdentityProducer.scanShard(
                     artifact,
                     inventoryPath,
                     scope,
                     shardId,
                     rowRoot,
+                    anchorClaim = { candidate, physicalClaim -> fullRunClaims += candidate to physicalClaim },
                 )
                 val second = FullTreeSourceEntityIdentityProducer.scanShard(
                     artifact,
@@ -109,6 +111,15 @@ class FullTreeSourceEntityIdentityProducerTest {
                 assertEquals(first.facts.size, first.facts.map { it.sourceEntityId }.distinct().size, runDescription)
                 assertEquals(first.facts.size, first.facts.map { it.physicalDie.locator() }.distinct().size, runDescription)
                 assertTrue(first.facts.all { it.sourceEntityId == it.physicalDie.sourceEntityId(it.kind) }, runDescription)
+                val censusClaims = first.facts.mapNotNull { fact ->
+                    fact.semanticAnchorCandidateId?.let { it to fact.sourceEntityId }
+                }.toSet()
+                assertTrue(censusClaims.isNotEmpty(), "$runDescription produced no source anchor claims")
+                assertTrue(censusClaims.all { it in fullRunClaims }, "$runDescription omitted a census anchor claim")
+                assertTrue(
+                    fullRunClaims.toSet().any { it !in censusClaims },
+                    "$runDescription omitted bounded claims from ordinary emitted source definitions",
+                )
                 assertTrue(first.facts.all { it.resolvedSemanticIdentityId == null }, runDescription)
                 assertTrue(first.facts.filter { it.kind == FullTreeSourceEntityKind.NO_RANGE_DEFINITION }.all {
                     it.denominatorDisposition == FullTreeDenominatorDisposition.NON_SCOREABLE && it.linkedEmittedRva == null

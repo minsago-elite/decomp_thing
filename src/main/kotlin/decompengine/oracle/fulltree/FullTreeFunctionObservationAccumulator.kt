@@ -114,6 +114,12 @@ internal class FullTreeFunctionObservationAccumulator(
         }
     }
 
+    /** Current unique emitted-RVA plus non-emitted population for the additive v2 wrapper. */
+    internal fun projectedEntityCount(): Long = add(emitted.size.toLong(), nonEmitted.size.toLong(), "function-observation entity")
+
+    /** Retained-byte charge for combining this frozen v1 projection with additive v2 source rows. */
+    internal fun modeledRetainedBytes(): Long = modeledRetainedBytes
+
     /** Accepts one artifact-proven non-declaration subprogram. */
     fun accept(observation: FullTreeObservedSubprogram) {
         requireMutable()

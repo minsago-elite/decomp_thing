@@ -34,6 +34,10 @@ internal object FullTreeSourceEntityIdentityProducer {
         controlLimits: FullTreeControlLimits = FullTreeControlLimits(),
         producerLimits: FullTreeFunctionObservationProducerLimits = FullTreeFunctionObservationProducerLimits(),
         checkpoint: (String) -> Unit = {},
+        /** Receives bounded candidate-to-physical claims, including ordinary emitted definitions. */
+        anchorClaim: ((candidateId: String, physicalClaimId: String) -> Unit)? = null,
+        /** Admits each canonical census row against the caller's aggregate run budget before retention. */
+        factAdmission: ((fact: FullTreeSourceEntityFact, canonicalRowBytes: Long) -> Unit)? = null,
     ): FullTreeSourceEntityIdentityScan {
         FullTreeScopeControl.validate(scope, controlLimits)
         requireStableDirectory(scratchParent, "source-identity scratch parent")
@@ -223,8 +227,9 @@ internal object FullTreeSourceEntityIdentityProducer {
                 maximumModeledRetainedBytes,
                 maximumCanonicalRowBytes,
                 maximumRowScratchBytes,
+                factAdmission,
             )
-            val anchorClaims = SourceIdentityAnchorClaims(budget)
+            val anchorClaims = SourceIdentityAnchorClaims(budget, anchorClaim)
             val facts = ArrayList<FullTreeSourceEntityFact>()
             val layout = FullTreeElfLayout.scanLayout(artifact, "rich artifact", producerLimits.elfLayoutLimits, checkpoint)
             val executable = FullTreeElfExecutableMembership.fromSorted(layout.executableRanges)
@@ -668,6 +673,7 @@ internal fun boundedSourceIdentityLineTableLimits(
 /** Includes anchors used only as inline callees/owners, not just census rows. */
 private class SourceIdentityAnchorClaims(
     private val budget: SourceIdentityRetentionBudget,
+    private val externalClaim: ((candidateId: String, physicalClaimId: String) -> Unit)?,
 ) {
     private val claims = HashMap<String, MutableSet<String>>()
 
@@ -676,6 +682,9 @@ private class SourceIdentityAnchorClaims(
         val prior = claims[candidateId]
         if (prior?.contains(sourceEntityId) == true) return
         budget.charge(candidateId.length.toLong() + sourceEntityId.length.toLong() + 128L, "source-anchor collision index")
+        // The additive run publisher admits this claim in its own bounded index before the
+        // shard-local index retains it. Failed scans never publish a partial observation.
+        externalClaim?.invoke(candidateId, sourceEntityId)
         claims.getOrPut(candidateId) { sortedSetOf() } += sourceEntityId
     }
 
@@ -802,6 +811,7 @@ private class SourceIdentityRetentionBudget(
     private val maximumBytes: Long,
     private val maximumCanonicalRowBytes: Long,
     val maximumRowScratchBytes: Long,
+    private val factAdmission: ((fact: FullTreeSourceEntityFact, canonicalRowBytes: Long) -> Unit)?,
 ) {
     private var facts = 0L
     private var bytes = 0L
@@ -831,6 +841,7 @@ private class SourceIdentityRetentionBudget(
     fun retain(fact: FullTreeSourceEntityFact) {
         if (facts >= maximumFacts) throw FullTreeControlException("source-identity census exceeds its entity bound")
         val serialized = canonicalSourceEntityFacts(listOf(fact), maximumCanonicalRowBytes).size.toLong()
+        factAdmission?.invoke(fact, serialized)
         charge(serialized, "source-identity fact")
         facts++
     }

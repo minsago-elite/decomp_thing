@@ -396,7 +396,7 @@ internal object FullTreeFunctionObservationShardPublisher {
     }
 }
 
-private data class AuthenticatedFunctionObservationLimits(
+internal data class AuthenticatedFunctionObservationLimits(
     val producer: FullTreeFunctionObservationProducerLimits,
     val maximumEntities: Int,
     val maximumOutputBytes: Long,
@@ -596,7 +596,7 @@ private fun publicationReceipt(
     peakResidentBytes = peakResidentBytes,
 )
 
-private fun deriveAuthenticatedLimits(
+internal fun deriveAuthenticatedLimits(
     scope: AuthenticatedFullTreeScope,
     inputs: FullTreeFunctionObservationAuthenticatedInputs,
     limits: FullTreeFunctionObservationShardPublisherLimits,
