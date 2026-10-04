@@ -222,6 +222,7 @@ internal object FullTreeSourceEntityIdentityProducer {
                 maximumFacts,
                 maximumModeledRetainedBytes,
                 maximumCanonicalRowBytes,
+                maximumRowScratchBytes,
             )
             val anchorClaims = SourceIdentityAnchorClaims(budget)
             val facts = ArrayList<FullTreeSourceEntityFact>()
@@ -329,6 +330,12 @@ internal object FullTreeSourceEntityIdentityProducer {
             if (collisionExpansionBytes > maximumSerializedBytes - maximumBaselineBytes) {
                 throw FullTreeControlException("source-identity collision evidence exceeds its authenticated output bound")
             }
+            val collisionCopyBytes = sourceIdentityCollisionAdjustedFactCopyUpperBound(
+                ordered,
+                collisionReport.byCandidateId,
+                maximumSerializedBytes,
+            )
+            budget.charge(collisionCopyBytes, "source-identity collision-adjusted fact copies")
             val collisionAdjusted = markUnprovedAnchorCollisions(ordered, collisionReport)
             val finalBytes = canonicalSourceEntityFacts(collisionAdjusted, maximumSerializedBytes)
             if (finalBytes.size.toLong() > maximumSerializedBytes) {
@@ -721,10 +728,80 @@ internal fun sourceIdentityCollisionExpansionUpperBound(
     return total
 }
 
+/** Bounds the copied nested evidence arrays and result-list references before collision copies are made. */
+internal fun sourceIdentityCollisionAdjustedFactCopyUpperBound(
+    facts: List<FullTreeSourceEntityFact>,
+    collisionSourceEntityIdsByCandidate: Map<String, List<String>>,
+    maximumCanonicalBytes: Long = MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES,
+): Long {
+    if (collisionSourceEntityIdsByCandidate.isEmpty()) return 0L
+    var total = 0L
+    try {
+        // markUnprovedAnchorCollisions returns a new list when a collision exists, even when a
+        // particular row is reused. Model those references separately from changed fact objects.
+        total = Math.addExact(64L, Math.multiplyExact(facts.size.toLong(), 8L))
+        facts.forEach { fact ->
+            val fields = fact.semanticAnchorFields
+            val candidateIds = listOfNotNull(
+                fact.semanticAnchorCandidateId,
+                fields?.inlineCalleeAnchorCandidateId,
+                fields?.inlineOwnerAnchorCandidateId,
+                fields?.templatePatternAnchorCandidateId,
+            ) + fields?.inlinePathAnchorCandidateIds.orEmpty()
+            if (candidateIds.any { collisionSourceEntityIdsByCandidate[it].orEmpty().isNotEmpty() }) {
+                val factBytes = canonicalSourceEntityFacts(listOf(fact), maximumCanonicalBytes).size.toLong()
+                total = Math.addExact(total, Math.addExact(factBytes, SOURCE_IDENTITY_RETAINED_CHARGE_OVERHEAD_BYTES))
+            }
+        }
+    } catch (failure: ArithmeticException) {
+        throw FullTreeControlException("source-identity collision-adjusted fact copy size overflows", failure)
+    }
+    return total
+}
+
+/** Admission for transient and accumulating text built while one source row is being derived. */
+private class SourceIdentityRowScratchBudget(
+    private val maximumBytes: Long,
+) {
+    private var chargedBytes = 0L
+
+    fun charge(bytesToAdd: Long, label: String) {
+        if (bytesToAdd < 0L) throw FullTreeControlException("$label scratch size is negative")
+        chargedBytes = try {
+            Math.addExact(chargedBytes, bytesToAdd)
+        } catch (failure: ArithmeticException) {
+            throw FullTreeControlException("$label row-scratch size overflows", failure)
+        }
+        if (chargedBytes > maximumBytes) {
+            throw FullTreeControlException(
+                "source-identity row scratch exceeds its authenticated bound while building $label " +
+                    "($chargedBytes > $maximumBytes)",
+            )
+        }
+    }
+}
+
+/** Memoizes one DIE's range-derived start for the duration of its row classification. */
+internal class FullTreeSourceIdentityFunctionStartResolution(
+    private val resolve: () -> ULong?,
+) {
+    private var resolved = false
+    private var value: ULong? = null
+
+    fun get(): ULong? {
+        if (!resolved) {
+            value = resolve()
+            resolved = true
+        }
+        return value
+    }
+}
+
 private class SourceIdentityRetentionBudget(
     private val maximumFacts: Long,
     private val maximumBytes: Long,
     private val maximumCanonicalRowBytes: Long,
+    val maximumRowScratchBytes: Long,
 ) {
     private var facts = 0L
     private var bytes = 0L
@@ -779,6 +856,7 @@ private class SourceEntityIdentityReader(
     private val anchorCache = HashMap<String, CachedAnchorEvidence>()
     private val anchorStack = LinkedHashSet<String>()
     private val anchorEdgeCaptures = ArrayDeque<MutableList<FullTreeSourceIdentityEdge>>()
+    private var activeRowScratchBudget: SourceIdentityRowScratchBudget? = null
 
     private data class CachedAnchorEvidence(
         val fields: FullTreeSourceAnchorFields?,
@@ -805,6 +883,17 @@ private class SourceEntityIdentityReader(
     )
 
     fun fact(record: FullTreeDwarfDieRecord): FullTreeSourceEntityFact? {
+        val prior = activeRowScratchBudget
+        if (prior != null) return factWithRowScratch(record)
+        activeRowScratchBudget = SourceIdentityRowScratchBudget(budget.maximumRowScratchBytes)
+        return try {
+            factWithRowScratch(record)
+        } finally {
+            activeRowScratchBudget = null
+        }
+    }
+
+    private fun factWithRowScratch(record: FullTreeDwarfDieRecord): FullTreeSourceEntityFact? {
         val physical = physical(owner, record)
         val edgeList = ArrayList<FullTreeSourceIdentityEdge>()
         val reasonCodes = sortedSetOf<String>()
@@ -822,13 +911,14 @@ private class SourceEntityIdentityReader(
             edgeList,
         ).map(PackedSubprogramChild::record)
         val templateState = templateState(owner, templateFormals, edgeList, reasonCodes)
+        val functionStartResolution = FullTreeSourceIdentityFunctionStartResolution { owner.functionStart(record) }
         val kind = when {
             isInline -> FullTreeSourceEntityKind.INLINE_INSTANCE
             templateState == TemplateParameterState.PATTERN -> FullTreeSourceEntityKind.TEMPLATE_PATTERN
             templateState == TemplateParameterState.INSTANCE -> FullTreeSourceEntityKind.TEMPLATE_INSTANCE
             templateState == TemplateParameterState.UNKNOWN -> FullTreeSourceEntityKind.UNRESOLVED
             record.truthy(DW_AT_DECLARATION, "DW_AT_declaration") -> FullTreeSourceEntityKind.DECLARATION_ONLY
-            owner.functionStart(record) == null -> FullTreeSourceEntityKind.NO_RANGE_DEFINITION
+            functionStartResolution.get() == null -> FullTreeSourceEntityKind.NO_RANGE_DEFINITION
             else -> FullTreeSourceEntityKind.UNRESOLVED
         }
         // Ordinary emitted functions are already represented by the emitted-RVA observation. The
@@ -837,7 +927,9 @@ private class SourceEntityIdentityReader(
             // Emitted definitions remain represented by the existing RVA observation, but their
             // source anchor still participates in unproved-collision detection when another row
             // relates to that definition.
-            if (relatedSubprogramKind(owner, record, edgeList, reasonCodes) == FullTreeSourceAnchorKind.SOURCE_DEFINITION) {
+            if (relatedSubprogramKind(owner, record, edgeList, reasonCodes, functionStartResolution) ==
+                FullTreeSourceAnchorKind.SOURCE_DEFINITION
+            ) {
                 anchorFields(owner, record, FullTreeSourceAnchorKind.SOURCE_DEFINITION, edgeList, reasonCodes, physical)
             }
             return null
@@ -1091,7 +1183,12 @@ private class SourceEntityIdentityReader(
                                             descriptor.toByteArray(StandardCharsets.UTF_8).size.toLong(),
                                             "template formal descriptor",
                                         )
-                                        values += packedFormal.packPath?.let { "pack[$it]:$descriptor" } ?: descriptor
+                                        val rendered = packedFormal.packPath?.let { "pack[$it]:$descriptor" } ?: descriptor
+                                        chargeRowScratch(
+                                            sourceIdentityUtf8ByteLength(rendered),
+                                            "template formal descriptor",
+                                        )
+                                        values += rendered
                                     }
                                 }
                                 if (complete) formalBranches += SourceAnchorBranchValue(source.score, values)
@@ -1136,7 +1233,10 @@ private class SourceEntityIdentityReader(
                                 FullTreeSourceIdentityEdgeKind.TEMPLATE_ARGUMENT, edges, reasons,
                             )
                                 ?.let { typeDescriptor(templateSourceUnit, formal, it, edges, FullTreeSourceIdentityEdgeKind.TEMPLATE_ARGUMENT, reasons) }
-                                ?.let { "type-argument:$it" }
+                                ?.let { type ->
+                                    chargeRowScratchText("template type argument", "type-argument:", type)
+                                    "type-argument:$type"
+                                }
                             DW_TAG_TEMPLATE_VALUE_PARAMETER -> {
                                 val typeAttribute = sourceReferenceAttribute(
                                     templateSourceUnit, formal, DW_AT_TYPE,
@@ -1157,7 +1257,12 @@ private class SourceEntityIdentityReader(
                                     if (constValues.size > 1) reasons += "ambiguous-template-argument-value"
                                     null
                                 }
-                                if (type == null || value == null) null else "value-argument:type=$type:value=$value"
+                                if (type == null || value == null) {
+                                    null
+                                } else {
+                                    chargeRowScratchText("template value argument", "value-argument:type=", type, ":value=", value)
+                                    "value-argument:type=$type:value=$value"
+                                }
                             }
                             else -> null
                         }
@@ -1415,6 +1520,31 @@ private class SourceEntityIdentityReader(
             }
             return IntegralTypeShape(signed, (bytes * 8L).toInt())
         }
+        if (record.tag == DW_TAG_ENUMERATION_TYPE) {
+            val attribute = sourceReferenceAttribute(
+                unit,
+                record,
+                DW_AT_TYPE,
+                FullTreeSourceIdentityEdgeKind.TYPE,
+                edges,
+                reasons,
+            ) ?: run {
+                reasons += "unknown-template-argument-type"
+                return null
+            }
+            val target = referenceEdge(
+                unit,
+                record,
+                attribute,
+                FullTreeSourceIdentityEdgeKind.TYPE,
+                physical(unit, record),
+                edges,
+            ) ?: run {
+                reasons += "unknown-template-argument-type"
+                return null
+            }
+            return integralTypeShape(target.first, target.second, edges, reasons, visited, depth + 1)
+        }
         if (record.tag !in setOf(DW_TAG_TYPEDEF, DW_TAG_CONST_TYPE, DW_TAG_VOLATILE_TYPE, DW_TAG_RESTRICT_TYPE)) {
             reasons += "unsupported-template-argument-type"
             return null
@@ -1462,7 +1592,12 @@ private class SourceEntityIdentityReader(
             reasons += "unknown-return-type"
             return null
         }
-        val result = arrayListOf(returnType.value?.let { "return:$it" } ?: "return:void")
+        val returnDescriptor = returnType.value?.let {
+            chargeRowScratchText("function signature return descriptor", "return:", it)
+            "return:$it"
+        } ?: "return:void"
+        if (returnType.value == null) chargeRowScratch(sourceIdentityUtf8ByteLength(returnDescriptor), "function signature return descriptor")
+        val result = arrayListOf(returnDescriptor)
         val parameterSets = arrayListOf<List<String>>()
         var parameterSetUnknown = false
         sources.forEach { source ->
@@ -1496,6 +1631,7 @@ private class SourceEntityIdentityReader(
                         if (descriptor == null) {
                             parameterSetUnknown = true
                         } else {
+                            chargeRowScratchText("function signature parameter descriptor", "parameter:", descriptor)
                             values += "parameter:$descriptor"
                         }
                     }
@@ -1628,6 +1764,8 @@ private class SourceEntityIdentityReader(
         record: FullTreeDwarfDieRecord,
         edges: MutableList<FullTreeSourceIdentityEdge>,
         reasons: MutableSet<String>,
+        functionStartResolution: FullTreeSourceIdentityFunctionStartResolution =
+            FullTreeSourceIdentityFunctionStartResolution { unit.functionStart(record) },
     ): FullTreeSourceAnchorKind? {
         if (record.tag != DW_TAG_SUBPROGRAM) return null
         val formals = packedSubprogramChildren(
@@ -1643,7 +1781,7 @@ private class SourceEntityIdentityReader(
             TemplateParameterState.UNKNOWN -> null
             TemplateParameterState.NONE -> when {
                 record.truthy(DW_AT_DECLARATION, "DW_AT_declaration") -> FullTreeSourceAnchorKind.DECLARATION_ONLY
-                unit.functionStart(record) == null -> FullTreeSourceAnchorKind.NO_RANGE_DEFINITION
+                functionStartResolution.get() == null -> FullTreeSourceAnchorKind.NO_RANGE_DEFINITION
                 else -> FullTreeSourceAnchorKind.SOURCE_DEFINITION
             }
         }
@@ -1675,13 +1813,26 @@ private class SourceEntityIdentityReader(
                 unit, record, DW_AT_TYPE, FullTreeSourceIdentityEdgeKind.TYPE, edges, reasons,
             ) ?: return null
             val ref = referenceEdge(unit, record, attr, FullTreeSourceIdentityEdgeKind.TYPE, physical, edges) ?: return null
-            return describeType(ref.first, ref.second, HashSet(seen), depth + 1, reasons, edges)?.let { "$label<$it>" }
+            val nestedDescriptor = describeType(ref.first, ref.second, HashSet(seen), depth + 1, reasons, edges)
+                ?: return null
+            chargeRowScratch(
+                sourceIdentityUtf8ByteLength(label) + sourceIdentityUtf8ByteLength(nestedDescriptor) + 2L,
+                "nested type descriptor",
+            )
+            return "$label<$nestedDescriptor>"
         }
         return when (record.tag) {
             DW_TAG_BASE_TYPE -> {
                 val encoding = record.optionalNonNegativeLong(DW_AT_ENCODING, "DW_AT_encoding") ?: return null
                 val bytes = record.optionalNonNegativeLong(DW_AT_BYTE_SIZE, "DW_AT_byte_size") ?: return null
-                name?.let { "base:${canonicalSourceIdentityBuiltinName(it)}:encoding=$encoding:bytes=$bytes" }
+                name?.let {
+                    val canonical = canonicalSourceIdentityBuiltinName(it)
+                    val descriptorBytes = sourceIdentityUtf8ByteLength("base:") +
+                        sourceIdentityUtf8ByteLength(canonical) +
+                        sourceIdentityUtf8ByteLength(":encoding=$encoding:bytes=$bytes")
+                    chargeRowScratch(descriptorBytes, "base type descriptor")
+                    "base:$canonical:encoding=$encoding:bytes=$bytes"
+                }
             }
             DW_TAG_POINTER_TYPE -> if (record.attributesNamed(DW_AT_TYPE).isEmpty()) "pointer<void>" else nested("pointer")
             DW_TAG_LVALUE_REFERENCE_TYPE -> nested("lvalue-reference")
@@ -1693,8 +1844,18 @@ private class SourceEntityIdentityReader(
             DW_TAG_SUBROUTINE_TYPE -> {
                 val parts = arrayListOf<String>()
                 fun appendPart(part: String) {
+                    chargeRowScratch(sourceIdentityUtf8ByteLength(part), "subroutine type component")
                     budget.charge(
                         part.toByteArray(StandardCharsets.UTF_8).size.toLong() + 8L,
+                        "subroutine type component",
+                    )
+                    parts += part
+                }
+                fun appendPart(prefix: String, value: String) {
+                    chargeRowScratchText("subroutine type component", prefix, value)
+                    val part = prefix + value
+                    budget.charge(
+                        sourceIdentityUtf8ByteLength(part) + 8L,
                         "subroutine type component",
                     )
                     parts += part
@@ -1711,7 +1872,7 @@ private class SourceEntityIdentityReader(
                     val returnType = describeType(
                         returnTarget.first, returnTarget.second, HashSet(seen), depth + 1, reasons, edges,
                     ) ?: return null
-                    appendPart("return:$returnType")
+                    appendPart("return:", returnType)
                 }
                 val parameters = packedSubprogramChildren(
                     unit,
@@ -1740,12 +1901,22 @@ private class SourceEntityIdentityReader(
                         val descriptor = describeType(
                             target.first, target.second, HashSet(seen), depth + 1, reasons, edges,
                         ) ?: return null
-                        appendPart("parameter:$descriptor")
+                        appendPart("parameter:", descriptor)
                     }
                 }
+                var descriptorBytes = sourceIdentityUtf8ByteLength("subroutine[") + 1L
+                parts.forEach { part ->
+                    val partBytes = sourceIdentityUtf8ByteLength(part)
+                    descriptorBytes = Math.addExact(
+                        descriptorBytes,
+                        sourceIdentityUtf8ByteLength(partBytes.toString()) + 1L + partBytes,
+                    )
+                }
+                chargeRowScratch(descriptorBytes, "subroutine type descriptor")
                 val descriptor = "subroutine[" + parts.joinToString(separator = "") { part ->
                     "${part.toByteArray(StandardCharsets.UTF_8).size}:$part"
                 } + "]"
+                chargeRowScratch(sourceIdentityUtf8ByteLength(descriptor), "subroutine type descriptor")
                 budget.charge(descriptor.toByteArray(StandardCharsets.UTF_8).size.toLong(), "subroutine type descriptor")
                 descriptor
             }
@@ -1763,7 +1934,26 @@ private class SourceEntityIdentityReader(
                     null
                 } else {
                     val scope = lexicalContext(unit, record)
+                    var encodedScopeBytes = 0L
+                    scope.forEach { component ->
+                        encodedScopeBytes = Math.addExact(
+                            encodedScopeBytes,
+                            sourceIdentityUtf8ByteLength(component.length.toString()) + 1L +
+                                sourceIdentityUtf8ByteLength(component),
+                        )
+                    }
+                    chargeRowScratch(encodedScopeBytes, "named type lexical-scope encoding")
                     val encodedScope = scope.joinToString(separator = "") { component -> "${component.length}:$component" }
+                    val descriptorBytes = sourceIdentityUtf8ByteLength(tag + ":") +
+                        sourceIdentityUtf8ByteLength(name.length.toString()) + 1L +
+                        sourceIdentityUtf8ByteLength(name) + 1L +
+                        sourceIdentityUtf8ByteLength(sourcePath.length.toString()) + 1L +
+                        sourceIdentityUtf8ByteLength(sourcePath) + 1L +
+                        sourceIdentityUtf8ByteLength(declarationLine.toString()) +
+                        sourceIdentityUtf8ByteLength(":scope[") +
+                        sourceIdentityUtf8ByteLength(scope.size.toString()) + 1L +
+                        sourceIdentityUtf8ByteLength(encodedScope) + 1L
+                    chargeRowScratch(descriptorBytes, "named type descriptor")
                     "$tag:${name.length}:$name:${sourcePath.length}:$sourcePath:$declarationLine:scope[${scope.size}:$encodedScope]"
                 }
             }
@@ -1996,9 +2186,9 @@ private class SourceEntityIdentityReader(
             fileIndex,
             unit.header.version,
         ) { unit.compilationDirectory() } ?: return null
-        return if (raw.startsWith('/')) {
-            runCatching { FullTreeScopeControl.normalizeSourcePath(scope, raw) }.getOrNull()
-        } else null
+        // Prefix-map sources are authenticated by the scope and may be relative. Let the same
+        // normalizer validate both forms; it rejects traversal and non-canonical results.
+        return runCatching { FullTreeScopeControl.normalizeSourcePath(scope, raw) }.getOrNull()
     }
 
     private fun lexicalContext(unit: FunctionDwarfUnit, record: FullTreeDwarfDieRecord): List<String> {
@@ -2014,7 +2204,12 @@ private class SourceEntityIdentityReader(
                 val name = current.optionalUniqueAttribute(DW_AT_NAME, "DW_AT_name")?.let {
                     FullTreeDwarfForms.decodeString(it.value, unit.sections, unit.stringOffsetsBase, unit.header.offsetSize, controlLimits, "lexical context name", 16_384)
                 }
-                if (name != null) chain.addFirst(current.tag.toString(16) + ":" + name)
+                if (name != null) {
+                    val tag = current.tag.toString(16)
+                    val componentBytes = sourceIdentityUtf8ByteLength(tag) + 1L + sourceIdentityUtf8ByteLength(name)
+                    chargeRowScratch(componentBytes, "lexical-context component")
+                    chain.addFirst("$tag:$name")
+                }
             }
             parent = current.nearestRetainedParentOffset
         }
@@ -2092,6 +2287,50 @@ private class SourceEntityIdentityReader(
             dieOffset = canonicalHex(record.offset),
         )
     }
+
+    private fun chargeRowScratch(bytes: Long, label: String) {
+        val scratch = activeRowScratchBudget
+            ?: throw FullTreeControlException("source-identity $label has no active row-scratch admission")
+        scratch.charge(bytes, label)
+    }
+
+    private fun chargeRowScratchText(label: String, vararg fragments: String) {
+        var bytes = 0L
+        fragments.forEach { fragment ->
+            bytes = try {
+                Math.addExact(bytes, sourceIdentityUtf8ByteLength(fragment))
+            } catch (failure: ArithmeticException) {
+                throw FullTreeControlException("source-identity $label text size overflows", failure)
+            }
+        }
+        chargeRowScratch(bytes, label)
+    }
+}
+
+/** Counts encoded UTF-8 bytes without materializing a byte array for an untrusted descriptor. */
+private fun sourceIdentityUtf8ByteLength(value: String): Long {
+    var bytes = 0L
+    var index = 0
+    while (index < value.length) {
+        val current = value[index]
+        val byteCount = when {
+            Character.isHighSurrogate(current) && index + 1 < value.length &&
+                Character.isLowSurrogate(value[index + 1]) -> {
+                index++
+                4L
+            }
+            current.code <= 0x7f -> 1L
+            current.code <= 0x7ff -> 2L
+            else -> 3L
+        }
+        bytes = try {
+            Math.addExact(bytes, byteCount)
+        } catch (failure: ArithmeticException) {
+            throw FullTreeControlException("source-identity descriptor byte length overflows", failure)
+        }
+        index++
+    }
+    return bytes
 }
 
 private fun sourceIdentityRetainedTags(): Set<Long> = setOf(

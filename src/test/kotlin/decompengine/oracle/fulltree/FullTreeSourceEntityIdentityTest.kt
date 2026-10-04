@@ -68,7 +68,12 @@ class FullTreeSourceEntityIdentityTest {
             listOf(first, second),
             mapOf(candidate to listOf(first.sourceEntityId, second.sourceEntityId).sorted()),
         )
+        val adjustedCopyUpperBound = sourceIdentityCollisionAdjustedFactCopyUpperBound(
+            listOf(first, second),
+            mapOf(candidate to listOf(first.sourceEntityId, second.sourceEntityId).sorted()),
+        )
         assertTrue(expansionUpperBound >= expandedBytes - baseBytes)
+        assertTrue(adjustedCopyUpperBound >= baseBytes)
         assertFailsWith<IllegalArgumentException> {
             canonicalSourceEntityFacts(listOf(first, first))
         }
@@ -117,6 +122,10 @@ class FullTreeSourceEntityIdentityTest {
             listOf(nested),
             mapOf(ancestorCandidate to collisionIds),
         )
+        val adjustedCopyUpperBound = sourceIdentityCollisionAdjustedFactCopyUpperBound(
+            listOf(nested),
+            mapOf(ancestorCandidate to collisionIds),
+        )
 
         assertEquals(FullTreeIdentityObservability.AMBIGUOUS, reconciledNested.identityObservability)
         assertEquals(collisionIds, reconciledNested.candidateCollisionSourceEntityIds)
@@ -124,6 +133,23 @@ class FullTreeSourceEntityIdentityTest {
         assertEquals(nested.edges, reconciledNested.edges)
         assertTrue(reconciledNested.edges.any { it.kind == FullTreeSourceIdentityEdgeKind.ABSTRACT_ORIGIN })
         assertTrue(expansionUpperBound >= expandedBytes - baseBytes)
+        assertTrue(adjustedCopyUpperBound >= baseBytes)
+    }
+
+    @Test
+    fun `function start resolution memoizes its bounded range lookup`() {
+        val parseBudget = FullTreeDwarfParseBudget(1L)
+        var calls = 0
+        val resolution = FullTreeSourceIdentityFunctionStartResolution {
+            calls++
+            parseBudget.consume("memoized function start")
+            0x1234uL
+        }
+
+        assertEquals(0x1234uL, resolution.get())
+        assertEquals(0x1234uL, resolution.get())
+        assertEquals(1, calls)
+        assertFailsWith<FullTreeControlException> { parseBudget.consume("second function-start parse") }
     }
 
     @Test
@@ -537,16 +563,20 @@ class FullTreeSourceEntityIdentityTest {
             templateActualArguments = listOf("type:base:long"),
         ).candidateId(FullTreeSourceEntityKind.TEMPLATE_INSTANCE)
         val offsetThree = fields(
+            sourceName = "offset<3, int>",
             templatePatternAnchorCandidateId = pattern,
             templateActualArguments = listOf("value-argument:type=base:int:value=3", "type-argument:base:int"),
         ).candidateId(FullTreeSourceEntityKind.TEMPLATE_INSTANCE)
         val offsetFour = fields(
+            sourceName = "offset<4, int>",
             templatePatternAnchorCandidateId = pattern,
             templateActualArguments = listOf("value-argument:type=base:int:value=4", "type-argument:base:int"),
         ).candidateId(FullTreeSourceEntityKind.TEMPLATE_INSTANCE)
         assertNotEquals(intInstance, longInstance)
         assertEquals(intInstance, intInstanceWithoutPattern)
         assertNotNull(intInstanceWithoutPattern)
+        assertNotNull(offsetThree)
+        assertNotNull(offsetFour)
         assertNotEquals(offsetThree, offsetFour)
 
         val patternFact = fact(

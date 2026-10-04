@@ -66,6 +66,16 @@ __attribute__((noinline)) inline T boolean_template(T value) {
     return Enabled ? value + static_cast<T>(1) : value - static_cast<T>(1);
 }
 
+enum class IdentityMode : unsigned char {
+    small = 3,
+    large = 7,
+};
+
+template <IdentityMode Mode>
+__attribute__((noinline)) inline int enum_template(int value) {
+    return value + static_cast<int>(Mode);
+}
+
 template <typename... Values>
 __attribute__((noinline)) inline int packed_template(Values... values) {
     return (0 + ... + static_cast<int>(values));

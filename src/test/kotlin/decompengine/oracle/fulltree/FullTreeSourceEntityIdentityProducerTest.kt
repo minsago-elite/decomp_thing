@@ -13,6 +13,7 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
@@ -224,6 +225,8 @@ class FullTreeSourceEntityIdentityProducerTest {
                         }
                         assertTrue(mutatedDuringScan, "artifact mutation checkpoint was not reached; $runDescription")
                         verifyIdentityEdgeLimitAbort(compiler, fixture, rowRoot, scope)
+                        verifyRowScratchLimitAbort(compiler, rowRoot, controls.authenticatedScope())
+                        verifyRelativeSourcePathNormalization(controls.authenticatedScope())
                     }
                 }
 
@@ -362,6 +365,88 @@ class FullTreeSourceEntityIdentityProducerTest {
         assertTrue(failure.message.orEmpty().contains("more than 32 edges"), failure.message.orEmpty())
     }
 
+    private fun verifyRowScratchLimitAbort(
+        compiler: Path,
+        scratch: Path,
+        originalScope: AuthenticatedFullTreeScope,
+    ) {
+        val rowRoot = scratch.resolve("row-scratch-bound")
+        Files.createDirectories(rowRoot)
+        val namespaces = (0 until 255).map { index -> "n${index.toString().padStart(3, '0')}" + "x".repeat(16_380) }
+        val source = rowRoot.resolve("row-scratch-bound.cpp")
+        Files.newBufferedWriter(source, StandardCharsets.UTF_8).use { writer ->
+            namespaces.forEach { writer.append("namespace ").append(it).append(" {\n") }
+            writer.append("struct Big {};\n")
+            repeat(namespaces.size) { writer.append("}\n") }
+            writer.append("using namespace ").append(namespaces.joinToString("::")).append(";\n")
+            val parameters = (0..31).joinToString(", ") { "Big p$it" }
+            writer.append("extern \"C\" void descriptor_bound($parameters) {}\n")
+            writer.append("extern \"C\" void (*descriptor_bound_reference)($parameters) = &descriptor_bound;\n")
+            writer.append("int main() { return descriptor_bound_reference == nullptr; }\n")
+        }
+        val artifact = rowRoot.resolve("row-scratch-bound.so")
+        runCommand(
+            listOf(
+                compiler.toString(), "-std=c++17", "-O0", "-g", "-gdwarf-5", "-fPIC",
+                "-fdebug-prefix-map=$rowRoot=/fixture/source-tree/clang/lib/InlineTemplate",
+                source.toString(), "-shared", "-Wl,--build-id=none", "-o", artifact.toString(),
+            ),
+            rowRoot,
+            "row-scratch-bound-compile.txt",
+        )
+        val scope = scopeForArtifact(originalScope, fixtureSha256(artifact), Files.size(artifact))
+        val inventoryPath = rowRoot.resolve("row-scratch-bound-inventory.json")
+        val inventory = FullTreeInventoryControl.generateAndPublish(artifact, scope, inventoryPath, maximumWorkers = 1)
+        val shard = inventory.inventory.controlArray("shards").single() as JsonObject
+        val failure = assertFailsWith<FullTreeControlException> {
+            FullTreeSourceEntityIdentityProducer.scanShard(
+                artifact,
+                inventoryPath,
+                scope,
+                shard.controlString("id"),
+                rowRoot,
+            )
+        }
+        assertTrue(failure.message.orEmpty().contains("row scratch exceeds"), failure.message.orEmpty())
+    }
+
+    private fun verifyRelativeSourcePathNormalization(
+        originalScope: AuthenticatedFullTreeScope,
+    ) {
+        val pathPolicy = originalScope.document.controlObject("pathPolicy")
+        val prefixMaps = pathPolicy.controlArray("prefixMaps").map { value ->
+            val prefix = value as JsonObject
+            if (prefix.controlString("from") == "/fixture/source-tree/") {
+                JsonObject(prefix.toMutableMap().apply {
+                    this["from"] = JsonPrimitive("relative-src/")
+                    this["to"] = JsonPrimitive("source/clang/lib/InlineTemplate/")
+                })
+            } else {
+                prefix
+            }
+        }
+        // The frozen scope-v1 JSON schema requires absolute prefix-map sources. Exercise the
+        // shared normalizer directly for a future versioned policy that admits relative sources;
+        // do not broaden or requalify the frozen scope schema in this extraction unit.
+        val document = JsonObject(originalScope.document.toMutableMap().apply {
+            this["pathPolicy"] = JsonObject(pathPolicy.toMutableMap().apply {
+                this["prefixMaps"] = JsonArray(prefixMaps)
+            })
+        })
+        val relativeScope = authenticatedScopeWithDocument(originalScope, document)
+        val schemaFailure = assertFailsWith<FullTreeControlException> {
+            FullTreeScopeControl.validate(relativeScope)
+        }
+        assertTrue(schemaFailure.message.orEmpty().contains("bundled schema"), schemaFailure.message.orEmpty())
+        assertEquals(
+            "source/clang/lib/InlineTemplate/outside.cpp",
+            FullTreeScopeControl.normalizeSourcePath(document, "relative-src/outside.cpp"),
+        )
+        assertFailsWith<FullTreeControlException> {
+            FullTreeScopeControl.normalizeSourcePath(document, "relative-src/../outside.cpp")
+        }
+    }
+
     private fun assertFixtureFacts(
         facts: List<FullTreeSourceEntityFact>,
         optimization: Int,
@@ -409,6 +494,28 @@ class FullTreeSourceEntityIdentityProducerTest {
 
         val templateInstances = facts.filter { it.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE }
         assertTrue(templateInstances.isNotEmpty(), "template instance DIEs were not retained; $runDescription")
+        val enumTemplateShapePresent = Regex("DW_AT_name.*enum_template").containsMatchIn(dwarfShape)
+        val enumTemplateInstances = templateInstances.filter {
+            it.semanticAnchorFields?.sourceName?.startsWith("enum_template<") == true
+        }
+        assertEquals(enumTemplateShapePresent, enumTemplateInstances.isNotEmpty(), runDescription)
+        if (enumTemplateShapePresent) {
+            val enumArguments = enumTemplateInstances.mapNotNull {
+                it.semanticAnchorFields?.templateActualArguments?.singleOrNull()
+            }.distinct()
+            assertTrue(enumArguments.size >= 2, "enum actuals were not retained as typed arguments; $runDescription")
+            assertTrue(enumArguments.all { it.startsWith("value-argument:type=enum:") }, runDescription)
+            assertEquals(
+                setOf("3", "7"),
+                enumArguments.mapNotNull { it.substringAfterLast(":value=", "").takeIf(String::isNotEmpty) }.toSet(),
+                "enum actual values were not decoded using the validated underlying type; $runDescription",
+            )
+            assertTrue(
+                enumTemplateInstances.mapNotNull { it.semanticAnchorCandidateId }.distinct().size >= 2,
+                "distinct enum specializations shared a semantic candidate; $runDescription",
+            )
+            assertTrue(enumTemplateInstances.none { "unsupported-template-argument-type" in it.reasonCodes }, runDescription)
+        }
         val packedTemplateShapePresent = dwarfShape.contains("packed_template<int, int>")
         val packedTemplateInstances = templateInstances.filter {
             it.semanticAnchorFields?.sourceName?.startsWith("packed_template<") == true
