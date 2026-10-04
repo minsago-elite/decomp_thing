@@ -331,7 +331,7 @@ internal object FullTreeFunctionObservationsV2 {
         facts.forEach { fact ->
             val candidateId = fact.semanticAnchorCandidateId ?: return@forEach
             if (!reconciliation.hasAnchorClaim(candidateId, fact.sourceEntityId)) {
-                v2Fail("source anchor candidate is not backed by an authenticated physical DIE claim")
+                v2Fail("source anchor candidate is not an authenticated direct anchor claimant for this physical DIE claim")
             }
         }
     }
