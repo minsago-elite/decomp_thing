@@ -66,6 +66,8 @@ internal object FullTreeFunctionObservationsV2 {
         require(maximumBytes in 1L..16L * 1024L * 1024L * 1024L)
         val facts = FullTreeSourceEntityFact.deterministicOrder(sourceFacts)
         facts.forEach(::validateSourceEntityForV2)
+        validateInlineAnchorEvidence(facts, reconciliation)
+        validateCollisionEvidence(facts, reconciliation)
         if (facts.map { it.sourceEntityId }.toSet().size != facts.size) {
             v2Fail("observation-v2 sourceEntityIds are not unique")
         }
@@ -189,6 +191,7 @@ internal object FullTreeFunctionObservationsV2 {
         if (facts != FullTreeSourceEntityFact.deterministicOrder(facts)) {
             v2Fail("observation-v2 source entities are not canonically ordered")
         }
+        validateInlineAnchorEvidence(facts, reconciliation)
         validateCollisionEvidence(facts, reconciliation)
         if (counts.v2Long("sourceEntities") != facts.size.toLong() ||
             counts.v2Object("sourceEntitiesByKind") != countKinds(facts) ||
@@ -293,6 +296,9 @@ internal object FullTreeFunctionObservationsV2 {
             if (fact.candidateCollisionSourceEntityIds != expectedIds) {
                 v2Fail("source anchor collision IDs do not match the authenticated full-run anchor claims")
             }
+            if (directIds.isNotEmpty() && fact.sourceEntityId !in directIds) {
+                v2Fail("colliding source row is not an authenticated direct anchor claimant")
+            }
             if (expectedIds.isEmpty()) {
                 if (fact.reasonCodes.any { it in collisionReasons }) {
                     v2Fail("source entity claims collision evidence absent from the authenticated full-run claims")
@@ -308,6 +314,63 @@ internal object FullTreeFunctionObservationsV2 {
                     fact.reasonCodes.any { it in collisionReasons && it != expectedReason }
                 ) {
                     v2Fail("source anchor collision is not retained as the exact ambiguous evidence")
+                }
+            }
+        }
+    }
+
+    /**
+     * Inline fields name other DIE anchors. Their hashes are candidates only, so the full-run
+     * receipt retains a bounded typed subset proving each candidate was claimed for one of the
+     * corresponding edge targets.
+     */
+    private fun validateInlineAnchorEvidence(
+        facts: List<FullTreeSourceEntityFact>,
+        reconciliation: FullTreeFunctionObservationV2IdentityReconciliation,
+    ) {
+        facts.forEach { fact ->
+            if (fact.kind != FullTreeSourceEntityKind.INLINE_INSTANCE) return@forEach
+            val fields = fact.semanticAnchorFields ?: return@forEach
+            val resolvedEdges = fact.edges.filter {
+                it.state == FullTreeSourceIdentityEdgeState.RESOLVED && it.target != null
+            }
+            val referenceEdges = resolvedEdges.filter {
+                it.kind == FullTreeSourceIdentityEdgeKind.SPECIFICATION ||
+                    it.kind == FullTreeSourceIdentityEdgeKind.ABSTRACT_ORIGIN
+            }
+            val ownerEdges = resolvedEdges.filter { it.kind == FullTreeSourceIdentityEdgeKind.INLINE_OWNER }
+
+            fun hasClaim(
+                candidateId: String,
+                edges: List<FullTreeSourceIdentityEdge>,
+                allowedKinds: List<FullTreeSourceAnchorKind>,
+            ): Boolean = edges.any { edge ->
+                val target = edge.target ?: return@any false
+                allowedKinds.any { kind ->
+                    reconciliation.hasInlineRelatedAnchorClaim(
+                        candidateId,
+                        target.sourceEntityId(kind),
+                        kind,
+                    )
+                }
+            }
+
+            fields.inlineCalleeAnchorCandidateId?.let { candidate ->
+                if (!hasClaim(candidate, referenceEdges, FullTreeSourceAnchorKind.entries)) {
+                    v2Fail("inline callee candidate is not bound to a referenced DIE anchor claim")
+                }
+            }
+            fields.inlineOwnerAnchorCandidateId?.let { candidate ->
+                val ownerKinds = FullTreeSourceAnchorKind.entries.filter {
+                    it != FullTreeSourceAnchorKind.INLINE_INSTANCE
+                }
+                if (!hasClaim(candidate, ownerEdges, ownerKinds)) {
+                    v2Fail("inline owner candidate is not bound to a referenced DIE anchor claim")
+                }
+            }
+            fields.inlinePathAnchorCandidateIds.orEmpty().forEach { candidate ->
+                if (!hasClaim(candidate, ownerEdges, listOf(FullTreeSourceAnchorKind.INLINE_INSTANCE))) {
+                    v2Fail("inline path candidate is not bound to a referenced inline DIE anchor claim")
                 }
             }
         }
@@ -520,6 +583,7 @@ internal class FullTreeFunctionObservationV2AnchorIndex(
 ) {
     private val claims = TreeMap<String, TreeSet<String>>(FULL_TREE_CODE_POINT_ORDER)
     private val templatePatternClaims = HashSet<Pair<String, String>>()
+    private val inlineRelatedClaims = HashSet<FullTreeFunctionObservationV2TypedAnchorClaim>()
     private var claimCount = 0L
     private var retainedBytes = 0L
     private var frozenReconciliation: FullTreeFunctionObservationV2IdentityReconciliation? = null
@@ -553,6 +617,73 @@ internal class FullTreeFunctionObservationV2AnchorIndex(
         claimCount = nextCount
         if (!claimExists) claims.getOrPut(candidateId) { TreeSet(FULL_TREE_CODE_POINT_ORDER) }.add(physicalClaimId)
         if (patternClaim && !patternClaimExists) templatePatternClaims.add(candidateId to physicalClaimId)
+    }
+
+    /** Retain only typed anchor claims actually named by this scanner-owned inline fact. */
+    fun acceptInlineRelatedClaims(fact: FullTreeSourceEntityFact) {
+        if (frozenReconciliation != null) v2Fail("full-run anchor claims are already reconciled")
+        if (fact.kind != FullTreeSourceEntityKind.INLINE_INSTANCE) return
+        val fields = fact.semanticAnchorFields ?: return
+        val resolvedEdges = fact.edges.filter {
+            it.state == FullTreeSourceIdentityEdgeState.RESOLVED && it.target != null
+        }
+        val referenceEdges = resolvedEdges.filter {
+            it.kind == FullTreeSourceIdentityEdgeKind.SPECIFICATION ||
+                it.kind == FullTreeSourceIdentityEdgeKind.ABSTRACT_ORIGIN
+        }
+        val ownerEdges = resolvedEdges.filter { it.kind == FullTreeSourceIdentityEdgeKind.INLINE_OWNER }
+
+        fun acceptReferencedClaim(
+            candidateId: String,
+            edges: List<FullTreeSourceIdentityEdge>,
+            allowedKinds: List<FullTreeSourceAnchorKind>,
+            label: String,
+        ) {
+            val matching = edges.flatMap { edge ->
+                val target = edge.target ?: return@flatMap emptyList()
+                allowedKinds.mapNotNull { kind ->
+                    val physicalClaimId = target.sourceEntityId(kind)
+                    if (claims[candidateId]?.contains(physicalClaimId) == true) {
+                        FullTreeFunctionObservationV2TypedAnchorClaim(candidateId, physicalClaimId, kind)
+                    } else {
+                        null
+                    }
+                }
+            }.toSet()
+            if (matching.isEmpty()) {
+                v2Fail("inline $label candidate is not backed by a typed claim on a referenced DIE")
+            }
+            matching.forEach { claim ->
+                if (inlineRelatedClaims.add(claim)) {
+                    val nextBytes = Math.addExact(retainedBytes, INLINE_RELATED_CLAIM_INDEX_BYTES)
+                    if (nextBytes > maximumRetainedBytes) {
+                        inlineRelatedClaims.remove(claim)
+                        v2Fail("inline anchor claim subset exceeds its authenticated working-set bound")
+                    }
+                    retainedBytes = nextBytes
+                }
+            }
+        }
+
+        fields.inlineCalleeAnchorCandidateId?.let {
+            acceptReferencedClaim(it, referenceEdges, FullTreeSourceAnchorKind.entries, "callee")
+        }
+        fields.inlineOwnerAnchorCandidateId?.let {
+            acceptReferencedClaim(
+                it,
+                ownerEdges,
+                FullTreeSourceAnchorKind.entries.filter { kind -> kind != FullTreeSourceAnchorKind.INLINE_INSTANCE },
+                "owner",
+            )
+        }
+        fields.inlinePathAnchorCandidateIds.orEmpty().forEach {
+            acceptReferencedClaim(
+                it,
+                ownerEdges,
+                listOf(FullTreeSourceAnchorKind.INLINE_INSTANCE),
+                "path",
+            )
+        }
     }
 
     fun reconciliation(
@@ -626,15 +757,22 @@ internal class FullTreeFunctionObservationV2AnchorIndex(
             collisionCandidateCount = collisionCount,
             collisionIdsByCandidate = Collections.unmodifiableMap(immutableCollisions),
         )
-        // The immutable, bounded subset lets envelope validation bind a pattern candidate to its
-        // exact referenced DIE without retaining the full collision index in the returned receipt.
+        // Bounded typed subsets let envelope validation bind pattern and inline candidates to
+        // referenced DIEs without retaining the full claim index in the returned receipt.
         result.bindTemplatePatternClaims(Collections.unmodifiableSet(templatePatternClaims))
+        result.bindInlineRelatedClaims(Collections.unmodifiableSet(inlineRelatedClaims))
         frozenReconciliation = result
         return result
     }
 }
 
 private val V2_SHA256 = Regex("[0-9a-f]{64}")
+
+internal data class FullTreeFunctionObservationV2TypedAnchorClaim(
+    val candidateId: String,
+    val physicalClaimId: String,
+    val kind: FullTreeSourceAnchorKind,
+)
 
 internal data class FullTreeFunctionObservationV2IdentityReconciliation(
     val populationSha256: String,
@@ -644,6 +782,7 @@ internal data class FullTreeFunctionObservationV2IdentityReconciliation(
     val collisionIdsByCandidate: Map<String, List<String>>,
 ) {
     private var templatePatternClaims: Set<Pair<String, String>> = emptySet()
+    private var inlineRelatedClaims: Set<FullTreeFunctionObservationV2TypedAnchorClaim> = emptySet()
 
     init {
         require(populationSha256.matches(Regex("[0-9a-f]{64}")))
@@ -668,9 +807,21 @@ internal data class FullTreeFunctionObservationV2IdentityReconciliation(
         check(templatePatternClaims.isEmpty())
         templatePatternClaims = claims
     }
+
+    internal fun hasInlineRelatedAnchorClaim(
+        candidateId: String,
+        physicalClaimId: String,
+        kind: FullTreeSourceAnchorKind,
+    ): Boolean = FullTreeFunctionObservationV2TypedAnchorClaim(candidateId, physicalClaimId, kind) in inlineRelatedClaims
+
+    internal fun bindInlineRelatedClaims(claims: Set<FullTreeFunctionObservationV2TypedAnchorClaim>) {
+        check(inlineRelatedClaims.isEmpty())
+        inlineRelatedClaims = claims
+    }
 }
 
 private const val TEMPLATE_PATTERN_CLAIM_INDEX_BYTES = 96L
+private const val INLINE_RELATED_CLAIM_INDEX_BYTES = 96L
 private const val FULL_RUN_RECONCILIATION_CHECKPOINT_INTERVAL = 4_096L
 
 internal fun reconcileObservationV2Facts(

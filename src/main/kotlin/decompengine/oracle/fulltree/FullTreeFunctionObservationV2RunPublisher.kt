@@ -285,6 +285,7 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                         },
                         factAdmission = { fact, canonicalRowBytes ->
                             FullTreeFunctionObservationsV2.validateSourceEntityForV2(fact)
+                            anchorIndex.acceptInlineRelatedClaims(fact)
                             val nextCount = Math.addExact(sourceFactCount, 1L)
                             val nextAdmissionBytes = Math.addExact(sourceFactAdmissionBytes, canonicalRowBytes)
                             val modeledRowBytes = sourceIdentityModeledRetainedChargeBytes(
