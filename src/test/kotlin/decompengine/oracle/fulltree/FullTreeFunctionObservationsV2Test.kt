@@ -26,6 +26,28 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class FullTreeFunctionObservationsV2Test {
     @Test
+    fun `prepared shard rehash checkpoints between bounded chunks and cooperates with cancellation`() =
+        inControlTemporaryDirectory { root ->
+            val contents = ByteArray(3 * 64 * 1024 + 7) { index -> (index % 251).toByte() }
+            val path = root.resolve("prepared-shard.json")
+            Files.write(path, contents)
+
+            val result = hashAndSize(path, "fixture prepared shard") {}
+            assertEquals(OracleArtifacts.sha256(contents), result.first)
+            assertEquals(contents.size.toLong(), result.second)
+
+            var checkpoints = 0
+            val cancelled = assertFailsWith<IllegalStateException> {
+                hashAndSize(path, "fixture prepared shard") {
+                    checkpoints++
+                    if (checkpoints == 2) throw IllegalStateException("cooperative test cancellation")
+                }
+            }
+            assertEquals("cooperative test cancellation", cancelled.message)
+            assertEquals(2, checkpoints, "hashing must checkpoint before consuming the full prepared file")
+        }
+
+    @Test
     fun `v2 concurrent scratch budget accounts for prepared outputs sqlite and dwarf decompression`() {
         val budget = fullTreeFunctionObservationV2ShardScratchBudget(
             maximumScratchBytes = 1_000L,

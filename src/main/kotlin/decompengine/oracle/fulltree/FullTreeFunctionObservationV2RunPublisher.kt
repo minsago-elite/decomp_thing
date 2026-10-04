@@ -614,7 +614,11 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                         }
                         val scan = scanResult ?: v2RunFail("observation-v2 producer returned no scan receipt")
                         Files.setPosixFilePermissions(shardFile, READ_ONLY_OUTPUT_PERMISSIONS)
-                        val observed = hashAndSize(shardFile)
+                        val observed = hashAndSize(
+                            shardFile,
+                            "prepared observation-v2 shard ${shard.identifier}",
+                            shardCheckpoint,
+                        )
                         if (observed.first != streamResult.outputSha256 || observed.second != streamResult.outputBytes) {
                             v2RunFail("prepared observation-v2 bytes differ from the streaming receipt")
                         }
@@ -708,7 +712,11 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                             ) {
                                 v2RunFail("staged observation-v2 metadata differs from its authenticated receipt")
                             }
-                            val actual = hashAndSize(staged.output)
+                            val actual = hashAndSize(
+                                staged.output,
+                                "staged observation-v2 shard ${staged.shardId}",
+                                deadline::checkpoint,
+                            )
                             if (actual.first != receipt.outputSha256 || actual.second != receipt.outputBytes) {
                                 v2RunFail("staged observation-v2 bytes differ from their authenticated receipt")
                             }
@@ -983,7 +991,11 @@ private fun deleteV2Tree(root: Path) {
     })
 }
 
-private fun hashAndSize(path: Path): Pair<String, Long> {
+internal fun hashAndSize(
+    path: Path,
+    label: String,
+    checkpoint: (String) -> Unit,
+): Pair<String, Long> {
     val digest = MessageDigest.getInstance("SHA-256")
     var bytes = 0L
     Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS).use { input ->
@@ -991,11 +1003,16 @@ private fun hashAndSize(path: Path): Pair<String, Long> {
         while (true) {
             val count = input.read(buffer)
             if (count < 0) break
-            if (count == 0) continue
+            if (count == 0) {
+                checkpoint("while hashing $label")
+                continue
+            }
             digest.update(buffer, 0, count)
             bytes = Math.addExact(bytes, count.toLong())
+            checkpoint("while hashing $label")
         }
     }
+    checkpoint("after hashing $label")
     return digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) } to bytes
 }
 
