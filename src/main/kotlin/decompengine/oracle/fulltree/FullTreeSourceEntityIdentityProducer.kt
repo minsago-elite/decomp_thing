@@ -2256,11 +2256,19 @@ private class SourceEntityIdentityReader(
         var parent = record.nearestRetainedParentOffset?.let(unit.index::find)
         var traversalDepth = 0
         var inlineDepth = 1 // include this inline instance in the bounded ancestry
+        var child = record
         while (parent != null) {
             if (traversalDepth++ >= MAXIMUM_SOURCE_IDENTITY_CONTEXT_DEPTH) {
                 throw FullTreeControlException("source-identity inline ancestry traversal exceeds its depth bound")
             }
             if (parent.tag == DW_TAG_INLINED_SUBROUTINE) {
+                addStructuralEdge(
+                    physical(unit, child),
+                    physical(unit, parent),
+                    FullTreeSourceIdentityEdgeKind.INLINE_OWNER,
+                    edges,
+                )
+                child = parent
                 inlineDepth++
                 if (inlineDepth > producerLimits.maximumReferenceChainEntries) {
                     throw FullTreeControlException(
