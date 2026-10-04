@@ -171,6 +171,7 @@ internal object FullTreeFunctionObservationProducer {
         shardId: String,
         controlLimits: FullTreeControlLimits = FullTreeControlLimits(),
         checkpoint: (String) -> Unit = {},
+        beforeInventoryValidation: (JsonObject) -> Unit = {},
     ): FullTreeFunctionObservationAuthenticatedInputs {
         FullTreeScopeControl.validate(scope, controlLimits)
         checkpoint("after authenticating function-observation scope")
@@ -180,6 +181,7 @@ internal object FullTreeFunctionObservationProducer {
             "full-tree inventory",
             "full-tree-inventory",
         )
+        beforeInventoryValidation(inventory)
         FullTreeInventoryControl.validate(inventory, scope, controlLimits)
         checkpoint("after authenticating function-observation inventory")
         val inventoryArtifactSha256 = OracleArtifacts.sha256(inventoryBytes)
@@ -597,6 +599,7 @@ internal class FunctionDwarfUnitRepository(
         ::functionAttributeContext,
     private val retainAllRecords: Boolean = false,
     private val maximumRetainedWorkingSetBytes: Long? = null,
+    private val maximumRetainedLineTableWorkingSetBytes: Long? = null,
 ) {
     // Active operation pins distinguish retained units from cumulative decoding work. An evicted
     // unit stays available while a reference graph holds it, avoiding duplicate live CU copies.
@@ -604,6 +607,10 @@ internal class FunctionDwarfUnitRepository(
     var loadedUnitBytes: Long = 0L
         private set
     var peakRetainedUnitBytes: Long = 0L
+        private set
+    var peakRetainedLineTableBytes: Long = 0L
+        private set
+    var peakRetainedLineTableUnits: Int = 0
         private set
     private val info = sections.required(".debug_info")
     private val abbreviations = sections.required(".debug_abbrev")
@@ -626,6 +633,18 @@ internal class FunctionDwarfUnitRepository(
         if (maximumRetainedWorkingSetBytes != null && bytes > maximumRetainedWorkingSetBytes) {
             throw FullTreeControlException("DWARF repository exceeds retained working-set byte bound")
         }
+        val retained = retainedUnits().values
+        val lineTableBytes = retained.fold(0L) { total, unit ->
+            Math.addExact(total, unit.lineTableModeledRetainedBytes)
+        }
+        if (maximumRetainedLineTableWorkingSetBytes != null && lineTableBytes > maximumRetainedLineTableWorkingSetBytes) {
+            throw FullTreeControlException(
+                "DWARF repository retained line-table model $lineTableBytes exceeds bound " +
+                    "$maximumRetainedLineTableWorkingSetBytes across ${retained.size} retained units",
+            )
+        }
+        peakRetainedLineTableBytes = maxOf(peakRetainedLineTableBytes, lineTableBytes)
+        peakRetainedLineTableUnits = maxOf(peakRetainedLineTableUnits, retained.count { it.lineTableModeledRetainedBytes > 0L })
         peakRetainedUnitBytes = maxOf(peakRetainedUnitBytes, bytes)
     }
 
@@ -661,7 +680,7 @@ internal class FunctionDwarfUnitRepository(
             retainRecord = { tag, depth -> retainAllRecords || depth == 0 || tag in retainedTags },
         )
         loadedUnitBytes = Math.addExact(loadedUnitBytes, Math.multiplyExact(index.modeledRetainedBytes, 2L))
-        return FunctionDwarfUnit(header, index, controlLimits, sections, parseBudget).also { unit ->
+        return FunctionDwarfUnit(header, index, controlLimits, sections, parseBudget, ::checkRetention).also { unit ->
             cache[header.offset] = unit
             operationPins?.put(header.offset, unit)
             checkRetention()
@@ -751,6 +770,7 @@ internal class FunctionDwarfUnit(
     val controlLimits: FullTreeControlLimits,
     val sections: FullTreeDwarfSections,
     private val parseBudget: FullTreeDwarfParseBudget,
+    private val onRetainedLineTable: () -> Unit = {},
 ) {
     private val childrenByParent: Map<Long?, List<FullTreeDwarfDieRecord>> by lazy {
         index.recordsInPhysicalOrder.groupBy { it.parentOffset }
@@ -773,6 +793,8 @@ internal class FunctionDwarfUnit(
     private var cachedCompilationDirectory: String? = null
     private var compilationDirectoryResolved = false
     private var cachedLineTable: FullTreeDwarfLineTable? = null
+    var lineTableModeledRetainedBytes: Long = 0L
+        private set
     private var lineTableResolved = false
     private var cachedAddressResolver: FullTreeDwarfAddressResolver? = null
     private var addressResolverResolved = false
@@ -818,7 +840,9 @@ internal class FunctionDwarfUnit(
                     limits,
                 )
             }
+            lineTableModeledRetainedBytes = if (cachedLineTable == null) 0L else modeledLineTableRetainedBytes(limits)
             lineTableResolved = true
+            onRetainedLineTable()
         }
         return cachedLineTable
     }
