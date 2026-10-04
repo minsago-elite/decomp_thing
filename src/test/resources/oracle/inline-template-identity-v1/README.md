@@ -30,6 +30,16 @@ template DIEs at `-O2`. The test checks that the values remain distinct and vali
 ambiguous, non-scoreable, and emitted-RVA-linked cases without adding source rows to the RVA
 denominator.
 
+The compiler matrix also keeps cross-compiler spelling differences out of template-instance
+candidates by hashing validated typed actuals with the base name only when the rendered trailing
+template-id is balanced and its top-level argument count matches those typed DIE facts. Malformed,
+unbalanced, or mismatched suffixes remain unknown, and the original `DW_AT_name` is retained in the
+census. `packed_template` checks that GNU formal-parameter pack
+wrappers are flattened to the same ordered signature shape as direct parameters while template
+actual pack paths remain evidence. `callback_signature` exercises bounded return/parameter and
+variadic descriptions of `DW_TAG_subroutine_type`. Same-line `Payload` types nested in distinct
+unions ensure union lexical scopes remain part of typed source descriptors and instance candidates.
+
 `boolean_template` adds a positive `bool` non-type actual control. Both `false` and `true` concrete
 instances must retain ordered typed arguments and distinct candidate hashes. This compiler fixture
 backs the boolean form decoder; its type/value decoding is still bounded source evidence, not

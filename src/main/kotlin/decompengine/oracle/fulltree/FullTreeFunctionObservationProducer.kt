@@ -171,6 +171,7 @@ internal object FullTreeFunctionObservationProducer {
         shardId: String,
         controlLimits: FullTreeControlLimits = FullTreeControlLimits(),
         checkpoint: (String) -> Unit = {},
+        beforeInventoryValidation: (JsonObject) -> Unit = {},
     ): FullTreeFunctionObservationAuthenticatedInputs {
         FullTreeScopeControl.validate(scope, controlLimits)
         checkpoint("after authenticating function-observation scope")
@@ -180,6 +181,7 @@ internal object FullTreeFunctionObservationProducer {
             "full-tree inventory",
             "full-tree-inventory",
         )
+        beforeInventoryValidation(inventory)
         FullTreeInventoryControl.validate(inventory, scope, controlLimits)
         checkpoint("after authenticating function-observation inventory")
         val inventoryArtifactSha256 = OracleArtifacts.sha256(inventoryBytes)

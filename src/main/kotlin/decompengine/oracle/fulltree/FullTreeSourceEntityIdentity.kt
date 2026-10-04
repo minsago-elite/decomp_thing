@@ -69,6 +69,109 @@ internal enum class FullTreeSourceIdentityEdgeState(val wireValue: String) {
     CYCLIC("cyclic"),
 }
 
+/**
+ * Returns a rendered function-template base only when its trailing template-id parses and its
+ * top-level argument count agrees with the validated typed-actual DIEs. The spelling is not used
+ * to resolve a relation; typed descriptors carry the specialization's semantic arguments.
+ */
+internal fun canonicalSourceIdentityTemplateInstanceBaseName(
+    sourceName: String,
+    typedActualCount: Int,
+): String? {
+    val name = sourceName.trim()
+    if (!name.endsWith('>') || typedActualCount <= 0) return null
+    // A malformed name can contain many candidate '<' characters. Cap aggregate parsing work so
+    // this bounded string decoder cannot become quadratic on hostile DWARF input.
+    val maximumParseSteps = name.length * 64
+    var parseSteps = 0
+    for (open in name.lastIndex downTo 1) {
+        if (name[open] != '<') continue
+        var angleDepth = 1
+        var parenDepth = 0
+        var bracketDepth = 0
+        var braceDepth = 0
+        var quote: Char? = null
+        var escaped = false
+        var argumentCount = 1
+        var argumentHasContent = false
+        var valid = true
+        var close = -1
+        var index = open + 1
+        while (index < name.length) {
+            if (++parseSteps > maximumParseSteps) return null
+            val char = name[index]
+            if (quote != null) {
+                if (escaped) escaped = false
+                else if (char == '\\') escaped = true
+                else if (char == quote) quote = null
+                argumentHasContent = true
+                index++
+                continue
+            }
+            when (char) {
+                '\'', '"' -> {
+                    quote = char
+                    argumentHasContent = true
+                }
+                '(' -> {
+                    parenDepth++
+                    argumentHasContent = true
+                }
+                ')' -> {
+                    if (parenDepth == 0) valid = false else parenDepth--
+                    argumentHasContent = true
+                }
+                '[' -> {
+                    bracketDepth++
+                    argumentHasContent = true
+                }
+                ']' -> {
+                    if (bracketDepth == 0) valid = false else bracketDepth--
+                    argumentHasContent = true
+                }
+                '{' -> {
+                    braceDepth++
+                    argumentHasContent = true
+                }
+                '}' -> {
+                    if (braceDepth == 0) valid = false else braceDepth--
+                    argumentHasContent = true
+                }
+                '<' -> {
+                    if (parenDepth == 0 && bracketDepth == 0 && braceDepth == 0) angleDepth++
+                    argumentHasContent = true
+                }
+                '>' -> if (parenDepth == 0 && bracketDepth == 0 && braceDepth == 0) {
+                    angleDepth--
+                    if (angleDepth < 0) valid = false
+                    if (angleDepth == 0) {
+                        close = index
+                        break
+                    }
+                    argumentHasContent = true
+                } else {
+                    argumentHasContent = true
+                }
+                ',' -> if (angleDepth == 1 && parenDepth == 0 && bracketDepth == 0 && braceDepth == 0) {
+                    if (!argumentHasContent) valid = false
+                    argumentCount++
+                    argumentHasContent = false
+                } else {
+                    argumentHasContent = true
+                }
+                else -> if (!char.isWhitespace()) argumentHasContent = true
+            }
+            if (!valid) break
+            index++
+        }
+        if (!valid || quote != null || parenDepth != 0 || bracketDepth != 0 || braceDepth != 0) continue
+        if (close != name.lastIndex || angleDepth != 0 || !argumentHasContent || argumentCount != typedActualCount) continue
+        val base = name.substring(0, open).trimEnd()
+        if (base.isNotEmpty()) return base
+    }
+    return null
+}
+
 /** Artifact-local physical address of one retained DWARF DIE. */
 internal data class FullTreeSourcePhysicalDie(
     val richArtifactSha256: String,
@@ -258,13 +361,17 @@ internal class FullTreeSourceAnchorFields(
             // actuals. A missing or later-proven pattern relation must not alter that candidate.
             if (kind == FullTreeSourceAnchorKind.TEMPLATE_INSTANCE) {
                 remove("templatePatternAnchorCandidateId")
+                val rawName = (get("sourceName") as? JsonPrimitive)?.content ?: return null
+                val actualCount = templateActualArguments?.size ?: return null
+                val baseName = canonicalSourceIdentityTemplateInstanceBaseName(rawName, actualCount) ?: return null
+                this["sourceName"] = JsonPrimitive(baseName)
             }
         })
         val preimage = JsonObject(
             mapOf(
                 "fields" to semanticFields,
                 "kind" to JsonPrimitive(kind.wireValue),
-                "version" to JsonPrimitive(4),
+                "version" to JsonPrimitive(5),
             ),
         )
         val bytes = OracleJson.canonicalBytes(preimage, sourceIdentityRowJsonLimits(MAXIMUM_SOURCE_IDENTITY_ROW_BYTES))
@@ -481,6 +588,11 @@ internal const val MAXIMUM_SOURCE_IDENTITY_RETAINED_BYTES = 64L * 1024L * 1024L
 internal const val MAXIMUM_SOURCE_IDENTITY_ROW_SCRATCH_FACTOR = 2L
 internal const val SOURCE_IDENTITY_RETAINED_CONTENT_EXPANSION_FACTOR = 3L
 internal const val SOURCE_IDENTITY_RETAINED_CHARGE_OVERHEAD_BYTES = 64L
+internal const val SOURCE_IDENTITY_INVENTORY_EXPANSION_FACTOR = 8L
+internal const val SOURCE_IDENTITY_CONTROL_JSON_NODE_BYTES = 64L
+internal const val MAXIMUM_SOURCE_IDENTITY_CONTROL_JSON_NODES = 1_000_000L
+internal const val SOURCE_IDENTITY_COMPILATION_UNIT_INDEX_BYTES = 1_024L
+internal const val SOURCE_IDENTITY_UNIT_METADATA_EXPANSION_FACTOR = 3L
 internal const val MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES = 256 * 1024 * 1024L
 
 internal fun sourceIdentityRowJsonLimits(maximumCanonicalBytes: Long): StrictJsonLimits {

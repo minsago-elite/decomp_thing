@@ -1169,9 +1169,10 @@ if MODE != "missing-usage":
     }
 respond(prompt, prompt_result)
 
-if MODE in RECONSTRUCTION_MODES:
+if MODE in RECONSTRUCTION_MODES or MODE == "overlapping-success":
     # Keep the fake agent alive until the client closes its protocol input. Exiting directly
-    # after the final response races the harness's response acceptance and shutdown transition.
+    # after the final response races the harness's response acceptance and shutdown transition;
+    # the overlapping-receipts test exercises both invocations at that lifecycle boundary.
     sys.stdin.read()
 
 if MODE == "response-then-crash":

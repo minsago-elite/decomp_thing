@@ -3,6 +3,7 @@ package decompengine.oracle.fulltree
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import java.nio.charset.StandardCharsets
+import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Collections
 import java.util.LinkedHashSet
@@ -36,13 +37,6 @@ internal object FullTreeSourceEntityIdentityProducer {
     ): FullTreeSourceEntityIdentityScan {
         FullTreeScopeControl.validate(scope, controlLimits)
         requireStableDirectory(scratchParent, "source-identity scratch parent")
-        val inputs = FullTreeFunctionObservationProducer.authenticateShardInputs(
-            inventoryPath,
-            scope,
-            shardId,
-            controlLimits,
-            checkpoint,
-        )
         val perShard = scope.document.controlObject("bounds").controlObject("perShard")
         // The authenticated per-shard entity ceiling applies to this census. The separate
         // 20,000-function limit belongs to function projection and is not a census cap.
@@ -88,16 +82,116 @@ internal object FullTreeSourceEntityIdentityProducer {
         if (modeledLineBytes > lineWorkingSetBudget) {
             throw FullTreeControlException("source-identity line-table model exceeds its authenticated working-set share")
         }
-        val maximumRepositoryBytes = sourceIdentityAvailableRepositoryWorkingSetBytes(
+
+        // The parsed inventory tree coexists with source rows, output, and DWARF state. Reserve its
+        // serialized-input expansion before parsing it; later reserve the exact CU-index count
+        // before materializing unit/header lists and maps. The file-size cap is rechecked by the
+        // stable canonical-control reader, so a replaced larger file cannot evade this preflight.
+        val inventoryBytes = try {
+            Files.size(inventoryPath)
+        } catch (failure: Exception) {
+            throw FullTreeControlException("source-identity inventory size is unavailable", failure)
+        }
+        if (inventoryBytes <= 0L || inventoryBytes > controlLimits.maximumInventoryBytes.toLong()) {
+            throw FullTreeControlException("source-identity inventory exceeds its authenticated input bound")
+        }
+        if (maximumFacts <= 0L || maximumModeledRetainedBytes <= 0L) {
+            throw FullTreeControlException("authenticated source-identity bounds are empty")
+        }
+        val maximumInventoryJsonNodes = minOf(inventoryBytes, MAXIMUM_SOURCE_IDENTITY_CONTROL_JSON_NODES)
+        val inventoryOnlyReserve = sourceIdentityFixedStructureResidentBytes(
+            authenticatedInventoryBytes = inventoryBytes,
+            modeledInventoryJsonNodes = maximumInventoryJsonNodes,
+            compilationUnitCount = 0L,
+            modeledElfLayoutBytes = 0L,
+            modeledObservedUnitMetadataBytes = 0L,
+        )
+        sourceIdentityAvailableRepositoryWorkingSetBytes(
             authenticatedMaximumResidentBytes = perShard.controlLong("maximumResidentBytes"),
             modeledLineTableBytes = modeledLineBytes,
             modeledRetainedFactBytes = maximumModeledRetainedBytes,
             maximumSerializedOutputBytes = maximumSerializedBytes,
             maximumRowScratchBytes = maximumRowScratchBytes,
+            modeledFixedStructureBytes = inventoryOnlyReserve,
         )
-        if (maximumFacts <= 0L || maximumModeledRetainedBytes <= 0L) {
-            throw FullTreeControlException("authenticated source-identity bounds are empty")
+        val inventoryReadLimits = controlLimits.copy(maximumInventoryBytes = inventoryBytes.toInt())
+        val modeledElfLayoutBytes = producerLimits.elfLayoutLimits.modeledResidentBytes()
+        var admission: SourceIdentityInventoryAdmission? = null
+        val inputs = FullTreeFunctionObservationProducer.authenticateShardInputs(
+            inventoryPath,
+            scope,
+            shardId,
+            inventoryReadLimits,
+            checkpoint,
+            beforeInventoryValidation = { inventory ->
+                val unitCount = inventory.controlArray("units").size
+                if (unitCount <= 0 || unitCount.toLong() > maximumReferencedUnits) {
+                    throw FullTreeControlException("source-identity inventory compilation-unit count exceeds its authenticated bound")
+                }
+                val fixedStructureBytes = sourceIdentityFixedStructureResidentBytes(
+                    authenticatedInventoryBytes = inventoryBytes,
+                    modeledInventoryJsonNodes = maximumInventoryJsonNodes,
+                    compilationUnitCount = unitCount.toLong(),
+                    modeledElfLayoutBytes = modeledElfLayoutBytes,
+                    modeledObservedUnitMetadataBytes = 0L,
+                )
+                val availableForUnitMetadata = sourceIdentityAvailableRepositoryWorkingSetBytes(
+                    authenticatedMaximumResidentBytes = perShard.controlLong("maximumResidentBytes"),
+                    modeledLineTableBytes = modeledLineBytes,
+                    modeledRetainedFactBytes = maximumModeledRetainedBytes,
+                    maximumSerializedOutputBytes = maximumSerializedBytes,
+                    maximumRowScratchBytes = maximumRowScratchBytes,
+                    modeledFixedStructureBytes = fixedStructureBytes,
+                )
+                val boundedUnitMetadataBytes = minOf(
+                    controlLimits.maximumDwarfMetadataBytes,
+                    availableForUnitMetadata / SOURCE_IDENTITY_UNIT_METADATA_EXPANSION_FACTOR,
+                )
+                if (boundedUnitMetadataBytes <= 0L) {
+                    throw FullTreeControlException("source-identity CU metadata has no authenticated resident-byte budget")
+                }
+                val modeledUnitMetadataBytes = Math.multiplyExact(
+                    boundedUnitMetadataBytes,
+                    SOURCE_IDENTITY_UNIT_METADATA_EXPANSION_FACTOR,
+                )
+                val fixedStructureBytesWithMetadata = sourceIdentityFixedStructureResidentBytes(
+                    authenticatedInventoryBytes = inventoryBytes,
+                    modeledInventoryJsonNodes = maximumInventoryJsonNodes,
+                    compilationUnitCount = unitCount.toLong(),
+                    modeledElfLayoutBytes = modeledElfLayoutBytes,
+                    modeledObservedUnitMetadataBytes = modeledUnitMetadataBytes,
+                )
+                val maximumRepositoryBytes = sourceIdentityAvailableRepositoryWorkingSetBytes(
+                    authenticatedMaximumResidentBytes = perShard.controlLong("maximumResidentBytes"),
+                    modeledLineTableBytes = modeledLineBytes,
+                    modeledRetainedFactBytes = maximumModeledRetainedBytes,
+                    maximumSerializedOutputBytes = maximumSerializedBytes,
+                    maximumRowScratchBytes = maximumRowScratchBytes,
+                    modeledFixedStructureBytes = fixedStructureBytesWithMetadata,
+                )
+                admission = SourceIdentityInventoryAdmission(
+                    compilationUnitCount = unitCount,
+                    boundedUnitMetadataBytes = boundedUnitMetadataBytes,
+                    maximumRepositoryBytes = maximumRepositoryBytes,
+                )
+            },
+        )
+        val inventoryUnitArray = inputs.inventory.controlArray("units")
+        val admitted = admission ?: throw FullTreeControlException("source-identity inventory was not admitted")
+        if (inventoryUnitArray.size != admitted.compilationUnitCount) {
+            throw FullTreeControlException("source-identity inventory unit count changed after admission")
         }
+        val inventoryUnitDocuments = inventoryUnitArray.controlObjects("inventory units")
+        val unitByOffset = inventoryUnitDocuments.associateBy {
+            parseDwarfOffset(it.controlString("dwarfOffset"), "inventory DWARF offset")
+        }
+        if (unitByOffset.size != inventoryUnitDocuments.size) {
+            throw FullTreeControlException("authenticated inventory repeats a DWARF compilation-unit offset")
+        }
+        val identityDwarfLimits = controlLimits.copy(
+            maximumCompilationUnits = inventoryUnitDocuments.size,
+            maximumDwarfMetadataBytes = admitted.boundedUnitMetadataBytes,
+        )
 
         StableControlFile.open(
             richArtifact,
@@ -112,7 +206,7 @@ internal object FullTreeSourceEntityIdentityProducer {
                 artifact,
                 scratchParent,
                 scope.document,
-                controlLimits,
+                identityDwarfLimits,
                 checkpoint,
             )
             FullTreeFunctionObservationProducer.authenticateInventoryAgainstArtifact(
@@ -120,13 +214,6 @@ internal object FullTreeSourceEntityIdentityProducer {
                 observedUnits,
                 scope.document,
             )
-            val unitDocuments = inputs.inventory.controlArray("units").controlObjects("inventory units")
-            val unitByOffset = unitDocuments.associateBy {
-                parseDwarfOffset(it.controlString("dwarfOffset"), "inventory DWARF offset")
-            }
-            if (unitByOffset.size != unitDocuments.size) {
-                throw FullTreeControlException("authenticated inventory repeats a DWARF compilation-unit offset")
-            }
             val headerParseBudget = FullTreeDwarfParseBudget(controlLimits.maximumDwarfParseSteps, checkpoint)
             var scannedDies = 0L
             var peakRetainedLineTableBytes = 0L
@@ -150,14 +237,14 @@ internal object FullTreeSourceEntityIdentityProducer {
                 val info = sections.required(".debug_info")
                 val headers = FullTreeFunctionObservationProducer.readAllHeaders(
                     info,
-                    unitDocuments.size,
+                    inventoryUnitDocuments.size,
                     headerParseBudget,
                 )
                 val headersByOffset = headers.associateBy { it.offset }
                 val retainedTags = sourceIdentityRetainedTags()
                 val maximumRetainedBytes = minOf(
                     producerLimits.dieLimits.maximumRetainedBytes,
-                    maximumRepositoryBytes / (2L * producerLimits.maximumCachedCompilationUnits),
+                    admitted.maximumRepositoryBytes / (2L * producerLimits.maximumCachedCompilationUnits),
                 )
                 if (maximumRetainedBytes <= 0L) {
                     throw FullTreeControlException("source-identity retained-unit budget is empty")
@@ -300,6 +387,50 @@ internal data class SourceIdentityMemoryBounds(
     val maximumModeledRetainedBytes: Long,
 )
 
+private data class SourceIdentityInventoryAdmission(
+    val compilationUnitCount: Int,
+    val boundedUnitMetadataBytes: Long,
+    val maximumRepositoryBytes: Long,
+)
+
+/**
+ * Modeled co-resident control and index structures, separate from retained source facts and the
+ * repository's decoded DIE cache. Inventory payload expansion covers raw/canonical buffers and
+ * decoded strings, and a per-JSON-node charge covers the parser's bounded object graph. The per-CU
+ * allowance covers inventory entries, header/list/map nodes, and temporary validation indexes.
+ * Observed CU strings/records and ELF layout use their own models. These deterministic charges
+ * are an admission model; they do not claim to be measured JVM RSS.
+ */
+internal fun sourceIdentityFixedStructureResidentBytes(
+    authenticatedInventoryBytes: Long,
+    modeledInventoryJsonNodes: Long,
+    compilationUnitCount: Long,
+    modeledElfLayoutBytes: Long,
+    modeledObservedUnitMetadataBytes: Long,
+): Long {
+    require(
+        authenticatedInventoryBytes >= 0L && modeledInventoryJsonNodes >= 0L && compilationUnitCount >= 0L &&
+            modeledElfLayoutBytes >= 0L && modeledObservedUnitMetadataBytes >= 0L,
+    )
+    return try {
+        Math.addExact(
+            Math.addExact(
+                Math.addExact(
+                    Math.multiplyExact(authenticatedInventoryBytes, SOURCE_IDENTITY_INVENTORY_EXPANSION_FACTOR),
+                    Math.addExact(
+                        Math.multiplyExact(modeledInventoryJsonNodes, SOURCE_IDENTITY_CONTROL_JSON_NODE_BYTES),
+                        Math.multiplyExact(compilationUnitCount, SOURCE_IDENTITY_COMPILATION_UNIT_INDEX_BYTES),
+                    ),
+                ),
+                modeledElfLayoutBytes,
+            ),
+            modeledObservedUnitMetadataBytes,
+        )
+    } catch (failure: ArithmeticException) {
+        throw FullTreeControlException("source-identity fixed-structure model overflows", failure)
+    }
+}
+
 /** Keep row, transient row scratch, retained-model, and shard-output ceilings distinct. */
 internal fun sourceIdentityMemoryBounds(
     authenticatedMaximumResidentBytes: Long,
@@ -333,20 +464,24 @@ internal fun sourceIdentityMemoryBounds(
     return SourceIdentityMemoryBounds(rowBytes, rowScratchBytes, retainedBytes)
 }
 
-/** Preflight resident space after line tables, retained facts, output, and the largest-row scratch. */
+/** Preflight modeled resident space after line tables, source facts, fixed indexes, output, and row scratch. */
 internal fun sourceIdentityAvailableRepositoryWorkingSetBytes(
     authenticatedMaximumResidentBytes: Long,
     modeledLineTableBytes: Long,
     modeledRetainedFactBytes: Long,
     maximumSerializedOutputBytes: Long,
     maximumRowScratchBytes: Long,
+    modeledFixedStructureBytes: Long = 0L,
 ): Long {
     val available = try {
         Math.subtractExact(
             Math.subtractExact(
                 Math.subtractExact(
-                    Math.subtractExact(authenticatedMaximumResidentBytes, modeledLineTableBytes),
-                    modeledRetainedFactBytes,
+                    Math.subtractExact(
+                        Math.subtractExact(authenticatedMaximumResidentBytes, modeledLineTableBytes),
+                        modeledRetainedFactBytes,
+                    ),
+                    modeledFixedStructureBytes,
                 ),
                 maximumSerializedOutputBytes,
             ),
@@ -886,48 +1021,112 @@ private class SourceEntityIdentityReader(
             var patternAnchorId: String? = null
             var actualArguments: List<String>? = null
             if (kind == FullTreeSourceAnchorKind.TEMPLATE_PATTERN || kind == FullTreeSourceAnchorKind.TEMPLATE_INSTANCE) {
-                val formalChildren = packedSubprogramChildren(
-                    templateSourceUnit,
-                    templateSourceRecord,
-                    setOf(DW_TAG_TEMPLATE_TYPE_PARAMETER, DW_TAG_TEMPLATE_VALUE_PARAMETER),
-                    if (kind == FullTreeSourceAnchorKind.TEMPLATE_PATTERN) FullTreeSourceIdentityEdgeKind.TEMPLATE_FORMAL
-                    else FullTreeSourceIdentityEdgeKind.TEMPLATE_ARGUMENT,
-                    edges,
-                )
-                val formals = formalChildren.map(PackedSubprogramChild::record)
-                if (formals.size > MAXIMUM_DWARF_TEMPLATE_PARAMETERS) {
-                    throw FullTreeControlException("source-identity template parameters exceed their 1,024-entry bound")
-                }
                 if (kind == FullTreeSourceAnchorKind.TEMPLATE_PATTERN) {
-                    if (formals.isEmpty() || templateState(templateSourceUnit, formals, edges, reasons) != TemplateParameterState.PATTERN) {
-                        reasons += "unknown-template-pattern-formals"
-                        return null
-                    }
-                    val values = arrayListOf<String>()
-                    formalChildren.forEach { packedFormal ->
-                        val formal = packedFormal.record
-                        addStructuralEdge(physical(templateSourceUnit, templateSourceRecord), physical(templateSourceUnit, formal), FullTreeSourceIdentityEdgeKind.TEMPLATE_FORMAL, edges)
-                        val name = formal.optionalUniqueAttribute(DW_AT_NAME, "DW_AT_name")?.let {
-                            FullTreeDwarfForms.decodeString(it.value, templateSourceUnit.sections, templateSourceUnit.stringOffsetsBase, templateSourceUnit.header.offsetSize, controlLimits, "template formal name", 16_384)
+                    val formalBranches = arrayListOf<SourceAnchorBranchValue<List<String>>>()
+                    var unknownFormalBranch = false
+                    var conflictingFormalKind = false
+                    sourceRecords.distinctBy { physical(it.unit, it.record).locator() }.forEach { source ->
+                        val sourceFormals = packedSubprogramChildren(
+                            source.unit,
+                            source.record,
+                            setOf(DW_TAG_TEMPLATE_TYPE_PARAMETER, DW_TAG_TEMPLATE_VALUE_PARAMETER),
+                            FullTreeSourceIdentityEdgeKind.TEMPLATE_FORMAL,
+                            edges,
+                        )
+                        if (sourceFormals.isEmpty()) return@forEach
+                        val sourceRecordsForFormals = sourceFormals.map(PackedSubprogramChild::record)
+                        if (sourceRecordsForFormals.size > MAXIMUM_DWARF_TEMPLATE_PARAMETERS) {
+                            throw FullTreeControlException("source-identity template parameters exceed their 1,024-entry bound")
                         }
-                        val descriptor = if (formal.tag == DW_TAG_TEMPLATE_TYPE_PARAMETER) {
-                            "type-formal:${name ?: "unnamed"}"
-                        } else {
-                            val declaredType = sourceReferenceAttribute(
-                                templateSourceUnit, formal, DW_AT_TYPE,
-                                FullTreeSourceIdentityEdgeKind.TEMPLATE_FORMAL, edges, reasons,
-                            )?.let { typeDescriptor(templateSourceUnit, formal, it, edges, FullTreeSourceIdentityEdgeKind.TEMPLATE_FORMAL, reasons) }
-                            if (declaredType == null) {
-                                reasons += "unknown-template-formal-type"
-                                return null
+                        when (templateState(source.unit, sourceRecordsForFormals, edges, reasons)) {
+                            TemplateParameterState.PATTERN -> {
+                                val values = arrayListOf<String>()
+                                var complete = true
+                                sourceFormals.forEach { packedFormal ->
+                                    val formal = packedFormal.record
+                                    addStructuralEdge(
+                                        physical(source.unit, source.record),
+                                        physical(source.unit, formal),
+                                        FullTreeSourceIdentityEdgeKind.TEMPLATE_FORMAL,
+                                        edges,
+                                    )
+                                    val name = formal.optionalUniqueAttribute(DW_AT_NAME, "DW_AT_name")?.let {
+                                        FullTreeDwarfForms.decodeString(
+                                            it.value,
+                                            source.unit.sections,
+                                            source.unit.stringOffsetsBase,
+                                            source.unit.header.offsetSize,
+                                            controlLimits,
+                                            "template formal name",
+                                            16_384,
+                                        )
+                                    }
+                                    val descriptor = if (formal.tag == DW_TAG_TEMPLATE_TYPE_PARAMETER) {
+                                        "type-formal:${name ?: "unnamed"}"
+                                    } else {
+                                        val declaredType = sourceReferenceAttribute(
+                                            source.unit,
+                                            formal,
+                                            DW_AT_TYPE,
+                                            FullTreeSourceIdentityEdgeKind.TEMPLATE_FORMAL,
+                                            edges,
+                                            reasons,
+                                        )?.let {
+                                            typeDescriptor(
+                                                source.unit,
+                                                formal,
+                                                it,
+                                                edges,
+                                                FullTreeSourceIdentityEdgeKind.TEMPLATE_FORMAL,
+                                                reasons,
+                                            )
+                                        }
+                                        if (declaredType == null) null else "value-formal:$declaredType:${name ?: "unnamed"}"
+                                    }
+                                    if (descriptor == null) {
+                                        reasons += "unknown-template-formal-type"
+                                        complete = false
+                                    } else {
+                                        budget.charge(
+                                            descriptor.toByteArray(StandardCharsets.UTF_8).size.toLong(),
+                                            "template formal descriptor",
+                                        )
+                                        values += packedFormal.packPath?.let { "pack[$it]:$descriptor" } ?: descriptor
+                                    }
+                                }
+                                if (complete) formalBranches += SourceAnchorBranchValue(source.score, values)
+                                else unknownFormalBranch = true
                             }
-                            "value-formal:$declaredType:${name ?: "unnamed"}"
+                            TemplateParameterState.UNKNOWN -> {
+                                reasons += "unknown-template-pattern-formals"
+                                unknownFormalBranch = true
+                            }
+                            TemplateParameterState.INSTANCE, TemplateParameterState.NONE -> {
+                                reasons += "ambiguous-inherited-template-formals"
+                                conflictingFormalKind = true
+                            }
                         }
-                        budget.charge(descriptor.toByteArray(StandardCharsets.UTF_8).size.toLong(), "template formal descriptor")
-                        values += packedFormal.packPath?.let { "pack[$it]:$descriptor" } ?: descriptor
                     }
-                    templateFormalDescriptors = values
+                    val mergedFormals = mergeValidatedSourceAnchorBranches(formalBranches)
+                    if (mergedFormals.ambiguous) {
+                        reasons += "ambiguous-inherited-template-formals"
+                    }
+                    templateFormalDescriptors = mergedFormals.value.takeUnless {
+                        unknownFormalBranch || conflictingFormalKind || mergedFormals.ambiguous
+                    }
+                    if (templateFormalDescriptors == null) reasons += "unknown-template-pattern-formals"
                 } else {
+                    val formalChildren = packedSubprogramChildren(
+                        templateSourceUnit,
+                        templateSourceRecord,
+                        setOf(DW_TAG_TEMPLATE_TYPE_PARAMETER, DW_TAG_TEMPLATE_VALUE_PARAMETER),
+                        FullTreeSourceIdentityEdgeKind.TEMPLATE_ARGUMENT,
+                        edges,
+                    )
+                    val formals = formalChildren.map(PackedSubprogramChild::record)
+                    if (formals.size > MAXIMUM_DWARF_TEMPLATE_PARAMETERS) {
+                        throw FullTreeControlException("source-identity template parameters exceed their 1,024-entry bound")
+                    }
                     val args = arrayListOf<String>()
                     formalChildren.forEach { packedFormal ->
                         val formal = packedFormal.record
@@ -1045,6 +1244,11 @@ private class SourceEntityIdentityReader(
             }
             if (sourcePath == null || declLine == null || language == null || signature == null) {
                 reasons += "source-anchor-incomplete"
+            }
+            if (kind == FullTreeSourceAnchorKind.TEMPLATE_INSTANCE && sourceName != null && actualArguments != null &&
+                canonicalSourceIdentityTemplateInstanceBaseName(sourceName, actualArguments.size) == null
+            ) {
+                reasons += "unknown-template-instance-name-rendering"
             }
             val fields = FullTreeSourceAnchorFields(
                 sourcePath = sourcePath,
@@ -1273,7 +1477,7 @@ private class SourceEntityIdentityReader(
             parameterChildren.forEach { packedParameter ->
                 val parameter = packedParameter.record
                 if (parameter.tag == DW_TAG_UNSPECIFIED_PARAMETERS) {
-                    values += packedParameter.packPath?.let { "pack[$it]:varargs" } ?: "varargs"
+                    values += "varargs"
                 } else {
                     val type = sourceReferenceAttribute(
                         source.unit, parameter, DW_AT_TYPE, FullTreeSourceIdentityEdgeKind.TYPE, edges, reasons,
@@ -1288,7 +1492,7 @@ private class SourceEntityIdentityReader(
                         if (descriptor == null) {
                             parameterSetUnknown = true
                         } else {
-                            values += packedParameter.packPath?.let { "pack[$it]:parameter:$descriptor" } ?: "parameter:$descriptor"
+                            values += "parameter:$descriptor"
                         }
                     }
                 }
@@ -1467,7 +1671,7 @@ private class SourceEntityIdentityReader(
                 unit, record, DW_AT_TYPE, FullTreeSourceIdentityEdgeKind.TYPE, edges, reasons,
             ) ?: return null
             val ref = referenceEdge(unit, record, attr, FullTreeSourceIdentityEdgeKind.TYPE, physical, edges) ?: return null
-            return describeType(ref.first, ref.second, seen, depth + 1, reasons, edges)?.let { "$label<$it>" }
+            return describeType(ref.first, ref.second, HashSet(seen), depth + 1, reasons, edges)?.let { "$label<$it>" }
         }
         return when (record.tag) {
             DW_TAG_BASE_TYPE -> {
@@ -1482,6 +1686,65 @@ private class SourceEntityIdentityReader(
             DW_TAG_VOLATILE_TYPE -> nested("volatile")
             DW_TAG_RESTRICT_TYPE -> nested("restrict")
             DW_TAG_TYPEDEF -> name?.let { typedef -> nested("typedef:$typedef") }
+            DW_TAG_SUBROUTINE_TYPE -> {
+                val parts = arrayListOf<String>()
+                fun appendPart(part: String) {
+                    budget.charge(
+                        part.toByteArray(StandardCharsets.UTF_8).size.toLong() + 8L,
+                        "subroutine type component",
+                    )
+                    parts += part
+                }
+                if (record.attributesNamed(DW_AT_TYPE).isEmpty()) {
+                    appendPart("return:void")
+                } else {
+                    val returnAttribute = sourceReferenceAttribute(
+                        unit, record, DW_AT_TYPE, FullTreeSourceIdentityEdgeKind.TYPE, edges, reasons,
+                    ) ?: return null
+                    val returnTarget = referenceEdge(
+                        unit, record, returnAttribute, FullTreeSourceIdentityEdgeKind.TYPE, physical, edges,
+                    ) ?: return null
+                    val returnType = describeType(
+                        returnTarget.first, returnTarget.second, HashSet(seen), depth + 1, reasons, edges,
+                    ) ?: return null
+                    appendPart("return:$returnType")
+                }
+                val parameters = packedSubprogramChildren(
+                    unit,
+                    record,
+                    setOf(DW_TAG_FORMAL_PARAMETER, DW_TAG_UNSPECIFIED_PARAMETERS),
+                    FullTreeSourceIdentityEdgeKind.TYPE,
+                    edges,
+                )
+                if (parameters.size > MAXIMUM_DWARF_PARAMETERS) {
+                    throw FullTreeControlException("source-identity callback parameters exceed their 1,024-entry bound")
+                }
+                parameters.forEach { packedParameter ->
+                    val parameter = packedParameter.record
+                    if (parameter.tag == DW_TAG_UNSPECIFIED_PARAMETERS) {
+                        appendPart("varargs")
+                    } else {
+                        val attribute = sourceReferenceAttribute(
+                            unit, parameter, DW_AT_TYPE, FullTreeSourceIdentityEdgeKind.TYPE, edges, reasons,
+                        ) ?: run {
+                            reasons += "unknown-callback-parameter-type"
+                            return null
+                        }
+                        val target = referenceEdge(
+                            unit, parameter, attribute, FullTreeSourceIdentityEdgeKind.TYPE, physical(unit, parameter), edges,
+                        ) ?: return null
+                        val descriptor = describeType(
+                            target.first, target.second, HashSet(seen), depth + 1, reasons, edges,
+                        ) ?: return null
+                        appendPart("parameter:$descriptor")
+                    }
+                }
+                val descriptor = "subroutine[" + parts.joinToString(separator = "") { part ->
+                    "${part.toByteArray(StandardCharsets.UTF_8).size}:$part"
+                } + "]"
+                budget.charge(descriptor.toByteArray(StandardCharsets.UTF_8).size.toLong(), "subroutine type descriptor")
+                descriptor
+            }
             DW_TAG_CLASS_TYPE, DW_TAG_STRUCTURE_TYPE, DW_TAG_UNION_TYPE, DW_TAG_ENUMERATION_TYPE -> {
                 val tag = when (record.tag) {
                     DW_TAG_CLASS_TYPE -> "class"
@@ -1743,7 +2006,7 @@ private class SourceEntityIdentityReader(
                 throw FullTreeControlException("source-identity lexical context exceeds its depth bound")
             }
             val current = unit.index.find(parent) ?: break
-            if (current.tag == DW_TAG_NAMESPACE || current.tag == DW_TAG_CLASS_TYPE || current.tag == DW_TAG_STRUCTURE_TYPE) {
+            if (current.tag in setOf(DW_TAG_NAMESPACE, DW_TAG_CLASS_TYPE, DW_TAG_STRUCTURE_TYPE, DW_TAG_UNION_TYPE)) {
                 val name = current.optionalUniqueAttribute(DW_AT_NAME, "DW_AT_name")?.let {
                     FullTreeDwarfForms.decodeString(it.value, unit.sections, unit.stringOffsetsBase, unit.header.offsetSize, controlLimits, "lexical context name", 16_384)
                 }

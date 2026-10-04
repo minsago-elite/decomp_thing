@@ -194,6 +194,15 @@ class FullTreeSourceEntityIdentityTest {
         assertTrue(parameterSet.ambiguous)
         assertNull(parameterSet.value)
 
+        val templateFormals = mergeValidatedSourceAnchorBranches(
+            listOf(
+                SourceAnchorBranchValue(score = 10, value = listOf("type-formal:T", "value-formal:base:int:N")),
+                SourceAnchorBranchValue(score = 1, value = listOf("type-formal:U", "value-formal:base:int:N")),
+            ),
+        )
+        assertTrue(templateFormals.ambiguous)
+        assertNull(templateFormals.value)
+
         val declarationColumn = mergeValidatedSourceAnchorBranches(
             listOf(
                 SourceAnchorBranchValue(score = 9, value = 23L),
@@ -311,6 +320,39 @@ class FullTreeSourceEntityIdentityTest {
                 modeledRetainedFactBytes = 64L * 1024L * 1024L,
                 maximumSerializedOutputBytes = 256L * 1024L * 1024L,
                 maximumRowScratchBytes = 128L * 1024L * 1024L,
+            )
+        }
+    }
+
+    @Test
+    fun `small resident budgets reject co-resident many-unit index structures before headers materialize`() {
+        assertEquals(controlJsonLimits(1_024).maximumNodes.toLong(), MAXIMUM_SOURCE_IDENTITY_CONTROL_JSON_NODES)
+        assertEquals(
+            64L * 1024L,
+            sourceIdentityFixedStructureResidentBytes(
+                authenticatedInventoryBytes = 0L,
+                modeledInventoryJsonNodes = 1_024L,
+                compilationUnitCount = 0L,
+                modeledElfLayoutBytes = 0L,
+                modeledObservedUnitMetadataBytes = 0L,
+            ),
+        )
+        val fixedStructures = sourceIdentityFixedStructureResidentBytes(
+            authenticatedInventoryBytes = 4L * 1024L,
+            modeledInventoryJsonNodes = 0L,
+            compilationUnitCount = 16_384L,
+            modeledElfLayoutBytes = 8L * 1024L * 1024L,
+            modeledObservedUnitMetadataBytes = 0L,
+        )
+        assertTrue(fixedStructures > 24L * 1024L * 1024L)
+        assertFailsWith<FullTreeControlException> {
+            sourceIdentityAvailableRepositoryWorkingSetBytes(
+                authenticatedMaximumResidentBytes = 24L * 1024L * 1024L,
+                modeledLineTableBytes = 1L * 1024L * 1024L,
+                modeledRetainedFactBytes = 4L * 1024L * 1024L,
+                maximumSerializedOutputBytes = 4L * 1024L * 1024L,
+                maximumRowScratchBytes = 2L * 1024L * 1024L,
+                modeledFixedStructureBytes = fixedStructures,
             )
         }
     }
@@ -532,6 +574,52 @@ class FullTreeSourceEntityIdentityTest {
             inlinePathAnchorCandidateIds = listOf("c".repeat(64)),
         ).candidateId(FullTreeSourceEntityKind.INLINE_INSTANCE)
         assertNotEquals(inlineAtCallOne, inlineAtCallTwo)
+    }
+
+    @Test
+    fun `template instance candidates normalize only balanced rendered specialization suffixes`() {
+        val actual = listOf("type-argument:base:long:encoding=5:bytes=8")
+        val gccStyle = fields(sourceName = "rendered<long int>", templateActualArguments = actual)
+        val clangStyle = fields(sourceName = "rendered<long>", templateActualArguments = actual)
+        assertNotEquals(gccStyle.canonicalJson(), clangStyle.canonicalJson())
+        assertEquals(
+            gccStyle.candidateId(FullTreeSourceEntityKind.TEMPLATE_INSTANCE),
+            clangStyle.candidateId(FullTreeSourceEntityKind.TEMPLATE_INSTANCE),
+        )
+        val gccNestedStyle = fields(
+            sourceName = "rendered<std::pair<long int, long int>>",
+            templateActualArguments = listOf("type-argument:pair<long,long>"),
+        )
+        val clangNestedStyle = fields(
+            sourceName = "rendered<std::pair<long, long>>",
+            templateActualArguments = listOf("type-argument:pair<long,long>"),
+        )
+        assertEquals(
+            gccNestedStyle.candidateId(FullTreeSourceEntityKind.TEMPLATE_INSTANCE),
+            clangNestedStyle.candidateId(FullTreeSourceEntityKind.TEMPLATE_INSTANCE),
+        )
+        assertNotEquals(
+            fields(sourceName = "first<long>", templateActualArguments = actual)
+                .candidateId(FullTreeSourceEntityKind.TEMPLATE_INSTANCE),
+            fields(sourceName = "second<long>", templateActualArguments = actual)
+                .candidateId(FullTreeSourceEntityKind.TEMPLATE_INSTANCE),
+        )
+        assertNull(fields(sourceName = "rendered<long", templateActualArguments = actual)
+            .candidateId(FullTreeSourceEntityKind.TEMPLATE_INSTANCE))
+        assertNull(fields(sourceName = "rendered<>", templateActualArguments = actual)
+            .candidateId(FullTreeSourceEntityKind.TEMPLATE_INSTANCE))
+        assertNull(fields(sourceName = "rendered<long, int>", templateActualArguments = actual)
+            .candidateId(FullTreeSourceEntityKind.TEMPLATE_INSTANCE))
+        assertNull(
+            fields(sourceName = "rendered" + "<".repeat(4_096) + ">", templateActualArguments = actual)
+                .candidateId(FullTreeSourceEntityKind.TEMPLATE_INSTANCE),
+        )
+        assertNotEquals(
+            fields(sourceName = "rendered<long int>")
+                .candidateId(FullTreeSourceEntityKind.NO_RANGE_DEFINITION),
+            fields(sourceName = "rendered<long>")
+                .candidateId(FullTreeSourceEntityKind.NO_RANGE_DEFINITION),
+        )
     }
 
     @Test

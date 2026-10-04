@@ -4,12 +4,24 @@
 DECLARE_SAME_LINE_TYPE(scope_left) DECLARE_SAME_LINE_TYPE(scope_right)
 #undef DECLARE_SAME_LINE_TYPE
 
+#define DECLARE_SAME_LINE_UNION(NAME) union NAME { struct Payload { int value; }; };
+DECLARE_SAME_LINE_UNION(SameUnionLeft) DECLARE_SAME_LINE_UNION(SameUnionRight)
+#undef DECLARE_SAME_LINE_UNION
+
 inline int declaration_only_inline(int value);
 template <typename T>
 inline T pattern_only(T value);
 
 inline int shared_inline(int value) {
     return value * 3 + 1;
+}
+
+inline int callback_target(int value, ...) {
+    return value + 1;
+}
+
+__attribute__((noinline)) inline int callback_signature(int (*callback)(int, ...), int value) {
+    return callback(value, value + 1);
 }
 
 inline int nested_leaf(int value) {
@@ -63,8 +75,15 @@ __attribute__((noinline)) inline T scoped_type_template(T value) {
     return value;
 }
 
+template <typename T>
+__attribute__((noinline)) inline T union_scoped_template(T value) {
+    return value;
+}
+
 extern template int template_pattern<int>(int);
 extern template long template_pattern<long>(long);
 extern template int unique_template_pattern<int>(int);
 extern template long unique_template_pattern<long>(long);
 extern template int pattern_only<int>(int);
+extern template SameUnionLeft::Payload union_scoped_template<SameUnionLeft::Payload>(SameUnionLeft::Payload);
+extern template SameUnionRight::Payload union_scoped_template<SameUnionRight::Payload>(SameUnionRight::Payload);

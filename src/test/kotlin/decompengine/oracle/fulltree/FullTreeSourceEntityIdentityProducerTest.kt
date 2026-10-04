@@ -397,8 +397,11 @@ class FullTreeSourceEntityIdentityProducerTest {
             }
             if (dwarfShape.contains("DW_TAG_GNU_formal_parameter_pack")) {
                 assertTrue(packedTemplateInstances.any { fact ->
-                    fact.semanticAnchorFields?.signature.orEmpty().any { it.startsWith("pack[") }
-                }, "GNU formal parameter pack paths were not retained; $runDescription")
+                    fact.semanticAnchorFields?.signature.orEmpty().any { it.startsWith("parameter:") }
+                }, "expanded GNU formal parameter pack types were not retained; $runDescription")
+                assertTrue(packedTemplateInstances.all { fact ->
+                    fact.semanticAnchorFields?.signature.orEmpty().none { it.startsWith("pack[") }
+                }, "producer-specific formal parameter pack wrappers leaked into signatures; $runDescription")
             }
         }
         val intAndLongShapesPresent = hasDwarfName(dwarfShape, "template_pattern<int") &&
@@ -431,10 +434,15 @@ class FullTreeSourceEntityIdentityProducerTest {
             assertTrue(intCandidates.isNotEmpty(), "complete int instance tuple has no candidate; $runDescription")
             assertTrue(longCandidates.isNotEmpty(), "complete long instance tuple has no candidate; $runDescription")
             assertTrue(intCandidates.intersect(longCandidates.toSet()).isEmpty(), "int/long instance candidates collided; $runDescription")
-            val missingPatternRelation = (intTemplateInstances + longTemplateInstances).filter {
+            val unlinkedIntInstances = intTemplateInstances.filter {
                 it.semanticAnchorFields?.templatePatternAnchorCandidateId == null
             }
-            assertTrue(missingPatternRelation.isNotEmpty(), "compiler emitted no explicitly unlinked int/long instance; $runDescription")
+            val unlinkedLongInstances = longTemplateInstances.filter {
+                it.semanticAnchorFields?.templatePatternAnchorCandidateId == null
+            }
+            assertTrue(unlinkedIntInstances.isNotEmpty(), "compiler emitted no explicitly unlinked int instance; $runDescription")
+            assertTrue(unlinkedLongInstances.isNotEmpty(), "compiler emitted no explicitly unlinked long instance; $runDescription")
+            val missingPatternRelation = unlinkedIntInstances + unlinkedLongInstances
             assertTrue(missingPatternRelation.all {
                 it.identityObservability in setOf(FullTreeIdentityObservability.UNKNOWN, FullTreeIdentityObservability.AMBIGUOUS) &&
                     it.resolvedSemanticIdentityId == null &&
@@ -499,6 +507,14 @@ class FullTreeSourceEntityIdentityProducerTest {
             it.denominatorDisposition == FullTreeDenominatorDisposition.NON_SCOREABLE && it.linkedEmittedRva == null
         }, runDescription)
 
+        val callbackFacts = facts.filter { it.semanticAnchorFields?.sourceName == "callback_signature" }
+        assertTrue(callbackFacts.isNotEmpty(), "callback function DIE was not retained; $runDescription")
+        assertTrue(callbackFacts.all { fact ->
+            val signature = fact.semanticAnchorFields?.signature.orEmpty().joinToString("|")
+            "subroutine[" in signature && "varargs" in signature
+        }, "callback signatures were not completely described; $runDescription")
+        assertTrue(callbackFacts.none { "unsupported-type-shape" in it.reasonCodes }, runDescription)
+
         val sharedInline = facts.filter {
             it.kind == FullTreeSourceEntityKind.INLINE_INSTANCE && it.semanticAnchorFields?.sourceName == "shared_inline"
         }
@@ -512,6 +528,20 @@ class FullTreeSourceEntityIdentityProducerTest {
             }.distinct()
             assertTrue(scopedTypeArguments.size >= 2, "same-spelling types from different namespaces collided; $runDescription")
             assertTrue(scopedTypeArguments.all { "scope[" in it }, "named-type template descriptors omitted lexical scope; $runDescription")
+
+            val unionScopedInstances = templateInstances.filter {
+                it.semanticAnchorFields?.sourceName?.startsWith("union_scoped_template<") == true
+            }
+            assertTrue(unionScopedInstances.isNotEmpty(), "union-scoped template instances were not retained; $runDescription")
+            val unionScopedArguments = unionScopedInstances.mapNotNull {
+                it.semanticAnchorFields?.templateActualArguments?.singleOrNull()
+            }.distinct()
+            assertTrue(unionScopedArguments.size >= 2, "same-name types in distinct union scopes collided; $runDescription")
+            assertTrue(unionScopedArguments.all { "scope[" in it && "SameUnion" in it }, runDescription)
+            assertTrue(
+                unionScopedInstances.mapNotNull { it.semanticAnchorCandidateId }.distinct().size >= 2,
+                "union lexical scopes did not distinguish instance candidates; $runDescription",
+            )
 
             val overloadFacts = facts.filter { it.semanticAnchorFields?.sourceName == "overloaded" }
             val overloadedShapePresent = Regex("DW_AT_name.*overloaded").containsMatchIn(dwarfShape)
