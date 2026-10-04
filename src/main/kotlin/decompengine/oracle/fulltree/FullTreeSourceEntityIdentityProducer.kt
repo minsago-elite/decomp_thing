@@ -261,7 +261,7 @@ internal object FullTreeSourceEntityIdentityProducer {
                     headerParseBudget,
                     retainedTags = retainedTags,
                     contextForAttribute = ::sourceIdentityAttributeContext,
-                    maximumRetainedWorkingSetBytes = maximumRepositoryBytes,
+                    maximumRetainedWorkingSetBytes = admitted.maximumRepositoryBytes,
                     maximumRetainedLineTableWorkingSetBytes = modeledLineBytes,
                 )
                 val sourceRevision = scope.sourceLock.controlObject("revision").controlString("commit")
