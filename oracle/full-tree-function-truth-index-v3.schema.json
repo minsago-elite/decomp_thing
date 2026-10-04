@@ -1,0 +1,295 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-function-truth-index-v3.schema.json",
+  "title": "Authenticated full-tree function truth v3 index with source-entity census",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "complete",
+    "oracle",
+    "counts",
+    "shards",
+    "exclusions",
+    "indexSha256",
+    "identityReconciliation"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 2
+    },
+    "complete": {
+      "const": true
+    },
+    "oracle": {
+      "type": "object"
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "elfRvas",
+        "dwarfRvas",
+        "scoredRvas",
+        "elfOnlyRvas",
+        "dwarfOnlyRvas",
+        "nonEmittedObservations",
+        "nonEmittedUnique",
+        "inlineOnlyUnique",
+        "selectedElsewhereUnique",
+        "definitionNoRangeUnique",
+        "coalescedEmittedRvas",
+        "sourceEntities",
+        "sourceEntitiesByKind",
+        "sourceEntitiesByObservability",
+        "sourceEntitiesByDenominatorDisposition"
+      ],
+      "properties": {
+        "elfRvas": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dwarfRvas": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "scoredRvas": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "elfOnlyRvas": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dwarfOnlyRvas": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "nonEmittedObservations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "nonEmittedUnique": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "inlineOnlyUnique": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "selectedElsewhereUnique": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "definitionNoRangeUnique": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "coalescedEmittedRvas": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sourceEntities": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sourceEntitiesByKind": {
+          "$ref": "#/$defs/kindCounts"
+        },
+        "sourceEntitiesByObservability": {
+          "$ref": "#/$defs/observabilityCounts"
+        },
+        "sourceEntitiesByDenominatorDisposition": {
+          "$ref": "#/$defs/dispositionCounts"
+        }
+      }
+    },
+    "shards": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/file"
+      }
+    },
+    "exclusions": {
+      "$ref": "#/$defs/file"
+    },
+    "indexSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "identityReconciliation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "candidateCount",
+        "claimCount",
+        "collisionCandidateCount",
+        "populationSha256"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "full-run-anchor-claims-v1"
+        },
+        "candidateCount": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "claimCount": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "collisionCandidateCount": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "populationSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "path",
+        "sha256",
+        "bytes",
+        "functions",
+        "nonEmitted",
+        "sourceEntities"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "functions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "nonEmitted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sourceEntities": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "kindCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "declaration-only",
+        "inline-instance",
+        "no-range-definition",
+        "template-instance",
+        "template-pattern",
+        "unresolved"
+      ],
+      "properties": {
+        "declaration-only": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "inline-instance": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "no-range-definition": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "template-instance": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "template-pattern": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unresolved": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      }
+    },
+    "observabilityCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ambiguous",
+        "observable",
+        "unknown",
+        "unobservable"
+      ],
+      "properties": {
+        "ambiguous": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "observable": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unknown": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unobservable": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      }
+    },
+    "dispositionCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ambiguous",
+        "emitted-rva-link",
+        "non-scoreable",
+        "unknown"
+      ],
+      "properties": {
+        "ambiguous": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "emitted-rva-link": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "non-scoreable": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unknown": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      }
+    }
+  }
+}

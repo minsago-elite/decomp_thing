@@ -1,0 +1,56 @@
+{
+  "compiler": {
+    "family": "GCC",
+    "observedVersion": "g++ (Debian 14.2.0-19) 14.2.0",
+    "readelfVersion": "GNU readelf (GNU Binutils for Debian) 2.44"
+  },
+  "fixture": "inline-template-identity-v1",
+  "linkedElf": {
+    "bytes": 27040,
+    "sha256": "381ce2bb68a29fd72cfcb3c24ea5bc91a8a863753f939518659d946fcee0ecd2"
+  },
+  "producer": {
+    "configurationSha256": "ca163ed4fcf7d36e54e7967c52e2c58fac3b9eae7c215b455bee24e4cc09d0c8",
+    "id": "full-tree-function-truth",
+    "version": 3
+  },
+  "schemaIdentities": [
+    {
+      "name": "full-tree-function-truth-v3",
+      "schemaSha256": "81bc31d80ee00b32e39ae8d8154a8890ecf5d724322ac0d1eb4c303a0a547c43",
+      "wireVersion": 2
+    },
+    {
+      "name": "full-tree-function-truth-index-v3",
+      "schemaSha256": "230ea7a9b402047b23a7c875af8c079881fa7a08d258306d7fa97d492a4ec6a5",
+      "wireVersion": 2
+    }
+  ],
+  "sourceFiles": [
+    {
+      "path": "README.md",
+      "sha256": "e21506a185caf9b1a1095ba15ab7053d341634fcafd2c347c7efff18dd2f8bc8"
+    },
+    {
+      "path": "caller_one.cpp",
+      "sha256": "3338aa393b18753a6aa4e59b8a2a3ffd0b296acaefa3bde7ad9a35108c6c7e55"
+    },
+    {
+      "path": "caller_two.cpp",
+      "sha256": "10ae558f7c11e5625b34b512098c64616e674cd7e3c2ecbae8ad61b533e61a52"
+    },
+    {
+      "path": "include/identity_fixture.hpp",
+      "sha256": "edb675d9ef5418a0b5e27ee468bb1c321e6366499475125533949ce3cf41fbd0"
+    },
+    {
+      "path": "instantiate.cpp",
+      "sha256": "ccd85bec46349ca4337102eb5dd9e1b37a9cae9b25d50cd4fdc0e9b9bec09aea"
+    },
+    {
+      "path": "unique_pattern.cpp",
+      "sha256": "78d954d860983fb6492aa156dda65a501a596f226c06407ca032aee66b12a68a"
+    }
+  ],
+  "vectorKind": "compiler-input-v1"
+}
