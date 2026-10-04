@@ -12,6 +12,19 @@ inline int shared_inline(int value) {
     return value * 3 + 1;
 }
 
+inline int nested_leaf(int value) {
+    volatile int adjusted = value + 1;
+    return adjusted * 3;
+}
+
+inline int nested_middle(int value) {
+    return nested_leaf(value) + value * 7;
+}
+
+inline int nested_root(int value) {
+    return nested_middle(value) ^ (value + 17);
+}
+
 inline long overloaded(long value) {
     return value + 3L;
 }
