@@ -852,9 +852,11 @@ private class SourceEntityIdentityReader(
             }
             val declFile = sourcePathRecord?.record?.optionalNonNegativeLong(DW_AT_DECL_FILE, "DW_AT_decl_file")
                 ?: baseRecord.optionalNonNegativeLong(DW_AT_DECL_FILE, "DW_AT_decl_file")
-            // Keep the primary DIE's compiler-local optional column as raw evidence only.
-            val declColumn = baseRecord.optionalNonNegativeLong(DW_AT_DECL_COLUMN, "DW_AT_decl_column")
-                ?: sourceRecords.firstNotNullOfOrNull { it.record.optionalNonNegativeLong(DW_AT_DECL_COLUMN, "DW_AT_decl_column") }
+            // The optional compiler-local column is excluded from the semantic hash, but every
+            // validated branch still participates in conflict detection before retaining it.
+            val declColumn = uniqueInheritedSourceValue(sourceRecords, "declaration-column", reasons) { source ->
+                source.record.optionalNonNegativeLong(DW_AT_DECL_COLUMN, "DW_AT_decl_column")
+            }
             val sourceName = uniqueInheritedSourceValue(sourceRecords, "source-name", reasons) { source ->
                 source.record.optionalUniqueAttribute(DW_AT_NAME, "DW_AT_name")?.let { attr ->
                     FullTreeDwarfForms.decodeString(

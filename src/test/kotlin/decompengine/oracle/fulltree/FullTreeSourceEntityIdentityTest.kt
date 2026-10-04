@@ -194,6 +194,15 @@ class FullTreeSourceEntityIdentityTest {
         assertTrue(parameterSet.ambiguous)
         assertNull(parameterSet.value)
 
+        val declarationColumn = mergeValidatedSourceAnchorBranches(
+            listOf(
+                SourceAnchorBranchValue(score = 9, value = 23L),
+                SourceAnchorBranchValue(score = 1, value = 24L),
+            ),
+        )
+        assertTrue(declarationColumn.ambiguous)
+        assertNull(declarationColumn.value)
+
         val sourcePath = mergeValidatedSourceAnchorBranches(
             listOf(
                 SourceAnchorBranchValue(score = 7, value = "source/fixture.cpp"),
