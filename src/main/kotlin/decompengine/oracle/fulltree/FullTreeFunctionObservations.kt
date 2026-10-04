@@ -1042,6 +1042,7 @@ private fun canonicalValueByteSize(
         (OracleJson.canonicalBytes(value, CONTROL_JSON_LIMITS, checkpoint).size - 1).toLong()
     }
 }
+}
 
 private fun canonicalStringByteSize(value: String, checkpoint: (String) -> Unit = {}): Long {
     var size = 2L

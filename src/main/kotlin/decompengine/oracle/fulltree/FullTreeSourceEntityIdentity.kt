@@ -557,7 +557,7 @@ internal class FullTreeSourceEntityFact(
         }
     }
 
-    fun canonicalJson(checkpoint: (String) -> Unit = {}) {
+    fun canonicalJson(checkpoint: (String) -> Unit = {}): JsonObject {
         checkpoint("before encoding canonical source-entity JSON")
         var comparisons = 0
         val orderedEdges = edges.sortedWith { left, right ->
