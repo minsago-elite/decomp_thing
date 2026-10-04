@@ -57,6 +57,11 @@ class FullTreeFunctionObservationsV2Test {
         assertEquals(100L, fullTreeFunctionObservationV2AnchorClaimBound(Long.MAX_VALUE, 32, 100L, 1_000_000L))
         val claimBound = fullTreeFunctionObservationV2AnchorClaimBound(1_000_000L, 1, 4_000_000L, 1_000_000L)
         assertTrue(claimBound > 64L)
+        assertEquals(
+            132_000L,
+            fullTreeFunctionObservationV2AnchorClaimBound(100L, 40L, 4_000_000L, 100_000_000L),
+            "anchor capacity must include physical-record ceilings for every authenticated CU",
+        )
         val index = FullTreeFunctionObservationV2AnchorIndex(claimBound, 1_000_000L)
         repeat(65) { ordinal ->
             index.accept(
@@ -775,14 +780,35 @@ class FullTreeFunctionObservationsV2Test {
                 )
             }
 
-            val changedCollision = replaceSourceRow(valid, 0, JsonObject(
-                valid.getValue("sourceEntities").jsonArray[0].jsonObject.toMutableMap().apply {
+            val collidingIndex = valid.getValue("sourceEntities").jsonArray.indexOfFirst { row ->
+                row.jsonObject.getValue("candidateCollisionSourceEntityIds").jsonArray.isNotEmpty()
+            }
+            assertTrue(collidingIndex >= 0, "fixture must contain a full-run collision claimant")
+            val collisionReasons = setOf("duplicate-source-anchor-unproven", "ambiguous-related-source-anchor")
+            val changedCollisionRow = JsonObject(
+                valid.getValue("sourceEntities").jsonArray[collidingIndex].jsonObject.toMutableMap().apply {
                     this["identityObservability"] = JsonPrimitive("observable")
+                    this["candidateCollisionSourceEntityIds"] = JsonArray(emptyList())
+                    this["reasonCodes"] = JsonArray(
+                        getValue("reasonCodes").jsonArray.filterNot {
+                            it.jsonPrimitive.content in collisionReasons
+                        },
+                    )
                 },
-            ))
+            )
+            val changedCollision = replaceSourceRow(valid, collidingIndex, changedCollisionRow)
+            val changedCollisionFacts = changedCollision.getValue("sourceEntities").jsonArray.map {
+                FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
+            }
+            val collisionCounts = JsonObject(changedCollision.getValue("counts").jsonObject.toMutableMap().apply {
+                put("sourceEntitiesByObservability", sourceObservabilityCounts(changedCollisionFacts))
+            })
+            val collisionDocumentWithRecount = JsonObject(changedCollision.toMutableMap().apply {
+                put("counts", collisionCounts)
+            })
             assertFailsWith<FullTreeFunctionObservationV2Exception> {
                 FullTreeFunctionObservationsV2.validateEnvelope(
-                    changedCollision, scope, inventory, inventorySha256, firstShard, reconciliation,
+                    collisionDocumentWithRecount, scope, inventory, inventorySha256, firstShard, reconciliation,
                 )
             }
             val nonCollidingIndex = valid.getValue("sourceEntities").jsonArray.indexOfFirst { row ->
@@ -876,6 +902,117 @@ class FullTreeFunctionObservationsV2Test {
         assertEquals(128L, fullTreeFunctionObservationV2OutputByteLimit(256L, hardLimit = 128L))
         assertEquals(64L, fullTreeFunctionObservationV2OutputByteLimit(64L, hardLimit = 128L))
     }
+
+    @Test
+    fun `both v2 sinks enforce completed descriptor schema bounds before retention`() =
+        inControlTemporaryDirectory { root ->
+            val unit = JsonObject(mapOf(
+                "id" to JsonPrimitive("cu-${"1".repeat(32)}"),
+                "sourcePath" to JsonPrimitive("source/fixture.cpp"),
+            ))
+            val shard = FullTreeFunctionObservationShardInput("fixture-shard", "a".repeat(64), listOf(unit))
+            fun fact(dieOffset: String, descriptor: String): FullTreeSourceEntityFact {
+                val physical = FullTreeSourcePhysicalDie(
+                    richArtifactSha256 = "c".repeat(64),
+                    unitId = unit.controlString("id"),
+                    section = ".debug_info",
+                    compilationUnitOffset = "0x0",
+                    dieOffset = dieOffset,
+                )
+                val fields = FullTreeSourceAnchorFields(
+                    sourcePath = "source/fixture.cpp",
+                    declarationFileIndex = 0L,
+                    declarationLine = 1L,
+                    declarationColumn = null,
+                    language = 33L,
+                    lexicalContext = emptyList(),
+                    sourceName = "fixture",
+                    signature = listOf(descriptor),
+                )
+                return FullTreeSourceEntityFact(
+                    sourceEntityId = physical.sourceEntityId(FullTreeSourceEntityKind.NO_RANGE_DEFINITION),
+                    physicalDie = physical,
+                    kind = FullTreeSourceEntityKind.NO_RANGE_DEFINITION,
+                    identityObservability = FullTreeIdentityObservability.OBSERVABLE,
+                    denominatorDisposition = FullTreeDenominatorDisposition.NON_SCOREABLE,
+                    semanticAnchorFields = fields,
+                    semanticAnchorCandidateId = requireNotNull(
+                        fields.candidateId(FullTreeSourceAnchorKind.NO_RANGE_DEFINITION),
+                    ),
+                    resolvedSemanticIdentityId = null,
+                    candidateCollisionSourceEntityIds = emptyList(),
+                    linkedEmittedRva = null,
+                    reasonCodes = emptyList(),
+                    edges = emptyList(),
+                )
+            }
+
+            val exactFact = fact("0x10", "x".repeat(MAXIMUM_SOURCE_IDENTITY_DESCRIPTOR_CHARACTERS))
+            val overlongFact = fact("0x11", "x".repeat(MAXIMUM_SOURCE_IDENTITY_DESCRIPTOR_CHARACTERS + 1))
+            val index = FullTreeFunctionObservationV2AnchorIndex(1L, 4096L)
+            index.accept(
+                FullTreeSourceAnchorKind.NO_RANGE_DEFINITION,
+                requireNotNull(exactFact.semanticAnchorCandidateId),
+                exactFact.sourceEntityId,
+            )
+            val reconciliation = index.reconciliation()
+            val bindings = FullTreeFunctionObservationBindings(
+                inventoryIndexSha256 = "b".repeat(64),
+                richArtifactSha256 = "c".repeat(64),
+                scopeSha256 = "d".repeat(64),
+            )
+            val memory = FullTreeFunctionObservationAccumulatorV2(shard)
+            memory.recordScannedDies(1L)
+            memory.acceptSourceEntity(exactFact)
+            val memoryBytes = FullTreeFunctionObservationsV2.canonicalEnvelopeBytes(
+                memory.finish(
+                    inventoryIndexSha256 = bindings.inventoryIndexSha256,
+                    richArtifactSha256 = bindings.richArtifactSha256,
+                    scopeSha256 = bindings.scopeSha256,
+                    reconciliation = reconciliation,
+                ),
+            )
+            OracleSchemas.validate(
+                FullTreeFunctionObservationsV2.SCHEMA_NAME,
+                OracleJson.parseCanonical(memoryBytes),
+            )
+            val memoryRejectsOverlong = FullTreeFunctionObservationAccumulatorV2(shard)
+            assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                memoryRejectsOverlong.acceptSourceEntity(overlongFact)
+            }
+
+            val sqliteLimits = FullTreeFunctionObservationSqliteLimits(
+                maximumDatabaseBytes = 4L * 1024L * 1024L,
+                maximumOutputBytes = 1024L * 1024L,
+                maximumCacheBytes = 64 * 1024,
+                databaseCheckpointRows = 1,
+                checkpoint = FullTreeFunctionObservationSqliteCheckpoint {},
+            )
+            val sqliteOutput = ByteArrayOutputStream()
+            FullTreeFunctionObservationSqlite.openV2(
+                privateDirectory(root.resolve("sqlite-exact")),
+                shard,
+                sqliteLimits,
+            ).use { sqlite ->
+                sqlite.recordScannedDies(1L)
+                sqlite.acceptSourceEntity(exactFact)
+                sqlite.finishToV2(sqliteOutput, bindings, reconciliation)
+            }
+            assertContentEquals(memoryBytes, sqliteOutput.toByteArray())
+            OracleSchemas.validate(
+                FullTreeFunctionObservationsV2.SCHEMA_NAME,
+                OracleJson.parseCanonical(sqliteOutput.toByteArray()),
+            )
+            FullTreeFunctionObservationSqlite.openV2(
+                privateDirectory(root.resolve("sqlite-overlong")),
+                shard,
+                sqliteLimits,
+            ).use { sqlite ->
+                assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                    sqlite.acceptSourceEntity(overlongFact)
+                }
+            }
+        }
 
     @Test
     fun `v2 validator binds candidate source revision to authenticated source lock`() =
@@ -1239,10 +1376,8 @@ class FullTreeFunctionObservationsV2Test {
             )
             assertRawReexecutionRejects(publishForgedDocument("forged-offset", forgedOffsetDocument))
 
-            val emittedRvas = document.getValue("emitted").jsonArray.map {
-                it.jsonObject.getValue("rva").jsonPrimitive.content
-            }.distinct()
-            assertTrue(emittedRvas.size >= 2, "fixture must contain two emitted RVAs")
+            val emittedRva = document.getValue("emitted").jsonArray.single()
+                .jsonObject.getValue("rva").jsonPrimitive.content
             val linkSubject = originalRows.first { it.semanticAnchorFields != null }
 
             val patternTarget = linkSubject.physicalDie.copy(
@@ -1357,7 +1492,7 @@ class FullTreeFunctionObservationsV2Test {
                 ),
                 resolvedSemanticIdentityId = null,
                 candidateCollisionSourceEntityIds = emptyList(),
-                linkedEmittedRva = emittedRvas.first(),
+                linkedEmittedRva = emittedRva,
                 reasonCodes = listOf("unknown-template-pattern-reference"),
                 edges = emptyList(),
             )
@@ -1370,19 +1505,6 @@ class FullTreeFunctionObservationsV2Test {
             FullTreeFunctionObservationsV2.validateEnvelope(
                 linkedDocument, scope, inventory, inventorySha, shard, first.reconciliation,
             )
-            val alternateEmittedRva = emittedRvas.first { it != linked.linkedEmittedRva }
-            val forgedLinkFact = linked.copy(linkedEmittedRva = alternateEmittedRva)
-            val forgedLinkRows = linkedRows.map { fact ->
-                if (fact.sourceEntityId == linked.sourceEntityId) forgedLinkFact else fact
-            }
-            val forgedLinkDocument = FullTreeFunctionObservationsV2.composeEnvelope(
-                v1ProjectionForCompose(document), forgedLinkRows, first.reconciliation, 8L * 1024L * 1024L,
-            )
-            FullTreeFunctionObservationsV2.validateEnvelope(
-                forgedLinkDocument, scope, inventory, inventorySha, shard, first.reconciliation,
-            )
-            assertRawReexecutionRejects(publishForgedDocument("forged-emitted-link", forgedLinkDocument))
-
             val structuralSubject = originalRows.firstOrNull { source ->
                 source.semanticAnchorCandidateId != null && source.candidateCollisionSourceEntityIds.isEmpty() &&
                     originalRows.any { target ->
@@ -1435,6 +1557,162 @@ class FullTreeFunctionObservationsV2Test {
             }
             assertTrue(Files.list(unsafeScratch).use { paths -> paths.findAny().isEmpty })
             assertTrue(Files.list(scratch).use { paths -> paths.findAny().isEmpty })
+        }
+
+    @Test
+    fun `raw reexecution rejects a source link repointed to another real emitted RVA`() =
+        inControlTemporaryDirectory { root ->
+            val fixture = createFullTreeControlFixture(root.resolve("control"))
+            val originalScope = fixture.authenticatedScope()
+            val mergedRules = JsonArray(
+                listOf(
+                    JsonObject(mapOf(
+                        "componentDepth" to JsonPrimitive(1),
+                        "pathPrefix" to JsonPrimitive("source/clang/"),
+                        "shardPrefix" to JsonPrimitive("fixture"),
+                    )),
+                    JsonObject(mapOf(
+                        "componentDepth" to JsonPrimitive(1),
+                        "pathPrefix" to JsonPrimitive("generated/tools/clang/"),
+                        "shardPrefix" to JsonPrimitive("fixture"),
+                    )),
+                ),
+            )
+            val mergedSharding = JsonObject(originalScope.document.controlObject("sharding").toMutableMap().apply {
+                put("rules", mergedRules)
+            })
+            writeControlObject(
+                fixture.scope,
+                JsonObject(originalScope.document.toMutableMap().apply { put("sharding", mergedSharding) }),
+            )
+            val scope = fixture.authenticatedScope()
+            val inventoryGeneration = FullTreeInventoryControl.generateAndPublish(
+                richArtifact = fixture.richArtifact,
+                scope = scope,
+                output = fixture.inventory,
+                maximumWorkers = 1,
+            )
+            assertEquals(1L, inventoryGeneration.inventory.getValue("counts").jsonObject
+                .getValue("shards").jsonPrimitive.long)
+
+            val scratch = privateDirectory(root.resolve("scratch"))
+            val outputParent = privateDirectory(root.resolve("output"))
+            val outputRoot = outputParent.resolve("run")
+            val publication = FullTreeFunctionObservationV2RunPublisher.generateAndPublish(
+                richArtifact = fixture.richArtifact,
+                inventoryPath = fixture.inventory,
+                scope = scope,
+                scratchParent = scratch,
+                outputRoot = outputRoot,
+                maximumWorkers = 1,
+            )
+            val receipt = publication.outputs.single()
+            val inventory = parseControlObject(fixture.inventory)
+            val inventorySha = fixtureSha256(fixture.inventory)
+            val shard = FullTreeFunctionObservations.shardInputs(
+                inventory,
+                inventorySha,
+                scope.document,
+                scope.sha256,
+            ).single()
+            val originalDocument = OracleJson.parseCanonical(
+                Files.readAllBytes(outputRoot.resolve("outputs/${receipt.shardId}.json")),
+            ) as JsonObject
+            val actualRvas = originalDocument.getValue("emitted").jsonArray.map {
+                it.jsonObject.getValue("rva").jsonPrimitive.content
+            }.distinct()
+            assertTrue(actualRvas.size >= 2, "authenticated fixture must provide two real emitted RVAs in one shard")
+            val originalFacts = originalDocument.getValue("sourceEntities").jsonArray.map {
+                FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
+            }
+            val subject = originalFacts.firstOrNull {
+                it.semanticAnchorFields != null && it.candidateCollisionSourceEntityIds.isEmpty()
+            }
+            assertTrue(subject != null, "authenticated fixture must provide a source row for the link mutation")
+            val source = requireNotNull(subject)
+            val fields = FullTreeSourceAnchorFields(
+                sourcePath = "source/clang/lib/Driver/main.cpp",
+                declarationFileIndex = 1L,
+                declarationLine = 1L,
+                declarationColumn = null,
+                language = 33L,
+                lexicalContext = emptyList(),
+                sourceName = "publisher_link_probe",
+                signature = listOf("return:void"),
+                templateActualArguments = listOf("type:int"),
+                authenticatedSourceRevision = scope.sourceLock.controlObject("revision").controlString("commit"),
+            )
+            val linked = FullTreeSourceEntityFact(
+                sourceEntityId = source.physicalDie.sourceEntityId(FullTreeSourceEntityKind.TEMPLATE_INSTANCE),
+                physicalDie = source.physicalDie,
+                kind = FullTreeSourceEntityKind.TEMPLATE_INSTANCE,
+                identityObservability = FullTreeIdentityObservability.UNKNOWN,
+                denominatorDisposition = FullTreeDenominatorDisposition.EMITTED_RVA_LINK,
+                semanticAnchorFields = fields,
+                semanticAnchorCandidateId = requireNotNull(fields.candidateId(FullTreeSourceAnchorKind.TEMPLATE_INSTANCE)),
+                resolvedSemanticIdentityId = null,
+                candidateCollisionSourceEntityIds = emptyList(),
+                linkedEmittedRva = actualRvas.first(),
+                reasonCodes = listOf("unknown-template-pattern-reference"),
+                edges = emptyList(),
+            )
+            val linkedFacts = originalFacts.map { if (it.sourceEntityId == source.sourceEntityId) linked else it }
+            val linkedDocument = FullTreeFunctionObservationsV2.composeEnvelope(
+                v1ProjectionForCompose(originalDocument),
+                linkedFacts,
+                publication.reconciliation,
+                8L * 1024L * 1024L,
+            )
+            FullTreeFunctionObservationsV2.validateEnvelope(
+                linkedDocument, scope, inventory, inventorySha, shard, publication.reconciliation,
+            )
+            val alternateRva = actualRvas.first { it != linked.linkedEmittedRva }
+            val forgedLink = linked.copy(linkedEmittedRva = alternateRva)
+            val forgedFacts = linkedFacts.map { if (it.sourceEntityId == linked.sourceEntityId) forgedLink else it }
+            val forgedDocument = FullTreeFunctionObservationsV2.composeEnvelope(
+                v1ProjectionForCompose(originalDocument),
+                forgedFacts,
+                publication.reconciliation,
+                8L * 1024L * 1024L,
+            )
+            FullTreeFunctionObservationsV2.validateEnvelope(
+                forgedDocument, scope, inventory, inventorySha, shard, publication.reconciliation,
+            )
+
+            val prepared = privateDirectory(root.resolve("prepared"))
+            val preparedOutputs = publication.binding.outputs.map { outputBinding ->
+                val bytes = FullTreeFunctionObservationsV2.canonicalEnvelopeBytes(forgedDocument)
+                val path = prepared.resolve("${outputBinding.shardId}.json")
+                Files.write(path, bytes)
+                Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("r--------"))
+                BoundedShardPreparedOutput(
+                    shardId = outputBinding.shardId,
+                    inputSha256 = outputBinding.inputSha256,
+                    output = path,
+                    outputSha256 = OracleArtifacts.sha256(bytes),
+                    outputBytes = bytes.size.toLong(),
+                    entities = outputBinding.entities,
+                )
+            }
+            val forgedParent = privateDirectory(root.resolve("forged"))
+            val forgedBinding = BoundedShardRunPublisher.publish(
+                target = forgedParent.resolve("run"),
+                runId = publication.binding.run.controlString("id"),
+                preparedOutputs = preparedOutputs,
+                bounds = boundedRunBounds(publication.binding.run.controlObject("bounds")),
+                semanticValidator = BoundedShardOutputSemanticValidator {},
+            )
+            val rejection = assertFailsWith<FullTreeFunctionObservationV2RunException> {
+                FullTreeFunctionObservationV2RunPublisher.loadAndValidate(
+                    candidateRoot = forgedBinding.root,
+                    expectedIndexArtifactSha256 = forgedBinding.indexArtifactSha256,
+                    richArtifact = fixture.richArtifact,
+                    inventoryPath = fixture.inventory,
+                    scope = scope,
+                    scratchParent = scratch,
+                )
+            }
+            assertTrue(rejection.message.orEmpty().contains("raw-input rederivation"))
         }
 
     @Test

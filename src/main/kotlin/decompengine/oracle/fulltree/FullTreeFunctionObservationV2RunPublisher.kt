@@ -93,13 +93,16 @@ internal fun fullTreeFunctionObservationV2RetainedBudget(
 }
 
 internal fun fullTreeFunctionObservationV2AnchorClaimBound(
-    maximumPhysicalRecordsPerShard: Long,
-    shardCount: Int,
+    maximumPhysicalRecordsPerCompilationUnit: Long,
+    compilationUnitCount: Long,
     maximumAnchorClaims: Long,
     maximumRunRetainedBytes: Long,
 ): Long {
-    require(maximumPhysicalRecordsPerShard > 0L && shardCount > 0 && maximumAnchorClaims > 0L && maximumRunRetainedBytes > 0L)
-    val physicalPopulation = saturatingMultiply(maximumPhysicalRecordsPerShard, shardCount.toLong())
+    require(
+        maximumPhysicalRecordsPerCompilationUnit > 0L && compilationUnitCount > 0L &&
+            maximumAnchorClaims > 0L && maximumRunRetainedBytes > 0L,
+    )
+    val physicalPopulation = saturatingMultiply(maximumPhysicalRecordsPerCompilationUnit, compilationUnitCount)
     val claimsPerPhysicalDie = MAXIMUM_IDENTITY_EDGES_PER_ENTITY.toLong() + 1L
     val scanClaimBound = saturatingMultiply(physicalPopulation, claimsPerPhysicalDie)
     return minOf(maximumAnchorClaims, minOf(scanClaimBound, maximumRunRetainedBytes / 256L)).coerceAtLeast(1L)
@@ -235,8 +238,9 @@ internal object FullTreeFunctionObservationV2RunPublisher {
 
                 val anchorIndex = FullTreeFunctionObservationV2AnchorIndex(
                     maximumClaims = fullTreeFunctionObservationV2AnchorClaimBound(
-                        maximumPhysicalRecordsPerShard = limits.shard.producer.dieLimits.maximumPhysicalRecords,
-                        shardCount = shards.size,
+                        maximumPhysicalRecordsPerCompilationUnit =
+                            limits.shard.producer.dieLimits.maximumPhysicalRecords,
+                        compilationUnitCount = shards.sumOf { it.units.size.toLong() },
                         maximumAnchorClaims = limits.maximumAnchorClaims,
                         maximumRunRetainedBytes = limits.maximumRunRetainedBytes,
                     ),
@@ -279,7 +283,8 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                         anchorClaim = { kind, candidateId, physicalClaimId ->
                             anchorIndex.accept(kind, candidateId, physicalClaimId)
                         },
-                        factAdmission = { _, canonicalRowBytes ->
+                        factAdmission = { fact, canonicalRowBytes ->
+                            FullTreeFunctionObservationsV2.validateSourceEntityForV2(fact)
                             val nextCount = Math.addExact(sourceFactCount, 1L)
                             val nextAdmissionBytes = Math.addExact(sourceFactAdmissionBytes, canonicalRowBytes)
                             val modeledRowBytes = sourceIdentityModeledRetainedChargeBytes(

@@ -241,6 +241,7 @@ private class FunctionObservationSqliteSink private constructor(
 
     override fun acceptSourceEntity(fact: FullTreeSourceEntityFact) = mutate("accept a source entity") {
         if (!supportsV2) sqliteFail("legacy function-observation SQLite sink does not support source entities")
+        FullTreeFunctionObservationsV2.validateSourceEntityForV2(fact)
         sourceEntitiesStarted = true
         limits.checkpoint.checkpoint("before accepting a source entity")
         if (unitsById[fact.physicalDie.unitId] == null) {

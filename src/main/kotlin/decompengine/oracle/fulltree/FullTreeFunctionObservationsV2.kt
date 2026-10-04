@@ -65,6 +65,7 @@ internal object FullTreeFunctionObservationsV2 {
     ): JsonObject {
         require(maximumBytes in 1L..16L * 1024L * 1024L * 1024L)
         val facts = FullTreeSourceEntityFact.deterministicOrder(sourceFacts)
+        facts.forEach(::validateSourceEntityForV2)
         if (facts.map { it.sourceEntityId }.toSet().size != facts.size) {
             v2Fail("observation-v2 sourceEntityIds are not unique")
         }
@@ -98,6 +99,36 @@ internal object FullTreeFunctionObservationsV2 {
         val bytes = canonicalEnvelopeBytes(result, maximumBytes)
         if (bytes.size.toLong() > maximumBytes) v2Fail("observation-v2 exceeds its authenticated byte bound")
         return result
+    }
+
+    /** Keep producer and both sinks within the exact per-string bounds in the v2 schema. */
+    fun validateSourceEntityForV2(fact: FullTreeSourceEntityFact) {
+        val fields = fact.semanticAnchorFields ?: return
+        if (fields.sourcePath?.let(::sourceIdentityJsonCodePointLength)?.let { it > 4_096 } == true) {
+            v2Fail("source path exceeds the observation-v2 schema character bound")
+        }
+        listOfNotNull(fields.sourceName, fields.authenticatedSourceRevision, fields.inlineCallFile)
+            .forEach { value ->
+                if (sourceIdentityJsonCodePointLength(value) > MAXIMUM_SOURCE_IDENTITY_DESCRIPTOR_CHARACTERS) {
+                    v2Fail("completed source-identity descriptor exceeds the observation-v2 schema character bound")
+                }
+            }
+        val descriptors = sequenceOf(
+            fields.lexicalContext.asSequence(),
+            fields.signature.orEmpty().asSequence(),
+            fields.templateFormalParameters.orEmpty().asSequence(),
+            fields.templateActualArguments.orEmpty().asSequence(),
+        ).flatten()
+        if (descriptors.any { sourceIdentityJsonCodePointLength(it) > MAXIMUM_SOURCE_IDENTITY_DESCRIPTOR_CHARACTERS }) {
+            v2Fail("completed source-identity descriptor exceeds the observation-v2 schema character bound")
+        }
+        if (fields.lexicalContext.size > MAXIMUM_SOURCE_IDENTITY_LEXICAL_CONTEXT_ITEMS ||
+            (fields.signature?.size ?: 0) > MAXIMUM_SOURCE_IDENTITY_SIGNATURE_ITEMS ||
+            (fields.templateFormalParameters?.size ?: 0) > MAXIMUM_SOURCE_IDENTITY_SIGNATURE_ITEMS ||
+            (fields.templateActualArguments?.size ?: 0) > MAXIMUM_SOURCE_IDENTITY_SIGNATURE_ITEMS
+        ) {
+            v2Fail("source-identity descriptor list exceeds the observation-v2 schema item bound")
+        }
     }
 
     fun canonicalEnvelopeBytes(document: JsonObject, maximumBytes: Long = MAXIMUM_CANONICAL_BYTES): ByteArray = try {
@@ -464,6 +495,12 @@ internal object FullTreeFunctionObservationsV2 {
         values.sortedBy { it.first }.associate { (key, value) -> key to JsonPrimitive(value) },
     )
 }
+
+private fun sourceIdentityJsonCodePointLength(value: String): Int = value.codePointCount(0, value.length)
+
+internal const val MAXIMUM_SOURCE_IDENTITY_DESCRIPTOR_CHARACTERS = 16_384
+private const val MAXIMUM_SOURCE_IDENTITY_LEXICAL_CONTEXT_ITEMS = 256
+private const val MAXIMUM_SOURCE_IDENTITY_SIGNATURE_ITEMS = 1_025
 
 /** Full-run, bounded anchor population, including ordinary source definitions omitted from census rows. */
 internal class FullTreeFunctionObservationV2AnchorIndex(

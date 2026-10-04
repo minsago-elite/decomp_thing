@@ -33,6 +33,7 @@ internal class FullTreeFunctionObservationAccumulatorV2(
 
     fun acceptSourceEntity(fact: FullTreeSourceEntityFact) {
         requireMutable()
+        FullTreeFunctionObservationsV2.validateSourceEntityForV2(fact)
         if (shard.units.none { it.controlString("id") == fact.physicalDie.unitId }) {
             v2AccumulatorFail("source entity owner is outside its authenticated shard")
         }
