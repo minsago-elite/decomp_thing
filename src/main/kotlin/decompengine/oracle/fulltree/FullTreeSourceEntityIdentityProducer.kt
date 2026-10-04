@@ -43,7 +43,7 @@ internal object FullTreeSourceEntityIdentityProducer {
         /** Receives bounded candidate-to-physical claims, including ordinary emitted definitions. */
         anchorClaim: ((kind: FullTreeSourceAnchorKind, candidateId: String, physicalClaimId: String) -> Unit)? = null,
         /** Admits each canonical census row against the caller's aggregate run budget before retention. */
-        factAdmission: ((fact: FullTreeSourceEntityFact, canonicalRowBytes: Long) -> Unit)? = null,
+        factAdmission: ((fact: FullTreeSourceEntityFact, canonicalArrayContributionBytes: Long) -> Unit)? = null,
         /** Optional run-level resident allowance after reserving co-resident full-run state. */
         residentBudgetBytes: Long? = null,
         /** Admits shard-local collision copies before the source rows are copied and retained. */
@@ -877,7 +877,7 @@ private class SourceIdentityRetentionBudget(
     private val maximumBytes: Long,
     private val maximumCanonicalRowBytes: Long,
     val maximumRowScratchBytes: Long,
-    private val factAdmission: ((fact: FullTreeSourceEntityFact, canonicalRowBytes: Long) -> Unit)?,
+    private val factAdmission: ((fact: FullTreeSourceEntityFact, canonicalArrayContributionBytes: Long) -> Unit)?,
 ) {
     private var facts = 0L
     private var bytes = 0L
