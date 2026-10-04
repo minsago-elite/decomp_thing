@@ -440,7 +440,7 @@ class FullTreeFunctionObservationsV2Test {
             }
             val inlineRow = valid.getValue("sourceEntities").jsonArray[inlineIndex].jsonObject
             val detachedSource = FullTreeSourcePhysicalDie(
-                richArtifactSha256 = richSha,
+                richArtifactSha256 = richSha256,
                 unitId = "cu-${"f".repeat(32)}",
                 section = ".debug_info",
                 compilationUnitOffset = "0x0",
