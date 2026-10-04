@@ -1718,14 +1718,15 @@ class FullTreeFunctionObservationsV2Test {
                 reasonCodes = listOf("unknown-template-pattern-reference"),
                 edges = emptyList(),
             )
-            val linkedRows = originalRows.map { fact ->
-                if (fact.sourceEntityId == linkSubject.sourceEntityId) linked else fact
-            }
+            val linkedClaims = FullTreeFunctionObservationV2AnchorIndex(2L, 4096L)
+            linkedClaims.accept(requireNotNull(linked.semanticAnchorCandidateId), linked.sourceEntityId)
+            linkedClaims.acceptSourceEntityPopulation(firstShard.identifier, listOf(linked))
+            val linkedReconciliation = linkedClaims.reconciliation()
             val linkedDocument = FullTreeFunctionObservationsV2.composeEnvelope(
-                v1ProjectionForCompose(document), linkedRows, first.reconciliation, 8L * 1024L * 1024L,
+                v1ProjectionForCompose(document), listOf(linked), linkedReconciliation, 8L * 1024L * 1024L,
             )
             FullTreeFunctionObservationsV2.validateEnvelope(
-                linkedDocument, scope, inventory, inventorySha, shard, first.reconciliation,
+                linkedDocument, scope, inventory, inventorySha, shard, linkedReconciliation,
             )
             val structuralSubject = originalRows.firstOrNull { source ->
                 source.semanticAnchorCandidateId != null && source.candidateCollisionSourceEntityIds.isEmpty() &&
@@ -1848,7 +1849,10 @@ class FullTreeFunctionObservationsV2Test {
                 FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
             }
             val subject = originalFacts.firstOrNull {
-                it.semanticAnchorFields != null && it.candidateCollisionSourceEntityIds.isEmpty()
+                it.semanticAnchorFields != null && it.candidateCollisionSourceEntityIds.isEmpty() &&
+                    (it.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE || originalFacts.none { other ->
+                        other.physicalDie == it.physicalDie && other.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE
+                    })
             }
             assertTrue(subject != null, "authenticated fixture must provide a source row for the link mutation")
             val source = requireNotNull(subject)
@@ -1878,28 +1882,24 @@ class FullTreeFunctionObservationsV2Test {
                 reasonCodes = listOf("unknown-template-pattern-reference"),
                 edges = emptyList(),
             )
-            val linkedFacts = originalFacts.map { if (it.sourceEntityId == source.sourceEntityId) linked else it }
-            val linkedDocument = FullTreeFunctionObservationsV2.composeEnvelope(
-                v1ProjectionForCompose(originalDocument),
-                linkedFacts,
-                publication.reconciliation,
-                8L * 1024L * 1024L,
-            )
-            FullTreeFunctionObservationsV2.validateEnvelope(
-                linkedDocument, scope, inventory, inventorySha, shard, publication.reconciliation,
+            val linkedFacts = FullTreeSourceEntityFact.deterministicOrder(
+                originalFacts.map { if (it.sourceEntityId == source.sourceEntityId) linked else it },
             )
             val alternateRva = actualRvas.first { it != linked.linkedEmittedRva }
             val forgedLink = linked.copy(linkedEmittedRva = alternateRva)
-            val forgedFacts = linkedFacts.map { if (it.sourceEntityId == linked.sourceEntityId) forgedLink else it }
-            val forgedDocument = FullTreeFunctionObservationsV2.composeEnvelope(
-                v1ProjectionForCompose(originalDocument),
-                forgedFacts,
-                publication.reconciliation,
-                8L * 1024L * 1024L,
+            val forgedFacts = FullTreeSourceEntityFact.deterministicOrder(
+                linkedFacts.map { if (it.sourceEntityId == linked.sourceEntityId) forgedLink else it },
             )
-            FullTreeFunctionObservationsV2.validateEnvelope(
-                forgedDocument, scope, inventory, inventorySha, shard, publication.reconciliation,
-            )
+            val forgedCounts = JsonObject(originalDocument.getValue("counts").jsonObject.toMutableMap().apply {
+                put("sourceEntities", JsonPrimitive(forgedFacts.size))
+                put("sourceEntitiesByKind", sourceKindCounts(forgedFacts))
+                put("sourceEntitiesByObservability", sourceObservabilityCounts(forgedFacts))
+                put("sourceEntitiesByDenominatorDisposition", sourceDispositionCounts(forgedFacts))
+            })
+            val forgedDocument = JsonObject(originalDocument.toMutableMap().apply {
+                put("sourceEntities", JsonArray(forgedFacts.map(FullTreeSourceEntityFact::canonicalJson)))
+                put("counts", forgedCounts)
+            })
 
             val prepared = privateDirectory(root.resolve("prepared"))
             val preparedOutputs = publication.binding.outputs.map { outputBinding ->
