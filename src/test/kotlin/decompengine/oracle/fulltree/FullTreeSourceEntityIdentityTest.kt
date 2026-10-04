@@ -716,7 +716,13 @@ class FullTreeSourceEntityIdentityTest {
                 referenceForm = "0x11",
                 rawReference = "0x${index + 1}",
                 state = state,
-                reasonCode = "reference-${state.wireValue}",
+                reasonCode = when (state) {
+                    FullTreeSourceIdentityEdgeState.MISSING_TARGET -> "target-not-retained-or-not-a-die-boundary"
+                    FullTreeSourceIdentityEdgeState.MALFORMED -> "reference-outside-validated-dwarf-boundary"
+                    FullTreeSourceIdentityEdgeState.UNSUPPORTED -> "unsupported-reference-form"
+                    FullTreeSourceIdentityEdgeState.CYCLIC -> "reference-cycle"
+                    FullTreeSourceIdentityEdgeState.RESOLVED -> error("unresolved state expected")
+                },
             )
             fact("0x${0x20 + index}", factKind, fields(), edges = listOf(edge))
         }
@@ -773,7 +779,7 @@ class FullTreeSourceEntityIdentityTest {
             referenceForm = "0x11",
             rawReference = "0x1",
             state = FullTreeSourceIdentityEdgeState.MISSING_TARGET,
-            reasonCode = "target-not-found",
+            reasonCode = "target-not-retained-or-not-a-die-boundary",
         )
 
         assertEquals(listOf("namespace:before"), fields.lexicalContext)

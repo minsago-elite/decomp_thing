@@ -23,6 +23,12 @@ internal data class FullTreeSourceEntityIdentityScan(
     val peakRetainedLineTableUnits: Int,
 )
 
+internal fun requireSourceIdentityScannedDiesWithinBound(scannedDies: Long, maximumScannedDies: Long) {
+    if (scannedDies < 0L || maximumScannedDies <= 0L || scannedDies > maximumScannedDies) {
+        throw FullTreeControlException("source-identity shard exceeds its aggregate physical-DIE bound")
+    }
+}
+
 /** Additive extractor for source identities; it does not write or alter either frozen observation schema. */
 internal object FullTreeSourceEntityIdentityProducer {
     fun scanShard(
@@ -40,6 +46,8 @@ internal object FullTreeSourceEntityIdentityProducer {
         factAdmission: ((fact: FullTreeSourceEntityFact, canonicalRowBytes: Long) -> Unit)? = null,
         /** Optional run-level resident allowance after reserving co-resident full-run state. */
         residentBudgetBytes: Long? = null,
+        /** Admits shard-local collision copies before the source rows are copied and retained. */
+        factAdjustmentAdmission: ((collisionCopyBytes: Long, collisionExpansionBytes: Long) -> Unit)? = null,
     ): FullTreeSourceEntityIdentityScan {
         FullTreeScopeControl.validate(scope, controlLimits)
         requireStableDirectory(scratchParent, "source-identity scratch parent")
@@ -189,6 +197,11 @@ internal object FullTreeSourceEntityIdentityProducer {
                 )
             },
         )
+        val maximumScannedDies = fullTreeFunctionObservationScannedDiesBound(
+            maximumPhysicalRecordsPerUnit = producerLimits.dieLimits.maximumPhysicalRecords,
+            unitCount = inputs.shard.units.size.toLong(),
+            configuredMaximumScannedDies = producerLimits.accumulatorLimits.maximumScannedDies,
+        )
         val inventoryUnitArray = inputs.inventory.controlArray("units")
         val admitted = admission ?: throw FullTreeControlException("source-identity inventory was not admitted")
         if (inventoryUnitArray.size != admitted.compilationUnitCount) {
@@ -292,9 +305,7 @@ internal object FullTreeSourceEntityIdentityProducer {
                         ?: throw FullTreeControlException("source-identity unit is absent from the inventory")
                     val owner = repository.load(header)
                     scannedDies = Math.addExact(scannedDies, owner.index.physicalRecordCount)
-                    if (scannedDies > producerLimits.dieLimits.maximumPhysicalRecords) {
-                        throw FullTreeControlException("source-identity shard exceeds its physical-DIE bound")
-                    }
+                    requireSourceIdentityScannedDiesWithinBound(scannedDies, maximumScannedDies)
 
                     repository.withRetainedUnits(owner) {
                         val ids = SourceEntityIdentityReader(
@@ -349,6 +360,7 @@ internal object FullTreeSourceEntityIdentityProducer {
                 collisionReport.byCandidateId,
                 maximumSerializedBytes,
             )
+            factAdjustmentAdmission?.invoke(collisionCopyBytes, collisionExpansionBytes)
             budget.charge(collisionCopyBytes, "source-identity collision-adjusted fact copies")
             val collisionAdjusted = markUnprovedAnchorCollisions(ordered, collisionReport)
             val finalBytes = canonicalSourceEntityFacts(collisionAdjusted, maximumSerializedBytes)
@@ -1016,7 +1028,10 @@ private class SourceEntityIdentityReader(
                 if (nested.isEmpty()) result += PackedSubprogramChild(child, packPath)
                 else nested.asReversed().forEach { pending.addFirst(Triple(child, it, packPath)) }
             } else if (child.tag in acceptedTags) {
-                if (parentPackPath != null) {
+                // Typed evidence starts at the actual parameter/formal DIE. Preserve its bounded
+                // parent-child path so the v2 envelope can check graph connectivity without
+                // inferring ancestry from DIE offset ordering.
+                if (parentPackPath != null || child.attributesNamed(DW_AT_TYPE).isNotEmpty()) {
                     addStructuralEdge(physical(unit, parent), physical(unit, child), structuralEdgeKind, edges)
                 }
                 result += PackedSubprogramChild(child, parentPackPath)

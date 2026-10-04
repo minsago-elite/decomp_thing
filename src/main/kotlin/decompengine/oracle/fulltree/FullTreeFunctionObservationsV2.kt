@@ -32,6 +32,9 @@ internal data class FullTreeFunctionObservationV2StreamResult(
 /** Identity of the additive observation contract. The v1 schema and policy stay frozen. */
 internal object FullTreeFunctionObservationsV2 {
     const val SCHEMA_NAME = "full-tree-function-observations-v2"
+    // Match OracleJson.StrictJsonLimits' shared 64 MiB canonical-document hard ceiling. Every v2
+    // sink, composer, validator, and run publisher applies this cap together with authenticated
+    // per-shard output bounds; this does not silently diverge from the strict JSON layer.
     const val MAXIMUM_CANONICAL_BYTES = 64L * 1024L * 1024L
     const val MAXIMUM_JSON_NODES = 1_000_000
 
@@ -185,10 +188,10 @@ internal object FullTreeFunctionObservationsV2 {
                 if (rva !in emittedRvas) v2Fail("source entity links to an absent emitted RVA")
             }
             val sourceRevision = fact.semanticAnchorFields?.authenticatedSourceRevision
-            if (sourceRevision != null &&
-                sourceRevision != scope.sourceLock.v2Object("revision").v2String("commit")
-            ) {
-                v2Fail("source anchor revision differs from the authenticated source lock")
+            val authenticatedRevision = scope.sourceLock.v2Object("revision").v2String("commit")
+            val completeAnchor = fact.kind.anchorKind()?.let { fact.semanticAnchorFields?.candidateId(it) } != null
+            if ((completeAnchor || sourceRevision != null) && sourceRevision != authenticatedRevision) {
+                v2Fail("complete source anchor revision is absent or differs from the authenticated source lock")
             }
             if (fact.semanticAnchorFields?.authenticatedSourceFileSha256 != null) {
                 v2Fail("source anchor file digest has no authenticated per-file evidence")
@@ -366,6 +369,9 @@ internal object FullTreeFunctionObservationsV2 {
                     }
                 }
             }
+            // This checks that the supplied edge graph is internally rooted at its census DIE.
+            // The run publisher re-executes source extraction against the authenticated artifact
+            // to verify every structural and typed edge against raw DWARF ancestry and references.
             val edgesBySource = fact.edges.groupBy { it.source }
             val reachable = HashSet<FullTreeSourcePhysicalDie>()
             val pending = ArrayDeque<FullTreeSourcePhysicalDie>()
@@ -380,25 +386,7 @@ internal object FullTreeFunctionObservationsV2 {
                     }
                 }
             }
-            fun isNestedTypedSource(edge: FullTreeSourceIdentityEdge): Boolean {
-                // Signature and template edges may start at a nested parameter/formal DIE rather
-                // than redundantly carrying every parent-child DIE relation in the v2 envelope.
-                if (edge.kind !in setOf(
-                        FullTreeSourceIdentityEdgeKind.TYPE,
-                        FullTreeSourceIdentityEdgeKind.TEMPLATE_FORMAL,
-                        FullTreeSourceIdentityEdgeKind.TEMPLATE_ARGUMENT,
-                    )
-                ) return false
-                val source = edge.source
-                val sourceOffset = source.dieOffset.removePrefix("0x").toULong(16)
-                return reachable.any { ancestor ->
-                    source.richArtifactSha256 == ancestor.richArtifactSha256 &&
-                        source.unitId == ancestor.unitId &&
-                        source.compilationUnitOffset == ancestor.compilationUnitOffset &&
-                        sourceOffset > ancestor.dieOffset.removePrefix("0x").toULong(16)
-                }
-            }
-            if (fact.edges.any { it.source !in reachable && !isNestedTypedSource(it) }) {
+            if (fact.edges.any { it.source !in reachable }) {
                 v2Fail("source-identity edge graph is detached from its source entity DIE")
             }
         }

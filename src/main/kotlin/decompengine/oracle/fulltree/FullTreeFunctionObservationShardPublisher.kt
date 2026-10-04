@@ -610,17 +610,16 @@ internal fun deriveAuthenticatedLimits(
     }
 
     val configured = limits.producer.accumulatorLimits
-    val physicalScanBound = checkedMultiply(
-        limits.producer.dieLimits.maximumPhysicalRecords,
-        unitCount,
-        "function-observation physical-DIE bound",
+    val maximumScannedDies = fullTreeFunctionObservationScannedDiesBound(
+        maximumPhysicalRecordsPerUnit = limits.producer.dieLimits.maximumPhysicalRecords,
+        unitCount = unitCount,
+        configuredMaximumScannedDies = configured.maximumScannedDies,
     )
     val nonNullScanBound = checkedMultiply(
         limits.producer.dieLimits.maximumNonNullRecords.toLong(),
         unitCount,
         "function-observation non-null DIE bound",
     )
-    val maximumScannedDies = minOf(configured.maximumScannedDies, physicalScanBound)
     // Subprogram DIEs may coalesce by RVA/identity, so this scan bound is intentionally independent
     // of the final perShard.entities bound.
     val maximumSubprograms = minOf(
@@ -1214,6 +1213,23 @@ private inline fun <T> translatePublicationFailures(action: () -> T): T = try {
         "function-observation shard publication failed: ${failure.message}",
         failure,
     )
+}
+
+/** The physical record ceiling is per CU; the configured scan ceiling remains shard-aggregate. */
+internal fun fullTreeFunctionObservationScannedDiesBound(
+    maximumPhysicalRecordsPerUnit: Long,
+    unitCount: Long,
+    configuredMaximumScannedDies: Long,
+): Long {
+    if (maximumPhysicalRecordsPerUnit <= 0L || unitCount <= 0L || configuredMaximumScannedDies <= 0L) {
+        publicationFail("function-observation scanned-DIE bounds are empty")
+    }
+    val physicalScanBound = checkedMultiply(
+        maximumPhysicalRecordsPerUnit,
+        unitCount,
+        "function-observation physical-DIE bound",
+    )
+    return minOf(configuredMaximumScannedDies, physicalScanBound)
 }
 
 private fun checkedAdd(left: Long, right: Long, label: String): Long = try {

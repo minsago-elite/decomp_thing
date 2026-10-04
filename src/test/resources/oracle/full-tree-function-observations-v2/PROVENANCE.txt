@@ -6,7 +6,7 @@ truth-v3 projection, scoreable census row, or release authority.
 
 Output: fixture-only-output.json
 Output SHA-256: f91a4db36ec5182c17ba361d785c7c953cbd58f1ffbfaaa924286b50ec9824f6
-Output bytes: 2557
+Output bytes: 2552
 Schema SHA-256: c068ed200c8493acbe830ba4e4d8390e8a30499b3d866c43646ff802ff645d89
 Producer configuration SHA-256: 5a4b9dc9015fb64ebb8ec038c8ceefa394b1eaaabfbaf0cf9bc3349497e7e116
 Source-entity ID: 0fc67883fb421eabb1e41bdf8718868234d7c9738d4a59182907644096052c46

@@ -189,7 +189,8 @@ class FullTreeFunctionObservationsV2Test {
                 inlineCallLine = callLine,
                 inlineCallColumn = callColumn,
                 inlinePathAnchorCandidateIds = inlinePath,
-                authenticatedSourceRevision = authenticatedSourceRevision,
+                authenticatedSourceRevision = authenticatedSourceRevision
+                    ?: scope.sourceLock.controlObject("revision").controlString("commit"),
             )
 
             val declarationFieldsA = anchorFields("shared_declaration", fileIndex = 1L, column = 4L)
@@ -293,7 +294,7 @@ class FullTreeFunctionObservationsV2Test {
                         referenceForm = "0x10",
                         rawReference = "0x80",
                         state = FullTreeSourceIdentityEdgeState.MISSING_TARGET,
-                        reasonCode = "missing-reference-target",
+                        reasonCode = "target-not-retained-or-not-a-die-boundary",
                     ),
                 ),
             )
@@ -388,7 +389,8 @@ class FullTreeFunctionObservationsV2Test {
                 reconciliation.populationSha256,
             )
             assertEquals(11L, reconciliation.claimCount)
-            assertEquals(8L, reconciliation.candidateCount)
+            assertEquals(7L, reconciliation.candidateCount)
+            assertEquals(allAnchorClaims.map { it.first }.distinct().size.toLong(), reconciliation.candidateCount)
             assertEquals(3L, reconciliation.collisionCandidateCount)
             val reconciledByShard = shardFacts.mapValues { (_, rows) -> reconcileObservationV2Facts(rows, reconciliation) }
 
@@ -618,6 +620,23 @@ class FullTreeFunctionObservationsV2Test {
             }
             assertTrue(unknownCompleteIndex >= 0)
             val unknownComplete = valid.getValue("sourceEntities").jsonArray[unknownCompleteIndex].jsonObject
+            val hiddenCompleteCandidate = replaceSourceRow(
+                valid,
+                unknownCompleteIndex,
+                JsonObject(unknownComplete.toMutableMap().apply {
+                    this["semanticAnchorCandidateId"] = JsonNull
+                }),
+            )
+            assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                FullTreeFunctionObservationsV2.validateEnvelope(
+                    hiddenCompleteCandidate,
+                    scope,
+                    inventory,
+                    inventorySha256,
+                    firstShard,
+                    reconciliation,
+                )
+            }
             val observabilityCounts = JsonObject(
                 valid.controlObject("counts").controlObject("sourceEntitiesByObservability").toMutableMap().apply {
                     put("unknown", JsonPrimitive(getValue("unknown").jsonPrimitive.long - 1L))
@@ -650,8 +669,10 @@ class FullTreeFunctionObservationsV2Test {
                 row.jsonObject.getValue("entityKind").jsonPrimitive.content == "inline-instance"
             }
             val inlineRow = valid.getValue("sourceEntities").jsonArray[inlineIndex].jsonObject
-            val nestedOwnerA = physical(firstUnit, "0x300")
-            val nestedOwnerB = physical(secondUnit, "0x400")
+            val nestedOwnerA = physical(firstUnit, "0x103")
+            val nestedOwnerB = physical(firstUnit, "0x101")
+            val nestedFormal = physical(firstUnit, "0x102")
+            val nestedTypeTarget = physical(secondUnit, "0x80")
             val inlineFactPhysical = FullTreeSourceEntityFact.fromCanonicalJson(inlineRow).physicalDie
             val nestedOwnerPath = listOf(
                 FullTreeSourceIdentityEdge(
@@ -672,16 +693,29 @@ class FullTreeFunctionObservationsV2Test {
                     state = FullTreeSourceIdentityEdgeState.RESOLVED,
                     reasonCode = null,
                 ),
+                FullTreeSourceIdentityEdge(
+                    kind = FullTreeSourceIdentityEdgeKind.TYPE,
+                    source = nestedOwnerB,
+                    target = nestedFormal,
+                    referenceForm = null,
+                    rawReference = null,
+                    state = FullTreeSourceIdentityEdgeState.RESOLVED,
+                    reasonCode = null,
+                ),
+                FullTreeSourceIdentityEdge(
+                    kind = FullTreeSourceIdentityEdgeKind.TYPE,
+                    source = nestedFormal,
+                    target = nestedTypeTarget,
+                    referenceForm = "0x10",
+                    rawReference = nestedTypeTarget.dieOffset,
+                    state = FullTreeSourceIdentityEdgeState.RESOLVED,
+                    reasonCode = null,
+                ),
             )
-            val nestedOwnerRow = JsonObject(inlineRow.toMutableMap().apply {
-                this["edges"] = JsonArray(nestedOwnerPath.map(FullTreeSourceIdentityEdge::canonicalJson))
-            })
+            val nestedOwnerFact = FullTreeSourceEntityFact.fromCanonicalJson(inlineRow).copy(edges = nestedOwnerPath)
             val nestedOwnerFacts = valid.getValue("sourceEntities").jsonArray.map { row ->
-                val objectRow = row.jsonObject
-                if (objectRow.getValue("sourceEntityId").jsonPrimitive.content ==
-                    inlineRow.getValue("sourceEntityId").jsonPrimitive.content
-                ) FullTreeSourceEntityFact.fromCanonicalJson(nestedOwnerRow)
-                else FullTreeSourceEntityFact.fromCanonicalJson(objectRow)
+                val fact = FullTreeSourceEntityFact.fromCanonicalJson(row.jsonObject)
+                if (fact.sourceEntityId == nestedOwnerFact.sourceEntityId) nestedOwnerFact else fact
             }
             val nestedOwnerDocument = FullTreeFunctionObservationsV2.composeEnvelope(
                 v1ProjectionForCompose(valid),
@@ -853,7 +887,7 @@ class FullTreeFunctionObservationsV2Test {
                 compilationUnitOffset = unit.controlString("dwarfOffset"),
                 dieOffset = "0x456",
             )
-            fun boundDocument(revision: String): Pair<JsonObject, FullTreeFunctionObservationV2IdentityReconciliation> {
+            fun boundDocument(revision: String?): Pair<JsonObject, FullTreeFunctionObservationV2IdentityReconciliation> {
                 val fields = FullTreeSourceAnchorFields(
                     sourcePath = "source/revision-bound.h",
                     declarationFileIndex = 1L,
@@ -896,6 +930,19 @@ class FullTreeFunctionObservationsV2Test {
                 shard,
                 validReconciliation,
             )
+
+            val (missingRevision, missingRevisionReconciliation) = boundDocument(null)
+            val missingRevisionFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                FullTreeFunctionObservationsV2.validateEnvelope(
+                    missingRevision,
+                    scope,
+                    inventory,
+                    inventorySha,
+                    shard,
+                    missingRevisionReconciliation,
+                )
+            }
+            assertTrue(missingRevisionFailure.message.orEmpty().contains("revision"))
 
             val (forged, forgedReconciliation) = boundDocument("forged-revision")
             val validFact = FullTreeSourceEntityFact.fromCanonicalJson(valid.getValue("sourceEntities").jsonArray.single().jsonObject)
@@ -989,7 +1036,7 @@ class FullTreeFunctionObservationsV2Test {
                     FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
                 }
                 rows.any { it.semanticAnchorFields != null } && rows.any {
-                    it.semanticAnchorCandidateId != null && it.candidateCollisionSourceEntityIds.isEmpty() && it.edges.isEmpty()
+                    it.semanticAnchorCandidateId != null && it.candidateCollisionSourceEntityIds.isEmpty()
                 }
             }
             val shard = firstInput.getValue(receipt.shardId)
@@ -1074,10 +1121,10 @@ class FullTreeFunctionObservationsV2Test {
             }
             assertTrue(fileDigestFailure.message.orEmpty().contains("no authenticated per-file evidence"))
 
-            val offsetSubject = originalRows.first {
-                it.edges.isEmpty() && it.semanticAnchorCandidateId != null &&
-                    it.candidateCollisionSourceEntityIds.isEmpty()
+            val offsetSource = originalRows.first {
+                it.semanticAnchorCandidateId != null && it.candidateCollisionSourceEntityIds.isEmpty()
             }
+            val offsetSubject = offsetSource.copy(edges = emptyList())
             val movedDie = offsetSubject.physicalDie.copy(dieOffset = "0x7fffffffffffffff")
             val forgedOffsetFact = offsetSubject.copy(
                 sourceEntityId = movedDie.sourceEntityId(offsetSubject.kind),
@@ -1092,52 +1139,111 @@ class FullTreeFunctionObservationsV2Test {
                 first.reconciliation,
                 8L * 1024L * 1024L,
             )
-            FullTreeFunctionObservationsV2.validateEnvelope(
-                forgedOffsetDocument,
-                scope,
-                inventory,
-                inventorySha,
-                shard,
-                first.reconciliation,
-            )
-            val offsetPrepared = privateDirectory(root.resolve("offset-prepared"))
-            val offsetPreparedOutputs = first.binding.outputs.map { outputBinding ->
-                val bytes = if (outputBinding.shardId == receipt.shardId) {
-                    FullTreeFunctionObservationsV2.canonicalEnvelopeBytes(forgedOffsetDocument)
-                } else {
-                    Files.readAllBytes(firstRoot.resolve("outputs/${outputBinding.shardId}.json"))
+            fun publishForgedDocument(label: String, forgedDocument: JsonObject): BoundedShardRunBinding {
+                val prepared = privateDirectory(root.resolve("$label-prepared"))
+                val preparedOutputs = first.binding.outputs.map { outputBinding ->
+                    val bytes = if (outputBinding.shardId == receipt.shardId) {
+                        FullTreeFunctionObservationsV2.canonicalEnvelopeBytes(forgedDocument)
+                    } else {
+                        Files.readAllBytes(firstRoot.resolve("outputs/${outputBinding.shardId}.json"))
+                    }
+                    val path = prepared.resolve("${outputBinding.shardId}.json")
+                    Files.write(path, bytes)
+                    Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("r--------"))
+                    BoundedShardPreparedOutput(
+                        shardId = outputBinding.shardId,
+                        inputSha256 = outputBinding.inputSha256,
+                        output = path,
+                        outputSha256 = OracleArtifacts.sha256(bytes),
+                        outputBytes = bytes.size.toLong(),
+                        entities = outputBinding.entities,
+                    )
                 }
-                val path = offsetPrepared.resolve("${outputBinding.shardId}.json")
-                Files.write(path, bytes)
-                Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("r--------"))
-                BoundedShardPreparedOutput(
-                    shardId = outputBinding.shardId,
-                    inputSha256 = outputBinding.inputSha256,
-                    output = path,
-                    outputSha256 = OracleArtifacts.sha256(bytes),
-                    outputBytes = bytes.size.toLong(),
-                    entities = outputBinding.entities,
+                val parent = privateDirectory(root.resolve("$label-run"))
+                return BoundedShardRunPublisher.publish(
+                    target = parent.resolve("run"),
+                    runId = first.binding.run.controlString("id"),
+                    preparedOutputs = preparedOutputs,
+                    bounds = boundedRunBounds(first.binding.run.controlObject("bounds")),
+                    semanticValidator = BoundedShardOutputSemanticValidator {},
                 )
             }
-            val forgedRunParent = privateDirectory(root.resolve("forged-offset-run"))
-            val forgedRun = BoundedShardRunPublisher.publish(
-                target = forgedRunParent.resolve("run"),
-                runId = first.binding.run.controlString("id"),
-                preparedOutputs = offsetPreparedOutputs,
-                bounds = boundedRunBounds(first.binding.run.controlObject("bounds")),
-                semanticValidator = BoundedShardOutputSemanticValidator {},
+            fun assertRawReexecutionRejects(forged: BoundedShardRunBinding) {
+                val rawFailure = assertFailsWith<FullTreeFunctionObservationV2RunException> {
+                    FullTreeFunctionObservationV2RunPublisher.loadAndValidate(
+                        candidateRoot = forged.root,
+                        expectedIndexArtifactSha256 = forged.indexArtifactSha256,
+                        richArtifact = fixture.richArtifact,
+                        inventoryPath = fixture.inventory,
+                        scope = scope,
+                        scratchParent = scratch,
+                    )
+                }
+                assertTrue(rawFailure.message.orEmpty().contains("raw-input rederivation"))
+            }
+            FullTreeFunctionObservationsV2.validateEnvelope(
+                forgedOffsetDocument, scope, inventory, inventorySha, shard, first.reconciliation,
             )
-            val rawOffsetFailure = assertFailsWith<FullTreeFunctionObservationV2RunException> {
-                FullTreeFunctionObservationV2RunPublisher.loadAndValidate(
-                    candidateRoot = forgedRun.root,
-                    expectedIndexArtifactSha256 = forgedRun.indexArtifactSha256,
-                    richArtifact = fixture.richArtifact,
-                    inventoryPath = fixture.inventory,
-                    scope = scope,
-                    scratchParent = scratch,
-                )
+            assertRawReexecutionRejects(publishForgedDocument("forged-offset", forgedOffsetDocument))
+
+            val emittedRvas = document.getValue("emitted").jsonArray.map {
+                it.jsonObject.getValue("rva").jsonPrimitive.content
+            }.distinct()
+            val linkedSubject = originalRows.firstOrNull { fact ->
+                fact.linkedEmittedRva != null && emittedRvas.any { it != fact.linkedEmittedRva }
             }
-            assertTrue(rawOffsetFailure.message.orEmpty().contains("raw-input rederivation"))
+            assertTrue(linkedSubject != null, "fixture must contain a linked source entity and a second emitted RVA")
+            val linked = requireNotNull(linkedSubject)
+            val alternateEmittedRva = emittedRvas.first { it != linked.linkedEmittedRva }
+            val forgedLinkFact = linked.copy(linkedEmittedRva = alternateEmittedRva)
+            val forgedLinkRows = originalRows.map { fact ->
+                if (fact.sourceEntityId == linked.sourceEntityId) forgedLinkFact else fact
+            }
+            val forgedLinkDocument = FullTreeFunctionObservationsV2.composeEnvelope(
+                v1ProjectionForCompose(document), forgedLinkRows, first.reconciliation, 8L * 1024L * 1024L,
+            )
+            FullTreeFunctionObservationsV2.validateEnvelope(
+                forgedLinkDocument, scope, inventory, inventorySha, shard, first.reconciliation,
+            )
+            assertRawReexecutionRejects(publishForgedDocument("forged-emitted-link", forgedLinkDocument))
+
+            val structuralSubject = originalRows.firstOrNull { source ->
+                source.semanticAnchorCandidateId != null && source.candidateCollisionSourceEntityIds.isEmpty() &&
+                    originalRows.any { target ->
+                        target.physicalDie.unitId == source.physicalDie.unitId &&
+                            target.physicalDie.compilationUnitOffset == source.physicalDie.compilationUnitOffset &&
+                            target.physicalDie.dieOffset.removePrefix("0x").toULong(16) >
+                            source.physicalDie.dieOffset.removePrefix("0x").toULong(16)
+                    }
+            }
+            assertTrue(structuralSubject != null, "fixture must contain two source DIEs in one CU")
+            val structural = requireNotNull(structuralSubject)
+            val unrelatedTarget = originalRows.first { target ->
+                target.physicalDie.unitId == structural.physicalDie.unitId &&
+                    target.physicalDie.compilationUnitOffset == structural.physicalDie.compilationUnitOffset &&
+                    target.physicalDie.dieOffset.removePrefix("0x").toULong(16) >
+                    structural.physicalDie.dieOffset.removePrefix("0x").toULong(16)
+            }.physicalDie
+            val forgedStructuralEdge = FullTreeSourceIdentityEdge(
+                kind = FullTreeSourceIdentityEdgeKind.TYPE,
+                source = structural.physicalDie,
+                target = unrelatedTarget,
+                referenceForm = null,
+                rawReference = null,
+                state = FullTreeSourceIdentityEdgeState.RESOLVED,
+                reasonCode = null,
+            )
+            val forgedStructuralFact = structural.copy(edges = listOf(forgedStructuralEdge))
+            val forgedStructuralRows = originalRows.map { fact ->
+                if (fact.sourceEntityId == structural.sourceEntityId) forgedStructuralFact else fact
+            }
+            val forgedStructuralDocument = FullTreeFunctionObservationsV2.composeEnvelope(
+                v1ProjectionForCompose(document), forgedStructuralRows, first.reconciliation, 8L * 1024L * 1024L,
+            )
+            FullTreeFunctionObservationsV2.validateEnvelope(
+                forgedStructuralDocument, scope, inventory, inventorySha, shard, first.reconciliation,
+            )
+            assertRawReexecutionRejects(publishForgedDocument("forged-structural-edge", forgedStructuralDocument))
 
             val unsafeScratch = Files.createDirectory(root.resolve("unsafe-scratch"))
             Files.setPosixFilePermissions(unsafeScratch, PosixFilePermissions.fromString("rwxrwxrwx"))
@@ -1203,6 +1309,48 @@ class FullTreeFunctionObservationsV2Test {
                     fields,
                 )
             }
+            val unresolved = fact(
+                physical.copy(dieOffset = "0x401"),
+                FullTreeSourceEntityKind.UNRESOLVED,
+                FullTreeIdentityObservability.UNKNOWN,
+                FullTreeDenominatorDisposition.UNKNOWN,
+                fields = null,
+                reasons = listOf("unsupported-source-identity"),
+            )
+            assertFailsWith<IllegalArgumentException> {
+                unresolved.copy(denominatorDisposition = FullTreeDenominatorDisposition.NON_SCOREABLE)
+            }
+            assertFailsWith<IllegalArgumentException> {
+                FullTreeSourceIdentityEdge(
+                    kind = FullTreeSourceIdentityEdgeKind.SPECIFICATION,
+                    source = physical,
+                    target = null,
+                    referenceForm = "0x13",
+                    rawReference = "0x40",
+                    state = FullTreeSourceIdentityEdgeState.MISSING_TARGET,
+                    reasonCode = null,
+                )
+            }
+            val duplicateStructuralEdge = FullTreeSourceIdentityEdge(
+                kind = FullTreeSourceIdentityEdgeKind.TYPE,
+                source = physical,
+                target = physical.copy(dieOffset = "0x402"),
+                referenceForm = null,
+                rawReference = null,
+                state = FullTreeSourceIdentityEdgeState.RESOLVED,
+                reasonCode = null,
+            )
+            assertFailsWith<IllegalArgumentException> {
+                fact(
+                    physical.copy(dieOffset = "0x403"),
+                    FullTreeSourceEntityKind.NO_RANGE_DEFINITION,
+                    FullTreeIdentityObservability.UNKNOWN,
+                    FullTreeDenominatorDisposition.NON_SCOREABLE,
+                    fields = null,
+                    reasons = listOf("unknown-type-reference"),
+                    edges = listOf(duplicateStructuralEdge, duplicateStructuralEdge),
+                )
+            }
             val accumulator = FullTreeFunctionObservationAccumulatorV2(shard)
             accumulator.acceptSourceEntity(row)
             assertFailsWith<FullTreeFunctionObservationV2Exception> { accumulator.acceptSourceEntity(row) }
@@ -1210,6 +1358,7 @@ class FullTreeFunctionObservationsV2Test {
             val sameDieOtherKind = row.copy(
                 sourceEntityId = physical.sourceEntityId(alternateKind),
                 kind = alternateKind,
+                identityObservability = FullTreeIdentityObservability.OBSERVABLE,
                 denominatorDisposition = FullTreeDenominatorDisposition.NON_SCOREABLE,
                 semanticAnchorCandidateId = fields.candidateId(requireNotNull(alternateKind.anchorKind())),
             )

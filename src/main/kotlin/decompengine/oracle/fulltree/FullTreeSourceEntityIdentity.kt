@@ -230,6 +230,21 @@ internal data class FullTreeSourceIdentityEdge(
         require((state == FullTreeSourceIdentityEdgeState.RESOLVED) == (target != null))
         require(reasonCode == null || reasonCode.matches(REASON_CODE))
         if (state == FullTreeSourceIdentityEdgeState.RESOLVED) require(reasonCode == null)
+        if (state != FullTreeSourceIdentityEdgeState.RESOLVED) {
+            val expectedReasons = when (state) {
+                FullTreeSourceIdentityEdgeState.MISSING_TARGET -> setOf("target-not-retained-or-not-a-die-boundary")
+                FullTreeSourceIdentityEdgeState.MALFORMED -> setOf(
+                    "malformed-reference-value",
+                    "reference-outside-validated-dwarf-boundary",
+                    "reference-not-in-a-compilation-unit",
+                    "conflicting-duplicate-reference-attribute",
+                )
+                FullTreeSourceIdentityEdgeState.UNSUPPORTED -> setOf("unsupported-reference-form")
+                FullTreeSourceIdentityEdgeState.CYCLIC -> setOf("reference-cycle")
+                FullTreeSourceIdentityEdgeState.RESOLVED -> emptySet()
+            }
+            require(reasonCode != null && reasonCode in expectedReasons)
+        }
         if (referenceForm != null) require(referenceForm.matches(Regex("0x[0-9a-f]+")))
         if (rawReference != null) require(rawReference.matches(Regex("0x(?:0|[1-9a-f][0-9a-f]*)")))
     }
@@ -430,6 +445,7 @@ internal class FullTreeSourceEntityFact(
         if (expectedAnchor == null && kind.anchorKind() == null) {
             require(semanticAnchorFields == null && semanticAnchorCandidateId == null)
         }
+        require(semanticAnchorCandidateId == expectedAnchor)
         if (identityObservability == FullTreeIdentityObservability.OBSERVABLE) {
             require(semanticAnchorCandidateId != null && semanticAnchorCandidateId == expectedAnchor)
         }
@@ -457,6 +473,10 @@ internal class FullTreeSourceEntityFact(
         require(identityObservability == expectedObservability)
         if (kind == FullTreeSourceEntityKind.INLINE_INSTANCE) {
             require(denominatorDisposition == FullTreeDenominatorDisposition.NON_SCOREABLE)
+            require(linkedEmittedRva == null)
+        }
+        if (kind == FullTreeSourceEntityKind.UNRESOLVED) {
+            require(denominatorDisposition == FullTreeDenominatorDisposition.UNKNOWN)
             require(linkedEmittedRva == null)
         }
         if (kind == FullTreeSourceEntityKind.DECLARATION_ONLY || kind == FullTreeSourceEntityKind.NO_RANGE_DEFINITION ||

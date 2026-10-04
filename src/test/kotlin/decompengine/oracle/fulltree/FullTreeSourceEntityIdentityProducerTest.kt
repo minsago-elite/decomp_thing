@@ -161,6 +161,28 @@ class FullTreeSourceEntityIdentityProducerTest {
         }
 
     @Test
+    fun `source identity aggregate scan bound scales per compilation unit and clamps configured shard ceiling`() {
+        val perUnitCeiling = 10_000_000L
+        val aggregateCeiling = fullTreeFunctionObservationScannedDiesBound(
+            maximumPhysicalRecordsPerUnit = perUnitCeiling,
+            unitCount = 2L,
+            configuredMaximumScannedDies = 50_000_000L,
+        )
+        assertEquals(20_000_000L, aggregateCeiling)
+        // Two six-million-DIE CUs fit below the authenticated two-CU scan bound without allocating
+        // synthetic DIE records to exercise the arithmetic path.
+        requireSourceIdentityScannedDiesWithinBound(12_000_000L, aggregateCeiling)
+        requireSourceIdentityScannedDiesWithinBound(aggregateCeiling, aggregateCeiling)
+        assertFailsWith<FullTreeControlException> {
+            requireSourceIdentityScannedDiesWithinBound(aggregateCeiling + 1L, aggregateCeiling)
+        }
+        assertEquals(
+            15_000_000L,
+            fullTreeFunctionObservationScannedDiesBound(perUnitCeiling, 2L, 15_000_000L),
+        )
+    }
+
+    @Test
     fun `line table cache bounds cover every authenticated compilation unit`() {
         val perUnit = 16L * 1024L
         val configured = FullTreeDwarfLineTableLimits(

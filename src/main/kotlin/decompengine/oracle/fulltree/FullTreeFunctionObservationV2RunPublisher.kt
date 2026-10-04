@@ -279,6 +279,24 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                             modeledRetainedBytes = nextRetained
                         },
                         residentBudgetBytes = sourcePassResidentBytes,
+                        factAdjustmentAdmission = { collisionCopyBytes, collisionExpansionBytes ->
+                            val nextSerializedBytes = Math.addExact(
+                                sourceFactAdmissionBytes,
+                                collisionExpansionBytes,
+                            )
+                            val nextRetained = Math.addExact(
+                                modeledRetainedBytes,
+                                sourceIdentityModeledRetainedChargeBytes(collisionCopyBytes),
+                            )
+                            if (nextSerializedBytes > wholeRun.controlLong("serializedBytes")) {
+                                v2RunFail("full-run source census collision evidence exceeds its authenticated byte bound")
+                            }
+                            if (nextRetained > retainedAdmission) {
+                                v2RunFail("shard-local collision evidence exceeds the retained-working-set budget")
+                            }
+                            sourceFactAdmissionBytes = nextSerializedBytes
+                            modeledRetainedBytes = nextRetained
+                        },
                     )
                     if (scan.inventoryArtifactSha256 != inventorySha256 || scan.richArtifactSha256 != richSha256) {
                         v2RunFail("source-identity scan inputs differ from the authenticated run")
@@ -312,10 +330,15 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                     val copiedRetainedUpperBound = Math.addExact(copyCharge, expansion)
                     val copyModeled = sourceIdentityModeledRetainedChargeBytes(copiedRetainedUpperBound)
                     val peakRetained = Math.addExact(modeledRetainedBytes, copyModeled)
+                    val reconciledRunBytes = Math.addExact(sourceFactCanonicalBytes, expansion)
                     if (peakRetained > retainedAdmission) {
                         v2RunFail("full-run collision reconciliation exceeds the retained-working-set budget")
                     }
+                    if (reconciledRunBytes > wholeRun.controlLong("serializedBytes")) {
+                        v2RunFail("full-run collision reconciliation exceeds its authenticated serialized-byte bound")
+                    }
                     modeledRetainedBytes = peakRetained
+                    sourceFactCanonicalBytes = reconciledRunBytes
                     val adjusted = reconcileObservationV2Facts(original, reconciliation)
                     val adjustedBytes = canonicalSourceEntityFactsByteLength(adjusted, perShardBytes)
                     if (adjustedBytes > perShardBytes) {
@@ -476,6 +499,9 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                             deadline.sampleWholeRun("before returning authenticated observation-v2 run")
                         }
                     }
+                    val normalizedScratchParent = scratchParent.toAbsolutePath().normalize()
+                    val publicationUsesScratch = target == normalizedScratchParent ||
+                        target.startsWith(normalizedScratchParent)
                     val binding = BoundedShardRunPublisher.publishWithCheckpoint(
                         target = target,
                         runId = runId,
@@ -496,6 +522,21 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                             }
                         },
                         checkpoint = publicationCheckpoint,
+                        stagingAdmission = { stagedBytes ->
+                            if (publicationUsesScratch) {
+                                val peak = try {
+                                    Math.addExact(preparedBytes, stagedBytes)
+                                } catch (failure: ArithmeticException) {
+                                    throw FullTreeFunctionObservationV2RunException(
+                                        "observation-v2 staged publication scratch size overflows",
+                                        failure,
+                                    )
+                                }
+                                if (peak > limits.maximumScratchBytes) {
+                                    v2RunFail("observation-v2 publication staging exceeds the authenticated scratch bound")
+                                }
+                            }
+                        },
                     )
                     return@translateV2RunFailure FullTreeFunctionObservationV2RunPublication(
                         binding = binding,
