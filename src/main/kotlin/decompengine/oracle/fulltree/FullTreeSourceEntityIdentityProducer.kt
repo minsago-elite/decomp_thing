@@ -418,7 +418,7 @@ internal object FullTreeSourceEntityIdentityProducer {
             val collisionIds = ArrayList(collisionIdSet)
             var comparisons = 0L
             collisionIds.sortWith { left, right ->
-                if (comparisons++ % SOURCE_IDENTITY_SORT_CHECKPOINT_INTERVAL == 0L) {
+                if (comparisons++ % SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL == 0L) {
                     checkpoint?.invoke("while sorting full-run collision IDs")
                 }
                 left.compareTo(right)
