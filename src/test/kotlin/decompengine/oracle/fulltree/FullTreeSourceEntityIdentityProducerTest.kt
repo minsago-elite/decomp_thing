@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.attribute.PosixFilePermissions
 import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -16,8 +17,302 @@ import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 class FullTreeSourceEntityIdentityProducerTest {
+    @Test
+    fun `sixteen long typed parameters publish within the identity edge bound and finalize cancellably`() =
+        inControlTemporaryDirectory { root ->
+            val controls = createFullTreeControlFixture(root.resolve("control"))
+            val originalScope = controls.authenticatedScope()
+            val rowRoot = Files.createDirectories(root.resolve("signature-fixture"))
+            val compiler = resolveCompiler("GXX", listOf("g++", "g++-14", "g++-13"))
+            val outerNamespace = "outer_${"a".repeat(220)}"
+            val innerNamespace = "inner_${"b".repeat(220)}"
+            val typeName = "Record${"r".repeat(120)}"
+            val qualifiedType = "::$outerNamespace::$innerNamespace::$typeName"
+            val parameters = (0 until 16).joinToString(", ") { "$qualifiedType p$it" }
+            val pointerParameters = (0 until 16).joinToString(", ") { qualifiedType }
+            val sourceText = """
+                #line 1 "/fixture/source-tree/clang/lib/InlineTemplate/compact-signature.cpp"
+                namespace $outerNamespace { namespace $innerNamespace { struct $typeName { long value; }; } }
+                extern "C" long compact_signature($parameters);
+                using CompactSignaturePointer = long (*)($pointerParameters);
+                static CompactSignaturePointer compact_signature_reference = &compact_signature;
+            """.trimIndent() + "\n"
+            val objects = (0..1).map { index ->
+                val source = rowRoot.resolve("compact-signature-$index.cpp")
+                Files.writeString(source, sourceText, StandardCharsets.UTF_8)
+                val objectFile = rowRoot.resolve("compact-signature-$index.o")
+                runCommand(
+                    listOf(
+                        compiler.toString(), "-std=c++17", "-O0", "-g", "-gdwarf-5", "-fPIC",
+                        "-fdebug-prefix-map=$rowRoot=/fixture/source-tree/clang/lib/InlineTemplate",
+                        source.toString(), "-c", "-o", objectFile.toString(),
+                    ),
+                    rowRoot,
+                    "compact-signature-$index-compile.txt",
+                )
+                objectFile
+            }
+            val artifact = rowRoot.resolve("compact-signature.so")
+            runCommand(
+                listOf(compiler.toString(), "-shared", "-Wl,--build-id=none") +
+                    objects.map(Path::toString) + listOf("-o", artifact.toString()),
+                rowRoot,
+                "compact-signature-link.txt",
+            )
+            val scope = scopeForArtifact(originalScope, fixtureSha256(artifact), Files.size(artifact))
+            val inventoryPath = rowRoot.resolve("compact-signature-inventory.json")
+            FullTreeInventoryControl.generateAndPublish(artifact, scope, inventoryPath, maximumWorkers = 1)
+            val inventory = parseControlObject(inventoryPath)
+            val inventorySha256 = fixtureSha256(inventoryPath)
+            val shardId = inventory.controlArray("shards").single().jsonObject.controlString("id")
+            val cancellationScratch = privateDirectory(root.resolve("cancellation-scratch"))
+            val finalizationStages = mutableListOf<String>()
+            var serializedChecks = 0
+            val cancellation = assertFailsWith<FullTreeControlException> {
+                FullTreeSourceEntityIdentityProducer.scanShard(
+                    artifact,
+                    inventoryPath,
+                    scope,
+                    shardId,
+                    cancellationScratch,
+                    checkpoint = { stage ->
+                        finalizationStages += stage
+                        if (stage == "after serializing canonical source-entity output" && ++serializedChecks == 3) {
+                            throw FullTreeControlException("test cancellation during source-identity finalization")
+                        }
+                    },
+                )
+            }
+            assertTrue(cancellation.message.orEmpty().contains("test cancellation"))
+            assertEquals(3, serializedChecks, "cancellation should arrive after adjusted copies and final serialization")
+            assertTrue("while reconciling source-anchor collisions" in finalizationStages)
+            assertTrue("while sizing full-run collision evidence" in finalizationStages)
+            assertTrue("while sizing full-run collision-adjusted copies" in finalizationStages)
+            assertTrue("while applying full-run source-anchor collisions" in finalizationStages)
+            assertTrue("while serializing canonical source-entity output" in finalizationStages)
+
+            val scratch = privateDirectory(root.resolve("publisher-scratch"))
+            val outputParent = privateDirectory(root.resolve("published-output"))
+            val publication = FullTreeFunctionObservationV2RunPublisher.generateAndPublish(
+                richArtifact = artifact,
+                inventoryPath = inventoryPath,
+                scope = scope,
+                scratchParent = scratch,
+                outputRoot = outputParent.resolve("run"),
+                maximumWorkers = 1,
+            )
+            FullTreeFunctionObservationV2RunPublisher.loadAndValidate(
+                candidateRoot = publication.binding.root,
+                expectedIndexArtifactSha256 = publication.binding.indexArtifactSha256,
+                richArtifact = artifact,
+                inventoryPath = inventoryPath,
+                scope = scope,
+                scratchParent = scratch,
+            )
+            val facts = publication.outputs.flatMap { receipt ->
+                val bytes = Files.readAllBytes(publication.binding.root.resolve("outputs/${receipt.shardId}.json"))
+                val document = OracleJson.parseCanonical(bytes) as JsonObject
+                document.getValue("sourceEntities").jsonArray.map {
+                    FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
+                }
+            }.filter { it.semanticAnchorFields?.sourceName == "compact_signature" }
+            assertEquals(2, facts.size, "both physical declaration rows must be retained")
+            assertTrue(facts.all { it.identityObservability == FullTreeIdentityObservability.AMBIGUOUS })
+            assertEquals(1, facts.map { it.semanticAnchorCandidateId }.distinct().size)
+            assertTrue(facts.all { it.candidateCollisionSourceEntityIds.size == 2 })
+            facts.forEach { fact ->
+                val signature = fact.semanticAnchorFields?.signature.orEmpty()
+                assertEquals(16, signature.count { it.startsWith("parameter:") })
+                assertTrue(signature.joinToString("|").toByteArray(StandardCharsets.UTF_8).size > 8_192)
+                assertTrue(fact.edges.size <= MAXIMUM_IDENTITY_EDGES_PER_ENTITY)
+                assertTrue(
+                    fact.edges.none { it.kind == FullTreeSourceIdentityEdgeKind.TYPE && it.referenceForm == null },
+                    "typed signature formals should not retain duplicate structural TYPE edges",
+                )
+                assertTrue(fact.edges.count {
+                    it.kind == FullTreeSourceIdentityEdgeKind.TYPE && it.referenceForm != null
+                } >= 17, "direct formal and nonvoid return type references must remain present")
+            }
+        }
+
+    @Test
+    fun `observation v2 run validator rejects a self-consistent forged template RVA link`() =
+        inControlTemporaryDirectory { root ->
+            val sourceFixture = Path.of(System.getProperty("user.dir"))
+                .resolve("src/test/resources/oracle/inline-template-identity-v1").toAbsolutePath().normalize()
+            val controls = createFullTreeControlFixture(root.resolve("control"))
+            val build = Files.createDirectories(root.resolve("compiled-fixture"))
+            val compiler = resolveCompiler("GXX", listOf("g++", "g++-14", "g++-13"))
+            val artifact = compileFixture(compiler, sourceFixture, build, optimization = 2)
+            val scope = scopeForArtifact(controls.authenticatedScope(), fixtureSha256(artifact), Files.size(artifact))
+            val inventoryPath = build.resolve("inventory.json")
+            FullTreeInventoryControl.generateAndPublish(artifact, scope, inventoryPath, maximumWorkers = 1)
+            val scratch = privateDirectory(root.resolve("scratch"))
+            val outputParent = privateDirectory(root.resolve("output"))
+            val publication = FullTreeFunctionObservationV2RunPublisher.generateAndPublish(
+                richArtifact = artifact,
+                inventoryPath = inventoryPath,
+                scope = scope,
+                scratchParent = scratch,
+                outputRoot = outputParent.resolve("run"),
+                maximumWorkers = 1,
+            )
+            val linkedOutput = publication.outputs.asSequence().mapNotNull { receipt ->
+                val bytes = Files.readAllBytes(publication.binding.root.resolve("outputs/${receipt.shardId}.json"))
+                val document = OracleJson.parseCanonical(bytes) as JsonObject
+                val rows = document.getValue("sourceEntities").jsonArray.map {
+                    FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
+                }
+                rows.firstOrNull { fact ->
+                    fact.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE &&
+                        fact.denominatorDisposition == FullTreeDenominatorDisposition.EMITTED_RVA_LINK
+                }?.let { Triple(receipt, document, it) }
+            }.firstOrNull() ?: throw AssertionError("compiler fixture emitted no linked template-instance census row")
+            val (receipt, document, linkedFact) = linkedOutput
+            val emittedRvas = document.getValue("emitted").jsonArray.map {
+                it.jsonObject.getValue("rva").jsonPrimitive.content
+            }
+            val forgedRva = emittedRvas.firstOrNull { it != linkedFact.linkedEmittedRva }
+                ?: throw AssertionError("compiler fixture needs a second emitted RVA for the repoint mutation")
+            val forgedRows = document.getValue("sourceEntities").jsonArray.map {
+                val fact = FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
+                if (fact.sourceEntityId == linkedFact.sourceEntityId) fact.copy(linkedEmittedRva = forgedRva) else fact
+            }
+            val v1Counts = JsonObject(document.controlObject("counts").toMutableMap().apply {
+                remove("sourceEntities")
+                remove("sourceEntitiesByKind")
+                remove("sourceEntitiesByObservability")
+                remove("sourceEntitiesByDenominatorDisposition")
+                remove("anchorClaims")
+                remove("anchorCandidateCount")
+                remove("anchorCollisionCandidateCount")
+            })
+            val v1Oracle = JsonObject(document.controlObject("oracle").toMutableMap().apply {
+                put("configurationSha256", JsonPrimitive(FullTreeFunctionObservations.configurationSha256))
+            })
+            val v1Projection = JsonObject(document.toMutableMap().apply {
+                remove("sourceEntities")
+                remove("identityReconciliation")
+                put("counts", v1Counts)
+                put("oracle", v1Oracle)
+                put("schemaVersion", JsonPrimitive(1))
+            })
+            val composeFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                FullTreeFunctionObservationsV2.composeEnvelope(
+                    v1Projection,
+                    forgedRows,
+                    publication.reconciliation,
+                    FullTreeFunctionObservationsV2.MAXIMUM_CANONICAL_BYTES,
+                )
+            }
+            assertTrue(composeFailure.message.orEmpty().contains("authenticated scan receipt"))
+            val inventoryDocument = parseControlObject(inventoryPath)
+            val inventorySha256 = fixtureSha256(inventoryPath)
+            val shardInput = FullTreeFunctionObservations.shardInputs(
+                inventoryDocument,
+                inventorySha256,
+                scope.document,
+                scope.sha256,
+            ).associateBy { it.identifier }.getValue(receipt.shardId)
+            // The composer correctly refuses this mutation because its authenticated census
+            // receipt binds the source-to-RVA link. Construct the same structurally canonical
+            // bytes independently so loadAndValidate still exercises the raw-input publication
+            // gate when a transport-valid run carries the forged row.
+            val forgedDocument = JsonObject(document.toMutableMap().apply {
+                put("sourceEntities", JsonArray(forgedRows.map(FullTreeSourceEntityFact::canonicalJson)))
+            })
+            val receiptFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                FullTreeFunctionObservationsV2.validateEnvelope(
+                    forgedDocument,
+                    scope,
+                    inventoryDocument,
+                    inventorySha256,
+                    shardInput,
+                    publication.reconciliation,
+                )
+            }
+            assertTrue(receiptFailure.message.orEmpty().contains("authenticated scan receipt"))
+
+            val preparedDirectory = privateDirectory(root.resolve("forged-prepared"))
+            val forgedOutputs = publication.binding.outputs.map { outputBinding ->
+                val bytes = if (outputBinding.shardId == receipt.shardId) {
+                    FullTreeFunctionObservationsV2.canonicalEnvelopeBytes(forgedDocument)
+                } else {
+                    Files.readAllBytes(publication.binding.root.resolve("outputs/${outputBinding.shardId}.json"))
+                }
+                val path = preparedDirectory.resolve("${outputBinding.shardId}.json")
+                Files.write(path, bytes)
+                Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("r--------"))
+                BoundedShardPreparedOutput(
+                    shardId = outputBinding.shardId,
+                    inputSha256 = outputBinding.inputSha256,
+                    output = path,
+                    outputSha256 = OracleArtifacts.sha256(bytes),
+                    outputBytes = bytes.size.toLong(),
+                    entities = outputBinding.entities,
+                )
+            }
+            val bounds = publication.binding.run.controlObject("bounds")
+            val boundedRunBounds = BoundedShardRunPublicationBounds(
+                maximumShards = bounds.controlLong("maximumShards").toInt(),
+                perShardEntities = bounds.controlLong("perShardEntities"),
+                wholeRunEntities = bounds.controlLong("wholeRunEntities"),
+                perShardBytes = bounds.controlLong("perShardBytes"),
+                wholeRunBytes = bounds.controlLong("wholeRunBytes"),
+                perShardSeconds = bounds.getValue("perShardSeconds").jsonPrimitive.content.toDouble(),
+                wholeRunSeconds = bounds.getValue("wholeRunSeconds").jsonPrimitive.content.toDouble(),
+                perShardCpuSeconds = bounds.getValue("perShardCpuSeconds").jsonPrimitive.content.toDouble(),
+                wholeRunCpuSeconds = bounds.getValue("wholeRunCpuSeconds").jsonPrimitive.content.toDouble(),
+                maximumResidentBytes = bounds.controlLong("maximumResidentBytes"),
+                maximumWorkers = bounds.controlLong("maximumWorkers").toInt(),
+            )
+            val forgedRun = BoundedShardRunPublisher.publish(
+                target = privateDirectory(root.resolve("forged-run-parent")).resolve("run"),
+                runId = publication.binding.run.controlString("id"),
+                preparedOutputs = forgedOutputs,
+                bounds = boundedRunBounds,
+                semanticValidator = BoundedShardOutputSemanticValidator {},
+            )
+            val failure = assertFailsWith<FullTreeFunctionObservationV2RunException> {
+                FullTreeFunctionObservationV2RunPublisher.loadAndValidate(
+                    candidateRoot = forgedRun.root,
+                    expectedIndexArtifactSha256 = forgedRun.indexArtifactSha256,
+                    richArtifact = artifact,
+                    inventoryPath = inventoryPath,
+                    scope = scope,
+                    scratchParent = scratch,
+                )
+            }
+            assertTrue(failure.message.orEmpty().contains("raw-input rederivation"))
+        }
+
+    @Test
+    fun `source identity aggregate scan bound scales per compilation unit and clamps configured shard ceiling`() {
+        val perUnitCeiling = 10_000_000L
+        val aggregateCeiling = fullTreeFunctionObservationScannedDiesBound(
+            maximumPhysicalRecordsPerUnit = perUnitCeiling,
+            unitCount = 2L,
+            configuredMaximumScannedDies = 50_000_000L,
+        )
+        assertEquals(20_000_000L, aggregateCeiling)
+        // Two six-million-DIE CUs fit below the authenticated two-CU scan bound without allocating
+        // synthetic DIE records to exercise the arithmetic path.
+        requireSourceIdentityScannedDiesWithinBound(12_000_000L, aggregateCeiling)
+        requireSourceIdentityScannedDiesWithinBound(aggregateCeiling, aggregateCeiling)
+        assertFailsWith<FullTreeControlException> {
+            requireSourceIdentityScannedDiesWithinBound(aggregateCeiling + 1L, aggregateCeiling)
+        }
+        assertEquals(
+            15_000_000L,
+            fullTreeFunctionObservationScannedDiesBound(perUnitCeiling, 2L, 15_000_000L),
+        )
+    }
+
     @Test
     fun `line table cache bounds cover every authenticated compilation unit`() {
         val perUnit = 16L * 1024L
@@ -36,6 +331,44 @@ class FullTreeSourceEntityIdentityProducerTest {
         assertTrue(Math.multiplyExact(modeledPerUnit, 32L) <= Math.multiplyExact(perUnit, 32L))
         assertFailsWith<FullTreeControlException> {
             boundedSourceIdentityLineTableLimits(configured, 1_024L)
+        }
+    }
+
+    @Test
+    fun `line table resident share uses admitted inventory count under a loose CU ceiling`() {
+        val maximumResidentBytes = 1L shl 30
+        val admittedCompilationUnits = 8L
+        val looseWholeRunCeiling = 120_000L
+        val configured = FullTreeDwarfLineTableLimits(
+            maximumDirectories = 512,
+            maximumFiles = 512,
+            maximumAggregatePathBytes = 4L * 1024L * 1024L,
+        )
+        val budget = sourceIdentityLineTableBudget(
+            configured = configured,
+            maximumResidentBytes = maximumResidentBytes,
+            admittedCompilationUnitCount = admittedCompilationUnits,
+            maximumAuthenticatedCompilationUnitCount = looseWholeRunCeiling,
+        )
+        assertEquals(maximumResidentBytes / 4L / admittedCompilationUnits, budget.perUnitRetainedBytes)
+        assertTrue(budget.modeledRetainedBytes <= maximumResidentBytes / 4L)
+        assertEquals(configured.maximumDirectories, budget.limits.maximumDirectories)
+        assertEquals(configured.maximumFiles, budget.limits.maximumFiles)
+        assertFailsWith<FullTreeControlException> {
+            sourceIdentityLineTableBudget(
+                configured,
+                maximumResidentBytes,
+                0L,
+                looseWholeRunCeiling,
+            )
+        }
+        assertFailsWith<FullTreeControlException> {
+            sourceIdentityLineTableBudget(
+                configured,
+                maximumResidentBytes,
+                admittedCompilationUnits,
+                admittedCompilationUnits - 1L,
+            )
         }
     }
 
@@ -89,12 +422,14 @@ class FullTreeSourceEntityIdentityProducerTest {
                 )
                 val shard = inventory.inventory.controlArray("shards").single() as JsonObject
                 val shardId = shard.controlString("id")
+                val fullRunClaims = mutableListOf<Pair<String, String>>()
                 val first = FullTreeSourceEntityIdentityProducer.scanShard(
                     artifact,
                     inventoryPath,
                     scope,
                     shardId,
                     rowRoot,
+                    anchorClaim = { _, candidate, physicalClaim -> fullRunClaims += candidate to physicalClaim },
                 )
                 val second = FullTreeSourceEntityIdentityProducer.scanShard(
                     artifact,
@@ -109,6 +444,15 @@ class FullTreeSourceEntityIdentityProducerTest {
                 assertEquals(first.facts.size, first.facts.map { it.sourceEntityId }.distinct().size, runDescription)
                 assertEquals(first.facts.size, first.facts.map { it.physicalDie.locator() }.distinct().size, runDescription)
                 assertTrue(first.facts.all { it.sourceEntityId == it.physicalDie.sourceEntityId(it.kind) }, runDescription)
+                val censusClaims = first.facts.mapNotNull { fact ->
+                    fact.semanticAnchorCandidateId?.let { it to fact.sourceEntityId }
+                }.toSet()
+                assertTrue(censusClaims.isNotEmpty(), "$runDescription produced no source anchor claims")
+                assertTrue(censusClaims.all { it in fullRunClaims }, "$runDescription omitted a census anchor claim")
+                assertTrue(
+                    fullRunClaims.toSet().any { it !in censusClaims },
+                    "$runDescription omitted bounded claims from ordinary emitted source definitions",
+                )
                 assertTrue(first.facts.all { it.resolvedSemanticIdentityId == null }, runDescription)
                 assertTrue(first.facts.filter { it.kind == FullTreeSourceEntityKind.NO_RANGE_DEFINITION }.all {
                     it.denominatorDisposition == FullTreeDenominatorDisposition.NON_SCOREABLE && it.linkedEmittedRva == null
@@ -379,7 +723,9 @@ class FullTreeSourceEntityIdentityProducerTest {
             writer.append("struct Big {};\n")
             repeat(namespaces.size) { writer.append("}\n") }
             writer.append("using namespace ").append(namespaces.joinToString("::")).append(";\n")
-            val parameters = (0..31).joinToString(", ") { "Big p$it" }
+            // One typed formal walks the enormous namespace descriptor through row-scratch
+            // admission while staying far below the separate 32-edge ceiling.
+            val parameters = "Big p0"
             writer.append("extern \"C\" void descriptor_bound($parameters) {}\n")
             writer.append("extern \"C\" void (*descriptor_bound_reference)($parameters) = &descriptor_bound;\n")
             writer.append("int main() { return descriptor_bound_reference == nullptr; }\n")
@@ -845,5 +1191,9 @@ class FullTreeSourceEntityIdentityProducerTest {
         Files.walk(path).use { stream ->
             stream.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
         }
+    }
+
+    private fun privateDirectory(path: Path): Path = Files.createDirectory(path).also {
+        Files.setPosixFilePermissions(it, PosixFilePermissions.fromString("rwx------"))
     }
 }

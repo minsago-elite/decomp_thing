@@ -23,6 +23,30 @@ internal data class FullTreeSourceEntityIdentityScan(
     val peakRetainedLineTableUnits: Int,
 )
 
+internal fun requireSourceIdentityScannedDiesWithinBound(scannedDies: Long, maximumScannedDies: Long) {
+    if (scannedDies < 0L || maximumScannedDies <= 0L || scannedDies > maximumScannedDies) {
+        throw FullTreeControlException("source-identity shard exceeds its aggregate physical-DIE bound")
+    }
+}
+
+/**
+ * Derives the only source-census denominator link this producer may emit. Declarations stay
+ * non-scoreable even if malformed or unusual DWARF also gives them an executable range.
+ */
+internal fun sourceIdentityEmittedRvaLink(
+    declaration: Boolean,
+    functionStart: () -> ULong?,
+    imageBase: ULong,
+    executable: FullTreeElfExecutableMembership,
+): Pair<FullTreeDenominatorDisposition, String?> {
+    if (declaration) return FullTreeDenominatorDisposition.NON_SCOREABLE to null
+    val start = functionStart() ?: return FullTreeDenominatorDisposition.NON_SCOREABLE to null
+    if (start < imageBase) return FullTreeDenominatorDisposition.UNKNOWN to null
+    val rva = start - imageBase
+    if (!executable.contains(rva)) return FullTreeDenominatorDisposition.UNKNOWN to null
+    return FullTreeDenominatorDisposition.EMITTED_RVA_LINK to canonicalUnsignedHex(rva)
+}
+
 /** Additive extractor for source identities; it does not write or alter either frozen observation schema. */
 internal object FullTreeSourceEntityIdentityProducer {
     fun scanShard(
@@ -34,6 +58,14 @@ internal object FullTreeSourceEntityIdentityProducer {
         controlLimits: FullTreeControlLimits = FullTreeControlLimits(),
         producerLimits: FullTreeFunctionObservationProducerLimits = FullTreeFunctionObservationProducerLimits(),
         checkpoint: (String) -> Unit = {},
+        /** Receives bounded candidate-to-physical claims, including ordinary emitted definitions. */
+        anchorClaim: ((kind: FullTreeSourceAnchorKind, candidateId: String, physicalClaimId: String) -> Unit)? = null,
+        /** Admits each canonical census row against the caller's aggregate run budget before retention. */
+        factAdmission: ((fact: FullTreeSourceEntityFact, canonicalArrayContributionBytes: Long) -> Unit)? = null,
+        /** Optional run-level resident allowance after reserving co-resident full-run state. */
+        residentBudgetBytes: Long? = null,
+        /** Admits shard-local collision copies before the source rows are copied and retained. */
+        factAdjustmentAdmission: ((collisionCopyBytes: Long, collisionExpansionBytes: Long) -> Unit)? = null,
     ): FullTreeSourceEntityIdentityScan {
         FullTreeScopeControl.validate(scope, controlLimits)
         requireStableDirectory(scratchParent, "source-identity scratch parent")
@@ -41,12 +73,19 @@ internal object FullTreeSourceEntityIdentityProducer {
         // The authenticated per-shard entity ceiling applies to this census. The separate
         // 20,000-function limit belongs to function projection and is not a census cap.
         val maximumFacts = perShard.controlLong("entities")
+        val maximumResidentBytes = minOf(
+            perShard.controlLong("maximumResidentBytes"),
+            residentBudgetBytes ?: Long.MAX_VALUE,
+        )
+        if (maximumResidentBytes <= 0L) {
+            throw FullTreeControlException("source-identity run resident-byte allowance is empty")
+        }
         val maximumSerializedBytes = minOf(
             perShard.controlLong("serializedBytes"),
             MAXIMUM_SOURCE_IDENTITY_BYTES,
         )
         val memoryBounds = sourceIdentityMemoryBounds(
-            perShard.controlLong("maximumResidentBytes"),
+            maximumResidentBytes,
             maximumSerializedBytes,
         )
         val maximumCanonicalRowBytes = memoryBounds.maximumCanonicalRowBytes
@@ -54,39 +93,13 @@ internal object FullTreeSourceEntityIdentityProducer {
         val maximumModeledRetainedBytes = memoryBounds.maximumModeledRetainedBytes
         val maximumReferencedUnits = scope.document.controlObject("bounds").controlObject("wholeRun")
             .controlLong("compilationUnits")
-        val lineWorkingSetBudget = perShard.controlLong("maximumResidentBytes") / 4L
-        val lineBytesPerUnit = lineWorkingSetBudget / maximumReferencedUnits
-        val boundedLineLimits = boundedSourceIdentityLineTableLimits(
-            producerLimits.lineTableLimits,
-            lineBytesPerUnit,
-        )
-        val lineLimits = boundedLineLimits
-        val modeledLineBytesPerUnit = try {
-            Math.addExact(
-                Math.addExact(
-                    Math.multiplyExact(lineLimits.maximumAggregatePathBytes, 2L),
-                    Math.multiplyExact(
-                        Math.addExact(lineLimits.maximumDirectories.toLong(), lineLimits.maximumFiles.toLong()),
-                        128L,
-                    ),
-                ),
-                1_024L,
-            )
-        } catch (failure: ArithmeticException) {
-            throw FullTreeControlException("source-identity line-table working-set model overflows", failure)
-        }
-        val modeledLineBytes = Math.multiplyExact(
-            modeledLineBytesPerUnit,
-            maximumReferencedUnits,
-        )
-        if (modeledLineBytes > lineWorkingSetBudget) {
-            throw FullTreeControlException("source-identity line-table model exceeds its authenticated working-set share")
-        }
+        var admittedLineTableBudget: SourceIdentityLineTableBudget? = null
 
         // The parsed inventory tree coexists with source rows, output, and DWARF state. Reserve its
-        // serialized-input expansion before parsing it; later reserve the exact CU-index count
-        // before materializing unit/header lists and maps. The file-size cap is rechecked by the
-        // stable canonical-control reader, so a replaced larger file cannot evade this preflight.
+        // serialized-input expansion before parsing it; later use the admitted inventory's exact
+        // CU count to divide the remaining line-table share before any line tables are retained.
+        // The file-size cap is rechecked by the stable canonical-control reader, so a replaced
+        // larger file cannot evade this preflight.
         val inventoryBytes = try {
             Files.size(inventoryPath)
         } catch (failure: Exception) {
@@ -107,8 +120,8 @@ internal object FullTreeSourceEntityIdentityProducer {
             modeledObservedUnitMetadataBytes = 0L,
         )
         sourceIdentityAvailableRepositoryWorkingSetBytes(
-            authenticatedMaximumResidentBytes = perShard.controlLong("maximumResidentBytes"),
-            modeledLineTableBytes = modeledLineBytes,
+            authenticatedMaximumResidentBytes = maximumResidentBytes,
+            modeledLineTableBytes = 0L,
             modeledRetainedFactBytes = maximumModeledRetainedBytes,
             maximumSerializedOutputBytes = maximumSerializedBytes,
             maximumRowScratchBytes = maximumRowScratchBytes,
@@ -125,9 +138,13 @@ internal object FullTreeSourceEntityIdentityProducer {
             checkpoint,
             beforeInventoryValidation = { inventory ->
                 val unitCount = inventory.controlArray("units").size
-                if (unitCount <= 0 || unitCount.toLong() > maximumReferencedUnits) {
-                    throw FullTreeControlException("source-identity inventory compilation-unit count exceeds its authenticated bound")
-                }
+                val lineTableBudget = sourceIdentityLineTableBudget(
+                    configured = producerLimits.lineTableLimits,
+                    maximumResidentBytes = maximumResidentBytes,
+                    admittedCompilationUnitCount = unitCount.toLong(),
+                    maximumAuthenticatedCompilationUnitCount = maximumReferencedUnits,
+                )
+                admittedLineTableBudget = lineTableBudget
                 val fixedStructureBytes = sourceIdentityFixedStructureResidentBytes(
                     authenticatedInventoryBytes = inventoryBytes,
                     modeledInventoryJsonNodes = maximumInventoryJsonNodes,
@@ -136,8 +153,8 @@ internal object FullTreeSourceEntityIdentityProducer {
                     modeledObservedUnitMetadataBytes = 0L,
                 )
                 val availableForUnitMetadata = sourceIdentityAvailableRepositoryWorkingSetBytes(
-                    authenticatedMaximumResidentBytes = perShard.controlLong("maximumResidentBytes"),
-                    modeledLineTableBytes = modeledLineBytes,
+                    authenticatedMaximumResidentBytes = maximumResidentBytes,
+                    modeledLineTableBytes = lineTableBudget.modeledRetainedBytes,
                     modeledRetainedFactBytes = maximumModeledRetainedBytes,
                     maximumSerializedOutputBytes = maximumSerializedBytes,
                     maximumRowScratchBytes = maximumRowScratchBytes,
@@ -162,8 +179,8 @@ internal object FullTreeSourceEntityIdentityProducer {
                     modeledObservedUnitMetadataBytes = modeledUnitMetadataBytes,
                 )
                 val maximumRepositoryBytes = sourceIdentityAvailableRepositoryWorkingSetBytes(
-                    authenticatedMaximumResidentBytes = perShard.controlLong("maximumResidentBytes"),
-                    modeledLineTableBytes = modeledLineBytes,
+                    authenticatedMaximumResidentBytes = maximumResidentBytes,
+                    modeledLineTableBytes = lineTableBudget.modeledRetainedBytes,
                     modeledRetainedFactBytes = maximumModeledRetainedBytes,
                     maximumSerializedOutputBytes = maximumSerializedBytes,
                     maximumRowScratchBytes = maximumRowScratchBytes,
@@ -176,8 +193,17 @@ internal object FullTreeSourceEntityIdentityProducer {
                 )
             },
         )
+        val maximumScannedDies = fullTreeFunctionObservationScannedDiesBound(
+            maximumPhysicalRecordsPerUnit = producerLimits.dieLimits.maximumPhysicalRecords,
+            unitCount = inputs.shard.units.size.toLong(),
+            configuredMaximumScannedDies = producerLimits.accumulatorLimits.maximumScannedDies,
+        )
         val inventoryUnitArray = inputs.inventory.controlArray("units")
         val admitted = admission ?: throw FullTreeControlException("source-identity inventory was not admitted")
+        val lineTableBudget = admittedLineTableBudget
+            ?: throw FullTreeControlException("source-identity line-table budget was not admitted")
+        val lineLimits = lineTableBudget.limits
+        val modeledLineBytes = lineTableBudget.modeledRetainedBytes
         if (inventoryUnitArray.size != admitted.compilationUnitCount) {
             throw FullTreeControlException("source-identity inventory unit count changed after admission")
         }
@@ -223,8 +249,10 @@ internal object FullTreeSourceEntityIdentityProducer {
                 maximumModeledRetainedBytes,
                 maximumCanonicalRowBytes,
                 maximumRowScratchBytes,
+                checkpoint,
+                factAdmission,
             )
-            val anchorClaims = SourceIdentityAnchorClaims(budget)
+            val anchorClaims = SourceIdentityAnchorClaims(budget, anchorClaim)
             val facts = ArrayList<FullTreeSourceEntityFact>()
             val layout = FullTreeElfLayout.scanLayout(artifact, "rich artifact", producerLimits.elfLayoutLimits, checkpoint)
             val executable = FullTreeElfExecutableMembership.fromSorted(layout.executableRanges)
@@ -251,7 +279,7 @@ internal object FullTreeSourceEntityIdentityProducer {
                     throw FullTreeControlException("source-identity retained-unit budget is empty")
                 }
                 val boundedProducerLimits = producerLimits.copy(
-                    lineTableLimits = boundedLineLimits,
+                    lineTableLimits = lineLimits,
                     dieLimits = producerLimits.dieLimits.copy(maximumRetainedBytes = maximumRetainedBytes),
                 )
                 val repository = FunctionDwarfUnitRepository(
@@ -278,9 +306,7 @@ internal object FullTreeSourceEntityIdentityProducer {
                         ?: throw FullTreeControlException("source-identity unit is absent from the inventory")
                     val owner = repository.load(header)
                     scannedDies = Math.addExact(scannedDies, owner.index.physicalRecordCount)
-                    if (scannedDies > producerLimits.dieLimits.maximumPhysicalRecords) {
-                        throw FullTreeControlException("source-identity shard exceeds its physical-DIE bound")
-                    }
+                    requireSourceIdentityScannedDiesWithinBound(scannedDies, maximumScannedDies)
 
                     repository.withRetainedUnits(owner) {
                         val ids = SourceEntityIdentityReader(
@@ -299,6 +325,7 @@ internal object FullTreeSourceEntityIdentityProducer {
                             producerLimits = boundedProducerLimits,
                             budget = budget,
                             anchorClaims = anchorClaims,
+                            checkpoint = checkpoint,
                         )
                         owner.index.recordsInPhysicalOrder.forEach { record ->
                             if (record.tag in SOURCE_ENTITY_TAGS) {
@@ -315,16 +342,17 @@ internal object FullTreeSourceEntityIdentityProducer {
                 peakRetainedLineTableUnits = repository.peakRetainedLineTableUnits
             }
             artifact.verifyUnchanged("source-identity scan")
-            val ordered = FullTreeSourceEntityFact.deterministicOrder(facts)
-            val maximumBaselineBytes = canonicalSourceEntityFactsByteLength(ordered, maximumSerializedBytes)
+            val ordered = FullTreeSourceEntityFact.deterministicOrder(facts, checkpoint)
+            val maximumBaselineBytes = canonicalSourceEntityFactsByteLength(ordered, maximumSerializedBytes, checkpoint)
             if (maximumBaselineBytes > maximumSerializedBytes) {
                 throw FullTreeControlException("canonical source-identity output exceeds its authenticated byte bound")
             }
-            val collisionReport = anchorClaims.collisionReport()
+            val collisionReport = anchorClaims.collisionReport(checkpoint)
             val collisionExpansionBytes = sourceIdentityCollisionExpansionUpperBound(
                 ordered,
                 collisionReport.byCandidateId,
                 maximumSerializedBytes,
+                checkpoint,
             )
             budget.charge(collisionExpansionBytes, "source-identity collision evidence")
             if (collisionExpansionBytes > maximumSerializedBytes - maximumBaselineBytes) {
@@ -334,10 +362,12 @@ internal object FullTreeSourceEntityIdentityProducer {
                 ordered,
                 collisionReport.byCandidateId,
                 maximumSerializedBytes,
+                checkpoint,
             )
+            factAdjustmentAdmission?.invoke(collisionCopyBytes, collisionExpansionBytes)
             budget.charge(collisionCopyBytes, "source-identity collision-adjusted fact copies")
-            val collisionAdjusted = markUnprovedAnchorCollisions(ordered, collisionReport)
-            val finalBytes = canonicalSourceEntityFacts(collisionAdjusted, maximumSerializedBytes)
+            val collisionAdjusted = markUnprovedAnchorCollisions(ordered, collisionReport, checkpoint)
+            val finalBytes = canonicalSourceEntityFacts(collisionAdjusted, maximumSerializedBytes, checkpoint)
             if (finalBytes.size.toLong() > maximumSerializedBytes) {
                 throw FullTreeControlException("canonical source-identity output exceeds its authenticated byte bound")
             }
@@ -359,9 +389,14 @@ internal object FullTreeSourceEntityIdentityProducer {
     internal fun markUnprovedAnchorCollisions(
         ordered: List<FullTreeSourceEntityFact>,
         report: SourceIdentityAnchorCollisionReport,
+        checkpoint: ((String) -> Unit)? = null,
     ): List<FullTreeSourceEntityFact> {
         if (report.byCandidateId.isEmpty()) return ordered
-        return ordered.map { fact ->
+        var copiedCollisionIds = 0L
+        return ordered.mapIndexed { index, fact ->
+            if (index.toLong() % SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL == 0L) {
+                checkpoint?.invoke("while applying full-run source-anchor collisions")
+            }
             val fields = fact.semanticAnchorFields
             val relatedCandidateIds = listOfNotNull(
                 fields?.inlineCalleeAnchorCandidateId,
@@ -369,8 +404,27 @@ internal object FullTreeSourceEntityIdentityProducer {
                 fields?.templatePatternAnchorCandidateId,
             ) + fields?.inlinePathAnchorCandidateIds.orEmpty()
             val directCollisionIds = fact.semanticAnchorCandidateId?.let(report.byCandidateId::get).orEmpty()
-            val relatedCollisionIds = relatedCandidateIds.flatMap { report.byCandidateId[it].orEmpty() }
-            val collisionIds = (directCollisionIds + relatedCollisionIds).distinct().sorted()
+            val collisionIdSet = HashSet<String>()
+            fun retainCollisionIds(values: Iterable<String>) {
+                values.forEach { sourceEntityId ->
+                    if (copiedCollisionIds++ % SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL == 0L) {
+                        checkpoint?.invoke("while copying full-run collision IDs onto source entities")
+                    }
+                    collisionIdSet += sourceEntityId
+                }
+            }
+            retainCollisionIds(directCollisionIds)
+            relatedCandidateIds.forEach { candidateId ->
+                retainCollisionIds(report.byCandidateId[candidateId].orEmpty())
+            }
+            val collisionIds = ArrayList(collisionIdSet)
+            var comparisons = 0L
+            collisionIds.sortWith { left, right ->
+                if (comparisons++ % SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL == 0L) {
+                    checkpoint?.invoke("while sorting full-run collision IDs")
+                }
+                left.compareTo(right)
+            }
             if (collisionIds.isEmpty()) fact else fact.copy(
                 identityObservability = FullTreeIdentityObservability.AMBIGUOUS,
                 candidateCollisionSourceEntityIds = collisionIds,
@@ -379,6 +433,7 @@ internal object FullTreeSourceEntityIdentityProducer {
                 } else {
                     "ambiguous-related-source-anchor"
                 }).distinct().sorted(),
+                checkpoint = checkpoint ?: {},
             )
         }
     }
@@ -665,9 +720,59 @@ internal fun boundedSourceIdentityLineTableLimits(
     )
 }
 
+internal data class SourceIdentityLineTableBudget(
+    val limits: FullTreeDwarfLineTableLimits,
+    val perUnitRetainedBytes: Long,
+    val modeledRetainedBytes: Long,
+)
+
+/** Divides the reserved resident share by the actual, authenticated CU population. */
+internal fun sourceIdentityLineTableBudget(
+    configured: FullTreeDwarfLineTableLimits,
+    maximumResidentBytes: Long,
+    admittedCompilationUnitCount: Long,
+    maximumAuthenticatedCompilationUnitCount: Long,
+): SourceIdentityLineTableBudget {
+    if (maximumResidentBytes <= 0L || admittedCompilationUnitCount <= 0L ||
+        maximumAuthenticatedCompilationUnitCount <= 0L
+    ) {
+        throw FullTreeControlException("source-identity line-table budget has no resident space or admitted CUs")
+    }
+    if (admittedCompilationUnitCount > maximumAuthenticatedCompilationUnitCount) {
+        throw FullTreeControlException("source-identity inventory compilation-unit count exceeds its authenticated bound")
+    }
+    val lineWorkingSetBudget = maximumResidentBytes / 4L
+    val perUnitRetainedBytes = lineWorkingSetBudget / admittedCompilationUnitCount
+    val limits = boundedSourceIdentityLineTableLimits(configured, perUnitRetainedBytes)
+    val modeledPerUnitBytes = try {
+        Math.addExact(
+            Math.addExact(
+                Math.multiplyExact(limits.maximumAggregatePathBytes, 2L),
+                Math.multiplyExact(
+                    Math.addExact(limits.maximumDirectories.toLong(), limits.maximumFiles.toLong()),
+                    128L,
+                ),
+            ),
+            1_024L,
+        )
+    } catch (failure: ArithmeticException) {
+        throw FullTreeControlException("source-identity line-table working-set model overflows", failure)
+    }
+    val modeledRetainedBytes = try {
+        Math.multiplyExact(modeledPerUnitBytes, admittedCompilationUnitCount)
+    } catch (failure: ArithmeticException) {
+        throw FullTreeControlException("source-identity line-table working-set model overflows", failure)
+    }
+    if (modeledRetainedBytes > lineWorkingSetBudget) {
+        throw FullTreeControlException("source-identity line-table model exceeds its authenticated working-set share")
+    }
+    return SourceIdentityLineTableBudget(limits, perUnitRetainedBytes, modeledRetainedBytes)
+}
+
 /** Includes anchors used only as inline callees/owners, not just census rows. */
 private class SourceIdentityAnchorClaims(
     private val budget: SourceIdentityRetentionBudget,
+    private val externalClaim: ((kind: FullTreeSourceAnchorKind, candidateId: String, physicalClaimId: String) -> Unit)?,
 ) {
     private val claims = HashMap<String, MutableSet<String>>()
 
@@ -676,17 +781,33 @@ private class SourceIdentityAnchorClaims(
         val prior = claims[candidateId]
         if (prior?.contains(sourceEntityId) == true) return
         budget.charge(candidateId.length.toLong() + sourceEntityId.length.toLong() + 128L, "source-anchor collision index")
+        // The additive run publisher admits this claim in its own bounded index before the
+        // shard-local index retains it. Failed scans never publish a partial observation.
+        externalClaim?.invoke(kind, candidateId, sourceEntityId)
         claims.getOrPut(candidateId) { sortedSetOf() } += sourceEntityId
     }
 
-    fun collisionReport(): SourceIdentityAnchorCollisionReport {
-        val collisions = claims.filterValues { it.size > 1 }
-        collisions.values.forEach { sourceEntityIds ->
-            budget.charge(sourceEntityIds.size.toLong() * 16L + 64L, "source-anchor collision report")
+    fun collisionReport(checkpoint: ((String) -> Unit)? = null): SourceIdentityAnchorCollisionReport {
+        val collisions = HashMap<String, List<String>>()
+        var copiedCollisionIds = 0L
+        claims.entries.forEachIndexed { index, (candidateId, sourceEntityIds) ->
+            if (index.toLong() % SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL == 0L) {
+                checkpoint?.invoke("while reconciling source-anchor collisions")
+            }
+            if (sourceEntityIds.size > 1) {
+                budget.charge(sourceEntityIds.size.toLong() * 16L + 64L, "source-anchor collision report")
+                val retainedIds = ArrayList<String>(sourceEntityIds.size)
+                sourceEntityIds.forEach { sourceEntityId ->
+                    if (copiedCollisionIds++ % SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL == 0L) {
+                        checkpoint?.invoke("while copying shard collision IDs")
+                    }
+                    retainedIds += sourceEntityId
+                }
+                collisions[candidateId] = retainedIds
+            }
         }
-        return SourceIdentityAnchorCollisionReport(
-            byCandidateId = collisions.mapValues { (_, sourceEntityIds) -> sourceEntityIds.toList() },
-        )
+        checkpoint?.invoke("after reconciling source-anchor collisions")
+        return SourceIdentityAnchorCollisionReport(byCandidateId = collisions)
     }
 }
 
@@ -695,11 +816,15 @@ internal fun sourceIdentityCollisionExpansionUpperBound(
     facts: List<FullTreeSourceEntityFact>,
     collisionSourceEntityIdsByCandidate: Map<String, List<String>>,
     maximumCanonicalBytes: Long = MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES,
+    checkpoint: ((String) -> Unit)? = null,
 ): Long {
-    canonicalSourceEntityFactsByteLength(facts, maximumCanonicalBytes)
+    canonicalSourceEntityFactsByteLength(facts, maximumCanonicalBytes, checkpoint)
     var total = 0L
     try {
-        facts.forEach { fact ->
+        facts.forEachIndexed { index, fact ->
+            if (index.toLong() % SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL == 0L) {
+                checkpoint?.invoke("while sizing full-run collision evidence")
+            }
             val fields = fact.semanticAnchorFields
             val candidateIds = listOfNotNull(
                 fact.semanticAnchorCandidateId,
@@ -733,6 +858,7 @@ internal fun sourceIdentityCollisionAdjustedFactCopyUpperBound(
     facts: List<FullTreeSourceEntityFact>,
     collisionSourceEntityIdsByCandidate: Map<String, List<String>>,
     maximumCanonicalBytes: Long = MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES,
+    checkpoint: ((String) -> Unit)? = null,
 ): Long {
     if (collisionSourceEntityIdsByCandidate.isEmpty()) return 0L
     var total = 0L
@@ -740,7 +866,10 @@ internal fun sourceIdentityCollisionAdjustedFactCopyUpperBound(
         // markUnprovedAnchorCollisions returns a new list when a collision exists, even when a
         // particular row is reused. Model those references separately from changed fact objects.
         total = Math.addExact(64L, Math.multiplyExact(facts.size.toLong(), 8L))
-        facts.forEach { fact ->
+        facts.forEachIndexed { index, fact ->
+            if (index.toLong() % SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL == 0L) {
+                checkpoint?.invoke("while sizing full-run collision-adjusted copies")
+            }
             val fields = fact.semanticAnchorFields
             val candidateIds = listOfNotNull(
                 fact.semanticAnchorCandidateId,
@@ -749,7 +878,7 @@ internal fun sourceIdentityCollisionAdjustedFactCopyUpperBound(
                 fields?.templatePatternAnchorCandidateId,
             ) + fields?.inlinePathAnchorCandidateIds.orEmpty()
             if (candidateIds.any { collisionSourceEntityIdsByCandidate[it].orEmpty().isNotEmpty() }) {
-                val factBytes = canonicalSourceEntityFacts(listOf(fact), maximumCanonicalBytes).size.toLong()
+                val factBytes = canonicalSourceEntityFacts(listOf(fact), maximumCanonicalBytes, checkpoint).size.toLong()
                 total = Math.addExact(total, Math.addExact(factBytes, SOURCE_IDENTITY_RETAINED_CHARGE_OVERHEAD_BYTES))
             }
         }
@@ -758,6 +887,8 @@ internal fun sourceIdentityCollisionAdjustedFactCopyUpperBound(
     }
     return total
 }
+
+private const val SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL = 4_096L
 
 /** Admission for transient and accumulating text built while one source row is being derived. */
 private class SourceIdentityRowScratchBudget(
@@ -802,6 +933,8 @@ private class SourceIdentityRetentionBudget(
     private val maximumBytes: Long,
     private val maximumCanonicalRowBytes: Long,
     val maximumRowScratchBytes: Long,
+    private val checkpoint: (String) -> Unit,
+    private val factAdmission: ((fact: FullTreeSourceEntityFact, canonicalArrayContributionBytes: Long) -> Unit)?,
 ) {
     private var facts = 0L
     private var bytes = 0L
@@ -830,8 +963,9 @@ private class SourceIdentityRetentionBudget(
 
     fun retain(fact: FullTreeSourceEntityFact) {
         if (facts >= maximumFacts) throw FullTreeControlException("source-identity census exceeds its entity bound")
-        val serialized = canonicalSourceEntityFacts(listOf(fact), maximumCanonicalRowBytes).size.toLong()
-        charge(serialized, "source-identity fact")
+        val canonicalSize = fullTreeSourceEntityCanonicalContribution(fact, maximumCanonicalRowBytes, checkpoint)
+        factAdmission?.invoke(fact, canonicalSize.arrayContributionBytes)
+        charge(canonicalSize.singletonArrayBytes, "source-identity fact")
         facts++
     }
 }
@@ -852,6 +986,7 @@ private class SourceEntityIdentityReader(
     private val producerLimits: FullTreeFunctionObservationProducerLimits,
     private val budget: SourceIdentityRetentionBudget,
     private val anchorClaims: SourceIdentityAnchorClaims,
+    private val checkpoint: (String) -> Unit,
 ) {
     private val anchorCache = HashMap<String, CachedAnchorEvidence>()
     private val anchorStack = LinkedHashSet<String>()
@@ -939,7 +1074,7 @@ private class SourceEntityIdentityReader(
             reasonCodes += "unknown-reference-edge"
         }
         val fields = kind.anchorKind()?.let { anchorFields(owner, record, it, edgeList, reasonCodes, physical) }
-        val anchorId = kind.anchorKind()?.let { anchorKind -> fields?.candidateId(anchorKind) }
+        val anchorId = kind.anchorKind()?.let { anchorKind -> fields?.candidateId(anchorKind, checkpoint) }
         val completeAnchor = anchorId != null
         if (!completeAnchor) reasonCodes += "source-anchor-incomplete"
         val declaration = record.truthy(DW_AT_DECLARATION, "DW_AT_declaration")
@@ -971,6 +1106,7 @@ private class SourceEntityIdentityReader(
             linkedEmittedRva = emittedRva,
             reasonCodes = reasonCodes.toList(),
             edges = edgeList.sortedWith(compareBy({ it.kind.wireValue }, { it.source.locator() }, { it.target?.locator() ?: "~" }, { it.state.wireValue }, { it.rawReference ?: "~" })),
+            checkpoint = checkpoint,
         )
     }
 
@@ -996,7 +1132,13 @@ private class SourceEntityIdentityReader(
                 if (nested.isEmpty()) result += PackedSubprogramChild(child, packPath)
                 else nested.asReversed().forEach { pending.addFirst(Triple(child, it, packPath)) }
             } else if (child.tag in acceptedTags) {
-                if (parentPackPath != null) {
+                // Preserve structural paths through pack wrappers. Direct typed formals keep
+                // their raw DW_AT_type reference without a duplicate parent edge.
+                val compactTypedFormal = structuralEdgeKind == FullTreeSourceIdentityEdgeKind.TYPE &&
+                    child.tag == DW_TAG_FORMAL_PARAMETER && child.attributesNamed(DW_AT_TYPE).isNotEmpty()
+                if (!compactTypedFormal &&
+                    (parentPackPath != null || child.attributesNamed(DW_AT_TYPE).isNotEmpty())
+                ) {
                     addStructuralEdge(physical(unit, parent), physical(unit, child), structuralEdgeKind, edges)
                 }
                 result += PackedSubprogramChild(child, parentPackPath)
@@ -1307,7 +1449,7 @@ private class SourceEntityIdentityReader(
                                     reasons,
                                     physical(target.first, target.second),
                                 )
-                                patternAnchorId = patternFields?.candidateId(FullTreeSourceAnchorKind.TEMPLATE_PATTERN)
+                                patternAnchorId = patternFields?.candidateId(FullTreeSourceAnchorKind.TEMPLATE_PATTERN, checkpoint)
                             } else reasons += "unknown-template-pattern-reference"
                         } else reasons += "unknown-template-pattern-reference"
                     } else {
@@ -1327,7 +1469,7 @@ private class SourceEntityIdentityReader(
                         val calleeKind = relatedSubprogramKind(baseUnit, callee, edges, reasons)
                         calleeKind?.let {
                             anchorFields(baseUnit, callee, it, edges, reasons, physical(baseUnit, callee))
-                                ?.candidateId(it)
+                                ?.candidateId(it, checkpoint)
                         }
                     }
                 if (inlineCallee == null) reasons += "unknown-inline-callee-anchor"
@@ -1340,7 +1482,7 @@ private class SourceEntityIdentityReader(
                     addStructuralEdge(physical, containingPhysical, FullTreeSourceIdentityEdgeKind.INLINE_OWNER, edges)
                     val ownerKind = relatedSubprogramKind(owner, containing, edges, reasons)
                     inlineOwner = ownerKind?.let {
-                        anchorFields(owner, containing, it, edges, reasons, containingPhysical)?.candidateId(it)
+                        anchorFields(owner, containing, it, edges, reasons, containingPhysical)?.candidateId(it, checkpoint)
                     }
                     if (inlineOwner == null) reasons += "unknown-inline-owner-anchor"
                 }
@@ -1378,13 +1520,18 @@ private class SourceEntityIdentityReader(
                 inlineCallColumn = callColumn,
                 inlinePathAnchorCandidateIds = inlinePath,
                 authenticatedSourceRevision = sourceRevision,
+                checkpoint = checkpoint,
             )
             result = fields
             budget.charge(
-                OracleJson.canonicalBytes(fields.canonicalJson(), sourceIdentityRowJsonLimits(MAXIMUM_SOURCE_IDENTITY_ROW_BYTES)).size.toLong(),
+                OracleJson.canonicalBytes(
+                    fields.canonicalJson(checkpoint),
+                    sourceIdentityRowJsonLimits(MAXIMUM_SOURCE_IDENTITY_ROW_BYTES),
+                    checkpoint,
+                ).size.toLong(),
                 "source-anchor fields",
             )
-            fields.candidateId(kind)?.let { anchorClaims.claim(kind, it, physical) }
+            fields.candidateId(kind, checkpoint)?.let { anchorClaims.claim(kind, it, physical) }
             return fields
         } finally {
             val reasonTranscript = reasons.filterNot(originalReasons::contains)
@@ -2168,12 +2315,12 @@ private class SourceEntityIdentityReader(
         unit: FunctionDwarfUnit,
         record: FullTreeDwarfDieRecord,
     ): Pair<FullTreeDenominatorDisposition, String?> {
-        val start = unit.functionStart(record)
-            ?: return FullTreeDenominatorDisposition.NON_SCOREABLE to null
-        if (start < layout.imageBase) return FullTreeDenominatorDisposition.UNKNOWN to null
-        val rva = start - layout.imageBase
-        if (!executable.contains(rva)) return FullTreeDenominatorDisposition.UNKNOWN to null
-        return FullTreeDenominatorDisposition.EMITTED_RVA_LINK to canonicalUnsignedHex(rva)
+        return sourceIdentityEmittedRvaLink(
+            declaration = record.truthy(DW_AT_DECLARATION, "DW_AT_declaration"),
+            functionStart = { unit.functionStart(record) },
+            imageBase = layout.imageBase,
+            executable = executable,
+        )
     }
 
     private fun declarationPath(unit: FunctionDwarfUnit, record: FullTreeDwarfDieRecord, attribute: Long, label: String): String? {
@@ -2236,11 +2383,19 @@ private class SourceEntityIdentityReader(
         var parent = record.nearestRetainedParentOffset?.let(unit.index::find)
         var traversalDepth = 0
         var inlineDepth = 1 // include this inline instance in the bounded ancestry
+        var child = record
         while (parent != null) {
             if (traversalDepth++ >= MAXIMUM_SOURCE_IDENTITY_CONTEXT_DEPTH) {
                 throw FullTreeControlException("source-identity inline ancestry traversal exceeds its depth bound")
             }
             if (parent.tag == DW_TAG_INLINED_SUBROUTINE) {
+                addStructuralEdge(
+                    physical(unit, child),
+                    physical(unit, parent),
+                    FullTreeSourceIdentityEdgeKind.INLINE_OWNER,
+                    edges,
+                )
+                child = parent
                 inlineDepth++
                 if (inlineDepth > producerLimits.maximumReferenceChainEntries) {
                     throw FullTreeControlException(
@@ -2254,7 +2409,7 @@ private class SourceEntityIdentityReader(
                     edges,
                     reasons,
                     physical(unit, parent),
-                )?.candidateId(FullTreeSourceAnchorKind.INLINE_INSTANCE)
+                )?.candidateId(FullTreeSourceAnchorKind.INLINE_INSTANCE, checkpoint)
                 if (anchor == null) return null
                 result.add(0, anchor)
             }

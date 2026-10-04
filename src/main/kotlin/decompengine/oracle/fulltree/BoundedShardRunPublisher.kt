@@ -133,11 +133,13 @@ object BoundedShardRunPublisher {
         semanticValidator: BoundedShardOutputSemanticValidator,
         limits: BoundedShardRunLimits,
         checkpoint: (String) -> Unit,
+        stagingAdmission: (stagedBytes: Long) -> Unit = {},
     ): BoundedShardRunBinding = exceptionBoundary {
         publishInternal(
             target, runId, preparedOutputs, bounds, semanticValidator, limits,
             BoundedShardRunPublicationProbe { stage -> checkpoint("bounded-shard publication $stage") },
             checkpoint,
+            stagingAdmission,
         )
     }
 
@@ -150,6 +152,7 @@ object BoundedShardRunPublisher {
         limits: BoundedShardRunLimits,
         probe: BoundedShardRunPublicationProbe,
         checkpoint: (String) -> Unit = {},
+        stagingAdmission: (stagedBytes: Long) -> Unit = {},
     ): BoundedShardRunBinding {
         checkpoint("before bounded-shard publication")
         val target = normalizeTarget(targetPath)
@@ -157,6 +160,13 @@ object BoundedShardRunPublisher {
         validateBounds(bounds, limits)
         val sources = authenticateSources(preparedOutputs, bounds, limits)
         val controls = createControls(runId, sources, bounds, limits)
+        val stagedOutputBytes = sources.fold(0L) { total, source ->
+            addExact(total, source.prepared.outputBytes, "staged output byte")
+        }
+        val stagedControlBytes = controls.checkpoints.fold(
+            addExact(controls.runBytes.size.toLong(), controls.indexBytes.size.toLong(), "staged control byte"),
+        ) { total, control -> addExact(total, control.bytes.size.toLong(), "staged control byte") }
+        stagingAdmission(addExact(stagedOutputBytes, stagedControlBytes, "staged publication byte"))
 
         Publication.create(target, sources.map { it.prepared.shardId }).use { publication ->
             publication.writeRootControl(RUN_FILE, controls.runBytes)

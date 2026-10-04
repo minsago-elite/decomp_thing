@@ -716,12 +716,23 @@ class FullTreeSourceEntityIdentityTest {
                 referenceForm = "0x11",
                 rawReference = "0x${index + 1}",
                 state = state,
-                reasonCode = "reference-${state.wireValue}",
+                reasonCode = when (state) {
+                    FullTreeSourceIdentityEdgeState.MISSING_TARGET -> "target-not-retained-or-not-a-die-boundary"
+                    FullTreeSourceIdentityEdgeState.MALFORMED -> "reference-outside-validated-dwarf-boundary"
+                    FullTreeSourceIdentityEdgeState.UNSUPPORTED -> "unsupported-reference-form"
+                    FullTreeSourceIdentityEdgeState.CYCLIC -> "reference-cycle"
+                    FullTreeSourceIdentityEdgeState.RESOLVED -> error("unresolved state expected")
+                },
             )
             fact("0x${0x20 + index}", factKind, fields(), edges = listOf(edge))
         }
         assertEquals(unresolvedStates.map { it.wireValue }, facts.map { it.edges.single().state.wireValue })
         assertContentEquals(canonicalSourceEntityFacts(facts), canonicalSourceEntityFacts(facts.reversed()))
+        listOf(FullTreeSourceIdentityEdgeState.MISSING_TARGET, FullTreeSourceIdentityEdgeState.CYCLIC).forEach { state ->
+            val edge = facts.single { it.edges.single().state == state }.edges.single()
+            assertFailsWith<IllegalArgumentException> { edge.copy(referenceForm = null) }
+            assertFailsWith<IllegalArgumentException> { edge.copy(rawReference = null) }
+        }
     }
 
     @Test
@@ -749,7 +760,7 @@ class FullTreeSourceEntityIdentityTest {
             sourceEntityId = source.sourceEntityId(FullTreeSourceEntityKind.TEMPLATE_INSTANCE),
             physicalDie = source,
             kind = FullTreeSourceEntityKind.TEMPLATE_INSTANCE,
-            identityObservability = FullTreeIdentityObservability.UNKNOWN,
+            identityObservability = FullTreeIdentityObservability.AMBIGUOUS,
             denominatorDisposition = FullTreeDenominatorDisposition.NON_SCOREABLE,
             semanticAnchorFields = fields,
             semanticAnchorCandidateId = candidateId,
@@ -773,7 +784,7 @@ class FullTreeSourceEntityIdentityTest {
             referenceForm = "0x11",
             rawReference = "0x1",
             state = FullTreeSourceIdentityEdgeState.MISSING_TARGET,
-            reasonCode = "target-not-found",
+            reasonCode = "target-not-retained-or-not-a-die-boundary",
         )
 
         assertEquals(listOf("namespace:before"), fields.lexicalContext)
@@ -913,10 +924,18 @@ class FullTreeSourceEntityIdentityTest {
         sourceEntityId = physical(offset).sourceEntityId(kind),
         physicalDie = physical(offset),
         kind = kind,
-        identityObservability = if (fields.candidateId(kind) == null) {
-            FullTreeIdentityObservability.UNKNOWN
-        } else {
-            FullTreeIdentityObservability.OBSERVABLE
+        identityObservability = when {
+            edges.any { it.state == FullTreeSourceIdentityEdgeState.CYCLIC } ->
+                FullTreeIdentityObservability.AMBIGUOUS
+            kind == FullTreeSourceEntityKind.DECLARATION_ONLY ->
+                FullTreeIdentityObservability.UNOBSERVABLE
+            edges.any {
+                it.state == FullTreeSourceIdentityEdgeState.MISSING_TARGET ||
+                    it.state == FullTreeSourceIdentityEdgeState.MALFORMED ||
+                    it.state == FullTreeSourceIdentityEdgeState.UNSUPPORTED
+            } -> FullTreeIdentityObservability.UNKNOWN
+            fields.candidateId(kind) == null -> FullTreeIdentityObservability.UNKNOWN
+            else -> FullTreeIdentityObservability.OBSERVABLE
         },
         denominatorDisposition = FullTreeDenominatorDisposition.NON_SCOREABLE,
         semanticAnchorFields = fields,

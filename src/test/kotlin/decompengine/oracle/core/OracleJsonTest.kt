@@ -134,6 +134,39 @@ class OracleJsonTest {
     }
 
     @Test
+    fun `strict JSON parser and encoder expose bounded cooperative checkpoints`() {
+        val limits = StrictJsonLimits(
+            maximumNodes = 10_000,
+            maximumInputBytes = 256 * 1024,
+            maximumCanonicalBytes = 256 * 1024,
+        )
+        val values = JsonArray((0 until 5_000).map { JsonPrimitive(it) })
+        val canonical = OracleJson.canonicalBytes(values, limits)
+
+        var parseProgress = 0
+        val parseFailure = assertFailsWith<IllegalStateException> {
+            OracleJson.parseCanonical(canonical, limits) { phase ->
+                if (phase == "while parsing strict JSON values" && ++parseProgress == 2) {
+                    throw IllegalStateException("cooperative parse cancellation")
+                }
+            }
+        }
+        assertEquals("cooperative parse cancellation", parseFailure.message)
+        assertEquals(2, parseProgress)
+
+        var encodeProgress = 0
+        val encodeFailure = assertFailsWith<IllegalStateException> {
+            OracleJson.canonicalBytes(values, limits) { phase ->
+                if (phase == "while encoding canonical JSON values" && ++encodeProgress == 2) {
+                    throw IllegalStateException("cooperative encoding cancellation")
+                }
+            }
+        }
+        assertEquals("cooperative encoding cancellation", encodeFailure.message)
+        assertEquals(2, encodeProgress)
+    }
+
+    @Test
     fun `strict grammar rejects trailing data and non-JSON whitespace`() {
         assertRejected("true false")
         assertRejected("[1,]")
