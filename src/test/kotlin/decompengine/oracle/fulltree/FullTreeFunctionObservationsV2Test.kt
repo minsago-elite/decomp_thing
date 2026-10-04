@@ -587,8 +587,8 @@ class FullTreeFunctionObservationsV2Test {
             assertEquals(1, allRows.count { it.kind == FullTreeSourceEntityKind.INLINE_INSTANCE })
             assertEquals(1, allRows.count { it.kind == FullTreeSourceEntityKind.UNRESOLVED })
             assertEquals(4, allRows.count { it.identityObservability == FullTreeIdentityObservability.AMBIGUOUS })
-            assertEquals(3, allRows.count { it.identityObservability == FullTreeIdentityObservability.UNKNOWN })
-            assertEquals(1, allRows.count { it.identityObservability == FullTreeIdentityObservability.UNOBSERVABLE })
+            assertEquals(4, allRows.count { it.identityObservability == FullTreeIdentityObservability.UNKNOWN })
+            assertEquals(0, allRows.count { it.identityObservability == FullTreeIdentityObservability.UNOBSERVABLE })
             assertTrue(allRows.filter { it.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE }.all {
                 it.semanticAnchorFields?.templatePatternAnchorCandidateId == null &&
                     "unknown-template-pattern-reference" in it.reasonCodes && it.resolvedSemanticIdentityId == null
@@ -1230,14 +1230,52 @@ class FullTreeFunctionObservationsV2Test {
             val emittedRvas = document.getValue("emitted").jsonArray.map {
                 it.jsonObject.getValue("rva").jsonPrimitive.content
             }.distinct()
-            val linkedSubject = originalRows.firstOrNull { fact ->
-                fact.linkedEmittedRva != null && emittedRvas.any { it != fact.linkedEmittedRva }
+            assertTrue(emittedRvas.size >= 2, "fixture must contain two emitted RVAs")
+            val linkSubject = originalRows.first { it.semanticAnchorFields != null }
+            // This small control ELF has no emitted template-instance census row. Build a
+            // fixture-only, schema-valid template row on its authenticated physical locator so
+            // the validator's allowed target membership can be exercised independently from the
+            // run publisher's raw-input rederivation.
+            val linkFields = FullTreeSourceAnchorFields(
+                sourcePath = "source/include/fixture.h",
+                declarationFileIndex = 1L,
+                declarationLine = 17L,
+                declarationColumn = 3L,
+                language = 33L,
+                lexicalContext = listOf("fixture"),
+                sourceName = "linked_template<int>",
+                signature = listOf("int (int)"),
+                templateActualArguments = listOf("type:int"),
+                authenticatedSourceRevision = scope.sourceLock.controlObject("revision").controlString("commit"),
+            )
+            val linked = FullTreeSourceEntityFact(
+                sourceEntityId = linkSubject.physicalDie.sourceEntityId(FullTreeSourceEntityKind.TEMPLATE_INSTANCE),
+                physicalDie = linkSubject.physicalDie,
+                kind = FullTreeSourceEntityKind.TEMPLATE_INSTANCE,
+                identityObservability = FullTreeIdentityObservability.UNKNOWN,
+                denominatorDisposition = FullTreeDenominatorDisposition.EMITTED_RVA_LINK,
+                semanticAnchorFields = linkFields,
+                semanticAnchorCandidateId = requireNotNull(
+                    linkFields.candidateId(FullTreeSourceAnchorKind.TEMPLATE_INSTANCE),
+                ),
+                resolvedSemanticIdentityId = null,
+                candidateCollisionSourceEntityIds = emptyList(),
+                linkedEmittedRva = emittedRvas.first(),
+                reasonCodes = listOf("unknown-template-pattern-reference"),
+                edges = emptyList(),
+            )
+            val linkedRows = originalRows.map { fact ->
+                if (fact.sourceEntityId == linkSubject.sourceEntityId) linked else fact
             }
-            assertTrue(linkedSubject != null, "fixture must contain a linked source entity and a second emitted RVA")
-            val linked = requireNotNull(linkedSubject)
+            val linkedDocument = FullTreeFunctionObservationsV2.composeEnvelope(
+                v1ProjectionForCompose(document), linkedRows, first.reconciliation, 8L * 1024L * 1024L,
+            )
+            FullTreeFunctionObservationsV2.validateEnvelope(
+                linkedDocument, scope, inventory, inventorySha, shard, first.reconciliation,
+            )
             val alternateEmittedRva = emittedRvas.first { it != linked.linkedEmittedRva }
             val forgedLinkFact = linked.copy(linkedEmittedRva = alternateEmittedRva)
-            val forgedLinkRows = originalRows.map { fact ->
+            val forgedLinkRows = linkedRows.map { fact ->
                 if (fact.sourceEntityId == linked.sourceEntityId) forgedLinkFact else fact
             }
             val forgedLinkDocument = FullTreeFunctionObservationsV2.composeEnvelope(

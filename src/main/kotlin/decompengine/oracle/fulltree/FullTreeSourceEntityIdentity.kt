@@ -534,7 +534,15 @@ internal class FullTreeSourceEntityFact(
 
     companion object {
         /** Strictly decodes the new observation-v2 source row and rechecks every derived ID. */
-        fun fromCanonicalJson(value: JsonObject, label: String = "source entity"): FullTreeSourceEntityFact {
+        fun fromCanonicalJson(value: JsonObject, label: String = "source entity"): FullTreeSourceEntityFact = try {
+            decodeCanonicalJson(value, label)
+        } catch (failure: FullTreeFunctionObservationV2Exception) {
+            throw failure
+        } catch (failure: IllegalArgumentException) {
+            throw FullTreeFunctionObservationV2Exception("$label is invalid", failure)
+        }
+
+        private fun decodeCanonicalJson(value: JsonObject, label: String): FullTreeSourceEntityFact {
             fun fail(detail: String): Nothing = throw FullTreeFunctionObservationV2Exception("$label $detail")
             fun obj(element: JsonElement?, name: String): JsonObject = element as? JsonObject ?: fail("$name is not an object")
             fun str(element: JsonElement?, name: String): String =
