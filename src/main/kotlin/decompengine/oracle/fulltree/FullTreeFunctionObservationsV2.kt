@@ -189,9 +189,8 @@ internal object FullTreeFunctionObservationsV2 {
             }
             val sourceRevision = fact.semanticAnchorFields?.authenticatedSourceRevision
             val authenticatedRevision = scope.sourceLock.v2Object("revision").v2String("commit")
-            val completeAnchor = fact.kind.anchorKind()?.let { fact.semanticAnchorFields?.candidateId(it) } != null
-            if ((completeAnchor || sourceRevision != null) && sourceRevision != authenticatedRevision) {
-                v2Fail("complete source anchor revision is absent or differs from the authenticated source lock")
+            if (fact.semanticAnchorFields != null && sourceRevision != authenticatedRevision) {
+                v2Fail("source anchor revision is absent or differs from the authenticated source lock")
             }
             if (fact.semanticAnchorFields?.authenticatedSourceFileSha256 != null) {
                 v2Fail("source anchor file digest has no authenticated per-file evidence")

@@ -944,6 +944,47 @@ class FullTreeFunctionObservationsV2Test {
             }
             assertTrue(missingRevisionFailure.message.orEmpty().contains("revision"))
 
+            val incompleteFields = FullTreeSourceAnchorFields(
+                sourcePath = "source/revision-bound.h",
+                declarationFileIndex = 1L,
+                declarationLine = null,
+                declarationColumn = null,
+                language = 33L,
+                lexicalContext = listOf("sample"),
+                sourceName = "revision_bound",
+                signature = listOf("void ()"),
+                authenticatedSourceRevision = null,
+            )
+            val incompleteRow = fact(
+                physical.copy(dieOffset = "0x457"),
+                FullTreeSourceEntityKind.DECLARATION_ONLY,
+                FullTreeIdentityObservability.UNOBSERVABLE,
+                FullTreeDenominatorDisposition.NON_SCOREABLE,
+                incompleteFields,
+                reasons = listOf("unknown-declaration-location"),
+            )
+            val incompleteReconciliation = FullTreeFunctionObservationV2AnchorIndex(4L, 4096L).reconciliation()
+            val incompleteAccumulator = FullTreeFunctionObservationAccumulatorV2(shard)
+            incompleteAccumulator.recordScannedDies(1L)
+            incompleteAccumulator.acceptSourceEntity(incompleteRow)
+            val incompleteAnchorDocument = incompleteAccumulator.finish(
+                inventoryIndexSha256 = inventory.controlString("indexSha256"),
+                richArtifactSha256 = richSha,
+                scopeSha256 = scope.sha256,
+                reconciliation = incompleteReconciliation,
+            )
+            val incompleteRevisionFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                FullTreeFunctionObservationsV2.validateEnvelope(
+                    incompleteAnchorDocument,
+                    scope,
+                    inventory,
+                    inventorySha,
+                    shard,
+                    incompleteReconciliation,
+                )
+            }
+            assertTrue(incompleteRevisionFailure.message.orEmpty().contains("revision"))
+
             val (forged, forgedReconciliation) = boundDocument("forged-revision")
             val validFact = FullTreeSourceEntityFact.fromCanonicalJson(valid.getValue("sourceEntities").jsonArray.single().jsonObject)
             val forgedFact = FullTreeSourceEntityFact.fromCanonicalJson(forged.getValue("sourceEntities").jsonArray.single().jsonObject)
