@@ -33,6 +33,28 @@ internal data class FullTreeFunctionObservationV2RunLimits(
     }
 }
 
+internal data class FullTreeFunctionObservationV2RetainedBudget(
+    val anchorIndexBytes: Long,
+    val sourceFactsBytes: Long,
+)
+
+internal fun fullTreeFunctionObservationV2RetainedBudget(
+    maximumRunRetainedBytes: Long,
+    maximumResidentBytes: Long,
+): FullTreeFunctionObservationV2RetainedBudget {
+    require(maximumRunRetainedBytes > 0L && maximumResidentBytes > 0L)
+    val anchorIndexBytes = minOf(maximumRunRetainedBytes / 2L, maximumResidentBytes / 8L).coerceAtLeast(1L)
+    return FullTreeFunctionObservationV2RetainedBudget(
+        anchorIndexBytes = anchorIndexBytes,
+        sourceFactsBytes = minOf(maximumRunRetainedBytes - anchorIndexBytes, maximumResidentBytes / 4L),
+    )
+}
+
+internal fun fullTreeFunctionObservationV2EffectiveWorkers(requestedWorkers: Int, shardCount: Int): Int {
+    require(requestedWorkers > 0 && shardCount > 0)
+    return minOf(requestedWorkers, shardCount)
+}
+
 internal data class FullTreeFunctionObservationV2ShardReceipt(
     val shardId: String,
     val inputSha256: String,
@@ -82,7 +104,7 @@ internal object FullTreeFunctionObservationV2RunPublisher {
         maximumWorkers: Int = 1,
         limits: FullTreeFunctionObservationV2RunLimits = FullTreeFunctionObservationV2RunLimits(),
     ): FullTreeFunctionObservationV2RunPublication = translateV2RunFailure {
-        require(maximumWorkers in 1..minOf(32, limits.run.maximumWorkers))
+        require(maximumWorkers in 1..minOf(32, limits.shard.control.maximumWorkers, limits.run.maximumWorkers))
         FullTreeScopeControl.validate(scope, limits.shard.control)
         val target = outputRoot.toAbsolutePath().normalize()
         requireDistinctControlOutput(target, "rich artifact" to richArtifact, "inventory" to inventoryPath)
@@ -115,16 +137,19 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                     scope.sha256,
                 )
                 if (shards.size > limits.run.maximumShards) v2RunFail("observation-v2 shard count exceeds its bound")
+                if (shards.isEmpty()) v2RunFail("observation-v2 run has no authenticated shards")
+                val effectiveWorkers = fullTreeFunctionObservationV2EffectiveWorkers(maximumWorkers, shards.size)
+                val retainedBudget = fullTreeFunctionObservationV2RetainedBudget(
+                    limits.maximumRunRetainedBytes,
+                    wholeRun.controlLong("maximumResidentBytes"),
+                )
 
                 val anchorIndex = FullTreeFunctionObservationV2AnchorIndex(
                     maximumClaims = minOf(
                         limits.maximumAnchorClaims,
                         minOf(wholeRun.controlLong("entities") * 64L, limits.maximumRunRetainedBytes / 256L),
                     ).coerceAtLeast(1L),
-                    maximumRetainedBytes = minOf(
-                        limits.maximumRunRetainedBytes / 2L,
-                        wholeRun.controlLong("maximumResidentBytes") / 8L,
-                    ).coerceAtLeast(1L),
+                    maximumRetainedBytes = retainedBudget.anchorIndexBytes,
                 )
                 val sourceFactsByShard = LinkedHashMap<String, List<FullTreeSourceEntityFact>>()
                 val shardDeadlines = shards.associate { shard ->
@@ -134,10 +159,7 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                 var sourceFactAdmissionBytes = 0L
                 var sourceFactCanonicalBytes = 0L
                 var modeledRetainedBytes = 0L
-                val retainedAdmission = minOf(
-                    limits.maximumRunRetainedBytes,
-                    wholeRun.controlLong("maximumResidentBytes") / 4L,
-                )
+                val retainedAdmission = retainedBudget.sourceFactsBytes
                 shards.forEach { shard ->
                     deadline.checkpoint("before extracting observation-v2 source entities")
                     val shardDeadline = shardDeadlines.getValue(shard.identifier)
@@ -329,10 +351,23 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                         perShardCpuSeconds = perShard.controlLong("cpuSeconds").toDouble(),
                         wholeRunCpuSeconds = wholeRun.controlLong("cpuSeconds").toDouble(),
                         maximumResidentBytes = wholeRun.controlLong("maximumResidentBytes"),
-                        maximumWorkers = maximumWorkers,
+                        maximumWorkers = effectiveWorkers,
                     )
                     val receiptsByShard = receipts.associateBy { it.shardId }
                     val runId = "observation-v2-${OracleArtifacts.sha256("${scope.sha256}:$richSha256".toByteArray()).take(32)}"
+                    val publicationCheckpoint: (String) -> Unit = { stage ->
+                        deadline.checkpoint(stage)
+                        if (stage.endsWith("BEFORE_ATOMIC_MOVE") ||
+                            stage.endsWith("AFTER_ATOMIC_MOVE") ||
+                            stage.endsWith("AFTER_FINAL_VERIFICATION")
+                        ) {
+                            inventoryGuard.verifyUnchanged("full-tree inventory at observation-v2 publication $stage")
+                            richGuard.verifyUnchanged("rich artifact at observation-v2 publication $stage")
+                        }
+                        if (stage.endsWith("AFTER_FINAL_VERIFICATION")) {
+                            deadline.sampleWholeRun("before returning authenticated observation-v2 run")
+                        }
+                    }
                     val binding = BoundedShardRunPublisher.publishWithCheckpoint(
                         target = target,
                         runId = runId,
@@ -352,11 +387,8 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                                 v2RunFail("staged observation-v2 bytes differ from their authenticated receipt")
                             }
                         },
-                        checkpoint = deadline::checkpoint,
+                        checkpoint = publicationCheckpoint,
                     )
-                    inventoryGuard.verifyUnchanged("before observation-v2 run return")
-                    richGuard.verifyUnchanged("before observation-v2 run return")
-                    deadline.sampleWholeRun("before returning authenticated observation-v2 run")
                     return@translateV2RunFailure FullTreeFunctionObservationV2RunPublication(
                         binding = binding,
                         scopeSha256 = scope.sha256,
@@ -364,7 +396,7 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                         richArtifactSha256 = richSha256,
                         reconciliation = reconciliation,
                         outputs = receipts,
-                        maximumWorkers = maximumWorkers,
+                        maximumWorkers = effectiveWorkers,
                     )
                 } finally {
                     prepared.close()

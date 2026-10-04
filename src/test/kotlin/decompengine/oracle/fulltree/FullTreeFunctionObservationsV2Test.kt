@@ -623,6 +623,26 @@ class FullTreeFunctionObservationsV2Test {
     }
 
     @Test
+    fun `v2 run retained admission shares one bound between anchor claims and source facts`() {
+        val budget = fullTreeFunctionObservationV2RetainedBudget(
+            maximumRunRetainedBytes = 1_000L,
+            maximumResidentBytes = 1_000_000L,
+        )
+        assertEquals(500L, budget.anchorIndexBytes)
+        assertEquals(500L, budget.sourceFactsBytes)
+        assertTrue(budget.anchorIndexBytes + budget.sourceFactsBytes <= 1_000L)
+    }
+
+    @Test
+    fun `v2 run worker bound cannot exceed the authenticated shard count`() {
+        assertEquals(1, fullTreeFunctionObservationV2EffectiveWorkers(requestedWorkers = 2, shardCount = 1))
+        assertEquals(2, fullTreeFunctionObservationV2EffectiveWorkers(requestedWorkers = 2, shardCount = 3))
+        assertFailsWith<IllegalArgumentException> {
+            fullTreeFunctionObservationV2EffectiveWorkers(requestedWorkers = 2, shardCount = 0)
+        }
+    }
+
+    @Test
     fun `v2 validator binds candidate source revision to authenticated source lock`() =
         inControlTemporaryDirectory { root ->
             val fixture = createFullTreeControlFixture(root.resolve("control"))
@@ -775,9 +795,9 @@ class FullTreeFunctionObservationsV2Test {
         }
 
     @Test
-    fun `v2 source rows reject repeated physical IDs forged candidates resolutions promotions and overlong edges`() {
-        val fixture = createFullTreeControlFixture(kotlin.io.path.createTempDirectory("full-tree-v2-facts-"))
-        try {
+    fun `v2 source rows reject repeated physical IDs forged candidates resolutions promotions and overlong edges`() =
+        inControlTemporaryDirectory { root ->
+            val fixture = createFullTreeControlFixture(root.resolve("control"))
             val scope = fixture.authenticatedScope()
             val inventory = parseControlObject(fixture.inventory)
             val inventorySha = fixtureSha256(fixture.inventory)
@@ -863,11 +883,8 @@ class FullTreeFunctionObservationsV2Test {
             assertFailsWith<IllegalArgumentException> {
                 FullTreeSourceEntityFact.fromCanonicalJson(mutatedRow("edges" to JsonArray(listOf(malformedEdge))))
             }
-        } finally {
-            val paths = Files.walk(fixture.root).use { it.toList() }
-            paths.sortedWith(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+            Unit
         }
-    }
 
     private fun fact(
         physical: FullTreeSourcePhysicalDie,
