@@ -575,6 +575,7 @@ internal fun reconcileObservationV2Facts(
             fact
         } else {
             fact.copy(
+                identityObservability = observationV2BaseObservability(fact, retainedReasons),
                 candidateCollisionSourceEntityIds = emptyList(),
                 reasonCodes = retainedReasons,
             )
@@ -584,6 +585,26 @@ internal fun reconcileObservationV2Facts(
         FullTreeSourceEntityFact.deterministicOrder(normalized),
         SourceIdentityAnchorCollisionReport(reconciliation.collisionIdsByCandidate),
     )
+}
+
+private fun observationV2BaseObservability(
+    fact: FullTreeSourceEntityFact,
+    reasonCodes: List<String>,
+): FullTreeIdentityObservability {
+    val ambiguousEdges = fact.edges.any { it.state == FullTreeSourceIdentityEdgeState.CYCLIC }
+    val unknownEdges = fact.edges.any {
+        it.state == FullTreeSourceIdentityEdgeState.MISSING_TARGET ||
+            it.state == FullTreeSourceIdentityEdgeState.MALFORMED ||
+            it.state == FullTreeSourceIdentityEdgeState.UNSUPPORTED
+    }
+    return when {
+        reasonCodes.any { it.startsWith("ambiguous-") } || ambiguousEdges -> FullTreeIdentityObservability.AMBIGUOUS
+        fact.kind == FullTreeSourceEntityKind.DECLARATION_ONLY ||
+            "declaration-only-no-definition" in reasonCodes -> FullTreeIdentityObservability.UNOBSERVABLE
+        reasonCodes.any { it.startsWith("unknown-") } || unknownEdges -> FullTreeIdentityObservability.UNKNOWN
+        fact.semanticAnchorCandidateId != null -> FullTreeIdentityObservability.OBSERVABLE
+        else -> FullTreeIdentityObservability.UNKNOWN
+    }
 }
 
 private fun JsonObject.v2Element(name: String): JsonElement = get(name) ?: v2Fail("missing field $name")
