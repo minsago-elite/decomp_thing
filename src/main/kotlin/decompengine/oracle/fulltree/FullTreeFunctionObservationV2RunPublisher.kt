@@ -428,7 +428,7 @@ private fun authenticatedV2SqliteLimits(
     preparedBytes: Long,
 ): FullTreeFunctionObservationSqliteLimits {
     val databaseScratchBytes = limits.maximumScratchBytes - preparedBytes
-    if (databaseScratchBytes < SQLITE_PAGE_BYTES) {
+    if (databaseScratchBytes < FULL_TREE_FUNCTION_OBSERVATION_SQLITE_PAGE_BYTES) {
         v2RunFail("prepared observation-v2 outputs leave no SQLite scratch page within the aggregate bound")
     }
     return FullTreeFunctionObservationSqliteLimits(

@@ -20,6 +20,8 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
+internal const val FULL_TREE_FUNCTION_OBSERVATION_SQLITE_PAGE_BYTES = 4096L
+
 internal class FullTreeFunctionObservationSqliteException(message: String, cause: Throwable? = null) :
     IllegalArgumentException(message, cause)
 

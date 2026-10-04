@@ -434,7 +434,7 @@ class FullTreeFunctionObservationsV2Test {
                         sqliteReceipt.databaseHighWaterBytes,
                     )
                     val tightScratchBytes = requiredScratchBytes - 1L
-                    assertTrue(tightScratchBytes >= SQLITE_PAGE_BYTES.toLong())
+                    assertTrue(tightScratchBytes >= FULL_TREE_FUNCTION_OBSERVATION_SQLITE_PAGE_BYTES)
                     assertFailsWith<FullTreeFunctionObservationSqliteException> {
                         FullTreeFunctionObservationSqlite.openV2(
                             root,
