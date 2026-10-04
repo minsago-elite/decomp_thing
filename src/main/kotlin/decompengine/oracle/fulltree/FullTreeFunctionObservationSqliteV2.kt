@@ -8,6 +8,8 @@ internal object FullTreeFunctionObservationSqliteV2 {
         scratchParent: Path,
         shard: FullTreeFunctionObservationShardInput,
         limits: FullTreeFunctionObservationSqliteLimits,
-    ): FullTreeFunctionObservationV2Sink =
-        FullTreeFunctionObservationSqlite.openV2(scratchParent, shard, limits)
+    ): FullTreeFunctionObservationV2Sink {
+        requireFunctionObservationV2OutputByteLimit(limits.maximumOutputBytes)
+        return FullTreeFunctionObservationSqlite.openV2(scratchParent, shard, limits)
+    }
 }

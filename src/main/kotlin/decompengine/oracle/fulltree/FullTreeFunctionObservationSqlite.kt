@@ -22,6 +22,20 @@ import kotlinx.serialization.json.JsonPrimitive
 
 internal const val FULL_TREE_FUNCTION_OBSERVATION_SQLITE_PAGE_BYTES = 4096L
 
+internal fun fullTreeFunctionObservationV2OutputByteLimit(
+    callerLimit: Long,
+    hardLimit: Long = FullTreeFunctionObservationsV2.MAXIMUM_CANONICAL_BYTES,
+): Long {
+    require(callerLimit > 0L && hardLimit > 0L)
+    return minOf(callerLimit, hardLimit)
+}
+
+internal fun requireFunctionObservationV2OutputByteLimit(callerLimit: Long) {
+    if (fullTreeFunctionObservationV2OutputByteLimit(callerLimit) != callerLimit) {
+        sqliteFail("observation-v2 output exceeds its canonical-wire byte limit")
+    }
+}
+
 internal class FullTreeFunctionObservationSqliteException(message: String, cause: Throwable? = null) :
     IllegalArgumentException(message, cause)
 
@@ -129,9 +143,7 @@ internal object FullTreeFunctionObservationSqlite {
         shard: FullTreeFunctionObservationShardInput,
         limits: FullTreeFunctionObservationSqliteLimits,
     ): FullTreeFunctionObservationV2Sink {
-        if (limits.maximumOutputBytes > FullTreeFunctionObservationsV2.MAXIMUM_CANONICAL_BYTES) {
-            sqliteFail("observation-v2 output exceeds its canonical-wire byte limit")
-        }
+        requireFunctionObservationV2OutputByteLimit(limits.maximumOutputBytes)
         val sink = open(scratchParent, shard, limits)
         return sink as? FullTreeFunctionObservationV2Sink ?: run {
             sink.close()
@@ -227,7 +239,8 @@ private class FunctionObservationSqliteSink private constructor(
         if (unitsById[fact.physicalDie.unitId] == null) {
             sqliteFail("source entity owner is outside its authenticated shard")
         }
-        val maximumRowBytes = minOf(limits.maximumOutputBytes, MAXIMUM_SOURCE_IDENTITY_ROW_BYTES).coerceAtLeast(1L)
+        val v2OutputByteLimit = fullTreeFunctionObservationV2OutputByteLimit(limits.maximumOutputBytes)
+        val maximumRowBytes = minOf(v2OutputByteLimit, MAXIMUM_SOURCE_IDENTITY_ROW_BYTES).coerceAtLeast(1L)
         val canonical = try {
             OracleJson.canonicalBytes(fact.canonicalJson(), sourceIdentityRowJsonLimits(maximumRowBytes))
         } catch (failure: Exception) {
@@ -243,7 +256,7 @@ private class FunctionObservationSqliteSink private constructor(
         ) {
             sqliteFail("observation-v2 entity population exceeds its authenticated bound")
         }
-        if (nextBytes > limits.maximumOutputBytes) {
+        if (nextBytes > v2OutputByteLimit) {
             sqliteFail("source-entity canonical rows exceed the authenticated output budget")
         }
         statements.insertSourceEntity.setString(1, fact.sourceEntityId)
@@ -352,7 +365,7 @@ private class FunctionObservationSqliteSink private constructor(
             state = SinkState.PROJECTING
             val bounded = FunctionObservationDigestingOutputStream(
                 output,
-                limits.maximumOutputBytes,
+                fullTreeFunctionObservationV2OutputByteLimit(limits.maximumOutputBytes),
                 limits.checkpoint,
                 workspace::checkCombinedScratchBound,
             )

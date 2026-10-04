@@ -429,6 +429,16 @@ class FullTreeFunctionObservationsV2Test {
                 assertEquals(OracleArtifacts.sha256(memoryBytes), sqliteReceipt.outputSha256)
 
                 if (shard.identifier == firstShard.identifier) {
+                    val overV2WireLimit = sqliteLimits.copy(
+                        maximumOutputBytes = FullTreeFunctionObservationsV2.MAXIMUM_CANONICAL_BYTES + 1L,
+                    )
+                    assertFailsWith<FullTreeFunctionObservationSqliteException> {
+                        FullTreeFunctionObservationSqlite.openV2(root, shard, overV2WireLimit)
+                    }
+                    assertFailsWith<FullTreeFunctionObservationSqliteException> {
+                        FullTreeFunctionObservationSqliteV2.open(root, shard, overV2WireLimit)
+                    }
+
                     val requiredScratchBytes = Math.addExact(
                         sqliteReceipt.outputBytes,
                         sqliteReceipt.databaseHighWaterBytes,
@@ -640,6 +650,18 @@ class FullTreeFunctionObservationsV2Test {
         assertFailsWith<IllegalArgumentException> {
             fullTreeFunctionObservationV2EffectiveWorkers(requestedWorkers = 2, shardCount = 0)
         }
+    }
+
+    @Test
+    fun `SQLite v2 output budget clamps to its hard canonical ceiling`() {
+        assertEquals(
+            FullTreeFunctionObservationsV2.MAXIMUM_CANONICAL_BYTES,
+            fullTreeFunctionObservationV2OutputByteLimit(
+                FullTreeFunctionObservationsV2.MAXIMUM_CANONICAL_BYTES + 1L,
+            ),
+        )
+        assertEquals(128L, fullTreeFunctionObservationV2OutputByteLimit(256L, hardLimit = 128L))
+        assertEquals(64L, fullTreeFunctionObservationV2OutputByteLimit(64L, hardLimit = 128L))
     }
 
     @Test
