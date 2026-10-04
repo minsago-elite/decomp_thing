@@ -593,7 +593,7 @@ class FullTreeFunctionObservationsV2Test {
                     FullTreeFunctionObservationSqlite.openV2(root, shard, sqliteLimits).use { rejectingSqlite ->
                         rejectingSqlite.recordScannedDies(3L)
                         observations.forEach(rejectingSqlite::accept)
-                        assertFailsWith<FullTreeFunctionObservationSqliteException> {
+                        assertFailsWith<FullTreeFunctionObservationV2Exception> {
                             rejectingSqlite.acceptSourceEntity(forgedLink)
                         }
                     }
@@ -1709,22 +1709,39 @@ class FullTreeFunctionObservationsV2Test {
             assertEquals(first.binding.runSha256, rederived.binding.runSha256)
             assertEquals(first.outputs, rederived.outputs)
 
-            val receipt = first.outputs.firstOrNull { candidate ->
-                if (candidate.sourceEntities == 0L) return@firstOrNull false
-                val rows = OracleJson.parseCanonical(
+            fun hasLaterDIEInSameCU(rows: List<FullTreeSourceEntityFact>, source: FullTreeSourceEntityFact): Boolean =
+                rows.any { target ->
+                    target.physicalDie.unitId == source.physicalDie.unitId &&
+                        target.physicalDie.compilationUnitOffset == source.physicalDie.compilationUnitOffset &&
+                        target.physicalDie.dieOffset.removePrefix("0x").toULong(16) >
+                        source.physicalDie.dieOffset.removePrefix("0x").toULong(16)
+                }
+
+            val mutationFixture = first.outputs.asSequence().mapNotNull { candidate ->
+                val candidateDocument = OracleJson.parseCanonical(
                     Files.readAllBytes(firstRoot.resolve("outputs/${candidate.shardId}.json")),
-                ).jsonObject.getValue("sourceEntities").jsonArray.map {
+                ) as JsonObject
+                val rows = candidateDocument.getValue("sourceEntities").jsonArray.map {
                     FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
                 }
-                rows.any { it.semanticAnchorFields != null && it.semanticAnchorCandidateId != null }
-            } ?: throw AssertionError("authenticated fixture must contain an anchored source row for mutation tests")
+                val anchored = rows.filter {
+                    it.semanticAnchorFields != null && it.semanticAnchorCandidateId != null
+                }
+                val hasDistinctDIE = anchored.any { source -> rows.any { it.physicalDie != source.physicalDie } }
+                val hasStructuralTarget = anchored.any { source -> hasLaterDIEInSameCU(rows, source) }
+                val hasEmittedRva = candidateDocument.getValue("emitted").jsonArray.isNotEmpty()
+                if (candidate.sourceEntities == rows.size.toLong() && anchored.isNotEmpty() &&
+                    hasDistinctDIE && hasStructuralTarget && hasEmittedRva
+                ) {
+                    Triple(candidate, candidateDocument, rows)
+                } else {
+                    null
+                }
+            }.firstOrNull() ?: throw AssertionError(
+                "authenticated fixture must have an anchored source row, distinct target DIE, later same-CU DIE, and emitted RVA for mutation tests",
+            )
+            val (receipt, document, originalRows) = mutationFixture
             val shard = firstInput.getValue(receipt.shardId)
-            val document = OracleJson.parseCanonical(
-                Files.readAllBytes(firstRoot.resolve("outputs/${receipt.shardId}.json")),
-            ) as JsonObject
-            val originalRows = document.getValue("sourceEntities").jsonArray.map {
-                FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject)
-            }
             val source = originalRows.firstOrNull {
                 it.semanticAnchorFields != null && it.semanticAnchorCandidateId != null
             } ?: throw AssertionError("selected shard must contain an anchored candidate for mutation tests")
@@ -1862,11 +1879,13 @@ class FullTreeFunctionObservationsV2Test {
             assertTrue(physicalOffsetFailure.message.orEmpty().contains("authenticated scan receipt"))
             assertRawReexecutionRejects(publishForgedDocument("forged-offset", forgedOffsetDocument))
 
-            val emittedRva = document.getValue("emitted").jsonArray.single()
-                .jsonObject.getValue("rva").jsonPrimitive.content
-            val linkSubject = originalRows.first { it.semanticAnchorFields != null }
+            val emittedRva = document.getValue("emitted").jsonArray.firstOrNull()
+                ?.jsonObject?.getValue("rva")?.jsonPrimitive?.content
+                ?: throw AssertionError("selected shard must contain an emitted RVA for denominator-link mutation tests")
+            val linkSubject = source
 
-            val patternTarget = originalRows.first { it.physicalDie != linkSubject.physicalDie }.physicalDie
+            val patternTarget = originalRows.firstOrNull { it.physicalDie != linkSubject.physicalDie }?.physicalDie
+                ?: throw AssertionError("selected shard must contain a second source DIE for pattern-edge mutation tests")
             val patternAnchorFields = FullTreeSourceAnchorFields(
                 sourcePath = "source/include/fixture.h",
                 declarationFileIndex = 1L,
@@ -2016,14 +2035,14 @@ class FullTreeFunctionObservationsV2Test {
                             source.physicalDie.dieOffset.removePrefix("0x").toULong(16)
                     }
             }
-            assertTrue(structuralSubject != null, "fixture must contain an anchored source DIE with a later DIE in its CU")
-            val structural = requireNotNull(structuralSubject)
-            val unrelatedTarget = originalRows.first { target ->
+            val structural = structuralSubject
+                ?: throw AssertionError("selected shard must contain an anchored source DIE with a later DIE in its CU")
+            val unrelatedTarget = originalRows.firstOrNull { target ->
                 target.physicalDie.unitId == structural.physicalDie.unitId &&
                     target.physicalDie.compilationUnitOffset == structural.physicalDie.compilationUnitOffset &&
                     target.physicalDie.dieOffset.removePrefix("0x").toULong(16) >
                     structural.physicalDie.dieOffset.removePrefix("0x").toULong(16)
-            }.physicalDie
+            }?.physicalDie ?: throw AssertionError("selected shard must contain a later same-CU target DIE")
             val forgedStructuralEdge = FullTreeSourceIdentityEdge(
                 kind = FullTreeSourceIdentityEdgeKind.TYPE,
                 source = structural.physicalDie,
