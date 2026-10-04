@@ -2056,4 +2056,6 @@ private val PROJECTION_QUERIES = listOf(
 private val V2_PROJECTION_QUERIES = listOf(
     "SELECT canonical FROM source_entity " +
         "ORDER BY entity_kind,candidate_key,unit_id,cu_offset,die_offset",
+    "SELECT entity_kind,candidate_key,unit_id,cu_offset,die_offset,canonical FROM source_entity " +
+        "ORDER BY entity_kind,candidate_key,unit_id,cu_offset,die_offset",
 )
