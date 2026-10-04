@@ -507,7 +507,9 @@ class FullTreeSourceEntityIdentityProducerTest {
             it.denominatorDisposition == FullTreeDenominatorDisposition.NON_SCOREABLE && it.linkedEmittedRva == null
         }, runDescription)
 
-        val callbackFacts = facts.filter { it.semanticAnchorFields?.sourceName == "callback_signature" }
+        val callbackFacts = facts.filter {
+            it.semanticAnchorFields?.sourceName?.startsWith("callback_signature<") == true
+        }
         assertTrue(callbackFacts.isNotEmpty(), "callback function DIE was not retained; $runDescription")
         assertTrue(callbackFacts.all { fact ->
             val signature = fact.semanticAnchorFields?.signature.orEmpty().joinToString("|")

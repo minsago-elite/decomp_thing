@@ -20,8 +20,9 @@ inline int callback_target(int value, ...) {
     return value + 1;
 }
 
-__attribute__((noinline)) inline int callback_signature(int (*callback)(int, ...), int value) {
-    return callback(value, value + 1);
+template <typename T>
+__attribute__((noinline)) inline T callback_signature(int (*callback)(int, ...), T value) {
+    return static_cast<T>(callback(static_cast<int>(value), 1));
 }
 
 inline int nested_leaf(int value) {
