@@ -314,7 +314,9 @@ internal object FullTreeFunctionObservationProducer {
             accept = sink::accept,
             residentBudgetBytes = residentBudgetBytes,
         )
-        FullTreeSourceEntityFact.deterministicOrder(sourceFacts).forEach { fact ->
+        // The run census and collision reconciliation retain source facts in deterministic order.
+        // The sinks canonicalize their own final projection, so do not allocate a second list here.
+        sourceFacts.forEach { fact ->
             checkpoint("before accepting observation-v2 source entity")
             sink.acceptSourceEntity(fact)
         }
