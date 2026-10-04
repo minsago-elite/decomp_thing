@@ -73,10 +73,11 @@ class FullTreeFunctionObservationsV2Test {
     }
 
     @Test
-    fun `resolved reference forms enforce their fixed offset widths`() {
+    fun `fixed reference forms enforce their encoded operand widths`() {
         assertEquals(0xffuL, fullTreeDwarfReferenceFormMaximumRawValue(FULL_TREE_DW_FORM_REF1.toULong()))
         assertEquals(0xffffuL, fullTreeDwarfReferenceFormMaximumRawValue(FULL_TREE_DW_FORM_REF2.toULong()))
         assertEquals(0xffff_ffffuL, fullTreeDwarfReferenceFormMaximumRawValue(FULL_TREE_DW_FORM_REF4.toULong()))
+        assertEquals(0xffff_ffffuL, fullTreeDwarfReferenceFormMaximumRawValue(FULL_TREE_DW_FORM_REF_SUP4.toULong()))
         assertTrue(fullTreeDwarfReferenceFormMaximumRawValue(FULL_TREE_DW_FORM_REF8.toULong()) == null)
         assertTrue(fullTreeDwarfReferenceFormMaximumRawValue(FULL_TREE_DW_FORM_REF_UDATA.toULong()) == null)
     }
@@ -103,6 +104,7 @@ class FullTreeFunctionObservationsV2Test {
     fun `v2 shard resident allowance subtracts co-resident run state`() {
         assertEquals(700L, fullTreeFunctionObservationV2AvailableResidentBytes(1_000L, 100L, 200L))
         assertEquals(650L, fullTreeFunctionObservationV2AvailableResidentBytes(1_000L, 100L, 200L, 50L))
+        assertEquals(600L, fullTreeFunctionObservationV2AvailableResidentBytes(1_000L, 100L, 200L, 50L, 50L))
         assertEquals(
             200L,
             fullTreeFunctionObservationV2SourceRowCanonicalizationScratchBytes(100L),
@@ -116,6 +118,24 @@ class FullTreeFunctionObservationsV2Test {
         }
         assertFailsWith<FullTreeFunctionObservationV2RunException> {
             fullTreeFunctionObservationV2AvailableResidentBytes(1_000L, 100L, 200L, 700L)
+        }
+        assertEquals(
+            2L * sourceIdentityFixedStructureResidentBytes(100L, 80L, 2L, 0L, 0L),
+            fullTreeFunctionObservationV2RunControlSnapshotBytes(100L, 80L, 2L),
+        )
+        assertFailsWith<FullTreeFunctionObservationV2RunException> {
+            fullTreeFunctionObservationV2AvailableResidentBytes(1_000L, 100L, 200L, 50L, 700L)
+        }
+    }
+
+    @Test
+    fun `run retained fact model drops array framing and charges each persistent row`() {
+        // A two-row canonical array has four fixed framing bytes and one comma in addition
+        // to the rows' exact additive contributions: 35 = 4 + 10 + 20 + 1.
+        assertEquals(602L, fullTreeFunctionObservationV2RetainedFactListBytes(35L, 2L))
+        assertEquals(0L, fullTreeFunctionObservationV2RetainedFactListBytes(3L, 0L))
+        assertFailsWith<FullTreeFunctionObservationV2RunException> {
+            fullTreeFunctionObservationV2RetainedFactListBytes(2L, 0L)
         }
     }
 
@@ -313,13 +333,14 @@ class FullTreeFunctionObservationsV2Test {
             )
             assertEquals(null, templateIntFields.templatePatternAnchorCandidateId)
             assertEquals(null, templateLongFields.templatePatternAnchorCandidateId)
-            val templateIntPhysical = physical(firstUnit, "0x130")
+            val templateIntPhysical = physical(firstUnit, absoluteOffset(firstUnit, 0x130uL))
+            val templateIntTarget = physical(secondUnit, absoluteOffset(secondUnit, 0x80uL))
             val templateIntToOtherCu = FullTreeSourceIdentityEdge(
                 kind = FullTreeSourceIdentityEdgeKind.TEMPLATE_ARGUMENT,
                 source = templateIntPhysical,
-                target = physical(secondUnit, "0x80"),
+                target = templateIntTarget,
                 referenceForm = "0x10",
-                rawReference = "0x80",
+                rawReference = templateIntTarget.dieOffset,
                 state = FullTreeSourceIdentityEdgeState.RESOLVED,
                 reasonCode = null,
             )
@@ -362,10 +383,10 @@ class FullTreeFunctionObservationsV2Test {
             val ownerCandidate = requireNotNull(ownerFields.candidateId(FullTreeSourceAnchorKind.SOURCE_DEFINITION))
             val calleeFields = anchorFields("inline_callee", line = 106L)
             val calleeCandidate = requireNotNull(calleeFields.candidateId(FullTreeSourceAnchorKind.SOURCE_DEFINITION))
-            val ownerA = physical(firstUnit, "0x200")
-            val ownerB = physical(secondUnit, "0x200")
-            val callee = physical(firstUnit, "0x210")
-            val inlinePhysical = physical(firstUnit, "0x150")
+            val ownerA = physical(firstUnit, absoluteOffset(firstUnit, 0x200uL))
+            val ownerB = physical(secondUnit, absoluteOffset(secondUnit, 0x200uL))
+            val callee = physical(firstUnit, absoluteOffset(firstUnit, 0x210uL))
+            val inlinePhysical = physical(firstUnit, absoluteOffset(firstUnit, 0x150uL))
             val inlineFields = anchorFields(
                 sourceName = "inline_call",
                 line = 107L,
@@ -388,7 +409,7 @@ class FullTreeFunctionObservationsV2Test {
                         source = inlinePhysical,
                         target = callee,
                         referenceForm = "0x10",
-                        rawReference = "0x210",
+                        rawReference = callee.dieOffset,
                         state = FullTreeSourceIdentityEdgeState.RESOLVED,
                         reasonCode = null,
                     ),
@@ -397,7 +418,7 @@ class FullTreeFunctionObservationsV2Test {
                         source = inlinePhysical,
                         target = ownerB,
                         referenceForm = "0x10",
-                        rawReference = "0x200",
+                        rawReference = ownerB.dieOffset,
                         state = FullTreeSourceIdentityEdgeState.RESOLVED,
                         reasonCode = null,
                     ),
@@ -1072,7 +1093,7 @@ class FullTreeFunctionObservationsV2Test {
         }
 
     @Test
-    fun `per-shard deadline accumulates source census and output phases`() {
+    fun `per-shard deadline accumulates source reconciliation and output phases`() {
         var wall = 0L
         var cpu = 0L
         val budget = V2ShardDeadline(
@@ -1083,9 +1104,14 @@ class FullTreeFunctionObservationsV2Test {
             cpuClock = { cpu },
         )
         budget.beginPhase()
-        wall = 6L
-        cpu = 6L
+        wall = 3L
+        cpu = 3L
         budget.endPhase("after source census")
+
+        budget.beginPhase()
+        wall = 7L
+        cpu = 7L
+        budget.endPhase("after source reconciliation")
 
         budget.beginPhase()
         wall = 11L
@@ -1320,20 +1346,12 @@ class FullTreeFunctionObservationsV2Test {
                 }),
             )
             assertEquals(validFact.semanticAnchorCandidateId, changedCoordinatesFact.semanticAnchorCandidateId)
-            val changedCoordinatesDocument = FullTreeFunctionObservationsV2.composeEnvelope(
-                v1ProjectionForCompose(valid),
-                listOf(changedCoordinatesFact),
-                validReconciliation,
-                8L * 1024L * 1024L,
-            )
             val changedCoordinatesFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
-                FullTreeFunctionObservationsV2.validateEnvelope(
-                    changedCoordinatesDocument,
-                    scope,
-                    inventory,
-                    inventorySha,
-                    shard,
+                FullTreeFunctionObservationsV2.composeEnvelope(
+                    v1ProjectionForCompose(valid),
+                    listOf(changedCoordinatesFact),
                     validReconciliation,
+                    8L * 1024L * 1024L,
                 )
             }
             assertTrue(changedCoordinatesFailure.message.orEmpty().contains("scan receipt"))
@@ -1406,6 +1424,82 @@ class FullTreeFunctionObservationsV2Test {
                 }
                 assertTrue(failure.message.orEmpty().contains("fixed-width DWARF form"))
             }
+
+            fun unsupportedReferenceDocument(
+                form: Long,
+                raw: String,
+            ): Pair<JsonObject, FullTreeFunctionObservationV2IdentityReconciliation> {
+                val edge = FullTreeSourceIdentityEdge(
+                    kind = FullTreeSourceIdentityEdgeKind.SPECIFICATION,
+                    source = validFact.physicalDie,
+                    target = null,
+                    referenceForm = "0x${form.toString(16)}",
+                    rawReference = raw,
+                    state = FullTreeSourceIdentityEdgeState.UNSUPPORTED,
+                    reasonCode = "unsupported-reference-form",
+                )
+                val forgedFact = validFact.copy(
+                    identityObservability = FullTreeIdentityObservability.UNKNOWN,
+                    reasonCodes = listOf("unknown-reference-edge"),
+                    edges = listOf(edge),
+                )
+                val forgedIndex = FullTreeFunctionObservationV2AnchorIndex(4L, 4096L)
+                forgedFact.semanticAnchorCandidateId?.let {
+                    forgedIndex.accept(it, forgedFact.sourceEntityId)
+                }
+                forgedIndex.acceptSourceEntityPopulation(shard.identifier, listOf(forgedFact))
+                val forgedReconciliation = forgedIndex.reconciliation()
+                return FullTreeFunctionObservationsV2.composeEnvelope(
+                    v1ProjectionForCompose(valid),
+                    listOf(forgedFact),
+                    forgedReconciliation,
+                    8L * 1024L * 1024L,
+                ) to forgedReconciliation
+            }
+
+            val validUnsupportedForm = unsupportedReferenceDocument(
+                FULL_TREE_DW_FORM_REF_SUP4,
+                "0xffffffff",
+            )
+            FullTreeFunctionObservationsV2.validateEnvelope(
+                validUnsupportedForm.first,
+                scope,
+                inventory,
+                inventorySha,
+                shard,
+                validUnsupportedForm.second,
+            )
+            val supportedFormLabeledUnsupported = unsupportedReferenceDocument(
+                FULL_TREE_DW_FORM_REF1,
+                "0x1",
+            )
+            val unsupportedFormFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                FullTreeFunctionObservationsV2.validateEnvelope(
+                    supportedFormLabeledUnsupported.first,
+                    scope,
+                    inventory,
+                    inventorySha,
+                    shard,
+                    supportedFormLabeledUnsupported.second,
+                )
+            }
+            assertTrue(unsupportedFormFailure.message.orEmpty().contains("does not classify as unsupported"))
+
+            val overWidthSup4 = unsupportedReferenceDocument(
+                FULL_TREE_DW_FORM_REF_SUP4,
+                "0x100000000",
+            )
+            val overWidthSup4Failure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                FullTreeFunctionObservationsV2.validateEnvelope(
+                    overWidthSup4.first,
+                    scope,
+                    inventory,
+                    inventorySha,
+                    shard,
+                    overWidthSup4.second,
+                )
+            }
+            assertTrue(overWidthSup4Failure.message.orEmpty().contains("fixed-width DWARF form"))
 
             val (missingRevision, missingRevisionReconciliation) = boundDocument(null)
             val missingRevisionFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
@@ -1637,7 +1731,7 @@ class FullTreeFunctionObservationsV2Test {
                     first.reconciliation,
                 )
             }
-            assertTrue(fileDigestFailure.message.orEmpty().contains("no authenticated per-file evidence"))
+            assertTrue(fileDigestFailure.message.orEmpty().contains("authenticated scan receipt"))
 
             val offsetSource = originalRows.first {
                 it.semanticAnchorCandidateId != null && it.candidateCollisionSourceEntityIds.isEmpty()
@@ -1970,7 +2064,7 @@ class FullTreeFunctionObservationsV2Test {
                 declarationColumn = null,
                 language = 33L,
                 lexicalContext = emptyList(),
-                sourceName = "publisher_link_probe",
+                sourceName = "publisher_link_probe<int>",
                 signature = listOf("return:void"),
                 templateActualArguments = listOf("type:int"),
                 authenticatedSourceRevision = scope.sourceLock.controlObject("revision").controlString("commit"),

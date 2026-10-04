@@ -54,23 +54,85 @@ internal fun fullTreeFunctionObservationV2AvailableResidentBytes(
     anchorIndexRetainedBytes: Long,
     sourceFactsRetainedBytes: Long,
     sourceRowCanonicalizationScratchBytes: Long = 0L,
+    runControlSnapshotBytes: Long = 0L,
 ): Long {
     require(
         wholeRunMaximumResidentBytes > 0L && anchorIndexRetainedBytes >= 0L && sourceFactsRetainedBytes >= 0L &&
-            sourceRowCanonicalizationScratchBytes >= 0L,
+            sourceRowCanonicalizationScratchBytes >= 0L && runControlSnapshotBytes >= 0L,
     )
     val reserved = try {
         Math.addExact(
-            Math.addExact(anchorIndexRetainedBytes, sourceFactsRetainedBytes),
-            sourceRowCanonicalizationScratchBytes,
+            Math.addExact(
+                Math.addExact(anchorIndexRetainedBytes, sourceFactsRetainedBytes),
+                sourceRowCanonicalizationScratchBytes,
+            ),
+            runControlSnapshotBytes,
         )
     } catch (failure: ArithmeticException) {
         throw FullTreeFunctionObservationV2RunException("observation-v2 resident reservation overflows", failure)
     }
     if (reserved >= wholeRunMaximumResidentBytes) {
-        v2RunFail("observation-v2 retained run state and source-row scratch leave no shard resident-byte allowance")
+        v2RunFail("observation-v2 retained run state and control snapshots leave no shard resident-byte allowance")
     }
     return wholeRunMaximumResidentBytes - reserved
+}
+
+/** Reserve the live run inventory and its per-shard unit snapshots in both scan phases. */
+internal fun fullTreeFunctionObservationV2RunControlSnapshotBytes(
+    authenticatedInventoryBytes: Long,
+    modeledInventoryJsonNodes: Long,
+    compilationUnitCount: Long,
+): Long {
+    val oneSnapshot = sourceIdentityFixedStructureResidentBytes(
+        authenticatedInventoryBytes = authenticatedInventoryBytes,
+        modeledInventoryJsonNodes = modeledInventoryJsonNodes,
+        compilationUnitCount = compilationUnitCount,
+        modeledElfLayoutBytes = 0L,
+        modeledObservedUnitMetadataBytes = 0L,
+    )
+    return try {
+        // One model covers the parsed run inventory; the second covers the copied unit objects
+        // retained by shardInputs. Each individual source scan separately reserves its own parse.
+        Math.multiplyExact(oneSnapshot, 2L)
+    } catch (failure: ArithmeticException) {
+        throw FullTreeFunctionObservationV2RunException("observation-v2 run inventory reservation overflows", failure)
+    }
+}
+
+/** Persistent retained charge for a canonical source-entity array, excluding array framing. */
+internal fun fullTreeFunctionObservationV2RetainedFactListBytes(
+    canonicalArrayBytes: Long,
+    entityCount: Long,
+): Long {
+    require(canonicalArrayBytes >= 0L && entityCount >= 0L)
+    if (entityCount == 0L) {
+        if (canonicalArrayBytes != 3L) {
+            v2RunFail("empty observation-v2 source facts have a non-canonical array length")
+        }
+        return 0L
+    }
+    val framingBytes = try {
+        Math.addExact(entityCount, 3L)
+    } catch (failure: ArithmeticException) {
+        throw FullTreeFunctionObservationV2RunException("observation-v2 source fact framing overflows", failure)
+    }
+    if (canonicalArrayBytes < framingBytes) {
+        v2RunFail("observation-v2 source fact array is smaller than its canonical framing")
+    }
+    return try {
+        val rowContributionBytes = canonicalArrayBytes - framingBytes
+        val retainedPayload = Math.multiplyExact(rowContributionBytes, SOURCE_IDENTITY_RETAINED_CONTENT_EXPANSION_FACTOR)
+        val retainedPerRowOverhead = Math.addExact(
+            Math.multiplyExact(
+                SOURCE_IDENTITY_RETAINED_CONTENT_EXPANSION_FACTOR,
+                64L,
+            ),
+            SOURCE_IDENTITY_RETAINED_CHARGE_OVERHEAD_BYTES,
+        )
+        Math.addExact(retainedPayload, Math.multiplyExact(entityCount, retainedPerRowOverhead))
+    } catch (failure: ArithmeticException) {
+        throw FullTreeFunctionObservationV2RunException("observation-v2 retained source-fact model overflows", failure)
+    }
 }
 
 internal data class FullTreeFunctionObservationV2ShardScratchBudget(
@@ -231,6 +293,14 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                 if (shards.size > limits.run.maximumShards) v2RunFail("observation-v2 shard count exceeds its bound")
                 if (shards.isEmpty()) v2RunFail("observation-v2 run has no authenticated shards")
                 val effectiveWorkers = fullTreeFunctionObservationV2EffectiveWorkers(maximumWorkers, shards.size)
+                val runControlSnapshotBytes = fullTreeFunctionObservationV2RunControlSnapshotBytes(
+                    authenticatedInventoryBytes = inventoryBytes.size.toLong(),
+                    modeledInventoryJsonNodes = minOf(
+                        inventoryBytes.size.toLong(),
+                        MAXIMUM_SOURCE_IDENTITY_CONTROL_JSON_NODES,
+                    ),
+                    compilationUnitCount = inventory.controlArray("units").size.toLong(),
+                )
                 val retainedBudget = fullTreeFunctionObservationV2RetainedBudget(
                     limits.maximumRunRetainedBytes,
                     wholeRun.controlLong("maximumResidentBytes"),
@@ -259,6 +329,7 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                     wholeRun.controlLong("maximumResidentBytes"),
                     retainedBudget.anchorIndexBytes,
                     retainedAdmission,
+                    runControlSnapshotBytes = runControlSnapshotBytes,
                 )
                 val sourcePassControlLimits = limits.shard.control.copy(
                     maximumDwarfScratchBytes = minOf(
@@ -270,6 +341,7 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                     deadline.checkpoint("before extracting observation-v2 source entities")
                     val shardDeadline = shardDeadlines.getValue(shard.identifier)
                     val shardCheckpoint = shardDeadline.beginPhase()
+                    val retainedBeforeShard = modeledRetainedBytes
                     val sourceCountBeforeShard = sourceFactCount
                     var sourceFactsAdmittedForShard = 0L
                     val scan = FullTreeSourceEntityIdentityProducer.scanShard(
@@ -353,6 +425,16 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                         v2RunFail("full-run source census exceeds its authenticated entity or byte bound")
                     }
                     sourceFactsByShard[shard.identifier] = scan.facts
+                    modeledRetainedBytes = Math.addExact(
+                        retainedBeforeShard,
+                        fullTreeFunctionObservationV2RetainedFactListBytes(
+                            scan.canonicalBytes,
+                            scan.facts.size.toLong(),
+                        ),
+                    )
+                    if (modeledRetainedBytes > retainedAdmission) {
+                        v2RunFail("retained full-run source facts exceed their authenticated working-set budget")
+                    }
                     deadline.sampleWholeRun("after extracting source entities for ${shard.identifier}")
                     inventoryGuard.verifyUnchanged("full-tree inventory after source-identity extraction")
                     richGuard.verifyUnchanged("rich artifact after source-identity extraction")
@@ -362,23 +444,25 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                 val reconciliation = anchorIndex.reconciliation(deadline::checkpoint)
                 shards.forEach { shard ->
                     deadline.checkpoint("before reconciling source entities for ${shard.identifier}")
+                    val shardDeadline = shardDeadlines.getValue(shard.identifier)
+                    val reconciliationCheckpoint = shardDeadline.beginPhase()
                     val original = sourceFactsByShard.getValue(shard.identifier)
                     val perShardBytes = minOf(perShard.controlLong("serializedBytes"), MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES)
                     val baselineBytes = canonicalSourceEntityFactsByteLength(
                         original,
                         perShardBytes,
-                        deadline::checkpoint,
+                        reconciliationCheckpoint,
                     )
                     val collisionNeutralBytes = observationV2CollisionNeutralSourceEntityFactsByteLength(
                         original,
                         perShardBytes,
-                        deadline::checkpoint,
+                        reconciliationCheckpoint,
                     )
                     val expansion = sourceIdentityCollisionExpansionUpperBound(
                         original,
                         reconciliation.collisionIdsByCandidate,
                         perShardBytes,
-                        deadline::checkpoint,
+                        reconciliationCheckpoint,
                     )
                     val adjustedUpperBound = Math.addExact(collisionNeutralBytes, expansion)
                     if (adjustedUpperBound > perShardBytes) {
@@ -388,12 +472,12 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                         original,
                         reconciliation.collisionIdsByCandidate,
                         perShardBytes,
-                        deadline::checkpoint,
+                        reconciliationCheckpoint,
                     )
                     val neutralCopyCharge = observationV2CollisionNeutralFactCopyUpperBound(
                         original,
                         perShardBytes,
-                        deadline::checkpoint,
+                        reconciliationCheckpoint,
                     )
                     val copiedRetainedUpperBound = Math.addExact(
                         Math.addExact(copyCharge, neutralCopyCharge),
@@ -411,12 +495,15 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                     if (reconciledRunUpperBound > wholeRun.controlLong("serializedBytes")) {
                         v2RunFail("full-run collision reconciliation exceeds its authenticated serialized-byte bound")
                     }
-                    modeledRetainedBytes = peakRetained
-                    val adjusted = reconcileObservationV2Facts(original, reconciliation, deadline::checkpoint)
+                    val baselineRetainedBytes = fullTreeFunctionObservationV2RetainedFactListBytes(
+                        baselineBytes,
+                        original.size.toLong(),
+                    )
+                    val adjusted = reconcileObservationV2Facts(original, reconciliation, reconciliationCheckpoint)
                     val adjustedBytes = canonicalSourceEntityFactsByteLength(
                         adjusted,
                         perShardBytes,
-                        deadline::checkpoint,
+                        reconciliationCheckpoint,
                     )
                     if (adjustedBytes > perShardBytes) {
                         v2RunFail("reconciled source entities exceed the authenticated per-shard byte bound")
@@ -432,7 +519,18 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                         v2RunFail("reconciled full-run source entities exceed their authenticated serialized-byte bound")
                     }
                     sourceFactsByShard[shard.identifier] = adjusted
-                    deadline.checkpoint("after reconciling source entities for ${shard.identifier}")
+                    val adjustedRetainedBytes = fullTreeFunctionObservationV2RetainedFactListBytes(
+                        adjustedBytes,
+                        adjusted.size.toLong(),
+                    )
+                    modeledRetainedBytes = Math.addExact(
+                        Math.subtractExact(modeledRetainedBytes, baselineRetainedBytes),
+                        adjustedRetainedBytes,
+                    )
+                    if (modeledRetainedBytes > retainedAdmission) {
+                        v2RunFail("reconciled full-run source facts exceed the retained-working-set budget")
+                    }
+                    shardDeadline.endPhase("after reconciling source entities for ${shard.identifier}")
                 }
                 inventoryGuard.verifyUnchanged("full-tree inventory before observation-v2 production")
                 richGuard.verifyUnchanged("rich artifact before observation-v2 production")
@@ -461,6 +559,7 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                             retainedBudget.anchorIndexBytes,
                             modeledRetainedBytes,
                             sourceRowCanonicalizationScratchBytes,
+                            runControlSnapshotBytes,
                         )
                         val effective = deriveAuthenticatedLimits(
                             scope,

@@ -84,12 +84,15 @@ class FullTreeSourceEntityIdentityProducerTest {
                 put("oracle", v1Oracle)
                 put("schemaVersion", JsonPrimitive(1))
             })
-            val forgedDocument = FullTreeFunctionObservationsV2.composeEnvelope(
-                v1Projection,
-                forgedRows,
-                publication.reconciliation,
-                FullTreeFunctionObservationsV2.MAXIMUM_CANONICAL_BYTES,
-            )
+            val composeFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                FullTreeFunctionObservationsV2.composeEnvelope(
+                    v1Projection,
+                    forgedRows,
+                    publication.reconciliation,
+                    FullTreeFunctionObservationsV2.MAXIMUM_CANONICAL_BYTES,
+                )
+            }
+            assertTrue(composeFailure.message.orEmpty().contains("authenticated scan receipt"))
             val inventoryDocument = parseControlObject(inventoryPath)
             val inventorySha256 = fixtureSha256(inventoryPath)
             val shardInput = FullTreeFunctionObservations.shardInputs(
@@ -98,14 +101,24 @@ class FullTreeSourceEntityIdentityProducerTest {
                 scope.document,
                 scope.sha256,
             ).associateBy { it.identifier }.getValue(receipt.shardId)
-            FullTreeFunctionObservationsV2.validateEnvelope(
-                forgedDocument,
-                scope,
-                inventoryDocument,
-                inventorySha256,
-                shardInput,
-                publication.reconciliation,
-            )
+            // The composer correctly refuses this mutation because its authenticated census
+            // receipt binds the source-to-RVA link. Construct the same structurally canonical
+            // bytes independently so loadAndValidate still exercises the raw-input publication
+            // gate when a transport-valid run carries the forged row.
+            val forgedDocument = JsonObject(document.toMutableMap().apply {
+                put("sourceEntities", JsonArray(forgedRows.map(FullTreeSourceEntityFact::canonicalJson)))
+            })
+            val receiptFailure = assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                FullTreeFunctionObservationsV2.validateEnvelope(
+                    forgedDocument,
+                    scope,
+                    inventoryDocument,
+                    inventorySha256,
+                    shardInput,
+                    publication.reconciliation,
+                )
+            }
+            assertTrue(receiptFailure.message.orEmpty().contains("authenticated scan receipt"))
 
             val preparedDirectory = privateDirectory(root.resolve("forged-prepared"))
             val forgedOutputs = publication.binding.outputs.map { outputBinding ->

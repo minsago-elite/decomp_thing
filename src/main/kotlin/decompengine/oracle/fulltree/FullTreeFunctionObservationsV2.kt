@@ -481,6 +481,13 @@ internal object FullTreeFunctionObservationsV2 {
                         }
                     }
                 }
+                if (edge.state == FullTreeSourceIdentityEdgeState.UNSUPPORTED) {
+                    val form = edge.referenceForm?.removePrefix("0x")?.toULongOrNull(16)
+                        ?: v2Fail("unsupported typed reference omits its decoded form")
+                    if (edge.rawReference == null || form !in SUPPORTED_UNSUPPORTED_REFERENCE_FORMS) {
+                        v2Fail("unsupported typed reference uses a form the producer does not classify as unsupported")
+                    }
+                }
                 if (edge.state == FullTreeSourceIdentityEdgeState.RESOLVED && edge.referenceForm != null) {
                     val target = edge.target ?: v2Fail("resolved typed reference has no target locator")
                     val form = edge.referenceForm?.removePrefix("0x")?.toULongOrNull(16)
@@ -598,9 +605,16 @@ private fun sourceIdentityJsonCodePointLength(value: String): Int = value.codePo
 internal fun fullTreeDwarfReferenceFormMaximumRawValue(form: ULong): ULong? = when (form) {
     FULL_TREE_DW_FORM_REF1.toULong() -> 0xffuL
     FULL_TREE_DW_FORM_REF2.toULong() -> 0xffffuL
-    FULL_TREE_DW_FORM_REF4.toULong() -> 0xffff_ffffuL
+    FULL_TREE_DW_FORM_REF4.toULong(), FULL_TREE_DW_FORM_REF_SUP4.toULong() -> 0xffff_ffffuL
     else -> null
 }
+
+private val SUPPORTED_UNSUPPORTED_REFERENCE_FORMS = setOf(
+    FULL_TREE_DW_FORM_REF_SUP4.toULong(),
+    FULL_TREE_DW_FORM_REF_SIG8.toULong(),
+    FULL_TREE_DW_FORM_REF_SUP8.toULong(),
+    FULL_TREE_DW_FORM_GNU_REF_ALT.toULong(),
+)
 
 internal const val MAXIMUM_SOURCE_IDENTITY_DESCRIPTOR_CHARACTERS = 16_384
 private const val MAXIMUM_SOURCE_IDENTITY_LEXICAL_CONTEXT_ITEMS = 256
