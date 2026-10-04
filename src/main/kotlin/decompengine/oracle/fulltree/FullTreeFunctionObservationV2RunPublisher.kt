@@ -330,6 +330,7 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                     if (Math.subtractExact(sourceFactCount, sourceCountBeforeShard) != scan.facts.size.toLong()) {
                         v2RunFail("source-identity run admission count differs from the accepted shard facts")
                     }
+                    anchorIndex.acceptSourceEntityPopulation(shard.identifier, scan.facts, deadline::checkpoint)
                     sourceFactCanonicalBytes = Math.addExact(sourceFactCanonicalBytes, scan.canonicalBytes)
                     if (sourceFactCanonicalBytes > wholeRun.controlLong("serializedBytes")) {
                         v2RunFail("full-run source census exceeds its authenticated entity or byte bound")
@@ -346,18 +347,24 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                     deadline.checkpoint("before reconciling source entities for ${shard.identifier}")
                     val original = sourceFactsByShard.getValue(shard.identifier)
                     val perShardBytes = minOf(perShard.controlLong("serializedBytes"), MAXIMUM_SOURCE_IDENTITY_CANONICAL_BYTES)
+                    val baselineBytes = canonicalSourceEntityFactsByteLength(
+                        original,
+                        perShardBytes,
+                        deadline::checkpoint,
+                    )
+                    val collisionNeutralBytes = observationV2CollisionNeutralSourceEntityFactsByteLength(
+                        original,
+                        perShardBytes,
+                        deadline::checkpoint,
+                    )
                     val expansion = sourceIdentityCollisionExpansionUpperBound(
                         original,
                         reconciliation.collisionIdsByCandidate,
                         perShardBytes,
                         deadline::checkpoint,
                     )
-                    val baselineBytes = canonicalSourceEntityFactsByteLength(
-                        original,
-                        perShardBytes,
-                        deadline::checkpoint,
-                    )
-                    if (expansion > perShardBytes - baselineBytes) {
+                    val adjustedUpperBound = Math.addExact(collisionNeutralBytes, expansion)
+                    if (adjustedUpperBound > perShardBytes) {
                         v2RunFail("full-run collision evidence exceeds the authenticated per-shard output bound")
                     }
                     val copyCharge = sourceIdentityCollisionAdjustedFactCopyUpperBound(
@@ -366,18 +373,28 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                         perShardBytes,
                         deadline::checkpoint,
                     )
-                    val copiedRetainedUpperBound = Math.addExact(copyCharge, expansion)
+                    val neutralCopyCharge = observationV2CollisionNeutralFactCopyUpperBound(
+                        original,
+                        perShardBytes,
+                        deadline::checkpoint,
+                    )
+                    val copiedRetainedUpperBound = Math.addExact(
+                        Math.addExact(copyCharge, neutralCopyCharge),
+                        expansion,
+                    )
                     val copyModeled = sourceIdentityModeledRetainedChargeBytes(copiedRetainedUpperBound)
                     val peakRetained = Math.addExact(modeledRetainedBytes, copyModeled)
-                    val reconciledRunBytes = Math.addExact(sourceFactCanonicalBytes, expansion)
+                    val reconciledRunUpperBound = Math.addExact(
+                        Math.subtractExact(sourceFactCanonicalBytes, baselineBytes),
+                        adjustedUpperBound,
+                    )
                     if (peakRetained > retainedAdmission) {
                         v2RunFail("full-run collision reconciliation exceeds the retained-working-set budget")
                     }
-                    if (reconciledRunBytes > wholeRun.controlLong("serializedBytes")) {
+                    if (reconciledRunUpperBound > wholeRun.controlLong("serializedBytes")) {
                         v2RunFail("full-run collision reconciliation exceeds its authenticated serialized-byte bound")
                     }
                     modeledRetainedBytes = peakRetained
-                    sourceFactCanonicalBytes = reconciledRunBytes
                     val adjusted = reconcileObservationV2Facts(original, reconciliation, deadline::checkpoint)
                     val adjustedBytes = canonicalSourceEntityFactsByteLength(
                         adjusted,
@@ -386,6 +403,16 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                     )
                     if (adjustedBytes > perShardBytes) {
                         v2RunFail("reconciled source entities exceed the authenticated per-shard byte bound")
+                    }
+                    if (adjustedBytes > adjustedUpperBound) {
+                        v2RunFail("reconciled source entities exceed their preflighted canonical-byte bound")
+                    }
+                    sourceFactCanonicalBytes = Math.addExact(
+                        Math.subtractExact(sourceFactCanonicalBytes, baselineBytes),
+                        adjustedBytes,
+                    )
+                    if (sourceFactCanonicalBytes > wholeRun.controlLong("serializedBytes")) {
+                        v2RunFail("reconciled full-run source entities exceed their authenticated serialized-byte bound")
                     }
                     sourceFactsByShard[shard.identifier] = adjusted
                     deadline.checkpoint("after reconciling source entities for ${shard.identifier}")

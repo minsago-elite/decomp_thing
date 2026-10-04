@@ -230,6 +230,9 @@ internal data class FullTreeSourceIdentityEdge(
         require((state == FullTreeSourceIdentityEdgeState.RESOLVED) == (target != null))
         require(reasonCode == null || reasonCode.matches(REASON_CODE))
         if (state == FullTreeSourceIdentityEdgeState.RESOLVED) require(reasonCode == null)
+        if (state == FullTreeSourceIdentityEdgeState.MISSING_TARGET || state == FullTreeSourceIdentityEdgeState.CYCLIC) {
+            require(referenceForm != null && rawReference != null)
+        }
         if (state != FullTreeSourceIdentityEdgeState.RESOLVED) {
             val expectedReasons = when (state) {
                 FullTreeSourceIdentityEdgeState.MISSING_TARGET -> setOf("target-not-retained-or-not-a-die-boundary")

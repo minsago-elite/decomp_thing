@@ -728,6 +728,11 @@ class FullTreeSourceEntityIdentityTest {
         }
         assertEquals(unresolvedStates.map { it.wireValue }, facts.map { it.edges.single().state.wireValue })
         assertContentEquals(canonicalSourceEntityFacts(facts), canonicalSourceEntityFacts(facts.reversed()))
+        listOf(FullTreeSourceIdentityEdgeState.MISSING_TARGET, FullTreeSourceIdentityEdgeState.CYCLIC).forEach { state ->
+            val edge = facts.single { it.edges.single().state == state }.edges.single()
+            assertFailsWith<IllegalArgumentException> { edge.copy(referenceForm = null) }
+            assertFailsWith<IllegalArgumentException> { edge.copy(rawReference = null) }
+        }
     }
 
     @Test
