@@ -666,9 +666,11 @@ class FullTreeFunctionTruthSqliteV3Test {
                         ),
                     ),
                 ),
-                maximumScratchBytes = 256L * mebibyte,
             ),
-            maximumScratchBytes = 256L * mebibyte,
+            // SQLite reserves authenticated database headroom before the fixture's small output
+            // is known; keep the fixture budget generous while retaining the narrowed producer
+            // model above. V3 still enforces its own shared cap independently.
+            maximumScratchBytes = 2L * 1024L * 1024L * 1024L,
         )
     }
 
