@@ -133,6 +133,11 @@ compiler, loader, image, or reproducibility gate was attempted. This candidate
 therefore cannot satisfy the fixed acquisition contract, and no package pin or
 profile was changed.
 
+The later workflow revision restores the full `qualify` job on pull requests
+and leaves this disproven-candidate probe as a separately named manual
+diagnostic. The skipped `qualify` result in run #10 predates that revision and
+is not an acceptance pass.
+
 Matching package version text is not compatibility or provenance evidence.
 The bounded alternative remains a separately reviewed source build from the
 exact signed upstream Clang 18.1.3 source on the same public runner class; that

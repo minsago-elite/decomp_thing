@@ -23,8 +23,8 @@ concurrency:
 
 jobs:
   snapshot-metadata:
-    name: Probe candidate Ubuntu Snapshot metadata only
-    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    name: Diagnostic probe for disproven June 15 Snapshot
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -62,9 +62,7 @@ jobs:
           retention-days: 1
 
   qualify:
-    # PR and manual runs are restricted to the metadata-only candidate probe
-    # until a reviewed signed-index result authorizes a profile change.
-    if: ${{ github.event_name == 'push' }}
+    name: Full Clang 18.1.3 acceptance qualification
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:

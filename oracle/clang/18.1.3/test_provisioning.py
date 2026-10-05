@@ -127,9 +127,13 @@ class ProvisioningNegativeTests(unittest.TestCase):
         actions = re.findall(r"^\s*uses:\s*([^\s#]+)", workflow, flags=re.MULTILINE)
         self.assertTrue(actions)
         self.assertTrue(all(re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", action) for action in actions), actions)
-        self.assertIn("Probe candidate Ubuntu Snapshot metadata only", workflow)
+        self.assertIn("Diagnostic probe for disproven June 15 Snapshot", workflow)
         self.assertIn("--snapshot 20240615T000000Z", workflow)
-        self.assertIn("if: ${{ github.event_name == 'push' }}", workflow)
+        self.assertIn("if: ${{ github.event_name == 'workflow_dispatch' }}", workflow)
+        self.assertIn("name: Full Clang 18.1.3 acceptance qualification", workflow)
+        qualify_job = re.search(r"(?ms)^  qualify:\n(.*?)(?=^  [A-Za-z0-9_-]+:|\Z)", workflow)
+        self.assertIsNotNone(qualify_job)
+        self.assertNotRegex(qualify_job.group(1), r"(?m)^    if:")
 
     def test_rootfs_command_uses_the_selected_contract_environment(self):
         contract = {"environment": {"LC_ALL": "C", "TZ": "UTC", "SOURCE_DATE_EPOCH": "7",
