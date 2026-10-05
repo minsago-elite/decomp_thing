@@ -5,8 +5,8 @@ Date of local probe: 2026-10-05 UTC
 Repository base: `c36b8c3e814a49965e5bba65475e9010e5f6a1de`
 Scope: issue #1480; this note is not a package lock, compatibility approval,
 toolchain profile, or acceptance evidence. It records the local environment
-result only; a successful workflow artifact carries its own authenticated build
-record and acceptance reports.
+result and bounded, short-lived public-runner metadata diagnostics; successful
+acceptance would require its own authenticated build record and reports.
 
 ## Local environment result
 
@@ -101,6 +101,37 @@ The run stopped before downloading the `.dsc`/source payload, verifying the
 LLVM source signature, comparing distro patches against upstream, or entering
 the compiler, loader, image, and reproducibility gates. Those gates remain
 unverified.
+
+## Public runner metadata-only candidate probe
+
+Workflow run [37347524443](https://github.com/minsago-elite/decomp_thing/actions/runs/37347524443)
+at PR head `8c70ed4e5998a0887a1f96b8222eb1e2a7de499d` completed successfully on
+the standard `ubuntu-24.04` runner. The metadata-only job authenticated the
+candidate Snapshot `20240615T000000Z`; it did not run the full qualification
+job. The evidence report hash is
+`0241bed24f4db5885459ca63a9e9e573df37948c416875506e2d640d24f5e537` and is
+printed in the workflow logs. Artifact `11361630892` contains the report, three
+signed `InRelease` files, and twelve signed-index files; its SHA-256 digest is
+`dba68bc65d023d426c84675c980d7a649f4234585994a325705dac6354748268`. The
+artifact is retained until `2026-10-06 17:20:42 UTC`.
+
+| Suite | Signed Release date (UTC) | Primary signer | `InRelease` SHA-256 |
+| --- | --- | --- | --- |
+| `noble` | 2024-04-25 15:10:33 | `F6ECB3762474EDA9D21B7022871920D1991BC93C` | `cdb2f31d809f589719a53c6ad15f255b27569c4059542ada282aaa21b8e164b0` |
+| `noble-updates` | 2024-06-14 23:59:46 | `F6ECB3762474EDA9D21B7022871920D1991BC93C` | `66623b91ab0e0d9ae6b70a3c190953d1a800073f6f316012c4a5ba97cba3f475` |
+| `noble-security` | 2024-06-14 17:32:58 | `F6ECB3762474EDA9D21B7022871920D1991BC93C` | `6ad8e7ab9b76512e4caf95408621d8819ddf7e324bb00afc9cf4f1b54f5d323a` |
+
+The signed source indexes report only `1:18.1.3-1` for
+`llvm-toolchain-18`; the pinned source version `1:18.1.3-1ubuntu1` is absent.
+Each of the five requested binary roots (`clang-18`, `llvm-18-dev`,
+`libclang-18-dev`, `libclang-cpp18-dev`, and `libclang-cpp18`) likewise reports
+only `1:18.1.3-1`, not the pinned `1:18.1.3-1ubuntu1`. The machine-readable
+status is `source-exact-version-not-found`. The probe authenticated 48,315,356
+bytes of signed metadata and downloaded zero package payload bytes. It fetched
+no `.dsc`, source archive, or `.deb`; no source-patch compatibility audit or
+compiler, loader, image, or reproducibility gate was attempted. This candidate
+therefore cannot satisfy the fixed acquisition contract, and no package pin or
+profile was changed.
 
 Matching package version text is not compatibility or provenance evidence.
 The bounded alternative remains a separately reviewed source build from the
