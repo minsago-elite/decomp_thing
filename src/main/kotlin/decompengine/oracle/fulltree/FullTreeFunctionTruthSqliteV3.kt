@@ -905,8 +905,8 @@ internal object FullTreeFunctionTruthSqliteV3 {
             OracleJson.parseCanonical(
                 bytes,
                 StrictJsonLimits(
-                    maximumInputBytes = bytes.size.toLong(),
-                    maximumCanonicalBytes = bytes.size.toLong(),
+                    maximumInputBytes = bytes.size,
+                    maximumCanonicalBytes = bytes.size,
                     maximumDepth = 128,
                     maximumNodes = FullTreeFunctionObservationsV2.MAXIMUM_JSON_NODES,
                     maximumStringBytes = MAXIMUM_SOURCE_IDENTITY_ROW_BYTES.toInt(),
