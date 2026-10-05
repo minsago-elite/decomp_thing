@@ -14,6 +14,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
+import java.security.MessageDigest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -206,10 +207,17 @@ class FullTreeGenericTemplateFrontendV1Test {
             (Profile.POLICY.getValue("limits") as JsonObject).keys,
         )
         assertEquals(PROFILE_SHA256, fixture.profile.sha256())
-        assertEquals(RECEIPT_SHA256, fixture.validated.frontendReceiptSha256)
         assertEquals(CONFIGURATION_SHA256, Provenance.configurationSha256)
         assertEquals(CANONICAL_RECEIPT_BYTES, fixture.canonicalReceipt.size)
         assertEquals(CANONICAL_RECEIPT_SHA256, shaBytes(fixture.canonicalReceipt))
+        val contractReceiptSet = receiptSetPreimageFromContract(fixture.document)
+        assertEquals(contractReceiptSet, Receipt.receiptSetPreimage(fixture.document))
+        val contractReceiptSha256 = domainHashFromContract(
+            "decomp-thing/generic-template/receipt-set/v1",
+            contractReceiptSet,
+        )
+        assertEquals(contractReceiptSha256, fixture.validated.frontendReceiptSha256)
+        assertEquals(RECEIPT_SHA256, contractReceiptSha256)
         assertEquals(2L, fixture.validated.unitCount)
         assertEquals(10L, fixture.validated.dependencyCount)
         assertEquals(0L, fixture.validated.outputBytes)
@@ -353,7 +361,7 @@ class FullTreeGenericTemplateFrontendV1Test {
     }
 
     @Test
-    fun `raw input loader authenticates a complete synthetic source build capture image and receipt chain`() =
+    fun `raw input loader authenticates a complete synthetic source build capture image and receipt chain`() {
         inControlTemporaryDirectory { directory ->
             val fixture = syntheticRawInputsFixture(directory)
             assertEquals(
@@ -465,6 +473,7 @@ class FullTreeGenericTemplateFrontendV1Test {
                 Provenance.validateRawInputs(fixture.document, fixture.raw, fixture.profile, fixture.receiptLimits)
             }
         }
+    }
 
     @Test
     fun `receipt rejects duplicate actions unknown fields missing dependencies and one-over limits`() {
@@ -478,8 +487,12 @@ class FullTreeGenericTemplateFrontendV1Test {
         val unknown = JsonObject(fixture.document + mapOf("unexpected" to JsonPrimitive(true)))
         assertFailsWith<FullTreeControlException> { Receipt.validate(unknown, fixture.limits) }
         val missingDependency = JsonObject(first - "dependencies")
+        val validEnvelope = document(fixture, units)
+        val malformedEnvelope = JsonObject(
+            validEnvelope + mapOf("units" to JsonArray(listOf(missingDependency, units[1]))),
+        )
         assertFailsWith<FullTreeControlException> {
-            Receipt.validate(document(fixture, JsonArray(listOf(missingDependency, units[1]))), fixture.limits)
+            Receipt.validate(malformedEnvelope, fixture.limits)
         }
         val noMainSource = JsonArray((first.getValue("dependencies") as JsonArray).filterNot { dependency ->
             (dependency as JsonObject).getValue("role") == JsonPrimitive("main-source")
@@ -1549,6 +1562,59 @@ class FullTreeGenericTemplateFrontendV1Test {
 
     private fun sha(value: String): String = shaBytes(value.toByteArray(StandardCharsets.UTF_8))
     private fun shaBytes(bytes: ByteArray): String = decompengine.oracle.core.OracleArtifacts.sha256(bytes)
+
+    /** Independently implements the accepted seven-field receipt-set projection and tuple ordering. */
+    private fun receiptSetPreimageFromContract(document: JsonObject): JsonObject {
+        val units = (document.getValue("units") as JsonArray).map { it as JsonObject }
+            .sortedWith(Comparator { left, right ->
+                val byUnitId = compareUnsignedUtf8ForContract(
+                    (left.getValue("unitId") as JsonPrimitive).content,
+                    (right.getValue("unitId") as JsonPrimitive).content,
+                )
+                if (byUnitId != 0) byUnitId else compareUnsignedUtf8ForContract(
+                    (left.getValue("actionId") as JsonPrimitive).content,
+                    (right.getValue("actionId") as JsonPrimitive).content,
+                )
+            })
+        val unitReceipts = JsonArray(units.map { unit ->
+            JsonObject(
+                mapOf(
+                    "unitId" to unit.getValue("unitId"),
+                    "actionId" to unit.getValue("actionId"),
+                    "receiptSha256" to unit.getValue("receiptSha256"),
+                ),
+            )
+        })
+        return JsonObject(
+            mapOf(
+                "schemaVersion" to document.getValue("schemaVersion"),
+                "policyId" to document.getValue("policyId"),
+                "policyVersion" to document.getValue("policyVersion"),
+                "configurationSha256" to document.getValue("configurationSha256"),
+                "bindings" to document.getValue("bindings"),
+                "unitReceipts" to unitReceipts,
+                "counts" to document.getValue("counts"),
+            ),
+        )
+    }
+
+    private fun domainHashFromContract(domain: String, value: JsonObject): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        digest.update(domain.toByteArray(StandardCharsets.US_ASCII))
+        digest.update(0.toByte())
+        digest.update(OracleJson.canonicalBytes(value))
+        return digest.digest().joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
+    }
+
+    private fun compareUnsignedUtf8ForContract(left: String, right: String): Int {
+        val leftBytes = left.toByteArray(StandardCharsets.UTF_8)
+        val rightBytes = right.toByteArray(StandardCharsets.UTF_8)
+        for (index in 0 until minOf(leftBytes.size, rightBytes.size)) {
+            val comparison = (leftBytes[index].toInt() and 0xff).compareTo(rightBytes[index].toInt() and 0xff)
+            if (comparison != 0) return comparison
+        }
+        return leftBytes.size.compareTo(rightBytes.size)
+    }
 
     private companion object {
         const val PATH_TRANSFORM_SHA256 = "3721264f731ec5268d665bd98442d65ec42a23a535292c994ba92a227b72fac9"
