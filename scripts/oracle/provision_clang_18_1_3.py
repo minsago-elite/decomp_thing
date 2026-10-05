@@ -51,6 +51,9 @@ MAX_DEB822_PARAGRAPH_BYTES = 16 * 1024 * 1024
 MAX_SOURCE_DIAGNOSTIC_ROWS = 256
 MAX_UPSTREAM_ARCHIVE_MEMBERS = 300_000
 MAX_UPSTREAM_EXPANDED_BYTES = 3 * 1024 * 1024 * 1024
+SNAPSHOT_METADATA_PROBE = "20240615T000000Z"
+MAX_SNAPSHOT_METADATA_BYTES = 512 * 1024 * 1024
+MAX_SNAPSHOT_INDEX_BYTES = 128 * 1024 * 1024
 ALLOWED_REDIRECT_HOSTS = {
     "github.com",
     "objects.githubusercontent.com",
@@ -633,6 +636,186 @@ def select_binary_record(indexes: list[dict], name: str, version: str, architect
     return selected
 
 
+def _metadata_source_row(row: dict) -> dict:
+    return {
+        "suite": row.get("_suite"), "component": row.get("_component"),
+        "package": row.get("Package"), "version": row.get("Version"),
+        "directory": row.get("Directory"), "checksumsSha256": row.get("Checksums-Sha256", ""),
+    }
+
+
+def _metadata_binary_row(row: dict) -> dict:
+    return {
+        "suite": row.get("_suite"), "component": row.get("_component"),
+        "package": row.get("Package"), "version": row.get("Version"),
+        "architecture": row.get("Architecture"), "source": row.get("Source"),
+        "filename": row.get("Filename"), "bytes": row.get("Size"), "sha256": row.get("SHA256"),
+    }
+
+
+def snapshot_metadata_selection(contract: dict, profile: dict, repositories: list[dict], indexes: list[dict],
+                                source_rows: list[dict], binary_rows: list[dict], metadata_bytes: int,
+                                keyring: Path) -> dict:
+    """Describe only the pinned source package and five binary roots from signed indexes."""
+    source_pin = profile["sourcePackage"]
+    roots = profile["binaryRoots"]
+    exact_sources = [row for row in source_rows
+                     if row.get("Package") == source_pin["name"] and row.get("Version") == source_pin["version"]]
+    source_payloads = {(row.get("Directory"), row.get("Checksums-Sha256")) for row in exact_sources}
+    source_status = (
+        "exact-version-unique" if exact_sources and len(source_payloads) == 1 else
+        "exact-version-conflict" if exact_sources else "exact-version-not-found"
+    )
+
+    root_reports = []
+    all_roots_exact = True
+    for pin in sorted(roots, key=lambda item: item["name"]):
+        rows = [row for row in binary_rows if row.get("Package") == pin["name"]]
+        exact = [row for row in rows if row.get("Version") == pin["version"]
+                 and row.get("Architecture") in ("amd64", "all")]
+        payloads = {(row.get("Filename"), row.get("Size"), row.get("SHA256")) for row in exact}
+        if not exact:
+            status = "exact-version-not-found"
+            all_roots_exact = False
+        elif len(payloads) != 1:
+            status = "exact-version-conflict"
+            all_roots_exact = False
+        else:
+            status = "exact-version-unique"
+        exact_records = []
+        for row in sorted(exact, key=lambda item: (item.get("_suite", ""), item.get("_component", ""))):
+            source_name, source_version = package_source_identity(row)
+            exact_records.append({**_metadata_binary_row(row),
+                                  "sourceNameMatches": source_name == source_pin["name"],
+                                  "sourceVersion": source_version})
+            if source_name != source_pin["name"] or source_version not in (
+                None, source_pin["version"].removeprefix("1:")
+            ):
+                all_roots_exact = False
+                status = "source-identity-mismatch"
+        root_reports.append({
+            "package": pin["name"], "expectedVersion": pin["version"], "status": status,
+            "observedVersions": sorted({str(row.get("Version")) for row in rows
+                                         if isinstance(row.get("Version"), str)}),
+            "exactRecords": exact_records,
+        })
+
+    if source_status != "exact-version-unique":
+        selection_status = "source-" + source_status
+    elif not all_roots_exact:
+        selection_status = "binary-root-set-incomplete-or-mismatched"
+    else:
+        selection_status = "exact-contract-records-present"
+
+    source_versions = sorted({str(row.get("Version")) for row in source_rows
+                              if row.get("Package") == source_pin["name"] and
+                              isinstance(row.get("Version"), str)})
+    return {
+        "schemaVersion": 1,
+        "purpose": "authenticated-ubuntu-snapshot-index-metadata-only",
+        "status": selection_status,
+        "profileId": profile["id"],
+        "candidateSnapshot": profile["snapshot"],
+        "candidateSnapshotBase": profile["snapshotBase"],
+        "configuredSnapshot": contract["profile"]["snapshot"],
+        "contractSha256": sha256_file(CONTRACT_PATH),
+        "recipe": recipe_identity(),
+        "trustedUbuntuKeyring": {"bytes": keyring.stat().st_size, "sha256": sha256_file(keyring)},
+        "repositories": repositories,
+        "indexes": indexes,
+        "acquiredMetadataBytes": metadata_bytes,
+        "bounds": {"maxMetadataBytes": MAX_SNAPSHOT_METADATA_BYTES,
+                   "maxSingleIndexBytes": MAX_SNAPSHOT_INDEX_BYTES,
+                   "maxIndexCount": len(profile["suites"]) * len(profile["components"]) * 2},
+        "payloadBytesDownloaded": 0,
+        "expectedSource": dict(source_pin),
+        "sourcePackage": {
+            "status": source_status,
+            "observedVersions": source_versions,
+            "exactRecords": [{**_metadata_source_row(row),
+                              "sourceFiles": source_file_rows(row)}
+                             for row in sorted(exact_sources,
+                                               key=lambda item: (item.get("_suite", ""), item.get("_component", "")))],
+        },
+        "binaryRoots": root_reports,
+    }
+
+
+def probe_snapshot_metadata(contract: dict, snapshot: str, output: Path, keyring: Path) -> dict:
+    """Authenticate one approved Snapshot's signed indexes without fetching package payloads."""
+    if snapshot != SNAPSHOT_METADATA_PROBE:
+        raise ProvisionError(f"metadata-only probe is pinned to {SNAPSHOT_METADATA_PROBE}")
+    if output.exists() and any(output.iterdir()):
+        raise ProvisionError(f"output directory must be empty: {output}")
+    output.mkdir(parents=True, exist_ok=True)
+    original_profile = contract["profile"]
+    profile = {**original_profile, "snapshot": snapshot,
+               "snapshotBase": f"https://snapshot.ubuntu.com/ubuntu/{snapshot}/"}
+    check_runner_bounds(output, profile)
+    index_count = len(profile["suites"]) * len(profile["components"]) * 2
+    if index_count != 12:
+        raise ProvisionError("metadata-only probe requires the frozen three-suite/two-component index set")
+    downloader = BoundedDownloader(output / "signed-index-metadata",
+                                   min(profile["bounds"]["maxAcquisitionBytes"], MAX_SNAPSHOT_METADATA_BYTES))
+    repositories: list[dict] = []
+    source_rows: list[dict] = []
+    binary_rows: list[dict] = []
+    index_records: list[dict] = []
+    binary_names = {row["name"] for row in profile["binaryRoots"]}
+
+    for suite in profile["suites"]:
+        inrelease_url = urllib.parse.urljoin(profile["snapshotBase"], f"dists/{suite}/InRelease")
+        inrelease, release_download = downloader.get(inrelease_url, max_bytes=8 * 1024 * 1024)
+        inrelease_path = output / "signed-index-metadata" / suite / "InRelease"
+        atomic_write(inrelease_path, inrelease)
+        signer = verify_gpgv(inrelease_path, keyring, set(profile["ubuntuArchivePrimaryFingerprints"]))
+        release = parse_deb822(cleartext_body(inrelease).decode("utf-8"))[0]
+        verify_release_profile(release, suite, profile)
+        table = release_sha256_table(release)
+        repositories.append({
+            "suite": suite,
+            "inRelease": {**release_download,
+                          "path": str(inrelease_path.relative_to(output))},
+            "signerPrimaryFingerprint": signer,
+            "releaseIdentity": {key: release.get(key) for key in (
+                "Origin", "Label", "Suite", "Codename", "Date", "Valid-Until",
+                "Architectures", "Components")},
+        })
+        for component in profile["components"]:
+            for kind in ("source", "binary-amd64"):
+                relative_index = index_path(table, component, kind,
+                                            "amd64" if kind == "binary-amd64" else None)
+                expected_size, expected_hash = table[relative_index]
+                index_url = urllib.parse.urljoin(profile["snapshotBase"],
+                                                 f"dists/{suite}/{relative_index}")
+                packed, download = downloader.get(index_url, expected_size, expected_hash,
+                                                  max_bytes=MAX_SNAPSHOT_INDEX_BYTES)
+                index_path_out = output / "signed-index-metadata" / suite / relative_index
+                atomic_write(index_path_out, packed)
+                for row in iter_compressed_index(index_path_out):
+                    if kind == "source" and row.get("Package") == profile["sourcePackage"]["name"]:
+                        selected = dict(row)
+                        selected["_suite"], selected["_component"] = suite, component
+                        source_rows.append(selected)
+                    elif kind == "binary-amd64" and row.get("Package") in binary_names:
+                        selected = dict(row)
+                        selected["_suite"], selected["_component"] = suite, component
+                        binary_rows.append(selected)
+                index_records.append({
+                    "suite": suite, "component": component, "kind": kind,
+                    "signedReleasePath": relative_index,
+                    "path": str(index_path_out.relative_to(output)),
+                    "releaseExpectedBytes": expected_size,
+                    "releaseExpectedSha256": expected_hash.lower(), **download,
+                })
+
+    evidence = snapshot_metadata_selection(contract, profile, repositories, index_records,
+                                           source_rows, binary_rows, downloader.total, keyring)
+    evidence["evidenceSha256"] = sha256(canonical_json(evidence))
+    atomic_write(output / "snapshot-metadata-report.json", canonical_json(evidence))
+    return evidence
+
+
 def acquire_candidate(contract: dict, output: Path, keyring: Path) -> dict:
     if output.exists() and any(output.iterdir()):
         raise ProvisionError(f"output directory must be empty: {output}")
@@ -1210,6 +1393,15 @@ def command_acquire(args: argparse.Namespace) -> int:
     ensure_source_artifact_contract(candidate, contract)
     print(f"authenticated acquisition candidate sha256:{candidate['candidateSha256']}")
     print("candidate is not a locked or accepted Clang profile")
+    return 0
+
+
+def command_probe_snapshot_metadata(args: argparse.Namespace) -> int:
+    contract = read_contract(args.contract)
+    report = probe_snapshot_metadata(contract, args.snapshot, args.output, args.keyring)
+    print(f"signed Snapshot metadata probe: {report['status']}")
+    print(f"evidence sha256:{report['evidenceSha256']}")
+    print(f"report: {args.output / 'snapshot-metadata-report.json'}")
     return 0
 
 
@@ -2535,6 +2727,15 @@ def _add_provenance_file(archive: tarfile.TarFile, source: Path, arcname: str, e
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
+    metadata = sub.add_parser(
+        "probe-snapshot-metadata",
+        help="authenticate one pinned Snapshot's indexes and inspect only the Clang 18 source and binary roots",
+    )
+    metadata.add_argument("--contract", type=Path, default=CONTRACT_PATH)
+    metadata.add_argument("--snapshot", choices=(SNAPSHOT_METADATA_PROBE,), required=True)
+    metadata.add_argument("--output", type=Path, required=True)
+    metadata.add_argument("--keyring", type=Path, default=DEFAULT_KEYRING)
+    metadata.set_defaults(run=command_probe_snapshot_metadata)
     acquire = sub.add_parser("acquire", help="authenticate pinned Snapshot indexes and source artifacts")
     acquire.add_argument("--contract", type=Path, default=CONTRACT_PATH)
     acquire.add_argument("--output", type=Path, required=True)

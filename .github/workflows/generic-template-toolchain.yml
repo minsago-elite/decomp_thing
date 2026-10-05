@@ -22,7 +22,46 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  snapshot-metadata:
+    name: Probe candidate Ubuntu Snapshot metadata only
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      LC_ALL: C
+      TZ: UTC
+      CLANG_WORK: ${{ github.workspace }}/build/clang1813
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Verify preinstalled Ubuntu archive verification tools
+        run: |
+          command -v gpgv
+          python3 --version
+          test -r /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+      - name: Authenticate only the candidate Snapshot indexes and pinned package rows
+        run: |
+          python3 scripts/oracle/provision_clang_18_1_3.py probe-snapshot-metadata \
+            --snapshot 20240615T000000Z \
+            --output "$CLANG_WORK/snapshot-probe-20240615"
+
+      - name: Upload candidate Snapshot metadata evidence only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ubuntu-snapshot-20240615-metadata-only
+          path: |
+            ${{ github.workspace }}/build/clang1813/snapshot-probe-20240615/snapshot-metadata-report.json
+            ${{ github.workspace }}/build/clang1813/snapshot-probe-20240615/signed-index-metadata/**
+          if-no-files-found: ignore
+          compression-level: 0
+          retention-days: 1
+
   qualify:
+    # PR and manual runs are restricted to the metadata-only candidate probe
+    # until a reviewed signed-index result authorizes a profile change.
+    if: ${{ github.event_name == 'push' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:

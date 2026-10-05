@@ -127,6 +127,9 @@ class ProvisioningNegativeTests(unittest.TestCase):
         actions = re.findall(r"^\s*uses:\s*([^\s#]+)", workflow, flags=re.MULTILINE)
         self.assertTrue(actions)
         self.assertTrue(all(re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", action) for action in actions), actions)
+        self.assertIn("Probe candidate Ubuntu Snapshot metadata only", workflow)
+        self.assertIn("--snapshot 20240615T000000Z", workflow)
+        self.assertIn("if: ${{ github.event_name == 'push' }}", workflow)
 
     def test_rootfs_command_uses_the_selected_contract_environment(self):
         contract = {"environment": {"LC_ALL": "C", "TZ": "UTC", "SOURCE_DATE_EPOCH": "7",
@@ -398,6 +401,183 @@ class ProvisioningNegativeTests(unittest.TestCase):
         self.assertEqual(len(report["matchingSourcePackageRecords"]), provision.MAX_SOURCE_DIAGNOSTIC_ROWS)
         self.assertEqual(report["matchingPackageRecordCount"], provision.MAX_SOURCE_DIAGNOSTIC_ROWS + 1)
         self.assertTrue(report["matchingPackageRecordsTruncated"])
+
+    def test_snapshot_metadata_probe_reports_exact_source_and_binary_roots_without_payload_claims(self):
+        profile = {**self.contract["profile"], "snapshot": provision.SNAPSHOT_METADATA_PROBE,
+                   "snapshotBase": "https://snapshot.ubuntu.com/ubuntu/20240615T000000Z/"}
+        source_pin = profile["sourcePackage"]
+        source = {
+            "Package": source_pin["name"], "Version": source_pin["version"],
+            "Directory": "pool/main/l/llvm-toolchain-18",
+            "Checksums-Sha256": "\n  ".join([
+                "e" * 64 + " 8313 llvm-toolchain-18_18.1.3-1ubuntu1.dsc",
+                "d" * 64 + " 155361864 llvm-toolchain-18_18.1.3.orig.tar.xz",
+                "a" * 64 + " 162568 llvm-toolchain-18_18.1.3-1ubuntu1.debian.tar.xz",
+            ]),
+            "_suite": "noble-updates", "_component": "main",
+        }
+        binaries = []
+        for index, pin in enumerate(profile["binaryRoots"]):
+            binaries.append({
+                "Package": pin["name"], "Version": pin["version"], "Architecture": "amd64",
+                "Source": "llvm-toolchain-18 (18.1.3-1ubuntu1)",
+                "Filename": f"pool/universe/l/llvm-toolchain-18/{pin['name']}_18.1.3-1ubuntu1_amd64.deb",
+                "Size": 100 + index, "SHA256": f"{index + 1:x}" * 64,
+                "_suite": "noble-updates", "_component": "universe",
+            })
+        with self.temporary_directory() as temp:
+            keyring = Path(temp) / "ubuntu-archive-keyring.gpg"
+            keyring.write_bytes(b"fixture keyring bytes")
+            report = provision.snapshot_metadata_selection(
+                self.contract, profile, [], [], [source], binaries, 1234, keyring,
+            )
+        self.assertEqual(report["status"], "exact-contract-records-present")
+        self.assertEqual(report["candidateSnapshot"], "20240615T000000Z")
+        self.assertEqual(report["configuredSnapshot"], "20240425T000000Z")
+        self.assertEqual(report["payloadBytesDownloaded"], 0)
+        self.assertEqual(report["sourcePackage"]["exactRecords"][0]["sourceFiles"][0]["name"],
+                         "llvm-toolchain-18_18.1.3-1ubuntu1.dsc")
+        self.assertEqual({row["package"] for row in report["binaryRoots"]},
+                         {row["name"] for row in profile["binaryRoots"]})
+        self.assertTrue(all(row["status"] == "exact-version-unique" for row in report["binaryRoots"]))
+
+    def test_snapshot_metadata_probe_does_not_normalize_source_or_binary_versions(self):
+        profile = {**self.contract["profile"], "snapshot": provision.SNAPSHOT_METADATA_PROBE,
+                   "snapshotBase": "https://snapshot.ubuntu.com/ubuntu/20240615T000000Z/"}
+        source = {"Package": "llvm-toolchain-18", "Version": "1:18.1.3-1",
+                  "Directory": "pool/main/l/llvm-toolchain-18",
+                  "Checksums-Sha256": "f" * 64 + " 1 x.dsc",
+                  "_suite": "noble-updates", "_component": "main"}
+        binaries = [{
+            "Package": pin["name"],
+            "Version": "1:18.1.3-1" if pin["name"] == "clang-18" else pin["version"],
+            "Architecture": "amd64", "Source": "llvm-toolchain-18 (18.1.3-1)",
+            "Filename": f"pool/universe/llvm/{pin['name']}.deb", "Size": 2,
+            "SHA256": "b" * 64, "_suite": "noble-updates", "_component": "universe",
+        } for pin in profile["binaryRoots"]]
+        with self.temporary_directory() as temp:
+            keyring = Path(temp) / "ubuntu-archive-keyring.gpg"
+            keyring.write_bytes(b"fixture keyring bytes")
+            report = provision.snapshot_metadata_selection(
+                self.contract, profile, [], [], [source], binaries, 1234, keyring,
+            )
+        self.assertEqual(report["status"], "source-exact-version-not-found")
+        self.assertEqual(report["sourcePackage"]["observedVersions"], ["1:18.1.3-1"])
+        clang = next(row for row in report["binaryRoots"] if row["package"] == "clang-18")
+        self.assertEqual(clang["status"], "exact-version-not-found")
+        self.assertEqual(clang["observedVersions"], ["1:18.1.3-1"])
+
+    def test_snapshot_metadata_probe_is_locked_to_the_reviewed_timestamp(self):
+        with self.temporary_directory() as temp:
+            output = Path(temp) / "metadata"
+            with self.assertRaisesRegex(provision.ProvisionError, "metadata-only probe is pinned"):
+                provision.probe_snapshot_metadata(
+                    self.contract, "20240425T000000Z", output, Path(temp) / "keyring"
+                )
+            self.assertFalse(output.exists())
+
+    def test_snapshot_metadata_probe_authenticates_only_inrelease_and_index_urls(self):
+        profile = self.contract["profile"]
+        snapshot = provision.SNAPSHOT_METADATA_PROBE
+        base = f"https://snapshot.ubuntu.com/ubuntu/{snapshot}/"
+        objects = {}
+
+        def packed_text(value):
+            return gzip.compress(value.encode("utf-8"), mtime=0)
+
+        source = (
+            "Package: llvm-toolchain-18\n"
+            "Version: 1:18.1.3-1ubuntu1\n"
+            "Directory: pool/main/l/llvm-toolchain-18\n"
+            "Checksums-Sha256:\n"
+            " " + "e" * 64 + " 8313 llvm-toolchain-18_18.1.3-1ubuntu1.dsc\n"
+            " " + "d" * 64 + " 155361864 llvm-toolchain-18_18.1.3.orig.tar.xz\n"
+            " " + "a" * 64 + " 162568 llvm-toolchain-18_18.1.3-1ubuntu1.debian.tar.xz\n"
+        )
+        packages = []
+        for index, pin in enumerate(profile["binaryRoots"]):
+            package_digest = f"{index + 1:x}" * 64
+            packages.append(
+                f"Package: {pin['name']}\n"
+                f"Version: {pin['version']}\n"
+                "Architecture: amd64\n"
+                "Source: llvm-toolchain-18 (18.1.3-1ubuntu1)\n"
+                f"Filename: pool/universe/l/llvm-toolchain-18/{pin['name']}.deb\n"
+                f"Size: {100 + index}\n"
+                f"SHA256: {package_digest}\n"
+            )
+        release_docs = []
+        for suite in profile["suites"]:
+            entries = []
+            for component in profile["components"]:
+                for kind in ("source", "binary-amd64"):
+                    relative_index = (f"{component}/source/Sources.gz" if kind == "source" else
+                                      f"{component}/binary-amd64/Packages.gz")
+                    if suite == "noble-updates" and component == "main" and kind == "source":
+                        index_bytes = packed_text(source)
+                    elif suite == "noble-updates" and component == "universe" and kind == "binary-amd64":
+                        index_bytes = packed_text("\n".join(packages))
+                    else:
+                        index_bytes = packed_text("")
+                    index_url = base + f"dists/{suite}/{relative_index}"
+                    objects[index_url] = index_bytes
+                    entries.append(f"  {provision.sha256(index_bytes)} {len(index_bytes)} {relative_index}")
+            body = (
+                f"Origin: Ubuntu\nLabel: Ubuntu\nSuite: {suite}\nCodename: noble\n"
+                "Date: Fri, 14 Jun 2024 23:00:00 UTC\n"
+                "Architectures: amd64 arm64\nComponents: main universe\n"
+                "SHA256:\n" + "\n".join(entries) + "\n"
+            )
+            inrelease = (
+                "-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA256\n\n" + body +
+                "-----BEGIN PGP SIGNATURE-----\n\nfixture-signature\n-----END PGP SIGNATURE-----\n"
+            ).encode("utf-8")
+            objects[base + f"dists/{suite}/InRelease"] = inrelease
+            release_docs.append(suite)
+
+        class FakeDownloader:
+            all_calls = []
+
+            def __init__(self, root, total_limit):
+                self.total = 0
+                self.calls = []
+
+            def get(self, url, expected_size=None, expected_sha256=None, max_bytes=0, allow_github_redirect=False):
+                self.calls.append(url)
+                self.all_calls.append(url)
+                data = objects[url]
+                if len(data) > max_bytes:
+                    raise AssertionError("probe exceeded its test byte bound")
+                if expected_size is not None:
+                    self_test.assertEqual(len(data), expected_size)
+                digest = provision.sha256(data)
+                if expected_sha256 is not None:
+                    self_test.assertEqual(digest, expected_sha256)
+                self.total += len(data)
+                return data, {"url": url, "finalUrl": url, "bytes": len(data), "sha256": digest}
+
+        self_test = self
+        with self.temporary_directory() as temp:
+            keyring = Path(temp) / "ubuntu-archive-keyring.gpg"
+            keyring.write_bytes(b"test keyring")
+            output = Path(temp) / "metadata"
+            with mock.patch.object(provision, "BoundedDownloader", FakeDownloader), \
+                 mock.patch.object(provision, "check_runner_bounds"), \
+                 mock.patch.object(provision, "verify_gpgv",
+                                   return_value=profile["ubuntuArchivePrimaryFingerprints"][0]):
+                report = provision.probe_snapshot_metadata(self.contract, snapshot, output, keyring)
+            report_exists = (output / "snapshot-metadata-report.json").is_file()
+            payload_files_exist = any(path.suffix in (".deb", ".dsc") for path in output.rglob("*"))
+
+        self.assertEqual(report["status"], "exact-contract-records-present")
+        self.assertEqual(len(report["repositories"]), 3)
+        self.assertEqual(len(report["indexes"]), 12)
+        self.assertEqual(report["payloadBytesDownloaded"], 0)
+        self.assertEqual(len(release_docs), 3)
+        self.assertEqual(len(FakeDownloader.all_calls), 15)
+        self.assertTrue(all(url.startswith(base + "dists/") for url in FakeDownloader.all_calls))
+        self.assertTrue(report_exists)
+        self.assertFalse(payload_files_exist)
 
     def test_gpgv_primary_fingerprint_is_not_signature_class(self):
         signing = "A" * 40
