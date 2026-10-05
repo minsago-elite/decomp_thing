@@ -57,23 +57,21 @@ class FullTreeFunctionTruthSqliteV3Test {
             fullTreeFunctionTruthV3NestedScratchPlan(8L, 8L, 16L, 4L)
         }
         assertEquals(
-            220L,
+            215L,
             fullTreeFunctionTruthV3AdapterPublishScratchPeakBytes(
                 currentScratchBytes = 140L,
                 preparedPayloadBytes = 60L,
                 maximumControlArtifactBytes = 5L,
-                shardCount = 2,
-                maximumScratchBytes = 220L,
+                maximumScratchBytes = 215L,
             ),
-            "prepared payloads are already in current scratch; publish adds one staged copy, one checkpoint per shard, run, and index",
+            "prepared payloads are already in current scratch; checkpoints, run, and index are bounded by three control caps",
         )
         assertFailsWith<IllegalArgumentException>("one byte below the adapter peak must reject") {
             fullTreeFunctionTruthV3AdapterPublishScratchPeakBytes(
                 currentScratchBytes = 140L,
                 preparedPayloadBytes = 60L,
                 maximumControlArtifactBytes = 5L,
-                shardCount = 2,
-                maximumScratchBytes = 219L,
+                maximumScratchBytes = 214L,
             )
         }
 

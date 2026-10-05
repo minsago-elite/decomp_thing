@@ -275,16 +275,15 @@ internal fun fullTreeFunctionTruthV3AdapterPublishScratchPeakBytes(
     currentScratchBytes: Long,
     preparedPayloadBytes: Long,
     maximumControlArtifactBytes: Long,
-    shardCount: Int,
     maximumScratchBytes: Long,
 ): Long {
-    require(currentScratchBytes >= 0L && preparedPayloadBytes >= 0L && maximumControlArtifactBytes > 0L && shardCount > 0)
+    require(currentScratchBytes >= 0L && preparedPayloadBytes >= 0L && maximumControlArtifactBytes > 0L)
     require(maximumScratchBytes > 0L && currentScratchBytes >= preparedPayloadBytes) {
         "truth-v3 prepared adapter bytes are missing from scratch accounting"
     }
     val stagedPayloadAndControls = Math.addExact(
         preparedPayloadBytes,
-        Math.multiplyExact(Math.addExact(shardCount.toLong(), 2L), maximumControlArtifactBytes),
+        Math.multiplyExact(3L, maximumControlArtifactBytes),
     )
     val peak = Math.addExact(currentScratchBytes, stagedPayloadAndControls)
     require(peak <= maximumScratchBytes) { "truth-v3 observation adapter publication exceeds its remaining scratch bound" }
@@ -1010,7 +1009,6 @@ internal object FullTreeFunctionTruthSqliteV3 {
                 currentScratchBytes = currentScratchBytes,
                 preparedPayloadBytes = totalBytes,
                 maximumControlArtifactBytes = limits.truth.observationRun.maximumControlArtifactBytes.toLong(),
-                shardCount = run.binding.outputs.size,
                 maximumScratchBytes = maximumScratchBound(limits),
             )
         } catch (failure: ArithmeticException) {
