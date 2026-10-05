@@ -682,6 +682,32 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 with self.assertRaises(provision.ProvisionError):
                     downloader.get("https://snapshot.ubuntu.com/object", expected_sha256="0" * 64)
 
+    def test_upstream_signature_pause_rejects_exact_and_changed_urls_before_download(self):
+        with self.temporary_directory() as temp:
+            upstream = self.contract["profile"]["upstream"]
+            signature_urls = (
+                upstream["signatureUrl"],
+                provision.PAUSED_UPSTREAM_SIGNATURE_URL + "?download=1",
+                "https://mirror.example.invalid/llvm-project-18.1.3.src.tar.xz.sig",
+            )
+            for index, signature_url in enumerate(signature_urls):
+                with self.subTest(signature_url=signature_url):
+                    contract = {
+                        **self.contract,
+                        "profile": {
+                            **self.contract["profile"],
+                            "upstream": {**upstream, "signatureUrl": signature_url},
+                        },
+                    }
+                    output = Path(temp) / f"acquisition-{index}"
+                    with mock.patch.object(provision.BoundedDownloader, "__init__") as init, \
+                            mock.patch.object(provision.BoundedDownloader, "get") as get:
+                        with self.assertRaisesRegex(provision.ProvisionError, "no acquisition requests were made"):
+                            provision.acquire_candidate(contract, output, Path(temp) / "missing-keyring.gpg")
+                    init.assert_not_called()
+                    get.assert_not_called()
+                    self.assertFalse(output.exists())
+
     def test_source_package_identity_requires_unambiguous_syntax(self):
         self.assertEqual(provision.package_source_identity({"Source": "llvm-toolchain-18 (18.1.3-1ubuntu1)"}),
                          ("llvm-toolchain-18", "18.1.3-1ubuntu1"))

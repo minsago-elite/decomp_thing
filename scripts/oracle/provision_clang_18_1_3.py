@@ -56,6 +56,9 @@ PAUSED_UPSTREAM_SIGNATURE_URL = (
     "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.3/"
     "llvm-project-18.1.3.src.tar.xz.sig"
 )
+# Keep candidate acquisition disabled for this profile until the denied
+# upstream signature source is explicitly resolved and the pause is reviewed.
+UPSTREAM_SIGNATURE_ACCESS_ENABLED = False
 MAX_SNAPSHOT_METADATA_BYTES = 512 * 1024 * 1024
 MAX_SNAPSHOT_INDEX_BYTES = 128 * 1024 * 1024
 ALLOWED_REDIRECT_HOSTS = {
@@ -821,6 +824,12 @@ def probe_snapshot_metadata(contract: dict, snapshot: str, output: Path, keyring
 
 
 def acquire_candidate(contract: dict, output: Path, keyring: Path) -> dict:
+    if not UPSTREAM_SIGNATURE_ACCESS_ENABLED:
+        raise ProvisionError(
+            "Clang 18.1.3 candidate acquisition is paused pending explicit resolution of "
+            "the denied upstream signature source; no acquisition requests were made. "
+            f"Blocked target: {PAUSED_UPSTREAM_SIGNATURE_URL}"
+        )
     if output.exists() and any(output.iterdir()):
         raise ProvisionError(f"output directory must be empty: {output}")
     output.mkdir(parents=True, exist_ok=True)
@@ -913,11 +922,6 @@ def acquire_candidate(contract: dict, output: Path, keyring: Path) -> dict:
     atomic_write(upstream_keyring_path, upstream_keyring_bytes)
     upstream_archive_url = upstream["archiveUrl"]
     upstream_sig_url = upstream["signatureUrl"]
-    if upstream_sig_url == PAUSED_UPSTREAM_SIGNATURE_URL:
-        raise ProvisionError(
-            "upstream LLVM signature access is paused after the official URL was denied; "
-            f"refusing to request it from this runner: {upstream_sig_url}"
-        )
     archive_bytes, upstream_archive = downloader.get(
         upstream_archive_url, max_bytes=1024 * 1024 * 1024, allow_github_redirect=True
     )
