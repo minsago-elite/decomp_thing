@@ -18,6 +18,7 @@ import java.util.Comparator
 import java.util.EnumMap
 import java.util.TreeMap
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.longOrNull
@@ -409,7 +410,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
                 ),
             )
             OracleSchemas.validate("full-tree-function-observations", legacy)
-            val bytes = OracleJson.canonicalBytes(legacy)
+            val bytes = canonicalV3Bytes(legacy)
             totalBytes = Math.addExact(totalBytes, bytes.size.toLong())
             if (totalBytes > maximumScratchBound(limits)) v3Fail("v3 observation adapter exceeds its scratch bound")
             val output = preparedDirectory.resolve("${binding.shardId}.json")
@@ -459,7 +460,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
             limits = limits.truth.observationRun,
         )
         checkV3Scratch(workspace.root, maximumScratchBound(limits))
-        adapter
+        return adapter
     }
 
     private fun composeV3Tree(
@@ -578,7 +579,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
                 put("sourceEntities", sourceRows)
             })
             OracleSchemas.validate(SHARD_SCHEMA_NAME, newShard)
-            val bytes = OracleJson.canonicalBytes(newShard)
+            val bytes = canonicalV3Bytes(newShard)
             val maxShardBytes = minOf(
                 wholeRunOutputBound,
                 v2Run.binding.run.v3Object("bounds").v3Long("perShardBytes"),
@@ -605,7 +606,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
             put("oracle", v3Oracle)
         })
         OracleSchemas.validate("full-tree-function-exclusions", v3Exclusions)
-        val exclusionBytes = OracleJson.canonicalBytes(v3Exclusions)
+        val exclusionBytes = canonicalV3Bytes(v3Exclusions)
         outputBytes = reserveV3OutputBytes(
             outputBytes, exclusionBytes.size.toLong(), wholeRunOutputBound, scratchBaseBytes, targetInsideScratch, limits,
         )
@@ -635,10 +636,10 @@ internal object FullTreeFunctionTruthSqliteV3 {
                 "shards" to JsonArray(v3ShardRecords),
             ),
         )
-        val logicalIndexSha256 = OracleArtifacts.sha256(OracleJson.canonicalBytes(indexWithoutSelf))
+        val logicalIndexSha256 = OracleArtifacts.sha256(canonicalV3Bytes(indexWithoutSelf))
         val index = JsonObject(indexWithoutSelf + ("indexSha256" to JsonPrimitive(logicalIndexSha256)))
         OracleSchemas.validate(INDEX_SCHEMA_NAME, index)
-        val indexBytes = OracleJson.canonicalBytes(index)
+        val indexBytes = canonicalV3Bytes(index)
         outputBytes = reserveV3OutputBytes(
             outputBytes, indexBytes.size.toLong(), wholeRunOutputBound, scratchBaseBytes, targetInsideScratch, limits,
         )
@@ -760,7 +761,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
         if (OracleArtifacts.sha256(indexBytes) != index.v3String("indexSha256")) {
             // indexSha256 is the logical hash, so compare its declared preimage separately below.
             val withoutSelf = JsonObject(index.filterKeys { it != "indexSha256" })
-            if (OracleArtifacts.sha256(OracleJson.canonicalBytes(withoutSelf)) != index.v3String("indexSha256")) {
+            if (OracleArtifacts.sha256(canonicalV3Bytes(withoutSelf)) != index.v3String("indexSha256")) {
                 v3Fail("truth-v3 logical index digest does not reconcile")
             }
         }
@@ -884,6 +885,18 @@ internal object FullTreeFunctionTruthSqliteV3 {
     private fun readCanonicalObject(path: Path, maximumBytes: Long): JsonObject =
         parseV3Object(readBoundedFile(path, maximumBytes, path.fileName.toString()), maximumBytes, path.fileName.toString())
 
+    private fun canonicalV3Bytes(document: JsonElement): ByteArray = OracleJson.canonicalBytes(
+        document,
+        StrictJsonLimits(
+            maximumInputBytes = FullTreeFunctionObservationsV2.MAXIMUM_CANONICAL_BYTES.toInt(),
+            maximumCanonicalBytes = FullTreeFunctionObservationsV2.MAXIMUM_CANONICAL_BYTES.toInt(),
+            maximumDepth = 128,
+            maximumNodes = FullTreeFunctionObservationsV2.MAXIMUM_JSON_NODES,
+            maximumStringBytes = MAXIMUM_SOURCE_IDENTITY_ROW_BYTES.toInt(),
+            maximumTotalStringBytes = FullTreeFunctionObservationsV2.MAXIMUM_CANONICAL_BYTES.toInt(),
+        ),
+    )
+
     private fun parseV3Object(bytes: ByteArray, maximumBytes: Long, label: String): JsonObject {
         if (bytes.isEmpty() || bytes.size.toLong() > maximumBytes || bytes.last() != '\n'.code.toByte()) {
             v3Fail("$label is empty, oversized, or not canonical JSON")
@@ -928,9 +941,10 @@ internal object FullTreeFunctionTruthSqliteV3 {
     }
 
     private fun checkV3Scratch(path: Path, maximumBytes: Long): Long {
-        val used = Files.walk(path).use { paths ->
-            paths.filter { Files.isRegularFile(it, LinkOption.NOFOLLOW_LINKS) }.fold(0L) { total, file ->
-                addV3Bounded(total, Files.size(file), maximumBytes)
+        var used = 0L
+        Files.walk(path).use { paths ->
+            paths.filter { Files.isRegularFile(it, LinkOption.NOFOLLOW_LINKS) }.forEach { file ->
+                used = addV3Bounded(used, Files.size(file), maximumBytes)
             }
         }
         if (used > maximumBytes) v3Fail("truth-v3 scratch exceeds its byte bound")
@@ -966,11 +980,15 @@ internal object FullTreeFunctionTruthSqliteV3 {
 
     private fun requireV3WorkspaceBound(root: Path, limits: FullTreeFunctionTruthV3Limits) {
         checkV3Scratch(root, maximumScratchBound(limits))
-        val modeled = Files.walk(root).use { paths ->
-            paths.filter { Files.isRegularFile(it, LinkOption.NOFOLLOW_LINKS) }
-                .fold(96L * 1024L * 1024L) { total, file ->
-                    Math.addExact(total, Math.multiplyExact(Files.size(file), 2L))
+        var modeled = 96L * 1024L * 1024L
+        try {
+            Files.walk(root).use { paths ->
+                paths.filter { Files.isRegularFile(it, LinkOption.NOFOLLOW_LINKS) }.forEach { file ->
+                    modeled = Math.addExact(modeled, Math.multiplyExact(Files.size(file), 2L))
                 }
+            }
+        } catch (failure: ArithmeticException) {
+            throw FullTreeFunctionTruthV3Exception("truth-v3 retained working-set model overflows", failure)
         }
         if (modeled > limits.maximumRetainedWorkingSetBytes) {
             v3Fail("truth-v3 retained working-set model exceeds its configured bound")
