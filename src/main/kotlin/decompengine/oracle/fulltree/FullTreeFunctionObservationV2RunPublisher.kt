@@ -343,7 +343,7 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                 )
                 val sourceFactsByShard = LinkedHashMap<String, List<FullTreeSourceEntityFact>>()
                 val shardDeadlines = shards.associate { shard ->
-                    shard.identifier to deadline.newShardBudget(scope)
+                    shard.identifier to deadline.newShardBudget(scope, shard.identifier)
                 }
                 var sourceFactCount = 0L
                 var sourceFactAdmissionBytes = 0L
@@ -798,11 +798,21 @@ internal object FullTreeFunctionObservationV2RunPublisher {
             "observation-v2 candidate run root",
         )
         requireDisjointRederivationTrees(stableCandidateRoot, stableScratchParent)
-        val candidate = BoundedShardRunVerifier.verify(
-            stableCandidateRoot,
-            expectedIndexArtifactSha256,
-            limits.run,
-        )
+        val outerCheckpoint = FullTreeOracleOperationCheckpoint.current()
+        val candidate = if (outerCheckpoint == null) {
+            BoundedShardRunVerifier.verify(
+                stableCandidateRoot,
+                expectedIndexArtifactSha256,
+                limits.run,
+            )
+        } else {
+            BoundedShardRunVerifier.verifyWithCheckpoint(
+                stableCandidateRoot,
+                expectedIndexArtifactSha256,
+                limits.run,
+                outerCheckpoint,
+            )
+        }
         val (currentScratchParent, currentScratchIdentity) = requireStableDirectory(
             stableScratchParent,
             "observation-v2 rederivation scratch parent after candidate verification",
@@ -877,8 +887,11 @@ private class V2RunDeadline private constructor(
     private val maximumWholeWall: Long,
     private val maximumWholeCpu: Long,
     private val maximumResidentBytes: Long,
+    private val outerCheckpoint: ((String) -> Unit)?,
+    private val outerShardPhases: FullTreeOracleShardPhaseObserver?,
 ) {
     fun checkpoint(label: String) {
+        outerCheckpoint?.invoke("observation-v2: $label")
         val wall = elapsed(startedWall, System.nanoTime(), "wall-clock")
         val cpu = elapsed(startedCpu, processCpuNanos(), "CPU")
         if (wall > maximumWholeWall || cpu > maximumWholeCpu) {
@@ -896,11 +909,11 @@ private class V2RunDeadline private constructor(
         if (resident > maximumResidentBytes) v2RunFail("observation-v2 run exceeded its authenticated resident-memory bound at $label")
     }
 
-    fun newShardBudget(scope: AuthenticatedFullTreeScope): V2ShardDeadline {
+    fun newShardBudget(scope: AuthenticatedFullTreeScope, shardId: String): V2ShardDeadline {
         val perShard = scope.document.controlObject("bounds").controlObject("perShard")
         val maximumWall = Math.multiplyExact(perShard.controlLong("wallClockSeconds"), 1_000_000_000L)
         val maximumCpu = Math.multiplyExact(perShard.controlLong("cpuSeconds"), 1_000_000_000L)
-        return V2ShardDeadline(::checkpoint, maximumWall, maximumCpu)
+        return V2ShardDeadline(::checkpoint, maximumWall, maximumCpu, shardId, outerShardPhases)
     }
 
     companion object {
@@ -914,6 +927,8 @@ private class V2RunDeadline private constructor(
                 Math.multiplyExact(wallSeconds, 1_000_000_000L),
                 Math.multiplyExact(cpuSeconds, 1_000_000_000L),
                 wholeRun.controlLong("maximumResidentBytes"),
+                FullTreeOracleOperationCheckpoint.current(),
+                FullTreeOracleOperationCheckpoint.currentShardPhases(),
             )
         }
     }
@@ -924,6 +939,8 @@ internal class V2ShardDeadline internal constructor(
     private val runCheckpoint: (String) -> Unit,
     private val maximumWall: Long,
     private val maximumCpu: Long,
+    private val shardId: String = "",
+    private val outerShardPhases: FullTreeOracleShardPhaseObserver? = null,
     private val wallClock: () -> Long = System::nanoTime,
     private val cpuClock: () -> Long = ::processCpuNanos,
 ) {
@@ -936,6 +953,7 @@ internal class V2ShardDeadline internal constructor(
         check(activeWallStart == null && activeCpuStart == null)
         activeWallStart = wallClock()
         activeCpuStart = cpuClock()
+        if (shardId.isNotEmpty()) outerShardPhases?.beginShardPhase(shardId)
         return ::checkpoint
     }
 
@@ -950,6 +968,7 @@ internal class V2ShardDeadline internal constructor(
         if (accumulatedWall > maximumWall || accumulatedCpu > maximumCpu) {
             v2RunFail("observation-v2 shard exceeded its authenticated cumulative time budget at $label")
         }
+        if (shardId.isNotEmpty()) outerShardPhases?.endShardPhase(shardId)
     }
 
     private fun checkpoint(label: String) {

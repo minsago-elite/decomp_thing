@@ -391,7 +391,7 @@ internal object FullTreeFunctionTruthSqlite {
         maximumWorkers: Int,
         limits: FullTreeFunctionTruthLimits,
         finish: (FunctionTruthReconciliation) -> T,
-        checkpoint: (String) -> Unit = {},
+        checkpoint: (String) -> Unit = FullTreeOracleOperationCheckpoint.current() ?: {},
     ): T = translateTruthFailures {
         requireSha256(expectedObservationIndexArtifactSha256, "function-observation index artifact")
         if (maximumWorkers !in 1..min(limits.maximumWorkers, limits.control.maximumWorkers)) {
@@ -487,6 +487,7 @@ internal object FullTreeFunctionTruthSqlite {
                     database.flush("after ingesting the ELF function index")
 
                     observation.outputs.forEachIndexed { index, binding ->
+                        FullTreeOracleOperationCheckpoint.withShardPhase(binding.shardId) {
                         budget.checkpoint("before re-deriving function-observation shard ${binding.shardId}")
                         val candidate = observation.root.resolve(OUTPUTS_DIRECTORY).resolve("${binding.shardId}.json")
                         val receipt = FullTreeFunctionObservationShardPublisher.loadAndValidate(
@@ -520,6 +521,7 @@ internal object FullTreeFunctionTruthSqlite {
                         database.flush("after ingesting function-observation shard ${binding.shardId}")
                         if ((index + 1) % limits.databaseCheckpointRows == 0) {
                             budget.checkpoint("while ingesting function-observation shards")
+                        }
                         }
                     }
                     requireObservationRunUnchanged(
@@ -1947,6 +1949,7 @@ private class FunctionTruthDatabase private constructor(
         val shardFiles = inventory.truthArray("shards").mapIndexed { index, raw ->
             val shard = raw as? JsonObject ?: truthFail("inventory shard $index is not an object")
             val shardId = shard.truthString("id")
+            FullTreeOracleOperationCheckpoint.withShardPhase(shardId) {
             val functionCount = scalarForShard("truth_function", shardId)
             val nonEmittedCount = scalarForShard("truth_non_emitted", shardId)
             if (checkedAdd(functionCount, nonEmittedCount, "truth shard entity") > perShard.truthLong("entities")) {
@@ -1972,6 +1975,7 @@ private class FunctionTruthDatabase private constructor(
                 functions = functionCount,
                 nonEmitted = nonEmittedCount,
             )
+            }
         }
         val exclusionCount = scalar("SELECT COUNT(*) FROM exclusion")
         if (exclusionCount != counts.elfOnlyRvas) {
@@ -2928,6 +2932,7 @@ private fun verifyFunctionTruthPublication(
     var totalNonEmitted = 0L
     var totalNonEmittedObservations = 0L
     projection.shards.forEachIndexed { shardIndex, file ->
+        FullTreeOracleOperationCheckpoint.withShardPhase(file.id) {
         val expectedShard = inventoryShards[file.id]
             ?: truthFail("function-truth projection references an unknown shard")
         var functions = 0L
@@ -3013,6 +3018,7 @@ private fun verifyFunctionTruthPublication(
         contentBytes = checkedAdd(contentBytes, file.bytes, "published function-truth content byte")
         if ((shardIndex + 1) % PUBLICATION_CHECKPOINT_FILES == 0) {
             budget.checkpoint("while verifying published function-truth shards")
+        }
         }
     }
     var exclusionFunctions = 0L

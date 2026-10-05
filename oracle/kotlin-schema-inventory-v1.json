@@ -1,7 +1,7 @@
 {
   "historicalStartingCount": 43,
   "kind": "kotlin-oracle-schema-inventory",
-  "schemaCount": 74,
+  "schemaCount": 76,
   "schemaInventoryVersion": 1,
   "schemas": [
     {
@@ -276,6 +276,24 @@
       "path": "oracle/full-tree-function-truth-index.schema.json",
       "registration": "shared-kotlin",
       "schemaSha256": "40a2c4d0c3a1b3317e010fd267b56e6ea3ec94620abd79c591b01bc6357e084f"
+    },
+    {
+      "formatVersions": [
+        2
+      ],
+      "name": "full-tree-function-truth-index-v3",
+      "path": "oracle/full-tree-function-truth-index-v3.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "250ecb435bdb1c98cedff2d39b8ccface0dd0d1de86b787cc1019c6d3da7c59f"
+    },
+    {
+      "formatVersions": [
+        2
+      ],
+      "name": "full-tree-function-truth-v3",
+      "path": "oracle/full-tree-function-truth-v3.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "81bc31d80ee00b32e39ae8d8154a8890ecf5d724322ac0d1eb4c303a0a547c43"
     },
     {
       "formatVersions": [
@@ -679,5 +697,5 @@
       "scopeNote": "Retained format; no current Kotlin OracleSchemas consumer is registered for it."
     }
   ],
-  "sharedCatalogCount": 70
+  "sharedCatalogCount": 72
 }

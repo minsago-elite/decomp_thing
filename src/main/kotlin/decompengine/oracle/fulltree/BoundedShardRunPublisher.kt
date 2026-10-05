@@ -170,10 +170,15 @@ object BoundedShardRunPublisher {
 
         Publication.create(target, sources.map { it.prepared.shardId }).use { publication ->
             publication.writeRootControl(RUN_FILE, controls.runBytes)
-            val staged = sources.map { source -> publication.copyOutput(source, bounds, limits, checkpoint) }
+            val staged = sources.map { source ->
+                FullTreeOracleOperationCheckpoint.withShardPhase(source.prepared.shardId) {
+                    publication.copyOutput(source, bounds, limits, checkpoint)
+                }
+            }
             publication.freezeOutputs()
 
             staged.forEach { output ->
+                FullTreeOracleOperationCheckpoint.withShardPhase(output.source.prepared.shardId) {
                 checkpoint("before bounded-shard semantic validation")
                 semanticValidator.validate(
                     BoundedShardOutputValidation(
@@ -188,10 +193,13 @@ object BoundedShardRunPublisher {
                 )
                 output.ensureStable("staged output after semantic validation")
                 output.source.ensureStable("prepared output after semantic validation")
+                }
             }
 
             controls.checkpoints.forEach { checkpoint ->
-                publication.writeCheckpoint(checkpoint.shardId, checkpoint.bytes)
+                FullTreeOracleOperationCheckpoint.withShardPhase(checkpoint.shardId) {
+                    publication.writeCheckpoint(checkpoint.shardId, checkpoint.bytes)
+                }
             }
             checkpoint("after writing bounded-shard checkpoints")
             publication.writeRootControl(INDEX_FILE, controls.indexBytes)

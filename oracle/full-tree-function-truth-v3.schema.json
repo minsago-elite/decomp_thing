@@ -1,0 +1,956 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-function-truth-v3.schema.json",
+  "title": "Reconciled full-tree function truth v3 shard with source-entity census",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "oracle",
+    "shard",
+    "counts",
+    "functions",
+    "nonEmitted",
+    "sourceEntities"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 2
+    },
+    "oracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scopeSha256",
+        "inventoryIndexSha256",
+        "observationIndexSha256",
+        "elfIndexSha256",
+        "configurationSha256"
+      ],
+      "properties": {
+        "scopeSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "inventoryIndexSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "observationIndexSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "elfIndexSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "configurationSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "shard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "unitIds"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "unitIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "functions",
+        "nonEmitted",
+        "sourceEntities",
+        "sourceEntitiesByKind",
+        "sourceEntitiesByObservability",
+        "sourceEntitiesByDenominatorDisposition"
+      ],
+      "properties": {
+        "functions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "nonEmitted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sourceEntities": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sourceEntitiesByKind": {
+          "$ref": "#/$defs/kindCounts"
+        },
+        "sourceEntitiesByObservability": {
+          "$ref": "#/$defs/observabilityCounts"
+        },
+        "sourceEntitiesByDenominatorDisposition": {
+          "$ref": "#/$defs/dispositionCounts"
+        }
+      }
+    },
+    "functions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/function"
+      }
+    },
+    "nonEmitted": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/nonEmitted"
+      }
+    },
+    "sourceEntities": {
+      "type": "array",
+      "maxItems": 5000000,
+      "items": {
+        "$ref": "#/$defs/sourceEntity"
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384
+    },
+    "rva": {
+      "type": "string",
+      "pattern": "^0x(?:0|[1-9a-f][0-9a-f]{0,15})$"
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "locator",
+        "unitId"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "dwarf-subprogram",
+            "elf-symbol"
+          ]
+        },
+        "locator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "unitId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "alias": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "evidence"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
+      }
+    },
+    "declaration": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "sourcePath",
+        "externalPathSha256",
+        "line",
+        "column",
+        "fileIndex",
+        "unitSourcePath"
+      ]
+    },
+    "function": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "rva",
+        "population",
+        "reasonCode",
+        "entityKind",
+        "emissionKind",
+        "ownerUnitId",
+        "ownershipCandidates",
+        "aliases",
+        "declarations"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^function-rva-0x(?:0|[1-9a-f][0-9a-f]{0,15})$"
+        },
+        "rva": {
+          "$ref": "#/$defs/rva"
+        },
+        "population": {
+          "enum": [
+            "scored",
+            "excluded"
+          ]
+        },
+        "reasonCode": {
+          "oneOf": [
+            {
+              "enum": [
+                "dwarf-rva-without-elf-function"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "entityKind": {
+          "enum": [
+            "function",
+            "thunk"
+          ]
+        },
+        "emissionKind": {
+          "enum": [
+            "single-definition",
+            "coalesced-odr-or-comdat"
+          ]
+        },
+        "ownerUnitId": {
+          "$ref": "#/$defs/id"
+        },
+        "ownershipCandidates": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "aliases": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/alias"
+          }
+        },
+        "declarations": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/declaration"
+          }
+        }
+      }
+    },
+    "nonEmitted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "population",
+        "reasonCode",
+        "ownerUnitId",
+        "observationIds",
+        "observationDieOffsets",
+        "aliases",
+        "declarations"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^non-emitted-function-[0-9a-f]{32}$"
+        },
+        "population": {
+          "const": "unobservable"
+        },
+        "reasonCode": {
+          "enum": [
+            "inline-no-emitted-range",
+            "definition-no-emitted-range",
+            "comdat-or-odr-selected-elsewhere"
+          ]
+        },
+        "ownerUnitId": {
+          "$ref": "#/$defs/id"
+        },
+        "observationIds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "observationDieOffsets": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "unitId",
+              "dieOffset"
+            ],
+            "properties": {
+              "unitId": {
+                "$ref": "#/$defs/id"
+              },
+              "dieOffset": {
+                "$ref": "#/$defs/rva"
+              }
+            }
+          }
+        },
+        "aliases": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/alias"
+          }
+        },
+        "declarations": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/declaration"
+          }
+        }
+      }
+    },
+    "sourceEntity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidateCollisionSourceEntityIds",
+        "denominatorDisposition",
+        "edges",
+        "entityKind",
+        "identityObservability",
+        "linkedEmittedRva",
+        "physicalDie",
+        "reasonCodes",
+        "resolvedSemanticIdentityId",
+        "semanticAnchorCandidateId",
+        "semanticAnchorFields",
+        "sourceEntityId"
+      ],
+      "properties": {
+        "candidateCollisionSourceEntityIds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/sha256"
+          },
+          "uniqueItems": true,
+          "maxItems": 2500000
+        },
+        "denominatorDisposition": {
+          "enum": [
+            "non-scoreable",
+            "emitted-rva-link",
+            "unknown",
+            "ambiguous"
+          ]
+        },
+        "edges": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/edge"
+          },
+          "maxItems": 32
+        },
+        "entityKind": {
+          "enum": [
+            "declaration-only",
+            "no-range-definition",
+            "template-pattern",
+            "template-instance",
+            "inline-instance",
+            "unresolved"
+          ]
+        },
+        "identityObservability": {
+          "enum": [
+            "observable",
+            "unobservable",
+            "unknown",
+            "ambiguous"
+          ]
+        },
+        "linkedEmittedRva": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/address"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "physicalDie": {
+          "$ref": "#/$defs/physicalDie"
+        },
+        "reasonCodes": {
+          "type": "array",
+          "items": {
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+            "type": "string",
+            "maxLength": 256
+          },
+          "uniqueItems": true,
+          "maxItems": 1024
+        },
+        "resolvedSemanticIdentityId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "semanticAnchorCandidateId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "semanticAnchorFields": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/anchorFields"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sourceEntityId": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "physicalDie": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "compilationUnitOffset",
+        "dieOffset",
+        "locator",
+        "richArtifactSha256",
+        "section",
+        "unitId"
+      ],
+      "properties": {
+        "compilationUnitOffset": {
+          "pattern": "^0x(?:0|[1-9a-f][0-9a-f]*)$",
+          "type": "string"
+        },
+        "dieOffset": {
+          "pattern": "^0x(?:0|[1-9a-f][0-9a-f]*)$",
+          "type": "string"
+        },
+        "locator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "richArtifactSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "section": {
+          "const": ".debug_info"
+        },
+        "unitId": {
+          "$ref": "#/$defs/unitId"
+        }
+      }
+    },
+    "anchorFields": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authenticatedSourceFileSha256",
+        "authenticatedSourceRevision",
+        "declarationColumn",
+        "declarationFileIndex",
+        "declarationLine",
+        "inlineCallColumn",
+        "inlineCallFile",
+        "inlineCallLine",
+        "inlineCalleeAnchorCandidateId",
+        "inlineOwnerAnchorCandidateId",
+        "inlinePathAnchorCandidateIds",
+        "language",
+        "lexicalContext",
+        "signature",
+        "sourceName",
+        "sourcePath",
+        "templateActualArguments",
+        "templateFormalParameters",
+        "templatePatternAnchorCandidateId"
+      ],
+      "properties": {
+        "authenticatedSourceFileSha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "authenticatedSourceRevision": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "declarationColumn": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "declarationFileIndex": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "declarationLine": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "inlineCallColumn": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "inlineCallFile": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "inlineCallLine": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "inlineCalleeAnchorCandidateId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "inlineOwnerAnchorCandidateId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "inlinePathAnchorCandidateIds": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/sha256"
+              },
+              "maxItems": 32
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "language": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lexicalContext": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384
+          },
+          "maxItems": 256
+        },
+        "signature": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16384
+              },
+              "maxItems": 1025
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sourceName": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sourcePath": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "templateActualArguments": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16384
+              },
+              "maxItems": 1025
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "templateFormalParameters": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16384
+              },
+              "maxItems": 1025
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "templatePatternAnchorCandidateId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "rawReference",
+        "reasonCode",
+        "referenceForm",
+        "source",
+        "state",
+        "target"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "specification",
+            "abstract-origin",
+            "type",
+            "template-formal",
+            "template-argument",
+            "inline-owner"
+          ]
+        },
+        "rawReference": {
+          "oneOf": [
+            {
+              "pattern": "^0x(?:0|[1-9a-f][0-9a-f]*)$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reasonCode": {
+          "oneOf": [
+            {
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+              "type": "string",
+              "maxLength": 256
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "referenceForm": {
+          "oneOf": [
+            {
+              "pattern": "^0x[0-9a-f]+$",
+              "type": "string",
+              "maxLength": 16
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "state": {
+          "enum": [
+            "resolved",
+            "missing-target",
+            "malformed",
+            "unsupported",
+            "cyclic"
+          ]
+        },
+        "target": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "kindCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "declaration-only",
+        "inline-instance",
+        "no-range-definition",
+        "template-instance",
+        "template-pattern",
+        "unresolved"
+      ],
+      "properties": {
+        "declaration-only": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "inline-instance": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "no-range-definition": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "template-instance": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "template-pattern": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unresolved": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      }
+    },
+    "observabilityCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ambiguous",
+        "observable",
+        "unknown",
+        "unobservable"
+      ],
+      "properties": {
+        "ambiguous": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "observable": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unknown": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unobservable": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      }
+    },
+    "dispositionCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ambiguous",
+        "emitted-rva-link",
+        "non-scoreable",
+        "unknown"
+      ],
+      "properties": {
+        "ambiguous": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "emitted-rva-link": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "non-scoreable": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unknown": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      }
+    },
+    "address": {
+      "pattern": "^0x(?:0|[1-9a-f][0-9a-f]{0,15})$",
+      "type": "string"
+    },
+    "unitId": {
+      "pattern": "^cu-[0-9a-f]{32}$",
+      "type": "string"
+    }
+  }
+}
