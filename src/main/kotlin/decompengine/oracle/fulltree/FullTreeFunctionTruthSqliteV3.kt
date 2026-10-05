@@ -266,6 +266,30 @@ internal fun fullTreeFunctionTruthV3SharedScratchBound(limits: FullTreeFunctionT
 internal fun fullTreeFunctionTruthV3HasDatabaseScratchCapacity(limits: FullTreeFunctionTruthV3Limits): Boolean =
     fullTreeFunctionTruthV3SharedScratchBound(limits) >= limits.truth.maximumDatabaseBytes
 
+/**
+ * Peak scratch while publishing the private observation adapter. `currentScratchBytes` already
+ * includes the prepared adapter payloads; publication makes one additional staged payload copy
+ * and bounded control artifacts. Keep the model explicit so callers reserve only live files.
+ */
+internal fun fullTreeFunctionTruthV3AdapterPublishScratchPeakBytes(
+    currentScratchBytes: Long,
+    preparedPayloadBytes: Long,
+    maximumControlArtifactBytes: Long,
+    maximumScratchBytes: Long,
+): Long {
+    require(currentScratchBytes >= 0L && preparedPayloadBytes >= 0L && maximumControlArtifactBytes > 0L)
+    require(maximumScratchBytes > 0L && currentScratchBytes >= preparedPayloadBytes) {
+        "truth-v3 prepared adapter bytes are missing from scratch accounting"
+    }
+    val stagedPayloadAndControls = Math.addExact(
+        preparedPayloadBytes,
+        Math.multiplyExact(3L, maximumControlArtifactBytes),
+    )
+    val peak = Math.addExact(currentScratchBytes, stagedPayloadAndControls)
+    require(peak <= maximumScratchBytes) { "truth-v3 observation adapter publication exceeds its remaining scratch bound" }
+    return peak
+}
+
 internal data class FullTreeFunctionTruthV3Counts(
     val functions: FullTreeFunctionTruthCounts,
     val sourceEntities: Long,
@@ -441,7 +465,11 @@ internal object FullTreeFunctionTruthSqliteV3 {
                     initialRun,
                     authenticateObservationV2(
                         observationSnapshot.root, expectedObservationV2IndexArtifactSha256, richArtifact, inventoryPath,
-                        scope, workspace.root, limits, deadline,
+                        scope,
+                        newObservationRevalidationScratch(workspace.root, observationSnapshot.root),
+                        limits,
+                        deadline,
+                        aggregateScratchRoot = workspace.root,
                     ),
                 )
                 deadline.checkpoint("before committing truth-v3 publication")
@@ -540,7 +568,11 @@ internal object FullTreeFunctionTruthSqliteV3 {
                 initialRun,
                 authenticateObservationV2(
                     observationSnapshot.root, expectedObservationV2IndexArtifactSha256, richArtifact, inventoryPath,
-                    scope, workspace.root, limits, deadline,
+                    scope,
+                    newObservationRevalidationScratch(workspace.root, observationSnapshot.root),
+                    limits,
+                    deadline,
+                    aggregateScratchRoot = workspace.root,
                 ),
             )
             verifyV3Candidate(candidateSnapshot, projection, candidateParent, candidateParentIdentity)
@@ -682,9 +714,10 @@ internal object FullTreeFunctionTruthSqliteV3 {
         scratchParent: Path,
         limits: FullTreeFunctionTruthV3Limits,
         deadline: V3RunDeadline,
+        aggregateScratchRoot: Path = scratchParent,
     ): FullTreeFunctionObservationV2RunPublication = try {
         deadline.checkpoint("before independently rederiving observation-v2")
-        val availableScratchBytes = remainingV3Scratch(limits, scratchParent)
+        val availableScratchBytes = remainingV3Scratch(limits, aggregateScratchRoot)
         val perShardOutputBound = scope.document.controlObject("bounds").controlObject("perShard")
             .controlLong("serializedBytes")
         val outputReservation = minOf(
@@ -723,12 +756,34 @@ internal object FullTreeFunctionTruthSqliteV3 {
             scratchParent = scratchParent,
             limits = nestedLimits,
         )
-            .also { deadline.checkpoint("after independently rederiving observation-v2") }
+            .also {
+                requireV3WorkspaceBound(aggregateScratchRoot, limits)
+                deadline.checkpoint("after independently rederiving observation-v2")
+            }
     } catch (failure: Exception) {
         throw FullTreeFunctionTruthV3Exception(
             "observation-v2 run failed independent raw-input rederivation for truth v3",
             failure,
         )
+    }
+
+    /**
+     * The V2 validator forbids scratch that overlaps its candidate tree. Final V3 rederivation
+     * consumes the pinned observation snapshot, so give it a private sibling scratch directory
+     * while measuring both trees against the enclosing V3 workspace ceiling.
+     */
+    private fun newObservationRevalidationScratch(workspaceRoot: Path, candidateRoot: Path): Path {
+        val workspace = workspaceRoot.toAbsolutePath().normalize()
+        val candidate = candidateRoot.toAbsolutePath().normalize()
+        val scratch = workspace.resolve("observation-v2-final-revalidation-scratch")
+        if (!candidate.startsWith(workspace) || scratch.startsWith(candidate) || candidate.startsWith(scratch)) {
+            v3Fail("final observation-v2 revalidation scratch must be disjoint from its pinned candidate tree")
+        }
+        return try {
+            Files.createDirectory(scratch, PosixFilePermissions.asFileAttribute(V3_WRITABLE_DIRECTORY))
+        } catch (failure: Exception) {
+            throw FullTreeFunctionTruthV3Exception("cannot create disjoint final observation-v2 revalidation scratch", failure)
+        }
     }
 
     private fun snapshotObservationV2(
@@ -932,13 +987,20 @@ internal object FullTreeFunctionTruthSqliteV3 {
             maximumWorkers = maxWorkers,
         )
         val currentScratchBytes = checkV3Scratch(workspace.root, maximumScratchBound(limits))
-        val modeledAdapterPublishBytes = try {
-            Math.addExact(Math.multiplyExact(totalBytes, 2L), 3L * limits.truth.observationRun.maximumControlArtifactBytes)
+        try {
+            fullTreeFunctionTruthV3AdapterPublishScratchPeakBytes(
+                currentScratchBytes = currentScratchBytes,
+                preparedPayloadBytes = totalBytes,
+                maximumControlArtifactBytes = limits.truth.observationRun.maximumControlArtifactBytes,
+                maximumScratchBytes = maximumScratchBound(limits),
+            )
         } catch (failure: ArithmeticException) {
             throw FullTreeFunctionTruthV3Exception("truth-v3 observation adapter scratch model overflows", failure)
-        }
-        if (modeledAdapterPublishBytes > maximumScratchBound(limits) - currentScratchBytes) {
-            v3Fail("truth-v3 observation adapter publication exceeds its remaining scratch bound")
+        } catch (failure: IllegalArgumentException) {
+            throw FullTreeFunctionTruthV3Exception(
+                "truth-v3 observation adapter publication exceeds its remaining scratch bound",
+                failure,
+            )
         }
         val target = workspace.root.resolve("legacy-observation-run")
         val adapter = BoundedShardRunPublisher.publish(
