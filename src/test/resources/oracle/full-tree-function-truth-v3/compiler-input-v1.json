@@ -1,13 +1,13 @@
 {
   "compiler": {
     "family": "GCC",
-    "observedVersion": "g++ (Debian 14.2.0-19) 14.2.0",
-    "readelfVersion": "GNU readelf (GNU Binutils for Debian) 2.44"
+    "observedVersion": "g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+    "readelfVersion": "GNU readelf (GNU Binutils for Ubuntu) 2.42"
   },
   "fixture": "inline-template-identity-v1",
   "linkedElf": {
-    "bytes": 27040,
-    "sha256": "381ce2bb68a29fd72cfcb3c24ea5bc91a8a863753f939518659d946fcee0ecd2"
+    "bytes": 27280,
+    "sha256": "641ef1219d91f8593c0439de52265801912450e4afa216b52711f7b99cb1ce6b"
   },
   "producer": {
     "configurationSha256": "a59e80ed0cd440f07be4741892d75ba5a3514532a73ecb67bbc617b4d24a34c2",

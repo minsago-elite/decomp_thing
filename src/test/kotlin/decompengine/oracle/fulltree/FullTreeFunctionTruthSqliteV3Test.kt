@@ -68,6 +68,30 @@ class FullTreeFunctionTruthSqliteV3Test {
         assertFailsWith<IllegalArgumentException> {
             fullTreeFunctionTruthV3AdmitWorkingSet(observed, truth, projected, retainedControl, exactWorkingSet - 1L)
         }
+        val fullRunRvaSetBytes = 64L * 1024L * 1024L
+        val setOnceWorkingSet = fullTreeFunctionTruthV3ModeledWorkingSetBytes(
+            observed, truth, projected, retainedControl, fullRunRvaSetBytes,
+        )
+        assertEquals(exactWorkingSet + fullRunRvaSetBytes, setOnceWorkingSet,
+            "the full-run emitted-RVA set is one retained allocation, not two control copies")
+        assertEquals(setOnceWorkingSet, fullTreeFunctionTruthV3AdmitWorkingSet(
+            observed, truth, projected, retainedControl, setOnceWorkingSet, fullRunRvaSetBytes,
+        ))
+        assertFailsWith<IllegalArgumentException>("one byte below the single-copy working set must fail") {
+            fullTreeFunctionTruthV3AdmitWorkingSet(
+                observed, truth, projected, retainedControl, setOnceWorkingSet - 1L, fullRunRvaSetBytes,
+            )
+        }
+        assertEquals(setOnceWorkingSet, fullTreeFunctionTruthV3AdmitShardWorkingSet(
+            observed, truth, projected, retainedControl, setOnceWorkingSet + 1L, setOnceWorkingSet,
+            fullRunRvaSetBytes,
+        ))
+        assertFailsWith<IllegalArgumentException>("per-shard cap must include one full-run RVA set") {
+            fullTreeFunctionTruthV3AdmitShardWorkingSet(
+                observed, truth, projected, retainedControl, setOnceWorkingSet + 1L, setOnceWorkingSet - 1L,
+                fullRunRvaSetBytes,
+            )
+        }
         assertEquals(exactWorkingSet, fullTreeFunctionTruthV3AdmitShardWorkingSet(
             observed, truth, projected, retainedControl, exactWorkingSet + 100L, exactWorkingSet,
         ))
@@ -141,6 +165,74 @@ class FullTreeFunctionTruthSqliteV3Test {
             }
         }
     }
+
+    @Test
+    fun `legacy truth v2 composition snapshot authenticates receipt bytes before projection`() =
+        inControlTemporaryDirectory { root ->
+            val truthRoot = privateDirectory(root.resolve("legacy-truth"))
+            val shards = Files.createDirectory(truthRoot.resolve("shards"), PosixFilePermissions.asFileAttribute(V3_WRITABLE_DIRECTORY))
+            val shardBytes = "{\"fixture\":\"truth-shard\"}".toByteArray(StandardCharsets.UTF_8)
+            val exclusionBytes = "{\"fixture\":\"exclusions\"}".toByteArray(StandardCharsets.UTF_8)
+            Files.write(shards.resolve("fixture.json"), shardBytes)
+            Files.write(truthRoot.resolve("exclusions.json"), exclusionBytes)
+            val shardRecord = v2FileRecord("fixture", "shards/fixture.json", shardBytes)
+            val exclusionRecord = v2FileRecord("elf-only-exclusions", "exclusions.json", exclusionBytes)
+            val counts = JsonObject(listOf(
+                "elfRvas", "dwarfRvas", "scoredRvas", "elfOnlyRvas", "dwarfOnlyRvas",
+                "nonEmittedObservations", "nonEmittedUnique", "inlineOnlyUnique", "selectedElsewhereUnique",
+                "definitionNoRangeUnique", "coalescedEmittedRvas",
+            ).associateWith { JsonPrimitive(0L) })
+            val withoutHash = JsonObject(mapOf(
+                "complete" to JsonPrimitive(true),
+                "counts" to counts,
+                "exclusions" to exclusionRecord,
+                "oracle" to JsonObject(emptyMap()),
+                "schemaVersion" to JsonPrimitive(1),
+                "shards" to JsonArray(listOf(shardRecord)),
+            ))
+            val logicalSha = OracleArtifacts.sha256(OracleJson.canonicalBytes(withoutHash))
+            val index = JsonObject(withoutHash + ("indexSha256" to JsonPrimitive(logicalSha)))
+            OracleSchemas.validate("full-tree-function-truth-index", index)
+            val indexBytes = OracleJson.canonicalBytes(index)
+            val indexSha = OracleArtifacts.sha256(indexBytes)
+            Files.write(truthRoot.resolve("index.json"), indexBytes)
+            val outputBytes = indexBytes.size.toLong() + shardBytes.size.toLong() + exclusionBytes.size.toLong()
+            val receipt = FullTreeFunctionTruthGeneration(
+                root = truthRoot,
+                index = index,
+                indexArtifactSha256 = indexSha,
+                indexSha256 = logicalSha,
+                observationIndexArtifactSha256 = "a".repeat(64),
+                elfIndexArtifactSha256 = "b".repeat(64),
+                outputBytes = outputBytes,
+                databaseHighWaterBytes = 0L,
+                counts = FullTreeFunctionTruthCounts(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            )
+
+            val workspace = privateDirectory(root.resolve("workspace"))
+            var transientMutationObserved = false
+            assertFailsWith<FullTreeFunctionTruthV3Exception>(
+                "composition pinning must reject a transient rewrite even if later revalidation sees restored bytes",
+            ) {
+                FullTreeFunctionTruthSqliteV3.snapshotLegacyTruthV3(receipt, workspace, FullTreeFunctionTruthV3Limits()) { stage ->
+                    if (!transientMutationObserved && stage == "before pinning truth-v3 tree member shards/fixture.json") {
+                        Files.write(shards.resolve("fixture.json"), "{\"fixture\":\"other-shard\"}".toByteArray(StandardCharsets.UTF_8))
+                        transientMutationObserved = true
+                    }
+                }
+            }
+            assertTrue(transientMutationObserved, "the legacy truth mutation must overlap receipt-authenticated pinning")
+            Files.write(shards.resolve("fixture.json"), shardBytes)
+            assertEquals(shardBytes.toList(), Files.readAllBytes(shards.resolve("fixture.json")).toList(),
+                "later legacy V2 revalidation would see the restored original bytes")
+
+            val pinnedWorkspace = privateDirectory(root.resolve("workspace-pinned"))
+            val snapshot = FullTreeFunctionTruthSqliteV3.snapshotLegacyTruthV3(
+                receipt, pinnedWorkspace, FullTreeFunctionTruthV3Limits(),
+            )
+            assertEquals(shardBytes.toList(), Files.readAllBytes(snapshot.root.resolve("shards/fixture.json")).toList())
+            snapshot.verifyPrivateSnapshotUnchanged()
+        }
 
     @Test
     fun `truth v3 rederives observation census and preserves one score row per RVA`() =
@@ -641,8 +733,25 @@ class FullTreeFunctionTruthSqliteV3Test {
 
     private fun tightScratchLimits(): FullTreeFunctionTruthV3Limits {
         val mebibyte = 1024L * 1024L
+        val fixtureObservationShard = FullTreeFunctionObservationShardPublisherLimits().copy(
+            producer = FullTreeFunctionObservationProducerLimits().copy(
+                dieLimits = FullTreeDwarfDieLimits(
+                    maximumPhysicalRecords = 10_000_000L,
+                    maximumNonNullRecords = 5_000_000,
+                    maximumAttributes = 50_000_000L,
+                    maximumTreeDepth = 65_536,
+                    maximumRetainedBytes = 24L * mebibyte,
+                ),
+                lineTableLimits = FullTreeDwarfLineTableLimits().copy(
+                    maximumDirectories = 4096,
+                    maximumFiles = 8192,
+                    maximumAggregatePathBytes = 4L * mebibyte,
+                ),
+            ),
+        )
         return FullTreeFunctionTruthV3Limits(
             truth = FullTreeFunctionTruthLimits(
+                observationShard = fixtureObservationShard,
                 maximumDatabaseBytes = 64L * mebibyte,
                 maximumScratchBytes = 512L * mebibyte,
                 maximumOutputBytes = 128L * mebibyte,
@@ -650,26 +759,10 @@ class FullTreeFunctionTruthSqliteV3Test {
                 maximumStringBytes = 1 * 1024 * 1024,
             ),
             observationV2 = FullTreeFunctionObservationV2RunLimits(
-                shard = FullTreeFunctionObservationShardPublisherLimits().copy(
-                    producer = FullTreeFunctionObservationProducerLimits().copy(
-                        dieLimits = FullTreeDwarfDieLimits(
-                            maximumPhysicalRecords = 10_000_000L,
-                            maximumNonNullRecords = 5_000_000,
-                            maximumAttributes = 50_000_000L,
-                            maximumTreeDepth = 65_536,
-                            maximumRetainedBytes = 24L * mebibyte,
-                        ),
-                        lineTableLimits = FullTreeDwarfLineTableLimits().copy(
-                            maximumDirectories = 4096,
-                            maximumFiles = 8192,
-                            maximumAggregatePathBytes = 4L * mebibyte,
-                        ),
-                    ),
-                ),
+                shard = fixtureObservationShard,
             ),
-            // SQLite reserves authenticated database headroom before the fixture's small output
-            // is known; keep the fixture budget generous while retaining the narrowed producer
-            // model above. V3 still enforces its own shared cap independently.
+            // Both independent raw observation passes use the same narrowed fixture producer
+            // limits; SQLite's database headroom remains generous and V3 enforces its own cap.
             maximumScratchBytes = 2L * 1024L * 1024L * 1024L,
         )
     }
@@ -1117,6 +1210,15 @@ class FullTreeFunctionTruthSqliteV3Test {
     private fun assertDirectoryEmpty(path: Path) {
         assertTrue(Files.list(path).use { it.findAny().isEmpty })
     }
+
+    private fun v2FileRecord(id: String, path: String, bytes: ByteArray): JsonObject = JsonObject(mapOf(
+        "bytes" to JsonPrimitive(bytes.size.toLong()),
+        "functions" to JsonPrimitive(0L),
+        "id" to JsonPrimitive(id),
+        "nonEmitted" to JsonPrimitive(0L),
+        "path" to JsonPrimitive(path),
+        "sha256" to JsonPrimitive(OracleArtifacts.sha256(bytes)),
+    ))
 
     private fun privateDirectory(path: Path): Path = Files.createDirectory(path).also {
         Files.setPosixFilePermissions(it, PosixFilePermissions.fromString("rwx------"))

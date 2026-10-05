@@ -26,8 +26,9 @@ non-scoreable; emitted function truth remains one row per emitted RVA.
 The compiler-backed test builds the checked-in `inline-template-identity-v1` C++ fixture with
 GCC, C++17, optimization, PIC, and DWARF 5. It maps both source and build paths with
 `-fdebug-prefix-map` and links with `-Wl,--build-id=none` so repeated builds in one toolchain use
-stable paths and bytes. The observed local compiler was `g++ (Debian 14.2.0-19) 14.2.0`; the
-observed `readelf` was GNU Binutils 2.44.
+stable paths and bytes. GitHub Actions observed `g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0`
+and GNU Binutils `readelf` 2.42; `compiler-input-v1.json` pins that compiler, `readelf`, and
+linked-ELF tuple.
 
 | Input | SHA-256 |
 | --- | --- |
@@ -37,7 +38,7 @@ observed `readelf` was GNU Binutils 2.44.
 | `include/identity_fixture.hpp` | `edb675d9ef5418a0b5e27ee468bb1c321e6366499475125533949ce3cf41fbd0` |
 | `instantiate.cpp` | `ccd85bec46349ca4337102eb5dd9e1b37a9cae9b25d50cd4fdc0e9b9bec09aea` |
 | `unique_pattern.cpp` | `78d954d860983fb6492aa156dda65a501a596f226c06407ca032aee66b12a68a` |
-| Linked rich/stripped fixture ELF (observed) | `381ce2bb68a29fd72cfcb3c24ea5bc91a8a863753f939518659d946fcee0ecd2` (27,040 bytes) |
+| Linked rich/stripped fixture ELF (observed) | `641ef1219d91f8593c0439de52265801912450e4afa216b52711f7b99cb1ce6b` (27,280 bytes) |
 
 `readelf --debug-dump=info --wide` on that ELF showed concrete `template_pattern<int>` and
 `template_pattern<long int>` DIE names and `DW_TAG_inlined_subroutine` records. Those names are
