@@ -331,6 +331,7 @@ object OracleSchemas {
         "full-tree-function-truth-index-v3",
         "full-tree-generated-file-inventory",
         "full-tree-generated-file-provenance",
+        "full-tree-generic-template-frontend-v1",
         "full-tree-header-plan-readiness",
         "full-tree-inventory",
         "full-tree-implementation-ownership",
