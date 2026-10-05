@@ -148,7 +148,7 @@ object FullTreeGenericTemplateFrontendProvenanceV1 {
             fail("build record differs from the authenticated manifest")
         }
         FullTreeInventoryControl.validate(raw.inventory, raw.scope, limits)
-        FullTreeSourceInventoryControl.validate(raw.sourceInventory, raw.scope, buildRecord, limits)
+        FullTreeSourceInventoryControl.validate(raw.sourceInventory, raw.scope, buildRecord, raw.inventory, limits)
 
         val captureDocument = parseCanonicalObject(
             raw.capture.canonicalBytes,
@@ -157,12 +157,12 @@ object FullTreeGenericTemplateFrontendProvenanceV1 {
         )
         val captureAuthority = captureDocument.controlObject("authority")
         if (captureAuthority.controlString("status") != "unexecuted-unreceipted-capture-input" ||
-            captureAuthority.controlBoolean("captureInputAuthenticated") ||
-            captureAuthority.controlBoolean("compilerActionsAuthenticated")
+            captureAuthority["captureInputAuthenticated"] != JsonPrimitive(false) ||
+            captureAuthority["compilerActionsAuthenticated"] != JsonPrimitive(false)
         ) {
             fail("capture input is being promoted to execution evidence")
         }
-        if (captureDocument.controlObject("compiler").controlBoolean("cxxDriverIdentityAuthenticated")) {
+        if (captureDocument.controlObject("compiler")["cxxDriverIdentityAuthenticated"] != JsonPrimitive(false)) {
             fail("upstream capture claims an authenticated C++ driver identity")
         }
         if (raw.generated.generationReceiptBound) {

@@ -30,7 +30,7 @@ object FullTreeGenericTemplateFrontendProfileV1 {
     const val MAX_GENERIC_EVIDENCE_BYTES = 67_108_864L
     const val MAX_RESOURCE_FILES = 65_536
     const val MAX_RESOURCE_TREE_BYTES = 1_073_741_824L
-    const val MAX_RESOURCE_MANIFEST_BYTES = 67_108_864L
+    const val MAX_RESOURCE_MANIFEST_BYTES = 67_108_864
     const val MAX_PATH_BYTES = 4_096
     const val MAX_PATH_ENTRIES = 64
     const val MAX_PATH_ENTRY_BYTES = 1_024
@@ -317,7 +317,7 @@ object FullTreeGenericTemplateFrontendProfileV1 {
             ),
         )
         return PathTransformV1(
-            rawPathSha256,
+            rawSha256,
             containerImageDigest,
             Collections.unmodifiableList(virtual),
             inertSha256,

@@ -364,7 +364,10 @@ class FullTreeGenericTemplateFrontendV1Test {
                 fixture.raw.capture.canonicalBytes,
                 controlJsonLimits(64 * 1024 * 1024),
             ) as JsonObject
-            assertFalse(captureDocument.controlObject("compiler").controlBoolean("cxxDriverIdentityAuthenticated"))
+            assertEquals(
+                JsonPrimitive(false),
+                captureDocument.controlObject("compiler")["cxxDriverIdentityAuthenticated"],
+            )
 
             val validated = Provenance.validateRawInputs(
                 fixture.document,
@@ -1057,11 +1060,11 @@ class FullTreeGenericTemplateFrontendV1Test {
         val actions = original.controlArray("actions")
         val graphSha256 = fullTreeGeneratedBuildGraphSha256(graph, actions)
         val withoutReport = JsonObject(
-            original + mapOf(
+            (original + mapOf(
                 "buildGraph" to graph,
                 "buildGraphProvenanceSha256" to JsonPrimitive(graphSha256),
-            ),
-        ).filterKeys { it != "reportSha256" }
+            )).filterKeys { it != "reportSha256" },
+        )
         val reportSha256 = shaBytes(OracleJson.canonicalBytes(withoutReport, controlJsonLimits(64 * 1024 * 1024)))
         writeControlObject(path, JsonObject(withoutReport + mapOf("reportSha256" to JsonPrimitive(reportSha256))))
     }
