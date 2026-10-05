@@ -18,20 +18,30 @@ authorization. No alternate proxy, mirror, browser download, mutable archive
 metadata, or other route was used. The local environment therefore did not
 authenticate any Ubuntu package bytes.
 
+The official LLVM downloads page identifies the 18.1 release signatures with
+short key ID `345AD05D`, but the exact public-key bytes and full fingerprint
+were not obtained. The contract currently names a key bundled for the 22.1.6
+oracle, which cannot authenticate the 2024 Clang 18.1.3 release. A direct
+public-key lookup at `https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x345AD05D`
+returned HTTP 403. No alternate key source or proxy was used; upstream source
+signature verification is therefore blocked and the configured key must not be
+treated as valid provenance.
+
 The owned provisioning workflow performs the acquisition on a standard public
 `ubuntu-24.04` Actions runner. This local run did not establish:
 
 - signed Snapshot `InRelease` → `Sources`/`Packages` SHA-256 metadata chain;
 - Ubuntu source version `1:18.1.3-1ubuntu1`, `.dsc`, payload checksums, and
   the exact pinned binary/development/runtime closure;
-- comparison of all 32 accepted contract-relevant source files against the
+- comparison of all 34 accepted contract-relevant source files against the
   signed upstream `llvmorg-18.1.3` release;
-- Clang C/C++ driver identities, the 298 generated/eight-family and 28 manual
-  `LangOptions` inventory, LibTooling API probe, resource closure, image
-  identity, or two-clean-run reproducibility.
+- Clang C/C++ driver identities, the source-level inventory of 298 generated
+  `LangOptions` macro fields/eight families and 28 manual members, selected
+  runtime `LangOptions` checks, LibTooling API observations, resource closure,
+  image identity, or two-clean-run reproducibility.
 
 Matching package version text is not compatibility or provenance evidence.
-The workflow rejects any difference in the 32 contract-relevant source files
+The workflow rejects any difference in the 34 contract-relevant source files
 before it provisions the toolchain. If that gate finds a difference, it emits
 the full audit artifact and stops. The bounded alternative is a separately
 reviewed source build from the exact signed upstream Clang 18.1.3 source on the

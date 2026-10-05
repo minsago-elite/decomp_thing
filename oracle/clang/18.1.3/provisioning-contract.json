@@ -43,6 +43,13 @@
     }
   },
   "langOptions": {
+    "inventoryEvidence": "authenticated-source-text-scan-of-LangOptions.def-and-LangOptions.h",
+    "runtimeChecks": [
+      "LangOptions::CPlusPlus14=true",
+      "LangOptions::CPlusPlus20=false",
+      "LangOptions::DoubleSquareBracketAttributes=true",
+      "LangOptions::Trigraphs=true"
+    ],
     "generatedFieldCount": 298,
     "familyCounts": {
       "LANGOPT": 170,
@@ -122,9 +129,11 @@
     "clang/include/clang/Driver/Options.h",
     "clang/include/clang/Frontend/CompilerInvocation.h",
     "clang/include/clang/Frontend/CompilerInstance.h",
+    "clang/include/clang/Tooling/Tooling.h",
     "clang/include/clang/AST/ASTContext.h",
     "clang/include/clang/AST/Decl.h",
     "clang/include/clang/AST/DeclTemplate.h",
+    "clang/include/clang/AST/RecursiveASTVisitor.h",
     "clang/include/clang/AST/TemplateBase.h",
     "clang/include/clang/AST/Type.h",
     "clang/include/clang/Lex/Lexer.h",

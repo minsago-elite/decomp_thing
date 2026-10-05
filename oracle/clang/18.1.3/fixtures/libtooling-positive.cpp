@@ -1,3 +1,7 @@
+#define CLANG1813_PROBE_VALUE 7
+
+static_assert(CLANG1813_PROBE_VALUE == 7, "probe macro must expand");
+
 template <class T> struct Box {
   T value;
 };

@@ -102,8 +102,15 @@ public:
 
   void HandleTranslationUnit(ASTContext &context) override {
     const LangOptions &options = compiler.getLangOpts();
-    if (!options.CPlusPlus14 || options.CPlusPlus20 || !options.Trigraphs ||
-        !options.DoubleSquareBracketAttributes)
+    if (options.CPlusPlus14)
+      runtimeLangOptionsChecks.emplace_back("LangOptions::CPlusPlus14=true");
+    if (!options.CPlusPlus20)
+      runtimeLangOptionsChecks.emplace_back("LangOptions::CPlusPlus20=false");
+    if (options.DoubleSquareBracketAttributes)
+      runtimeLangOptionsChecks.emplace_back("LangOptions::DoubleSquareBracketAttributes=true");
+    if (options.Trigraphs)
+      runtimeLangOptionsChecks.emplace_back("LangOptions::Trigraphs=true");
+    if (runtimeLangOptionsChecks.size() != 4)
       failed = true;
     targetTriple = compiler.getTarget().getTriple().str();
     if (targetTriple != "x86_64-pc-linux-gnu")
@@ -117,18 +124,37 @@ public:
 
   bool failed = false;
   std::string targetTriple;
+  std::vector<std::string> runtimeLangOptionsChecks;
 
 private:
   CompilerInstance &compiler;
 };
 
+struct MacroObservations {
+  unsigned expansionCount = 0;
+  unsigned macroInfoChecks = 0;
+  unsigned nonBuiltinClassifications = 0;
+};
+
 class MacroCallbackProbe : public PPCallbacks {
 public:
+  explicit MacroCallbackProbe(MacroObservations &observations)
+      : observations(observations) {}
+
   void MacroExpands(const Token &, const MacroDefinition &definition, SourceRange,
                     const MacroArgs *) override {
+    ++observations.expansionCount;
     if (const MacroInfo *info = definition.getMacroInfo())
-      (void)info->isBuiltinMacro();
+      if (!info->isBuiltinMacro()) {
+        ++observations.macroInfoChecks;
+        ++observations.nonBuiltinClassifications;
+      } else {
+        ++observations.macroInfoChecks;
+      }
   }
+
+private:
+  MacroObservations &observations;
 };
 
 class ProbeAction : public ASTFrontendAction {
@@ -142,19 +168,28 @@ public:
 
   bool BeginSourceFileAction(CompilerInstance &compiler) override {
     (void)compiler.getPreprocessor().getLangOpts();
-    compiler.getPreprocessor().addPPCallbacks(std::make_unique<MacroCallbackProbe>());
+    compiler.getPreprocessor().addPPCallbacks(
+        std::make_unique<MacroCallbackProbe>(macroObservations));
     return true;
   }
 
   void EndSourceFileAction() override {
     if (consumerView && consumerView->failed)
       failed = true;
-    if (consumerView)
+    if (consumerView) {
       targetTriple = consumerView->targetTriple;
+      runtimeLangOptionsChecks = consumerView->runtimeLangOptionsChecks;
+    }
+    if (macroObservations.expansionCount == 0 ||
+        macroObservations.macroInfoChecks == 0 ||
+        macroObservations.nonBuiltinClassifications == 0)
+      failed = true;
   }
 
   bool failed = false;
   std::string targetTriple;
+  MacroObservations macroObservations;
+  std::vector<std::string> runtimeLangOptionsChecks;
 
 private:
   ProbeConsumer *consumerView = nullptr;
@@ -186,7 +221,18 @@ int main(int argc, char **argv) {
     return 4;
 
   std::cout << "{\"compilerVersion\":\"" << getClangVersion()
-            << "\",\"target\":\"" << actionView->targetTriple << "\",\"callingConventions\":[";
+            << "\",\"target\":\"" << actionView->targetTriple
+            << "\",\"runtimeLangOptionsChecks\":[";
+  for (std::size_t i = 0; i < actionView->runtimeLangOptionsChecks.size(); ++i) {
+    if (i) std::cout << ',';
+    std::cout << '\"' << actionView->runtimeLangOptionsChecks[i] << '\"';
+  }
+  std::cout << "],\"macroObservations\":{\"expansionCount\":"
+            << actionView->macroObservations.expansionCount
+            << ",\"macroInfoChecks\":" << actionView->macroObservations.macroInfoChecks
+            << ",\"nonBuiltinClassifications\":"
+            << actionView->macroObservations.nonBuiltinClassifications
+            << "},\"callingConventions\":[";
   for (std::size_t i = 0; i < names.size(); ++i) {
     if (i) std::cout << ',';
     std::cout << '\"' << names[i] << '\"';

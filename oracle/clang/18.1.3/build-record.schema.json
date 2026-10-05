@@ -199,16 +199,17 @@
         "status": {"const": "compatible"},
         "patchCount": {"type": "integer", "minimum": 0},
         "patchInventorySha256": {"$ref": "#/$defs/sha256"},
-        "relevantFileCount": {"const": 32},
+        "relevantFileCount": {"const": 34},
         "relevantFileManifestSha256": {"$ref": "#/$defs/sha256"}
       }
     },
     "probe": {
       "type": "object", "additionalProperties": false,
-      "required": ["compilerVersion", "target", "generatedFields", "familyCounts", "generatedFieldNames", "manualFields", "callingConventions", "apiChecks", "definitionSha256", "headerSha256", "sourceSha256", "binarySha256", "fixtureSha256"],
+      "required": ["compilerVersion", "target", "inventoryEvidence", "generatedFields", "familyCounts", "generatedFieldNames", "manualFields", "callingConventions", "apiChecks", "runtimeLangOptionsChecks", "macroObservations", "definitionSha256", "headerSha256", "sourceSha256", "binarySha256", "fixtureSha256"],
       "properties": {
         "compilerVersion": {"type": "string", "pattern": "^18\\.1\\.3"},
         "target": {"const": "x86_64-pc-linux-gnu"},
+        "inventoryEvidence": {"const": "authenticated-source-text-scan-of-LangOptions.def-and-LangOptions.h"},
         "generatedFields": {"const": 298},
         "familyCounts": {
           "type": "object", "additionalProperties": false,
@@ -220,9 +221,9 @@
             "COMPATIBLE_VALUE_LANGOPT": {"const": 5}, "BENIGN_VALUE_LANGOPT": {"const": 1}
           }
         },
-        "generatedFieldNames": {"type": "array", "minItems": 298, "maxItems": 298, "items": {"type": "string"}},
-        "manualFields": {"type": "array", "minItems": 28, "maxItems": 28, "items": {"type": "string"}},
-        "callingConventions": {"type": "array", "minItems": 22, "maxItems": 22, "items": {"type": "string"}},
+        "generatedFieldNames": {"type": "array", "minItems": 298, "maxItems": 298, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}},
+        "manualFields": {"type": "array", "minItems": 28, "maxItems": 28, "uniqueItems": true, "items": {"type": "string"}},
+        "callingConventions": {"type": "array", "minItems": 22, "maxItems": 22, "uniqueItems": true, "items": {"type": "string"}},
         "apiChecks": {"const": [
           "ClassTemplatePartialSpecializationDecl::getSpecializedTemplate",
           "ClassTemplatePartialSpecializationDecl::getTemplateParameters",
@@ -247,6 +248,21 @@
           "TargetInfo::getTriple",
           "ToolInvocation"
         ]},
+        "runtimeLangOptionsChecks": {"const": [
+          "LangOptions::CPlusPlus14=true",
+          "LangOptions::CPlusPlus20=false",
+          "LangOptions::DoubleSquareBracketAttributes=true",
+          "LangOptions::Trigraphs=true"
+        ]},
+        "macroObservations": {
+          "type": "object", "additionalProperties": false,
+          "required": ["expansionCount", "macroInfoChecks", "nonBuiltinClassifications"],
+          "properties": {
+            "expansionCount": {"type": "integer", "minimum": 1},
+            "macroInfoChecks": {"type": "integer", "minimum": 1},
+            "nonBuiltinClassifications": {"type": "integer", "minimum": 1}
+          }
+        },
         "definitionSha256": {"$ref": "#/$defs/sha256"},
         "headerSha256": {"$ref": "#/$defs/sha256"},
         "sourceSha256": {"$ref": "#/$defs/sha256"},

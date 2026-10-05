@@ -114,6 +114,15 @@ def read_contract(path: Path = CONTRACT_PATH) -> dict:
     if set(roots) != required or len(set(roots.values())) != 1:
         raise ProvisionError("binary roots must include the exact compiler/development/runtime closure pins")
     lang = value["langOptions"]
+    if lang.get("inventoryEvidence") != "authenticated-source-text-scan-of-LangOptions.def-and-LangOptions.h":
+        raise ProvisionError("LangOptions inventory evidence type must identify its authenticated source-text scan")
+    if lang.get("runtimeChecks") != [
+        "LangOptions::CPlusPlus14=true",
+        "LangOptions::CPlusPlus20=false",
+        "LangOptions::DoubleSquareBracketAttributes=true",
+        "LangOptions::Trigraphs=true",
+    ]:
+        raise ProvisionError("selected LangOptions runtime check contract drift")
     if sum(lang["familyCounts"].values()) != lang["generatedFieldCount"]:
         raise ProvisionError("LangOptions family counts do not sum to the pinned field count")
     if len(lang["manualFields"]) != lang["manualFieldsCount"] or len(set(lang["manualFields"])) != lang["manualFieldsCount"]:
@@ -145,7 +154,15 @@ def parse_deb822(payload: str) -> list[dict[str, str]]:
     return list(iter_deb822_lines(payload.splitlines()))
 
 
-def iter_deb822_lines(lines):
+def deb822_multiline_rows(value: str) -> list[str]:
+    """Remove only the empty field-value line preceding a normal continuation list."""
+    rows = value.splitlines()
+    if value.startswith("\n") and rows and rows[0] == "":
+        return rows[1:]
+    return rows
+
+
+def iter_deb822_lines(lines, allow_empty: bool = False):
     """Yield strict Debian paragraphs without retaining a complete Packages index."""
     fields: dict[str, str] = {}
     last_key: str | None = None
@@ -180,7 +197,7 @@ def iter_deb822_lines(lines):
     if fields:
         yield fields
         paragraph_count += 1
-    if not paragraph_count:
+    if not paragraph_count and not allow_empty:
         raise ProvisionError("empty Debian control/index document")
 
 
@@ -207,12 +224,17 @@ def iter_compressed_index(path: Path):
     try:
         if path.name.endswith(".gz"):
             with gzip.open(path, mode="rb") as stream:
-                yield from iter_deb822_lines(bounded_lines(stream))
+                # A signed Release table may legitimately name an empty pocket
+                # index. The caller authenticates the compressed bytes first;
+                # malformed non-empty paragraphs still fail closed.
+                yield from iter_deb822_lines(bounded_lines(stream), allow_empty=True)
             return
         if path.name.endswith(".xz"):
             with lzma.open(path, mode="rb") as stream:
-                yield from iter_deb822_lines(bounded_lines(stream))
+                yield from iter_deb822_lines(bounded_lines(stream), allow_empty=True)
             return
+    except ProvisionError as error:
+        raise ProvisionError(f"could not parse signed index {path.name}: {error}") from error
     except (OSError, EOFError, lzma.LZMAError, zlib.error, UnicodeDecodeError) as error:
         raise ProvisionError(f"could not decode streamed signed index {path.name}: {error}") from error
     raise ProvisionError(f"unsupported signed index encoding: {path.name}")
@@ -314,12 +336,7 @@ def dearmor_release_key(key_path: Path, temporary_root: Path) -> bytes:
 
 
 def release_sha256_table(release: dict[str, str]) -> dict[str, tuple[int, str]]:
-    rows = release.get("SHA256", "").splitlines()
-    # The Debian control parser preserves the line break after the empty
-    # ``SHA256:`` field value, so a conventional multiline Release table starts
-    # with exactly one empty row before its indented digest rows.
-    if rows and rows[0] == "":
-        rows = rows[1:]
+    rows = deb822_multiline_rows(release.get("SHA256", ""))
     result: dict[str, tuple[int, str]] = {}
     for row_number, row in enumerate(rows, start=1):
         parts = row.split()
@@ -421,7 +438,7 @@ def atomic_write(path: Path, data: bytes) -> None:
 
 
 def source_file_rows(source: dict[str, str]) -> list[dict[str, str | int]]:
-    raw = source.get("Checksums-Sha256", "").splitlines()
+    raw = deb822_multiline_rows(source.get("Checksums-Sha256", ""))
     result: list[dict[str, str | int]] = []
     for row in raw:
         parts = row.split()
@@ -926,6 +943,7 @@ def audit_langoptions(def_path: Path, header_path: Path, contract: dict) -> dict
     if missing:
         raise ProvisionError("LangOptions.h manual member inventory is missing: " + ", ".join(missing))
     return {
+        "inventoryEvidence": spec["inventoryEvidence"],
         "generatedFields": len(rows),
         "familyCounts": counts,
         "generatedFieldNames": names,
@@ -998,7 +1016,7 @@ def audit_patches(source_root: Path, upstream_root: Path, output: Path, contract
         relevant.append(row)
         if row["status"] != "identical":
             differences.append(row)
-    if len(relevant_set) != 32:
+    if len(relevant_set) != 34:
         raise ProvisionError("the owned relevant-file audit list changed unexpectedly")
     patch_manifest = {"files": patch_rows}
     relevant_manifest = {"files": relevant}
@@ -1024,6 +1042,8 @@ def audit_patches(source_root: Path, upstream_root: Path, output: Path, contract
 
 def validate_probe_report(report: dict, inventory: dict, contract: dict) -> dict:
     spec = contract["langOptions"]
+    if inventory.get("inventoryEvidence") != spec["inventoryEvidence"]:
+        raise ProvisionError("LangOptions inventory is not labeled as the authenticated source-text scan")
     if inventory.get("generatedFields") != spec["generatedFieldCount"]:
         raise ProvisionError("probe LangOptions generated field count mismatch")
     if inventory.get("familyCounts") != spec["familyCounts"]:
@@ -1034,20 +1054,33 @@ def validate_probe_report(report: dict, inventory: dict, contract: dict) -> dict
         raise ProvisionError("probe calling-convention inventory mismatch")
     if report.get("apiChecks") != spec["apiChecks"]:
         raise ProvisionError("probe API checks differ from the exact pinned LibTooling contract")
-    if not str(report.get("compilerVersion", "")).startswith("18.1.3") or report.get("target") != "x86_64-pc-linux-gnu":
-        raise ProvisionError("probe compiler version or target mismatch")
+    if report.get("runtimeLangOptionsChecks") != spec["runtimeChecks"]:
+        raise ProvisionError("probe did not observe the exact selected LangOptions runtime checks")
+    macro_observations = report.get("macroObservations", {})
+    if any(type(macro_observations.get(key)) is not int or macro_observations[key] < 1
+           for key in ("expansionCount", "macroInfoChecks", "nonBuiltinClassifications")):
+        raise ProvisionError("fixture did not observe bounded macro expansion and MacroInfo classification")
+    validate_profile_compiler_identity(report.get("compilerVersion", ""), report.get("target", ""))
     return {
+        "inventoryEvidence": inventory["inventoryEvidence"],
         "compilerVersion": report["compilerVersion"],
         "target": report["target"],
         "generatedFields": inventory["generatedFields"],
         "familyCounts": inventory["familyCounts"],
         "generatedFieldNames": inventory["generatedFieldNames"],
         "manualFields": inventory["manualFields"],
+        "runtimeLangOptionsChecks": report["runtimeLangOptionsChecks"],
+        "macroObservations": macro_observations,
         "callingConventions": report["callingConventions"],
         "apiChecks": report["apiChecks"],
         "definitionSha256": inventory["definitionSha256"],
         "headerSha256": inventory["headerSha256"],
     }
+
+
+def validate_profile_compiler_identity(compiler_version: str, target: str) -> None:
+    if re.match(r"^18\.1\.3(?:$|[ +\-])", str(compiler_version)) is None or target != "x86_64-pc-linux-gnu":
+        raise ProvisionError("probe compiler version or target mismatch")
 
 
 def command_acquire(args: argparse.Namespace) -> int:
@@ -1063,7 +1096,10 @@ def command_audit_langoptions(args: argparse.Namespace) -> int:
     contract = read_contract(args.contract)
     inventory = audit_langoptions(args.definition, args.header, contract)
     atomic_write(args.output, canonical_json(inventory))
-    print(f"verified {inventory['generatedFields']} generated LangOptions fields and {inventory['manualFieldsCount']} manual fields")
+    print(
+        f"source-scanned {inventory['generatedFields']} generated LangOptions fields and "
+        f"{inventory['manualFieldsCount']} manual fields; runtime option assertions come from the LibTooling probe"
+    )
     return 0
 
 
@@ -1125,9 +1161,9 @@ def rootfs_env_args(contract: dict, extra: dict[str, str] | None = None) -> list
     return ["/usr/bin/env", "-i", *[f"{key}={value}" for key, value in sorted(child_environment.items())]]
 
 
-def rootfs_run(rootfs: Path, command: list[str], timeout: int = 300,
+def rootfs_run(rootfs: Path, command: list[str], contract: dict, timeout: int = 300,
                environment: dict[str, str] | None = None) -> str:
-    env_args = rootfs_env_args(read_contract(), environment)
+    env_args = rootfs_env_args(contract, environment)
     return run_checked(
         ["sudo", "chroot", str(rootfs), *env_args, *command], timeout=timeout,
     ).stdout
@@ -1237,8 +1273,8 @@ def package_metadata_for_keys(candidate_root: Path, candidate: dict,
     return result
 
 
-def installed_package_keys(rootfs: Path) -> set[tuple[str, str, str]]:
-    out = rootfs_run(rootfs, ["/usr/bin/dpkg-query", "-W", "-f=${Package}\t${Version}\t${Architecture}\n"])
+def installed_package_keys(rootfs: Path, contract: dict) -> set[tuple[str, str, str]]:
+    out = rootfs_run(rootfs, ["/usr/bin/dpkg-query", "-W", "-f=${Package}\t${Version}\t${Architecture}\n"], contract)
     keys = set()
     for line in out.splitlines():
         parts = line.split("\t")
@@ -1254,7 +1290,7 @@ def installed_package_keys(rootfs: Path) -> set[tuple[str, str, str]]:
 
 def installed_packages(rootfs: Path, records: dict[tuple[str, str, str], dict],
                        expected_keys: set[tuple[str, str, str]], contract: dict) -> list[dict]:
-    keys = installed_package_keys(rootfs)
+    keys = installed_package_keys(rootfs, contract)
     if keys != expected_keys:
         missing = expected_keys - keys
         unexpected = keys - expected_keys
@@ -1325,7 +1361,10 @@ def symlink_chain(rootfs: Path, logical_path: str) -> tuple[list[str], Path]:
             resolved.relative_to(rootfs.resolve(strict=True))
         except ValueError as error:
             raise ProvisionError(f"driver symlink chain escapes rootfs: {logical_path}") from error
-        current = candidate
+        # Keep each lexical link above, but continue traversal from the
+        # canonical in-root target so a relative target containing '..' does
+        # not leak into the authenticated resolvedPath.
+        current = resolved
     if not current.is_file():
         raise ProvisionError(f"driver resolves to non-regular file: {logical_path}")
     return chain, current
@@ -1344,10 +1383,10 @@ def driver_record(rootfs: Path, logical_path: str, role: str, version_output: st
     }
 
 
-def runtime_dependencies(rootfs: Path, logical_paths: list[str]) -> list[dict]:
+def runtime_dependencies(rootfs: Path, logical_paths: list[str], contract: dict) -> list[dict]:
     paths: set[str] = set()
     for logical in logical_paths:
-        output = rootfs_run(rootfs, ["/usr/bin/ldd", logical])
+        output = rootfs_run(rootfs, ["/usr/bin/ldd", logical], contract)
         for line in output.splitlines():
             match = re.search(r"=>\s+(/\S+)", line)
             if match:
@@ -1364,7 +1403,8 @@ def runtime_dependencies(rootfs: Path, logical_paths: list[str]) -> list[dict]:
         chain, target = symlink_chain(rootfs, path)
         if target.is_file():
             content = target.read_bytes()
-            entries.append({"path": path, "bytes": len(content), "sha256": sha256(content)})
+            target_path = "/" + target.relative_to(rootfs).as_posix()
+            entries.append({"path": target_path, "bytes": len(content), "sha256": sha256(content)})
             for link in chain:
                 entries.append(file_entry(rootfs, link.split(" -> ", 1)[0]))
     # Same file path can appear through multiple executable mappings; retain one row.
@@ -1378,12 +1418,41 @@ def resource_manifest(rootfs: Path, resource_dir: str) -> dict:
         raise ProvisionError("Clang reported a missing resource-header directory")
     entries = []
     for path in sorted(root.rglob("*")):
-        if path.is_file() or path.is_symlink():
+        if path.is_symlink():
+            raise ProvisionError("Clang resource directory contains a symlink rejected by the A profile loader")
+        if path.is_file():
             absolute = "/" + path.relative_to(rootfs).as_posix()
             entries.append(file_entry(rootfs, absolute))
+        elif not path.is_dir():
+            raise ProvisionError("Clang resource directory contains a non-regular entry")
     if not entries:
         raise ProvisionError("Clang resource directory has no files")
     return manifest(entries)
+
+
+def frontend_resource_manifest_sha256(resource_dir: str, resource_record: dict) -> str:
+    """Recompute A's domain-separated resource digest from the recorded files."""
+    entries = resource_record.get("entries", [])
+    prefix = resource_dir.rstrip("/") + "/"
+    files = []
+    for row in entries:
+        path = row.get("path", "")
+        if not isinstance(path, str) or not path.startswith(prefix) or path == prefix:
+            raise ProvisionError("recorded resource file is outside its pinned resource directory")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(row.get("sha256", ""))):
+            raise ProvisionError("recorded resource file digest is malformed")
+        files.append({"path": "toolchain" + path, "sha256": row["sha256"]})
+    files.sort(key=lambda row: row["path"].encode("utf-8"))
+    preimage = {"files": files, "resolvedResourceDirectory": "toolchain" + resource_dir}
+    payload = canonical_json(preimage).removesuffix(b"\n")
+    return sha256(b"decomp-thing/generic-template/resource-directory/v1\0" + payload)
+
+
+def verify_recorded_resource_manifest(rootfs: Path, record: dict) -> dict:
+    actual = resource_manifest(rootfs, record["resourceDirectory"])
+    if actual != record.get("resources"):
+        raise ProvisionError("resource-directory bytes differ from the authenticated build-record manifest")
+    return actual
 
 
 def normalize_rootfs(rootfs: Path, epoch: int) -> None:
@@ -1395,7 +1464,8 @@ def normalize_rootfs(rootfs: Path, epoch: int) -> None:
         partial = target / "partial"
         if partial.is_dir() and not partial.is_symlink():
             run_checked(["sudo", "find", str(partial), "-mindepth", "1", "-maxdepth", "1", "-exec", "rm", "-rf", "--", "{}", "+"])
-    for rel in ("var/log/dpkg.log", "var/log/alternatives.log", "var/log/bootstrap.log", "var/lib/systemd/random-seed"):
+    for rel in ("var/log/dpkg.log", "var/log/alternatives.log", "var/log/bootstrap.log", "var/lib/systemd/random-seed",
+                "var/cache/ldconfig/aux-cache"):
         run_checked(["sudo", "rm", "-f", str(rootfs / rel)])
     run_checked(["sudo", "truncate", "-s", "0", str(rootfs / "etc/machine-id")])
     run_checked(["sudo", "find", str(rootfs), "-xdev", "-exec", "touch", "-h", "-d", f"@{epoch}", "{}", "+"], timeout=300)
@@ -1580,7 +1650,7 @@ def provision_rootfs(args: argparse.Namespace) -> int:
         f"--keyring={args.keyring}", "noble", str(profile_root), snapshot,
     ]
     run_checked(debootstrap_command, timeout=900)
-    bootstrap_package_keys = installed_package_keys(profile_root)
+    bootstrap_package_keys = installed_package_keys(profile_root, contract)
 
     sources = "\n".join(
         f"deb [check-valid-until=no signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] {snapshot} {suite} main universe"
@@ -1591,10 +1661,10 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     run_checked(["sudo", "install", "-m", "0644", str(sources_path), str(profile_root / "etc/apt/sources.list")])
     apt_prefix = ["/usr/bin/apt-get", "-o", "Acquire::Check-Valid-Until=false", "-o", "Acquire::Retries=0",
                   "-o", "APT::Get::AllowUnauthenticated=false", "-o", "APT::Install-Recommends=false"]
-    rootfs_run(profile_root, [*apt_prefix, "update"], timeout=600,
+    rootfs_run(profile_root, [*apt_prefix, "update"], contract, timeout=600,
                environment={"DEBIAN_FRONTEND": "noninteractive"})
     pinned_args = [f"{row['name']}={row['version']}" for row in profile["binaryRoots"]]
-    rootfs_run(profile_root, [*apt_prefix, "install", "--yes", "--no-install-recommends", "--download-only", *pinned_args], timeout=900,
+    rootfs_run(profile_root, [*apt_prefix, "install", "--yes", "--no-install-recommends", "--download-only", *pinned_args], contract, timeout=900,
                environment={"DEBIAN_FRONTEND": "noninteractive"})
     downloaded_debs = sorted((profile_root / "var/cache/apt/archives").glob("*.deb"))
     if not downloaded_debs:
@@ -1623,22 +1693,22 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     downloaded_names = {row["name"] for row in downloaded_rows}
     if not {row["name"] for row in profile["binaryRoots"]}.issubset(downloaded_names):
         raise ProvisionError("APT download-only phase did not acquire every explicitly pinned toolchain root package")
-    rootfs_run(profile_root, [*apt_prefix, "install", "--yes", "--no-install-recommends", *pinned_args], timeout=900,
+    rootfs_run(profile_root, [*apt_prefix, "install", "--yes", "--no-install-recommends", *pinned_args], contract, timeout=900,
                environment={"DEBIAN_FRONTEND": "noninteractive"})
-    rootfs_run(profile_root, [*apt_prefix, "check"], timeout=300,
+    rootfs_run(profile_root, [*apt_prefix, "check"], contract, timeout=300,
                environment={"DEBIAN_FRONTEND": "noninteractive"})
 
     package_rows = installed_packages(profile_root, metadata, expected_final_keys, contract)
     package_total = sum(row["bytes"] for row in package_rows)
     if package_total > profile["bounds"]["maxAcquisitionBytes"]:
         raise ProvisionError("installed package closure exceeds cumulative package-byte budget")
-    c_version = rootfs_run(profile_root, ["/usr/bin/clang-18", "--version"]).strip()
-    cxx_version = rootfs_run(profile_root, ["/usr/bin/clang++-18", "--version"]).strip()
+    c_version = rootfs_run(profile_root, ["/usr/bin/clang-18", "--version"], contract).strip()
+    cxx_version = rootfs_run(profile_root, ["/usr/bin/clang++-18", "--version"], contract).strip()
     tools = [
         driver_record(profile_root, "/usr/bin/clang-18", "c-driver", c_version),
         driver_record(profile_root, "/usr/bin/clang++-18", "cxx-driver", cxx_version),
     ]
-    reported_resource_dir = rootfs_run(profile_root, ["/usr/bin/clang-18", "-print-resource-dir"]).strip()
+    reported_resource_dir = rootfs_run(profile_root, ["/usr/bin/clang-18", "-print-resource-dir"], contract).strip()
     if not reported_resource_dir.startswith("/usr/lib/llvm-18/"):
         raise ProvisionError(f"Clang resource directory is outside the versioned LLVM 18 root: {reported_resource_dir}")
     resource_path = rootfs_path(profile_root, reported_resource_dir).resolve(strict=True)
@@ -1658,13 +1728,13 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     shutil.copyfile(fixture, fixture_in_root)
     probe_in_root.chmod(0o444)
     fixture_in_root.chmod(0o444)
-    libdir = rootfs_run(profile_root, ["/usr/bin/llvm-config-18", "--libdir"]).strip()
-    cxxflags = shlex.split(rootfs_run(profile_root, ["/usr/bin/llvm-config-18", "--cxxflags"]).strip())
+    libdir = rootfs_run(profile_root, ["/usr/bin/llvm-config-18", "--libdir"], contract).strip()
+    cxxflags = shlex.split(rootfs_run(profile_root, ["/usr/bin/llvm-config-18", "--cxxflags"], contract).strip())
     probe_path = "/tmp/clang18-libtooling-probe"
     compile_command = ["/usr/bin/clang++-18", *cxxflags, "--target=x86_64-pc-linux-gnu", "-std=c++17", "/tmp/clang18-libtooling-probe.cpp",
                        f"-L{libdir}", f"-Wl,-rpath,{libdir}", "-lclang-cpp", "-lLLVM-18", "-o", probe_path]
-    rootfs_run(profile_root, compile_command, timeout=600)
-    runtime_report = rootfs_run(profile_root, [probe_path, "/tmp/clang18-positive.cpp"], timeout=120)
+    rootfs_run(profile_root, compile_command, contract, timeout=600)
+    runtime_report = rootfs_run(profile_root, [probe_path, "/tmp/clang18-positive.cpp"], contract, timeout=120)
     runtime_json = json.loads(runtime_report)
     inventory = audit_langoptions(
         rootfs_path(profile_root, "/usr/lib/llvm-18/include/clang/Basic/LangOptions.def"),
@@ -1676,7 +1746,7 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     probe_checked["apiChecks"] = runtime_json["apiChecks"]
     probe_checked["fixtureSha256"] = sha256(fixture.read_bytes())
 
-    runtime_files = runtime_dependencies(profile_root, ["/usr/bin/clang-18", "/usr/bin/clang++-18", probe_path])
+    runtime_files = runtime_dependencies(profile_root, ["/usr/bin/clang-18", "/usr/bin/clang++-18", probe_path], contract)
     runtime_manifest = manifest(runtime_files)
     epoch = int(contract["environment"]["SOURCE_DATE_EPOCH"])
     rootfs_tar_path = args.workdir / f"clang-rootfs-{args.label}.tar"
@@ -1888,14 +1958,28 @@ def validate_build_record(record: dict, contract: dict) -> None:
 
     probe = record.get("probe", {})
     spec = contract["langOptions"]
+    validate_profile_compiler_identity(probe.get("compilerVersion", ""), probe.get("target", ""))
+    if probe.get("inventoryEvidence") != spec["inventoryEvidence"]:
+        raise ProvisionError("build record does not label the LangOptions inventory as a source-text scan")
     if probe.get("generatedFields") != 298 or probe.get("familyCounts") != spec["familyCounts"]:
         raise ProvisionError("build record LangOptions generated field inventory mismatch")
+    generated_names = probe.get("generatedFieldNames", [])
+    if (not isinstance(generated_names, list) or len(generated_names) != spec["generatedFieldCount"] or
+            any(not isinstance(name, str) or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None
+                for name in generated_names) or len(set(generated_names)) != spec["generatedFieldCount"]):
+        raise ProvisionError("build record generated LangOptions name manifest is incomplete or duplicated")
     if probe.get("manualFields") != spec["manualFields"] or len(probe["manualFields"]) != 28:
         raise ProvisionError("build record manual LangOptions inventory mismatch")
     if probe.get("callingConventions") != spec["callingConventions"] or len(probe["callingConventions"]) != 22:
         raise ProvisionError("build record calling-convention inventory mismatch")
     if probe.get("apiChecks") != spec["apiChecks"]:
         raise ProvisionError("build record LibTooling API inventory mismatch")
+    if probe.get("runtimeLangOptionsChecks") != spec["runtimeChecks"]:
+        raise ProvisionError("build record lacks the exact selected LangOptions runtime checks")
+    macro_observations = probe.get("macroObservations", {})
+    if any(type(macro_observations.get(key)) is not int or macro_observations[key] < 1
+           for key in ("expansionCount", "macroInfoChecks", "nonBuiltinClassifications")):
+        raise ProvisionError("build record lacks observed macro callback and MacroInfo checks")
     if any(not re.fullmatch(r"[0-9a-f]{64}", str(probe.get(field, "")))
            for field in ("binarySha256", "sourceSha256", "fixtureSha256")):
         raise ProvisionError("build record probe bytes are not authenticated")
@@ -2011,6 +2095,8 @@ def command_write_loader_input(args: argparse.Namespace) -> int:
     }:
         raise ProvisionError("A loader smoke input requires the final two-run build record")
     rootfs_dir = args.rootfs.resolve(strict=True)
+    resource_record = verify_recorded_resource_manifest(rootfs_dir, record)
+    expected_resource_sha256 = frontend_resource_manifest_sha256(record["resourceDirectory"], resource_record)
     tool = next(row for row in record["tools"] if row["role"] == "cxx-driver")
     actual_chain, actual_driver = symlink_chain(rootfs_dir, tool["path"])
     actual_resolved_path = "/" + actual_driver.relative_to(rootfs_dir).as_posix()
@@ -2064,6 +2150,7 @@ def command_write_loader_input(args: argparse.Namespace) -> int:
         "compilerSha256": tool["sha256"],
         "toolchainProfileSha256": profile_digest,
         "symlinkCount": str(len(chain)),
+        "expectedResourceManifestSha256": expected_resource_sha256,
         "runtimeCount": str(len(runtime_rows)),
         "adapterSha256": sha256_file(ROOT / "oracle/clang/18.1.3/Clang1813AProfileLoaderSmoke.java"),
         "adapterSourceRevision": "0" * 40,
@@ -2096,6 +2183,64 @@ def command_verify_image(args: argparse.Namespace) -> int:
     return 0
 
 
+def read_provenance_report(path: Path, label: str) -> dict:
+    if path.is_symlink() or not path.is_file():
+        raise ProvisionError(f"{label} provenance report is not a regular file")
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ProvisionError(f"{label} provenance report is not valid UTF-8 JSON") from error
+    if not isinstance(report, dict):
+        raise ProvisionError(f"{label} provenance report must be a JSON object")
+    return report
+
+
+def validate_provenance_probe_report(report: dict, record: dict) -> None:
+    if canonical_json(report) != canonical_json(record.get("probe")):
+        raise ProvisionError("probe provenance report differs from the reproducible build-record probe")
+
+
+def validate_provenance_loader_report(report: dict, record: dict, record_sha256: str) -> None:
+    resources = record["resources"]
+    expected_resource_sha = frontend_resource_manifest_sha256(record["resourceDirectory"], resources)
+    if (report.get("scope") != "infrastructure-loader-smoke-only" or
+            report.get("buildRecordSha256") != record_sha256 or
+            report.get("imageDigest") != record["image"]["imageDigest"] or
+            report.get("resourceDirectory") != "toolchain" + record["resourceDirectory"] or
+            report.get("resourceManifestSha256") != expected_resource_sha or
+            report.get("resourceFileCount") != resources.get("entryCount") or
+            report.get("resourceTreeBytes") != sum(row["bytes"] for row in resources.get("entries", []))):
+        raise ProvisionError("A-loader smoke report does not bind the build record, image, and resource manifest")
+    for field in ("infrastructureProfileProjectionSha256", "pathTransformSha256", "cxxDriverIdentitySha256"):
+        if not re.fullmatch(r"[0-9a-f]{64}", str(report.get(field, ""))):
+            raise ProvisionError(f"A-loader smoke report has an invalid {field}")
+    for field in ("rejectedWrongImage", "rejectedWrongCxxDriverBytes", "rejectedChangedResourceIdentity",
+                  "rejectedChangedRuntimeLibraryIdentity", "rejectedMissingResourceDirectory"):
+        if report.get(field) is not True:
+            raise ProvisionError(f"A-loader smoke report lacks the required negative check: {field}")
+
+
+def validate_provenance_negative_report(report: dict, record: dict, contract: dict,
+                                        artifact_lock_path: Path | None = None) -> None:
+    negative = contract["negativeControl"]
+    lock_path = artifact_lock_path or ROOT / negative["artifactLock"]
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    expected = lock["artifacts"][negative["artifactRole"]]
+    fixture = ROOT / negative["fixture"]
+    if (report.get("scope") != "negative-version-gate-only; not a Clang 18.1.3 identity" or
+            report.get("artifactOracleId") != negative["oracleId"] or
+            report.get("artifactLockSha256") != sha256_file(lock_path) or
+            report.get("compilerBytes") != expected["bytes"] or
+            report.get("compilerSha256") != expected["sha256"] or
+            report.get("fixtureBytes") != fixture.stat().st_size or
+            report.get("fixtureSha256") != record.get("probe", {}).get("fixtureSha256") or
+            report.get("fixtureSha256") != sha256_file(fixture) or
+            report.get("fixtureAcceptedByClang22") is not True or
+            report.get("compiler18GateRejected") != "probe compiler version or target mismatch" or
+            re.search(r"\bversion\s+22\.1\.6(?:\s|$)", report.get("compilerVersionOutput", "")) is None):
+        raise ProvisionError("Clang 22.1.6 negative smoke report does not match the locked comparator and fixture")
+
+
 def command_package_provenance(args: argparse.Namespace) -> int:
     contract = read_contract(args.contract)
     record = json.loads(args.record.read_text(encoding="utf-8"))
@@ -2108,6 +2253,13 @@ def command_package_provenance(args: argparse.Namespace) -> int:
     patch_audit = args.acquisition / "patch-audit.json"
     if not candidate.is_file() or not patch_audit.is_file() or not (args.acquisition / "downloads").is_dir():
         raise ProvisionError("provenance package is missing authenticated acquisition inputs")
+    record_sha256 = sha256_file(args.record)
+    probe_report = read_provenance_report(args.probe_report, "LibTooling probe")
+    loader_report = read_provenance_report(args.loader_report, "A-loader")
+    negative_report = read_provenance_report(args.negative_report, "Clang 22.1.6 negative")
+    validate_provenance_probe_report(probe_report, record)
+    validate_provenance_loader_report(loader_report, record, record_sha256)
+    validate_provenance_negative_report(negative_report, record, contract)
     expected_artifacts = [
         candidate, patch_audit, args.acquisition / "downloads",
         args.record, args.probe_report, args.loader_report, args.negative_report,
@@ -2222,27 +2374,14 @@ def command_negative_version_smoke(args: argparse.Namespace) -> int:
         str(args.compiler), "--no-default-config", "--target=x86_64-pc-linux-gnu",
         "-std=c++14", "-fsyntax-only", str(fixture),
     ], timeout=60)
-    api_checks = contract["langOptions"]["apiChecks"]
-    inventory = {
-        "generatedFields": contract["langOptions"]["generatedFieldCount"],
-        "familyCounts": contract["langOptions"]["familyCounts"],
-        "manualFields": contract["langOptions"]["manualFields"],
-        "manualFieldsCount": contract["langOptions"]["manualFieldsCount"],
-    }
-    report = {
-        "compilerVersion": first_line.removeprefix("Ubuntu ").removeprefix("clang version "),
-        "target": "x86_64-pc-linux-gnu",
-        "callingConventions": contract["langOptions"]["callingConventions"],
-        "apiChecks": api_checks,
-    }
     try:
-        validate_probe_report(report, inventory, contract)
+        validate_profile_compiler_identity(first_line, "x86_64-pc-linux-gnu")
     except ProvisionError as error:
         if "compiler version or target mismatch" not in str(error):
             raise
         rejected = str(error)
     else:
-        raise ProvisionError("Clang 22.1.6 unexpectedly passed the Clang 18.1.3 compiler identity gate")
+        raise ProvisionError("negative comparator was accepted as the pinned Clang 18.1.3 profile")
     result = {
         "schemaVersion": 1,
         "scope": "negative-version-gate-only; not a Clang 18.1.3 identity",

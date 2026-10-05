@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import re
 import shutil
 import sys
 import tarfile
@@ -49,6 +50,8 @@ class ProvisioningNegativeTests(unittest.TestCase):
         }
         file_manifest = provision.manifest([{"path": "/usr/lib/llvm-18/lib/libclang-cpp.so",
                                              "bytes": 1, "sha256": digest}])
+        resources = provision.manifest([{"path": "/usr/lib/llvm-18/lib/clang/18.1.3/include/stddef.h",
+                                         "bytes": 1, "sha256": digest}])
         repositories = [{
             "suite": suite,
             "inRelease": f"{profile['snapshotBase']}dists/{suite}/InRelease",
@@ -57,12 +60,16 @@ class ProvisioningNegativeTests(unittest.TestCase):
         } for suite in profile["suites"]]
         probe = {
             "compilerVersion": "18.1.3", "target": "x86_64-pc-linux-gnu",
+            "inventoryEvidence": self.contract["langOptions"]["inventoryEvidence"],
             "generatedFields": self.contract["langOptions"]["generatedFieldCount"],
             "familyCounts": self.contract["langOptions"]["familyCounts"],
             "generatedFieldNames": [f"Field{i}" for i in range(298)],
             "manualFields": self.contract["langOptions"]["manualFields"],
             "callingConventions": self.contract["langOptions"]["callingConventions"],
             "apiChecks": self.contract["langOptions"]["apiChecks"],
+            "runtimeLangOptionsChecks": self.contract["langOptions"]["runtimeChecks"],
+            "macroObservations": {"expansionCount": 1, "macroInfoChecks": 1,
+                                   "nonBuiltinClassifications": 1},
             "definitionSha256": digest, "headerSha256": digest,
             "sourceSha256": digest, "binarySha256": digest, "fixtureSha256": digest,
         }
@@ -87,11 +94,11 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 "upstreamKeyring": {"bytes": 1, "sha256": digest},
             },
             "patchAudit": {"status": "compatible", "patchCount": 0,
-                            "patchInventorySha256": digest, "relevantFileCount": 32,
+                            "patchInventorySha256": digest, "relevantFileCount": 34,
                             "relevantFileManifestSha256": digest},
             "packages": packages, "downloadedPackages": [dict(row) for row in packages],
             "tools": [tool("c-driver"), tool("cxx-driver")],
-            "runtime": file_manifest, "resources": file_manifest,
+            "runtime": file_manifest, "resources": resources,
             "resourceDirectory": "/usr/lib/llvm-18/lib/clang/18.1.3",
             "probe": probe, "environment": self.contract["environment"],
             "recipe": provision.recipe_identity(),
@@ -115,6 +122,125 @@ class ProvisioningNegativeTests(unittest.TestCase):
             "libclang-cpp18-dev", "libclang-cpp18",
         })
 
+    def test_workflow_actions_are_pinned_to_immutable_commit_shas(self):
+        workflow = (ROOT / ".github/workflows/generic-template-toolchain.yml").read_text(encoding="utf-8")
+        actions = re.findall(r"^\s*uses:\s*([^\s#]+)", workflow, flags=re.MULTILINE)
+        self.assertTrue(actions)
+        self.assertTrue(all(re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", action) for action in actions), actions)
+
+    def test_rootfs_command_uses_the_selected_contract_environment(self):
+        contract = {"environment": {"LC_ALL": "C", "TZ": "UTC", "SOURCE_DATE_EPOCH": "7",
+                                     "PATH": "/custom/bin"}}
+        completed = type("Result", (), {"stdout": "ok"})()
+        with mock.patch.object(provision, "run_checked", return_value=completed) as run:
+            self.assertEqual(provision.rootfs_run(Path("/rootfs"), ["/usr/bin/env"], contract), "ok")
+        command = run.call_args.args[0]
+        self.assertIn("PATH=/custom/bin", command)
+        self.assertIn("SOURCE_DATE_EPOCH=7", command)
+
+    def test_driver_symlink_resolved_path_is_canonical_but_chain_is_preserved(self):
+        with self.temporary_directory() as temp:
+            rootfs = Path(temp) / "rootfs"
+            target = rootfs / "usr/lib/llvm-18/bin/clang++"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"clang++ bytes")
+            logical = rootfs / "usr/bin/clang++-18"
+            logical.parent.mkdir(parents=True)
+            logical.symlink_to("../lib/llvm-18/bin/clang++")
+            row = provision.driver_record(rootfs, "/usr/bin/clang++-18", "cxx-driver", "clang version 18.1.3\n")
+            self.assertEqual(row["resolvedPath"], "/usr/lib/llvm-18/bin/clang++")
+            self.assertEqual(row["symlinkChain"], ["/usr/bin/clang++-18 -> ../lib/llvm-18/bin/clang++"])
+
+    def test_runtime_manifest_binds_resolved_library_bytes_and_symlink_rows(self):
+        with self.temporary_directory() as temp:
+            rootfs = Path(temp) / "rootfs"
+            library_dir = rootfs / "usr/lib/llvm-18/lib"
+            library_dir.mkdir(parents=True)
+            for name, content in (("libclang-cpp.so.18.1", b"clang library"), ("libLLVM-18.so.1", b"llvm library")):
+                (library_dir / name).write_bytes(content)
+            (library_dir / "libclang-cpp.so").symlink_to("libclang-cpp.so.18.1")
+            (library_dir / "libLLVM-18.so").symlink_to("libLLVM-18.so.1")
+            rows = provision.runtime_dependencies(rootfs, [], self.contract)
+            by_path = {row["path"]: row for row in rows}
+            self.assertEqual(by_path["/usr/lib/llvm-18/lib/libclang-cpp.so.18.1"]["sha256"],
+                             provision.sha256(b"clang library"))
+            self.assertEqual(by_path["/usr/lib/llvm-18/lib/libclang-cpp.so"]["sha256"],
+                             provision.sha256(b"symlink\0libclang-cpp.so.18.1"))
+
+    def test_loader_resource_manifest_is_rechecked_before_emitting_input(self):
+        record = self.valid_build_record()
+        with self.temporary_directory() as temp:
+            rootfs = Path(temp) / "rootfs"
+            resource_file = rootfs / "usr/lib/llvm-18/lib/clang/18.1.3/include/stddef.h"
+            resource_file.parent.mkdir(parents=True)
+            resource_file.write_bytes(b"resource header")
+            record["resources"] = provision.resource_manifest(rootfs, record["resourceDirectory"])
+            self.assertEqual(provision.verify_recorded_resource_manifest(rootfs, record), record["resources"])
+            resource_file.write_bytes(b"changed resource header")
+            with self.assertRaisesRegex(provision.ProvisionError, "resource-directory bytes differ"):
+                provision.verify_recorded_resource_manifest(rootfs, record)
+
+    def test_normalization_removes_inode_bearing_ldconfig_aux_cache(self):
+        with self.temporary_directory() as temp:
+            rootfs = Path(temp) / "rootfs"
+            rootfs.mkdir()
+            with mock.patch.object(provision, "run_checked") as run:
+                provision.normalize_rootfs(rootfs, 1714003200)
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertTrue(any(str(rootfs / "var/cache/ldconfig/aux-cache") in command for command in commands))
+
+    def test_provenance_reports_must_bind_to_build_record_and_locked_comparator(self):
+        record = self.valid_build_record()
+        record["probe"]["fixtureSha256"] = provision.sha256_file(
+            ROOT / self.contract["negativeControl"]["fixture"])
+        provision.validate_provenance_probe_report(dict(record["probe"]), record)
+
+        record_sha = "b" * 64
+        resource_digest = provision.frontend_resource_manifest_sha256(
+            record["resourceDirectory"], record["resources"])
+        loader_report = {
+            "scope": "infrastructure-loader-smoke-only",
+            "buildRecordSha256": record_sha,
+            "imageDigest": record["image"]["imageDigest"],
+            "resourceDirectory": "toolchain" + record["resourceDirectory"],
+            "resourceFileCount": record["resources"]["entryCount"],
+            "resourceTreeBytes": sum(row["bytes"] for row in record["resources"]["entries"]),
+            "resourceManifestSha256": resource_digest,
+            "infrastructureProfileProjectionSha256": "c" * 64,
+            "pathTransformSha256": "d" * 64,
+            "cxxDriverIdentitySha256": "e" * 64,
+            "rejectedWrongImage": True,
+            "rejectedWrongCxxDriverBytes": True,
+            "rejectedChangedResourceIdentity": True,
+            "rejectedChangedRuntimeLibraryIdentity": True,
+            "rejectedMissingResourceDirectory": True,
+        }
+        provision.validate_provenance_loader_report(loader_report, record, record_sha)
+        loader_report["buildRecordSha256"] = "f" * 64
+        with self.assertRaisesRegex(provision.ProvisionError, "does not bind the build record"):
+            provision.validate_provenance_loader_report(loader_report, record, record_sha)
+
+        lock_path = ROOT / self.contract["negativeControl"]["artifactLock"]
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        artifact = lock["artifacts"][self.contract["negativeControl"]["artifactRole"]]
+        fixture = ROOT / self.contract["negativeControl"]["fixture"]
+        negative = {
+            "scope": "negative-version-gate-only; not a Clang 18.1.3 identity",
+            "artifactOracleId": self.contract["negativeControl"]["oracleId"],
+            "artifactLockSha256": provision.sha256_file(lock_path),
+            "compilerBytes": artifact["bytes"],
+            "compilerSha256": artifact["sha256"],
+            "compilerVersionOutput": "Ubuntu clang version 22.1.6",
+            "fixtureBytes": fixture.stat().st_size,
+            "fixtureSha256": record["probe"]["fixtureSha256"],
+            "fixtureAcceptedByClang22": True,
+            "compiler18GateRejected": "probe compiler version or target mismatch",
+        }
+        provision.validate_provenance_negative_report(negative, record, self.contract)
+        negative["compilerSha256"] = "0" * 64
+        with self.assertRaisesRegex(provision.ProvisionError, "does not match the locked comparator"):
+            provision.validate_provenance_negative_report(negative, record, self.contract)
+
     def test_deb822_rejects_duplicate_fields(self):
         with self.assertRaises(provision.ProvisionError):
             provision.parse_deb822("Package: llvm\nPackage: forged\n")
@@ -130,6 +256,14 @@ class ProvisioningNegativeTests(unittest.TestCase):
             with mock.patch.object(provision, "MAX_INDEX_LINE_BYTES", 4):
                 with self.assertRaisesRegex(provision.ProvisionError, "oversized control line"):
                     list(provision.iter_compressed_index(path))
+
+    def test_signed_empty_package_index_is_allowed_but_empty_control_document_is_not(self):
+        with self.temporary_directory() as temp:
+            path = Path(temp) / "Packages.gz"
+            path.write_bytes(gzip.compress(b""))
+            self.assertEqual(list(provision.iter_compressed_index(path)), [])
+        with self.assertRaisesRegex(provision.ProvisionError, "empty Debian control/index document"):
+            provision.parse_deb822("")
 
     def test_inrelease_cleartext_unescapes_dash_prefixed_lines(self):
         data = ("-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA256\n\n"
@@ -175,6 +309,25 @@ class ProvisioningNegativeTests(unittest.TestCase):
         )[0]
         with self.assertRaisesRegex(provision.ProvisionError, "malformed SHA256 row"):
             provision.release_sha256_table(release)
+
+    def test_source_checksums_accept_standard_empty_field_value_line(self):
+        digest = "c" * 64
+        source = provision.parse_deb822(
+            "Package: llvm-toolchain-18\nChecksums-Sha256:\n  " + digest + " 456 llvm-toolchain-18.tar.xz\n"
+        )[0]
+        self.assertEqual(
+            provision.source_file_rows(source),
+            [{"name": "llvm-toolchain-18.tar.xz", "bytes": 456, "sha256": digest}],
+        )
+
+    def test_source_checksums_reject_an_internal_blank_row(self):
+        digest = "c" * 64
+        source = provision.parse_deb822(
+            "Package: llvm-toolchain-18\nChecksums-Sha256:\n  " + digest +
+            " 456 first.tar.xz\n \n  " + "d" * 64 + " 789 second.tar.xz\n"
+        )[0]
+        with self.assertRaisesRegex(provision.ProvisionError, "malformed source Checksums-Sha256 row"):
+            provision.source_file_rows(source)
 
     def test_gpgv_primary_fingerprint_is_not_signature_class(self):
         signing = "A" * 40
@@ -304,11 +457,29 @@ class ProvisioningNegativeTests(unittest.TestCase):
     def test_probe_report_rejects_real_22_1_6_identity(self):
         report = {"compilerVersion": "22.1.6", "target": "x86_64-pc-linux-gnu",
                   "callingConventions": self.contract["langOptions"]["callingConventions"],
-                  "apiChecks": self.contract["langOptions"]["apiChecks"]}
+                  "apiChecks": self.contract["langOptions"]["apiChecks"],
+                  "runtimeLangOptionsChecks": self.contract["langOptions"]["runtimeChecks"],
+                  "macroObservations": {"expansionCount": 1, "macroInfoChecks": 1,
+                                         "nonBuiltinClassifications": 1}}
         inventory = {"generatedFields": 298, "familyCounts": self.contract["langOptions"]["familyCounts"],
                      "manualFields": self.contract["langOptions"]["manualFields"],
-                     "manualFieldsCount": 28}
+                     "manualFieldsCount": 28,
+                     "inventoryEvidence": self.contract["langOptions"]["inventoryEvidence"]}
         with self.assertRaisesRegex(provision.ProvisionError, "compiler version or target mismatch"):
+            provision.validate_probe_report(report, inventory, self.contract)
+
+    def test_probe_report_rejects_missing_runtime_macro_observations(self):
+        report = {"compilerVersion": "18.1.3", "target": "x86_64-pc-linux-gnu",
+                  "callingConventions": self.contract["langOptions"]["callingConventions"],
+                  "apiChecks": self.contract["langOptions"]["apiChecks"],
+                  "runtimeLangOptionsChecks": self.contract["langOptions"]["runtimeChecks"],
+                  "macroObservations": {"expansionCount": 1, "macroInfoChecks": 1,
+                                         "nonBuiltinClassifications": 0}}
+        inventory = {"generatedFields": 298, "familyCounts": self.contract["langOptions"]["familyCounts"],
+                     "manualFields": self.contract["langOptions"]["manualFields"],
+                     "manualFieldsCount": 28,
+                     "inventoryEvidence": self.contract["langOptions"]["inventoryEvidence"]}
+        with self.assertRaisesRegex(provision.ProvisionError, "macro expansion and MacroInfo classification"):
             provision.validate_probe_report(report, inventory, self.contract)
 
     def test_build_record_rejects_missing_root_package(self):
@@ -354,7 +525,20 @@ class ProvisioningNegativeTests(unittest.TestCase):
             header.write_text("class LangOptions : public LangOptionsBase {\n" + members + "\n};\n", encoding="utf-8")
             inventory = provision.audit_langoptions(definition, header, self.contract)
             self.assertEqual(inventory["generatedFields"], 298)
+            self.assertEqual(inventory["inventoryEvidence"], self.contract["langOptions"]["inventoryEvidence"])
             self.assertEqual(inventory["manualFieldsCount"], 28)
+            report = {
+                "compilerVersion": "18.1.3",
+                "target": "x86_64-pc-linux-gnu",
+                "callingConventions": self.contract["langOptions"]["callingConventions"],
+                "apiChecks": self.contract["langOptions"]["apiChecks"],
+                "runtimeLangOptionsChecks": self.contract["langOptions"]["runtimeChecks"],
+                "macroObservations": {"expansionCount": 1, "macroInfoChecks": 1,
+                                       "nonBuiltinClassifications": 1},
+            }
+            checked = provision.validate_probe_report(report, inventory, self.contract)
+            self.assertEqual(checked["inventoryEvidence"], self.contract["langOptions"]["inventoryEvidence"])
+            self.assertEqual(checked["runtimeLangOptionsChecks"], self.contract["langOptions"]["runtimeChecks"])
 
     def test_source_patch_audit_emits_rejection_for_contract_file_difference(self):
         with self.temporary_directory() as temp:
@@ -374,6 +558,32 @@ class ProvisioningNegativeTests(unittest.TestCase):
             self.assertEqual(result["status"], "incompatible")
             self.assertEqual(result["decision"], "reject-distro-profile")
             self.assertTrue((base / "patch-audit.json").is_file())
+
+    def test_source_patch_audit_covers_tooling_and_recursive_visitor_headers(self):
+        tooling_header = "clang/include/clang/Tooling/Tooling.h"
+        visitor_header = "clang/include/clang/AST/RecursiveASTVisitor.h"
+        self.assertIn(tooling_header, self.contract["relevantFiles"])
+        self.assertIn(visitor_header, self.contract["relevantFiles"])
+        self.assertEqual(len(self.contract["relevantFiles"]), 34)
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            package = base / "package"
+            upstream = base / "upstream"
+            (package / "debian/patches").mkdir(parents=True)
+            (package / "debian/patches/series").write_text("", encoding="utf-8")
+            for rel in self.contract["relevantFiles"]:
+                package_path, upstream_path = package / rel, upstream / rel
+                package_path.parent.mkdir(parents=True, exist_ok=True)
+                upstream_path.parent.mkdir(parents=True, exist_ok=True)
+                package_path.write_bytes(b"identical source bytes")
+                upstream_path.write_bytes(b"identical source bytes")
+            (package / visitor_header).write_bytes(b"changed visitor semantics")
+            with self.assertRaises(provision.ProvisionError):
+                provision.audit_patches(package, upstream, base / "patch-audit.json", self.contract)
+            result = json.loads((base / "patch-audit.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["relevantFileCount"], 34)
+            self.assertEqual([row["path"] for row in result["unresolvedContractRelevantDifferences"]],
+                             [visitor_header])
 
     def test_oci_image_verifier_rejects_unrecorded_blob(self):
         with self.temporary_directory() as temp:

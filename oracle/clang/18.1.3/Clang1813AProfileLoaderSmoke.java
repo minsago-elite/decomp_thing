@@ -33,6 +33,9 @@ public final class Clang1813AProfileLoaderSmoke {
         FullTreeGenericTemplateFrontendProfileV1.MAX_RESOURCE_FILES,
         FullTreeGenericTemplateFrontendProfileV1.MAX_RESOURCE_TREE_BYTES,
         FullTreeGenericTemplateFrontendProfileV1.MAX_RESOURCE_MANIFEST_BYTES);
+    if (!resources.getSha256().equals(required(input, "expectedResourceManifestSha256"))) {
+      throw new IllegalStateException("A profile resource bytes differ from the authenticated build-record manifest");
+    }
 
     int count = Integer.parseInt(required(input, "symlinkCount"));
     List<Pair<String, String>> chain = new ArrayList<>();
