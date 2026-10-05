@@ -18,14 +18,22 @@ authorization. No alternate proxy, mirror, browser download, mutable archive
 metadata, or other route was used. The local environment therefore did not
 authenticate any Ubuntu package bytes.
 
-The official LLVM downloads page identifies the 18.1 release signatures with
-short key ID `345AD05D`, but the exact public-key bytes and full fingerprint
-were not obtained. The contract currently names a key bundled for the 22.1.6
-oracle, which cannot authenticate the 2024 Clang 18.1.3 release. A direct
-public-key lookup at `https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x345AD05D`
-returned HTTP 403. No alternate key source or proxy was used; upstream source
-signature verification is therefore blocked and the configured key must not be
-treated as valid provenance.
+The official LLVM downloads page links the 18.1.3 release to GitHub. Its
+expanded asset listing contains the `llvm-project-18.1.3.src.tar.xz` archive,
+the matching `.sig`, and an AArch64 Linux bundle; it lists no x86-64 Linux
+bundle. The `345AD05D` text on the downloads page is attached to the separate
+LLVM 11.0.1 legacy entry, so it is not evidence for the 18.1.3 signer. The
+direct official asset URL
+`https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.3/llvm-project-18.1.3.src.tar.xz.sig`
+was denied by the web tool as a restricted URL. I did not retry it through
+another route. The exact public-key bytes and full signer fingerprint remain
+unverified. The contract currently names a key bundled for the 22.1.6 oracle,
+which cannot authenticate the 2024 Clang 18.1.3 release. A direct public-key
+lookup at
+`https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x345AD05D` returned
+HTTP 403. No alternate key source or proxy was used; upstream source signature
+verification is therefore blocked and the configured key must not be treated
+as valid provenance.
 
 An independent review supplied the Tom Stellard key suffix
 `A2C794A986419D8A` as a research lead. It is not a full fingerprint, key
