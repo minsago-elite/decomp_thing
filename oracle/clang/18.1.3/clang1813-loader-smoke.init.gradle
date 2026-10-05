@@ -1,0 +1,26 @@
+gradle.projectsEvaluated {
+    def project = gradle.rootProject
+    project.tasks.register("clang1813AProfileLoaderSmoke") {
+        dependsOn project.tasks.named("classes")
+        doLast {
+            def source = new File(project.rootDir, "oracle/clang/18.1.3/Clang1813AProfileLoaderSmoke.java")
+            def input = project.findProperty("clang1813.loaderInput")
+            if (input == null || !new File(input.toString()).isFile()) {
+                throw new GradleException("-Pclang1813.loaderInput must name the generated smoke input")
+            }
+            def classesDir = new File(project.buildDir, "clang1813-loader-smoke/classes")
+            classesDir.mkdirs()
+            def runtimeClasspath = project.sourceSets.main.runtimeClasspath
+            def javac = new File(System.getProperty("java.home"), "bin/javac")
+            project.exec {
+                commandLine javac.absolutePath, "-encoding", "UTF-8", "-classpath",
+                    runtimeClasspath.asPath, "-d", classesDir.absolutePath, source.absolutePath
+            }
+            project.javaexec {
+                classpath = project.files(classesDir, runtimeClasspath)
+                mainClass.set("Clang1813AProfileLoaderSmoke")
+                args input.toString()
+            }
+        }
+    }
+}
