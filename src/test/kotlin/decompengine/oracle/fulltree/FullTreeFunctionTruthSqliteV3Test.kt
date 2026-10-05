@@ -68,8 +68,20 @@ class FullTreeFunctionTruthSqliteV3Test {
         assertFailsWith<IllegalArgumentException> {
             fullTreeFunctionTruthV3AdmitWorkingSet(observed, truth, projected, retainedControl, exactWorkingSet - 1L)
         }
+        assertEquals(exactWorkingSet, fullTreeFunctionTruthV3AdmitShardWorkingSet(
+            observed, truth, projected, retainedControl, exactWorkingSet + 100L, exactWorkingSet,
+        ))
+        assertFailsWith<IllegalArgumentException> {
+            fullTreeFunctionTruthV3AdmitShardWorkingSet(
+                observed, truth, projected, retainedControl, exactWorkingSet + 100L, exactWorkingSet - 1L,
+            )
+        }
+        fullTreeFunctionTruthV3CheckResidentBytes(95L, 100L, 200L, 100L)
+        assertFailsWith<IllegalArgumentException> {
+            fullTreeFunctionTruthV3CheckResidentBytes(95L, 101L, 200L, 100L)
+        }
 
-        assertEquals(10L to 10L, fullTreeFunctionTruthV3AccumulateShardBudget(0L, 0L, 6L, 4L, 10L, 10L))
+        assertEquals(6L to 4L, fullTreeFunctionTruthV3AccumulateShardBudget(0L, 0L, 6L, 4L, 10L, 10L))
         assertEquals(10L to 10L, fullTreeFunctionTruthV3AccumulateShardBudget(6L, 4L, 4L, 6L, 10L, 10L))
         assertFailsWith<IllegalArgumentException> {
             // Each phase is below the authenticated cap, but their accumulated wall time is not.
@@ -79,13 +91,43 @@ class FullTreeFunctionTruthSqliteV3Test {
             // Cumulative CPU is checked independently of wall time.
             fullTreeFunctionTruthV3AccumulateShardBudget(0L, 7L, 0L, 4L, 10L, 10L)
         }
+
+        var wallNanos = 0L
+        var cpuNanos = 0L
+        val ledger = FullTreeFunctionTruthV3ShardPhaseLedger(
+            maximumWallNanos = 10L,
+            maximumCpuNanos = 10L,
+            wallClock = { wallNanos },
+            cpuClock = { cpuNanos },
+        )
+        FullTreeOracleOperationCheckpoint.withCheckpoint({}, ledger) {
+            FullTreeOracleOperationCheckpoint.withShardPhase("nested-shard") {
+                wallNanos += 2L
+                cpuNanos += 2L
+                FullTreeOracleOperationCheckpoint.withShardPhase("nested-shard") {
+                    assertEquals(1, ledger.activeShardCount())
+                    wallNanos += 3L
+                    cpuNanos += 3L
+                }
+            }
+            FullTreeOracleOperationCheckpoint.withShardPhase("nested-shard") {
+                wallNanos += 5L
+                cpuNanos += 5L
+            }
+            assertFailsWith<IllegalArgumentException>("nested callbacks share one cumulative shard wall/CPU budget") {
+                FullTreeOracleOperationCheckpoint.withShardPhase("nested-shard") {
+                    wallNanos += 1L
+                    cpuNanos += 1L
+                }
+            }
+        }
     }
 
     @Test
     fun `truth v3 rederives observation census and preserves one score row per RVA`() =
         inControlTemporaryDirectory { root ->
-            val fixture = createCompilerFixture(root)
-            val limits = tightScratchLimits()
+            val fixture = createCompilerFixture(root, perShardResidentBytes = 1792L * 1024L * 1024L)
+            val limits = tightScratchLimits().copy(maximumRetainedWorkingSetBytes = 2L * 1024L * 1024L * 1024L)
             val first = FullTreeFunctionTruthSqliteV3.generateAndPublish(
                 richArtifact = fixture.rich,
                 strippedArtifact = fixture.stripped,
@@ -156,6 +198,44 @@ class FullTreeFunctionTruthSqliteV3Test {
             assertTrue(first.counts.sourceEntities > 0L, "compiler fixture must exercise source census projection")
             assertCensusCounts(first.root, index)
             assertConcreteTemplateShapes(first.root)
+            val wholeTruthEntities = Math.addExact(
+                Math.addExact(first.counts.functions.elfRvas, first.counts.functions.dwarfOnlyRvas),
+                first.counts.functions.nonEmittedUnique,
+            )
+            val exactWholeCombined = fullTreeFunctionTruthV3CombinedEntityCount(
+                wholeTruthEntities,
+                first.counts.sourceEntities,
+                Math.addExact(wholeTruthEntities, first.counts.sourceEntities),
+            )
+            assertEquals(Math.addExact(wholeTruthEntities, first.counts.sourceEntities), exactWholeCombined)
+            assertFailsWith<IllegalArgumentException>("one fewer whole-run entity must reject actual V3 evidence") {
+                fullTreeFunctionTruthV3CombinedEntityCount(
+                    wholeTruthEntities,
+                    first.counts.sourceEntities,
+                    exactWholeCombined - 1L,
+                )
+            }
+            index.controlArray("shards").forEach { raw ->
+                val record = raw as JsonObject
+                val shard = parseControlObject(first.root.resolve(record.controlString("path")))
+                val counts = shard.controlObject("counts")
+                val shardTruthEntities = Math.addExact(
+                    Math.addExact(counts.controlLong("elfRvas"), counts.controlLong("dwarfOnlyRvas")),
+                    counts.controlLong("nonEmittedUnique"),
+                )
+                val exactPerShardCombined = Math.addExact(shardTruthEntities, counts.controlLong("sourceEntities"))
+                assertEquals(
+                    exactPerShardCombined,
+                    fullTreeFunctionTruthV3CombinedEntityCount(
+                        shardTruthEntities, counts.controlLong("sourceEntities"), exactPerShardCombined,
+                    ),
+                )
+                assertFailsWith<IllegalArgumentException>("one fewer per-shard entity must reject actual V3 evidence") {
+                    fullTreeFunctionTruthV3CombinedEntityCount(
+                        shardTruthEntities, counts.controlLong("sourceEntities"), exactPerShardCombined - 1L,
+                    )
+                }
+            }
 
             val scoreRvas = HashSet<String>()
             val scoreRowCount = index.controlArray("shards").sumOf { raw ->
@@ -640,7 +720,7 @@ class FullTreeFunctionTruthSqliteV3Test {
         return JsonObject(counts.mapValues { JsonPrimitive(it.value) })
     }
 
-    private fun createCompilerFixture(root: Path): V3Fixture {
+    private fun createCompilerFixture(root: Path, perShardResidentBytes: Long? = null): V3Fixture {
         val sourceRoot = Path.of(System.getProperty("user.dir"))
             .resolve("src/test/resources/oracle/inline-template-identity-v1").toAbsolutePath().normalize()
         val compiler = resolveCompiler("GXX", listOf("g++", "g++-14", "g++-13"))
@@ -695,6 +775,13 @@ class FullTreeFunctionTruthSqliteV3Test {
                 put("richArtifactSha256", JsonPrimitive(richHash))
                 put("strippedArtifactSha256", JsonPrimitive(strippedHash))
             }))
+            if (perShardResidentBytes != null) {
+                put("bounds", JsonObject(original.document.controlObject("bounds").toMutableMap().apply {
+                    put("perShard", JsonObject(original.document.controlObject("bounds").controlObject("perShard").toMutableMap().apply {
+                        put("maximumResidentBytes", JsonPrimitive(perShardResidentBytes))
+                    }))
+                }))
+            }
         })
         val scope = AuthenticatedFullTreeScope(
             document = scopeDocument,
