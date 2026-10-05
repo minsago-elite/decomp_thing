@@ -554,6 +554,10 @@ class FullTreeFunctionTruthSqliteV3Test {
         assertTrue(Files.list(path).use { it.findAny().isEmpty })
     }
 
+    private fun privateDirectory(path: Path): Path = Files.createDirectory(path).also {
+        Files.setPosixFilePermissions(it, PosixFilePermissions.fromString("rwx------"))
+    }
+
     private fun v3TreeBytes(root: Path): Map<String, List<Byte>> = Files.walk(root).use { paths ->
         paths.filter { Files.isRegularFile(it, LinkOption.NOFOLLOW_LINKS) }.sorted()
             .toList().associate { root.relativize(it).toString() to Files.readAllBytes(it).toList() }
