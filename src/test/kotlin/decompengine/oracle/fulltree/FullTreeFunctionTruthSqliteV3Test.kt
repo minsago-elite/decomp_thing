@@ -30,6 +30,16 @@ class FullTreeFunctionTruthSqliteV3Test {
         assertFailsWith<IllegalArgumentException> {
             fullTreeFunctionTruthV3CombinedEntityCount(4L, 7L, 10L)
         }
+        assertTrue(fullTreeFunctionTruthV3HasOnlyEmittedRvaLinks(
+            listOf("emitted-rva-from-another-shard"), setOf("emitted-rva-from-another-shard"),
+        ), "a source link may name an emitted score row owned by another shard")
+        assertFalse(fullTreeFunctionTruthV3HasOnlyEmittedRvaLinks(
+            listOf("rva-absent-from-full-run"), setOf("emitted-rva-from-another-shard"),
+        ), "a source link must not name an off-run RVA")
+        assertEquals(10L, FullTreeFunctionTruthSqliteV3.reserveV3OutputBytes(0L, 10L, 10L))
+        assertFailsWith<IllegalArgumentException> {
+            FullTreeFunctionTruthSqliteV3.reserveV3OutputBytes(0L, 10L, 9L)
+        }
 
         val nestedAtLimit = fullTreeFunctionTruthV3NestedScratchPlan(
             remainingBytes = 10L,
@@ -98,7 +108,7 @@ class FullTreeFunctionTruthSqliteV3Test {
                 scope = fixture.scope,
                 scratchParent = fixture.scratch,
                 outputRoot = root.resolve("truth-v3-second"),
-                limits = limits,
+                limits = limits.copy(maximumOutputBytes = first.outputBytes),
             )
 
             assertEquals(first.index, second.index)
@@ -220,6 +230,8 @@ class FullTreeFunctionTruthSqliteV3Test {
 
             assertSelfConsistentMutationsRejected(first, root)
             assertV3RawInputPathReplacementIsDetected(fixture, root)
+            assertV3CandidateSnapshotRejectsRaces(first, root)
+            assertV3ObservationSnapshotRejectsTreeSwap(fixture, root)
             assertTrue(
                 fixture.compilerInputVectorMatches,
                 "compiler fixture drift is not pinned: compiler=${fixture.compilerIdentity}, " +
@@ -349,6 +361,103 @@ class FullTreeFunctionTruthSqliteV3Test {
             assertFailsWith<IllegalArgumentException> {
                 guards.verifyUnchanged("post-derivation publication boundary regression")
             }
+        }
+    }
+
+    private fun assertV3CandidateSnapshotRejectsRaces(
+        expected: FullTreeFunctionTruthV3Generation,
+        root: Path,
+    ) {
+        val maximumFiles = expected.index.controlArray("shards").size.toLong() + 2L
+        fun pinned(label: String): Pair<Path, FullTreeFunctionTruthSqliteV3.V3StableTreeSnapshot> {
+            val candidate = copyTree(expected.root, root.resolve("truth-v3-$label-original"))
+            val identity = FullTreeFunctionTruthSqliteV3.V3StableTreeSnapshot.captureIdentity(
+                candidate, setOf("shards"), maximumFiles, expected.outputBytes, {},
+                setOf("index.json", "exclusions.json"),
+            )
+            val snapshot = identity.createSnapshot(
+                candidate, root.resolve("truth-v3-$label-pinned"), setOf("shards"), null, {}, expected.outputBytes,
+            )
+            return candidate to snapshot
+        }
+
+        val (rewritten, rewrittenSnapshot) = pinned("rewrite-race")
+        var rewrote = false
+        FullTreeFunctionTruthSqliteV3.compareV3CandidateTreeBytes(
+            rewrittenSnapshot.root, expected.root, maximumFiles, expected.outputBytes,
+        ) { member ->
+            if (member == "exclusions.json" && !rewrote) {
+                makeTreeWritable(rewritten)
+                val index = rewritten.resolve("index.json")
+                val bytes = Files.readAllBytes(index)
+                bytes[0] = if (bytes[0] == '{'.code.toByte()) '['.code.toByte() else '{'.code.toByte()
+                Files.write(index, bytes)
+                rewrote = true
+            }
+        }
+        assertTrue(rewrote, "a later candidate comparison must overlap the in-place rewrite")
+        assertFailsWith<FullTreeFunctionTruthV3Exception>("the earlier-compared member remains pinned through final validation") {
+            rewrittenSnapshot.verifyOriginalUnchanged()
+        }
+
+        val (swapped, swappedSnapshot) = pinned("path-swap-race")
+        var swappedMember = false
+        FullTreeFunctionTruthSqliteV3.compareV3CandidateTreeBytes(
+            swappedSnapshot.root, expected.root, maximumFiles, expected.outputBytes,
+        ) { member ->
+            if (member == "exclusions.json" && !swappedMember) {
+                makeTreeWritable(swapped)
+                val shard = Files.list(swapped.resolve("shards")).use { it.findFirst().orElseThrow() }
+                val saved = Files.readAllBytes(shard)
+                val displaced = shard.resolveSibling("${shard.fileName}.displaced")
+                Files.move(shard, displaced, StandardCopyOption.ATOMIC_MOVE)
+                Files.write(shard, saved)
+                swappedMember = true
+            }
+        }
+        assertTrue(swappedMember, "a later candidate comparison must overlap the path swap")
+        assertFailsWith<FullTreeFunctionTruthV3Exception>("byte-identical path replacement must retain its original file identity") {
+            swappedSnapshot.verifyOriginalUnchanged()
+        }
+    }
+
+    private fun assertV3ObservationSnapshotRejectsTreeSwap(fixture: V3Fixture, root: Path) {
+        val limits = tightScratchLimits()
+        val identity = FullTreeFunctionTruthSqliteV3.V3StableTreeSnapshot.captureIdentity(
+            fixture.observationV2Root,
+            setOf("outputs", "checkpoints"),
+            Math.addExact(Math.multiplyExact(limits.observationV2.run.maximumShards.toLong(), 2L), 2L),
+            minOf(limits.maximumScratchBytes, limits.truth.maximumScratchBytes, limits.observationV2.maximumScratchBytes),
+            {},
+            setOf("run.json", "index.json"),
+        )
+        val validationScratch = privateDirectory(root.resolve("observation-v2-snapshot-validation-scratch"))
+        val validated = FullTreeFunctionObservationV2RunPublisher.loadAndValidate(
+            candidateRoot = fixture.observationV2Root,
+            expectedIndexArtifactSha256 = fixture.observationV2IndexSha256,
+            richArtifact = fixture.rich,
+            inventoryPath = fixture.inventoryPath,
+            scope = fixture.scope,
+            scratchParent = validationScratch,
+            limits = limits.observationV2,
+        )
+        assertEquals(fixture.observationV2IndexSha256, validated.binding.indexArtifactSha256)
+        identity.verifyIdentity()
+        val pinned = identity.createSnapshot(
+            fixture.observationV2Root,
+            root.resolve("observation-v2-pinned-source"),
+            setOf("outputs", "checkpoints"),
+            null,
+            {},
+        )
+        val replacement = copyTree(fixture.observationV2Root, root.resolve("observation-v2-replacement"))
+        val displaced = root.resolve("observation-v2-displaced")
+        Files.move(fixture.observationV2Root, displaced, StandardCopyOption.ATOMIC_MOVE)
+        Files.move(replacement, fixture.observationV2Root, StandardCopyOption.ATOMIC_MOVE)
+        assertFailsWith<FullTreeFunctionTruthV3Exception>(
+            "an observation tree swap after nested validation must be rejected before publication",
+        ) {
+            pinned.verifyOriginalUnchanged()
         }
     }
 
@@ -562,6 +671,7 @@ class FullTreeFunctionTruthSqliteV3Test {
         )
         val stripped = build.resolve("fixture-stripped.so")
         Files.copy(artifact, stripped)
+        writeCompilerObservationDiagnostic(compilerVersion, readelfVersion, artifact)
         val compilerInputVectorMatches = assertCompilerInputVector(sourceRoot, compilerVersion, readelfVersion, artifact)
         val controls = createFullTreeControlFixture(root.resolve("control"))
         val original = controls.authenticatedScope()
@@ -632,6 +742,26 @@ class FullTreeFunctionTruthSqliteV3Test {
             readelfVersion.lineSequence().first(),
             compilerInputVectorMatches,
         )
+    }
+
+    private fun writeCompilerObservationDiagnostic(compilerVersion: String, readelfVersion: String, artifact: Path) {
+        val diagnostic = JsonObject(
+            mapOf(
+                "compiler" to JsonObject(mapOf(
+                    "observedVersion" to JsonPrimitive(compilerVersion.lineSequence().first()),
+                    "readelfVersion" to JsonPrimitive(readelfVersion.lineSequence().first()),
+                )),
+                "linkedElf" to JsonObject(mapOf(
+                    "bytes" to JsonPrimitive(Files.size(artifact)),
+                    "sha256" to JsonPrimitive(fixtureSha256(artifact)),
+                )),
+                "vectorKind" to JsonPrimitive("compiler-output-v1"),
+            ),
+        )
+        val path = Path.of(System.getProperty("user.dir"))
+            .resolve("build/test-results/test/full-tree-function-truth-v3-compiler-observed-v1.json")
+        Files.createDirectories(path.parent)
+        Files.write(path, OracleJson.canonicalBytes(diagnostic))
     }
 
     private fun assertCompilerInputVector(sourceRoot: Path, compilerVersion: String, readelfVersion: String, artifact: Path): Boolean {

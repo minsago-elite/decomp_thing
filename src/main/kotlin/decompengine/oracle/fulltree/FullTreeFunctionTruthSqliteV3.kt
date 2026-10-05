@@ -12,6 +12,7 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.util.Comparator
@@ -87,6 +88,29 @@ internal fun fullTreeFunctionTruthV3NestedScratchPlan(
     return FullTreeFunctionTruthV3NestedScratchPlan(scratch, output)
 }
 
+/** Reserve real SQLite capacity when a V3 rederivation narrows the nested V2 scratch ceiling. */
+internal fun fullTreeFunctionTruthV3NestedObservationDwarfScratchBytes(
+    availableScratchBytes: Long,
+    preparedOutputBytes: Long,
+    configuredOutputBytes: Long,
+    configuredDatabaseBytes: Long,
+    configuredDwarfScratchBytes: Long,
+): Long {
+    require(availableScratchBytes > 0L && preparedOutputBytes >= 0L && configuredOutputBytes > 0L &&
+        configuredDatabaseBytes > 0L && configuredDwarfScratchBytes > 0L)
+    val sqlitePageBytes = FULL_TREE_FUNCTION_OBSERVATION_SQLITE_PAGE_BYTES
+    val outputReservation = minOf(configuredOutputBytes, FullTreeFunctionObservationsV2.MAXIMUM_CANONICAL_BYTES)
+    val desiredDatabaseReservation = minOf(
+        configuredDatabaseBytes,
+        maxOf(sqlitePageBytes * 64L, availableScratchBytes / 4L),
+    )
+    val availableForDwarf = availableScratchBytes - preparedOutputBytes - outputReservation - desiredDatabaseReservation
+    require(availableForDwarf > sqlitePageBytes) {
+        "truth-v3 shared scratch cannot reserve observation output, decompression space, and SQLite pages"
+    }
+    return minOf(configuredDwarfScratchBytes, availableForDwarf)
+}
+
 internal fun fullTreeFunctionTruthV3AccumulateShardBudget(
     previousWallNanos: Long,
     previousCpuNanos: Long,
@@ -115,6 +139,11 @@ internal fun fullTreeFunctionTruthV3CombinedEntityCount(
     require(combined <= maximumEntities) { "truth-v3 combined entity bound exceeded" }
     return combined
 }
+
+internal fun fullTreeFunctionTruthV3HasOnlyEmittedRvaLinks(
+    linkedRvas: Iterable<String>,
+    fullRunEmittedRvas: Set<String>,
+): Boolean = linkedRvas.all(fullRunEmittedRvas::contains)
 
 /** V3 adds a source census without changing the v2 emitted-RVA score population. */
 internal data class FullTreeFunctionTruthV3Limits(
@@ -193,6 +222,8 @@ internal object FullTreeFunctionTruthSqliteV3 {
     private const val V3_SHARD_ENVELOPE_BYTES = 64L * 1024L
     private const val V3_CONTROL_BASE_BYTES = 8L * 1024L
     private const val V3_SHARD_RECORD_CONTROL_BYTES = 512L
+    private const val V3_FIXED_RETAINED_BYTES = 96L * 1024L * 1024L
+    private const val V3_EMITTED_RVA_SET_ENTRY_BYTES = 96L
 
     val producerPolicy: JsonObject = JsonObject(
         mapOf(
@@ -243,7 +274,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
         limits: FullTreeFunctionTruthV3Limits = FullTreeFunctionTruthV3Limits(),
     ): FullTreeFunctionTruthV3Generation = runV3 {
         val deadline = V3RunDeadline.start(scope, limits)
-        FullTreeOracleOperationCheckpoint.withCheckpoint(deadline::checkpoint) {
+        FullTreeOracleOperationCheckpoint.withCheckpoint(deadline::checkpoint, deadline) {
         deadline.checkpoint("truth-v3 generation entry")
         requireV3Sha(expectedObservationV2IndexArtifactSha256, "observation-v2 index artifact")
         validateV3ScopeAndLimits(scope, limits)
@@ -259,12 +290,24 @@ internal object FullTreeFunctionTruthSqliteV3 {
         requireStableDirectory(parent, "truth-v3 output parent")
         V3RawInputGuards.open(richArtifact, strippedArtifact, inventoryPath, elfFunctionIndex, limits).use { rawInputs ->
         V3Workspace.create(scratchParent).use { workspace ->
+            val observationIdentity = V3StableTreeSnapshot.captureIdentity(
+                observationV2Root,
+                setOf("outputs", "checkpoints"),
+                Math.addExact(Math.multiplyExact(limits.observationV2.run.maximumShards.toLong(), 2L), 2L),
+                maximumScratchBound(limits),
+                deadline::checkpoint,
+                setOf("run.json", "index.json"),
+            )
             val initialRun = authenticateObservationV2(
                 observationV2Root, expectedObservationV2IndexArtifactSha256, richArtifact, inventoryPath,
                 scope, workspace.root, limits, deadline,
             )
+            observationIdentity.verifyIdentity(deadline::checkpoint)
+            val observationSnapshot = snapshotObservationV2(
+                observationV2Root, initialRun.binding, observationIdentity, workspace.root, limits, deadline,
+            )
             val (legacyTruth, v2Run) = deriveLegacyAndCensus(
-                richArtifact, strippedArtifact, inventoryPath, elfFunctionIndex, observationV2Root,
+                richArtifact, strippedArtifact, inventoryPath, elfFunctionIndex, observationSnapshot.root,
                 expectedObservationV2IndexArtifactSha256, scope, workspace, initialRun, limits, deadline,
             )
             requireV3WorkspaceBound(workspace.root, limits)
@@ -273,7 +316,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
                 val projection = composeV3Tree(
                     publication.staging,
                     legacyTruth.root,
-                    observationV2Root,
+                    observationSnapshot.root,
                     v2Run,
                     legacyTruth,
                     scope,
@@ -289,13 +332,14 @@ internal object FullTreeFunctionTruthSqliteV3 {
                 requireSameV2Reconciliation(
                     initialRun,
                     authenticateObservationV2(
-                        observationV2Root, expectedObservationV2IndexArtifactSha256, richArtifact, inventoryPath,
+                        observationSnapshot.root, expectedObservationV2IndexArtifactSha256, richArtifact, inventoryPath,
                         scope, workspace.root, limits, deadline,
                     ),
                 )
                 deadline.checkpoint("before committing truth-v3 publication")
                 publication.commit(projection, deadline::checkpoint) {
                     rawInputs.verifyUnchanged("at truth-v3 publication boundary")
+                    observationSnapshot.verifyOriginalUnchanged(deadline::checkpoint)
                 }
                 FullTreeFunctionTruthV3Generation(
                     root = target,
@@ -329,7 +373,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
         limits: FullTreeFunctionTruthV3Limits = FullTreeFunctionTruthV3Limits(),
     ): FullTreeFunctionTruthV3Validation = runV3 {
         val deadline = V3RunDeadline.start(scope, limits)
-        FullTreeOracleOperationCheckpoint.withCheckpoint(deadline::checkpoint) {
+        FullTreeOracleOperationCheckpoint.withCheckpoint(deadline::checkpoint, deadline) {
         deadline.checkpoint("truth-v3 validation entry")
         requireV3Sha(expectedObservationV2IndexArtifactSha256, "observation-v2 index artifact")
         validateV3ScopeAndLimits(scope, limits)
@@ -345,23 +389,38 @@ internal object FullTreeFunctionTruthSqliteV3 {
         requireStableDirectory(candidate, "truth-v3 candidate root")
         V3RawInputGuards.open(richArtifact, strippedArtifact, inventoryPath, elfFunctionIndex, limits).use { rawInputs ->
         V3Workspace.create(scratchParent).use { workspace ->
+            val observationIdentity = V3StableTreeSnapshot.captureIdentity(
+                observationV2Root,
+                setOf("outputs", "checkpoints"),
+                Math.addExact(Math.multiplyExact(limits.observationV2.run.maximumShards.toLong(), 2L), 2L),
+                maximumScratchBound(limits),
+                deadline::checkpoint,
+                setOf("run.json", "index.json"),
+            )
             val initialRun = authenticateObservationV2(
                 observationV2Root, expectedObservationV2IndexArtifactSha256, richArtifact, inventoryPath,
                 scope, workspace.root, limits, deadline,
             )
+            observationIdentity.verifyIdentity(deadline::checkpoint)
+            val observationSnapshot = snapshotObservationV2(
+                observationV2Root, initialRun.binding, observationIdentity, workspace.root, limits, deadline,
+            )
             val (legacyTruth, v2Run) = deriveLegacyAndCensus(
-                richArtifact, strippedArtifact, inventoryPath, elfFunctionIndex, observationV2Root,
+                richArtifact, strippedArtifact, inventoryPath, elfFunctionIndex, observationSnapshot.root,
                 expectedObservationV2IndexArtifactSha256, scope, workspace, initialRun, limits, deadline,
             )
             requireV3WorkspaceBound(workspace.root, limits)
             val derivedRoot = workspace.root.resolve("derived-truth-v3")
             Files.createDirectory(derivedRoot, PosixFilePermissions.asFileAttribute(V3_WRITABLE_DIRECTORY))
             val projection = composeV3Tree(
-                derivedRoot, legacyTruth.root, observationV2Root, v2Run, legacyTruth, scope, workspace.root, limits,
+                derivedRoot, legacyTruth.root, observationSnapshot.root, v2Run, legacyTruth, scope, workspace.root, limits,
                 deadline,
             )
             requireV3WorkspaceBound(workspace.root, limits)
-            verifyV3Candidate(candidate, projection, candidateParent, candidateParentIdentity)
+            val candidateSnapshot = snapshotCandidate(
+                candidate, projection, workspace.root, scope, limits, deadline,
+            )
+            verifyV3Candidate(candidateSnapshot, projection, candidateParent, candidateParentIdentity)
             revalidateLegacyTruth(
                 legacyTruth, richArtifact, strippedArtifact, inventoryPath, elfFunctionIndex,
                     scope, workspace, v2Run.maximumWorkers, limits, deadline,
@@ -369,12 +428,14 @@ internal object FullTreeFunctionTruthSqliteV3 {
             requireSameV2Reconciliation(
                 initialRun,
                 authenticateObservationV2(
-                    observationV2Root, expectedObservationV2IndexArtifactSha256, richArtifact, inventoryPath,
+                    observationSnapshot.root, expectedObservationV2IndexArtifactSha256, richArtifact, inventoryPath,
                     scope, workspace.root, limits, deadline,
                 ),
             )
-            verifyV3Candidate(candidate, projection, candidateParent, candidateParentIdentity)
+            verifyV3Candidate(candidateSnapshot, projection, candidateParent, candidateParentIdentity)
+            candidateSnapshot.verifyOriginalUnchanged(deadline::checkpoint)
             rawInputs.verifyUnchanged("at truth-v3 candidate comparison boundary")
+            observationSnapshot.verifyOriginalUnchanged(deadline::checkpoint)
             FullTreeFunctionTruthV3Validation(
                 indexArtifactSha256 = projection.indexArtifactSha256,
                 indexSha256 = projection.indexSha256,
@@ -443,8 +504,34 @@ internal object FullTreeFunctionTruthSqliteV3 {
     ): FullTreeFunctionObservationV2RunPublication = try {
         deadline.checkpoint("before independently rederiving observation-v2")
         val availableScratchBytes = remainingV3Scratch(limits, scratchParent)
+        val perShardOutputBound = scope.document.controlObject("bounds").controlObject("perShard")
+            .controlLong("serializedBytes")
+        val outputReservation = minOf(
+            perShardOutputBound,
+            limits.observationV2.shard.maximumOutputBytes,
+            FullTreeFunctionObservationsV2.MAXIMUM_CANONICAL_BYTES,
+        )
+        val nestedDwarfScratch = try {
+            fullTreeFunctionTruthV3NestedObservationDwarfScratchBytes(
+                availableScratchBytes,
+                0L,
+                outputReservation,
+                limits.observationV2.shard.maximumDatabaseBytes,
+                limits.observationV2.shard.control.maximumDwarfScratchBytes,
+            )
+        } catch (failure: IllegalArgumentException) {
+            throw FullTreeFunctionTruthV3Exception(
+                "truth-v3 shared scratch cannot reserve bounded observation-v2 database capacity",
+                failure,
+            )
+        }
         val nestedLimits = limits.observationV2.copy(
             maximumScratchBytes = minOf(limits.observationV2.maximumScratchBytes, availableScratchBytes),
+            shard = limits.observationV2.shard.copy(
+                control = limits.observationV2.shard.control.copy(
+                    maximumDwarfScratchBytes = nestedDwarfScratch,
+                ),
+            ),
         )
         FullTreeFunctionObservationV2RunPublisher.loadAndValidate(
             candidateRoot = observationV2Root,
@@ -461,6 +548,82 @@ internal object FullTreeFunctionTruthSqliteV3 {
             "observation-v2 run failed independent raw-input rederivation for truth v3",
             failure,
         )
+    }
+
+    private fun snapshotObservationV2(
+        originalRoot: Path,
+        binding: BoundedShardRunBinding,
+        identity: V3StableTreeSnapshot,
+        workspaceRoot: Path,
+        limits: FullTreeFunctionTruthV3Limits,
+        deadline: V3RunDeadline,
+    ): V3StableTreeSnapshot {
+        val expected = TreeMap<String, V3ExpectedTreeMember>()
+        val runBytes = canonicalV3Bytes(binding.run)
+        val indexBytes = canonicalV3Bytes(binding.index)
+        expected["run.json"] = V3ExpectedTreeMember(runBytes.size.toLong(), binding.runSha256)
+        expected["index.json"] = V3ExpectedTreeMember(indexBytes.size.toLong(), binding.indexArtifactSha256)
+        val indexRecords = binding.index.v3Array("shards").associate { raw ->
+            val record = raw as? JsonObject ?: v3Fail("observation-v2 index record is not an object")
+            record.v3String("shardId") to record
+        }
+        binding.outputs.forEach { output ->
+            expected["outputs/${output.shardId}.json"] = V3ExpectedTreeMember(output.outputBytes, output.outputSha256)
+            val record = indexRecords[output.shardId]
+                ?: v3Fail("observation-v2 checkpoint record is missing for ${output.shardId}")
+            val checkpoint = JsonObject(record.toMutableMap().apply {
+                put("runSha256", JsonPrimitive(binding.runSha256))
+                put("schemaVersion", JsonPrimitive(1))
+                put("status", JsonPrimitive("complete"))
+            })
+            val checkpointBytes = canonicalV3Bytes(checkpoint)
+            expected["checkpoints/${output.shardId}.json"] = V3ExpectedTreeMember(
+                checkpointBytes.size.toLong(), OracleArtifacts.sha256(checkpointBytes),
+            )
+        }
+        val memberBytes = expected.values.fold(0L) { total, member -> Math.addExact(total, member.bytes) }
+        reserveV3ScratchCapacity(workspaceRoot, memberBytes, limits)
+        val snapshot = identity.createSnapshot(
+            originalRoot,
+            workspaceRoot.resolve("observation-v2-pinned"),
+            setOf("outputs", "checkpoints"),
+            expected,
+            deadline::checkpoint,
+        )
+        checkV3Scratch(workspaceRoot, maximumScratchBound(limits))
+        return snapshot
+    }
+
+    private fun snapshotCandidate(
+        candidateRoot: Path,
+        projection: V3Projection,
+        workspaceRoot: Path,
+        scope: AuthenticatedFullTreeScope,
+        limits: FullTreeFunctionTruthV3Limits,
+        deadline: V3RunDeadline,
+    ): V3StableTreeSnapshot {
+        val maxFiles = Math.addExact(projection.index.v3Array("shards").size.toLong(), 2L)
+        val identity = V3StableTreeSnapshot.captureIdentity(
+            candidateRoot,
+            setOf("shards"),
+            maxFiles,
+            projection.outputBytes,
+            deadline::checkpoint,
+            setOf("index.json", "exclusions.json"),
+        )
+        val wholeRunBytes = scope.document.controlObject("bounds").controlObject("wholeRun").controlLong("serializedBytes")
+        val acceptedBytes = minOf(projection.outputBytes, wholeRunBytes, limits.maximumOutputBytes, limits.truth.maximumOutputBytes)
+        reserveV3ScratchCapacity(workspaceRoot, identity.totalBytes, limits)
+        val snapshot = identity.createSnapshot(
+            candidateRoot,
+            workspaceRoot.resolve("candidate-truth-v3-pinned"),
+            setOf("shards"),
+            null,
+            deadline::checkpoint,
+            acceptedBytes,
+        )
+        checkV3Scratch(workspaceRoot, maximumScratchBound(limits))
+        return snapshot
     }
 
     private fun revalidateLegacyTruth(
@@ -514,7 +677,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
         val prepared = ArrayList<BoundedShardPreparedOutput>(run.binding.outputs.size)
         var totalBytes = 0L
         run.binding.outputs.forEachIndexed { index, binding ->
-            val shardStart = deadline.beginShard(binding.shardId, scope)
+            val shardStart = deadline.beginShard(binding.shardId)
             deadline.checkpoint("before adapting observation-v2 shard ${binding.shardId}")
             val path = observationV2Root.resolve("outputs/${binding.shardId}.json")
             val observationBytes = Files.size(path)
@@ -525,7 +688,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
                 adapterProjectionBytes,
                 projectedV3ControlBytes(
                     run.binding.outputs.size,
-                    Files.size(run.binding.root.resolve("run.json")) + Files.size(run.binding.root.resolve("index.json")),
+                    Files.size(observationV2Root.resolve("run.json")) + Files.size(observationV2Root.resolve("index.json")),
                 ),
                 limits,
             )
@@ -654,12 +817,12 @@ internal object FullTreeFunctionTruthSqliteV3 {
             limits.truth.maximumOutputBytes,
             v2Run.binding.run.v3Object("bounds").v3Long("wholeRunBytes"),
         )
-        val projectedTotalOutputBytes = preflightV3RunOutputBytes(
+        preflightV3RunWorkingSet(
             legacyRoot,
             observationV2Root,
             legacyIndex,
             v2Run,
-            wholeRunOutputBound,
+            limits,
             deadline,
         )
         val truthEntities = Math.addExact(
@@ -667,12 +830,21 @@ internal object FullTreeFunctionTruthSqliteV3 {
             legacyTruth.counts.nonEmittedUnique,
         )
         val wholeRunEntityBound = scope.document.controlObject("bounds").controlObject("wholeRun").controlLong("entities")
+        val perShardEntityBound = scope.document.controlObject("bounds").controlObject("perShard").controlLong("entities")
+        val fullRunEmittedRvas = collectFullRunEmittedRvas(
+            legacyRoot,
+            legacyIndex,
+            v2Run,
+            truthEntities,
+            limits,
+            deadline,
+        )
         var allSourceEntities = 0L
         var outputBytes = 0L
         val v3ShardRecords = ArrayList<JsonObject>(v2Run.binding.outputs.size)
 
         v2Run.binding.outputs.forEachIndexed { shardIndex, observation ->
-            val shardStart = deadline.beginShard(observation.shardId, scope)
+            val shardStart = deadline.beginShard(observation.shardId)
             val shardSourceEntities = v2Run.outputs.getOrNull(shardIndex)?.sourceEntities
                 ?: v3Fail("observation-v2 source census receipt is missing for ${observation.shardId}")
             val nextSourceEntityTotal = Math.addExact(allSourceEntities, shardSourceEntities)
@@ -690,26 +862,44 @@ internal object FullTreeFunctionTruthSqliteV3 {
             if (shardId != observation.shardId || sourcesByShard[shardId] !== observation) {
                 v3Fail("legacy truth and observation-v2 shard orders differ")
             }
-            val sourcePath = observationV2Root.resolve("outputs/$shardId.json")
             val truthPath = legacyRoot.resolve("shards/$shardId.json")
-            val sourceFileBytes = Files.size(sourcePath)
             val truthFileBytes = Files.size(truthPath)
-            val projectedShardBytes = projectedV3ShardBytes(sourceFileBytes, truthFileBytes)
-            preflightV3ShardOutput(projectedShardBytes, minOf(
-                wholeRunOutputBound,
-                v2Run.binding.run.v3Object("bounds").v3Long("perShardBytes"),
-            ))
+            val sourcePath = observationV2Root.resolve("outputs/$shardId.json")
+            val sourceFileBytes = Files.size(sourcePath)
+            val estimatedProjectionBytes = projectedV3ShardBytes(sourceFileBytes, truthFileBytes)
             admitV3ShardWorkingSet(
                 sourceFileBytes,
                 truthFileBytes,
-                projectedShardBytes,
-                projectedV3ControlBytes(
-                    v2Run.binding.outputs.size,
-                    Files.size(legacyRoot.resolve("index.json")) + Files.size(legacyRoot.resolve("exclusions.json")) +
-                        Files.size(observationV2Root.resolve("run.json")) + Files.size(observationV2Root.resolve("index.json")),
+                estimatedProjectionBytes,
+                Math.addExact(
+                    projectedV3ControlBytes(
+                        v2Run.binding.outputs.size,
+                        Files.size(legacyRoot.resolve("index.json")) + Files.size(legacyRoot.resolve("exclusions.json")) +
+                            Files.size(observationV2Root.resolve("run.json")) + Files.size(observationV2Root.resolve("index.json")),
+                    ),
+                    fullRunEmittedRvas.retainedBytes,
                 ),
                 limits,
             )
+            val truthBytes = readBoundedFile(truthPath, limits.truth.maximumOutputBytes, "legacy truth shard")
+            val truthDocument = parseV3Object(truthBytes, truthBytes.size.toLong(), "legacy truth shard")
+            val truthShardCounts = truthDocument.v3Object("counts")
+            val truthShardEntities = Math.addExact(
+                Math.addExact(truthShardCounts.v3Long("elfRvas"), truthShardCounts.v3Long("dwarfOnlyRvas")),
+                truthShardCounts.v3Long("nonEmittedUnique"),
+            )
+            try {
+                fullTreeFunctionTruthV3CombinedEntityCount(
+                    truthShardEntities,
+                    shardSourceEntities,
+                    perShardEntityBound,
+                )
+            } catch (failure: IllegalArgumentException) {
+                throw FullTreeFunctionTruthV3Exception(
+                    "truth-v3 combined emitted, non-emitted, and source-census shard population exceeds the authenticated per-shard entity bound",
+                    failure,
+                )
+            }
             val sourceDocument = readAuthenticatedObservationV2(sourcePath, observation, scope, limits)
             val sourceRows = sourceDocument.v3Array("sourceEntities")
             val census = countSourceRows(sourceRows)
@@ -735,25 +925,18 @@ internal object FullTreeFunctionTruthSqliteV3 {
             }
             allSourceEntities = nextSourceEntityTotal
 
-            val truthBytes = readBoundedFile(truthPath, limits.truth.maximumOutputBytes, "legacy truth shard")
-            val truthDocument = parseV3Object(truthBytes, truthBytes.size.toLong(), "legacy truth shard")
-            val emittedTruthFunctions = truthDocument.v3Array("functions").map { raw ->
-                (raw as? JsonObject ?: v3Fail("truth function row is not an object")).v3String("rva")
-            }
-            val emittedTruthRvas = emittedTruthFunctions.toHashSet()
-            if (emittedTruthRvas.size != emittedTruthFunctions.size) {
-                v3Fail("v3 truth projection repeats an emitted RVA score row")
-            }
+            val linkedRvas = ArrayList<String>()
             sourceRows.forEachIndexed { sourceIndex, raw ->
                 if ((sourceIndex and 255) == 0) deadline.checkpoint("while reconciling source links for $shardId")
                 val source = raw as? JsonObject ?: v3Fail("source entity $sourceIndex is not an object")
                 if (source.v3String("denominatorDisposition") == FullTreeDenominatorDisposition.EMITTED_RVA_LINK.wireValue) {
                     val linkedRva = source["linkedEmittedRva"]?.let { (it as? JsonPrimitive)?.content }
                         ?: v3Fail("emitted source entity has no linked RVA")
-                    if (linkedRva !in emittedTruthRvas) {
-                        v3Fail("source census link does not name its one emitted truth row")
-                    }
+                    linkedRvas += linkedRva
                 }
+            }
+            if (!fullTreeFunctionTruthV3HasOnlyEmittedRvaLinks(linkedRvas, fullRunEmittedRvas.rvas)) {
+                v3Fail("source census link does not name an emitted truth row in the authenticated full run")
             }
             val oldCounts = truthDocument.v3Object("counts")
             val newCounts = JsonObject(oldCounts.toMutableMap().apply {
@@ -846,9 +1029,6 @@ internal object FullTreeFunctionTruthSqliteV3 {
         }
         if (totalContent != outputBytes - indexBytes.size || outputBytes > limits.maximumOutputBytes) {
             v3Fail("truth-v3 output byte total does not reconcile")
-        }
-        if (outputBytes > projectedTotalOutputBytes) {
-            v3Fail("truth-v3 serialized output exceeds its preflighted whole-run projection")
         }
         verifyV3IndexTree(targetNormalized, index, indexBytes, outputBytes)
         val finalCounts = FullTreeFunctionTruthV3Counts(
@@ -1042,14 +1222,14 @@ internal object FullTreeFunctionTruthSqliteV3 {
     }
 
     private fun verifyV3Candidate(
-        candidate: Path,
+        candidate: V3StableTreeSnapshot,
         expected: V3Projection,
         candidateParent: Path,
         candidateParentIdentity: Any,
     ) {
         requireDirectoryIdentity(candidateParent, candidateParentIdentity, "truth-v3 candidate parent")
         compareV3CandidateTreeBytes(
-            candidate,
+            candidate.root,
             expected.root,
             Math.addExact(expected.index.v3Array("shards").size.toLong(), 2L),
             expected.outputBytes,
@@ -1062,6 +1242,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
         independentlyDerivedRoot: Path,
         maximumFiles: Long,
         expectedOutputBytes: Long,
+        afterComparedMember: ((String) -> Unit)? = null,
     ) {
         val candidateParent = candidate.parent ?: v3Fail("truth-v3 candidate root must have a parent")
         val (_, candidateParentIdentity) = requireStableDirectory(candidateParent, "truth-v3 candidate parent")
@@ -1075,6 +1256,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
             FullTreeOracleOperationCheckpoint.checkpoint("while comparing truth-v3 candidate member $relative")
             val derived = expectedFiles.getValue(relative)
             if (Files.mismatch(file, derived) != -1L) v3Fail("truth-v3 candidate bytes differ from raw rederivation at $relative")
+            afterComparedMember?.invoke(relative)
         }
         requireDirectoryIdentity(candidate, identity, "truth-v3 candidate root")
         requireDirectoryIdentity(candidateShards, candidateShardsIdentity, "truth-v3 candidate shard directory")
@@ -1226,7 +1408,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
         return used
     }
 
-    private fun reserveV3OutputBytes(
+    internal fun reserveV3OutputBytes(
         currentOutputBytes: Long,
         nextMemberBytes: Long,
         outputBound: Long,
@@ -1271,51 +1453,78 @@ internal object FullTreeFunctionTruthSqliteV3 {
         throw FullTreeFunctionTruthV3Exception("truth-v3 retained control model overflows", failure)
     }
 
-    private fun preflightV3RunOutputBytes(
+    private fun preflightV3RunWorkingSet(
         legacyRoot: Path,
         observationV2Root: Path,
         legacyIndex: JsonObject,
         v2Run: FullTreeFunctionObservationV2RunPublication,
-        outputBound: Long,
+        limits: FullTreeFunctionTruthV3Limits,
         deadline: V3RunDeadline,
-    ): Long {
+    ) {
         if (legacyIndex.v3Array("shards").size != v2Run.binding.outputs.size) {
             v3Fail("truth-v3 preflight shard populations differ")
         }
-        var total = 0L
-        val wholePerShardBound = v2Run.binding.run.v3Object("bounds").v3Long("perShardBytes")
         v2Run.binding.outputs.forEachIndexed { index, observation ->
-            deadline.checkpoint("preflighting serialized truth-v3 shard ${observation.shardId}")
+            deadline.checkpoint("preflighting truth-v3 shard working set ${observation.shardId}")
             val truthRecord = legacyIndex.v3Array("shards")[index] as? JsonObject
                 ?: v3Fail("truth-v3 preflight has a non-object truth shard record")
             val shardId = truthRecord.v3String("id")
             if (shardId != observation.shardId) v3Fail("truth-v3 preflight shard order differs")
             val observationBytes = Files.size(observationV2Root.resolve("outputs/$shardId.json"))
             val truthBytes = Files.size(legacyRoot.resolve("shards/$shardId.json"))
-            val projectedShard = projectedV3ShardBytes(observationBytes, truthBytes)
-            preflightV3ShardOutput(projectedShard, minOf(outputBound, wholePerShardBound))
-            total = addV3Bounded(total, projectedShard, outputBound)
-        }
-        val projectedExclusions = Math.addExact(Files.size(legacyRoot.resolve("exclusions.json")), V3_SHARD_ENVELOPE_BYTES)
-        val projectedIndex = try {
-            Math.addExact(
-                Math.addExact(Files.size(legacyRoot.resolve("index.json")), Files.size(observationV2Root.resolve("index.json"))),
-                projectedV3ControlBytes(v2Run.binding.outputs.size),
-            )
-        } catch (failure: ArithmeticException) {
-            throw FullTreeFunctionTruthV3Exception("truth-v3 projected control artifact size overflows", failure)
-        }
-        total = addV3Bounded(total, projectedExclusions, outputBound)
-        return addV3Bounded(total, projectedIndex, outputBound)
-    }
-
-    private fun preflightV3ShardOutput(projectedBytes: Long, outputBound: Long) {
-        if (projectedBytes <= 0L || projectedBytes > outputBound) {
-            v3Fail("truth-v3 projected serialized shard exceeds its authenticated output-byte bound")
+            if (observationBytes > limits.observationV2.run.maximumPerShardOutputBytes ||
+                truthBytes > limits.truth.maximumOutputBytes
+            ) {
+                v3Fail("truth-v3 preflight input shard exceeds its authenticated file-size bounds")
+            }
         }
     }
 
-    /** Admit copied JSON graphs and overlap scratch from file sizes before either input is retained. */
+    private data class V3EmittedRvaPopulation(val rvas: Set<String>, val retainedBytes: Long)
+
+    private fun collectFullRunEmittedRvas(
+        legacyRoot: Path,
+        legacyIndex: JsonObject,
+        v2Run: FullTreeFunctionObservationV2RunPublication,
+        maximumTruthEntities: Long,
+        limits: FullTreeFunctionTruthV3Limits,
+        deadline: V3RunDeadline,
+    ): V3EmittedRvaPopulation {
+        val records = legacyIndex.v3Array("shards")
+        if (records.size != v2Run.binding.outputs.size) v3Fail("truth-v3 emitted-RVA shard populations differ")
+        val maximumSetBytes = limits.maximumRetainedWorkingSetBytes - V3_FIXED_RETAINED_BYTES
+        if (maximumSetBytes < 0L) v3Fail("truth-v3 emitted-RVA population has no retained-memory allowance")
+        val rvas = HashSet<String>()
+        records.forEachIndexed { index, raw ->
+            deadline.checkpoint("collecting full-run emitted RVA population")
+            val record = raw as? JsonObject ?: v3Fail("truth-v3 emitted-RVA record is not an object")
+            val shardId = record.v3String("id")
+            if (v2Run.binding.outputs[index].shardId != shardId) {
+                v3Fail("truth-v3 emitted-RVA shard order differs from authenticated observation-v2")
+            }
+            val truthPath = legacyRoot.resolve("shards/$shardId.json")
+            val bytes = readBoundedFile(truthPath, limits.truth.maximumOutputBytes, "legacy truth shard")
+            val truth = parseV3Object(bytes, bytes.size.toLong(), "legacy truth shard")
+            val functions = truth.v3Array("functions")
+            functions.forEachIndexed { functionIndex, rawFunction ->
+                if ((functionIndex and 255) == 0) deadline.checkpoint("while collecting emitted RVAs for $shardId")
+                val function = rawFunction as? JsonObject ?: v3Fail("truth function row is not an object")
+                val rva = function.v3String("rva")
+                if (rvas.contains(rva)) v3Fail("truth-v3 full run repeats an emitted RVA score row")
+                val nextCount = Math.addExact(rvas.size.toLong(), 1L)
+                if (nextCount > maximumTruthEntities) v3Fail("truth-v3 emitted RVA population exceeds its authenticated entity bound")
+                val nextRetainedBytes = Math.multiplyExact(nextCount, V3_EMITTED_RVA_SET_ENTRY_BYTES)
+                if (nextRetainedBytes > maximumSetBytes) {
+                    v3Fail("truth-v3 full-run emitted-RVA set exceeds its retained-working-set allowance")
+                }
+                rvas += rva
+            }
+        }
+        val retainedBytes = Math.multiplyExact(rvas.size.toLong(), V3_EMITTED_RVA_SET_ENTRY_BYTES)
+        return V3EmittedRvaPopulation(rvas, retainedBytes)
+    }
+
+    /** Admit concurrently live JSON graphs; serialized-output ceilings are checked against exact bytes later. */
     private fun admitV3ShardWorkingSet(
         authenticatedObservationBytes: Long,
         emittedTruthBytes: Long,
@@ -1401,8 +1610,11 @@ internal object FullTreeFunctionTruthSqliteV3 {
         private val maximumWallNanos: Long,
         private val maximumCpuNanos: Long,
         private val maximumResidentBytes: Long,
-    ) {
+        private val maximumShardWallNanos: Long,
+        private val maximumShardCpuNanos: Long,
+    ) : FullTreeOracleShardPhaseObserver {
         private val shardUsageNanos = HashMap<String, Pair<Long, Long>>()
+        private val activeNestedShardPhases = HashMap<String, V3ShardStart>()
 
         fun checkpoint(stage: String) {
             if (Thread.currentThread().isInterrupted) {
@@ -1426,16 +1638,26 @@ internal object FullTreeFunctionTruthSqliteV3 {
             }
         }
 
-        fun beginShard(shardId: String, scope: AuthenticatedFullTreeScope): V3ShardStart {
+        fun beginShard(shardId: String): V3ShardStart {
             checkpoint("before shard $shardId")
-            val perShard = scope.document.controlObject("bounds").controlObject("perShard")
             return V3ShardStart(
                 shardId = shardId,
                 wallNanos = System.nanoTime(),
                 cpuNanos = truthV3ProcessCpuNanos(),
-                maximumWallNanos = Math.multiplyExact(perShard.controlLong("wallClockSeconds"), 1_000_000_000L),
-                maximumCpuNanos = Math.multiplyExact(perShard.controlLong("cpuSeconds"), 1_000_000_000L),
+                maximumWallNanos = maximumShardWallNanos,
+                maximumCpuNanos = maximumShardCpuNanos,
             )
+        }
+
+        override fun beginShardPhase(shardId: String) {
+            if (activeNestedShardPhases.containsKey(shardId)) v3Fail("truth-v3 nested shard phase overlaps for $shardId")
+            activeNestedShardPhases[shardId] = beginShard(shardId)
+        }
+
+        override fun endShardPhase(shardId: String) {
+            val start = activeNestedShardPhases.remove(shardId)
+                ?: v3Fail("truth-v3 nested shard phase was not started for $shardId")
+            finishShard(start, shardId)
         }
 
         fun finishShard(start: V3ShardStart, shardId: String) {
@@ -1473,6 +1695,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
         companion object {
             fun start(scope: AuthenticatedFullTreeScope, limits: FullTreeFunctionTruthV3Limits): V3RunDeadline {
                 val wholeRun = scope.document.controlObject("bounds").controlObject("wholeRun")
+                val perShard = scope.document.controlObject("bounds").controlObject("perShard")
                 return V3RunDeadline(
                     startedWallNanos = System.nanoTime(),
                     startedCpuNanos = truthV3ProcessCpuNanos(),
@@ -1482,6 +1705,8 @@ internal object FullTreeFunctionTruthSqliteV3 {
                         wholeRun.controlLong("maximumResidentBytes"),
                         limits.maximumRetainedWorkingSetBytes,
                     ),
+                    maximumShardWallNanos = Math.multiplyExact(perShard.controlLong("wallClockSeconds"), 1_000_000_000L),
+                    maximumShardCpuNanos = Math.multiplyExact(perShard.controlLong("cpuSeconds"), 1_000_000_000L),
                 )
             }
         }
@@ -1496,6 +1721,235 @@ internal object FullTreeFunctionTruthSqliteV3 {
         val outputBytes: Long,
         val counts: FullTreeFunctionTruthV3Counts,
         val elfIndexArtifactSha256: String,
+    )
+
+    internal data class V3ExpectedTreeMember(val bytes: Long, val sha256: String)
+
+    /**
+     * Pins every path identity and byte digest in an authenticated run or candidate tree. The
+     * private copy is the only tree read during projection/comparison; the caller's original tree
+     * is re-enumerated and rehashed at the final publication/return boundary.
+     */
+    internal class V3StableTreeSnapshot private constructor(
+        private val sourceRoot: Path,
+        val root: Path,
+        private val rootIdentity: Any,
+        private val directoryIdentities: Map<String, Any>,
+        private val files: Map<String, V3TreeFileIdentity>,
+        private val allowedDirectories: Set<String>,
+        private val allowedRootFiles: Set<String>,
+        private val maximumFiles: Long,
+        private val maximumBytes: Long,
+        val totalBytes: Long,
+    ) {
+        fun verifyIdentity(checkpoint: (String) -> Unit = {}) {
+            val current = enumerate(
+                sourceRoot, allowedDirectories, allowedRootFiles, maximumFiles, maximumBytes, checkpoint,
+            )
+            if (current.rootIdentity != rootIdentity || current.directoryIdentities != directoryIdentities ||
+                current.files.mapValues { (_, file) -> file.fileIdentity to file.bytes } !=
+                files.mapValues { (_, file) -> file.fileIdentity to file.bytes }
+            ) {
+                FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 authenticated input tree identities or membership changed")
+            }
+        }
+
+        fun verifyOriginalUnchanged(checkpoint: (String) -> Unit = {}) {
+            verifyIdentity(checkpoint)
+            files.forEach { (relative, expected) ->
+                checkpoint("while rechecking pinned truth-v3 input member $relative")
+                val path = sourceRoot.resolve(relative)
+                StableControlFile.open(path, maximumBytes, "truth-v3 pinned member $relative").use { guard ->
+                    if (guard.size != expected.bytes || guard.authenticatedSha256 != expected.sha256) {
+                        FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 pinned input member changed bytes at $relative")
+                    }
+                    guard.verifyUnchanged("truth-v3 pinned input member $relative")
+                }
+            }
+            verifyIdentity(checkpoint)
+        }
+
+        fun createSnapshot(
+            originalRoot: Path,
+            destination: Path,
+            expectedDirectories: Set<String>,
+            expectedFiles: Map<String, V3ExpectedTreeMember>?,
+            checkpoint: (String) -> Unit,
+            maximumSnapshotBytes: Long = maximumBytes,
+        ): V3StableTreeSnapshot {
+            if (originalRoot.toAbsolutePath().normalize() != sourceRoot) {
+                FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 snapshot source differs from its authenticated tree")
+            }
+            if (expectedDirectories != allowedDirectories || maximumSnapshotBytes <= 0L || maximumSnapshotBytes > maximumBytes) {
+                FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 snapshot directory or byte bound differs from its authenticated tree")
+            }
+            verifyIdentity(checkpoint)
+            if (expectedFiles != null && expectedFiles.keys != files.keys) {
+                FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 snapshot member set differs from authenticated evidence")
+            }
+            if (totalBytes > maximumSnapshotBytes) FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 snapshot exceeds its byte bound")
+            Files.createDirectory(destination, PosixFilePermissions.asFileAttribute(V3_WRITABLE_DIRECTORY))
+            expectedDirectories.sorted().forEach { directory ->
+                Files.createDirectory(destination.resolve(directory), PosixFilePermissions.asFileAttribute(V3_WRITABLE_DIRECTORY))
+            }
+            val copied = TreeMap<String, V3TreeFileIdentity>()
+            files.forEach { (relative, source) ->
+                checkpoint("before pinning truth-v3 tree member $relative")
+                val expected = expectedFiles?.get(relative)
+                if (expected != null && expected.bytes != source.bytes) {
+                    FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 authenticated member byte count differs at $relative")
+                }
+                StableControlFile.open(source.path, maximumBytes, "truth-v3 snapshot source $relative").use { guard ->
+                    if (guard.size != source.bytes || source.fileIdentity != identityOf(source.path)) {
+                        FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 source member identity changed before snapshot at $relative")
+                    }
+                    val digest = MessageDigest.getInstance("SHA-256")
+                    val target = destination.resolve(relative)
+                    FileChannel.open(target, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE).use { channel ->
+                        val buffer = ByteArray(64 * 1024)
+                        var position = 0L
+                        while (position < guard.size) {
+                            val amount = guard.readAt(position, buffer, 0, minOf(buffer.size.toLong(), guard.size - position).toInt())
+                            if (amount <= 0) FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 source member ended while pinning $relative")
+                            digest.update(buffer, 0, amount)
+                            var pending = ByteBuffer.wrap(buffer, 0, amount)
+                            while (pending.hasRemaining()) channel.write(pending)
+                            position = Math.addExact(position, amount.toLong())
+                            checkpoint("while pinning truth-v3 tree member $relative")
+                        }
+                        channel.force(true)
+                    }
+                    val sha256 = digest.digest().joinToString("") { "%02x".format(it) }
+                    if (guard.authenticatedSha256 != sha256 || expected?.sha256?.let { it != sha256 } == true) {
+                        FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 snapshot member digest differs from authenticated evidence at $relative")
+                    }
+                    guard.verifyUnchanged("truth-v3 snapshot source $relative")
+                    if (identityOf(source.path) != source.fileIdentity) {
+                        FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 source member path changed while pinning $relative")
+                    }
+                    Files.setPosixFilePermissions(target, PosixFilePermissions.fromString("r--------"))
+                    copied[relative] = V3TreeFileIdentity(target, source.fileIdentity, source.bytes, sha256)
+                }
+            }
+            verifyIdentity(checkpoint)
+            val snapshotDirectoryPermissions = PosixFilePermissions.fromString("r-x------")
+            expectedDirectories.sortedDescending().forEach { directory ->
+                Files.setPosixFilePermissions(destination.resolve(directory), snapshotDirectoryPermissions)
+            }
+            Files.setPosixFilePermissions(destination, snapshotDirectoryPermissions)
+            val snapshotAttributes = enumerate(
+                destination, expectedDirectories, allowedRootFiles, maximumFiles, maximumSnapshotBytes, checkpoint,
+            )
+            if (snapshotAttributes.files.keys != copied.keys || snapshotAttributes.totalBytes != totalBytes) {
+                FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 private snapshot membership differs after pinning")
+            }
+            return V3StableTreeSnapshot(
+                sourceRoot,
+                destination.toAbsolutePath().normalize(),
+                rootIdentity,
+                directoryIdentities,
+                copied,
+                allowedDirectories,
+                allowedRootFiles,
+                maximumFiles,
+                maximumSnapshotBytes,
+                totalBytes,
+            )
+        }
+
+        companion object {
+            fun captureIdentity(
+                root: Path,
+                allowedDirectories: Set<String>,
+                maximumFiles: Long,
+                maximumBytes: Long,
+                checkpoint: (String) -> Unit,
+                allowedRootFiles: Set<String>,
+            ): V3StableTreeSnapshot {
+                if (maximumFiles < 1L || maximumBytes <= 0L) FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 tree identity bound is invalid")
+                val metadata = enumerate(root, allowedDirectories, allowedRootFiles, maximumFiles, maximumBytes, checkpoint)
+                return V3StableTreeSnapshot(
+                    root.toAbsolutePath().normalize(), root.toAbsolutePath().normalize(), metadata.rootIdentity,
+                    metadata.directoryIdentities, metadata.files, allowedDirectories, allowedRootFiles,
+                    maximumFiles, maximumBytes, metadata.totalBytes,
+                )
+            }
+
+            private fun enumerate(
+                root: Path,
+                allowedDirectories: Set<String>,
+                allowedRootFiles: Set<String>,
+                maximumFiles: Long,
+                maximumBytes: Long,
+                checkpoint: (String) -> Unit,
+            ): V3TreeMetadata {
+                val (normalizedRoot, rootIdentity) = try {
+                    requireStableDirectory(root, "truth-v3 pinned tree root")
+                } catch (failure: Exception) {
+                    throw FullTreeFunctionTruthV3Exception("truth-v3 pinned tree root is not stable", failure)
+                }
+                val directories = TreeMap<String, Any>()
+                val files = TreeMap<String, V3TreeFileIdentity>()
+                var bytes = 0L
+                Files.walk(normalizedRoot).use { paths ->
+                    paths.filter { it != normalizedRoot }.forEach { path ->
+                        checkpoint("while enumerating truth-v3 pinned tree")
+                        if (Files.isSymbolicLink(path)) FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 pinned tree contains a symbolic link")
+                        val relative = normalizedRoot.relativize(path).toString().replace('\\', '/')
+                        val depth = relative.count { it == '/' }
+                        val attrs = Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+                        if (attrs.isDirectory) {
+                            if (depth != 0 || relative !in allowedDirectories) {
+                                FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 pinned tree has an unexpected directory")
+                            }
+                            val identity = attrs.fileKey() ?: FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 pinned directory identity is unavailable")
+                            directories[relative] = identity
+                        } else if (attrs.isRegularFile) {
+                            if (depth > 1 || (depth == 0 && relative !in allowedRootFiles) ||
+                                (depth == 1 && relative.substringBefore('/') !in allowedDirectories)
+                            ) {
+                                FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 pinned tree has an unexpected file path")
+                            }
+                            if (files.size >= maximumFiles) FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 pinned tree exceeds its member-count bound")
+                            if (attrs.size() <= 0L) FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 pinned tree contains an empty member")
+                            bytes = FullTreeFunctionTruthSqliteV3.addV3Bounded(bytes, attrs.size(), maximumBytes)
+                            FullTreeFunctionTruthSqliteV3.requireV3StableTreeFile(path)
+                            val identity = attrs.fileKey() ?: FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 pinned file identity is unavailable")
+                            files[relative] = V3TreeFileIdentity(path, identity, attrs.size(), "")
+                        } else {
+                            FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 pinned tree contains a non-regular member")
+                        }
+                    }
+                }
+                if (directories.keys != allowedDirectories || files.keys.any { it.substringBefore('/') !in allowedDirectories && '/' in it } ||
+                    files.keys.filter { '/' !in it }.toSet() != allowedRootFiles
+                ) {
+                    FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 pinned tree membership differs from its permitted layout")
+                }
+                requireDirectoryIdentity(normalizedRoot, rootIdentity, "truth-v3 pinned tree root")
+                directories.forEach { (relative, identity) ->
+                    requireDirectoryIdentity(normalizedRoot.resolve(relative), identity, "truth-v3 pinned directory $relative")
+                }
+                return V3TreeMetadata(rootIdentity, directories, files, bytes)
+            }
+
+            private fun identityOf(path: Path): Any {
+                val attributes = Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+                if (!attributes.isRegularFile || attributes.isSymbolicLink || attributes.fileKey() == null) {
+                    FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 file identity is unavailable")
+                }
+                return checkNotNull(attributes.fileKey())
+            }
+        }
+    }
+
+    private data class V3TreeFileIdentity(val path: Path, val fileIdentity: Any, val bytes: Long, val sha256: String)
+
+    private data class V3TreeMetadata(
+        val rootIdentity: Any,
+        val directoryIdentities: Map<String, Any>,
+        val files: Map<String, V3TreeFileIdentity>,
+        val totalBytes: Long,
     )
 
     internal class V3RawInputGuards private constructor(

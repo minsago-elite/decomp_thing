@@ -487,6 +487,7 @@ internal object FullTreeFunctionTruthSqlite {
                     database.flush("after ingesting the ELF function index")
 
                     observation.outputs.forEachIndexed { index, binding ->
+                        FullTreeOracleOperationCheckpoint.withShardPhase(binding.shardId) {
                         budget.checkpoint("before re-deriving function-observation shard ${binding.shardId}")
                         val candidate = observation.root.resolve(OUTPUTS_DIRECTORY).resolve("${binding.shardId}.json")
                         val receipt = FullTreeFunctionObservationShardPublisher.loadAndValidate(
@@ -520,6 +521,7 @@ internal object FullTreeFunctionTruthSqlite {
                         database.flush("after ingesting function-observation shard ${binding.shardId}")
                         if ((index + 1) % limits.databaseCheckpointRows == 0) {
                             budget.checkpoint("while ingesting function-observation shards")
+                        }
                         }
                     }
                     requireObservationRunUnchanged(
