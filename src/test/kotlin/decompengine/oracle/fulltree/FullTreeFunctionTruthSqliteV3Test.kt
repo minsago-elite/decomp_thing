@@ -78,8 +78,27 @@ class FullTreeFunctionTruthSqliteV3Test {
         }
         fullTreeFunctionTruthV3CheckResidentBytes(95L, 100L, 200L, 100L)
         assertFailsWith<IllegalArgumentException> {
-            fullTreeFunctionTruthV3CheckResidentBytes(95L, 101L, 200L, 100L)
+            fullTreeFunctionTruthV3CheckResidentBytes(101L, 101L, 200L, 100L)
         }
+        // A prior operation's high-water mark remains a whole-run constraint, not a new shard's limit.
+        fullTreeFunctionTruthV3CheckResidentBytes(95L, 150L, 200L, 100L)
+        assertFailsWith<IllegalArgumentException> {
+            fullTreeFunctionTruthV3CheckResidentBytes(95L, 201L, 200L, 100L)
+        }
+
+        val tight = tightScratchLimits()
+        val sharedScratchLimits = tight.copy(
+            truth = tight.truth.copy(
+                maximumDatabaseBytes = 8L * 1024L * 1024L * 1024L,
+                maximumScratchBytes = 8L * 1024L * 1024L * 1024L,
+            ),
+            observationV2 = tight.observationV2.copy(maximumScratchBytes = 1024L * 1024L * 1024L),
+            maximumScratchBytes = 16L * 1024L * 1024L * 1024L,
+        )
+        assertEquals(16L * 1024L * 1024L * 1024L, fullTreeFunctionTruthV3SharedScratchBound(sharedScratchLimits))
+        assertTrue(fullTreeFunctionTruthV3HasDatabaseScratchCapacity(sharedScratchLimits))
+        assertTrue(sharedScratchLimits.observationV2.maximumScratchBytes < sharedScratchLimits.maximumScratchBytes)
+        assertTrue(sharedScratchLimits.truth.maximumScratchBytes < sharedScratchLimits.maximumScratchBytes)
 
         assertEquals(6L to 4L, fullTreeFunctionTruthV3AccumulateShardBudget(0L, 0L, 6L, 4L, 10L, 10L))
         assertEquals(10L to 10L, fullTreeFunctionTruthV3AccumulateShardBudget(6L, 4L, 4L, 6L, 10L, 10L))
@@ -150,8 +169,32 @@ class FullTreeFunctionTruthSqliteV3Test {
                 scope = fixture.scope,
                 scratchParent = fixture.scratch,
                 outputRoot = root.resolve("truth-v3-second"),
-                limits = limits.copy(maximumOutputBytes = first.outputBytes),
+                limits = limits.copy(
+                    maximumOutputBytes = first.outputBytes,
+                    truth = limits.truth.copy(maximumOutputBytes = minOf(limits.truth.maximumOutputBytes, first.outputBytes - 1L)),
+                ),
             )
+
+            val narrowNestedTruthOutput = minOf(limits.truth.maximumOutputBytes, first.outputBytes - 1L)
+            assertTrue(narrowNestedTruthOutput < first.outputBytes, "V3's census output must have its own output allowance")
+            assertFailsWith<FullTreeFunctionTruthV3Exception>("one byte below generated V3 bytes must reject publication") {
+                FullTreeFunctionTruthSqliteV3.generateAndPublish(
+                    richArtifact = fixture.rich,
+                    strippedArtifact = fixture.stripped,
+                    inventoryPath = fixture.inventoryPath,
+                    elfFunctionIndex = fixture.elfIndex,
+                    observationV2Root = fixture.observationV2Root,
+                    expectedObservationV2IndexArtifactSha256 = fixture.observationV2IndexSha256,
+                    scope = fixture.scope,
+                    scratchParent = fixture.scratch,
+                    outputRoot = root.resolve("truth-v3-one-over-output-limit"),
+                    limits = limits.copy(
+                        maximumOutputBytes = first.outputBytes - 1L,
+                        truth = limits.truth.copy(maximumOutputBytes = narrowNestedTruthOutput),
+                    ),
+                )
+            }
+            assertFalse(Files.exists(root.resolve("truth-v3-one-over-output-limit")))
 
             assertEquals(first.index, second.index)
             assertEquals(first.indexArtifactSha256, second.indexArtifactSha256)
@@ -311,6 +354,7 @@ class FullTreeFunctionTruthSqliteV3Test {
             assertSelfConsistentMutationsRejected(first, root)
             assertV3RawInputPathReplacementIsDetected(fixture, root)
             assertV3CandidateSnapshotRejectsRaces(first, root)
+            assertV3StagingIsReauthenticatedAroundFreeze(first, root)
             assertV3ObservationSnapshotRejectsTreeSwap(fixture, root)
             assertTrue(
                 fixture.compilerInputVectorMatches,
@@ -499,6 +543,60 @@ class FullTreeFunctionTruthSqliteV3Test {
         assertFailsWith<FullTreeFunctionTruthV3Exception>("byte-identical path replacement must retain its original file identity") {
             swappedSnapshot.verifyOriginalUnchanged()
         }
+    }
+
+    private fun assertV3StagingIsReauthenticatedAroundFreeze(
+        expected: FullTreeFunctionTruthV3Generation,
+        root: Path,
+    ) {
+        val index = parseControlObject(expected.root.resolve("index.json"))
+        val firstShard = expected.root.resolve((index.controlArray("shards").first() as JsonObject).controlString("path"))
+        val indexBytes = Files.readAllBytes(expected.root.resolve("index.json"))
+
+        val freezeRace = copyTree(expected.root, root.resolve("truth-v3-staging-freeze-race"))
+        makeTreeWritable(freezeRace)
+        val freezeRaceIndex = parseControlObject(freezeRace.resolve("index.json"))
+        val freezeRaceShard = freezeRace.resolve(expected.root.relativize(firstShard).toString())
+        var mutatedDuringFreeze = false
+        assertFailsWith<FullTreeFunctionTruthV3Exception>("post-freeze member rehash must reject a mutation during chmod") {
+            FullTreeFunctionTruthSqliteV3.freezeAndVerifyV3Staging(
+                freezeRace,
+                freezeRaceIndex,
+                Files.readAllBytes(freezeRace.resolve("index.json")),
+                expected.outputBytes,
+            ) { stage ->
+                if (!mutatedDuringFreeze && stage == "while freezing truth-v3 member ${freezeRaceShard.fileName}") {
+                    val changed = Files.readAllBytes(freezeRaceShard)
+                    changed[0] = if (changed[0] == '{'.code.toByte()) '['.code.toByte() else '{'.code.toByte()
+                    Files.write(freezeRaceShard, changed)
+                    mutatedDuringFreeze = true
+                }
+            }
+        }
+        assertTrue(mutatedDuringFreeze, "the fixture mutation must overlap staged-file freezing")
+
+        val finalBoundary = copyTree(expected.root, root.resolve("truth-v3-staging-final-boundary"))
+        val finalIndex = parseControlObject(finalBoundary.resolve("index.json"))
+        val snapshot = FullTreeFunctionTruthSqliteV3.freezeAndVerifyV3Staging(
+            finalBoundary,
+            finalIndex,
+            Files.readAllBytes(finalBoundary.resolve("index.json")),
+            expected.outputBytes,
+        )
+        makeTreeWritable(finalBoundary)
+        val finalShard = finalBoundary.resolve(expected.root.relativize(firstShard).toString())
+        val changed = Files.readAllBytes(finalShard)
+        changed[0] = if (changed[0] == '{'.code.toByte()) '['.code.toByte() else '{'.code.toByte()
+        Files.write(finalShard, changed)
+        assertFailsWith<FullTreeFunctionTruthV3Exception>("the final rename-boundary rehash must catch a changed staged member") {
+            FullTreeFunctionTruthSqliteV3.reauthenticateV3Staging(
+                snapshot,
+                finalIndex,
+                Files.readAllBytes(finalBoundary.resolve("index.json")),
+                expected.outputBytes,
+            )
+        }
+        assertEquals(indexBytes.toList(), Files.readAllBytes(expected.root.resolve("index.json")).toList())
     }
 
     private fun assertV3ObservationSnapshotRejectsTreeSwap(fixture: V3Fixture, root: Path) {

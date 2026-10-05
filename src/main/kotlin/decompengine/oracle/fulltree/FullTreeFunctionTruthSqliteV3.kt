@@ -224,7 +224,7 @@ internal fun fullTreeFunctionTruthV3CheckResidentBytes(
     }
     if (activeShardMaximumBytes != null) {
         require(activeShardMaximumBytes > 0L)
-        if (currentBytes > activeShardMaximumBytes || highWaterBytes > activeShardMaximumBytes) {
+        if (currentBytes > activeShardMaximumBytes) {
             throw IllegalArgumentException("truth-v3 shard phase exceeded its authenticated per-shard resident-memory bound")
         }
     }
@@ -249,6 +249,12 @@ internal data class FullTreeFunctionTruthV3Limits(
         require(maximumRetainedWorkingSetBytes in 128L * 1024L * 1024L..2L * 1024L * 1024L * 1024L)
     }
 }
+
+internal fun fullTreeFunctionTruthV3SharedScratchBound(limits: FullTreeFunctionTruthV3Limits): Long =
+    limits.maximumScratchBytes
+
+internal fun fullTreeFunctionTruthV3HasDatabaseScratchCapacity(limits: FullTreeFunctionTruthV3Limits): Boolean =
+    fullTreeFunctionTruthV3SharedScratchBound(limits) >= limits.truth.maximumDatabaseBytes
 
 internal data class FullTreeFunctionTruthV3Counts(
     val functions: FullTreeFunctionTruthCounts,
@@ -702,7 +708,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
             setOf("index.json", "exclusions.json"),
         )
         val wholeRunBytes = scope.document.controlObject("bounds").controlObject("wholeRun").controlLong("serializedBytes")
-        val acceptedBytes = minOf(projection.outputBytes, wholeRunBytes, limits.maximumOutputBytes, limits.truth.maximumOutputBytes)
+        val acceptedBytes = minOf(projection.outputBytes, wholeRunBytes, limits.maximumOutputBytes)
         reserveV3ScratchCapacity(workspaceRoot, identity.totalBytes, limits)
         val snapshot = identity.createSnapshot(
             candidateRoot,
@@ -905,7 +911,6 @@ internal object FullTreeFunctionTruthSqliteV3 {
         val allDispositionCounts = zeroDispositionCounts()
         val wholeRunOutputBound = minOf(
             limits.maximumOutputBytes,
-            limits.truth.maximumOutputBytes,
             v2Run.binding.run.v3Object("bounds").v3Long("wholeRunBytes"),
         )
         preflightV3RunWorkingSet(
@@ -1214,7 +1219,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
         ) {
             v3Fail("truth-v3 working-set limits exceed the authenticated whole-run resident bound")
         }
-        if (maximumScratchBound(limits) < limits.truth.maximumDatabaseBytes) {
+        if (!fullTreeFunctionTruthV3HasDatabaseScratchCapacity(limits)) {
             v3Fail("truth-v3 scratch bound is smaller than the frozen emitted-RVA database minimum")
         }
     }
@@ -1269,6 +1274,39 @@ internal object FullTreeFunctionTruthSqliteV3 {
         ) {
             v3Fail("observation-v2 raw rederivation changed before truth-v3 publication or validation")
         }
+    }
+
+    /** Freeze a complete staged tree, then reauthenticate its members and retain path identities. */
+    internal fun freezeAndVerifyV3Staging(
+        root: Path,
+        index: JsonObject,
+        indexBytes: ByteArray,
+        outputBytes: Long,
+        checkpoint: (String) -> Unit = {},
+    ): V3StableTreeSnapshot {
+        makeV3ReadOnly(root, checkpoint)
+        checkpoint("after freezing truth-v3 publication staging")
+        verifyV3IndexTree(root, index, indexBytes, outputBytes)
+        return V3StableTreeSnapshot.captureIdentity(
+            root,
+            setOf("shards"),
+            Math.addExact(index.v3Array("shards").size.toLong(), 2L),
+            outputBytes,
+            checkpoint,
+            setOf("index.json", "exclusions.json"),
+        )
+    }
+
+    /** Rehash the frozen tree at the final rename boundary; same-UID writers are not permanently excluded. */
+    internal fun reauthenticateV3Staging(
+        snapshot: V3StableTreeSnapshot,
+        index: JsonObject,
+        indexBytes: ByteArray,
+        outputBytes: Long,
+        checkpoint: (String) -> Unit = {},
+    ) {
+        snapshot.verifyIdentity(checkpoint)
+        verifyV3IndexTree(snapshot.root, index, indexBytes, outputBytes)
     }
 
     private fun verifyV3IndexTree(root: Path, index: JsonObject, indexBytes: ByteArray, expectedOutputBytes: Long) {
@@ -1535,11 +1573,8 @@ internal object FullTreeFunctionTruthSqliteV3 {
         }
     }
 
-    private fun maximumScratchBound(limits: FullTreeFunctionTruthV3Limits): Long = minOf(
-        limits.maximumScratchBytes,
-        limits.truth.maximumScratchBytes,
-        limits.observationV2.maximumScratchBytes,
-    )
+    private fun maximumScratchBound(limits: FullTreeFunctionTruthV3Limits): Long =
+        fullTreeFunctionTruthV3SharedScratchBound(limits)
 
     private fun projectedV3ShardBytes(observationBytes: Long, truthBytes: Long): Long {
         if (observationBytes <= 0L || truthBytes < 0L) v3Fail("truth-v3 shard has invalid preflight input sizes")
@@ -2182,9 +2217,9 @@ internal object FullTreeFunctionTruthSqliteV3 {
             verifyInputs()
             if (projection.root != staging) FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 projection is outside its publication staging tree")
             if (projection.outputBytes > maximumBytes) FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 output exceeds its publication bound")
-            FullTreeFunctionTruthSqliteV3.verifyV3IndexTree(staging, projection.index, projection.indexBytes, projection.outputBytes)
-            makeV3ReadOnly(staging, checkpoint)
-            checkpoint("after freezing truth-v3 publication staging")
+            val stagedSnapshot = FullTreeFunctionTruthSqliteV3.freezeAndVerifyV3Staging(
+                staging, projection.index, projection.indexBytes, projection.outputBytes, checkpoint,
+            )
             requireDirectoryIdentity(parent, parentIdentity, "truth-v3 publication parent")
             requireDirectoryIdentity(staging, stagingIdentity, "truth-v3 staging root")
             if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) v3Fail("truth-v3 output root already exists")
@@ -2201,6 +2236,9 @@ internal object FullTreeFunctionTruthSqliteV3 {
                         FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 output root already exists")
                     }
                     LinuxFilesystemSyscalls.synchronize(descriptor)
+                    FullTreeFunctionTruthSqliteV3.reauthenticateV3Staging(
+                        stagedSnapshot, projection.index, projection.indexBytes, projection.outputBytes, checkpoint,
+                    )
                     try {
                         LinuxFilesystemSyscalls.renameNoReplace(parentFd, staging.fileName.toString(), target.fileName.toString())
                     } catch (failure: LinuxSyscallException) {
