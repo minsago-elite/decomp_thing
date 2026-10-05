@@ -1,0 +1,288 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://decomp-thing.invalid/oracle/clang/18.1.3/build-record.schema.json",
+  "title": "Authenticated Clang 18.1.3 Ubuntu Noble toolchain build record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "buildSystem", "profile", "acquisition", "source", "patchAudit",
+    "packages", "downloadedPackages", "tools", "runtime", "resources", "resourceDirectory", "probe", "recipe", "environment",
+    "commands", "rootfs", "image", "imageArtifact", "reproducibility"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "buildSystem": {"const": "ubuntu-snapshot-debootstrap-apt"},
+    "profile": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "architecture", "target", "snapshot", "codename"],
+      "properties": {
+        "id": {"const": "clang-libtooling-18.1.3-ubuntu-noble-amd64-v1"},
+        "architecture": {"const": "amd64"},
+        "target": {"const": "x86_64-linux-gnu"},
+        "snapshot": {"const": "20240702T000000Z"},
+        "codename": {"const": "noble"}
+      }
+    },
+    "acquisition": {"$ref": "#/$defs/acquisition"},
+    "source": {"$ref": "#/$defs/source"},
+    "patchAudit": {"$ref": "#/$defs/patchAudit"},
+    "packages": {
+      "type": "array", "minItems": 1, "maxItems": 1200,
+      "items": {"$ref": "#/$defs/package"}
+    },
+    "downloadedPackages": {
+      "type": "array", "minItems": 5, "maxItems": 1200,
+      "items": {"$ref": "#/$defs/package"}
+    },
+    "tools": {
+      "type": "array", "minItems": 2, "maxItems": 2,
+      "items": {"$ref": "#/$defs/tool"}
+    },
+    "runtime": {"$ref": "#/$defs/manifest"},
+    "resources": {"$ref": "#/$defs/manifest"},
+    "resourceDirectory": {"type": "string", "pattern": "^/usr/lib/llvm-18/.*$"},
+    "probe": {"$ref": "#/$defs/probe"},
+    "recipe": {"$ref": "#/$defs/recipe"},
+    "environment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["LC_ALL", "TZ", "SOURCE_DATE_EPOCH", "PATH"],
+      "properties": {
+        "LC_ALL": {"const": "C"},
+        "TZ": {"const": "UTC"},
+        "SOURCE_DATE_EPOCH": {"type": "string", "pattern": "^(0|[1-9][0-9]*)$"},
+        "PATH": {"type": "string", "minLength": 1}
+      }
+    },
+    "commands": {
+      "type": "object", "additionalProperties": false,
+      "required": ["debootstrap", "writeAptSources", "aptUpdate", "aptDownloadOnly", "aptInstall", "clangCVersion", "clangCxxVersion", "clangResourceDirectory", "llvmConfigLibdir", "llvmConfigCxxflags", "probeCompile", "probeRun", "rootfsTar", "ociArchive"],
+      "properties": {
+        "debootstrap": {"$ref": "#/$defs/argv"},
+        "writeAptSources": {"$ref": "#/$defs/argv"},
+        "aptUpdate": {"$ref": "#/$defs/argv"},
+        "aptDownloadOnly": {"$ref": "#/$defs/argv"},
+        "aptInstall": {"$ref": "#/$defs/argv"},
+        "clangCVersion": {"$ref": "#/$defs/argv"},
+        "clangCxxVersion": {"$ref": "#/$defs/argv"},
+        "clangResourceDirectory": {"$ref": "#/$defs/argv"},
+        "llvmConfigLibdir": {"$ref": "#/$defs/argv"},
+        "llvmConfigCxxflags": {"$ref": "#/$defs/argv"},
+        "probeCompile": {"$ref": "#/$defs/argv"},
+        "probeRun": {"$ref": "#/$defs/argv"},
+        "rootfsTar": {"$ref": "#/$defs/argv"},
+        "ociArchive": {"$ref": "#/$defs/argv"}
+      }
+    },
+    "rootfs": {"$ref": "#/$defs/hashedArtifact"},
+    "image": {
+      "type": "object", "additionalProperties": false,
+      "required": ["format", "manifestSha256", "imageDigest"],
+      "properties": {
+        "format": {"const": "oci-image-layout-v1"},
+        "manifestSha256": {"$ref": "#/$defs/sha256"},
+        "imageDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "imageArtifact": {"$ref": "#/$defs/hashedArtifact"},
+    "reproducibility": {
+      "type": "object", "additionalProperties": false,
+      "required": ["cleanBuilds", "matchingRootfsSha256", "matchingImageDigest"],
+      "properties": {
+        "cleanBuilds": {"const": 2},
+        "matchingRootfsSha256": {"type": "boolean", "const": true},
+        "matchingImageDigest": {"type": "boolean", "const": true}
+      }
+    }
+  },
+  "$defs": {
+    "argv": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "hashedArtifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bytes", "sha256"],
+      "properties": {"bytes": {"type": "integer", "minimum": 1}, "sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "manifest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["entryCount", "bytes", "sha256", "entries"],
+      "properties": {
+        "entryCount": {"type": "integer", "minimum": 1},
+        "bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "entries": {"type": "array", "items": {"$ref": "#/$defs/fileEntry"}}
+      }
+    },
+    "fileEntry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "bytes", "sha256"],
+      "properties": {"path": {"type": "string", "minLength": 1}, "bytes": {"type": "integer", "minimum": 0}, "sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "package": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "version", "architecture", "suite", "component", "file", "bytes", "sha256"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "architecture": {"enum": ["amd64", "all"]},
+        "suite": {"enum": ["noble", "noble-updates", "noble-security"]},
+        "component": {"enum": ["main", "universe"]},
+        "file": {"type": "string", "pattern": "^[^/].*\\.deb$"},
+        "bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "tool": {
+      "type": "object", "additionalProperties": false,
+      "required": ["role", "path", "symlinkChain", "resolvedPath", "bytes", "sha256", "mode", "versionOutput"],
+      "properties": {
+        "role": {"enum": ["c-driver", "cxx-driver"]},
+        "path": {"type": "string", "pattern": "^/usr/"},
+        "symlinkChain": {"type": "array", "items": {"type": "string"}},
+        "resolvedPath": {"type": "string", "pattern": "^/usr/"},
+        "bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "mode": {"type": "string", "pattern": "^[0-7]{4}$"},
+        "versionOutput": {"type": "string", "minLength": 1}
+      }
+    },
+    "acquisition": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repositories", "ubuntuKeyring", "candidateSha256", "sourceIndexesSha256", "binaryIndexesSha256", "signatureFingerprints"],
+      "properties": {
+        "repositories": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"$ref": "#/$defs/repository"}},
+        "ubuntuKeyring": {"$ref": "#/$defs/hashedArtifact"},
+        "candidateSha256": {"$ref": "#/$defs/sha256"},
+        "sourceIndexesSha256": {"$ref": "#/$defs/sha256"},
+        "binaryIndexesSha256": {"$ref": "#/$defs/sha256"},
+        "signatureFingerprints": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "string", "pattern": "^[0-9A-F]{40}$"}}
+      }
+    },
+    "repository": {
+      "type": "object", "additionalProperties": false,
+      "required": ["suite", "inRelease", "sha256", "bytes", "signerPrimaryFingerprint"],
+      "properties": {
+        "suite": {"enum": ["noble", "noble-updates", "noble-security"]},
+        "inRelease": {"type": "string"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "bytes": {"type": "integer", "minimum": 1},
+        "signerPrimaryFingerprint": {"type": "string", "pattern": "^[0-9A-F]{40}$"}
+      }
+    },
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["package", "version", "upstreamTag", "dsc", "files", "upstreamArchive", "upstreamSignature", "upstreamKeyring"],
+      "properties": {
+        "package": {"const": "llvm-toolchain-18"},
+        "version": {"const": "1:18.1.3-1ubuntu1"},
+        "upstreamTag": {"const": "llvmorg-18.1.3"},
+        "dsc": {"$ref": "#/$defs/hashedArtifact"},
+        "files": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/sourceFile"}},
+        "upstreamArchive": {"$ref": "#/$defs/hashedArtifact"},
+        "upstreamSignature": {"$ref": "#/$defs/hashedArtifact"},
+        "upstreamKeyring": {"$ref": "#/$defs/hashedArtifact"}
+      }
+    },
+    "sourceFile": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "bytes", "sha256", "role"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "role": {"enum": ["dsc", "upstream-source", "debian-patches"]}
+      }
+    },
+    "patchAudit": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "patchCount", "patchInventorySha256", "relevantFileCount", "relevantFileManifestSha256"],
+      "properties": {
+        "status": {"const": "compatible"},
+        "patchCount": {"type": "integer", "minimum": 0},
+        "patchInventorySha256": {"$ref": "#/$defs/sha256"},
+        "relevantFileCount": {"const": 34},
+        "relevantFileManifestSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "probe": {
+      "type": "object", "additionalProperties": false,
+      "required": ["compilerVersion", "target", "inventoryEvidence", "generatedFields", "familyCounts", "generatedFieldNames", "manualFields", "callingConventions", "apiChecks", "runtimeLangOptionsChecks", "macroObservations", "definitionSha256", "headerSha256", "sourceSha256", "binarySha256", "fixtureSha256"],
+      "properties": {
+        "compilerVersion": {"type": "string", "pattern": "^18\\.1\\.3"},
+        "target": {"const": "x86_64-pc-linux-gnu"},
+        "inventoryEvidence": {"const": "authenticated-source-text-scan-of-LangOptions.def-and-LangOptions.h"},
+        "generatedFields": {"const": 298},
+        "familyCounts": {
+          "type": "object", "additionalProperties": false,
+          "required": ["LANGOPT", "COMPATIBLE_LANGOPT", "BENIGN_LANGOPT", "ENUM_LANGOPT", "BENIGN_ENUM_LANGOPT", "VALUE_LANGOPT", "COMPATIBLE_VALUE_LANGOPT", "BENIGN_VALUE_LANGOPT"],
+          "properties": {
+            "LANGOPT": {"const": 170}, "COMPATIBLE_LANGOPT": {"const": 20},
+            "BENIGN_LANGOPT": {"const": 58}, "ENUM_LANGOPT": {"const": 23},
+            "BENIGN_ENUM_LANGOPT": {"const": 11}, "VALUE_LANGOPT": {"const": 10},
+            "COMPATIBLE_VALUE_LANGOPT": {"const": 5}, "BENIGN_VALUE_LANGOPT": {"const": 1}
+          }
+        },
+        "generatedFieldNames": {"type": "array", "minItems": 298, "maxItems": 298, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}},
+        "manualFields": {"type": "array", "minItems": 28, "maxItems": 28, "uniqueItems": true, "items": {"type": "string"}},
+        "callingConventions": {"type": "array", "minItems": 22, "maxItems": 22, "uniqueItems": true, "items": {"type": "string"}},
+        "apiChecks": {"const": [
+          "ClassTemplatePartialSpecializationDecl::getSpecializedTemplate",
+          "ClassTemplatePartialSpecializationDecl::getTemplateParameters",
+          "ClassTemplateSpecializationDecl::getSpecializedTemplateOrPartial",
+          "ClassTemplateSpecializationDecl::getTemplateArgs",
+          "ClassTemplateSpecializationDecl::getTemplateInstantiationArgs",
+          "CompilerInstance::getTarget",
+          "FunctionDecl::getPrimaryTemplate",
+          "FunctionDecl::getTemplateSpecializationKind",
+          "FunctionProtoType::getCallConv",
+          "FunctionProtoType::getExceptionSpecType",
+          "FunctionProtoType::getParamTypes",
+          "LangOptions::CPlusPlus14",
+          "LangOptions::DoubleSquareBracketAttributes",
+          "LangOptions::Trigraphs",
+          "Lexer::getLocForEndOfToken",
+          "MacroInfo::isBuiltinMacro",
+          "PPCallbacks::MacroExpands",
+          "Preprocessor::getLangOpts",
+          "QualType::getCanonicalType",
+          "QualType::getSplitUnqualifiedType",
+          "TargetInfo::getTriple",
+          "ToolInvocation"
+        ]},
+        "runtimeLangOptionsChecks": {"const": [
+          "LangOptions::CPlusPlus14=true",
+          "LangOptions::CPlusPlus20=false",
+          "LangOptions::DoubleSquareBracketAttributes=true",
+          "LangOptions::Trigraphs=true"
+        ]},
+        "macroObservations": {
+          "type": "object", "additionalProperties": false,
+          "required": ["expansionCount", "macroInfoChecks", "nonBuiltinClassifications"],
+          "properties": {
+            "expansionCount": {"type": "integer", "minimum": 1},
+            "macroInfoChecks": {"type": "integer", "minimum": 1},
+            "nonBuiltinClassifications": {"type": "integer", "minimum": 1}
+          }
+        },
+        "definitionSha256": {"$ref": "#/$defs/sha256"},
+        "headerSha256": {"$ref": "#/$defs/sha256"},
+        "sourceSha256": {"$ref": "#/$defs/sha256"},
+        "binarySha256": {"$ref": "#/$defs/sha256"},
+        "fixtureSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "recipe": {
+      "type": "object", "additionalProperties": false,
+      "required": ["contractSha256", "schemaSha256", "provisionerSha256", "probeSha256", "fixtureSha256", "aLoaderSmokeSha256", "aLoaderInitSha256", "workflowSha256"],
+      "properties": {
+        "contractSha256": {"$ref": "#/$defs/sha256"},
+        "schemaSha256": {"$ref": "#/$defs/sha256"},
+        "provisionerSha256": {"$ref": "#/$defs/sha256"},
+        "probeSha256": {"$ref": "#/$defs/sha256"},
+        "fixtureSha256": {"$ref": "#/$defs/sha256"},
+        "aLoaderSmokeSha256": {"$ref": "#/$defs/sha256"},
+        "aLoaderInitSha256": {"$ref": "#/$defs/sha256"},
+        "workflowSha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

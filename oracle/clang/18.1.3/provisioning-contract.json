@@ -1,0 +1,157 @@
+{
+  "schemaVersion": 1,
+  "profile": {
+    "id": "clang-libtooling-18.1.3-ubuntu-noble-amd64-v1",
+    "target": "x86_64-linux-gnu",
+    "architecture": "amd64",
+    "distribution": "Ubuntu",
+    "codename": "noble",
+    "snapshot": "20240702T000000Z",
+    "snapshotBase": "https://snapshot.ubuntu.com/ubuntu/20240702T000000Z/",
+    "suites": ["noble", "noble-updates", "noble-security"],
+    "components": ["main", "universe"],
+    "sourcePackage": {
+      "name": "llvm-toolchain-18",
+      "version": "1:18.1.3-1ubuntu1"
+    },
+    "binaryRoots": [
+      {"name": "clang-18", "version": "1:18.1.3-1ubuntu1"},
+      {"name": "llvm-18-dev", "version": "1:18.1.3-1ubuntu1"},
+      {"name": "libclang-18-dev", "version": "1:18.1.3-1ubuntu1"},
+      {"name": "libclang-cpp18-dev", "version": "1:18.1.3-1ubuntu1"},
+      {"name": "libclang-cpp18", "version": "1:18.1.3-1ubuntu1"}
+    ],
+    "ubuntuArchivePrimaryFingerprints": [
+      "F6ECB3762474EDA9D21B7022871920D1991BC93C",
+      "843938DF228D22F7B3742BC0D94AA3F0EFE21092"
+    ],
+    "upstream": {
+      "tag": "llvmorg-18.1.3",
+      "archiveUrl": "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.3/llvm-project-18.1.3.src.tar.xz",
+      "signatureUrl": "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.3/llvm-project-18.1.3.src.tar.xz.sig",
+      "keyFile": "oracle/llvm/22.1.6/keys/douglas-yung-llvm-release.asc",
+      "keySha256": "d3e02c6fbcc641935ebd8b5a0d623563f90fef1a51c161917d7d5ed921e36288",
+      "primaryFingerprint": "FFB3368980F3E6BB5737145A316C56D064CACBA5"
+    },
+    "bounds": {
+      "timeoutMinutes": 35,
+      "maxAcquisitionBytes": 3221225472,
+      "minFreeDiskBytes": 7516192768,
+      "minMemoryBytes": 6442450944,
+      "maxArtifactBytes": 2147483648,
+      "maxPackageCount": 1200
+    }
+  },
+  "langOptions": {
+    "inventoryEvidence": "authenticated-source-text-scan-of-LangOptions.def-and-LangOptions.h",
+    "runtimeChecks": [
+      "LangOptions::CPlusPlus14=true",
+      "LangOptions::CPlusPlus20=false",
+      "LangOptions::DoubleSquareBracketAttributes=true",
+      "LangOptions::Trigraphs=true"
+    ],
+    "generatedFieldCount": 298,
+    "familyCounts": {
+      "LANGOPT": 170,
+      "COMPATIBLE_LANGOPT": 20,
+      "BENIGN_LANGOPT": 58,
+      "ENUM_LANGOPT": 23,
+      "BENIGN_ENUM_LANGOPT": 11,
+      "VALUE_LANGOPT": 10,
+      "COMPATIBLE_VALUE_LANGOPT": 5,
+      "BENIGN_VALUE_LANGOPT": 1
+    },
+    "manualFields": [
+      "LangStd", "Sanitize", "SanitizeCoverage", "NoSanitizeFiles",
+      "XRayAlwaysInstrumentFiles", "XRayNeverInstrumentFiles", "XRayAttrListFiles",
+      "ProfileListFiles", "ObjCRuntime", "CFRuntime", "ObjCConstantStringClass",
+      "OverflowHandler", "ModuleName", "CurrentModule", "ModuleFeatures",
+      "CommentOpts", "NoBuiltinFuncs", "MacroPrefixMap", "OMPTargetTriples",
+      "OMPHostIRFile", "CUID", "CXXABI", "IsHeaderFile", "GPUDefaultStream",
+      "RandstructSeed", "UseTargetPathSeparator", "CheckNew", "OpenACCMacroOverride"
+    ],
+    "rejectedProductionFamilies": ["COMPATIBLE_ENUM_LANGOPT"],
+    "callingConventions": [
+      "CC_C", "CC_X86StdCall", "CC_X86FastCall", "CC_X86ThisCall", "CC_X86VectorCall",
+      "CC_X86Pascal", "CC_Win64", "CC_X86_64SysV", "CC_X86RegCall", "CC_AAPCS",
+      "CC_AAPCS_VFP", "CC_IntelOclBicc", "CC_SpirFunction", "CC_OpenCLKernel", "CC_Swift",
+      "CC_SwiftAsync", "CC_PreserveMost", "CC_PreserveAll", "CC_AArch64VectorCall",
+      "CC_AArch64SVEPCS", "CC_AMDGPUKernelCall", "CC_M68kRTD"
+    ],
+    "manualFieldsCount": 28,
+    "unsupportedNewerCallingConventions": ["CC_PreserveNone", "CC_RISCVVectorCall"],
+    "apiChecks": [
+      "ClassTemplatePartialSpecializationDecl::getSpecializedTemplate",
+      "ClassTemplatePartialSpecializationDecl::getTemplateParameters",
+      "ClassTemplateSpecializationDecl::getSpecializedTemplateOrPartial",
+      "ClassTemplateSpecializationDecl::getTemplateArgs",
+      "ClassTemplateSpecializationDecl::getTemplateInstantiationArgs",
+      "CompilerInstance::getTarget",
+      "FunctionDecl::getPrimaryTemplate",
+      "FunctionDecl::getTemplateSpecializationKind",
+      "FunctionProtoType::getCallConv",
+      "FunctionProtoType::getExceptionSpecType",
+      "FunctionProtoType::getParamTypes",
+      "LangOptions::CPlusPlus14",
+      "LangOptions::DoubleSquareBracketAttributes",
+      "LangOptions::Trigraphs",
+      "Lexer::getLocForEndOfToken",
+      "MacroInfo::isBuiltinMacro",
+      "PPCallbacks::MacroExpands",
+      "Preprocessor::getLangOpts",
+      "QualType::getCanonicalType",
+      "QualType::getSplitUnqualifiedType",
+      "TargetInfo::getTriple",
+      "ToolInvocation"
+    ]
+  },
+  "environment": {
+    "LC_ALL": "C",
+    "TZ": "UTC",
+    "SOURCE_DATE_EPOCH": "1714003200",
+    "PATH": "/usr/lib/llvm-18/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  },
+  "negativeControl": {
+    "oracleId": "clang-driver-22.1.6",
+    "artifactLock": "oracle/llvm/22.1.6/release-artifacts.json",
+    "artifactRole": "full",
+    "requiredVersion": "22.1.6",
+    "fixture": "oracle/clang/18.1.3/fixtures/libtooling-positive.cpp"
+  },
+  "relevantFiles": [
+    "clang/include/clang/Basic/LangOptions.def",
+    "clang/include/clang/Basic/LangOptions.h",
+    "clang/include/clang/Basic/CommentOptions.h",
+    "clang/include/clang/Basic/Specifiers.h",
+    "clang/include/clang/Basic/Features.def",
+    "clang/include/clang/Basic/TargetInfo.h",
+    "clang/include/clang/Driver/Options.td",
+    "clang/include/clang/Driver/Options.h",
+    "clang/include/clang/Frontend/CompilerInvocation.h",
+    "clang/include/clang/Frontend/CompilerInstance.h",
+    "clang/include/clang/Tooling/Tooling.h",
+    "clang/include/clang/AST/ASTContext.h",
+    "clang/include/clang/AST/Decl.h",
+    "clang/include/clang/AST/DeclTemplate.h",
+    "clang/include/clang/AST/RecursiveASTVisitor.h",
+    "clang/include/clang/AST/TemplateBase.h",
+    "clang/include/clang/AST/Type.h",
+    "clang/include/clang/Lex/Lexer.h",
+    "clang/include/clang/Lex/PPCallbacks.h",
+    "clang/include/clang/Lex/Preprocessor.h",
+    "clang/include/clang/Lex/MacroInfo.h",
+    "clang/lib/Basic/TargetInfo.cpp",
+    "clang/lib/Driver/Driver.cpp",
+    "clang/lib/Driver/ToolChains/Clang.cpp",
+    "clang/lib/Frontend/CompilerInvocation.cpp",
+    "clang/lib/Frontend/CompilerInstance.cpp",
+    "clang/lib/Tooling/Tooling.cpp",
+    "clang/lib/AST/ASTContext.cpp",
+    "clang/lib/AST/DeclTemplate.cpp",
+    "clang/lib/Lex/Lexer.cpp",
+    "clang/lib/Lex/PPDirectives.cpp",
+    "clang/lib/Lex/PPMacroExpansion.cpp",
+    "clang/lib/Lex/Preprocessor.cpp",
+    "clang/lib/Sema/SemaTemplate.cpp"
+  ]
+}
