@@ -991,7 +991,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
             fullTreeFunctionTruthV3AdapterPublishScratchPeakBytes(
                 currentScratchBytes = currentScratchBytes,
                 preparedPayloadBytes = totalBytes,
-                maximumControlArtifactBytes = limits.truth.observationRun.maximumControlArtifactBytes,
+                maximumControlArtifactBytes = limits.truth.observationRun.maximumControlArtifactBytes.toLong(),
                 maximumScratchBytes = maximumScratchBound(limits),
             )
         } catch (failure: ArithmeticException) {
