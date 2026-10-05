@@ -79,7 +79,7 @@ class FullTreeFunctionTruthSqliteV3Test {
                 "the v2 index schema bytes must stay frozen",
             )
             assertEquals(
-                "7b23de968c0038849bb75bca8ff0aa35e3e53645475ca0aab9800d4077b7426c",
+                "a59e80ed0cd440f07be4741892d75ba5a3514532a73ecb67bbc617b4d24a34c2",
                 FullTreeFunctionTruthSqliteV3.configurationSha256,
             )
             assertEquals(
@@ -328,6 +328,8 @@ class FullTreeFunctionTruthSqliteV3Test {
             .resolve("src/test/resources/oracle/inline-template-identity-v1").toAbsolutePath().normalize()
         val compiler = resolveCompiler("GXX", listOf("g++", "g++-14", "g++-13"))
         val compilerVersion = runCommand(listOf(compiler.toString(), "--version"), root, "compiler-version.txt")
+        val readelf = resolveCompiler("READELF", listOf("readelf", "llvm-readelf"))
+        val readelfVersion = runCommand(listOf(readelf.toString(), "--version"), root, "readelf-version.txt")
         val build = Files.createDirectories(root.resolve("compiled"))
         val objects = listOf("caller_one", "caller_two", "instantiate", "unique_pattern").map { name ->
             val target = build.resolve("$name.o")
@@ -352,7 +354,7 @@ class FullTreeFunctionTruthSqliteV3Test {
         )
         val stripped = build.resolve("fixture-stripped.so")
         Files.copy(artifact, stripped)
-        assertCompilerInputVector(sourceRoot, compilerVersion, artifact)
+        assertCompilerInputVector(sourceRoot, compilerVersion, readelfVersion, artifact)
         val controls = createFullTreeControlFixture(root.resolve("control"))
         val original = controls.authenticatedScope()
         val richHash = fixtureSha256(artifact)
@@ -422,7 +424,7 @@ class FullTreeFunctionTruthSqliteV3Test {
         )
     }
 
-    private fun assertCompilerInputVector(sourceRoot: Path, compilerVersion: String, artifact: Path) {
+    private fun assertCompilerInputVector(sourceRoot: Path, compilerVersion: String, readelfVersion: String, artifact: Path) {
         val vector = parseControlObject(sourceRoot.parent.resolve("full-tree-function-truth-v3/compiler-input-v1.json"))
         assertEquals("compiler-input-v1", vector.controlString("vectorKind"))
         assertEquals("inline-template-identity-v1", vector.controlString("fixture"))
@@ -436,8 +438,13 @@ class FullTreeFunctionTruthSqliteV3Test {
         vector.controlArray("sourceFiles").controlObjects("source files").forEach { source ->
             assertEquals(source.controlString("sha256"), fixtureSha256(sourceRoot.resolve(source.controlString("path"))))
         }
-        if (compilerVersion.startsWith("g++ (Debian 14.2.0-19) 14.2.0")) {
-            assertEquals(vector.controlObject("compiler").controlString("observedVersion"), compilerVersion.lineSequence().first())
+        val recordedToolchain = vector.controlObject("compiler")
+        if (recordedToolchain.controlString("observedVersion") == compilerVersion.lineSequence().first() &&
+            recordedToolchain.controlString("readelfVersion") == readelfVersion.lineSequence().first()
+        ) {
+            val linkedElf = vector.controlObject("linkedElf")
+            assertEquals(linkedElf.controlLong("bytes"), Files.size(artifact), "linked fixture ELF byte count")
+            assertEquals(linkedElf.controlString("sha256"), fixtureSha256(artifact), "linked fixture ELF digest")
         }
         assertTrue(Files.size(artifact) > 0L)
     }

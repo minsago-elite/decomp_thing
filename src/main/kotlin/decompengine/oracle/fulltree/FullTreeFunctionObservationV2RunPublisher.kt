@@ -798,11 +798,21 @@ internal object FullTreeFunctionObservationV2RunPublisher {
             "observation-v2 candidate run root",
         )
         requireDisjointRederivationTrees(stableCandidateRoot, stableScratchParent)
-        val candidate = BoundedShardRunVerifier.verify(
-            stableCandidateRoot,
-            expectedIndexArtifactSha256,
-            limits.run,
-        )
+        val outerCheckpoint = FullTreeOracleOperationCheckpoint.current()
+        val candidate = if (outerCheckpoint == null) {
+            BoundedShardRunVerifier.verify(
+                stableCandidateRoot,
+                expectedIndexArtifactSha256,
+                limits.run,
+            )
+        } else {
+            BoundedShardRunVerifier.verifyWithCheckpoint(
+                stableCandidateRoot,
+                expectedIndexArtifactSha256,
+                limits.run,
+                outerCheckpoint,
+            )
+        }
         val (currentScratchParent, currentScratchIdentity) = requireStableDirectory(
             stableScratchParent,
             "observation-v2 rederivation scratch parent after candidate verification",
@@ -877,8 +887,10 @@ private class V2RunDeadline private constructor(
     private val maximumWholeWall: Long,
     private val maximumWholeCpu: Long,
     private val maximumResidentBytes: Long,
+    private val outerCheckpoint: ((String) -> Unit)?,
 ) {
     fun checkpoint(label: String) {
+        outerCheckpoint?.invoke("observation-v2: $label")
         val wall = elapsed(startedWall, System.nanoTime(), "wall-clock")
         val cpu = elapsed(startedCpu, processCpuNanos(), "CPU")
         if (wall > maximumWholeWall || cpu > maximumWholeCpu) {
@@ -914,6 +926,7 @@ private class V2RunDeadline private constructor(
                 Math.multiplyExact(wallSeconds, 1_000_000_000L),
                 Math.multiplyExact(cpuSeconds, 1_000_000_000L),
                 wholeRun.controlLong("maximumResidentBytes"),
+                FullTreeOracleOperationCheckpoint.current(),
             )
         }
     }

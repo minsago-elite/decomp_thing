@@ -284,7 +284,7 @@
       "name": "full-tree-function-truth-index-v3",
       "path": "oracle/full-tree-function-truth-index-v3.schema.json",
       "registration": "shared-kotlin",
-      "schemaSha256": "230ea7a9b402047b23a7c875af8c079881fa7a08d258306d7fa97d492a4ec6a5"
+      "schemaSha256": "250ecb435bdb1c98cedff2d39b8ccface0dd0d1de86b787cc1019c6d3da7c59f"
     },
     {
       "formatVersions": [

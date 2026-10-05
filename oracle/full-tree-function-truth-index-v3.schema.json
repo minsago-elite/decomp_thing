@@ -107,11 +107,11 @@
     "shards": {
       "type": "array",
       "items": {
-        "$ref": "#/$defs/file"
+        "$ref": "#/$defs/shardFile"
       }
     },
     "exclusions": {
-      "$ref": "#/$defs/file"
+      "$ref": "#/$defs/exclusionFile"
     },
     "indexSha256": {
       "$ref": "#/$defs/sha256"
@@ -153,7 +153,7 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
-    "file": {
+    "shardFile": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -192,6 +192,45 @@
           "minimum": 0
         },
         "sourceEntities": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "exclusionFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "path",
+        "sha256",
+        "bytes",
+        "functions",
+        "nonEmitted"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "functions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "nonEmitted": {
           "type": "integer",
           "minimum": 0
         }

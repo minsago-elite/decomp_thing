@@ -10,7 +10,7 @@
     "sha256": "381ce2bb68a29fd72cfcb3c24ea5bc91a8a863753f939518659d946fcee0ecd2"
   },
   "producer": {
-    "configurationSha256": "7b23de968c0038849bb75bca8ff0aa35e3e53645475ca0aab9800d4077b7426c",
+    "configurationSha256": "a59e80ed0cd440f07be4741892d75ba5a3514532a73ecb67bbc617b4d24a34c2",
     "id": "full-tree-function-truth",
     "version": 3
   },
@@ -22,7 +22,7 @@
     },
     {
       "name": "full-tree-function-truth-index-v3",
-      "schemaSha256": "230ea7a9b402047b23a7c875af8c079881fa7a08d258306d7fa97d492a4ec6a5",
+      "schemaSha256": "250ecb435bdb1c98cedff2d39b8ccface0dd0d1de86b787cc1019c6d3da7c59f",
       "wireVersion": 2
     }
   ],

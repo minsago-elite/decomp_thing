@@ -391,7 +391,7 @@ internal object FullTreeFunctionTruthSqlite {
         maximumWorkers: Int,
         limits: FullTreeFunctionTruthLimits,
         finish: (FunctionTruthReconciliation) -> T,
-        checkpoint: (String) -> Unit = {},
+        checkpoint: (String) -> Unit = FullTreeOracleOperationCheckpoint.current() ?: {},
     ): T = translateTruthFailures {
         requireSha256(expectedObservationIndexArtifactSha256, "function-observation index artifact")
         if (maximumWorkers !in 1..min(limits.maximumWorkers, limits.control.maximumWorkers)) {

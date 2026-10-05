@@ -9,8 +9,8 @@ scoring, or downstream use.
 | --- | --- |
 | Producer policy | `full-tree-function-truth`, version `3` |
 | V3 shard schema | `full-tree-function-truth-v3`, wire `schemaVersion: 2`, SHA-256 `81bc31d80ee00b32e39ae8d8154a8890ecf5d724322ac0d1eb4c303a0a547c43` |
-| V3 index schema | `full-tree-function-truth-index-v3`, wire `schemaVersion: 2`, SHA-256 `230ea7a9b402047b23a7c875af8c079881fa7a08d258306d7fa97d492a4ec6a5` |
-| V3 configuration | SHA-256 `7b23de968c0038849bb75bca8ff0aa35e3e53645475ca0aab9800d4077b7426c` |
+| V3 index schema | `full-tree-function-truth-index-v3`, wire `schemaVersion: 2`, SHA-256 `250ecb435bdb1c98cedff2d39b8ccface0dd0d1de86b787cc1019c6d3da7c59f` |
+| V3 configuration | SHA-256 `a59e80ed0cd440f07be4741892d75ba5a3514532a73ecb67bbc617b4d24a34c2` |
 | Frozen V2 configuration | SHA-256 `17c61e43524b98a215075b82fa50732d6d8f50d883dce235e511731612da04e5` |
 | Frozen V2 shard schema | SHA-256 `b21be27d085c61c60cbaba11da1208b24c897c264001c790b0ca32b2ae24e5f7` |
 | Frozen V2 index schema | SHA-256 `40a2c4d0c3a1b3317e010fd267b56e6ea3ec94620abd79c591b01bc6357e084f` |
