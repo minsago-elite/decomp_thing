@@ -40,6 +40,22 @@ The owned provisioning workflow performs the acquisition on a standard public
   runtime `LangOptions` checks, LibTooling API observations, resource closure,
   image identity, or two-clean-run reproducibility.
 
+## Public runner result
+
+Workflow run `37339788139` at PR head
+`ed16e335ea323c59a77f1ffd2ff0574775209404` ran on the standard
+`ubuntu-24.04` public runner. It verified the pinned Snapshot `InRelease`
+signatures and the signed Release SHA-256 references for the selected source
+and binary indexes, then failed before downloading the source payload:
+
+`expected a unique signed source record for llvm-toolchain-18=1:18.1.3-1ubuntu1; found 0 records`
+
+The workflow's package closure, upstream source-signature check, patch
+comparison and all compiler/image/profile gates were skipped. The failure does
+not establish whether the package is absent from this pinned Snapshot or the
+profile's source-record selection needs correction; no different snapshot or
+source profile has been selected.
+
 Matching package version text is not compatibility or provenance evidence.
 The workflow rejects any difference in the 34 contract-relevant source files
 before it provisions the toolchain. If that gate finds a difference, it emits
