@@ -57,21 +57,53 @@ class FullTreeFunctionTruthSqliteV3Test {
             fullTreeFunctionTruthV3NestedScratchPlan(8L, 8L, 16L, 4L)
         }
         assertEquals(
-            215L,
+            220L,
             fullTreeFunctionTruthV3AdapterPublishScratchPeakBytes(
                 currentScratchBytes = 140L,
                 preparedPayloadBytes = 60L,
                 maximumControlArtifactBytes = 5L,
-                maximumScratchBytes = 215L,
+                shardCount = 2,
+                maximumScratchBytes = 220L,
             ),
-            "prepared payloads are already in current scratch; publish adds one staged copy",
+            "prepared payloads are already in current scratch; publish adds one staged copy, one checkpoint per shard, run, and index",
         )
         assertFailsWith<IllegalArgumentException>("one byte below the adapter peak must reject") {
             fullTreeFunctionTruthV3AdapterPublishScratchPeakBytes(
                 currentScratchBytes = 140L,
                 preparedPayloadBytes = 60L,
                 maximumControlArtifactBytes = 5L,
-                maximumScratchBytes = 214L,
+                shardCount = 2,
+                maximumScratchBytes = 219L,
+            )
+        }
+
+        val rvaCollectionTruthBytes = 1_024L
+        val rvaCollectionControls = 128L
+        val rvaCollectionSet = 96L
+        val exactRvaCollectionWorkingSet = fullTreeFunctionTruthV3ModeledWorkingSetBytes(
+            observationBytes = 1L,
+            legacyTruthBytes = rvaCollectionTruthBytes,
+            projectedShardBytes = 1L,
+            retainedControlBytes = rvaCollectionControls,
+            retainedSingleCopyBytes = rvaCollectionSet,
+        )
+        assertEquals(
+            exactRvaCollectionWorkingSet,
+            fullTreeFunctionTruthV3AdmitEmittedRvaCollectionWorkingSet(
+                truthShardBytes = rvaCollectionTruthBytes,
+                retainedControlBytes = rvaCollectionControls,
+                retainedEmittedRvaBytes = rvaCollectionSet,
+                configuredWorkingSetBytes = exactRvaCollectionWorkingSet,
+                authenticatedPerShardResidentBytes = exactRvaCollectionWorkingSet,
+            ),
+        )
+        assertFailsWith<IllegalArgumentException>("RVA collection must be admitted before allocating one extra byte") {
+            fullTreeFunctionTruthV3AdmitEmittedRvaCollectionWorkingSet(
+                truthShardBytes = rvaCollectionTruthBytes,
+                retainedControlBytes = rvaCollectionControls,
+                retainedEmittedRvaBytes = rvaCollectionSet,
+                configuredWorkingSetBytes = exactRvaCollectionWorkingSet - 1L,
+                authenticatedPerShardResidentBytes = exactRvaCollectionWorkingSet,
             )
         }
 

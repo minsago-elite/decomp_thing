@@ -275,20 +275,37 @@ internal fun fullTreeFunctionTruthV3AdapterPublishScratchPeakBytes(
     currentScratchBytes: Long,
     preparedPayloadBytes: Long,
     maximumControlArtifactBytes: Long,
+    shardCount: Int,
     maximumScratchBytes: Long,
 ): Long {
-    require(currentScratchBytes >= 0L && preparedPayloadBytes >= 0L && maximumControlArtifactBytes > 0L)
+    require(currentScratchBytes >= 0L && preparedPayloadBytes >= 0L && maximumControlArtifactBytes > 0L && shardCount > 0)
     require(maximumScratchBytes > 0L && currentScratchBytes >= preparedPayloadBytes) {
         "truth-v3 prepared adapter bytes are missing from scratch accounting"
     }
     val stagedPayloadAndControls = Math.addExact(
         preparedPayloadBytes,
-        Math.multiplyExact(3L, maximumControlArtifactBytes),
+        Math.multiplyExact(Math.addExact(shardCount.toLong(), 2L), maximumControlArtifactBytes),
     )
     val peak = Math.addExact(currentScratchBytes, stagedPayloadAndControls)
     require(peak <= maximumScratchBytes) { "truth-v3 observation adapter publication exceeds its remaining scratch bound" }
     return peak
 }
+
+internal fun fullTreeFunctionTruthV3AdmitEmittedRvaCollectionWorkingSet(
+    truthShardBytes: Long,
+    retainedControlBytes: Long,
+    retainedEmittedRvaBytes: Long,
+    configuredWorkingSetBytes: Long,
+    authenticatedPerShardResidentBytes: Long,
+): Long = fullTreeFunctionTruthV3AdmitShardWorkingSet(
+    observationBytes = 1L,
+    truthBytes = truthShardBytes,
+    projectedBytes = 1L,
+    retainedControlBytes = retainedControlBytes,
+    configuredWorkingSetBytes = configuredWorkingSetBytes,
+    authenticatedPerShardResidentBytes = authenticatedPerShardResidentBytes,
+    retainedSingleCopyBytes = retainedEmittedRvaBytes,
+)
 
 internal data class FullTreeFunctionTruthV3Counts(
     val functions: FullTreeFunctionTruthCounts,
@@ -911,6 +928,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
     ): BoundedShardRunBinding {
         val preparedDirectory = workspace.root.resolve("legacy-observation-prepared")
         Files.createDirectory(preparedDirectory, PosixFilePermissions.asFileAttribute(V3_WRITABLE_DIRECTORY))
+        val (_, preparedDirectoryIdentity) = requireStableDirectory(preparedDirectory, "truth-v3 prepared adapter directory")
         val prepared = ArrayList<BoundedShardPreparedOutput>(run.binding.outputs.size)
         var totalBytes = 0L
         run.binding.outputs.forEachIndexed { index, binding ->
@@ -992,6 +1010,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
                 currentScratchBytes = currentScratchBytes,
                 preparedPayloadBytes = totalBytes,
                 maximumControlArtifactBytes = limits.truth.observationRun.maximumControlArtifactBytes.toLong(),
+                shardCount = run.binding.outputs.size,
                 maximumScratchBytes = maximumScratchBound(limits),
             )
         } catch (failure: ArithmeticException) {
@@ -1020,8 +1039,34 @@ internal object FullTreeFunctionTruthSqliteV3 {
             },
             limits = limits.truth.observationRun,
         )
+        deletePreparedAdapterFiles(preparedDirectory, preparedDirectoryIdentity, prepared)
         checkV3Scratch(workspace.root, maximumScratchBound(limits))
         return adapter
+    }
+
+    private fun deletePreparedAdapterFiles(
+        directory: Path,
+        expectedDirectoryIdentity: Any,
+        prepared: List<BoundedShardPreparedOutput>,
+    ) {
+        requireDirectoryIdentity(directory, expectedDirectoryIdentity, "truth-v3 prepared adapter directory")
+        val expectedNames = prepared.map { it.output.fileName.toString() }.toSet()
+        if (expectedNames.size != prepared.size) v3Fail("truth-v3 prepared adapter member names are not unique")
+        val entries = Files.list(directory).use { paths -> paths.toList() }
+        if (entries.map { it.fileName.toString() }.toSet() != expectedNames || entries.size != expectedNames.size) {
+            v3Fail("truth-v3 prepared adapter directory membership changed after publication")
+        }
+        entries.forEach { path ->
+            if (Files.isSymbolicLink(path) || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+                v3Fail("truth-v3 prepared adapter member is not a regular file")
+            }
+            Files.delete(path)
+        }
+        requireDirectoryIdentity(directory, expectedDirectoryIdentity, "truth-v3 prepared adapter directory")
+        if (Files.list(directory).use { it.findAny().isPresent }) {
+            v3Fail("truth-v3 prepared adapter directory did not empty after publication")
+        }
+        Files.delete(directory)
     }
 
     private fun composeV3Tree(
@@ -1077,9 +1122,11 @@ internal object FullTreeFunctionTruthSqliteV3 {
         val perShardEntityBound = scope.document.controlObject("bounds").controlObject("perShard").controlLong("entities")
         val fullRunEmittedRvas = collectFullRunEmittedRvas(
             legacyRoot,
+            observationV2Root,
             legacyIndex,
             v2Run,
             truthEntities,
+            scope.document.controlObject("bounds").controlObject("perShard").controlLong("maximumResidentBytes"),
             limits,
             deadline,
         )
@@ -1773,9 +1820,11 @@ internal object FullTreeFunctionTruthSqliteV3 {
 
     private fun collectFullRunEmittedRvas(
         legacyRoot: Path,
+        observationV2Root: Path,
         legacyIndex: JsonObject,
         v2Run: FullTreeFunctionObservationV2RunPublication,
         maximumTruthEntities: Long,
+        authenticatedPerShardResidentBytes: Long,
         limits: FullTreeFunctionTruthV3Limits,
         deadline: V3RunDeadline,
     ): V3EmittedRvaPopulation {
@@ -1784,6 +1833,11 @@ internal object FullTreeFunctionTruthSqliteV3 {
         val maximumSetBytes = limits.maximumRetainedWorkingSetBytes - V3_FIXED_RETAINED_BYTES
         if (maximumSetBytes < 0L) v3Fail("truth-v3 emitted-RVA population has no retained-memory allowance")
         val rvas = HashSet<String>()
+        val retainedControlBytes = projectedV3ControlBytes(
+            records.size,
+            Files.size(legacyRoot.resolve("index.json")) + Files.size(legacyRoot.resolve("exclusions.json")) +
+                Files.size(observationV2Root.resolve("run.json")) + Files.size(observationV2Root.resolve("index.json")),
+        )
         records.forEachIndexed { index, raw ->
             val record = raw as? JsonObject ?: v3Fail("truth-v3 emitted-RVA record is not an object")
             val shardId = record.v3String("id")
@@ -1793,6 +1847,27 @@ internal object FullTreeFunctionTruthSqliteV3 {
             withV3TreeMemberPhase("shards/$shardId.json") {
             deadline.checkpoint("collecting full-run emitted RVA population")
             val truthPath = legacyRoot.resolve("shards/$shardId.json")
+            val truthFileBytes = Files.size(truthPath)
+            if (truthFileBytes !in 1L..limits.truth.maximumOutputBytes) {
+                v3Fail("truth-v3 emitted-RVA shard exceeds its authenticated file-size bound")
+            }
+            val retainedRvaBytes = Math.multiplyExact(rvas.size.toLong(), V3_EMITTED_RVA_SET_ENTRY_BYTES)
+            try {
+                fullTreeFunctionTruthV3AdmitEmittedRvaCollectionWorkingSet(
+                    truthShardBytes = truthFileBytes,
+                    retainedControlBytes = retainedControlBytes,
+                    retainedEmittedRvaBytes = retainedRvaBytes,
+                    configuredWorkingSetBytes = limits.maximumRetainedWorkingSetBytes,
+                    authenticatedPerShardResidentBytes = authenticatedPerShardResidentBytes,
+                )
+            } catch (failure: ArithmeticException) {
+                throw FullTreeFunctionTruthV3Exception("truth-v3 emitted-RVA collection working-set model overflows", failure)
+            } catch (failure: IllegalArgumentException) {
+                throw FullTreeFunctionTruthV3Exception(
+                    "truth-v3 emitted-RVA collection exceeds its admitted retained-working-set budget",
+                    failure,
+                )
+            }
             val bytes = readBoundedFile(truthPath, limits.truth.maximumOutputBytes, "legacy truth shard")
             val truth = parseV3Object(bytes, bytes.size.toLong(), "legacy truth shard")
             val functions = truth.v3Array("functions")
