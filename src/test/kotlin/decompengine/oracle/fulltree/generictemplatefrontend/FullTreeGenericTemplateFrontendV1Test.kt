@@ -279,25 +279,31 @@ class FullTreeGenericTemplateFrontendV1Test {
         OracleSchemas.validate(Provenance.SCHEMA_NAME, fixture.document)
         val schemaOnly = Receipt.validate(fixture.document, fixture.limits)
         assertEquals(RECEIPT_SHA256, schemaOnly.frontendReceiptSha256)
-        val receiptPath = Files.createTempFile("generic-template-receipt-", ".json")
+        val receiptDirectory = Files.createTempDirectory("generic-template-receipt-")
         try {
-            Files.write(receiptPath, fixture.canonicalReceipt)
-            val loaded = Provenance.loadAndValidate(
-                receiptPath,
-                fixture.limits,
-                expectedBindings = fixture.bindings,
-                expectedPathTransform = fixture.pathTransform,
-                expectedProfile = fixture.profile,
-                expectedRawEnvironment = fixture.rawEnvironment,
-                expectedSourceFileDigests = fixture.fileDigests,
-                expectedResourceManifest = fixture.resourceManifest,
-                expectedDriverPath = fixture.driverPath,
-            )
-            assertEquals(RECEIPT_SHA256, loaded.frontendReceiptSha256)
-            val structurallyLoaded = Provenance.loadAndValidate(receiptPath, fixture.limits)
-            assertEquals(RECEIPT_SHA256, structurallyLoaded.frontendReceiptSha256)
+            Files.setPosixFilePermissions(receiptDirectory, PosixFilePermissions.fromString("rwx------"))
+            val receiptPath = receiptDirectory.resolve("receipt.json")
+            try {
+                Files.write(receiptPath, fixture.canonicalReceipt)
+                val loaded = Provenance.loadAndValidate(
+                    receiptPath,
+                    fixture.limits,
+                    expectedBindings = fixture.bindings,
+                    expectedPathTransform = fixture.pathTransform,
+                    expectedProfile = fixture.profile,
+                    expectedRawEnvironment = fixture.rawEnvironment,
+                    expectedSourceFileDigests = fixture.fileDigests,
+                    expectedResourceManifest = fixture.resourceManifest,
+                    expectedDriverPath = fixture.driverPath,
+                )
+                assertEquals(RECEIPT_SHA256, loaded.frontendReceiptSha256)
+                val structurallyLoaded = Provenance.loadAndValidate(receiptPath, fixture.limits)
+                assertEquals(RECEIPT_SHA256, structurallyLoaded.frontendReceiptSha256)
+            } finally {
+                Files.deleteIfExists(receiptPath)
+            }
         } finally {
-            Files.deleteIfExists(receiptPath)
+            Files.deleteIfExists(receiptDirectory)
         }
     }
 
