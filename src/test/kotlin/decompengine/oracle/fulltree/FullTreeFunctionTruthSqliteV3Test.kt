@@ -97,6 +97,7 @@ class FullTreeFunctionTruthSqliteV3Test {
             assertCensusCounts(first.root, index)
             assertConcreteTemplateShapes(first.root)
 
+            val scoreRvas = HashSet<String>()
             val scoreRowCount = index.controlArray("shards").sumOf { raw ->
                 val shardRecord = raw as JsonObject
                 val shard = parseControlObject(first.root.resolve(shardRecord.controlString("path")))
@@ -106,6 +107,7 @@ class FullTreeFunctionTruthSqliteV3Test {
                 assertEquals(shard.controlArray("sourceEntities").size.toLong(), shard.controlObject("counts").controlLong("sourceEntities"))
                 val rvas = functions.map { it.controlString("rva") }
                 assertEquals(rvas.size, rvas.distinct().size, "source census must not duplicate score rows")
+                assertTrue(rvas.all(scoreRvas::add), "an emitted RVA may have only one truth row across the full run")
                 val emittedRvas = rvas.toSet()
                 shard.controlArray("sourceEntities").controlObjects("source entities").forEach { entity ->
                     val linked = entity["linkedEmittedRva"]
@@ -212,7 +214,11 @@ class FullTreeFunctionTruthSqliteV3Test {
                 val value = parseControlObject(path)
                 val index = value.controlArray("sourceEntities").indexOfFirst { raw ->
                     val row = raw as? JsonObject ?: return@indexOfFirst false
-                    row["linkedEmittedRva"] != null && row["linkedEmittedRva"] != JsonNull
+                    row["linkedEmittedRva"] != null && row["linkedEmittedRva"] != JsonNull &&
+                        row.controlArray("edges").any { rawEdge ->
+                            val edge = rawEdge as? JsonObject ?: return@any false
+                            (edge["target"] as? JsonPrimitive)?.isString == true
+                        }
                 }
                 if (index < 0) null else CandidateSource(
                     path,
@@ -223,7 +229,7 @@ class FullTreeFunctionTruthSqliteV3Test {
             }.firstOrNull()
         }
         val (shardPath, shard, sourceIndex, original) = selected
-            ?: error("fixture must contain an emitted-RVA-linked census row")
+            ?: error("fixture must contain an emitted-RVA-linked census row with a resolved typed edge")
         val sources = shard.controlArray("sourceEntities").toMutableList()
         val current = original["semanticAnchorCandidateId"]
         val oldCandidate = (current as? JsonPrimitive)?.takeIf { it.isString }?.content
