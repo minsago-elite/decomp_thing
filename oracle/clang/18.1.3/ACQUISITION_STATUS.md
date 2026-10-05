@@ -102,7 +102,7 @@ LLVM source signature, comparing distro patches against upstream, or entering
 the compiler, loader, image, and reproducibility gates. Those gates remain
 unverified.
 
-## Public runner metadata-only candidate probe
+## Public runner metadata-only diagnostic: June 15 candidate
 
 Workflow run [37347524443](https://github.com/minsago-elite/decomp_thing/actions/runs/37347524443)
 at PR head `8c70ed4e5998a0887a1f96b8222eb1e2a7de499d` completed successfully on
@@ -133,17 +133,85 @@ compiler, loader, image, or reproducibility gate was attempted. This candidate
 therefore cannot satisfy the fixed acquisition contract, and no package pin or
 profile was changed.
 
-The later workflow revision restores the full `qualify` job on pull requests
-and leaves this disproven-candidate probe as a separately named manual
-diagnostic. The skipped `qualify` result in run #10 predates that revision and
-is not an acceptance pass.
+Run #10's skipped `qualify` result was a temporary workflow state and is not an
+acceptance pass. Run #11 restored the full PR gate; it failed closed during
+signed acquisition with zero exact source records for `1:18.1.3-1ubuntu1` and
+observed version `1:18.1.3-1@noble/main`. Every compiler, loader, and image
+step was skipped after that failure. At that revision the June 15 diagnostic
+was manual-only.
 
-The restored PR gate is confirmed by [run #11](https://github.com/minsago-elite/decomp_thing/actions/runs/37349203491)
-at head `9847f7d986da9267f8e0e157cb4b04fcb6d6d415`: `qualify` ran on the PR
-and failed closed during signed acquisition with zero exact source records
-for `1:18.1.3-1ubuntu1` and observed version `1:18.1.3-1@noble/main`. Every
-compiler, loader, and image step was skipped after that failure. The diagnostic
-job was skipped because that revision limited it to manual dispatch.
+## Public runner metadata-only diagnostic: July 2 candidate
+
+Following the July 1 Ubuntu notice that the Noble fix was published in
+`llvm-toolchain-18 1:18.1.3-1ubuntu1`, workflow [run #12](https://github.com/minsago-elite/decomp_thing/actions/runs/37349799547)
+tested the specific Snapshot `20240702T000000Z` on `ubuntu-24.04`. Its separate
+metadata diagnostic job succeeded with status `exact-contract-records-present`.
+The report SHA-256 is
+`62429b8b1301116f941285d155457ccfbf58718e5022e5c17129a2448f7332ad`. Artifact
+`11362655050` contains the report, three signed `InRelease` files, and all
+twelve signed indexes; its ZIP SHA-256 is
+`3a80557fda54465a011487032df389ab5af568891b2bf44b16f47886a4ba3ddb`. The
+artifact expires at `2026-10-06 17:39:13 UTC`.
+
+All three `InRelease` files verified with primary signer
+`F6ECB3762474EDA9D21B7022871920D1991BC93C`:
+
+| Suite | Signed Release date (UTC) | `InRelease` SHA-256 |
+| --- | --- | --- |
+| `noble` | 2024-04-25 15:10:33 | `cdb2f31d809f589719a53c6ad15f255b27569c4059542ada282aaa21b8e164b0` |
+| `noble-updates` | 2024-07-01 23:14:08 | `622667146ddd72547790c378cc1c2668b4aff8d5577ec16b306ec42422b0bd20` |
+| `noble-security` | 2024-07-01 09:51:15 | `81de4aba4045c691cbb11b423d0f731859106e385224c7039aa17e53df24a113` |
+
+The exact source row is in signed `noble-updates/main/source/Sources.gz`
+(104,595 bytes; SHA-256
+`9b193031f58ccdf8477b7d2fb194504b305e816eeb2aac7408e21ec487a53a84`):
+`llvm-toolchain-18`, version `1:18.1.3-1ubuntu1`, directory
+`pool/main/l/llvm-toolchain-18`. Its signed `Checksums-Sha256` field records:
+
+| Source file | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `llvm-toolchain-18_18.1.3-1ubuntu1.dsc` | 8,420 | `1775aeccdacc7c5c016b1ddbb2e2ebe5ea1fd308b48e6f0511d256922fdf2537` |
+| `llvm-toolchain-18_18.1.3.orig.tar.xz` | 155,361,864 | `ddf2448d682adbfb4a57aa7ac45219cc00aef6ae9ce2fabd8598fa1cc97d26c4` |
+| `llvm-toolchain-18_18.1.3-1ubuntu1.debian.tar.xz` | 162,708 | `7063d88002765b53e8efd42e75d4027f873d78c0c4ec51817b92e17e1c327a08` |
+
+The source index digest is the SHA-256 value signed in the
+`noble-updates` Release. The exact binary records below are likewise covered
+by the signed amd64 package indexes: `main/binary-amd64/Packages.gz` is 268,541
+bytes with SHA-256
+`fcf0527e4d18fe973f12d94533596b76f7443c13affa07559135358afbf0e831`, and
+`universe/binary-amd64/Packages.gz` is 136,990 bytes with SHA-256
+`6e2c7b5055fd2b0317cbc6b2c2a179ed8e33497f6cfcabeb1fd15190e0aa4709`.
+
+The signed `noble-updates` amd64 package indexes authenticate all five exact
+binary roots. `Source` is `llvm-toolchain-18` for every root; that field omits
+the source version, while the exact source row above supplies it.
+
+| Package | Component | Bytes | SHA-256 |
+| --- | --- | ---: | --- |
+| `clang-18` | `universe` | 80,040 | `628b16701014ef7ad648380b20ea74b90dd543857f933b3e34d2fc042783de25` |
+| `llvm-18-dev` | `universe` | 45,109,568 | `1e68b8c3f788832c5c83d56a1b3dbbba1ee148407f61c873ed659bb373ae6388` |
+| `libclang-18-dev` | `universe` | 28,788,538 | `c7575822ec648defe1b04d83a1d6b7779fc26da548c2453acfa120e26d47ed53` |
+| `libclang-cpp18-dev` | `universe` | 3,664 | `dc0c194881c2300867c369380a457a6ec2ee8be6d3d182d0deec81a3f50182d6` |
+| `libclang-cpp18` | `main` | 13,492,572 | `e91eda104813ee0468d145d010a4a4e142401f3f17f9a65596c66d416298d018` |
+
+The source index and relevant binary-index SHA-256 values above match the
+signed Release tables. The probe acquired 48,554,460 bytes of metadata and
+zero package payload bytes; it downloaded no `.dsc`, source archive, or `.deb`.
+This is signed index provenance only. Upstream signature verification, the
+comparison of all 34 contract-relevant source files/patches, and every compiler,
+loader, image, and reproducibility acceptance gate remain unverified. The
+production provisioning contract remains pinned to `20240425T000000Z`; it was
+not changed based on this diagnostic.
+
+At the same head, the normal PR `qualify` job ran separately and failed closed
+against that unchanged production pin: it found no exact source record for
+`1:18.1.3-1ubuntu1`, only `1:18.1.3-1@noble/main`. This prevents the diagnostic
+job's success from being mistaken for production qualification.
+
+For pull requests, the workflow always runs both `qualify` and the separate
+July 2 metadata diagnostic. Manual dispatch defaults to full qualification;
+the metadata-only mode is an explicit diagnostic choice and is not a PR
+acceptance path.
 
 Matching package version text is not compatibility or provenance evidence.
 The bounded alternative remains a separately reviewed source build from the
