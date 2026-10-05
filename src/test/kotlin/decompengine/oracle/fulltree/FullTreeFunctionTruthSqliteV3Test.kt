@@ -79,7 +79,7 @@ class FullTreeFunctionTruthSqliteV3Test {
                 "the v2 index schema bytes must stay frozen",
             )
             assertEquals(
-                "ca163ed4fcf7d36e54e7967c52e2c58fac3b9eae7c215b455bee24e4cc09d0c8",
+                "7b23de968c0038849bb75bca8ff0aa35e3e53645475ca0aab9800d4077b7426c",
                 FullTreeFunctionTruthSqliteV3.configurationSha256,
             )
             assertEquals(

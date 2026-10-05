@@ -10,7 +10,7 @@
     "sha256": "381ce2bb68a29fd72cfcb3c24ea5bc91a8a863753f939518659d946fcee0ecd2"
   },
   "producer": {
-    "configurationSha256": "ca163ed4fcf7d36e54e7967c52e2c58fac3b9eae7c215b455bee24e4cc09d0c8",
+    "configurationSha256": "7b23de968c0038849bb75bca8ff0aa35e3e53645475ca0aab9800d4077b7426c",
     "id": "full-tree-function-truth",
     "version": 3
   },

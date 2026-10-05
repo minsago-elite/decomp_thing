@@ -10,7 +10,7 @@ scoring, or downstream use.
 | Producer policy | `full-tree-function-truth`, version `3` |
 | V3 shard schema | `full-tree-function-truth-v3`, wire `schemaVersion: 2`, SHA-256 `81bc31d80ee00b32e39ae8d8154a8890ecf5d724322ac0d1eb4c303a0a547c43` |
 | V3 index schema | `full-tree-function-truth-index-v3`, wire `schemaVersion: 2`, SHA-256 `230ea7a9b402047b23a7c875af8c079881fa7a08d258306d7fa97d492a4ec6a5` |
-| V3 configuration | SHA-256 `ca163ed4fcf7d36e54e7967c52e2c58fac3b9eae7c215b455bee24e4cc09d0c8` |
+| V3 configuration | SHA-256 `7b23de968c0038849bb75bca8ff0aa35e3e53645475ca0aab9800d4077b7426c` |
 | Frozen V2 configuration | SHA-256 `17c61e43524b98a215075b82fa50732d6d8f50d883dce235e511731612da04e5` |
 | Frozen V2 shard schema | SHA-256 `b21be27d085c61c60cbaba11da1208b24c897c264001c790b0ca32b2ae24e5f7` |
 | Frozen V2 index schema | SHA-256 `40a2c4d0c3a1b3317e010fd267b56e6ea3ec94620abd79c591b01bc6357e084f` |
