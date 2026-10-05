@@ -138,6 +138,13 @@ and leaves this disproven-candidate probe as a separately named manual
 diagnostic. The skipped `qualify` result in run #10 predates that revision and
 is not an acceptance pass.
 
+The restored PR gate is confirmed by [run #11](https://github.com/minsago-elite/decomp_thing/actions/runs/37349203491)
+at head `9847f7d986da9267f8e0e157cb4b04fcb6d6d415`: `qualify` ran on the PR
+and failed closed during signed acquisition with zero exact source records
+for `1:18.1.3-1ubuntu1` and observed version `1:18.1.3-1@noble/main`. Every
+compiler, loader, and image step was skipped after that failure. The diagnostic
+job was skipped because that revision limited it to manual dispatch.
+
 Matching package version text is not compatibility or provenance evidence.
 The bounded alternative remains a separately reviewed source build from the
 exact signed upstream Clang 18.1.3 source on the same public runner class; that

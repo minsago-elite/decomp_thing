@@ -127,13 +127,13 @@ class ProvisioningNegativeTests(unittest.TestCase):
         actions = re.findall(r"^\s*uses:\s*([^\s#]+)", workflow, flags=re.MULTILINE)
         self.assertTrue(actions)
         self.assertTrue(all(re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", action) for action in actions), actions)
-        self.assertIn("Diagnostic probe for disproven June 15 Snapshot", workflow)
-        self.assertIn("--snapshot 20240615T000000Z", workflow)
-        self.assertIn("if: ${{ github.event_name == 'workflow_dispatch' }}", workflow)
-        self.assertIn("name: Full Clang 18.1.3 acceptance qualification", workflow)
+        self.assertIn("Diagnostic probe for July 2 candidate (metadata only)", workflow)
+        self.assertIn("--snapshot 20240702T000000Z", workflow)
+        self.assertIn("if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'snapshot-metadata-diagnostic') }}", workflow)
         qualify_job = re.search(r"(?ms)^  qualify:\n(.*?)(?=^  [A-Za-z0-9_-]+:|\Z)", workflow)
         self.assertIsNotNone(qualify_job)
-        self.assertNotRegex(qualify_job.group(1), r"(?m)^    if:")
+        self.assertIn("if: ${{ github.event_name != 'workflow_dispatch' || inputs.mode == 'full-qualification' }}",
+                      qualify_job.group(1))
 
     def test_rootfs_command_uses_the_selected_contract_environment(self):
         contract = {"environment": {"LC_ALL": "C", "TZ": "UTC", "SOURCE_DATE_EPOCH": "7",
@@ -408,7 +408,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
 
     def test_snapshot_metadata_probe_reports_exact_source_and_binary_roots_without_payload_claims(self):
         profile = {**self.contract["profile"], "snapshot": provision.SNAPSHOT_METADATA_PROBE,
-                   "snapshotBase": "https://snapshot.ubuntu.com/ubuntu/20240615T000000Z/"}
+                   "snapshotBase": f"https://snapshot.ubuntu.com/ubuntu/{provision.SNAPSHOT_METADATA_PROBE}/"}
         source_pin = profile["sourcePackage"]
         source = {
             "Package": source_pin["name"], "Version": source_pin["version"],
@@ -436,7 +436,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 self.contract, profile, [], [], [source], binaries, 1234, keyring,
             )
         self.assertEqual(report["status"], "exact-contract-records-present")
-        self.assertEqual(report["candidateSnapshot"], "20240615T000000Z")
+        self.assertEqual(report["candidateSnapshot"], provision.SNAPSHOT_METADATA_PROBE)
         self.assertEqual(report["configuredSnapshot"], "20240425T000000Z")
         self.assertEqual(report["payloadBytesDownloaded"], 0)
         self.assertEqual(report["sourcePackage"]["exactRecords"][0]["sourceFiles"][0]["name"],
@@ -447,7 +447,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
 
     def test_snapshot_metadata_probe_does_not_normalize_source_or_binary_versions(self):
         profile = {**self.contract["profile"], "snapshot": provision.SNAPSHOT_METADATA_PROBE,
-                   "snapshotBase": "https://snapshot.ubuntu.com/ubuntu/20240615T000000Z/"}
+                   "snapshotBase": f"https://snapshot.ubuntu.com/ubuntu/{provision.SNAPSHOT_METADATA_PROBE}/"}
         source = {"Package": "llvm-toolchain-18", "Version": "1:18.1.3-1",
                   "Directory": "pool/main/l/llvm-toolchain-18",
                   "Checksums-Sha256": "f" * 64 + " 1 x.dsc",
