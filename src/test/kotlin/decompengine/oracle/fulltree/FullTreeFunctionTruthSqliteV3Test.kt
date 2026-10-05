@@ -552,6 +552,22 @@ class FullTreeFunctionTruthSqliteV3Test {
                 maximumStringBytes = 1 * 1024 * 1024,
             ),
             observationV2 = FullTreeFunctionObservationV2RunLimits(
+                shard = FullTreeFunctionObservationShardPublisherLimits().copy(
+                    producer = FullTreeFunctionObservationProducerLimits().copy(
+                        dieLimits = FullTreeDwarfDieLimits(
+                            maximumPhysicalRecords = 10_000_000L,
+                            maximumNonNullRecords = 5_000_000,
+                            maximumAttributes = 50_000_000L,
+                            maximumTreeDepth = 65_536,
+                            maximumRetainedBytes = 24L * mebibyte,
+                        ),
+                        lineTableLimits = FullTreeDwarfLineTableLimits().copy(
+                            maximumDirectories = 4096,
+                            maximumFiles = 8192,
+                            maximumAggregatePathBytes = 4L * mebibyte,
+                        ),
+                    ),
+                ),
                 maximumScratchBytes = 256L * mebibyte,
             ),
             maximumScratchBytes = 256L * mebibyte,
@@ -814,6 +830,7 @@ class FullTreeFunctionTruthSqliteV3Test {
             scratchParent = scratch,
             outputRoot = v2Root,
             maximumWorkers = 2,
+            limits = tightScratchLimits().observationV2,
         )
         assertTrue(compilerVersion.isNotBlank())
         return V3Fixture(
