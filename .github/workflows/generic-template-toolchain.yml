@@ -46,6 +46,9 @@ jobs:
             --snapshot 20240615T000000Z \
             --output "$CLANG_WORK/snapshot-probe-20240615"
 
+      - name: Print the authenticated metadata report for review
+        run: cat "$CLANG_WORK/snapshot-probe-20240615/snapshot-metadata-report.json"
+
       - name: Upload candidate Snapshot metadata evidence only
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
