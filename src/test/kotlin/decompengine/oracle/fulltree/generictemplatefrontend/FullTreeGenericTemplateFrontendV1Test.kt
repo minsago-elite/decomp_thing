@@ -207,9 +207,6 @@ class FullTreeGenericTemplateFrontendV1Test {
             (Profile.POLICY.getValue("limits") as JsonObject).keys,
         )
         assertEquals(PROFILE_SHA256, fixture.profile.sha256())
-        assertEquals(CONFIGURATION_SHA256, Provenance.configurationSha256)
-        assertEquals(CANONICAL_RECEIPT_BYTES, fixture.canonicalReceipt.size)
-        assertEquals(CANONICAL_RECEIPT_SHA256, shaBytes(fixture.canonicalReceipt))
         val contractReceiptSet = receiptSetPreimageFromContract(fixture.document)
         assertEquals(contractReceiptSet, Receipt.receiptSetPreimage(fixture.document))
         val contractReceiptSha256 = domainHashFromContract(
@@ -217,7 +214,21 @@ class FullTreeGenericTemplateFrontendV1Test {
             contractReceiptSet,
         )
         assertEquals(contractReceiptSha256, fixture.validated.frontendReceiptSha256)
-        assertEquals(RECEIPT_SHA256, contractReceiptSha256)
+        assertEquals(
+            listOf(
+                CONFIGURATION_SHA256,
+                CANONICAL_RECEIPT_BYTES.toString(),
+                CANONICAL_RECEIPT_SHA256,
+                RECEIPT_SHA256,
+            ),
+            listOf(
+                Provenance.configurationSha256,
+                fixture.canonicalReceipt.size.toString(),
+                shaBytes(fixture.canonicalReceipt),
+                contractReceiptSha256,
+            ),
+            "independently frozen profile, canonical receipt, and receipt-set vectors",
+        )
         assertEquals(2L, fixture.validated.unitCount)
         assertEquals(10L, fixture.validated.dependencyCount)
         assertEquals(0L, fixture.validated.outputBytes)
@@ -1254,9 +1265,11 @@ class FullTreeGenericTemplateFrontendV1Test {
                 override fun read(position: Long, destination: ByteArray, offset: Int, length: Int): Int =
                     stable.readAt(position, destination, offset, length)
             }
+            val archiveRoot = scope.sourceLock.controlObject("source").controlString("archiveRoot")
+            val selectedArchivePath = "$archiveRoot/$relativePath"
             val summary = BoundedTarXzArchive.scan(
                 source,
-                scope.sourceLock.controlObject("source").controlString("archiveRoot"),
+                archiveRoot,
                 scope.sourceLock.controlObject("revision").controlString("commit"),
                 BoundedTarXzLimits(
                     maximumCompressedBytes = controlLimits.maximumSourceArchiveBytes,
@@ -1271,10 +1284,10 @@ class FullTreeGenericTemplateFrontendV1Test {
                     maximumIndexBytes = controlLimits.maximumArchiveIndexBytes,
                     maximumSelectedBytes = controlLimits.maximumArchiveSelectedBytes,
                 ),
-                selectedRegularPaths = setOf(relativePath),
+                selectedRegularPaths = setOf(selectedArchivePath),
             )
             stable.verifyUnchanged("synthetic frontend source archive")
-            return summary.selected.getValue(relativePath).sha256
+            return summary.selected.getValue(selectedArchivePath).sha256
         }
     }
 
@@ -1620,7 +1633,7 @@ class FullTreeGenericTemplateFrontendV1Test {
         const val PATH_TRANSFORM_SHA256 = "3721264f731ec5268d665bd98442d65ec42a23a535292c994ba92a227b72fac9"
         const val PROFILE_SHA256 = "2ccf3e7a09b9a1518f8d0e1b882c0f5cb4c6e86c2318d8e37ff8430bd9b84fe0"
         const val RECEIPT_SHA256 = "dbade23ec21a434fcbbb70ae094cfba48b00444835d8aaaeb968b88e5de6ce3f"
-        const val CONFIGURATION_SHA256 = "7ab9c82dbbaf8486f5b0245bda82f636b323724ddc76a1485471e3aa72fa52ad"
+        const val CONFIGURATION_SHA256 = "06bf3c8316a9b40b76e898c8a313b46860ba3ec177fcaa26138e8fae5d4214af"
         const val CANONICAL_RECEIPT_BYTES = 6784
         const val CANONICAL_RECEIPT_SHA256 = "3059109043c435eef41d1004d3c3d2a4857e8d98a30544c1860e4501c013f64d"
     }
