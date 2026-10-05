@@ -329,6 +329,76 @@ class ProvisioningNegativeTests(unittest.TestCase):
         with self.assertRaisesRegex(provision.ProvisionError, "malformed source Checksums-Sha256 row"):
             provision.source_file_rows(source)
 
+    def test_source_selection_error_reports_versions_from_signed_package_records(self):
+        rows = [{
+            "Package": "llvm-toolchain-18", "Version": "1:18.1.3-1ubuntu0",
+            "_suite": "noble", "_component": "universe",
+        }]
+        with self.assertRaisesRegex(
+            provision.ProvisionError,
+            r"expected a unique signed source record.*observed signed versions: 1:18.1.3-1ubuntu0@noble/universe",
+        ):
+            provision.select_source_record(rows, "llvm-toolchain-18", "1:18.1.3-1ubuntu1")
+
+    def test_source_index_diagnostic_binds_snapshot_hashes_versions_and_binary_sources(self):
+        profile = self.contract["profile"]
+        digest = "e" * 64
+        repositories = [{
+            "suite": "noble",
+            "signerPrimaryFingerprint": profile["ubuntuArchivePrimaryFingerprints"][0],
+            "inRelease": {"bytes": 123, "sha256": digest},
+            "releaseIdentity": {"Date": "Thu, 25 Apr 2024 00:00:00 UTC", "Suite": "noble"},
+        }]
+        indexes = [{
+            "suite": "noble", "component": "universe", "kind": "source",
+            "path": "downloads/noble/universe/source/Sources.xz", "bytes": 456, "sha256": digest,
+        }, {
+            "suite": "noble", "component": "universe", "kind": "binary-amd64",
+            "path": "downloads/noble/universe/binary-amd64/Packages.xz", "bytes": 654, "sha256": digest,
+        }]
+        sources = [{
+            "_suite": "noble", "_component": "universe", "Package": "llvm-toolchain-18",
+            "Version": "1:18.1.3-1ubuntu0", "Directory": "pool/universe/l/llvm-toolchain-18",
+            "Checksums-Sha256": "f" * 64 + " 789 llvm-toolchain-18_18.1.3.orig.tar.xz",
+        }]
+        binaries = [{
+            "_suite": "noble", "_component": "universe", "Package": "clang-18",
+            "Version": "1:18.1.3-1ubuntu1", "Architecture": "amd64",
+            "Source": "llvm-toolchain-18 (1:18.1.3-1ubuntu0)",
+            "Filename": "pool/universe/l/llvm-toolchain-18/clang-18.deb",
+            "Size": "987", "SHA256": digest,
+        }]
+
+        related_sources = [{
+            "_suite": "noble", "_component": "universe", "Package": "llvm-toolchain-17",
+            "Version": "1:17.0.6-9ubuntu1", "Directory": "pool/universe/l/llvm-toolchain-17",
+        }]
+        report = provision.source_index_diagnostic(
+            profile, repositories, indexes, sources, related_sources, len(related_sources), binaries
+        )
+        self.assertEqual(report["snapshot"], profile["snapshot"])
+        self.assertEqual(report["expectedSource"], profile["sourcePackage"])
+        self.assertEqual(report["sourceIndexes"][0]["sha256"], digest)
+        self.assertEqual(report["binaryIndexes"][0]["sha256"], digest)
+        self.assertEqual(report["sourcePackageVersionsObserved"], ["1:18.1.3-1ubuntu0"])
+        self.assertEqual(report["exactSourceVersionRecordCount"], 0)
+        self.assertEqual(report["selectionAssessment"], "package-found-but-exact-version-not-found")
+        self.assertEqual(report["selectionSemantics"], "exact Package and Version strings; no epoch or version normalization")
+        self.assertEqual(report["matchingSourcePackageRecords"][0]["package"], "llvm-toolchain-17")
+        self.assertEqual(report["binaryRootRecords"][0]["source"], binaries[0]["Source"])
+
+    def test_source_index_diagnostic_caps_related_rows_and_marks_truncation(self):
+        profile = self.contract["profile"]
+        related_sources = [{
+            "_suite": "noble", "_component": "universe", "Package": f"llvm-toolchain-{index}",
+            "Version": f"1:{index}.0.0-1", "Directory": f"pool/universe/l/llvm-toolchain-{index}",
+        } for index in range(provision.MAX_SOURCE_DIAGNOSTIC_ROWS + 1)]
+        report = provision.source_index_diagnostic(profile, [], [], [], related_sources,
+                                                   len(related_sources), [])
+        self.assertEqual(len(report["matchingSourcePackageRecords"]), provision.MAX_SOURCE_DIAGNOSTIC_ROWS)
+        self.assertEqual(report["matchingPackageRecordCount"], provision.MAX_SOURCE_DIAGNOSTIC_ROWS + 1)
+        self.assertTrue(report["matchingPackageRecordsTruncated"])
+
     def test_gpgv_primary_fingerprint_is_not_signature_class(self):
         signing = "A" * 40
         primary = "B" * 40

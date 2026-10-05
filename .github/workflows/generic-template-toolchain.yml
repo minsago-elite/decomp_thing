@@ -155,6 +155,7 @@ jobs:
           path: |
             ${{ github.workspace }}/build/clang1813/acquisition/patch-audit.json
             ${{ github.workspace }}/build/clang1813/acquisition/acquisition-candidate.json
+            ${{ github.workspace }}/build/clang1813/acquisition/source-selection-diagnostics.json
             oracle/clang/18.1.3/ACQUISITION_STATUS.md
           if-no-files-found: ignore
           compression-level: 0

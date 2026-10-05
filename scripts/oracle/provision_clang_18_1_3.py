@@ -48,6 +48,7 @@ MAX_SINGLE_DOWNLOAD = 1024 * 1024 * 1024
 MAX_INDEX_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024
 MAX_INDEX_LINE_BYTES = 16 * 1024 * 1024
 MAX_DEB822_PARAGRAPH_BYTES = 16 * 1024 * 1024
+MAX_SOURCE_DIAGNOSTIC_ROWS = 256
 MAX_UPSTREAM_ARCHIVE_MEMBERS = 300_000
 MAX_UPSTREAM_EXPANDED_BYTES = 3 * 1024 * 1024 * 1024
 ALLOWED_REDIRECT_HOSTS = {
@@ -504,8 +505,112 @@ def select_source_record(indexes: list[dict], package_name: str, version: str) -
     rows = [row for row in indexes if row.get("Package") == package_name and row.get("Version") == version]
     unique = {(row.get("Directory"), row.get("Checksums-Sha256")) for row in rows}
     if not rows or len(unique) != 1:
-        raise ProvisionError(f"expected a unique signed source record for {package_name}={version}; found {len(rows)} records")
+        observed = sorted({
+            f"{row.get('Version', '<missing>')}@{row.get('_suite', '<unknown>')}/{row.get('_component', '<unknown>')}"
+            for row in indexes if row.get("Package") == package_name
+        })
+        observed_text = ", ".join(observed) if observed else "none"
+        raise ProvisionError(
+            f"expected a unique signed source record for {package_name}={version}; "
+            f"found {len(rows)} exact records; observed signed versions: {observed_text}"
+        )
     return rows[0]
+
+
+def source_index_diagnostic(profile: dict, repo_rows: list[dict], index_records: list[dict],
+                            source_rows: list[dict], related_source_rows: list[dict],
+                            related_source_record_count: int, binary_rows: list[dict]) -> dict:
+    """Preserve the authenticated index coverage and package versions before selection."""
+    source_records = [{
+        "suite": row.get("_suite"),
+        "component": row.get("_component"),
+        "package": row.get("Package"),
+        "version": row.get("Version"),
+        "directory": row.get("Directory"),
+        "checksumsSha256": row.get("Checksums-Sha256", ""),
+    } for row in source_rows]
+    source_records.sort(key=lambda row: (row["suite"] or "", row["component"] or "", row["version"] or ""))
+    related_records = [{
+        "suite": row.get("_suite"),
+        "component": row.get("_component"),
+        "package": row.get("Package"),
+        "version": row.get("Version"),
+        "directory": row.get("Directory"),
+    } for row in related_source_rows]
+    related_records.sort(key=lambda row: (
+        row["suite"] or "", row["component"] or "", row["package"] or "", row["version"] or ""
+    ))
+
+    binary_records = [{
+        "suite": row.get("_suite"),
+        "component": row.get("_component"),
+        "package": row.get("Package"),
+        "version": row.get("Version"),
+        "architecture": row.get("Architecture"),
+        "source": row.get("Source"),
+        "filename": row.get("Filename"),
+        "bytes": row.get("Size"),
+        "sha256": row.get("SHA256"),
+    } for row in binary_rows]
+    binary_records.sort(key=lambda row: (
+        row["suite"] or "", row["component"] or "", row["package"] or "", row["version"] or ""
+    ))
+
+    source_indexes = [dict(row) for row in index_records if row.get("kind") == "source"]
+    source_indexes.sort(key=lambda row: (row.get("suite", ""), row.get("component", "")))
+    binary_indexes = [dict(row) for row in index_records if row.get("kind") == "binary-amd64"]
+    binary_indexes.sort(key=lambda row: (row.get("suite", ""), row.get("component", "")))
+    releases = [{
+        "suite": row["suite"],
+        "signerPrimaryFingerprint": row["signerPrimaryFingerprint"],
+        "inRelease": row["inRelease"],
+        "releaseIdentity": row["releaseIdentity"],
+    } for row in repo_rows]
+    releases.sort(key=lambda row: row["suite"])
+    pin = profile["sourcePackage"]
+    exact_rows = [row for row in source_records if row.get("version") == pin["version"]]
+    exact_count = len(exact_rows)
+    unique_exact_payloads = {
+        (row.get("directory"), row.get("checksumsSha256")) for row in exact_rows
+    }
+    if not source_records:
+        assessment = "package-name-not-found-in-selected-source-indexes"
+    elif exact_count == 0:
+        assessment = "package-found-but-exact-version-not-found"
+    elif len(unique_exact_payloads) > 1:
+        assessment = "exact-version-has-conflicting-source-records"
+    elif exact_count > 1:
+        assessment = "exact-version-has-duplicate-identical-source-records"
+    else:
+        assessment = "one-exact-package-and-version-record"
+    serialized_source_records = source_records[:MAX_SOURCE_DIAGNOSTIC_ROWS]
+    serialized_related_records = related_records[:MAX_SOURCE_DIAGNOSTIC_ROWS]
+    matching_record_count = len(source_records) + related_source_record_count
+    return {
+        "schemaVersion": 1,
+        "profileId": profile["id"],
+        "snapshot": profile["snapshot"],
+        "snapshotBase": profile["snapshotBase"],
+        "expectedSource": dict(pin),
+        "selectionSemantics": "exact Package and Version strings; no epoch or version normalization",
+        "selectionAssessment": assessment,
+        "releaseMetadata": releases,
+        "sourceIndexes": source_indexes,
+        "binaryIndexes": binary_indexes,
+        "sourcePackageRecordCount": len(source_records),
+        "sourcePackageRecords": serialized_source_records,
+        "sourcePackageVersionsObserved": sorted({
+            row["version"] for row in source_records if isinstance(row["version"], str)
+        }),
+        "exactSourceVersionRecordCount": exact_count,
+        "uniqueExactSourcePayloadCount": len(unique_exact_payloads),
+        "matchingPackageRecordCount": matching_record_count,
+        "matchingPackageRecordsTruncated": matching_record_count > (
+            len(serialized_source_records) + len(serialized_related_records)
+        ),
+        "matchingSourcePackageRecords": serialized_related_records,
+        "binaryRootRecords": binary_records,
+    }
 
 
 def select_binary_record(indexes: list[dict], name: str, version: str, architecture: str = "amd64") -> dict:
@@ -537,6 +642,8 @@ def acquire_candidate(contract: dict, output: Path, keyring: Path) -> dict:
     downloader = BoundedDownloader(output / "downloads", contract["profile"]["bounds"]["maxAcquisitionBytes"])
     repo_rows: list[dict] = []
     all_sources: list[dict] = []
+    related_source_rows: list[dict] = []
+    related_source_record_count = 0
     all_binaries: list[dict] = []
     index_records: list[dict] = []
     source_pin = profile["sourcePackage"]
@@ -558,7 +665,7 @@ def acquire_candidate(contract: dict, output: Path, keyring: Path) -> dict:
             "releaseIdentity": {key: release.get(key) for key in ("Origin", "Label", "Suite", "Codename", "Date", "Valid-Until", "Architectures", "Components")},
         })
         for component in profile["components"]:
-            for kind, target in (("source", all_sources), ("binary-amd64", all_binaries)):
+            for kind in ("source", "binary-amd64"):
                 index_name = index_path(table, component, kind, "amd64" if kind == "binary-amd64" else None)
                 expected_size, expected_hash = table[index_name]
                 url = urllib.parse.urljoin(profile["snapshotBase"], f"dists/{suite}/{index_name}")
@@ -566,17 +673,31 @@ def acquire_candidate(contract: dict, output: Path, keyring: Path) -> dict:
                 archive_path = output / "downloads" / suite / index_name
                 atomic_write(archive_path, packed)
                 for row in iter_compressed_index(archive_path):
-                    if kind == "source" and row.get("Package") != source_pin["name"]:
-                        continue
-                    if kind == "binary-amd64" and row.get("Package") not in binary_root_names:
-                        continue
-                    row = dict(row)
-                    row["_suite"] = suite
-                    row["_component"] = component
-                    target.append(row)
+                    if kind == "source":
+                        package_name = row.get("Package", "")
+                        if package_name == source_pin["name"]:
+                            row = dict(row)
+                            row["_suite"] = suite
+                            row["_component"] = component
+                            all_sources.append(row)
+                        elif isinstance(package_name, str) and package_name.lower().startswith(("llvm", "clang")):
+                            related_source_record_count += 1
+                            if len(related_source_rows) < MAX_SOURCE_DIAGNOSTIC_ROWS:
+                                row = dict(row)
+                                row["_suite"] = suite
+                                row["_component"] = component
+                                related_source_rows.append(row)
+                    elif row.get("Package") in binary_root_names:
+                        row = dict(row)
+                        row["_suite"] = suite
+                        row["_component"] = component
+                        all_binaries.append(row)
                 index_records.append({"suite": suite, "component": component, "kind": kind,
                                       "path": str(archive_path.relative_to(output)), **info})
 
+    diagnostic = source_index_diagnostic(profile, repo_rows, index_records, all_sources,
+                                         related_source_rows, related_source_record_count, all_binaries)
+    atomic_write(output / "source-selection-diagnostics.json", canonical_json(diagnostic))
     source = select_source_record(all_sources, source_pin["name"], source_pin["version"])
     source_files = source_file_rows(source)
     directory = source.get("Directory")
