@@ -315,11 +315,16 @@ def dearmor_release_key(key_path: Path, temporary_root: Path) -> bytes:
 
 def release_sha256_table(release: dict[str, str]) -> dict[str, tuple[int, str]]:
     rows = release.get("SHA256", "").splitlines()
+    # The Debian control parser preserves the line break after the empty
+    # ``SHA256:`` field value, so a conventional multiline Release table starts
+    # with exactly one empty row before its indented digest rows.
+    if rows and rows[0] == "":
+        rows = rows[1:]
     result: dict[str, tuple[int, str]] = {}
-    for row in rows:
+    for row_number, row in enumerate(rows, start=1):
         parts = row.split()
         if len(parts) != 3 or not re.fullmatch(r"[0-9a-fA-F]{64}", parts[0]) or not parts[1].isdigit():
-            raise ProvisionError("malformed SHA256 row in signed Release metadata")
+            raise ProvisionError(f"malformed SHA256 row {row_number} in signed Release metadata")
         digest, length, name = parts
         if name.startswith("/") or ".." in PurePosixPath(name).parts or name in result:
             raise ProvisionError("unsafe or duplicate path in signed Release metadata")

@@ -158,6 +158,24 @@ class ProvisioningNegativeTests(unittest.TestCase):
                          "main/binary-amd64/Packages.gz")
         self.assertEqual(provision.index_path(table, "main", "source"), "main/source/Sources.xz")
 
+    def test_release_sha256_table_accepts_standard_empty_field_value_line(self):
+        digest = "a" * 64
+        release = provision.parse_deb822(
+            "Suite: noble\nSHA256:\n  " + digest + " 123 main/binary-amd64/Packages.gz\n"
+        )[0]
+        self.assertEqual(
+            provision.release_sha256_table(release),
+            {"main/binary-amd64/Packages.gz": (123, digest)},
+        )
+
+    def test_release_sha256_table_rejects_an_internal_blank_row(self):
+        digest = "a" * 64
+        release = provision.parse_deb822(
+            "SHA256:\n  " + digest + " 123 Packages.gz\n \n  " + "b" * 64 + " 456 Sources.gz\n"
+        )[0]
+        with self.assertRaisesRegex(provision.ProvisionError, "malformed SHA256 row"):
+            provision.release_sha256_table(release)
+
     def test_gpgv_primary_fingerprint_is_not_signature_class(self):
         signing = "A" * 40
         primary = "B" * 40
