@@ -170,7 +170,7 @@ class FullTreeFunctionTruthSqliteV3Test {
     fun `legacy truth v2 composition snapshot authenticates receipt bytes before projection`() =
         inControlTemporaryDirectory { root ->
             val truthRoot = privateDirectory(root.resolve("legacy-truth"))
-            val shards = Files.createDirectory(truthRoot.resolve("shards"), PosixFilePermissions.asFileAttribute(V3_WRITABLE_DIRECTORY))
+            val shards = privateDirectory(truthRoot.resolve("shards"))
             val shardBytes = "{\"fixture\":\"truth-shard\"}".toByteArray(StandardCharsets.UTF_8)
             val exclusionBytes = "{\"fixture\":\"exclusions\"}".toByteArray(StandardCharsets.UTF_8)
             Files.write(shards.resolve("fixture.json"), shardBytes)
