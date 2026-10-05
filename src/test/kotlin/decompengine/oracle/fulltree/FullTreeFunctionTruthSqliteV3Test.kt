@@ -395,6 +395,14 @@ class FullTreeFunctionTruthSqliteV3Test {
             }
             assertPublicEntityBoundEnforcement(first, fixture, root, limits)
 
+            val emittedRvaRows = index.controlArray("shards").flatMap { raw ->
+                val shardRecord = raw as JsonObject
+                parseControlObject(first.root.resolve(shardRecord.controlString("path")))
+                    .controlArray("functions").controlObjects("truth functions")
+                    .map { it.controlString("rva") }
+            }
+            val fullRunEmittedRvas = emittedRvaRows.toSet()
+            assertEquals(emittedRvaRows.size, fullRunEmittedRvas.size, "truth rows must be unique across the full run")
             val scoreRvas = HashSet<String>()
             val scoreRowCount = index.controlArray("shards").sumOf { raw ->
                 val shardRecord = raw as JsonObject
@@ -406,11 +414,10 @@ class FullTreeFunctionTruthSqliteV3Test {
                 val rvas = functions.map { it.controlString("rva") }
                 assertEquals(rvas.size, rvas.distinct().size, "source census must not duplicate score rows")
                 assertTrue(rvas.all(scoreRvas::add), "an emitted RVA may have only one truth row across the full run")
-                val emittedRvas = rvas.toSet()
                 shard.controlArray("sourceEntities").controlObjects("source entities").forEach { entity ->
                     val linked = entity["linkedEmittedRva"]
                     if (entity.controlString("denominatorDisposition") == "emitted-rva-link") {
-                        assertTrue(linked is JsonPrimitive && linked.content in emittedRvas)
+                        assertTrue(linked is JsonPrimitive && linked.content in fullRunEmittedRvas)
                     } else {
                         assertEquals(JsonNull, linked, "non-linked source facts must not create score rows")
                     }
@@ -589,7 +596,7 @@ class FullTreeFunctionTruthSqliteV3Test {
         )
         val exactWholeRunEntities = Math.addExact(wholeTruthEntities, baseline.counts.sourceEntities)
         val baselineIndex = parseControlObject(baseline.root.resolve("index.json"))
-        val exactPerShardEntities = baselineIndex.controlArray("shards").maxOf { raw ->
+        val exactV3PerShardEntities = baselineIndex.controlArray("shards").maxOf { raw ->
             val record = raw as JsonObject
             val shard = parseControlObject(baseline.root.resolve(record.controlString("path")))
             val counts = shard.controlObject("counts")
@@ -598,7 +605,9 @@ class FullTreeFunctionTruthSqliteV3Test {
                 counts.controlLong("sourceEntities"),
             )
         }
+        val exactPerShardEntities = maxOf(exactV3PerShardEntities, fixture.observationV2PerShardEntityCount)
         assertTrue(exactPerShardEntities > 0L)
+        assertTrue(exactPerShardEntities <= exactWholeRunEntities)
         val oneUnderWholeRun = exactWholeRunEntities - 1L
         assertTrue(oneUnderWholeRun >= exactPerShardEntities,
             "fixture must permit an independently under-bounded whole-run scope")
@@ -626,12 +635,14 @@ class FullTreeFunctionTruthSqliteV3Test {
         )
         assertEquals(exactWholeRunEntities, exact.counts.functions.elfRvas + exact.counts.functions.dwarfOnlyRvas +
             exact.counts.functions.nonEmittedUnique + exact.counts.sourceEntities)
-        assertEquals(exactPerShardEntities, exact.index.controlArray("shards").maxOf { raw ->
+        val exactPublishedV3PerShardEntities = exact.index.controlArray("shards").maxOf { raw ->
             val record = raw as JsonObject
             val shard = parseControlObject(exact.root.resolve(record.controlString("path")))
             val counts = shard.controlObject("counts")
             counts.controlLong("functions") + counts.controlLong("nonEmitted") + counts.controlLong("sourceEntities")
-        })
+        }
+        assertEquals(exactV3PerShardEntities, exactPublishedV3PerShardEntities)
+        assertTrue(exactPublishedV3PerShardEntities <= exactPerShardEntities)
         val validated = FullTreeFunctionTruthSqliteV3.loadAndValidate(
             candidateRoot = exact.root,
             richArtifact = exactFixture.rich,
@@ -693,8 +704,69 @@ class FullTreeFunctionTruthSqliteV3Test {
         }
         assertEquals(exactCandidateBefore, v3TreeBytes(exact.root),
             "under-bounded public validation leaves the candidate bytes unchanged")
+
+        val oneUnderPerShard = exactV3PerShardEntities - 1L
+        assertTrue(oneUnderPerShard > 0L, "the actual V3 per-shard population must allow a positive one-under scope")
+        assertTrue(
+            fixture.observationV2PerShardEntityCount > oneUnderPerShard,
+            "the strict per-shard scope must exercise the independently rederived raw V2 entity admission",
+        )
+        val perShardUnderFixture = rebindEntityBounds(
+            fixture,
+            root.resolve("per-shard-entity-bound-under-inputs"),
+            wholeRunEntities = exactWholeRunEntities,
+            perShardEntities = oneUnderPerShard,
+            regenerateObservationV2 = false,
+        )
+        val perShardRejectedOutput = root.resolve("truth-v3-per-shard-entity-bound-one-under")
+        val generationFailure = assertFailsWith<FullTreeFunctionTruthV3Exception>(
+            "public generation rejects an authenticated per-shard bound one below actual V3 evidence",
+        ) {
+            FullTreeFunctionTruthSqliteV3.generateAndPublish(
+                richArtifact = perShardUnderFixture.rich,
+                strippedArtifact = perShardUnderFixture.stripped,
+                inventoryPath = perShardUnderFixture.inventoryPath,
+                elfFunctionIndex = perShardUnderFixture.elfIndex,
+                observationV2Root = perShardUnderFixture.observationV2Root,
+                expectedObservationV2IndexArtifactSha256 = perShardUnderFixture.observationV2IndexSha256,
+                scope = perShardUnderFixture.scope,
+                scratchParent = perShardUnderFixture.scratch,
+                outputRoot = perShardRejectedOutput,
+                limits = limits,
+            )
+        }
+        assertTrue(
+            generationFailure.hasCauseMessageFragment("prepared shard entity count is outside its bound"),
+            "public generation must independently rederive raw V2 evidence and reject its actual entity count under the authenticated V3 scope",
+        )
+        assertFalse(Files.exists(perShardRejectedOutput, LinkOption.NOFOLLOW_LINKS),
+            "an under-bounded public generation must not publish a tree")
+
+        val validationFailure = assertFailsWith<FullTreeFunctionTruthV3Exception>(
+            "public validation independently rejects an authenticated per-shard bound one below actual V3 evidence",
+        ) {
+            FullTreeFunctionTruthSqliteV3.loadAndValidate(
+                candidateRoot = exact.root,
+                richArtifact = perShardUnderFixture.rich,
+                strippedArtifact = perShardUnderFixture.stripped,
+                inventoryPath = perShardUnderFixture.inventoryPath,
+                elfFunctionIndex = perShardUnderFixture.elfIndex,
+                observationV2Root = perShardUnderFixture.observationV2Root,
+                expectedObservationV2IndexArtifactSha256 = perShardUnderFixture.observationV2IndexSha256,
+                scope = perShardUnderFixture.scope,
+                scratchParent = perShardUnderFixture.scratch,
+                limits = limits,
+            )
+        }
+        assertTrue(
+            validationFailure.hasCauseMessageFragment("prepared shard entity count is outside its bound"),
+            "public validation must independently rederive raw V2 evidence under the authenticated V3 scope before comparing the candidate",
+        )
+        assertEquals(exactCandidateBefore, v3TreeBytes(exact.root),
+            "per-shard under-bounded public validation leaves the candidate bytes unchanged")
         assertDirectoryEmpty(exactFixture.scratch)
         assertDirectoryEmpty(underFixture.scratch)
+        assertDirectoryEmpty(perShardUnderFixture.scratch)
     }
 
     private fun JsonObject.withField(name: String, value: JsonElement): JsonObject =
@@ -1074,6 +1146,7 @@ class FullTreeFunctionTruthSqliteV3Test {
         root: Path,
         wholeRunEntities: Long,
         perShardEntities: Long,
+        regenerateObservationV2: Boolean = true,
     ): V3Fixture {
         require(wholeRunEntities > 0L && perShardEntities > 0L && perShardEntities <= wholeRunEntities)
         Files.createDirectories(root)
@@ -1111,27 +1184,46 @@ class FullTreeFunctionTruthSqliteV3Test {
             maximumWorkers = 1,
         )
         val scratch = privateDirectory(root.resolve("scratch"))
-        val observationV2Root = root.resolve("observations-v2")
-        val observationV2 = FullTreeFunctionObservationV2RunPublisher.generateAndPublish(
-            richArtifact = fixture.rich,
-            inventoryPath = inventoryPath,
-            scope = scope,
-            scratchParent = scratch,
-            outputRoot = observationV2Root,
-            maximumWorkers = 2,
-            limits = tightScratchLimits().observationV2,
-        )
+        val observationV2Root: Path
+        val observationV2IndexSha256: String
+        val observationV2EntityCount: Long
+        val observationV2PerShardEntityCount: Long
+        if (regenerateObservationV2) {
+            observationV2Root = root.resolve("observations-v2")
+            val observationV2 = FullTreeFunctionObservationV2RunPublisher.generateAndPublish(
+                richArtifact = fixture.rich,
+                inventoryPath = inventoryPath,
+                scope = scope,
+                scratchParent = scratch,
+                outputRoot = observationV2Root,
+                maximumWorkers = 2,
+                limits = tightScratchLimits().observationV2,
+            )
+            observationV2IndexSha256 = observationV2.binding.indexArtifactSha256
+            observationV2EntityCount = Math.addExact(
+                Math.addExact(observationV2.emittedRvas, observationV2.nonEmitted),
+                observationV2.sourceEntities,
+            )
+            observationV2PerShardEntityCount = observationV2.outputs.maxOf { output ->
+                Math.addExact(Math.addExact(output.emittedRvas, output.nonEmitted), output.sourceEntities)
+            }
+        } else {
+            // The old run is only a candidate. The public V3 API must rederive from raw inputs under
+            // the new authenticated scope before it can compare that candidate with fresh output.
+            observationV2Root = fixture.observationV2Root
+            observationV2IndexSha256 = fixture.observationV2IndexSha256
+            observationV2EntityCount = fixture.observationV2EntityCount
+            observationV2PerShardEntityCount = fixture.observationV2PerShardEntityCount
+        }
         return fixture.copy(
             inventoryPath = inventoryPath,
             scope = scope,
             elfIndex = elfIndex,
             observationV2Root = observationV2Root,
-            observationV2IndexSha256 = observationV2.binding.indexArtifactSha256,
+            observationV2IndexSha256 = observationV2IndexSha256,
             scratch = scratch,
-            observationV2EntityCount = Math.addExact(
-                Math.addExact(observationV2.emittedRvas, observationV2.nonEmitted),
-                observationV2.sourceEntities,
-            ),
+            observationV2EntityCount = observationV2EntityCount,
+            observationV2PerShardEntityCount = observationV2PerShardEntityCount,
         )
     }
 
@@ -1250,6 +1342,9 @@ class FullTreeFunctionTruthSqliteV3Test {
             readelfVersion.lineSequence().first(),
             compilerInputVectorMatches,
             Math.addExact(Math.addExact(v2.emittedRvas, v2.nonEmitted), v2.sourceEntities),
+            v2.outputs.maxOf { output ->
+                Math.addExact(Math.addExact(output.emittedRvas, output.nonEmitted), output.sourceEntities)
+            },
         )
     }
 
@@ -1425,6 +1520,9 @@ class FullTreeFunctionTruthSqliteV3Test {
         assertTrue(Files.list(path).use { it.findAny().isEmpty })
     }
 
+    private fun Throwable.hasCauseMessageFragment(fragment: String): Boolean =
+        generateSequence(this) { it.cause }.any { it.message?.contains(fragment) == true }
+
     private fun v2FileRecord(id: String, path: String, bytes: ByteArray): JsonObject = JsonObject(mapOf(
         "bytes" to JsonPrimitive(bytes.size.toLong()),
         "functions" to JsonPrimitive(0L),
@@ -1456,6 +1554,7 @@ class FullTreeFunctionTruthSqliteV3Test {
         val readelfIdentity: String,
         val compilerInputVectorMatches: Boolean,
         val observationV2EntityCount: Long,
+        val observationV2PerShardEntityCount: Long,
     )
 
     private data class CandidateSource(
