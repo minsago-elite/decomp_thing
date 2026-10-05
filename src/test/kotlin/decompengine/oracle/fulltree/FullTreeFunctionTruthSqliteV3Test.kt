@@ -322,7 +322,7 @@ class FullTreeFunctionTruthSqliteV3Test {
                 expectedObservationV2IndexArtifactSha256 = fixture.observationV2IndexSha256,
                 scope = fixture.scope,
                 scratchParent = fixture.scratch,
-                limits = limits,
+                limits = limits.copy(truth = limits.truth.copy(maximumOutputBytes = narrowNestedTruthOutput)),
             )
             assertTrue(validated.rawInputsRederived)
             assertTrue(validated.candidateBytesMatchedAtValidationBoundary)
