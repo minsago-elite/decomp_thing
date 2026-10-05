@@ -1632,9 +1632,9 @@ class FullTreeGenericTemplateFrontendV1Test {
     private companion object {
         const val PATH_TRANSFORM_SHA256 = "3721264f731ec5268d665bd98442d65ec42a23a535292c994ba92a227b72fac9"
         const val PROFILE_SHA256 = "2ccf3e7a09b9a1518f8d0e1b882c0f5cb4c6e86c2318d8e37ff8430bd9b84fe0"
-        const val RECEIPT_SHA256 = "dbade23ec21a434fcbbb70ae094cfba48b00444835d8aaaeb968b88e5de6ce3f"
+        const val RECEIPT_SHA256 = "0665807b64084979feea919da5aa9af7c0fefb891fe370bc814356bb04e6d41f"
         const val CONFIGURATION_SHA256 = "06bf3c8316a9b40b76e898c8a313b46860ba3ec177fcaa26138e8fae5d4214af"
         const val CANONICAL_RECEIPT_BYTES = 6784
-        const val CANONICAL_RECEIPT_SHA256 = "3059109043c435eef41d1004d3c3d2a4857e8d98a30544c1860e4501c013f64d"
+        const val CANONICAL_RECEIPT_SHA256 = "33f8d423aa811e0e0d047a16d5612d0b3fad9f8594ae3b5b38d1be7e44d3f30c"
     }
 }
