@@ -132,8 +132,11 @@ class ProvisioningNegativeTests(unittest.TestCase):
         self.assertIn("if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'snapshot-metadata-diagnostic') }}", workflow)
         qualify_job = re.search(r"(?ms)^  qualify:\n(.*?)(?=^  [A-Za-z0-9_-]+:|\Z)", workflow)
         self.assertIsNotNone(qualify_job)
+        qualify_text = qualify_job.group(1)
         self.assertIn("if: ${{ github.event_name != 'workflow_dispatch' || inputs.mode == 'full-qualification' }}",
-                      qualify_job.group(1))
+                      qualify_text)
+        self.assertLess(qualify_text.index("Run offline fail-closed provisioning tests"),
+                        qualify_text.index("Authenticate Ubuntu Snapshot source and patch compatibility first"))
 
     def test_rootfs_command_uses_the_selected_contract_environment(self):
         contract = {"environment": {"LC_ALL": "C", "TZ": "UTC", "SOURCE_DATE_EPOCH": "7",

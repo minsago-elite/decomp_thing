@@ -98,14 +98,14 @@ jobs:
           sudo apt-get install --yes --no-install-recommends \
             debootstrap dpkg-dev gpgv gnupg ubuntu-keyring python3
 
+      - name: Run offline fail-closed provisioning tests
+        run: python3 -m unittest discover -s oracle/clang/18.1.3 -p 'test_*.py' -v
+
       - name: Authenticate Ubuntu Snapshot source and patch compatibility first
         run: |
           mkdir -p "$CLANG_WORK"
           python3 scripts/oracle/provision_clang_18_1_3.py acquire \
             --output "$CLANG_WORK/acquisition"
-
-      - name: Run offline fail-closed provisioning tests
-        run: python3 -m unittest discover -s oracle/clang/18.1.3 -p 'test_*.py' -v
 
       - name: Run the accepted A profile and provenance loader tests
         run: |
