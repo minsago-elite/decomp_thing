@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/full-tree-generic-template-frontend-v1.schema.json",
+  "title": "Authenticated generic-template Clang frontend provenance v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "policyId", "policyVersion", "configurationSha256", "bindings", "units", "counts"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "policyId": {"const": "full-tree-generic-template-frontend"},
+    "policyVersion": {"const": 1},
+    "configurationSha256": {"$ref": "#/$defs/sha256"},
+    "bindings": {"$ref": "#/$defs/bindings"},
+    "units": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/unit"}
+    },
+    "counts": {"$ref": "#/$defs/counts"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(source|generated|build|toolchain)/.+$"
+    },
+    "bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scopeSha256", "sourceLockSha256", "artifactManifestSha256", "buildRecordSha256", "sourceArchiveSha256", "sourceInventorySha256", "generatedInventorySha256", "richArtifactSha256", "richInventorySha256", "compilationDatabaseSha256", "frontendProfileSha256"],
+      "properties": {
+        "scopeSha256": {"$ref": "#/$defs/sha256"},
+        "sourceLockSha256": {"$ref": "#/$defs/sha256"},
+        "artifactManifestSha256": {"$ref": "#/$defs/sha256"},
+        "buildRecordSha256": {"$ref": "#/$defs/sha256"},
+        "sourceArchiveSha256": {"$ref": "#/$defs/sha256"},
+        "sourceInventorySha256": {"$ref": "#/$defs/sha256"},
+        "generatedInventorySha256": {"$ref": "#/$defs/sha256"},
+        "richArtifactSha256": {"$ref": "#/$defs/sha256"},
+        "richInventorySha256": {"$ref": "#/$defs/sha256"},
+        "compilationDatabaseSha256": {"$ref": "#/$defs/sha256"},
+        "frontendProfileSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["PATH", "HOME", "TMPDIR", "LC_ALL", "SOURCE_DATE_EPOCH", "TZ"],
+      "properties": {
+        "CPATH": {"const": ""},
+        "CPLUS_INCLUDE_PATH": {"const": ""},
+        "C_INCLUDE_PATH": {"const": ""},
+        "HOME": {"const": "/__decomp/home"},
+        "LANG": {"type": "string"},
+        "LC_ALL": {"const": "C"},
+        "OBJCPLUS_INCLUDE_PATH": {"const": ""},
+        "OBJC_INCLUDE_PATH": {"const": ""},
+        "PATH": {"type": "string", "pattern": "^/__decomp/toolchain/path/[0-9]{4}(:/__decomp/toolchain/path/[0-9]{4})*$"},
+        "SDKROOT": {"const": ""},
+        "SOURCE_DATE_EPOCH": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+        "TMPDIR": {"const": "/__decomp/tmp"},
+        "TZ": {"const": "UTC"}
+      }
+    },
+    "dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "role"],
+      "properties": {
+        "path": {"$ref": "#/$defs/path"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "role": {"enum": ["compiler-executable", "toolchain-runtime", "main-source", "resource-header", "header", "source", "generated", "build-input"]}
+      }
+    },
+    "unit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unitId", "actionId", "sourcePath", "sourceFileSha256", "captureActionSha256", "argvSha256", "executionArgvSha256", "cwd", "environment", "environmentSha256", "dependencySetSha256", "dependencies", "semanticContextSha256", "resolvedResourceDirectory", "resourceHeaderManifestSha256", "frontendProfileSha256", "adapterSha256", "receiptSha256", "exitCode", "outputBytes"],
+      "properties": {
+        "unitId": {"type": "string", "minLength": 1, "maxLength": 16384},
+        "actionId": {"$ref": "#/$defs/sha256"},
+        "sourcePath": {"type": "string", "pattern": "^(source|generated)/.+$", "maxLength": 4096},
+        "sourceFileSha256": {"$ref": "#/$defs/sha256"},
+        "captureActionSha256": {"$ref": "#/$defs/sha256"},
+        "argvSha256": {"$ref": "#/$defs/sha256"},
+        "executionArgvSha256": {"$ref": "#/$defs/sha256"},
+        "cwd": {"type": "string", "pattern": "^(source|generated|build)(/.+)?$", "maxLength": 4096},
+        "environment": {"$ref": "#/$defs/environment"},
+        "environmentSha256": {"$ref": "#/$defs/sha256"},
+        "dependencySetSha256": {"$ref": "#/$defs/sha256"},
+        "dependencies": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/dependency"}},
+        "semanticContextSha256": {"$ref": "#/$defs/sha256"},
+        "resolvedResourceDirectory": {"type": "string", "pattern": "^toolchain/.+$", "maxLength": 4096},
+        "resourceHeaderManifestSha256": {"$ref": "#/$defs/sha256"},
+        "frontendProfileSha256": {"$ref": "#/$defs/sha256"},
+        "adapterSha256": {"$ref": "#/$defs/sha256"},
+        "receiptSha256": {"$ref": "#/$defs/sha256"},
+        "exitCode": {"const": 0},
+        "outputBytes": {"const": 0}
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unitCount", "dependencyCount", "outputBytes"],
+      "properties": {
+        "unitCount": {"type": "integer", "minimum": 1},
+        "dependencyCount": {"type": "integer", "minimum": 1},
+        "outputBytes": {"const": 0}
+      }
+    }
+  }
+}
