@@ -32,7 +32,7 @@ concurrency:
 
 jobs:
   snapshot-metadata:
-    name: Diagnostic probe for July 2 candidate (metadata only)
+    name: Production snapshot metadata diagnostic
     if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'snapshot-metadata-diagnostic') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -129,7 +129,8 @@ jobs:
             --acquisition "$CLANG_WORK/acquisition" \
             --rootfs "$CLANG_WORK/rootfs-run1" \
             --workdir "$CLANG_WORK/work" \
-            --output "$CLANG_WORK/run1" --label run1
+            --output "$CLANG_WORK/run1" --label run1 \
+            --rootfs-tar-output "$CLANG_WORK/run1/clang-18.1.3-noble-amd64.rootfs.tar"
 
       - name: Provision second clean toolchain rootfs
         run: |
@@ -146,7 +147,8 @@ jobs:
             --second "$CLANG_WORK/run2/build-record-fragment.json" \
             --output "$CLANG_WORK/build-record.json"
           python3 scripts/oracle/provision_clang_18_1_3.py verify-record \
-            --record "$CLANG_WORK/build-record.json"
+            --record "$CLANG_WORK/build-record.json" \
+            --rootfs-tar "$CLANG_WORK/run1/clang-18.1.3-noble-amd64.rootfs.tar"
           python3 scripts/oracle/provision_clang_18_1_3.py verify-image \
             --record "$CLANG_WORK/build-record.json" \
             --oci-archive "$CLANG_WORK/run1/clang-18.1.3-noble-amd64.oci.tar"
@@ -183,6 +185,15 @@ jobs:
         with:
           name: clang-18.1.3-noble-amd64-image
           path: ${{ github.workspace }}/build/clang1813/run1/clang-18.1.3-noble-amd64.oci.tar
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload the record-verified rootfs for downstream extraction
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: clang-18.1.3-noble-amd64-rootfs
+          path: ${{ github.workspace }}/build/clang1813/run1/clang-18.1.3-noble-amd64.rootfs.tar
           if-no-files-found: error
           compression-level: 0
           retention-days: 1

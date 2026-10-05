@@ -19,7 +19,7 @@
         "id": {"const": "clang-libtooling-18.1.3-ubuntu-noble-amd64-v1"},
         "architecture": {"const": "amd64"},
         "target": {"const": "x86_64-linux-gnu"},
-        "snapshot": {"const": "20240425T000000Z"},
+        "snapshot": {"const": "20240702T000000Z"},
         "codename": {"const": "noble"}
       }
     },

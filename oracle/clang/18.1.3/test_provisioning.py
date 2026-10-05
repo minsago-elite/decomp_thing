@@ -127,7 +127,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
         actions = re.findall(r"^\s*uses:\s*([^\s#]+)", workflow, flags=re.MULTILINE)
         self.assertTrue(actions)
         self.assertTrue(all(re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", action) for action in actions), actions)
-        self.assertIn("Diagnostic probe for July 2 candidate (metadata only)", workflow)
+        self.assertIn("Production snapshot metadata diagnostic", workflow)
         self.assertIn("--snapshot 20240702T000000Z", workflow)
         self.assertIn("if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'snapshot-metadata-diagnostic') }}", workflow)
         qualify_job = re.search(r"(?ms)^  qualify:\n(.*?)(?=^  [A-Za-z0-9_-]+:|\Z)", workflow)
@@ -437,7 +437,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
             )
         self.assertEqual(report["status"], "exact-contract-records-present")
         self.assertEqual(report["candidateSnapshot"], provision.SNAPSHOT_METADATA_PROBE)
-        self.assertEqual(report["configuredSnapshot"], "20240425T000000Z")
+        self.assertEqual(report["configuredSnapshot"], self.contract["profile"]["snapshot"])
         self.assertEqual(report["payloadBytesDownloaded"], 0)
         self.assertEqual(report["sourcePackage"]["exactRecords"][0]["sourceFiles"][0]["name"],
                          "llvm-toolchain-18_18.1.3-1ubuntu1.dsc")
@@ -762,6 +762,18 @@ class ProvisioningNegativeTests(unittest.TestCase):
         with self.assertRaisesRegex(provision.ProvisionError, "differs from the installed signed package"):
             provision.validate_build_record(record, self.contract)
 
+    def test_build_record_rejects_missing_or_malformed_source_inventory_digests(self):
+        for field in ("definitionSha256", "headerSha256"):
+            for omit in (True, False):
+                with self.subTest(field=field, omit=omit):
+                    record = self.valid_build_record()
+                    if omit:
+                        record["probe"].pop(field)
+                    else:
+                        record["probe"][field] = "not-a-sha256"
+                    with self.assertRaisesRegex(provision.ProvisionError, "probe bytes are not authenticated"):
+                        provision.validate_build_record(record, self.contract)
+
     def test_langoptions_source_audit_accepts_exact_pinned_inventory(self):
         with self.temporary_directory() as temp:
             base = Path(temp)
@@ -869,6 +881,48 @@ class ProvisioningNegativeTests(unittest.TestCase):
             record["imageArtifact"] = {"bytes": archive_path.stat().st_size,
                                        "sha256": provision.sha256_file(archive_path)}
             with self.assertRaisesRegex(provision.ProvisionError, "unrecorded files or blobs"):
+                provision.verify_oci_archive(archive_path, record, 1024 * 1024)
+
+    def test_oci_image_verifier_rejects_config_descriptor_size_mismatch(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            rootfs_tar = base / "rootfs.tar"
+            payload = b"bounded synthetic rootfs tar payload"
+            rootfs_tar.write_bytes(payload)
+            layout = base / "layout"
+            image = provision.create_oci_layout(rootfs_tar, layout, "fixture", 1714003200)
+
+            manifest_path = layout / "blobs/sha256" / image["manifestSha256"]
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            config_path = layout / "blobs/sha256" / manifest["config"]["digest"].removeprefix("sha256:")
+            config_bytes = config_path.read_bytes()
+            manifest["config"]["size"] = len(config_bytes) + 1
+            manifest_bytes = provision.canonical_json(manifest)
+            manifest_sha256 = provision.sha256(manifest_bytes)
+            (manifest_path.parent / manifest_sha256).write_bytes(manifest_bytes)
+            manifest_path.unlink()
+
+            index_path = layout / "index.json"
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            index["manifests"][0]["digest"] = "sha256:" + manifest_sha256
+            index["manifests"][0]["size"] = len(manifest_bytes)
+            index_path.write_bytes(provision.canonical_json(index))
+
+            archive_path = base / "image.tar"
+            names = sorted(path.relative_to(layout).as_posix() for path in layout.rglob("*") if path.is_file())
+            provision.run_checked([
+                "tar", "--sort=name", "--format=posix", "--numeric-owner", "--owner=0", "--group=0",
+                "--mtime=@1714003200", "--pax-option=delete=atime,delete=ctime", "-cf", str(archive_path),
+                "-C", str(layout), *names,
+            ])
+            record = {
+                "rootfs": {"bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()},
+                "image": {**image, "manifestSha256": manifest_sha256,
+                          "imageDigest": "sha256:" + manifest_sha256},
+                "imageArtifact": {"bytes": archive_path.stat().st_size,
+                                  "sha256": provision.sha256_file(archive_path)},
+            }
+            with self.assertRaisesRegex(provision.ProvisionError, "config descriptor size differs"):
                 provision.verify_oci_archive(archive_path, record, 1024 * 1024)
 
 

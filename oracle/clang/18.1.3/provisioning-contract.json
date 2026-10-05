@@ -6,8 +6,8 @@
     "architecture": "amd64",
     "distribution": "Ubuntu",
     "codename": "noble",
-    "snapshot": "20240425T000000Z",
-    "snapshotBase": "https://snapshot.ubuntu.com/ubuntu/20240425T000000Z/",
+    "snapshot": "20240702T000000Z",
+    "snapshotBase": "https://snapshot.ubuntu.com/ubuntu/20240702T000000Z/",
     "suites": ["noble", "noble-updates", "noble-security"],
     "components": ["main", "universe"],
     "sourcePackage": {

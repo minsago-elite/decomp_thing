@@ -199,9 +199,10 @@ signed Release tables. The probe acquired 48,554,460 bytes of metadata and
 zero package payload bytes; it downloaded no `.dsc`, source archive, or `.deb`.
 This is signed index provenance only. Upstream signature verification, the
 comparison of all 34 contract-relevant source files/patches, and every compiler,
-loader, image, and reproducibility acceptance gate remain unverified. The
-production provisioning contract remains pinned to `20240425T000000Z`; it was
-not changed based on this diagnostic.
+loader, image, and reproducibility acceptance gate remain unverified. At the
+time of this diagnostic the production contract remained pinned to
+`20240425T000000Z`; the change to July 2 described below followed separate
+review approval.
 
 At the same head, the normal PR `qualify` job ran separately and failed closed
 against that unchanged production pin: it found no exact source record for
@@ -217,3 +218,33 @@ Matching package version text is not compatibility or provenance evidence.
 The bounded alternative remains a separately reviewed source build from the
 exact signed upstream Clang 18.1.3 source on the same public runner class; that
 alternative is not implemented or qualified here.
+
+## Approved production snapshot and fail-closed qualification
+
+After the July 2 signed-index diagnostic, independent review approved
+`20240702T000000Z` as the production snapshot. The contract and build-record
+schema now pin that timestamp; the source package version and all five binary
+root version pins remain exactly `1:18.1.3-1ubuntu1`. This approval uses signed
+index provenance, not version text alone, and does not approve the distro
+patches or source compatibility.
+
+The full public-runner PR qualification remains a separate mandatory gate. Its
+acquisition step has a fail-closed prerequisite before making any request to
+the official LLVM 18.1.3 detached-signature URL that was denied in this
+environment. When acquisition reaches that prerequisite it stops with the
+exact URL, without trying that URL through Actions, a proxy, mirror, or another
+route. Until the signature is accessible through an authorized path and
+independently reviewed, the upstream source signature, complete 34-file source
+audit, compiler/API probes, loader checks, image/rootfs identity, and two-run
+reproducibility remain unverified. No image or build record from this PR may be
+treated as accepted.
+
+The qualification workflow retains the canonical rootfs tar only after its
+build record is created. Before an artifact upload, `verify-record` checks the
+tar byte count and SHA-256 against the record, while `verify-image` checks the
+OCI layer's expanded bytes against the same rootfs identity. A successful
+qualification will upload the rootfs tar as a one-day artifact for downstream
+extraction; the image and provenance remain separate one-day artifacts. No
+such accepted artifact is available until all preceding gates pass. B's
+integration and the shared registry/inventory are outside this issue's owned
+scope and were not changed or run.

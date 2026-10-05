@@ -52,6 +52,10 @@ MAX_SOURCE_DIAGNOSTIC_ROWS = 256
 MAX_UPSTREAM_ARCHIVE_MEMBERS = 300_000
 MAX_UPSTREAM_EXPANDED_BYTES = 3 * 1024 * 1024 * 1024
 SNAPSHOT_METADATA_PROBE = "20240702T000000Z"
+PAUSED_UPSTREAM_SIGNATURE_URL = (
+    "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.3/"
+    "llvm-project-18.1.3.src.tar.xz.sig"
+)
 MAX_SNAPSHOT_METADATA_BYTES = 512 * 1024 * 1024
 MAX_SNAPSHOT_INDEX_BYTES = 128 * 1024 * 1024
 ALLOWED_REDIRECT_HOSTS = {
@@ -909,6 +913,11 @@ def acquire_candidate(contract: dict, output: Path, keyring: Path) -> dict:
     atomic_write(upstream_keyring_path, upstream_keyring_bytes)
     upstream_archive_url = upstream["archiveUrl"]
     upstream_sig_url = upstream["signatureUrl"]
+    if upstream_sig_url == PAUSED_UPSTREAM_SIGNATURE_URL:
+        raise ProvisionError(
+            "upstream LLVM signature access is paused after the official URL was denied; "
+            f"refusing to request it from this runner: {upstream_sig_url}"
+        )
     archive_bytes, upstream_archive = downloader.get(
         upstream_archive_url, max_bytes=1024 * 1024 * 1024, allow_github_redirect=True
     )
@@ -1901,6 +1910,8 @@ def verify_oci_archive(path: Path, record: dict, max_bytes: int) -> None:
             config_digest = config_desc.get("digest", "")
             config_name = "blobs/sha256/" + config_digest.removeprefix("sha256:")
             config_bytes = read_small(config_name)
+            if type(config_desc.get("size")) is not int or config_desc["size"] != len(config_bytes):
+                raise ProvisionError("OCI image config descriptor size differs from the config blob length")
             if not config_digest.startswith("sha256:") or sha256(config_bytes) != config_digest.removeprefix("sha256:"):
                 raise ProvisionError("OCI image config content does not match its digest")
             config = json.loads(config_bytes)
@@ -2172,7 +2183,16 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     record_path = args.output / "build-record-fragment.json"
     atomic_write(record_path, canonical_json(record))
     atomic_write(args.output / "probe-report.json", canonical_json(probe_checked))
-    rootfs_tar_path.unlink()
+    if args.rootfs_tar_output is not None:
+        if args.rootfs_tar_output.exists() or args.rootfs_tar_output.is_symlink():
+            raise ProvisionError("verified rootfs tar output path must not already exist")
+        output_parent = args.output.resolve(strict=True)
+        if (args.rootfs_tar_output.parent != output_parent or
+                args.rootfs_tar_output.parent.resolve(strict=True) != output_parent):
+            raise ProvisionError("verified rootfs tar output must be inside the canonical run output directory")
+        os.replace(rootfs_tar_path, args.rootfs_tar_output)
+    else:
+        rootfs_tar_path.unlink()
     if not args.keep_rootfs:
         run_checked(["sudo", "rm", "-rf", str(profile_root)])
     print(f"provisioned {profile['id']} rootfs sha256:{rootfs_identity['sha256']} image {image_record['imageDigest']}")
@@ -2294,7 +2314,7 @@ def validate_build_record(record: dict, contract: dict) -> None:
            for key in ("expansionCount", "macroInfoChecks", "nonBuiltinClassifications")):
         raise ProvisionError("build record lacks observed macro callback and MacroInfo checks")
     if any(not re.fullmatch(r"[0-9a-f]{64}", str(probe.get(field, "")))
-           for field in ("binarySha256", "sourceSha256", "fixtureSha256")):
+           for field in ("definitionSha256", "headerSha256", "binarySha256", "sourceSha256", "fixtureSha256")):
         raise ProvisionError("build record probe bytes are not authenticated")
 
     for name in ("runtime", "resources"):
@@ -2313,7 +2333,9 @@ def validate_build_record(record: dict, contract: dict) -> None:
 
     rootfs = record.get("rootfs", {})
     image = record.get("image", {})
-    if rootfs.get("bytes", 0) < 1 or not re.fullmatch(r"[0-9a-f]{64}", str(rootfs.get("sha256", ""))):
+    if (rootfs.get("bytes", 0) < 1 or
+            rootfs.get("bytes", 0) > profile["bounds"]["maxArtifactBytes"] or
+            not re.fullmatch(r"[0-9a-f]{64}", str(rootfs.get("sha256", "")))):
         raise ProvisionError("build record rootfs identity is invalid")
     if image.get("format") != "oci-image-layout-v1" or image.get("imageDigest") != "sha256:" + str(image.get("manifestSha256", "")):
         raise ProvisionError("build record immutable image identity is invalid")
@@ -2392,8 +2414,9 @@ def command_verify_record(args: argparse.Namespace) -> int:
     }:
         raise ProvisionError("build record does not contain two-run reproducibility evidence")
     if args.rootfs_tar:
-        payload = args.rootfs_tar.read_bytes()
-        if len(payload) != record["rootfs"]["bytes"] or sha256(payload) != record["rootfs"]["sha256"]:
+        identity = record["rootfs"]
+        if (args.rootfs_tar.stat().st_size != identity["bytes"] or
+                sha256_file(args.rootfs_tar) != identity["sha256"]):
             raise ProvisionError("rootfs tar bytes differ from the pinned build record")
     print("verified the pinned Clang 18.1.3 profile/build-record contract")
     return 0
@@ -2770,6 +2793,8 @@ def build_parser() -> argparse.ArgumentParser:
     provision.add_argument("--output", type=Path, required=True)
     provision.add_argument("--label", choices=("run1", "run2"), required=True)
     provision.add_argument("--keep-rootfs", action="store_true", help="retain rootfs for the authenticated loader smoke step")
+    provision.add_argument("--rootfs-tar-output", type=Path,
+                           help="retain the canonical rootfs tar at this bounded, record-hashed artifact path")
     provision.set_defaults(run=provision_rootfs)
     compare = sub.add_parser("compare-runs", help="require two clean rootfs/image runs to reproduce exactly")
     compare.add_argument("--contract", type=Path, default=CONTRACT_PATH)
