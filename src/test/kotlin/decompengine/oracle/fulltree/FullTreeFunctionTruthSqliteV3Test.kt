@@ -736,8 +736,9 @@ class FullTreeFunctionTruthSqliteV3Test {
             )
         }
         assertTrue(
-            generationFailure.hasCauseMessageFragment("prepared shard entity count is outside its bound"),
-            "public generation must independently rederive raw V2 evidence and reject its actual entity count under the authenticated V3 scope",
+            generationFailure.hasCauseMessageFragment("observation-v2 entity population exceeds its authenticated bound"),
+            "public generation must independently rederive raw V2 evidence and reject its per-shard entity population under the authenticated V3 scope; " +
+                "observed failure chain: ${generationFailure.causeMessageChain()}",
         )
         assertFalse(Files.exists(perShardRejectedOutput, LinkOption.NOFOLLOW_LINKS),
             "an under-bounded public generation must not publish a tree")
@@ -759,8 +760,9 @@ class FullTreeFunctionTruthSqliteV3Test {
             )
         }
         assertTrue(
-            validationFailure.hasCauseMessageFragment("prepared shard entity count is outside its bound"),
-            "public validation must independently rederive raw V2 evidence under the authenticated V3 scope before comparing the candidate",
+            validationFailure.hasCauseMessageFragment("observation-v2 entity population exceeds its authenticated bound"),
+            "public validation must independently rederive raw V2 per-shard admission under the authenticated V3 scope before comparing the candidate; " +
+                "observed failure chain: ${validationFailure.causeMessageChain()}",
         )
         assertEquals(exactCandidateBefore, v3TreeBytes(exact.root),
             "per-shard under-bounded public validation leaves the candidate bytes unchanged")
@@ -1522,6 +1524,9 @@ class FullTreeFunctionTruthSqliteV3Test {
 
     private fun Throwable.hasCauseMessageFragment(fragment: String): Boolean =
         generateSequence(this) { it.cause }.any { it.message?.contains(fragment) == true }
+
+    private fun Throwable.causeMessageChain(): String =
+        generateSequence(this) { it.cause }.joinToString(" <- ") { it.message.orEmpty() }
 
     private fun v2FileRecord(id: String, path: String, bytes: ByteArray): JsonObject = JsonObject(mapOf(
         "bytes" to JsonPrimitive(bytes.size.toLong()),
