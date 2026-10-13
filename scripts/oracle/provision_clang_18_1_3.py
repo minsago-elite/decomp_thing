@@ -13,6 +13,7 @@ import argparse
 import datetime
 import gzip
 import hashlib
+import io
 import json
 import lzma
 import os
@@ -33,6 +34,11 @@ import zlib
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACT_PATH = ROOT / "oracle/clang/18.1.3/provisioning-contract.json"
 DEFAULT_KEYRING = Path("/usr/share/keyrings/ubuntu-archive-keyring.gpg")
+APT_KEYRING_IN_ROOT = "/usr/share/keyrings/decomp-thing-ubuntu-archive-keyring.gpg"
+OCI_INDEX_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json"
+OCI_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
+OCI_CONFIG_MEDIA_TYPE = "application/vnd.oci.image.config.v1+json"
+OCI_GZIP_LAYER_MEDIA_TYPE = "application/vnd.oci.image.layer.v1.tar+gzip"
 RECIPE_FILES = {
     "contractSha256": CONTRACT_PATH,
     "schemaSha256": CONTRACT_PATH.parent / "build-record.schema.json",
@@ -1927,7 +1933,7 @@ def normalize_rootfs(rootfs: Path, epoch: int) -> None:
 def deterministic_rootfs_tar(rootfs: Path, destination: Path, epoch: int) -> dict:
     normalize_rootfs(rootfs, epoch)
     command = [
-        "sudo", "env", "LC_ALL=C", "tar", "--sort=name", "--format=posix", "--numeric-owner", "--owner=0", "--group=0",
+        "sudo", "env", "LC_ALL=C", "tar", "--sort=name", "--format=posix", "--numeric-owner",
         f"--mtime=@{epoch}", "--pax-option=delete=atime,delete=ctime",
         "-cf", str(destination), "-C", str(rootfs), ".",
     ]
@@ -1972,18 +1978,18 @@ def create_oci_layout(rootfs_tar: Path, output: Path, profile_id: str, environme
     (blobs / config_digest).write_bytes(config_bytes)
     manifest = {
         "schemaVersion": 2,
-        "mediaType": "application/vnd.oci.image.manifest.v1+json",
-        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": "sha256:" + config_digest, "size": len(config_bytes)},
-        "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": "sha256:" + layer_digest, "size": len(layer)}],
+        "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+        "config": {"mediaType": OCI_CONFIG_MEDIA_TYPE, "digest": "sha256:" + config_digest, "size": len(config_bytes)},
+        "layers": [{"mediaType": OCI_GZIP_LAYER_MEDIA_TYPE, "digest": "sha256:" + layer_digest, "size": len(layer)}],
     }
     manifest_bytes = canonical_json(manifest)
     manifest_digest = sha256(manifest_bytes)
     (blobs / manifest_digest).write_bytes(manifest_bytes)
     (output / "oci-layout").write_bytes(canonical_json({"imageLayoutVersion": "1.0.0"}))
     index = {
-        "schemaVersion": 2, "mediaType": "application/vnd.oci.image.index.v1+json",
+        "schemaVersion": 2, "mediaType": OCI_INDEX_MEDIA_TYPE,
         "manifests": [{
-            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "mediaType": OCI_MANIFEST_MEDIA_TYPE,
             "digest": "sha256:" + manifest_digest, "size": len(manifest_bytes),
             "annotations": {"org.opencontainers.image.ref.name": "clang-18.1.3-noble-amd64"},
         }],
@@ -2031,8 +2037,10 @@ def verify_oci_archive(path: Path, record: dict, max_bytes: int) -> None:
                 raise ProvisionError("OCI layout version is unsupported")
             index = json.loads(read_small("index.json"))
             descriptors = index.get("manifests", [])
-            if index.get("schemaVersion") != 2 or len(descriptors) != 1:
-                raise ProvisionError("OCI index must contain exactly one image manifest")
+            if (index.get("schemaVersion") != 2 or index.get("mediaType") != OCI_INDEX_MEDIA_TYPE or
+                    len(descriptors) != 1 or not isinstance(descriptors[0], dict) or
+                    descriptors[0].get("mediaType") != OCI_MANIFEST_MEDIA_TYPE):
+                raise ProvisionError("OCI index or manifest descriptor has an invalid media type or shape")
             manifest_desc = descriptors[0]
             digest = record["image"]["imageDigest"]
             if manifest_desc.get("digest") != digest:
@@ -2044,8 +2052,11 @@ def verify_oci_archive(path: Path, record: dict, max_bytes: int) -> None:
             manifest = json.loads(manifest_bytes)
             config_desc = manifest.get("config", {})
             layers = manifest.get("layers", [])
-            if len(layers) != 1 or manifest.get("schemaVersion") != 2:
-                raise ProvisionError("OCI manifest must contain exactly one rootfs layer")
+            if (len(layers) != 1 or manifest.get("schemaVersion") != 2 or
+                    manifest.get("mediaType") != OCI_MANIFEST_MEDIA_TYPE or
+                    not isinstance(config_desc, dict) or config_desc.get("mediaType") != OCI_CONFIG_MEDIA_TYPE or
+                    not isinstance(layers[0], dict) or layers[0].get("mediaType") != OCI_GZIP_LAYER_MEDIA_TYPE):
+                raise ProvisionError("OCI manifest, config, or rootfs layer descriptor has an invalid media type or shape")
             config_digest = config_desc.get("digest", "")
             config_name = "blobs/sha256/" + config_digest.removeprefix("sha256:")
             config_bytes = read_small(config_name)
@@ -2110,6 +2121,29 @@ def apt_command_prefix() -> list[str]:
             "-o", "APT::Get::AllowUnauthenticated=false", "-o", "APT::Install-Recommends=false"]
 
 
+def apt_source_list(contract: dict) -> bytes:
+    snapshot = contract["profile"]["snapshotBase"]
+    suites = contract["profile"]["suites"]
+    lines = [
+        f"deb [check-valid-until=no signed-by={APT_KEYRING_IN_ROOT}] {snapshot} {suite} main universe"
+        for suite in suites
+    ]
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def install_selected_archive_keyring(rootfs: Path, keyring: Path, expected_sha256: str) -> Path:
+    if keyring.is_symlink() or not keyring.is_file() or sha256_file(keyring) != expected_sha256:
+        raise ProvisionError("selected Ubuntu archive keyring bytes differ from the authenticated candidate")
+    parent = rootfs_path(rootfs, "/usr/share/keyrings")
+    destination = parent / PurePosixPath(APT_KEYRING_IN_ROOT).name
+    if destination.exists() or destination.is_symlink():
+        raise ProvisionError("dedicated in-root Ubuntu archive keyring path already exists")
+    run_checked(["sudo", "install", "-m", "0644", str(keyring), str(destination)])
+    if destination.is_symlink() or not destination.is_file() or sha256_file(destination) != expected_sha256:
+        raise ProvisionError("installed in-root Ubuntu archive keyring differs from authenticated candidate bytes")
+    return destination
+
+
 def probe_compile_command() -> list[str]:
     return ["/usr/bin/clang++-18", "-I/usr/lib/llvm-18/include", "--target=x86_64-pc-linux-gnu",
             "-std=c++17", "-fno-exceptions", "-fno-rtti", "-D_GNU_SOURCE", "-D__STDC_CONSTANT_MACROS",
@@ -2123,6 +2157,7 @@ def canonical_commands(contract: dict, keyring_sha256: str) -> dict[str, list[st
     apt = apt_command_prefix()
     pinned = [f"{row['name']}={row['version']}" for row in contract["profile"]["binaryRoots"]]
     epoch = int(contract["environment"]["SOURCE_DATE_EPOCH"])
+    source_list_sha256 = sha256(apt_source_list(contract))
 
     def in_root(command: list[str], apt_environment: bool = False) -> list[str]:
         extra = {"DEBIAN_FRONTEND": "noninteractive"} if apt_environment else None
@@ -2131,7 +2166,10 @@ def canonical_commands(contract: dict, keyring_sha256: str) -> dict[str, list[st
     return {
         "debootstrap": debootstrap_command(
             contract, "<PROFILE_ROOT>", Path(f"<UBUNTU_ARCHIVE_KEYRING_SHA256:{keyring_sha256}>")),
-        "writeAptSources": ["sudo", "install", "-m", "0644", "<SOURCE_LIST>",
+        "installAptKeyring": ["sudo", "install", "-m", "0644",
+                               f"<UBUNTU_ARCHIVE_KEYRING_SHA256:{keyring_sha256}>",
+                               f"<PROFILE_ROOT>{APT_KEYRING_IN_ROOT}"],
+        "writeAptSources": ["sudo", "install", "-m", "0644", f"<SOURCE_LIST_SHA256:{source_list_sha256}>",
                             "<PROFILE_ROOT>/etc/apt/sources.list"],
         "aptUpdate": in_root([*apt, "update"], True),
         "aptDownloadOnly": in_root([*apt, "install", "--yes", "--no-install-recommends", "--download-only", *pinned], True),
@@ -2145,7 +2183,7 @@ def canonical_commands(contract: dict, keyring_sha256: str) -> dict[str, list[st
         "probeCompile": in_root(probe_compile_command()),
         "probeRun": in_root(["/tmp/clang18-libtooling-probe", "/tmp/clang18-positive.cpp"]),
         "rootfsTar": ["sudo", "env", "LC_ALL=C", "tar", "--sort=name", "--format=posix",
-                      "--numeric-owner", "--owner=0", "--group=0", f"--mtime=@{epoch}",
+                      "--numeric-owner", f"--mtime=@{epoch}",
                       "--pax-option=delete=atime,delete=ctime", "-cf", "<ROOTFS_TAR>", "-C", "<PROFILE_ROOT>", "."],
         "ociArchive": ["tar", "--sort=name", "--format=posix", "--numeric-owner", "--owner=0",
                        "--group=0", f"--mtime=@{epoch}", "--pax-option=delete=atime,delete=ctime",
@@ -2187,17 +2225,15 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     check_runner_bounds(args.workdir, profile)
     profile_root = args.rootfs
     profile_root.parent.mkdir(parents=True, exist_ok=True)
-    snapshot = profile["snapshotBase"]
     run_checked(debootstrap_command(contract, str(profile_root), args.keyring), timeout=900)
     bootstrap_package_keys = installed_package_keys(profile_root, contract)
     require_bootstrap_ca_certificates(profile_root, bootstrap_package_keys)
+    selected_keyring_sha256 = candidate["trustedKeyring"]["sha256"]
+    install_selected_archive_keyring(profile_root, args.keyring, selected_keyring_sha256)
 
-    sources = "\n".join(
-        f"deb [check-valid-until=no signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] {snapshot} {suite} main universe"
-        for suite in profile["suites"]
-    ) + "\n"
+    sources = apt_source_list(contract)
     sources_path = args.workdir / f"clang-source-list-{args.label}.list"
-    atomic_write(sources_path, sources.encode())
+    atomic_write(sources_path, sources)
     run_checked(["sudo", "install", "-m", "0644", str(sources_path), str(profile_root / "etc/apt/sources.list")])
     apt_prefix = apt_command_prefix()
     rootfs_run(profile_root, [*apt_prefix, "update"], contract, timeout=600,
@@ -2345,7 +2381,50 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     return 0
 
 
+def reject_build_record_schema_unknown_fields(record: object) -> None:
+    """Enforce every additionalProperties:false object boundary in the pinned schema."""
+    try:
+        schema = json.loads(RECIPE_FILES["schemaSha256"].read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ProvisionError(f"could not read checked-in build-record schema: {error}") from error
+
+    def validate(value: object, rule: dict, location: str) -> None:
+        reference = rule.get("$ref")
+        if reference is not None:
+            match = re.fullmatch(r"#/(\$defs)/([^/]+)", str(reference))
+            if match is None:
+                raise ProvisionError(f"checked-in build-record schema has an unsupported reference at {location}")
+            definition = schema.get(match.group(1), {}).get(match.group(2))
+            if not isinstance(definition, dict):
+                raise ProvisionError(f"checked-in build-record schema reference is missing at {location}")
+            validate(value, definition, location)
+            rule = {key: child for key, child in rule.items() if key != "$ref"}
+            if not rule:
+                return
+
+        if isinstance(value, dict):
+            properties = rule.get("properties", {})
+            additional = rule.get("additionalProperties", True)
+            for name, child in value.items():
+                child_location = f"{location}.{name}"
+                if name in properties:
+                    validate(child, properties[name], child_location)
+                elif additional is False:
+                    raise ProvisionError(f"build record violates checked-in schema at {child_location}: unknown field")
+                elif isinstance(additional, dict):
+                    validate(child, additional, child_location)
+        elif isinstance(value, list):
+            item_rule = rule.get("items")
+            if isinstance(item_rule, dict):
+                for index, item in enumerate(value):
+                    validate(item, item_rule, f"{location}[{index}]")
+
+    validate(record, schema, "$")
+
+
 def validate_build_record(record: dict, contract: dict, contract_path: Path = CONTRACT_PATH) -> None:
+    if not isinstance(record, dict):
+        raise ProvisionError("build record must be a JSON object")
     profile = contract["profile"]
     if record.get("schemaVersion") != 1 or record.get("buildSystem") != "ubuntu-snapshot-debootstrap-apt" or record.get("profile") != {
         "id": profile["id"], "architecture": "amd64", "target": "x86_64-linux-gnu",
@@ -2524,6 +2603,7 @@ def validate_build_record(record: dict, contract: dict, contract_path: Path = CO
             raise ProvisionError(f"build record lacks a valid signed index digest: {field}")
     if record["acquisition"].get("signatureFingerprints") != [row["signerPrimaryFingerprint"] for row in repositories]:
         raise ProvisionError("build record repository signer summary is inconsistent")
+    reject_build_record_schema_unknown_fields(record)
 
 
 def compare_build_runs(first_path: Path, second_path: Path, output_path: Path, contract: dict,
@@ -2732,12 +2812,65 @@ def validate_provenance_loader_report(report: dict, record: dict, record_sha256:
             raise ProvisionError(f"A-loader smoke report lacks the required negative check: {field}")
 
 
+def validate_locked_comparator_manifest(lock_path: Path, negative: dict) -> tuple[dict, Path, str, dict]:
+    if lock_path.is_symlink() or not lock_path.is_file():
+        raise ProvisionError("locked Clang 22.1.6 comparator release lock is not a regular file")
+    try:
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ProvisionError(f"locked comparator release metadata is invalid: {error}") from error
+    if not isinstance(lock, dict):
+        raise ProvisionError("locked comparator release metadata must be a JSON object")
+    oracle = lock.get("oracle", {})
+    if not isinstance(oracle, dict):
+        raise ProvisionError("locked comparator identity is malformed")
+    expected_manifest_sha = oracle.get("artifactManifestSha256")
+    if (oracle.get("id") != negative.get("oracleId") or oracle.get("version") != "22.1.6" or
+            not isinstance(expected_manifest_sha, str) or
+            not re.fullmatch(r"[0-9a-f]{64}", expected_manifest_sha)):
+        raise ProvisionError("locked comparator identity or artifact-manifest digest is invalid")
+    manifest_name = PurePosixPath(str(oracle.get("artifactManifestPath", "")))
+    if manifest_name.is_absolute() or len(manifest_name.parts) != 1 or manifest_name.name in ("", ".", ".."):
+        raise ProvisionError("locked comparator artifact-manifest path is unsafe")
+    manifest_path = lock_path.parent / manifest_name.name
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise ProvisionError("locked comparator artifact manifest is not a regular file")
+    try:
+        manifest_bytes = manifest_path.read_bytes()
+    except OSError as error:
+        raise ProvisionError(f"could not read locked comparator artifact manifest: {error}") from error
+    if sha256(manifest_bytes) != expected_manifest_sha:
+        raise ProvisionError("comparator artifact manifest digest differs from the release-artifacts lock")
+    try:
+        manifest_data = json.loads(manifest_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ProvisionError(f"locked comparator artifact manifest is invalid: {error}") from error
+    if not isinstance(manifest_data, dict):
+        raise ProvisionError("locked comparator manifest must be a JSON object")
+    manifest_oracle = manifest_data.get("oracle", {})
+    if not isinstance(manifest_oracle, dict):
+        raise ProvisionError("locked comparator manifest identity is malformed")
+    if (manifest_data.get("schemaVersion") != lock.get("schemaVersion") or
+            manifest_oracle.get("id") != oracle.get("id") or
+            manifest_oracle.get("version") != oracle.get("version")):
+        raise ProvisionError("comparator manifest oracle identity differs from the release-artifacts lock")
+    role = negative.get("artifactRole")
+    lock_artifacts = lock.get("artifacts", {})
+    manifest_artifacts = manifest_data.get("artifacts", {})
+    expected_artifact = lock_artifacts.get(role) if isinstance(lock_artifacts, dict) else None
+    manifest_artifact = manifest_artifacts.get(role) if isinstance(manifest_artifacts, dict) else None
+    if (not isinstance(expected_artifact, dict) or not isinstance(manifest_artifact, dict) or
+            expected_artifact.get("bytes") != manifest_artifact.get("bytes") or
+            expected_artifact.get("sha256") != manifest_artifact.get("sha256")):
+        raise ProvisionError("comparator manifest artifact identity differs from the release-artifacts lock")
+    return lock, manifest_path, expected_manifest_sha, expected_artifact
+
+
 def validate_provenance_negative_report(report: dict, record: dict, contract: dict,
-                                        artifact_lock_path: Path | None = None) -> None:
+                                        artifact_lock_path: Path | None = None) -> tuple[Path, str]:
     negative = contract["negativeControl"]
     lock_path = artifact_lock_path or ROOT / negative["artifactLock"]
-    lock = json.loads(lock_path.read_text(encoding="utf-8"))
-    expected = lock["artifacts"][negative["artifactRole"]]
+    _, manifest_path, manifest_sha256, expected = validate_locked_comparator_manifest(lock_path, negative)
     fixture = ROOT / negative["fixture"]
     if (report.get("scope") != "negative-version-gate-only; not a Clang 18.1.3 identity" or
             report.get("artifactOracleId") != negative["oracleId"] or
@@ -2751,6 +2884,7 @@ def validate_provenance_negative_report(report: dict, record: dict, contract: di
             report.get("compiler18GateRejected") != "probe compiler version or target mismatch" or
             re.search(r"\bversion\s+22\.1\.6(?:\s|$)", report.get("compilerVersionOutput", "")) is None):
         raise ProvisionError("Clang 22.1.6 negative smoke report does not match the locked comparator and fixture")
+    return manifest_path, manifest_sha256
 
 
 def command_package_provenance(args: argparse.Namespace) -> int:
@@ -2772,7 +2906,11 @@ def command_package_provenance(args: argparse.Namespace) -> int:
     negative_report = read_provenance_report(args.negative_report, "Clang 22.1.6 negative")
     validate_provenance_probe_report(probe_report, record)
     validate_provenance_loader_report(loader_report, record, record_sha256)
-    validate_provenance_negative_report(negative_report, record, contract)
+    comparator_manifest, comparator_manifest_sha256 = validate_provenance_negative_report(
+        negative_report, record, contract,
+    )
+    comparator_lock = ROOT / contract["negativeControl"]["artifactLock"]
+    comparator_lock_sha256 = negative_report["artifactLockSha256"]
     expected_artifacts = [
         candidate, patch_audit, args.acquisition / "downloads",
         args.record, args.probe_report, args.loader_report, args.negative_report,
@@ -2786,8 +2924,8 @@ def command_package_provenance(args: argparse.Namespace) -> int:
         ROOT / "oracle/clang/18.1.3/test_provisioning.py",
         ROOT / "oracle/clang/18.1.3/ACQUISITION_STATUS.md",
         ROOT / ".github/workflows/generic-template-toolchain.yml",
-        ROOT / "oracle/llvm/22.1.6/release-artifacts.json",
-        ROOT / "oracle/llvm/22.1.6/oracle-manifest.json",
+        comparator_lock,
+        comparator_manifest,
         args.keyring, ROOT / contract["profile"]["upstream"]["keyFile"],
     ]
     if args.output.exists():
@@ -2852,15 +2990,21 @@ def command_package_provenance(args: argparse.Namespace) -> int:
                         arcname = "generic-template-toolchain.yml"
                     elif source == ROOT / "oracle/clang/18.1.3/ACQUISITION_STATUS.md":
                         arcname = "ACQUISITION_STATUS.md"
-                    elif source == ROOT / "oracle/llvm/22.1.6/release-artifacts.json":
+                    elif source == comparator_lock:
                         arcname = "trusted_keys/clang-22.1.6-release-artifacts.json"
-                    elif source == ROOT / "oracle/llvm/22.1.6/oracle-manifest.json":
+                    elif source == comparator_manifest:
                         arcname = "trusted_keys/clang-22.1.6-oracle-manifest.json"
                     elif source == args.keyring:
                         arcname = "trusted_keys/ubuntu-archive-keyring.gpg"
                     else:
                         arcname = "trusted_keys/llvm-release.asc"
-                    _add_provenance_file(archive, source, arcname, epoch)
+                    _add_provenance_file(
+                        archive, source, arcname, epoch,
+                        expected_sha256=(
+                            comparator_manifest_sha256 if source == comparator_manifest else
+                            comparator_lock_sha256 if source == comparator_lock else None
+                        ),
+                    )
     except (OSError, tarfile.TarError) as error:
         raise ProvisionError(f"could not build provenance archive: {error}") from error
     if args.output.stat().st_size > contract["profile"]["bounds"]["maxArtifactBytes"]:
@@ -2916,15 +3060,22 @@ def command_negative_version_smoke(args: argparse.Namespace) -> int:
     return 0
 
 
-def _add_provenance_file(archive: tarfile.TarFile, source: Path, arcname: str, epoch: int) -> None:
+def _add_provenance_file(archive: tarfile.TarFile, source: Path, arcname: str, epoch: int,
+                         expected_sha256: str | None = None) -> None:
     info = tarfile.TarInfo(arcname)
-    info.size = source.stat().st_size
+    payload = source.read_bytes() if expected_sha256 is not None else None
+    if payload is not None and sha256(payload) != expected_sha256:
+        raise ProvisionError(f"provenance input changed before packaging: {arcname}")
+    info.size = len(payload) if payload is not None else source.stat().st_size
     info.mtime = epoch
     info.uid = info.gid = 0
     info.uname = info.gname = ""
     info.mode = 0o444
-    with source.open("rb") as stream:
-        archive.addfile(info, stream)
+    if payload is not None:
+        archive.addfile(info, io.BytesIO(payload))
+    else:
+        with source.open("rb") as stream:
+            archive.addfile(info, stream)
 
 
 def build_parser() -> argparse.ArgumentParser:

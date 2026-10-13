@@ -55,9 +55,10 @@
     },
     "commands": {
       "type": "object", "additionalProperties": false,
-      "required": ["debootstrap", "writeAptSources", "aptUpdate", "aptDownloadOnly", "aptInstall", "aptCheck", "clangCVersion", "clangCxxVersion", "clangResourceDirectory", "llvmConfigLibdir", "llvmConfigCxxflags", "probeCompile", "probeRun", "rootfsTar", "ociArchive"],
+      "required": ["debootstrap", "installAptKeyring", "writeAptSources", "aptUpdate", "aptDownloadOnly", "aptInstall", "aptCheck", "clangCVersion", "clangCxxVersion", "clangResourceDirectory", "llvmConfigLibdir", "llvmConfigCxxflags", "probeCompile", "probeRun", "rootfsTar", "ociArchive"],
       "properties": {
         "debootstrap": {"$ref": "#/$defs/argv"},
+        "installAptKeyring": {"$ref": "#/$defs/argv"},
         "writeAptSources": {"$ref": "#/$defs/argv"},
         "aptUpdate": {"$ref": "#/$defs/argv"},
         "aptDownloadOnly": {"$ref": "#/$defs/argv"},

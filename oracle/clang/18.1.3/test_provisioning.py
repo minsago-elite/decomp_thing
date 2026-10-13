@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -208,6 +209,98 @@ class ProvisioningNegativeTests(unittest.TestCase):
                                     for value in executed])
         self.assertIn("--include=ca-certificates", executed)
 
+    def test_selected_archive_keyring_is_installed_and_bound_to_https_sources(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            rootfs = base / "rootfs"
+            keyring = base / "selected archive-keyring.gpg"
+            payload = b"synthetic selected Ubuntu archive keyring bytes"
+            keyring.write_bytes(payload)
+            (rootfs / "usr/share/keyrings").mkdir(parents=True)
+
+            def install(command, timeout=None):
+                shutil.copyfile(command[-2], command[-1])
+                Path(command[-1]).chmod(0o644)
+                return mock.Mock(stdout="")
+
+            with mock.patch.object(provision, "run_checked", side_effect=install) as run:
+                installed = provision.install_selected_archive_keyring(rootfs, keyring, provision.sha256(payload))
+            self.assertEqual(installed.read_bytes(), payload)
+            self.assertEqual(installed.stat().st_mode & 0o777, 0o644)
+            self.assertEqual(run.call_args.args[0], [
+                "sudo", "install", "-m", "0644", str(keyring), str(installed),
+            ])
+            with mock.patch.object(provision, "run_checked") as run:
+                with self.assertRaisesRegex(provision.ProvisionError, "selected Ubuntu archive keyring bytes"):
+                    provision.install_selected_archive_keyring(rootfs, keyring, "f" * 64)
+                run.assert_not_called()
+
+        sources = provision.apt_source_list(self.contract).decode("utf-8")
+        self.assertIn(f"signed-by={provision.APT_KEYRING_IN_ROOT}", sources)
+        self.assertNotIn("signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg", sources)
+        digest = "a" * 64
+        commands = provision.canonical_commands(self.contract, digest)
+        self.assertEqual(commands["installAptKeyring"], [
+            "sudo", "install", "-m", "0644", f"<UBUNTU_ARCHIVE_KEYRING_SHA256:{digest}>",
+            f"<PROFILE_ROOT>{provision.APT_KEYRING_IN_ROOT}",
+        ])
+        self.assertEqual(commands["writeAptSources"][4],
+                         f"<SOURCE_LIST_SHA256:{provision.sha256(provision.apt_source_list(self.contract))}>")
+
+    def test_selected_archive_keyring_install_precedes_first_apt_command(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            keyring = base / "selected.gpg"
+            keyring.write_bytes(b"selected bytes")
+            rootfs = base / "rootfs"
+            events = []
+
+            def bootstrap(command, timeout=None):
+                rootfs.mkdir(parents=True)
+                (rootfs / "usr/share/keyrings").mkdir(parents=True)
+                (rootfs / "etc/apt").mkdir(parents=True)
+                (rootfs / "etc/ssl/certs").mkdir(parents=True)
+                (rootfs / "etc/ssl/certs/ca-certificates.crt").write_bytes(b"synthetic CA bundle")
+                return mock.Mock(stdout="")
+
+            def run_checked(command, timeout=None):
+                if "debootstrap" in command:
+                    return bootstrap(command, timeout)
+                if command[1:4] == ["install", "-m", "0644"]:
+                    source, destination = Path(command[-2]), Path(command[-1])
+                    shutil.copyfile(source, destination)
+                    destination.chmod(0o644)
+                    events.append("selected-keyring" if destination.name == Path(provision.APT_KEYRING_IN_ROOT).name
+                                  else "source-list")
+                    return mock.Mock(stdout="")
+                raise AssertionError(command)
+
+            def rootfs_run(root, command, contract, **kwargs):
+                events.append("apt-update")
+                raise provision.ProvisionError("stop before package fetch")
+
+            args = provision.argparse.Namespace(
+                contract=provision.CONTRACT_PATH, workdir=base, rootfs=rootfs,
+                output=base / "output", acquisition=base / "acquisition", keyring=keyring, label="fixture",
+            )
+            candidate = {"trustedKeyring": {"sha256": provision.sha256_file(keyring)}}
+            packages = {("ca-certificates", "synthetic", "all")}
+            with mock.patch.object(provision, "load_candidate", return_value=(candidate, [])), \
+                    mock.patch.object(provision.shutil, "rmtree"), \
+                    mock.patch.object(provision, "check_runner_bounds"), \
+                    mock.patch.object(provision, "run_checked", side_effect=run_checked), \
+                    mock.patch.object(provision, "installed_package_keys", return_value=packages), \
+                    mock.patch.object(provision, "rootfs_run", side_effect=rootfs_run), \
+                    mock.patch.object(provision.BoundedDownloader, "get") as network:
+                with self.assertRaisesRegex(provision.ProvisionError, "stop before package fetch"):
+                    provision.provision_rootfs(args)
+            self.assertEqual(events, ["selected-keyring", "source-list", "apt-update"])
+            self.assertEqual((rootfs / Path(provision.APT_KEYRING_IN_ROOT).relative_to("/")).read_bytes(),
+                             keyring.read_bytes())
+            self.assertIn(f"signed-by={provision.APT_KEYRING_IN_ROOT}",
+                          (rootfs / "etc/apt/sources.list").read_text(encoding="utf-8"))
+            network.assert_not_called()
+
     def test_build_record_commands_reject_changed_omitted_inserted_and_reordered_arguments(self):
         baseline = self.valid_build_record()
         provision.validate_build_record(baseline, self.contract)
@@ -234,11 +327,62 @@ class ProvisioningNegativeTests(unittest.TestCase):
             with self.subTest(mutation=mutation), self.assertRaisesRegex(provision.ProvisionError, "canonical recipe"):
                 provision.validate_build_record(record, self.contract)
 
+    def test_build_record_rejects_schema_disallowed_top_level_and_nested_fields(self):
+        mutations = (
+            ("top-level", lambda record: record.update(acceptanceStatus="accepted"), False),
+            ("profile", lambda record: record["profile"].update(unreviewed=True), True),
+            ("package", lambda record: (record["packages"][0].update(unreviewed=True),
+                                         record["downloadedPackages"][0].update(unreviewed=True)), False),
+            ("runtime entry", lambda record: record["runtime"]["entries"][0].update(unreviewed=True), False),
+            ("image", lambda record: record["image"].update(acceptanceStatus="accepted"), False),
+            ("probe", lambda record: record["probe"]["macroObservations"].update(accepted=True), False),
+        )
+        for label, mutate, schema_only in mutations:
+            record = self.valid_build_record()
+            mutate(record)
+            if label == "runtime entry" and not schema_only:
+                record["runtime"].update(provision.manifest(record["runtime"]["entries"]))
+            with self.subTest(location=label), self.assertRaisesRegex(
+                provision.ProvisionError, r"checked-in schema.*unknown field",
+            ):
+                if schema_only:
+                    provision.reject_build_record_schema_unknown_fields(record)
+                else:
+                    provision.validate_build_record(record, self.contract)
+
+    def test_rootfs_archive_preserves_numeric_package_ownership(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            rootfs = base / "rootfs"
+            rootfs.mkdir()
+            package_file = rootfs / "usr/bin/package-owned"
+            package_file.parent.mkdir(parents=True)
+            package_file.write_bytes(b"synthetic package file")
+            expected_owner = package_file.stat()
+            destination = base / "rootfs.tar"
+
+            def local_tar(command, timeout=None):
+                self.assertNotIn("--owner=0", command)
+                self.assertNotIn("--group=0", command)
+                subprocess.run(command[1:], check=True)
+                return mock.Mock(stdout="")
+
+            with mock.patch.object(provision, "normalize_rootfs"), \
+                    mock.patch.object(provision, "run_checked", side_effect=local_tar) as run:
+                provision.deterministic_rootfs_tar(rootfs, destination, 1714003200)
+            command = run.call_args.args[0]
+            self.assertIn("--numeric-owner", command)
+            self.assertFalse(any(arg.startswith("--owner=") or arg.startswith("--group=") for arg in command))
+            with tarfile.open(destination, "r:") as archive:
+                member = archive.getmember("./usr/bin/package-owned")
+                self.assertEqual((member.uid, member.gid), (expected_owner.st_uid, expected_owner.st_gid))
+
     def test_build_record_commands_bind_keyring_environment_and_package_pins(self):
         record = self.valid_build_record()
         commands = record["commands"]
         digest = record["acquisition"]["ubuntuKeyring"]["sha256"]
         self.assertIn(f"--keyring=<UBUNTU_ARCHIVE_KEYRING_SHA256:{digest}>", commands["debootstrap"])
+        self.assertIn(f"<UBUNTU_ARCHIVE_KEYRING_SHA256:{digest}>", commands["installAptKeyring"])
         self.assertIn("-fno-exceptions", commands["probeCompile"])
         self.assertIn("-fno-rtti", commands["probeCompile"])
         mutations = {
@@ -519,6 +663,30 @@ class ProvisioningNegativeTests(unittest.TestCase):
         negative["compilerSha256"] = "0" * 64
         with self.assertRaisesRegex(provision.ProvisionError, "does not match the locked comparator"):
             provision.validate_provenance_negative_report(negative, record, self.contract)
+
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            copied_lock = base / "release-artifacts.json"
+            copied_manifest = base / "oracle-manifest.json"
+            shutil.copyfile(lock_path, copied_lock)
+            shutil.copyfile(lock_path.parent / "oracle-manifest.json", copied_manifest)
+            negative_contract = self.contract["negativeControl"]
+            lock_copy = json.loads(copied_lock.read_bytes())
+            self.assertEqual(provision.validate_locked_comparator_manifest(copied_lock, negative_contract)[1],
+                             copied_manifest)
+
+            copied_manifest.write_bytes(copied_manifest.read_bytes() + b"\n")
+            with self.assertRaisesRegex(provision.ProvisionError, "manifest digest differs from the release-artifacts lock"):
+                provision.validate_locked_comparator_manifest(copied_lock, negative_contract)
+
+            manifest_copy = json.loads((lock_path.parent / "oracle-manifest.json").read_bytes())
+            manifest_copy["oracle"]["id"] = "unlocked-comparator"
+            modified_manifest = provision.canonical_json(manifest_copy)
+            copied_manifest.write_bytes(modified_manifest)
+            lock_copy["oracle"]["artifactManifestSha256"] = provision.sha256(modified_manifest)
+            copied_lock.write_bytes(provision.canonical_json(lock_copy))
+            with self.assertRaisesRegex(provision.ProvisionError, "manifest oracle identity differs"):
+                provision.validate_locked_comparator_manifest(copied_lock, negative_contract)
 
     def test_deb822_rejects_duplicate_fields(self):
         with self.assertRaises(provision.ProvisionError):
@@ -1337,6 +1505,57 @@ class ProvisioningNegativeTests(unittest.TestCase):
             with self.assertRaisesRegex(provision.ProvisionError, "config descriptor size differs"):
                 provision.verify_oci_archive(archive_path, record, 1024 * 1024)
 
+    def test_oci_image_verifier_rejects_missing_or_untrusted_media_types(self):
+        descriptor_fields = ("index", "index-manifest", "manifest", "config", "layer")
+        for field in descriptor_fields:
+            for mutation in ("missing", "untrusted"):
+                with self.subTest(field=field, mutation=mutation), self.temporary_directory() as temp:
+                    base = Path(temp)
+                    rootfs_tar = base / "rootfs.tar"
+                    payload = b"synthetic rootfs bytes for media-type validation"
+                    rootfs_tar.write_bytes(payload)
+                    layout = base / "layout"
+                    image = provision.create_oci_layout(rootfs_tar, layout, "fixture", self.contract["environment"])
+                    index_path = layout / "index.json"
+                    index = json.loads(index_path.read_text(encoding="utf-8"))
+                    descriptor = index["manifests"][0]
+                    manifest_path = layout / "blobs/sha256" / image["manifestSha256"]
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    target = {
+                        "index": (index, "mediaType"),
+                        "index-manifest": (descriptor, "mediaType"),
+                        "manifest": (manifest, "mediaType"),
+                        "config": (manifest["config"], "mediaType"),
+                        "layer": (manifest["layers"][0], "mediaType"),
+                    }[field]
+                    if mutation == "missing":
+                        target[0].pop(target[1])
+                    else:
+                        target[0][target[1]] = "application/x-untrusted"
+                    if field in ("manifest", "config", "layer"):
+                        manifest_bytes = provision.canonical_json(manifest)
+                        manifest_sha256 = provision.sha256(manifest_bytes)
+                        (manifest_path.parent / manifest_sha256).write_bytes(manifest_bytes)
+                        manifest_path.unlink()
+                        descriptor.update(digest="sha256:" + manifest_sha256, size=len(manifest_bytes))
+                        image.update(manifestSha256=manifest_sha256, imageDigest="sha256:" + manifest_sha256)
+                    index_path.write_bytes(provision.canonical_json(index))
+
+                    archive_path = base / "image.tar"
+                    with tarfile.open(archive_path, "w") as archive:
+                        for path in sorted(layout.rglob("*")):
+                            if path.is_file():
+                                archive.add(path, arcname=path.relative_to(layout).as_posix())
+                    record = {
+                        "profile": {"id": "fixture"}, "environment": self.contract["environment"],
+                        "rootfs": {"bytes": len(payload), "sha256": provision.sha256(payload)},
+                        "image": image,
+                        "imageArtifact": {"bytes": archive_path.stat().st_size,
+                                          "sha256": provision.sha256_file(archive_path)},
+                    }
+                    with self.assertRaisesRegex(provision.ProvisionError, "media type"):
+                        provision.verify_oci_archive(archive_path, record, 1024 * 1024)
+
 
 class RecipeAndCandidateBindingTests(unittest.TestCase):
     @classmethod
@@ -1649,6 +1868,13 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                 self.assertEqual(provision.sha256(loader_bytes), record["recipe"]["aLoaderSha256"])
                 self.assertEqual(archive.extractfile("acquisition/acquisition-candidate.json").read(),
                                  (root / "acquisition-candidate.json").read_bytes())
+                comparator_manifest = archive.extractfile(
+                    "trusted_keys/clang-22.1.6-oracle-manifest.json").read()
+                comparator_lock = json.loads(lock_path.read_bytes())
+                self.assertEqual(provision.sha256(comparator_manifest),
+                                 comparator_lock["oracle"]["artifactManifestSha256"])
+                self.assertEqual(comparator_manifest,
+                                 (lock_path.parent / comparator_lock["oracle"]["artifactManifestPath"]).read_bytes())
 
 
 if __name__ == "__main__":
