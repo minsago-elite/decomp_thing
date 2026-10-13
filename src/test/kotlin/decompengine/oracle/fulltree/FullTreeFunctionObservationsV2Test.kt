@@ -27,7 +27,7 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class FullTreeFunctionObservationsV2Test {
     @Test
-    fun `raw v2 rederivation rejects template merging splitting inline conflation and pattern promotion`() =
+    fun `raw v2 rejects three compiler mutations and local v2 rejects synthetic pattern promotion`() =
         inControlTemporaryDirectory { root ->
             val compilerFixture = FullTreeSourceEntityIdentityProducerTest()
             val controls = createFullTreeControlFixture(root.resolve("control"))
@@ -216,8 +216,8 @@ class FullTreeFunctionObservationsV2Test {
             assertEquals(secondSite.edges, conflated.edges, "callee and owner evidence stays intact; only the call column changes")
             rejectChangedFacts("inline-site-conflation", facts.map { if (it.sourceEntityId == secondSite.sourceEntityId) conflated else it })
 
-            // No generic pattern is claimed to exist in this compiler fixture. This independent
-            // positive contract fixture proves pattern non-scoreability before its promotion.
+            // No generic pattern is claimed to exist in this compiler fixture. This synthetic
+            // positive passes the local contract only, not authenticated raw-input rederivation.
             val patternFields = copyAnchorFields(intFields, authenticatedFileSha256 = null,
                 templateFormalParameters = listOf("type-parameter:T"), templateActualArguments = null)
             val pattern = fact(intInstance.physicalDie, FullTreeSourceEntityKind.TEMPLATE_PATTERN,
@@ -241,7 +241,19 @@ class FullTreeFunctionObservationsV2Test {
             })
             assertEquals(setOf("denominatorDisposition", "linkedEmittedRva"),
                 promoted.keys.filter { promoted[it] != pattern.canonicalJson()[it] }.toSet())
-            rejectTransportValidCandidate("pattern-promotion", documentWithRows(positivePattern, listOf(promoted)))
+            val promotedPattern = documentWithRows(positivePattern, listOf(promoted))
+            OracleSchemas.validate(FullTreeFunctionObservationsV2.SCHEMA_NAME, promotedPattern)
+            assertEquals(promotedPattern, OracleJson.parseCanonical(
+                FullTreeFunctionObservationsV2.canonicalEnvelopeBytes(promotedPattern),
+            ))
+            assertEquals(v1ProjectionForCompose(positivePattern), v1ProjectionForCompose(promotedPattern))
+            val promotionRejection = assertFailsWith<FullTreeFunctionObservationV2Exception> {
+                FullTreeFunctionObservationsV2.validateEnvelope(promotedPattern, scope, inventory, inventorySha256,
+                    shardInputs.getValue(shardId), patternReconciliation)
+            }
+            assertEquals("source entity 0 is invalid", promotionRejection.message)
+            assertTrue(promotionRejection.cause is IllegalArgumentException,
+                "the same locally valid pattern must fail its row contract after only denominator/link promotion")
         }
 
     @Test
