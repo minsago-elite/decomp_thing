@@ -68,7 +68,7 @@ private fun runGccEngineCommand(args: List<String>, fullRecoveryExport: Boolean,
         System.err.println(failure.message)
         val command = if (runtimeDiagnostics) "gcc-engine-runtime-diagnostic" else if (fullRecoveryExport) "gcc-engine-full-export" else "gcc-engine-plan"
         val resumeOption = if (fullRecoveryExport) "" else " [--resume-after-checkpoint <multiple-of-512>]"
-        val engines = if (runtimeDiagnostics) "cc1" else if (fullRecoveryExport) "<cc1|driver>" else "<cc1|lto1>"
+        val engines = decompengine.oracle.gcc.GccBundledCliOptions.engineUsage(fullRecoveryExport, runtimeDiagnostics)
         System.err.println("usage: llm_bin_patch $command $engines <stripped-binary> " +
             "--profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>$resumeOption")
         kotlin.system.exitProcess(2)

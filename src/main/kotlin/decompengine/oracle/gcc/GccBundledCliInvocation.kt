@@ -22,6 +22,12 @@ internal data class GccBundledCliOptions(
     }
 
     companion object {
+        fun engineUsage(fullRecoveryExport: Boolean, runtimeDiagnostics: Boolean = false): String = when {
+            runtimeDiagnostics -> "cc1"
+            fullRecoveryExport -> "<cc1|driver>"
+            else -> "<cc1|lto1>"
+        }
+
         fun parse(arguments: List<String>, fullRecoveryExport: Boolean = false,
             runtimeDiagnostics: Boolean = false): GccBundledCliOptions {
             require(!runtimeDiagnostics || fullRecoveryExport) { "runtime diagnostics require full recovery" }
