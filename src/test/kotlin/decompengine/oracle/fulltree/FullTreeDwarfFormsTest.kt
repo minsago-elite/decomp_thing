@@ -1,5 +1,6 @@
 package decompengine.oracle.fulltree
 
+import java.math.BigInteger
 import java.nio.ByteOrder
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -150,7 +151,7 @@ class FullTreeDwarfFormsTest {
     }
 
     @Test
-    fun `data16 constants honor CU byte order and reject a nonzero high half`() {
+    fun `data16 constants that fit ULong preserve the existing unsigned form`() {
         val little = unsigned(ULong.MAX_VALUE, 8) + ByteArray(8)
         val littleValue = assertIs<FullTreeDwarfUnsignedConstantValue>(
             readForm(
@@ -183,47 +184,38 @@ class FullTreeDwarfFormsTest {
         assertEquals(FULL_TREE_DW_FORM_DATA16, indirect.resolvedForm)
         assertEquals(ULong.MAX_VALUE, indirect.rawValue)
         assertEquals(1, indirect.indirectDepth)
-
-        val littleOverflow = little.copyOf().also { it[8] = 1 }
-        assertFailsWith<FullTreeControlException> {
-            readForm(
-                littleOverflow,
-                FULL_TREE_DW_FORM_DATA16,
-                context = FullTreeDwarfFormContext.CONSTANT,
-            )
-        }
-        val bigOverflow = big.copyOf().also { it[0] = 1 }
-        assertFailsWith<FullTreeControlException> {
-            readForm(
-                bigOverflow,
-                FULL_TREE_DW_FORM_DATA16,
-                context = FullTreeDwarfFormContext.CONSTANT,
-                byteOrder = ByteOrder.BIG_ENDIAN,
-            )
-        }
     }
 
     @Test
-    fun `data16 data values preserve unsigned payload and indirection in both byte orders`() {
+    fun `data16 constants and data values preserve all 128 bits and indirection in both byte orders`() {
+        val values = listOf(
+            ByteArray(16) to "0",
+            (unsigned(ULong.MAX_VALUE, 8) + ByteArray(8)) to "18446744073709551615",
+            (ByteArray(8) + unsigned(1UL, 8)) to "18446744073709551616",
+            (unsigned(0x0123_4567_89ab_cdefUL, 8) + unsigned(0x0123_4567_89ab_cdefUL, 8)) to
+                "1512366075204170929049582354406559215",
+            ByteArray(16) { 0xff.toByte() } to "340282366920938463463374607431768211455",
+        )
         for (byteOrder in listOf(ByteOrder.LITTLE_ENDIAN, ByteOrder.BIG_ENDIAN)) {
-            for (depth in 0..2) for (value in listOf(0UL, 0x0123_4567_89ab_cdefUL, ULong.MAX_VALUE)) {
-                val little = unsigned(value, 8) + ByteArray(8)
-                val payload = if (byteOrder == ByteOrder.LITTLE_ENDIAN) little else little.reversedArray()
-                val prefix = if (depth == 0) byteArrayOf() else
-                    ByteArray(depth - 1) { FULL_TREE_DW_FORM_INDIRECT.toByte() } + byteArrayOf(FULL_TREE_DW_FORM_DATA16.toByte())
-                val form = if (depth == 0) FULL_TREE_DW_FORM_DATA16 else FULL_TREE_DW_FORM_INDIRECT
-                val result = assertIs<FullTreeDwarfUnsignedConstantValue>(readForm(prefix + payload, form,
-                    context = FullTreeDwarfFormContext.DATA_VALUE, byteOrder = byteOrder))
-                assertEquals(value, result.rawValue)
-                assertEquals(FULL_TREE_DW_FORM_DATA16, result.resolvedForm)
-                assertEquals(depth, result.indirectDepth)
-                val overflow = payload.copyOf().also { it[if (byteOrder == ByteOrder.LITTLE_ENDIAN) 8 else 0] = 1 }
-                assertFailsWith<FullTreeControlException> {
-                    readForm(prefix + overflow, form, context = FullTreeDwarfFormContext.DATA_VALUE, byteOrder = byteOrder)
-                }
-                assertFailsWith<FullTreeControlException> {
-                    readForm(prefix + payload.copyOf(15), form,
-                        context = FullTreeDwarfFormContext.DATA_VALUE, byteOrder = byteOrder)
+            for (context in listOf(FullTreeDwarfFormContext.CONSTANT, FullTreeDwarfFormContext.DATA_VALUE)) {
+                for (depth in 0..2) for ((little, decimal) in values) {
+                    val payload = if (byteOrder == ByteOrder.LITTLE_ENDIAN) little else little.reversedArray()
+                    val prefix = if (depth == 0) byteArrayOf() else
+                        ByteArray(depth - 1) { FULL_TREE_DW_FORM_INDIRECT.toByte() } + byteArrayOf(FULL_TREE_DW_FORM_DATA16.toByte())
+                    val form = if (depth == 0) FULL_TREE_DW_FORM_DATA16 else FULL_TREE_DW_FORM_INDIRECT
+                    val result = assertIs<FullTreeDwarfConstantValue>(readForm(prefix + payload, form,
+                        context = context, byteOrder = byteOrder))
+                    if (BigInteger(decimal).bitLength() <= 64) {
+                        assertEquals(decimal, assertIs<FullTreeDwarfUnsignedConstantValue>(result).rawValue.toString())
+                    } else {
+                        assertEquals(decimal, assertIs<FullTreeDwarfWideUnsignedConstantValue>(result).rawValue.toString())
+                    }
+                    assertEquals(FULL_TREE_DW_FORM_DATA16, result.resolvedForm)
+                    assertEquals(depth, result.indirectDepth)
+                    assertFailsWith<FullTreeControlException> {
+                        readForm(prefix + payload.copyOf(15), form,
+                            context = context, byteOrder = byteOrder)
+                    }
                 }
             }
         }

@@ -575,6 +575,7 @@ internal fun interfaceIntegralFact(
                 is FullTreeDwarfNumericValue -> if (attribute.declaredForm in setOf(FULL_TREE_DW_FORM_FLAG,
                         FULL_TREE_DW_FORM_FLAG_PRESENT)) raw.value.toString() else null
                 is FullTreeDwarfUnsignedConstantValue -> raw.rawValue.toString()
+                is FullTreeDwarfWideUnsignedConstantValue -> raw.rawValue.toString()
                 is FullTreeDwarfSignedConstantValue -> raw.rawValue.toString()
                 else -> null
             }
