@@ -1547,6 +1547,13 @@ class LinuxBubblewrapBoundaryTest {
         assertEquals("not-found", output)
     }
 
+    private fun clearStaging(root: Path) {
+        if (!Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)) return
+        Files.walk(root).use { entries ->
+            entries.sorted(Comparator.reverseOrder()).filter { it != root }.forEach(Files::deleteIfExists)
+        }
+    }
+
     private fun <T> withRepositoryTemporaryDirectory(prefix: String, action: (Path) -> T): T {
         val base = createRepositoryTemporaryDirectory(prefix)
         var actionFailure: Throwable? = null
@@ -1659,7 +1666,7 @@ class LinuxBubblewrapBoundaryTest {
                     if (!Files.exists(child, LinkOption.NOFOLLOW_LINKS)) {
                         try {
                             Files.createDirectory(child)
-                            created += child
+                            created.add(child)
                         } catch (_: FileAlreadyExistsException) {
                             // Another test worker created the same repository-local parent.
                         }
