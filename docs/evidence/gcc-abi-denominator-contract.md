@@ -81,4 +81,26 @@ Validation for this documentation-only slice is limited to the repository
 hash/count reads recorded above and `git diff --check`; no production replay
 or full GCC analysis was run.
 
+## Pre-policy observation inventory
+
+The later `dwarf-pre-policy-inventory-v1` implementation records the bounded
+source observations needed to review the population policy. It is carried by
+the version 3 GCC driver interface evidence bundle, separately from the
+SysV AMD64 projection version and without changing pinned artifact or exporter
+identities. Its input and ordered record commitments cover captured functions,
+globals, raw types and type children, object observations, every retained
+function/global type-root candidate, and explicit completeness findings.
+
+This inventory does not complete the denominator ledger. Required shared-type
+population completeness remains false; required member cardinalities remain
+null. Equal names or layouts do not merge physical candidates, automatic local
+observations remain recorded, and an exclusion is not inferred from a missing
+or unresolved type. Integrity verification binds supplied streams to the
+inventory digest but does not independently prove their derivation or root
+coverage. A reviewed, authenticated policy and independently reconciled ledger
+must still establish function, global-storage and shared-type entity identity,
+classification, reasons and totals, and bind the recovered model before
+scoring. Hosted retained-driver evidence for an earlier bundle version does
+not qualify this new inventory format.
+
 Refs #692

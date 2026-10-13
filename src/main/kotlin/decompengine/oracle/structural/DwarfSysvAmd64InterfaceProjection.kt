@@ -63,7 +63,7 @@ internal class DwarfSysvAmd64Projection internal constructor(
  * Unsupported forms/layouts preserve unknown; absent defaults apply only to valid C/C++ evidence.
  */
 internal object DwarfSysvAmd64InterfaceProjection {
-    const val VERSION = "dwarf-sysv-amd64-lp64-projection-v3"
+    const val VERSION = "dwarf-sysv-amd64-lp64-projection-v4"
     private const val TARGET_SHA = "362e5b8fb1b068d932e35c7bf92d2206cceb9edb5b2991b66e3b12673f608c4b"
     private const val MAX_DEPTH = 64
     private const val MAX_TYPES = 200_000
@@ -108,6 +108,7 @@ internal object DwarfSysvAmd64InterfaceProjection {
         put("postMergeRules", "any-MEMORY=MEMORY;orphan-X87UP=MEMORY;over-two-eightbytes-only-SSE-followed-by-SSEUP;orphan-SSEUP=SSE;aggregate-over64bytes-or-ordinary-unaligned-field=MEMORY")
         put("transportRules", "x87-arguments-memory;x87-returns-registers;explicit-nontrivial-C++-invisible-reference;no-whole-call-register-allocation")
         put("originSequenceRules", "raw-ambiguous-sequences-reconcile-only-when-every-prototyped-list-has-identical-arity-varargs-and-exact-type-roots-after-validated-typedef-top-level-qualifier-closure;raw-ambiguity-retained;equal-ABI-classes-alone-insufficient")
+        put("selectedParameterRules", "selected-parameter-ABI-requires-empty-raw-provenance-reasons;unresolved-selected-parameter-retains-slot-and-reasons;independent-arity-varargs-and-clean-types-retained")
         put("globalTypeRules", "same-language-type-closure;positive-automatic-locals-unexpanded;declared-type-observability-separate-from-storage-and-source-identity")
         put("unsupported", "unknown-language,nonstandard-convention,unprototyped-C,ambiguous-inheritance,unspecified-C++-class-call-semantics,unproved-alignment,atomic-types,expressions,vectors,vendor-types,cycles,oversized-layout")
         put("limits", buildJsonObject {
@@ -166,7 +167,12 @@ internal object DwarfSysvAmd64InterfaceProjection {
                 }
                 else -> single(f.returnType)?.let { type(it, language, 1) }
             }
-            val parameters = f.parameters.map { p -> language?.let { lang -> single(p.type)?.let { type(it, lang, 1) } } }
+            val parameters = f.parameters.map { p ->
+                if (p.reasons.isNotEmpty()) {
+                    reasons += p.reasons.map { "raw-parameter:${p.ordinal}:$it" }
+                    null
+                } else language?.let { lang -> single(p.type)?.let { type(it, lang, 1) } }
+            }
             if (returned?.observable != true) reasons += "unresolved-return-ABI"
             if (parameters.any { it?.observable != true || it.shape?.scalar == DwarfAbiScalarKind.VOID }) reasons += "unresolved-parameter-ABI"
             if (!f.executable || f.rva == null) reasons += "not-an-executable-physical-function"
