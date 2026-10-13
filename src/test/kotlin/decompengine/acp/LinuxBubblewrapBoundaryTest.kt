@@ -28,11 +28,10 @@ import kotlin.test.assertTrue
 class LinuxBubblewrapBoundaryTest {
     @Test
     fun `configured temporary parent pins private controls and exact fd probe beside a disjoint workspace`() {
-        val base = createTempDirectory("acp-private-control-parent-").toAbsolutePath().normalize()
-        val parent = Files.createDirectory(base.resolve("control-parent"))
-        Files.setPosixFilePermissions(parent, OWNER_ONLY)
-        val workspace = Files.createDirectory(base.resolve("workspace"))
-        try {
+        withRepositoryTemporaryDirectory("acp-private-control-parent-") { base ->
+            val parent = Files.createDirectory(base.resolve("control-parent"))
+            Files.setPosixFilePermissions(parent, OWNER_ONLY)
+            val workspace = Files.createDirectory(base.resolve("workspace"))
             withTemporaryParent(parent.toString()) {
                 val validated = invokeBoundaryPrivate("sandboxControlTemporaryParent", emptyArray()) as Path
                 assertEquals(parent, validated)
@@ -75,24 +74,30 @@ class LinuxBubblewrapBoundaryTest {
                 }
                 assertTrue(Files.list(parent).use { it.findAny().isEmpty })
             }
-            // Default Linux compatibility can be checked without creating any host-/tmp files.
+            // Default Linux compatibility can be checked without creating any additional host-/tmp files.
             withTemporaryParent("/tmp") {
                 assertEquals(Path.of("/tmp"), invokeBoundaryPrivate("sandboxControlTemporaryParent", emptyArray()))
             }
-        } finally {
-            clearStaging(base)
-            Files.delete(base)
         }
     }
 
     @Test
     fun `temporary parent rejects missing relative noncanonical file and symlink paths before host probes`() {
-        val base = createTempDirectory("acp-invalid-control-parent-").toAbsolutePath().normalize()
-        val parent = Files.createDirectory(base.resolve("real"))
-        val file = Files.writeString(base.resolve("file"), "not a directory")
-        val link = Files.createSymbolicLink(base.resolve("link"), parent)
-        val nested = Files.createDirectory(parent.resolve("nested"))
-        try {
+        var failedSetupBase: Path? = null
+        assertFailsWith<IOException> {
+            withRepositoryTemporaryDirectory("acp-setup-failure-") { partial ->
+                failedSetupBase = partial
+                Files.createDirectory(partial.resolve("partial-setup"))
+                throw IOException("injected setup failure")
+            }
+        }
+        assertFalse(Files.exists(requireNotNull(failedSetupBase)))
+
+        withRepositoryTemporaryDirectory("acp-invalid-control-parent-") { base ->
+            val parent = Files.createDirectory(base.resolve("real"))
+            val file = Files.writeString(base.resolve("file"), "not a directory")
+            val link = Files.createSymbolicLink(base.resolve("link"), parent)
+            val nested = Files.createDirectory(parent.resolve("nested"))
             listOf(null, "", "relative", "\u0000", base.resolve("missing").toString(), file.toString(),
                 link.toString(), link.resolve("nested").toString(), nested.resolve("..").toString()).forEach { value ->
                 withTemporaryParent(value) {
@@ -105,9 +110,6 @@ class LinuxBubblewrapBoundaryTest {
                     assertTrue(Files.list(nested).use { it.findAny().isEmpty })
                 }
             }
-        } finally {
-            clearStaging(base)
-            Files.delete(base)
         }
     }
 
@@ -1351,6 +1353,28 @@ class LinuxBubblewrapBoundaryTest {
         if (!Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)) return
         Files.walk(root).use { entries ->
             entries.sorted(Comparator.reverseOrder()).filter { it != root }.forEach(Files::deleteIfExists)
+        }
+    }
+
+    private fun <T> withRepositoryTemporaryDirectory(prefix: String, action: (Path) -> T): T {
+        var repository = Path.of("").toAbsolutePath().normalize()
+        while (!Files.exists(repository.resolve(".git"), LinkOption.NOFOLLOW_LINKS) ||
+            !Files.isRegularFile(repository.resolve("gradlew"), LinkOption.NOFOLLOW_LINKS)
+        ) {
+            repository = repository.parent ?: throw IllegalStateException("test is not running inside the repository")
+        }
+        val canonicalRepository = repository.toRealPath()
+        val temporaryParent = Files.createDirectories(repository.resolve("build/tmp/acp-boundary-tests")).toRealPath()
+        require(temporaryParent.startsWith(canonicalRepository)) { "ACP test temporary parent escaped the repository" }
+        val base = Files.createTempDirectory(temporaryParent, prefix).toAbsolutePath().normalize()
+        try {
+            return action(base)
+        } finally {
+            try {
+                clearStaging(base)
+            } finally {
+                Files.deleteIfExists(base)
+            }
         }
     }
 
