@@ -532,10 +532,63 @@ def package_source_identity(package: dict[str, str]) -> tuple[str, str | None]:
     return match.group(1), match.group(2)
 
 
-def select_source_record(indexes: list[dict], package_name: str, version: str) -> dict:
+def source_location_identity(package_name: object, version: object, directory: object,
+                             suite: object, component: object, profile: dict) -> dict[str, str]:
+    """Validate and normalize the signed source row's complete location identity."""
+    if package_name != profile["sourcePackage"]["name"] or version != profile["sourcePackage"]["version"]:
+        raise ProvisionError("signed source package name/version differs from the pinned profile")
+    if suite not in profile["suites"] or component not in profile["components"]:
+        raise ProvisionError("signed source row suite/component is outside the pinned profile")
+    if not isinstance(directory, str):
+        raise ProvisionError("signed source Directory field is missing or unsafe")
+    parts = PurePosixPath(directory).parts
+    bucket = "lib" if str(package_name).startswith("lib") else str(package_name)[0].lower()
+    if (directory != "/".join(parts) or len(parts) < 4 or parts[0] != "pool" or
+            parts[1] != component or parts[2] != bucket or
+            any(part in ("", ".", "..") or re.fullmatch(r"[A-Za-z0-9+._~-]+", part) is None
+                for part in parts)):
+        raise ProvisionError("signed source Directory does not identify the pinned component/package pool path")
+    return {
+        "name": str(package_name), "version": str(version), "directory": directory,
+        "suite": str(suite), "component": str(component),
+    }
+
+
+def candidate_source_location_identity(source: dict, profile: dict) -> dict[str, str]:
+    if not isinstance(source, dict):
+        raise ProvisionError("candidate source location identity is malformed")
+    return source_location_identity(
+        source.get("name"), source.get("version"), source.get("directory"),
+        source.get("suite"), source.get("component"), profile,
+    )
+
+
+def verify_candidate_source_identity(candidate_source: dict, signed_source: dict, profile: dict) -> None:
+    expected = source_location_identity(
+        signed_source.get("Package"), signed_source.get("Version"), signed_source.get("Directory"),
+        signed_source.get("_suite"), signed_source.get("_component"), profile,
+    )
+    if candidate_source_location_identity(candidate_source, profile) != expected:
+        raise ProvisionError("candidate source location identity differs from the selected signed source row")
+
+
+def select_source_record(indexes: list[dict], package_name: str, version: str, profile: dict) -> dict:
+    """Select identical signed copies by explicit pinned suite/component order."""
     rows = [row for row in indexes if row.get("Package") == package_name and row.get("Version") == version]
-    unique = {(row.get("Directory"), row.get("Checksums-Sha256")) for row in rows}
-    if not rows or len(unique) != 1:
+    identities = []
+    for row in rows:
+        identities.append(source_location_identity(
+            row.get("Package"), row.get("Version"), row.get("Directory"),
+            row.get("_suite"), row.get("_component"), profile,
+        ))
+        source_file_rows(row)
+    unique_coordinates = {(row["suite"], row["component"]) for row in identities}
+    payload_identities = {
+        (row["directory"], tuple(sorted((item["name"], item["bytes"], item["sha256"])
+                                         for item in source_file_rows(source))))
+        for row, source in zip(identities, rows)
+    }
+    if not rows or len(unique_coordinates) != len(rows) or len(payload_identities) != 1:
         observed = sorted({
             f"{row.get('Version', '<missing>')}@{row.get('_suite', '<unknown>')}/{row.get('_component', '<unknown>')}"
             for row in indexes if row.get("Package") == package_name
@@ -545,6 +598,9 @@ def select_source_record(indexes: list[dict], package_name: str, version: str) -
             f"expected a unique signed source record for {package_name}={version}; "
             f"found {len(rows)} exact records; observed signed versions: {observed_text}"
         )
+    suite_order = {suite: index for index, suite in enumerate(profile["suites"])}
+    component_order = {component: index for index, component in enumerate(profile["components"])}
+    rows.sort(key=lambda row: (suite_order[row["_suite"]], component_order[row["_component"]]))
     return rows[0]
 
 
@@ -931,7 +987,7 @@ def acquire_candidate(contract: dict, output: Path, keyring: Path) -> dict:
     diagnostic = source_index_diagnostic(profile, repo_rows, index_records, all_sources,
                                          related_source_rows, related_source_record_count, all_binaries)
     atomic_write(output / "source-selection-diagnostics.json", canonical_json(diagnostic))
-    source = select_source_record(all_sources, source_pin["name"], source_pin["version"])
+    source = select_source_record(all_sources, source_pin["name"], source_pin["version"], profile)
     source_files = source_file_rows(source)
     directory = source.get("Directory")
     if not directory or directory.startswith("/") or ".." in PurePosixPath(directory).parts:
@@ -1048,6 +1104,7 @@ def ensure_source_artifact_contract(candidate: dict, contract: dict | None = Non
     contract = contract or read_contract()
     if candidate.get("profileId") != contract["profile"]["id"]:
         raise ProvisionError("candidate profile ID mismatch")
+    candidate_source_location_identity(candidate.get("source"), contract["profile"])
     keyring = candidate.get("trustedKeyring", {})
     if (keyring.get("bytes", 0) < 1 or not isinstance(keyring.get("sha256"), str) or
             not re.fullmatch(r"[0-9a-f]{64}", keyring["sha256"])):
@@ -1144,7 +1201,8 @@ def verify_candidate_data(candidate_root: Path, candidate: dict, contract: dict,
                     parsed_indexes.append(dict(row, _suite=suite, _component=component))
 
     source_pin = profile["sourcePackage"]
-    source = select_source_record(parsed_indexes, source_pin["name"], source_pin["version"])
+    source = select_source_record(parsed_indexes, source_pin["name"], source_pin["version"], profile)
+    verify_candidate_source_identity(candidate["source"], source, profile)
     authenticated_source_files = {
         str(row["name"]): (int(row["bytes"]), str(row["sha256"]))
         for row in source_file_rows(source)
@@ -2289,6 +2347,33 @@ def rootfs_path(rootfs: Path, absolute_path: str) -> Path:
     return result
 
 
+def rootfs_regular_file(rootfs: Path, absolute_path: str, *, executable: bool = False) -> tuple[Path, int]:
+    """Require a non-symlink regular file at the exact in-root path."""
+    try:
+        path = rootfs_path(rootfs, absolute_path)
+    except OSError as error:
+        raise ProvisionError(f"retained rootfs file is unavailable: {absolute_path}") from error
+    root = rootfs.resolve(strict=True)
+    current = root
+    parts = PurePosixPath(absolute_path).parts[1:]
+    for index, part in enumerate(parts):
+        current = current / part
+        try:
+            metadata = current.lstat()
+        except OSError as error:
+            raise ProvisionError(f"retained rootfs file is unavailable: {absolute_path}") from error
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ProvisionError(f"retained rootfs file path contains a symlink: {absolute_path}")
+        if index < len(parts) - 1 and not stat.S_ISDIR(metadata.st_mode):
+            raise ProvisionError(f"retained rootfs file path contains a non-directory parent: {absolute_path}")
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ProvisionError(f"retained rootfs path is not a regular file: {absolute_path}")
+    mode = metadata.st_mode & 0o7777
+    if executable and not (mode & 0o111):
+        raise ProvisionError(f"retained rootfs executable lacks execute permission: {absolute_path}")
+    return path, mode
+
+
 def file_entry(rootfs: Path, absolute_path: str) -> dict:
     path = rootfs_path(rootfs, absolute_path)
     if path.is_symlink():
@@ -3406,9 +3491,73 @@ def read_provenance_report(path: Path, label: str) -> dict:
     return report
 
 
-def validate_provenance_probe_report(report: dict, record: dict) -> None:
+def preflight_provenance_output(output: Path, input_roots: list[Path], input_files: list[Path]) -> Path:
+    """Resolve output aliases and reject all packaged-tree overlaps before creating paths."""
+    if output.is_symlink() or output.exists():
+        raise ProvisionError("provenance archive output must not already exist or be a symlink")
+    try:
+        canonical_output = output.resolve(strict=False)
+        canonical_roots = []
+        for root in input_roots:
+            if root.is_symlink():
+                raise ProvisionError("provenance input root must not be a symlink")
+            canonical_roots.append(root.resolve(strict=True))
+        canonical_files = []
+        for path in input_files:
+            if path.is_symlink():
+                canonical_files.append(path.resolve(strict=True))
+            elif path.exists():
+                canonical_files.append(path.resolve(strict=True))
+    except OSError as error:
+        raise ProvisionError(f"could not resolve provenance output/input paths: {error}") from error
+    for root in canonical_roots:
+        if canonical_output == root or root in canonical_output.parents:
+            raise ProvisionError("provenance archive output overlaps a recursively packaged input tree")
+    if canonical_output in canonical_files:
+        raise ProvisionError("provenance archive output overlaps a packaged input file")
+    return canonical_output
+
+
+def validate_provenance_probe_report(report: dict, record: dict, rootfs: Path, contract: dict) -> tuple[Path, Path, int]:
     if canonical_json(report) != canonical_json(record.get("probe")):
         raise ProvisionError("probe provenance report differs from the reproducible build-record probe")
+    probe_path, probe_mode = rootfs_regular_file(
+        rootfs, "/tmp/clang18-libtooling-probe", executable=True,
+    )
+    fixture_path, _ = rootfs_regular_file(rootfs, "/tmp/clang18-positive.cpp")
+    probe_digest = sha256_file(probe_path)
+    expected_probe_digest = record["probe"]["binarySha256"]
+    if probe_digest != expected_probe_digest:
+        raise ProvisionError("retained probe executable bytes differ from the build-record binarySha256")
+    fixture_digest = sha256_file(fixture_path)
+    if (fixture_digest != record["probe"]["fixtureSha256"] or
+            fixture_digest != record["recipe"]["fixtureSha256"]):
+        raise ProvisionError("retained probe fixture bytes differ from the authenticated fixture identity")
+
+    # Replay only through the fixed chroot command bound by canonical_commands;
+    # never execute the candidate binary in the host namespace.
+    replay_output = rootfs_run(
+        rootfs, ["/tmp/clang18-libtooling-probe", "/tmp/clang18-positive.cpp"],
+        contract, timeout=120,
+    )
+    try:
+        replay_report = json.loads(replay_output)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise ProvisionError("retained probe replay did not emit valid JSON") from error
+    if not isinstance(replay_report, dict):
+        raise ProvisionError("retained probe replay output must be a JSON object")
+    inventory = audit_langoptions(
+        rootfs_path(rootfs, "/usr/lib/llvm-18/include/clang/Basic/LangOptions.def"),
+        rootfs_path(rootfs, "/usr/lib/llvm-18/include/clang/Basic/LangOptions.h"),
+        contract,
+    )
+    checked = validate_probe_report(replay_report, inventory, contract)
+    checked["sourceSha256"] = sha256_file(RECIPE_FILES["probeSha256"])
+    checked["binarySha256"] = probe_digest
+    checked["fixtureSha256"] = fixture_digest
+    if canonical_json(checked) != canonical_json(record["probe"]):
+        raise ProvisionError("retained probe replay differs from the reproducible build-record probe")
+    return probe_path, fixture_path, probe_mode
 
 
 def frontend_cxx_driver_identity_sha256(record: dict, record_sha256: str) -> str:
@@ -3634,32 +3783,21 @@ def command_package_provenance(args: argparse.Namespace) -> int:
         "cleanBuilds": 2, "matchingRootfsSha256": True, "matchingImageDigest": True,
     }:
         raise ProvisionError("provenance packaging requires a final reproducible build record")
+    initial_files = [
+        args.record, args.oci_archive, args.probe_report, args.loader_report, args.negative_report,
+        args.contract, args.keyring, *RECIPE_FILES.values(),
+    ]
+    preflight_provenance_output(args.output, [args.acquisition, args.rootfs], initial_files)
     candidate = args.acquisition / "acquisition-candidate.json"
     patch_audit = args.acquisition / "patch-audit.json"
     if not candidate.is_file() or not patch_audit.is_file() or not (args.acquisition / "downloads").is_dir():
         raise ProvisionError("provenance package is missing authenticated acquisition inputs")
     if args.rootfs.is_symlink() or not args.rootfs.is_dir():
         raise ProvisionError("provenance packaging requires the retained final rootfs directory")
-    _, parsed_indexes = load_candidate(args.acquisition, contract, args.keyring, build_record=record)
-    if args.oci_archive.is_symlink() or not args.oci_archive.is_file():
-        raise ProvisionError("provenance packaging requires the retained run-two OCI image archive")
-    verify_retained_rootfs_and_image(args.rootfs, args.oci_archive, record, contract)
-    signed_package_metadata = package_metadata_map(parsed_indexes)
-    validate_record_package_metadata(
-        record, signed_package_metadata, installed_package_keys(args.rootfs, contract),
-    )
-    verify_recorded_runtime_closure(args.rootfs, record, contract)
-    record_sha256 = sha256_file(args.record)
-    probe_report = read_provenance_report(args.probe_report, "LibTooling probe")
-    loader_report = read_provenance_report(args.loader_report, "A-loader")
-    negative_report = read_provenance_report(args.negative_report, "Clang 22.1.6 negative")
-    validate_provenance_probe_report(probe_report, record)
-    validate_provenance_loader_report(loader_report, record, record_sha256, args.rootfs)
-    comparator_manifest, comparator_manifest_sha256 = validate_provenance_negative_report(
-        negative_report, record, contract,
-    )
     comparator_lock = ROOT / contract["negativeControl"]["artifactLock"]
-    comparator_lock_sha256 = negative_report["artifactLockSha256"]
+    _, comparator_manifest, _, _ = validate_locked_comparator_manifest(
+        comparator_lock, contract["negativeControl"],
+    )
     expected_artifacts = [
         candidate, patch_audit, args.acquisition / "downloads",
         args.record, args.probe_report, args.loader_report, args.negative_report,
@@ -3673,16 +3811,40 @@ def command_package_provenance(args: argparse.Namespace) -> int:
         ROOT / "oracle/clang/18.1.3/test_provisioning.py",
         ROOT / "oracle/clang/18.1.3/ACQUISITION_STATUS.md",
         ROOT / ".github/workflows/generic-template-toolchain.yml",
-        comparator_lock,
-        comparator_manifest,
+        comparator_lock, comparator_manifest,
         args.keyring, ROOT / contract["profile"]["upstream"]["keyFile"],
     ]
-    if args.output.exists():
-        raise ProvisionError("provenance archive output must not already exist")
-    args.output.parent.mkdir(parents=True, exist_ok=True)
+    preflight_provenance_output(args.output, [args.acquisition, args.rootfs], expected_artifacts)
+    _, parsed_indexes = load_candidate(args.acquisition, contract, args.keyring, build_record=record)
+    if args.oci_archive.is_symlink() or not args.oci_archive.is_file():
+        raise ProvisionError("provenance packaging requires the retained run-two OCI image archive")
+    verify_retained_rootfs_and_image(args.rootfs, args.oci_archive, record, contract)
+    signed_package_metadata = package_metadata_map(parsed_indexes)
+    validate_record_package_metadata(
+        record, signed_package_metadata, installed_package_keys(args.rootfs, contract),
+    )
+    verify_recorded_runtime_closure(args.rootfs, record, contract)
+    record_sha256 = sha256_file(args.record)
+    probe_report = read_provenance_report(args.probe_report, "LibTooling probe")
+    loader_report = read_provenance_report(args.loader_report, "A-loader")
+    negative_report = read_provenance_report(args.negative_report, "Clang 22.1.6 negative")
+    probe_binary, probe_fixture, probe_mode = validate_provenance_probe_report(
+        probe_report, record, args.rootfs, contract,
+    )
+    validate_provenance_loader_report(loader_report, record, record_sha256, args.rootfs)
+    comparator_manifest, comparator_manifest_sha256 = validate_provenance_negative_report(
+        negative_report, record, contract,
+    )
+    comparator_lock_sha256 = negative_report["artifactLockSha256"]
+    output_path = preflight_provenance_output(args.output, [args.acquisition, args.rootfs], expected_artifacts)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if preflight_provenance_output(args.output, [args.acquisition, args.rootfs], expected_artifacts) != output_path:
+        raise ProvisionError("provenance output path changed after its preflight")
+    archive_created = False
     epoch = int(contract["environment"]["SOURCE_DATE_EPOCH"])
     try:
-        with tarfile.open(args.output, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        with tarfile.open(output_path, mode="x", format=tarfile.PAX_FORMAT) as archive:
+            archive_created = True
             for source in expected_artifacts:
                 if not source.exists():
                     raise ProvisionError(f"provenance evidence file is missing: {source}")
@@ -3754,12 +3916,33 @@ def command_package_provenance(args: argparse.Namespace) -> int:
                             comparator_lock_sha256 if source == comparator_lock else None
                         ),
                     )
+            current_probe_binary, current_probe_mode = rootfs_regular_file(
+                args.rootfs, "/tmp/clang18-libtooling-probe", executable=True,
+            )
+            current_probe_fixture, _ = rootfs_regular_file(args.rootfs, "/tmp/clang18-positive.cpp")
+            if (current_probe_mode != probe_mode or sha256_file(current_probe_binary) != record["probe"]["binarySha256"] or
+                    sha256_file(current_probe_fixture) != record["probe"]["fixtureSha256"]):
+                raise ProvisionError("retained probe binary/fixture changed after bounded replay")
+            _add_provenance_file(
+                archive, probe_binary, "rootfs/tmp/clang18-libtooling-probe", epoch,
+                expected_sha256=record["probe"]["binarySha256"], mode=probe_mode,
+            )
+            _add_provenance_file(
+                archive, probe_fixture, "rootfs/tmp/clang18-positive.cpp", epoch,
+                expected_sha256=record["probe"]["fixtureSha256"], mode=0o444,
+            )
+    except ProvisionError:
+        if archive_created:
+            output_path.unlink(missing_ok=True)
+        raise
     except (OSError, tarfile.TarError) as error:
+        if archive_created:
+            output_path.unlink(missing_ok=True)
         raise ProvisionError(f"could not build provenance archive: {error}") from error
-    if args.output.stat().st_size > contract["profile"]["bounds"]["maxArtifactBytes"]:
-        args.output.unlink(missing_ok=True)
+    if output_path.stat().st_size > contract["profile"]["bounds"]["maxArtifactBytes"]:
+        output_path.unlink(missing_ok=True)
         raise ProvisionError("provenance archive exceeds the configured artifact byte budget")
-    print(f"packaged authenticated provenance archive ({args.output.stat().st_size} bytes)")
+    print(f"packaged authenticated provenance archive ({output_path.stat().st_size} bytes)")
     return 0
 
 
@@ -3810,8 +3993,10 @@ def command_negative_version_smoke(args: argparse.Namespace) -> int:
 
 
 def _add_provenance_file(archive: tarfile.TarFile, source: Path, arcname: str, epoch: int,
-                         expected_sha256: str | None = None) -> None:
+                         expected_sha256: str | None = None, mode: int = 0o444) -> None:
     info = tarfile.TarInfo(arcname)
+    if expected_sha256 is not None and (source.is_symlink() or not source.is_file()):
+        raise ProvisionError(f"provenance input is not a regular file: {arcname}")
     payload = source.read_bytes() if expected_sha256 is not None else None
     if payload is not None and sha256(payload) != expected_sha256:
         raise ProvisionError(f"provenance input changed before packaging: {arcname}")
@@ -3819,7 +4004,7 @@ def _add_provenance_file(archive: tarfile.TarFile, source: Path, arcname: str, e
     info.mtime = epoch
     info.uid = info.gid = 0
     info.uname = info.gname = ""
-    info.mode = 0o444
+    info.mode = mode & 0o7777
     if payload is not None:
         archive.addfile(info, io.BytesIO(payload))
     else:
