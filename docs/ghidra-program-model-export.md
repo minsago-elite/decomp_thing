@@ -36,8 +36,9 @@ specification. Accepted function records or a contiguous prefix of authenticated
 before a planning checkpoint can leave fragments or deterministic `.pending` files only for the first incomplete
 batch; those incomplete artifacts are regenerated, while missing, extra, reordered, stale, cross-inventory, or
 cross-mode checkpoints are rejected. A mismatched binary or exporter is rejected instead of mixing evidence; start a
-new output directory when intentionally changing either. Legacy schema-1 state has no whole-program semantic binding
-and is deliberately not migrated into reusable schema-2 state.
+new output directory when intentionally changing either. Current state and GCC profile admission select exporter
+version 16 and its exact source digest; version-15 and earlier state is historical and rejected. Legacy schema-1 state
+has no whole-program semantic binding and is deliberately not migrated into reusable schema-2 state.
 
 The reference GCC-driver budget is one 10-minute invocation and 4 GiB peak RSS. The Kotlin process adapter enforces the
 10-minute wall-clock ceiling and leaves completed records resumable on timeout. A benchmark profile supplies the exact
@@ -47,11 +48,12 @@ NSA's Ghidra 12.1.3 release archive (569,445,154 bytes; SHA-256
 authenticated export plus ownership planning. The bundled direct-API worker caps its Java heap at 2 GiB independently;
 the Kotlin monitor measures the JVM and its complete descendant process tree against the profile ceiling.
 Each full function decompilation has a 60-second timeout and one 180-second retry for a native timeout. The
-version-15 exporter requests C output without transferring the native syntax-tree/high-variable graph and renders
+current version-16 exporter requests C output without transferring the native syntax-tree/high-variable graph and renders
 each successful result once. Metadata still comes from the analyzed program. This optimization is specific to the
 exporter's C-text consumer; consumers of high variables, p-code, or token addresses require the syntax tree.
-An authored native fixture preserved exact C and all model records against the version-14 behavior. This is bounded
-equivalence evidence, not full cc1 throughput, parallel-worker, cancellation, or interrupted-resume qualification.
+An authored native fixture for historical version 15 preserved exact C and all model records against the version-14
+behavior. This is bounded equivalence evidence, not full cc1 throughput, parallel-worker, cancellation, or
+interrupted-resume qualification.
 The default four-argument export remains serial. The explicitly selected bundled runtime v6 uses the checked cc1 throughput
 policy: four CPUs, four analysis threads, and four independent native decompilers. The public `ubuntu-24.04` reference
 runner supplies four CPUs and 16 GB of RAM ([GitHub runner specifications](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)).
