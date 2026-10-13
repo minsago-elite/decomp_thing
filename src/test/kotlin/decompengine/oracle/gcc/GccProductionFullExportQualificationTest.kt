@@ -151,7 +151,7 @@ class GccProductionFullExportQualificationTest {
         val authentication = runCatching {
             require(operationId != null) { "operation journal is unavailable" }
             requireDiagnosticRecordAvailability(availability, originalFailure == null && exitCode == 0)
-            requireDiagnosticJournal(records, operationId, options, arguments, ::retain)
+            requireDiagnosticJournal(records, operationId, options, arguments, installation, ::retain)
         }
         val summary = JsonObject(mapOf(
             "provider" to JsonPrimitive("gcc-cc1-runtime-diagnostic-capture-v1"),
@@ -185,7 +185,7 @@ class GccProductionFullExportQualificationTest {
     }
 
     private fun requireDiagnosticJournal(records: Map<String, ByteArray>, operationId: String,
-        options: GccBundledCliOptions, arguments: List<String>,
+        options: GccBundledCliOptions, arguments: List<String>, installation: Path,
         retain: (String, Path, Int) -> Unit) {
         val definition = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(records.getValue("definition.json"))
         val runtime = requireNotNull(definition.bundledRuntime)
@@ -229,10 +229,8 @@ class GccProductionFullExportQualificationTest {
             GccBundledOperationInputs.open(intent, listOf(options.output.resolve("journal"), options.scratch)).use { inputs ->
                 require(prepared["deploymentClosureSha256"] == JsonPrimitive(inputs.deploymentClosureSha256))
                 val configuredReference = Path.of(requireNotNull(System.getProperty("decompengine.oracle.gcc.bundledGhidraReference")))
-                require(records.getValue("gcc-bundled-ghidra-reference-v1.json").contentEquals(readStable(configuredReference, 8 * 1024 * 1024)))
-                require(runtime.root == Path.of(requireNotNull(System.getProperty("decompengine.oracle.gcc.bundledGhidraRoot"))))
-                val reference = GccBundledGhidraReference.parse(records.getValue("gcc-bundled-ghidra-reference-v1.json"))
-                reference.requireCandidate(runtime, definition.artifacts)
+                requireDiagnosticRuntimeSelection(installation, runtime, definition.artifacts,
+                    records.getValue("gcc-bundled-ghidra-reference-v1.json"), configuredReference)
                 var previous = "prepared.json"
                 for (name in listOf("attachment.json", "start-authorized.json", "execution.json")) {
                     val bytes = records[name] ?: break
@@ -286,6 +284,22 @@ class GccProductionFullExportQualificationTest {
                 profile.requireCurrent()
             }
         }
+    }
+
+    private fun requireDiagnosticRuntimeSelection(installation: Path, runtime: GccBundledGhidraRuntime,
+        artifacts: List<GccCompilerEngineContainmentArtifactIdentity>, retainedReference: ByteArray,
+        configuredReference: Path) {
+        require(installation.isAbsolute && installation.normalize() == installation && installation.toRealPath() == installation) {
+            "diagnostic installation is not canonical"
+        }
+        val selectedRoot = installation.resolve("libexec/ghidra")
+        require(selectedRoot.toRealPath() == selectedRoot && runtime.root == selectedRoot) {
+            "diagnostic runtime differs from the selected installed application"
+        }
+        require(retainedReference.contentEquals(readStable(configuredReference, 8 * 1024 * 1024))) {
+            "diagnostic deployment reference differs from the independent configured reference"
+        }
+        GccBundledGhidraReference.parse(retainedReference).requireCandidate(runtime, artifacts)
     }
 
     private fun requireDiagnosticRecordAvailability(availability: Map<String, JsonElement>, requireExecution: Boolean) {
@@ -607,6 +621,69 @@ class GccProductionFullExportQualificationTest {
                 }
             }
         }
+    }
+
+    @Test
+    fun `diagnostic provenance accepts provisioned copy and rejects foreign runtime or mutated manifest`(@TempDir root: Path) {
+        val configuredReference = Path.of(requireNotNull(System.getProperty("decompengine.oracle.gcc.bundledGhidraReference")))
+        val referenceBytes = readStable(configuredReference, 8 * 1024 * 1024)
+        val reference = GccBundledGhidraReference.parse(referenceBytes)
+        val installation = privateDirectory(root.resolve("provisioned-application"))
+        val selectedRoot = Files.createDirectories(installation.resolve("libexec/ghidra")).toRealPath()
+        val copiedReference = Files.createDirectories(installation.resolve("lib"))
+            .resolve("gcc-bundled-ghidra-reference-v1.json")
+        Files.write(copiedReference, referenceBytes, CREATE_NEW)
+        fun runtime(bundleRoot: Path) = GccBundledGhidraRuntime(bundleRoot, reference.classPath.map { relative ->
+            val entry = reference.entries.getValue(relative)
+            GccBundledGhidraClassPathEntry(bundleRoot.resolve(relative), requireNotNull(entry.bytes), requireNotNull(entry.sha256))
+        }, invocationVersion = 7)
+        val selected = runtime(selectedRoot)
+        // This fixture checks selection and reference consistency; it creates no execution authority.
+        val artifacts = GCC_BUNDLED_CONTAINMENT_ARTIFACT_ROLES.mapIndexed { index, role ->
+            val relative = when (role) {
+                GccCompilerEngineContainmentArtifactRole.GHIDRA_BRIDGE_JAR -> "decomp-ghidra-bridge.jar"
+                GccCompilerEngineContainmentArtifactRole.GHIDRA_EXPORT_GUARD -> "scripts/RunBundledExports.class"
+                GccCompilerEngineContainmentArtifactRole.GHIDRA_RUNTIME_MANIFEST -> "bundle.sha256"
+                else -> null
+            }
+            val entry = relative?.let(reference.entries::getValue)
+            GccCompilerEngineContainmentArtifactIdentity(role,
+                relative?.let(selectedRoot::resolve) ?: root.resolve(
+                    if (role == GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE) "ExportProgramModel.java" else role.wireName),
+                when (role) {
+                    GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE -> reference.exporterBytes
+                    GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE -> 569445154L
+                    else -> entry?.bytes ?: index + 1L
+                },
+                when (role) {
+                    GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE -> reference.exporterSha256
+                    GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE -> decompengine.analysis.BundledGhidra.ARCHIVE_SHA256
+                    else -> entry?.sha256 ?: "a".repeat(64)
+                })
+        }
+        fun verify(candidate: GccBundledGhidraRuntime = selected,
+            identities: List<GccCompilerEngineContainmentArtifactIdentity> = artifacts,
+            retained: ByteArray = readStable(copiedReference, 8 * 1024 * 1024)) =
+            requireDiagnosticRuntimeSelection(installation, candidate, identities, retained, configuredReference)
+        assertTrue(selectedRoot != Path.of(requireNotNull(System.getProperty("decompengine.oracle.gcc.bundledGhidraRoot"))))
+        verify()
+        val foreignRoot = Files.createDirectories(root.resolve("foreign-application/libexec/ghidra")).toRealPath()
+        val foreignArtifacts = artifacts.map { identity ->
+            if (identity.path.startsWith(selectedRoot))
+                identity.copy(path = foreignRoot.resolve(selectedRoot.relativize(identity.path))) else identity
+        }
+        val foreignRuntime = runtime(foreignRoot)
+        reference.requireCandidate(foreignRuntime, foreignArtifacts)
+        assertFailsWith<IllegalArgumentException> { verify(candidate = foreignRuntime, identities = foreignArtifacts) }
+        val changedManifest = artifacts.map { identity ->
+            if (identity.role == GccCompilerEngineContainmentArtifactRole.GHIDRA_RUNTIME_MANIFEST)
+                identity.copy(sha256 = "0".repeat(64)) else identity
+        }
+        assertFailsWith<IllegalArgumentException> { verify(identities = changedManifest) }
+        Files.write(copiedReference, referenceBytes + byteArrayOf(10))
+        assertFailsWith<IllegalArgumentException> { verify() }
+        Files.write(copiedReference, referenceBytes)
+        verify()
     }
 
     @Test
