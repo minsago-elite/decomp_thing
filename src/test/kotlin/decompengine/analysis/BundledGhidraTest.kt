@@ -4,6 +4,7 @@ import decompengine.project.sha256
 import decompengine.project.RecoveredCallSitesTest
 import decompengine.oracle.gcc.GccCompilerEngineProfiles
 import decompengine.oracle.gcc.authenticateGhidraInstallation
+import decompengine.oracle.fulltree.inControlTemporaryDirectory
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
@@ -109,6 +110,68 @@ class BundledGhidraTest {
             bundle.verify()
         } finally {
             if (process.isAlive) process.destroyForcibly().waitFor()
+        }
+    }
+
+    @Test
+    fun `installed worker requires the exact parent permit before Ghidra initialization`() {
+        assumeTrue(System.getenv("RUN_REAL_GHIDRA") == "true", "installed Ghidra launch permit check is opt-in")
+        inControlTemporaryDirectory { root ->
+            // Authenticate once, then reuse the same installed bridge/classpath for every gate control.
+            val probe = BundledGhidra.locate().probeCommand()
+            assertEquals("probe", probe.last())
+            assertEquals(BundledGhidra.WORKER_CLASS, probe[probe.lastIndex - 2])
+            assertFalse("await-parent-launch" in probe, "legacy probe commands must remain ungated")
+            val ready = "Bundled Ghidra direct API ready: ${BundledGhidra.VERSION}"
+            val cases = listOf("valid" to "1\n", "eof" to "", "wrong-token" to "0\n", "wrong-terminator" to "1x", "truncated" to "1")
+            for ((name, permit) in cases) {
+                val valid = name == "valid"
+                val work = root.resolve(name).createDirectories()
+                val home = work.resolve("home").createDirectories()
+                val temporary = work.resolve("tmp").createDirectories()
+                val cache = work.resolve("cache").createDirectories()
+                val output = work.resolve("probe.log")
+                // Rejected permits must fail before even inspecting the release. If initialization
+                // moves before the gate, this missing path causes a different failure immediately.
+                val missingRelease = work.resolve("deliberately-missing-release")
+                assertFalse(Files.exists(missingRelease))
+                val release = if (valid) probe[probe.lastIndex - 1] else missingRelease.toString()
+                val command = listOf(probe.first(), "-Duser.home=$home", "-Djava.io.tmpdir=$temporary", "-XX:-UsePerfData") +
+                    probe.drop(1).dropLast(2) + listOf(release, "await-parent-launch", probe.last())
+                val process = ProcessBuilder(command).directory(work.toFile()).apply {
+                    environment().remove("GHIDRA_HOME")
+                    environment()["TMPDIR"] = temporary.toString()
+                    environment()["XDG_CACHE_HOME"] = cache.toString()
+                    redirectErrorStream(true)
+                    redirectOutput(output.toFile())
+                }.start()
+                try {
+                    assertFalse(process.waitFor(250, TimeUnit.MILLISECONDS), "$name worker exited before receiving a permit")
+                    assertFalse(output.readText().contains(ready), "$name worker reported readiness before parent authorization")
+                    process.outputStream.use { it.write(permit.toByteArray(Charsets.US_ASCII)) }
+                    assertTrue(process.waitFor(if (valid) 60 else 10, TimeUnit.SECONDS), "$name gated probe timed out")
+                    val diagnostic = output.readText()
+                    assertEquals(if (valid) 0 else 1, process.exitValue(), diagnostic)
+                    if (valid) {
+                        assertTrue(diagnostic.contains(ready), diagnostic)
+                        assertFalse(diagnostic.contains("Parent did not authorize"), diagnostic)
+                    } else {
+                        assertTrue(diagnostic.lineSequence().any {
+                            it == "java.lang.IllegalStateException: Parent did not authorize bundled analysis launch"
+                        }, diagnostic)
+                        assertFalse(diagnostic.contains(ready), diagnostic)
+                    }
+                } finally {
+                    if (process.isAlive) process.destroyForcibly()
+                    try {
+                        assertTrue(process.waitFor(5, TimeUnit.SECONDS), "$name probe could not be reaped")
+                    } finally {
+                        process.outputStream.close()
+                        process.inputStream.close()
+                        process.errorStream.close()
+                    }
+                }
+            }
         }
     }
 

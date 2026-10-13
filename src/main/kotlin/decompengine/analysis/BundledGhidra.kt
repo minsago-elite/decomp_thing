@@ -48,6 +48,14 @@ class BundledGhidra private constructor(val root: Path) {
         return command
     }
 
+    /** Only the generic exporter uses this opt-in gate; existing probe/oracle commands stay unchanged. */
+    internal fun analysisCommandForOwnedLaunch(invocation: GhidraInvocation, checkpoint: (String) -> Unit): List<String> {
+        val libraries = BundledGhidraVerificationProcess().verifyAndGetLibraries(root, checkpoint)
+        val command = workerCommand(checkpoint, libraries) + "await-parent-launch" + invocation.arguments()
+        checkpoint("before returning owned bundled Ghidra analysis command")
+        return command
+    }
+
     private fun workerCommand(checkpoint: (String) -> Unit, libraries: List<Path>): List<String> {
         val bridge = root.resolve("decomp-ghidra-bridge.jar")
         require(libraries.isNotEmpty()) { "Bundled Ghidra libraries are missing; rebuild installDist" }

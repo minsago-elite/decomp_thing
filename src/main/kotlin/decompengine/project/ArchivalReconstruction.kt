@@ -4,6 +4,7 @@ import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkflowPhase
 import decompengine.analysis.AnalysisDeadline
 import decompengine.analysis.BundledGhidra
+import decompengine.analysis.BoundedAnalysisProcessLaunch
 import decompengine.analysis.GhidraAnalysisException
 import decompengine.analysis.GhidraInvocation
 import decompengine.analysis.GhidraPostScript
@@ -73,20 +74,31 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
     private val limits: GhidraProgramModelExportLimits,
     private val analysisToolSha256: String,
     private val recoveryMode: GhidraProgramModelRecoveryMode,
+    private val processStarter: (List<String>, Path) -> Process,
+    private val requiresLaunchPermit: Boolean,
 ) : ExportBudgetedProgramModelAnalyzer {
     internal constructor(
         commandFactory: (GhidraInvocation) -> List<String>,
         limits: GhidraProgramModelExportLimits = GhidraProgramModelExportLimits(),
         analysisToolSha256: String = UNAUTHENTICATED_ANALYSIS_TOOL_SHA256,
         recoveryMode: GhidraProgramModelRecoveryMode = GhidraProgramModelRecoveryMode.FULL,
-    ) : this({ invocation, _ -> commandFactory(invocation) }, limits, analysisToolSha256, recoveryMode)
+    ) : this({ invocation, _ -> commandFactory(invocation) }, limits, analysisToolSha256, recoveryMode, ::startExportProcess, false)
+
+    internal constructor(
+        commandFactory: (GhidraInvocation) -> List<String>,
+        limits: GhidraProgramModelExportLimits,
+        processStarter: (List<String>, Path) -> Process,
+        requiresLaunchPermit: Boolean = false,
+    ) : this({ invocation, _ -> commandFactory(invocation) }, limits,
+        UNAUTHENTICATED_ANALYSIS_TOOL_SHA256, GhidraProgramModelRecoveryMode.FULL, processStarter, requiresLaunchPermit)
 
     constructor(
         limits: GhidraProgramModelExportLimits = GhidraProgramModelExportLimits(),
         analysisToolSha256: String = BundledGhidra.ARCHIVE_SHA256,
         recoveryMode: GhidraProgramModelRecoveryMode = GhidraProgramModelRecoveryMode.FULL,
-    ) : this({ invocation, checkpoint -> BundledGhidra.locate().analysisCommand(invocation, checkpoint) },
-        limits, analysisToolSha256, recoveryMode)
+    ) : this({ invocation, checkpoint ->
+        BundledGhidra.locate().analysisCommandForOwnedLaunch(invocation, checkpoint)
+    }, limits, analysisToolSha256, recoveryMode, ::startExportProcess, true)
 
     init {
         require(analysisToolSha256.matches(Regex("[0-9a-f]{64}"))) {
@@ -103,6 +115,8 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             ),
             analysisToolSha256 = analysisToolSha256,
             recoveryMode = recoveryMode,
+            processStarter = processStarter,
+            requiresLaunchPermit = requiresLaunchPermit,
         )
 
     override fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel =
@@ -200,7 +214,11 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
 
     private fun executeExport(command: List<String>, workDir: Path, reports: Path, deadline: AnalysisDeadline): Int {
         val remainingNanosAtLaunch = deadline.remainingNanos("before worker launch")
-        val process = ProcessBuilder(command).directory(workDir.toFile()).start()
+        val process = EXPORT_PROCESS_LAUNCH.start(
+            deadline::checkpoint,
+            { processStarter(command, workDir) },
+            { lateProcess -> stopLateExportProcess(lateProcess, limits.terminationGrace) },
+        )
         val processTree = ExportProcessTree(process, limits.terminationGrace)
         val peakResidentBytes = AtomicLong(0)
         val memoryExceeded = AtomicBoolean(false)
@@ -230,6 +248,12 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         }
         try {
             deadline.checkpoint("after worker launch")
+            if (requiresLaunchPermit) {
+                // A newly started bundled worker stays inert until its handle is owned here.
+                // The two-byte permit fits in the fresh stdin pipe without a child-side read.
+                process.outputStream.write(byteArrayOf('1'.code.toByte(), '\n'.code.toByte()))
+                process.outputStream.flush()
+            }
             process.outputStream.close()
             val memoryMonitor = CompletableFuture.runAsync {
                 while (process.isAlive) {
@@ -429,6 +453,8 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
     }
 
     companion object {
+        private val EXPORT_PROCESS_LAUNCH = BoundedAnalysisProcessLaunch()
+
         internal const val UNAUTHENTICATED_ANALYSIS_TOOL_SHA256 =
             "0000000000000000000000000000000000000000000000000000000000000000"
 
@@ -590,5 +616,29 @@ class ArchivalReconstructionService(
             """.trimIndent() + "\n",
         )
         return ArchivalReconstructionResult(project, build, bundle)
+    }
+}
+
+private fun startExportProcess(command: List<String>, workDir: Path): Process =
+    ProcessBuilder(command).directory(workDir.toFile()).start()
+
+private fun stopLateExportProcess(process: Process, terminationGrace: Duration) {
+    val interruptedOnEntry = Thread.interrupted()
+    var failure: Throwable? = null
+    fun cleanup(action: () -> Unit) {
+        try { action() } catch (caught: Throwable) {
+            val previous = failure
+            if (previous == null) failure = caught else if (previous !== caught) previous.addSuppressed(caught)
+        }
+    }
+    try {
+        cleanup { ExportProcessTree(process, terminationGrace).terminate() }
+        cleanup { process.outputStream.close() }
+        cleanup { process.inputStream.close() }
+        cleanup { process.errorStream.close() }
+        if (process.isAlive) cleanup { throw GhidraAnalysisException("late export worker did not stop within its cleanup allowance") }
+        failure?.let { throw it }
+    } finally {
+        if (interruptedOnEntry) Thread.currentThread().interrupt()
     }
 }
