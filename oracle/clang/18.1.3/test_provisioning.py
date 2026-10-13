@@ -1457,6 +1457,16 @@ class ProvisioningNegativeTests(unittest.TestCase):
             self.assertEqual(checked["inventoryEvidence"], self.contract["langOptions"]["inventoryEvidence"])
             self.assertEqual(checked["runtimeLangOptionsChecks"], self.contract["langOptions"]["runtimeChecks"])
 
+    def test_langoptions_full_audit_accepts_public_llvmorg_18_1_3_fixtures(self):
+        fixtures = ROOT / "oracle/clang/18.1.3/fixtures"
+        definition = fixtures / "llvmorg-18.1.3-LangOptions.def"
+        header = fixtures / "llvmorg-18.1.3-LangOptions.h"
+        inventory = provision.audit_langoptions(definition, header, self.contract)
+        self.assertEqual(inventory["generatedFields"], self.contract["langOptions"]["generatedFieldCount"])
+        self.assertEqual(inventory["familyCounts"], self.contract["langOptions"]["familyCounts"])
+        self.assertEqual(inventory["manualFields"], self.contract["langOptions"]["manualFields"])
+        self.assertEqual(inventory["manualFieldsCount"], 28)
+
     def test_langoptions_source_audit_rejects_added_or_removed_manual_members(self):
         with self.temporary_directory() as temp:
             base = Path(temp)
@@ -1477,6 +1487,17 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 with self.subTest(change=label), self.assertRaisesRegex(
                         provision.ProvisionError, "direct manual member inventory mismatch"):
                     provision.audit_langoptions(definition, header, self.contract)
+
+            duplicated = fields + [fields[0]]
+            duplicate_header = base / "LangOptions-duplicate.h"
+            duplicate_header.write_text(
+                "class LangOptions : public LangOptionsBase {\npublic:\n" +
+                "\n".join(f"  int {name};" for name in duplicated) + "\n};\n",
+                encoding="utf-8")
+            with self.assertRaisesRegex(
+                    provision.ProvisionError,
+                    rf"count=29 expected=28, duplicates=\['{re.escape(fields[0])}'\]"):
+                provision.audit_langoptions(definition, duplicate_header, self.contract)
 
     def test_langoptions_source_audit_rejects_comma_declarator_injection(self):
         with self.temporary_directory() as temp:
@@ -1512,6 +1533,20 @@ public:
             provision.extract_cxx_class_data_members(header, "LangOptions"),
             ["templateField", "functionField", "unqualifiedTemplateField", "callbackField",
              "bracedField", "commaExpressionField"],
+        )
+
+    def test_langoptions_member_parser_handles_default_argument_methods_and_templated_function_braces(self):
+        header = """class LangOptions {
+public:
+  std::function<void()> AddedCallback{};
+  void setLangDefaults(int value = defaultValue()) { int methodLocal; }
+  template <typename T> void setTemplatedDefaults(T value = T{}) { int templateLocal; }
+  int FollowingField;
+};
+"""
+        self.assertEqual(
+            provision.extract_cxx_class_data_members(header, "LangOptions"),
+            ["AddedCallback", "FollowingField"],
         )
 
     def test_langoptions_source_audit_fails_closed_on_function_pointer_member(self):

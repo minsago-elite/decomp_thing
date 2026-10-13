@@ -1403,15 +1403,27 @@ def _cxx_member_declarator_names(statement: str, class_name: str) -> list[str]:
         index += 1
 
     declarators = []
-    angle_depth = 0
+    paren_depth = bracket_depth = brace_depth = angle_depth = 0
     for token in tokens:
-        if token == "<":
+        if not (paren_depth or bracket_depth or brace_depth or angle_depth) and token in ("=", "{"):
+            break
+        declarators.append(token)
+        if token == "(":
+            paren_depth += 1
+        elif token == ")" and paren_depth:
+            paren_depth -= 1
+        elif token == "[":
+            bracket_depth += 1
+        elif token == "]" and bracket_depth:
+            bracket_depth -= 1
+        elif token == "{":
+            brace_depth += 1
+        elif token == "}" and brace_depth:
+            brace_depth -= 1
+        elif token == "<":
             angle_depth += 1
         elif token == ">" and angle_depth:
             angle_depth -= 1
-        if angle_depth == 0 and token in ("=", "{"):
-            break
-        declarators.append(token)
 
     # Distinguish ordinary member functions from data members with a
     # parenthesized declarator. Function-pointer/data-member forms are not
@@ -1477,6 +1489,53 @@ def _cxx_member_declarator_names(statement: str, class_name: str) -> list[str]:
     return []
 
 
+def _cxx_prefix_has_method_parameter_list(prefix: str) -> bool:
+    """Recognize a completed method parameter list before a class member body.
+
+    Parentheses inside a template-id (for example ``std::function<void()>``)
+    are deliberately nested under angle delimiters and do not identify a
+    method. Default-argument equals signs remain nested under the method's
+    parameter parentheses.
+    """
+    tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*|::|&&|->|<=|>=|==|!=|\S", prefix)
+    paren_depth = bracket_depth = angle_depth = 0
+    top_level_parens: list[tuple[int, int]] = []
+    open_index: int | None = None
+    top_level_initializer = False
+    for token_index, token in enumerate(tokens):
+        if token == "<":
+            angle_depth += 1
+        elif token == ">" and angle_depth:
+            angle_depth -= 1
+        elif not angle_depth and token == "[":
+            bracket_depth += 1
+        elif not angle_depth and token == "]" and bracket_depth:
+            bracket_depth -= 1
+        elif not (angle_depth or bracket_depth) and token == "(":
+            if paren_depth == 0:
+                open_index = token_index
+            paren_depth += 1
+        elif not (angle_depth or bracket_depth) and token == ")" and paren_depth:
+            paren_depth -= 1
+            if paren_depth == 0 and open_index is not None:
+                top_level_parens.append((open_index, token_index))
+                open_index = None
+        elif not (paren_depth or bracket_depth or angle_depth) and token == "=":
+            top_level_initializer = True
+    if (top_level_initializer or paren_depth or bracket_depth or angle_depth or
+            not top_level_parens):
+        return False
+
+    # An ordinary field's template function type has its parentheses nested
+    # beneath '<...>', so it never reaches this branch. For a true method the
+    # final completed top-level pair has a callable name immediately before it.
+    signature_open, _ = top_level_parens[-1]
+    before = tokens[:signature_open]
+    callable_name = before[-1] if before else ""
+    return (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", callable_name) is not None or
+            callable_name == ")")
+
+
 def extract_cxx_class_data_members(text: str, class_name: str) -> list[str]:
     """Enumerate direct data-member declarations in one C++ class definition."""
     masked = _mask_cxx_comments_and_literals(text)
@@ -1503,9 +1562,8 @@ def extract_cxx_class_data_members(text: str, class_name: str) -> list[str]:
         char = body[index]
         if char == "{" and initializer_depth == 0:
             prefix = "".join(statement)
-            declaration_head = prefix.split("=", 1)[0]
-            is_type_body = re.search(r"\b(?:class|struct|union|enum)\b", declaration_head)
-            is_function_body = "(" in declaration_head
+            is_type_body = re.search(r"\b(?:class|struct|union|enum)\b", prefix)
+            is_function_body = _cxx_prefix_has_method_parameter_list(prefix)
             if is_type_body or is_function_body:
                 nested = 1
                 index += 1
@@ -1563,8 +1621,12 @@ def audit_langoptions(def_path: Path, header_path: Path, contract: dict) -> dict
             set(actual_manual_fields) != set(expected_manual_fields)):
         missing = sorted(set(expected_manual_fields) - set(actual_manual_fields))
         extra = sorted(set(actual_manual_fields) - set(expected_manual_fields))
+        duplicates = sorted({name for name in actual_manual_fields
+                             if actual_manual_fields.count(name) > 1})
         raise ProvisionError(
-            f"LangOptions.h direct manual member inventory mismatch: missing={missing}, extra={extra}"
+            "LangOptions.h direct manual member inventory mismatch: "
+            f"count={len(actual_manual_fields)} expected={spec['manualFieldsCount']}, "
+            f"duplicates={duplicates}, missing={missing}, extra={extra}"
         )
     return {
         "inventoryEvidence": spec["inventoryEvidence"],
