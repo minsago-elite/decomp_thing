@@ -2,7 +2,7 @@ package decompengine.web
 
 import com.sun.net.httpserver.HttpExchange
 import kotlinx.serialization.json.*
-import java.time.Instant
+import java.time.Clock
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
@@ -14,6 +14,7 @@ internal class WebEventStream(
     private val read: (String, String) -> ByteArray,
     private val pollMs: Long = 1000,
     private val heartbeatMs: Long = 15_000,
+    private val clock: Clock = Clock.systemUTC(),
 ) {
     init { require(pollMs in 1..1000 && heartbeatMs in 1..15_000) }
 
@@ -76,7 +77,7 @@ internal class WebEventStream(
                     write(webSseFrame(buildJsonObject {
                         put("apiVersion", 1); put("kind", "event"); put("type", "retention.gap")
                         put("jobId", jobId); put("runId", runId); put("cursor", JsonNull); put("sequence", JsonNull)
-                        put("occurredAt", Instant.now().toString()); put("originRequestId", JsonNull)
+                        put("occurredAt", clock.instant().toString()); put("originRequestId", JsonNull)
                         put("agentInvocationId", JsonNull); put("agentSequence", JsonNull)
                         put("payload", buildJsonObject {
                             put("requestedCursor", cursor)
