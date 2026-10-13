@@ -1,7 +1,7 @@
 {
   "historicalStartingCount": 43,
   "kind": "kotlin-oracle-schema-inventory",
-  "schemaCount": 78,
+  "schemaCount": 79,
   "schemaInventoryVersion": 1,
   "schemas": [
     {
