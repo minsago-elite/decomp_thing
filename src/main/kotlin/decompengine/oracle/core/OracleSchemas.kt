@@ -358,6 +358,7 @@ object OracleSchemas {
         "llvm-behavior-candidate-observations",
         "llvm-behavior-case-ownership",
         "llvm-behavior-comparison-assessment",
+        "llvm-behavior-mismatch-ledger-v1",
         "llvm-behavior-hosted-clean-build-v2",
         "llvm-behavior-reference-input-plan-v2",
         "llvm-behavior-runtime-preflight",

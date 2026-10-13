@@ -1,0 +1,370 @@
+package decompengine.project
+
+import decompengine.analysis.ANALYSIS_PROCESS_LAUNCH_EXECUTOR
+import decompengine.analysis.AnalysisDeadline
+import decompengine.analysis.BundledGhidraVerificationProcess
+import decompengine.analysis.GhidraAnalysisException
+import decompengine.oracle.fulltree.inControlTemporaryDirectory
+import java.nio.file.Files
+import java.nio.file.Path
+import java.time.Duration
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.io.path.readBytes
+import kotlin.io.path.readText
+import kotlin.io.path.writeBytes
+import kotlin.test.Test
+import kotlin.test.assertContentEquals
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertIs
+import kotlin.test.assertTrue
+
+class GhidraExportLaunchTest {
+    @Test
+    fun `shared deadline refuses blocked process launch before it returns and preserves prior evidence`(): Unit =
+        inControlTemporaryDirectory { root ->
+            val reports = root.resolve("analysis/reports")
+            Files.createDirectories(reports)
+            val model = reports.resolve("program_model.json")
+            val report = reports.resolve("ghidra_analysis.json")
+            val previous = "prior accepted evidence\n".toByteArray()
+            model.writeBytes(previous)
+            report.writeBytes(previous)
+            val entered = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            val launched = CompletableFuture<Process>()
+            val failure = AtomicReference<Throwable?>()
+            val analyzer = GhidraHeadlessProgramModelAnalyzer(
+                { listOf("/bin/sleep", "30") },
+                GhidraProgramModelExportLimits(wallClockTimeout = Duration.ofSeconds(5), terminationGrace = Duration.ZERO),
+                processStarter = { command, work ->
+                    entered.countDown()
+                    awaitIgnoringInterrupts(release)
+                    ProcessBuilder(command).directory(work.toFile()).start().also(launched::complete)
+                },
+            )
+            val caller = Thread {
+                try {
+                    analyzer.analyzeWithDeadline(root.resolve("authored-input"), root.resolve("analysis"),
+                        AnalysisDeadline.start(TimeUnit.MILLISECONDS.toNanos(250), "launch parent"))
+                } catch (caught: Throwable) {
+                    failure.set(caught)
+                }
+            }
+            try {
+                caller.start()
+                assertTrue(entered.await(2, TimeUnit.SECONDS), "process launch did not start")
+                caller.join(1_500)
+                assertFalse(caller.isAlive, "caller remained inside processStarter after its admitted deadline")
+                assertIs<GhidraAnalysisException>(failure.get())
+                assertContentEquals(previous, model.readBytes())
+                assertContentEquals(previous, report.readBytes())
+            } finally {
+                release.countDown()
+                caller.join(2_000)
+                try {
+                    val process = launched.get(2, TimeUnit.SECONDS)
+                    try {
+                        process.onExit().get(2, TimeUnit.SECONDS)
+                        assertFalse(process.isAlive, "late export worker survived cancellation")
+                    } finally {
+                        ensureStopped(process)
+                    }
+                    assertContentEquals(previous, model.readBytes())
+                    assertContentEquals(previous, report.readBytes())
+                } finally {
+                    awaitLaunchPoolIdle()
+                }
+            }
+        }
+
+    @Test
+    fun `expired parent never activates an already started worker whose handle is withheld`(): Unit =
+        inControlTemporaryDirectory { root ->
+            val fixture = GatedExportFixture(root)
+            val starter = BlockedStartedWorker()
+            val caller = ExportCall {
+                fixture.analyzer(starter::start).analyzeWithDeadline(fixture.input, fixture.work, deadline(250))
+            }
+            try {
+                caller.thread.start()
+                assertTrue(starter.entered.await(2, TimeUnit.SECONDS), "gated worker did not reach its stdin wait")
+                assertTrue(starter.launched.get(2, TimeUnit.SECONDS).isAlive, "fixture worker did not remain gated")
+                caller.assertFailure<GhidraAnalysisException>()
+                fixture.assertPriorEvidence()
+            } finally {
+                starter.release.countDown()
+                caller.thread.join(2_000)
+                try {
+                    starter.assertLateWorkerReaped()
+                    fixture.assertPriorEvidence()
+                } finally {
+                    awaitLaunchPoolIdle()
+                }
+            }
+        }
+
+    @Test
+    fun `budget binding preserves the custom starter and permit for a timely canonical export`(): Unit =
+        inControlTemporaryDirectory { root ->
+            val fixture = GatedExportFixture(root)
+            val starts = AtomicInteger()
+            val launched = AtomicReference<Process?>()
+            val analyzer = fixture.analyzer { command, work ->
+                starts.incrementAndGet()
+                ProcessBuilder(command).directory(work.toFile()).start().also { process ->
+                    launched.set(process)
+                    assertWorkerReady(process)
+                    fixture.assertPriorEvidence()
+                }
+            }.withExportBudgets(GeneratedCMakeReconstructionProfile.descriptor.budgets.copy(
+                exportWallClockMillis = 3_000,
+                exportMaximumResidentBytes = 64L * 1024 * 1024,
+            ))
+            try {
+                val actual = analyzer.analyzeWithDeadline(fixture.input, fixture.work, deadline(5_000))
+
+                assertEquals(fixture.expected, actual)
+                assertEquals(1, starts.get(), "budget binding discarded the custom process starter")
+                assertContentEquals(fixture.canonicalBytes, fixture.model.readBytes())
+                assertEquals("activated\n", fixture.activation.readText())
+                assertEquals("new analysis evidence\n", fixture.report.readText())
+                val usage = fixture.work.resolve("reports/ghidra_resource_usage.json").readText()
+                assertTrue(usage.contains("\"wallClockMillisLimit\":3000"))
+                assertTrue(usage.contains("\"maximumResidentBytesLimit\":67108864"))
+                assertFalse(checkNotNull(launched.get()).isAlive)
+            } finally {
+                try {
+                    launched.get()?.let(::ensureStopped)
+                } finally {
+                    awaitLaunchPoolIdle()
+                }
+            }
+        }
+
+    @Test
+    fun `caller interruption abandons withheld handle without activating its late worker`(): Unit =
+        inControlTemporaryDirectory { root ->
+            val fixture = GatedExportFixture(root)
+            val starter = BlockedStartedWorker()
+            val caller = ExportCall {
+                fixture.analyzer(starter::start).analyzeWithDeadline(fixture.input, fixture.work, deadline(5_000))
+            }
+            try {
+                caller.thread.start()
+                assertTrue(starter.entered.await(2, TimeUnit.SECONDS), "gated worker did not reach its stdin wait")
+                caller.thread.interrupt()
+                caller.assertFailure<InterruptedException>()
+                fixture.assertPriorEvidence()
+            } finally {
+                starter.release.countDown()
+                caller.thread.join(2_000)
+                try {
+                    starter.assertLateWorkerReaped()
+                    fixture.assertPriorEvidence()
+                } finally {
+                    awaitLaunchPoolIdle()
+                }
+            }
+        }
+
+    @Test
+    fun `two abandoned launchers reject further export and verifier admission until late cleanup`(): Unit =
+        inControlTemporaryDirectory { root ->
+            val fixtures = List(2) { GatedExportFixture(root.resolve("worker-$it")) }
+            val starters = List(2) { BlockedStartedWorker() }
+            val callers = fixtures.zip(starters).map { (fixture, starter) ->
+                ExportCall {
+                    fixture.analyzer(starter::start).analyzeWithDeadline(fixture.input, fixture.work, deadline(250))
+                }
+            }
+            val unexpectedExportStart = AtomicBoolean()
+            val unexpectedVerifierStart = AtomicBoolean()
+            val thirdFixture = GatedExportFixture(root.resolve("rejected-worker"))
+            val rejectedExport = ExportCall {
+                thirdFixture.analyzer { _, _ ->
+                    unexpectedExportStart.set(true)
+                    error("saturated pool must reject before starting another export")
+                }.analyzeWithDeadline(thirdFixture.input, thirdFixture.work, deadline(5_000))
+            }
+            val verifier = BundledGhidraVerificationProcess(
+                commandFactory = { listOf("/bin/false") },
+                processStarter = { _, _ ->
+                    unexpectedVerifierStart.set(true)
+                    error("saturated shared pool must reject before starting the verifier")
+                },
+                maximumWallMillis = 5_000,
+            )
+            val rejectedVerifier = ExportCall { verifier.verifyAndGetLibraries(root) {} }
+            try {
+                callers.forEach { it.thread.start() }
+                starters.forEach { starter ->
+                    assertTrue(starter.entered.await(2, TimeUnit.SECONDS), "both launch slots must be occupied")
+                }
+                callers.forEach { it.assertFailure<GhidraAnalysisException>() }
+                fixtures.forEach { it.assertPriorEvidence() }
+                // Expired callers must leave their uninterruptible launch tasks occupying the fixed cap.
+                for (rejected in listOf(rejectedExport, rejectedVerifier)) {
+                    rejected.thread.start()
+                    val failure = rejected.assertFailure<GhidraAnalysisException>(1_000)
+                    assertTrue(failure.message.orEmpty().contains("launch capacity is exhausted"))
+                }
+                assertFalse(unexpectedExportStart.get())
+                assertFalse(unexpectedVerifierStart.get())
+                thirdFixture.assertPriorEvidence()
+            } finally {
+                starters.forEach { it.release.countDown() }
+                (callers + rejectedExport + rejectedVerifier).forEach { caller ->
+                    if (caller.thread.isAlive) caller.thread.interrupt()
+                    caller.thread.join(2_000)
+                }
+                // Release every starter even when one assertion fails, then reap every real worker.
+                try {
+                    try {
+                        starters[0].assertLateWorkerReaped()
+                    } finally {
+                        starters[1].assertLateWorkerReaped()
+                    }
+                    (fixtures + thirdFixture).forEach { it.assertPriorEvidence() }
+                } finally {
+                    awaitLaunchPoolIdle()
+                }
+            }
+        }
+
+    private class GatedExportFixture(root: Path) {
+        val work = root.resolve("analysis")
+        val input = root.resolve("authored-input")
+        val model = work.resolve("reports/program_model.json")
+        val report = work.resolve("reports/ghidra_analysis.json")
+        val activation = root.resolve("activation-marker")
+        private val canonical = root.resolve("canonical-model.json")
+        private val prior = "prior accepted evidence\n".toByteArray()
+        private val inactive = "not activated\n".toByteArray()
+        private val inputBytes = "authored local input\n".toByteArray()
+        val expected = RecoveredProgramModel(
+            inputSha256 = sha256(inputBytes),
+            functions = listOf(RecoveredFunction(
+                id = "fn_authored", name = "authored", address = 0x401000UL,
+                prototype = "int authored(void)", decompiledC = "int authored(void) { return 7; }\n",
+            )),
+        )
+        val canonicalBytes = expected.toJson().toByteArray()
+
+        init {
+            Files.createDirectories(model.parent)
+            input.writeBytes(inputBytes)
+            canonical.writeBytes(canonicalBytes)
+            model.writeBytes(prior)
+            report.writeBytes(prior)
+            activation.writeBytes(inactive)
+        }
+
+        fun analyzer(starter: (List<String>, Path) -> Process) = GhidraHeadlessProgramModelAnalyzer(
+            commandFactory = { invocation ->
+                assertEquals(model.toAbsolutePath().normalize(), Path.of(invocation.postScripts.single().arguments.last()))
+                listOf("/bin/sh", "-c", """
+                    printf 'ready\n'
+                    IFS= read -r permit || exit 70
+                    [ "${'$'}permit" = 1 ] || exit 71
+                    printf 'activated\n' > "${'$'}1"
+                    cp "${'$'}2" "${'$'}3"
+                    printf 'new analysis evidence\n' > "${'$'}4"
+                """.trimIndent(), "gated-export", activation.toString(), canonical.toString(), model.toString(), report.toString())
+            },
+            limits = GhidraProgramModelExportLimits(wallClockTimeout = Duration.ofSeconds(5), terminationGrace = Duration.ZERO),
+            processStarter = starter,
+            requiresLaunchPermit = true,
+        )
+
+        fun assertPriorEvidence() {
+            assertContentEquals(prior, model.readBytes())
+            assertContentEquals(prior, report.readBytes())
+            assertContentEquals(inactive, activation.readBytes())
+        }
+    }
+
+    private class BlockedStartedWorker {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val launched = CompletableFuture<Process>()
+
+        fun start(command: List<String>, work: Path): Process {
+            val process = ProcessBuilder(command).directory(work.toFile()).start()
+            launched.complete(process)
+            assertWorkerReady(process)
+            entered.countDown()
+            awaitIgnoringInterrupts(release)
+            return process
+        }
+
+        fun assertLateWorkerReaped() {
+            val process = launched.get(2, TimeUnit.SECONDS)
+            try {
+                process.onExit().get(2, TimeUnit.SECONDS)
+                assertFalse(process.isAlive, "late gated worker survived cancellation")
+                assertFalse(ProcessHandle.of(process.pid()).map { it.isAlive }.orElse(false), "late PID remains live")
+            } finally {
+                ensureStopped(process)
+            }
+        }
+    }
+
+    private class ExportCall(operation: () -> Any) {
+        val failure = AtomicReference<Throwable?>()
+        val elapsedNanos = AtomicLong()
+        val thread = Thread {
+            val started = System.nanoTime()
+            try {
+                operation()
+            } catch (caught: Throwable) {
+                failure.set(caught)
+            } finally {
+                elapsedNanos.set(System.nanoTime() - started)
+            }
+        }
+
+        inline fun <reified T : Throwable> assertFailure(maximumMillis: Long = 2_000): T {
+            thread.join(maximumMillis - 100)
+            assertFalse(thread.isAlive, "caller did not return within its bounded launch allowance")
+            assertTrue(elapsedNanos.get() < TimeUnit.MILLISECONDS.toNanos(maximumMillis), "launch did not return promptly")
+            return assertIs<T>(failure.get())
+        }
+    }
+
+    private companion object {
+        fun deadline(milliseconds: Long) = AnalysisDeadline.start(TimeUnit.MILLISECONDS.toNanos(milliseconds), "launch parent")
+
+        fun assertWorkerReady(process: Process) {
+            assertContentEquals("ready\n".toByteArray(), process.inputStream.readNBytes(6), "shell did not reach the permit gate")
+        }
+
+        fun ensureStopped(process: Process) {
+            if (process.isAlive) process.destroyForcibly()
+            assertTrue(process.waitFor(2, TimeUnit.SECONDS), "fixture process could not be reaped")
+        }
+
+        fun awaitLaunchPoolIdle() {
+            val pool = ANALYSIS_PROCESS_LAUNCH_EXECUTOR as ThreadPoolExecutor
+            val end = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            while (pool.activeCount != 0 && System.nanoTime() < end) Thread.yield()
+            assertEquals(0, pool.activeCount, "late launch cleanup must finish before another test begins")
+        }
+
+        fun awaitIgnoringInterrupts(latch: CountDownLatch) {
+            val end = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+            while (latch.count != 0L) {
+                val remaining = end - System.nanoTime()
+                check(remaining > 0) { "fixture launch was not released" }
+                try { latch.await(remaining, TimeUnit.NANOSECONDS) } catch (_: InterruptedException) { }
+            }
+        }
+    }
+}

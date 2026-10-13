@@ -580,6 +580,15 @@
     },
     {
       "formatVersions": [
+        1
+      ],
+      "name": "llvm-behavior-mismatch-ledger-v1",
+      "path": "oracle/llvm-behavior-mismatch-ledger-v1.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "a9c7084456e726b59dba6272df45f6fc5fcca753135dbe926475f8d91750efcd"
+    },
+    {
+      "formatVersions": [
         2
       ],
       "name": "llvm-behavior-native-sandbox-policy-v2",
@@ -716,5 +725,5 @@
       "scopeNote": "Retained format; no current Kotlin OracleSchemas consumer is registered for it."
     }
   ],
-  "sharedCatalogCount": 73
+  "sharedCatalogCount": 74
 }

@@ -1,0 +1,475 @@
+package decompengine.oracle.fulltree
+
+import decompengine.oracle.core.OracleJson
+import java.nio.ByteBuffer
+import java.security.MessageDigest
+import kotlin.test.Test
+import kotlin.test.assertContentEquals
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
+import kotlin.test.assertTrue
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+
+class BoundedDwarfObservationInventoryTest {
+    @Test
+    fun `all physical interface roots survive including conflicting lists and automatic variables`() {
+        val returnType = known("t-return", "return-type")
+        val first = parameter("p-first", 0, known("t-first", "first-type"))
+        val second = parameter("p-second", 1, known("t-second", "second-type"))
+        val alternative = parameter("p-alternative", 0, known("t-alternative", "alternative-type"))
+        val unmatched = parameter("p-unmatched", 2, known("t-unmatched", "unmatched-type"))
+        val globalType = known("t-global", "global-type")
+        val automaticType = known("t-automatic", "automatic-type", "type-graph-not-expanded-for-automatic-local")
+        val input = facts(functions = listOf(function("f", returnType,
+            parameters = listOf(first, unmatched), parameterLists = listOf(
+                DwarfInterfaceParameterList("list-definition", listOf(first, second), absent()),
+                DwarfInterfaceParameterList("list-declaration", listOf(alternative), absent()),
+            ))), globals = listOf(variable("global", globalType), variable("automatic", automaticType, "automatic")))
+
+        val inventory = collect(input)
+        val roots = records(inventory, "inventoryRoots")
+        assertEquals(7, roots.size)
+        assertEquals(listOf(returnType, first.type, second.type, alternative.type, unmatched.type, globalType, automaticType)
+            .map { it.toJson(::JsonPrimitive) }.toSet(), roots.map { it.getValue("typeFact") }.toSet())
+        assertEquals(1, roots.count { string(it, "ownerKind") == "function-return" })
+        assertEquals(3, roots.count { string(it, "ownerKind") == "function-parameter" })
+        assertEquals(1, roots.count { string(it, "ownerKind") == "selected-parameter-unmatched" })
+        assertEquals(2, roots.count { string(it, "ownerKind") == "variable" })
+        val candidates = roots.filter { string(it, "ownerKind") == "function-parameter" }
+        assertEquals(listOf("list-definition", "list-definition", "list-declaration"),
+            candidates.map { string(it, "parameterListLocator") })
+        assertEquals(listOf("0", "1", "0"), candidates.map { string(it, "parameterOrdinal") })
+        roots.filter { string(it, "ownerKind") in setOf("function-return", "variable") }.forEach {
+            assertEquals(JsonNull, it["parameterListLocator"])
+            assertEquals(JsonNull, it["parameterOrdinal"])
+        }
+        val automatic = roots.single { it["typeFact"] == automaticType.toJson(::JsonPrimitive) }
+        assertEquals("deferred", string(array(automatic, "candidates").single() as JsonObject, "availability"))
+        assertFalse(boolean(inventory.manifest, "requiredTypePopulationComplete"))
+    }
+
+    @Test
+    fun `ambiguous deferred missing and materialized references retain distinct evidence`() {
+        val ambiguous = DwarfInterfaceFact(DwarfInterfaceFactState.AMBIGUOUS,
+            listOf("present", "missing"), listOf("definition", "declaration"), listOf("conflicting-declarations"))
+        val deferred = known("deferred", "automatic-local", "type-graph-not-expanded-for-automatic-local")
+        val materializedDeferred = known("present", "deferred-edge", "type-reference-not-expanded:abi-layout")
+        val input = facts(functions = listOf(function("f", ambiguous)), globals = listOf(
+            variable("automatic", deferred, "automatic"), variable("materialized", materializedDeferred),
+            variable("absent", absent()), variable("unknown", DwarfInterfaceFact(DwarfInterfaceFactState.UNKNOWN,
+                evidence = listOf("supplementary"), reasons = listOf("unsupported-reference-form"))),
+        ), types = listOf(type("present")))
+        val inventory = collect(input)
+        val roots = records(inventory, "inventoryRoots")
+        val ambiguousRoot = roots.single { it["typeFact"] == ambiguous.toJson(::JsonPrimitive) }
+        assertEquals(listOf("present", "missing"), array(ambiguousRoot, "candidates").map {
+            string(it as JsonObject, "targetId")
+        })
+        assertEquals(listOf("materialized", "missing"), array(ambiguousRoot, "candidates").map {
+            string(it as JsonObject, "availability")
+        })
+        val materialized = roots.single { it["typeFact"] == materializedDeferred.toJson(::JsonPrimitive) }
+        assertEquals("materialized", string(array(materialized, "candidates").single() as JsonObject, "availability"))
+        val codes = records(inventory, "inventoryFindings").map { string(it, "code") }.toSet()
+        assertTrue(codes.containsAll(setOf("reference-state-ambiguous", "reference-state-absent",
+            "reference-state-unknown", "reference-target-missing:missing", "reference-target-deferred:deferred",
+            "required-type-population-unresolved")))
+    }
+
+    @Test
+    fun `cycles and containing type edges survive without claiming member completeness`() {
+        val cycle = known("self", "member-type", "type-reference-cycle:self")
+        val child = DwarfInterfaceTypeChild("member", 0x0dL, known("same", "member-name"), cycle,
+            mapOf(0x49L to cycle, 0x1dL to known("container", "member-containing-type")), emptyList())
+        val method = DwarfInterfaceTypeChild("method", 0x2eL, known("same", "method-name"), absent(),
+            emptyMap(), listOf("unsupported-type-child-layout"))
+        val input = facts(types = listOf(type("self", target = cycle,
+            attributes = mapOf(0x49L to cycle, 0x1dL to known("container", "containing-type")),
+            children = listOf(child, method)), type("container")))
+        val inventory = collect(input)
+        val edges = records(inventory, "inventoryReferences")
+        assertTrue(edges.any { string(it, "ownerKind") == "type" && string(it, "relation") == "containing-type" &&
+            string(it, "ownerLocator") == "self" })
+        assertTrue(edges.any { string(it, "ownerKind") == "type-child" && string(it, "relation") == "containing-type" &&
+            string(it, "ownerLocator") == "member" && string(it, "parentTypeId") == "self" })
+        assertTrue(edges.any { it["typeFact"] == cycle.toJson(::JsonPrimitive) })
+        assertTrue(records(inventory, "inventoryFindings").any { string(it, "code") == "reference-cycle" })
+        val completeness = records(inventory, "inventoryTypeCompleteness")
+        assertEquals(2, completeness.size)
+        val self = completeness.single { string(it, "ownerTypeId") == "self" }
+        assertEquals("2", string(self, "observedChildCount"))
+        assertEquals("1", string(self, "observedDirectMemberCount"))
+        completeness.forEach {
+            assertEquals(JsonNull, it["requiredMemberCardinality"])
+            assertFalse(boolean(it, "complete"))
+        }
+    }
+
+    @Test
+    fun `equal names and shapes never deduplicate physical types or roots`() {
+        val input = facts(functions = listOf(function("f-one", known("type-one", "type-use-one")),
+            function("f-two", known("type-two", "type-use-two"))),
+            types = listOf(type("type-one"), type("type-two")))
+        val inventory = collect(input)
+        assertEquals(setOf("type-one", "type-two"), records(inventory, "inventoryTypeCompleteness")
+            .map { string(it, "ownerTypeId") }.toSet())
+        assertEquals(setOf("f-one", "f-two"), records(inventory, "inventoryRoots")
+            .map { string(it, "ownerLocator") }.toSet())
+        assertEquals("2", string(commitments(inventory, "rawCommitments").getValue("types"), "recordCount"))
+        assertEquals("2", string(commitments(inventory, "rawCommitments").getValue("functions"), "recordCount"))
+    }
+
+    @Test
+    fun `canonical commitments normalize type map and input role order`() {
+        val one = facts(types = listOf(type("z"), type("a")))
+        val two = facts(types = listOf(type("a"), type("z")))
+        val inputs = listOf(richInput(), BoundedDwarfObservationInput("stripped", STRIPPED_SHA, 2L))
+        val first = collect(one, inputs = inputs)
+        val second = collect(two, inputs = inputs.reversed())
+        assertEquals(first.manifest, second.manifest)
+        val firstShards = shards(first)
+        val secondShards = shards(second)
+        assertEquals(firstShards.size, secondShards.size)
+        firstShards.zip(secondShards).forEach { (a, b) -> assertContentEquals(a, b) }
+    }
+
+    @Test
+    fun `raw and derived commitments use framed ordered canonical records`() {
+        val input = facts(functions = listOf(function("f", known("t", "return"))), types = listOf(type("t")))
+        val inventory = collect(input)
+        val raw = linkedMapOf<String, MutableList<JsonObject>>()
+        input.visitCanonicalShards { kind, ordinal, bytes, count ->
+            raw.getOrPut(kind, ::mutableListOf) += parseCanonicalDwarfShard(bytes,
+                expectedKind = kind, expectedOrdinal = ordinal, expectedRecordCount = count).records
+        }
+        val rawCommitments = commitments(inventory, "rawCommitments")
+        raw.forEach { (kind, records) -> assertCommitment(kind,
+            if (kind == "metadata") records.map(::semanticMetadata) else records, rawCommitments.getValue(kind)) }
+        val derivedCommitments = commitments(inventory, "inventoryCommitments")
+        derivedCommitments.forEach { (kind, commitment) -> assertCommitment(kind, records(inventory, kind), commitment) }
+    }
+
+    @Test
+    fun `raw provenance and stripped layout mutations change the inventory identity`() {
+        val original = facts(functions = listOf(function("f", known("t", "original-evidence"))), types = listOf(type("t")))
+        val changed = facts(functions = listOf(function("f", known("t", "replacement-evidence"))), types = listOf(type("t")))
+        val first = collect(original)
+        val second = collect(changed)
+        assertNotEquals(first.manifest["inventorySha256"], second.manifest["inventorySha256"])
+        assertNotEquals(commitments(first, "rawCommitments").getValue("functions")["sha256"],
+            commitments(second, "rawCommitments").getValue("functions")["sha256"])
+        val inputs = listOf(richInput(), BoundedDwarfObservationInput("stripped", STRIPPED_SHA, 2L))
+        val layoutOne = collect(original, inputs = inputs, strippedLayout = layout(0))
+        val layoutTwo = collect(original, inputs = inputs, strippedLayout = layout(1))
+        assertNotEquals(layoutOne.manifest["inventorySha256"], layoutTwo.manifest["inventorySha256"])
+        val objectOne = collect(original, inputs = inputs, strippedObjects = listOf(symbol("table:1", "first")))
+        val objectTwo = collect(original, inputs = inputs, strippedObjects = listOf(symbol("table:1", "second")))
+        assertNotEquals(objectOne.manifest["inventorySha256"], objectTwo.manifest["inventorySha256"])
+    }
+
+    @Test
+    fun `source identities reject mismatched rich facts and unbound stripped observations`() {
+        val input = facts()
+        val invalid = listOf(emptyList(), listOf(BoundedDwarfObservationInput("rich", STRIPPED_SHA, 1L)),
+            listOf(BoundedDwarfObservationInput("rich", RICH_SHA, 2L)), listOf(richInput(), richInput()))
+        invalid.forEach { inputs -> assertFailsWith<IllegalArgumentException> { collect(input, inputs = inputs) } }
+        assertFailsWith<IllegalArgumentException> { collect(input, strippedLayout = layout(0)) }
+        assertFailsWith<IllegalArgumentException> { collect(input, strippedObjects = listOf(symbol("table:1", "object"))) }
+    }
+
+    @Test
+    fun `empty observations still emit explicit groups and unresolved population finding`() {
+        val inventory = collect(facts())
+        val observed = mutableListOf<Pair<String, Int>>()
+        inventory.visitCanonicalShards { kind, ordinal, bytes, count ->
+            val shard = parseCanonicalDwarfShard(bytes, expectedKind = kind, expectedOrdinal = ordinal,
+                expectedRecordCount = count)
+            observed += kind to shard.recordCount
+        }
+        assertEquals(setOf("inventoryRoots", "inventoryReferences", "inventoryTypeCompleteness",
+            "inventoryFindings", "inventorySelections"), observed.map { it.first }.toSet())
+        assertEquals(0, records(inventory, "inventoryRoots").size)
+        assertEquals(0, records(inventory, "inventoryReferences").size)
+        assertEquals(0, records(inventory, "inventoryTypeCompleteness").size)
+        assertEquals(0, records(inventory, "inventorySelections").size)
+        assertTrue(records(inventory, "inventoryFindings").any { string(it, "code") == "required-type-population-unresolved" })
+        assertFalse(boolean(inventory.manifest, "requiredTypePopulationComplete"))
+    }
+
+    @Test
+    fun `verifier binds raw and inventory streams and rejects missing reordered repeated or altered records`() {
+        val input = facts(functions = listOf(function("f", known("t", "return"))), types = listOf(type("t")))
+        val inventory = collect(input)
+        val stream = stream(input, inventory)
+        verify(inventory.manifest, stream)
+        assertFailsWith<IllegalArgumentException> { verify(inventory.manifest, stream.dropLast(1)) }
+        assertFailsWith<IllegalArgumentException> { verify(inventory.manifest, stream.reversed()) }
+        assertFailsWith<IllegalArgumentException> { verify(inventory.manifest, listOf(stream.first()) + stream) }
+        val rootShard = stream.single { it.kind == "inventoryRoots" }
+        val altered = replaceGroup(stream, "inventoryRoots", rootShard.records.map {
+            JsonObject(it + ("ownerLocator" to JsonPrimitive("different-physical-function")))
+        })
+        assertFailsWith<IllegalArgumentException> { verify(inventory.manifest, altered) }
+        val extendedRoots = rootShard.records.map { JsonObject(it + ("accepted" to JsonPrimitive(true))) }
+        val extendedManifest = replaceCommitment(inventory.manifest, "inventoryCommitments", "inventoryRoots", extendedRoots)
+        val schemaFailure = assertFailsWith<IllegalArgumentException> {
+            verify(extendedManifest, replaceGroup(stream, "inventoryRoots", extendedRoots))
+        }
+        assertTrue(schemaFailure.message.orEmpty().contains("closed schema"))
+        val verifier = BoundedDwarfObservationInventoryV1.verifier(inventory.manifest)
+        verifier.acceptStrippedLayout(null)
+        stream.forEach { verifier.accept(it.kind, it.ordinal, it.bytes, it.records.size) }
+        verifier.finish()
+        assertFailsWith<IllegalArgumentException> { verifier.finish() }
+    }
+
+    @Test
+    fun `rehashed empty and duplicate metadata cannot bypass the rich input identity`() {
+        val input = facts()
+        val inventory = collect(input)
+        val stream = stream(input, inventory)
+        val original = stream.single { it.kind == "metadata" }.records.single()
+        for (records in listOf(emptyList(), listOf(original, original))) {
+            val changed = replaceGroup(stream, "metadata", records)
+            val manifest = replaceCommitment(inventory.manifest, "rawCommitments", "metadata", records.map(::semanticMetadata))
+            val failure = assertFailsWith<IllegalArgumentException> { verify(manifest, changed) }
+            assertTrue(failure.message.orEmpty().contains("exactly one raw metadata record"))
+        }
+        val wrongInput = JsonObject(original + ("inputSha256" to JsonPrimitive(STRIPPED_SHA)))
+        val changed = replaceGroup(stream, "metadata", listOf(wrongInput))
+        val manifest = replaceCommitment(inventory.manifest, "rawCommitments", "metadata", listOf(semanticMetadata(wrongInput)))
+        assertFailsWith<IllegalArgumentException> { verify(manifest, changed) }
+    }
+
+    @Test
+    fun `rehashed stripped objects without an input binding fail even with no layout`() {
+        val input = facts()
+        val objects = listOf(symbol("table:1", "object"))
+        val inventory = collect(input, inputs = listOf(richInput(), BoundedDwarfObservationInput("stripped", STRIPPED_SHA, 2)),
+            strippedObjects = objects)
+        val stream = stream(input, inventory, objects)
+        verify(inventory.manifest, stream)
+        val manifest = rehash(JsonObject(inventory.manifest + ("inputs" to JsonArray(listOf(richInput().toJson())))))
+        val failure = assertFailsWith<IllegalArgumentException> { verify(manifest, stream) }
+        assertTrue(failure.message.orEmpty().contains("missing stripped input binding"))
+    }
+
+    @Test
+    fun `closed manifest counts and stripped layout remain bound after digest recomputation`() {
+        val input = facts()
+        val inventory = collect(input, inputs = listOf(richInput(), BoundedDwarfObservationInput("stripped", STRIPPED_SHA, 2)),
+            strippedLayout = layout(0))
+        val stream = stream(input, inventory)
+        verify(inventory.manifest, stream, layout(0).toJson())
+        assertFailsWith<IllegalArgumentException> { verify(inventory.manifest, stream, layout(1).toJson()) }
+        val extra = rehash(JsonObject(inventory.manifest + ("extraAuthority" to JsonPrimitive(true))))
+        assertFailsWith<IllegalArgumentException> { verify(extra, stream, layout(0).toJson()) }
+        val counts = inventory.manifest.getValue("counts") as JsonObject
+        val wrongCount = rehash(JsonObject(inventory.manifest + ("counts" to JsonObject(counts + ("variableRoots" to JsonPrimitive(1))))))
+        assertFailsWith<IllegalArgumentException> { verify(wrongCount, stream, layout(0).toJson()) }
+        val falseComplete = rehash(JsonObject(inventory.manifest + ("requiredTypePopulationComplete" to JsonPrimitive(true))))
+        assertFailsWith<IllegalArgumentException> { verify(falseComplete, stream, layout(0).toJson()) }
+    }
+
+    @Test
+    fun `collection and verification enforce aggregate record byte node work and shard bounds`() {
+        val input = facts(functions = listOf(function("f", known("t", "return"))), types = listOf(type("t")))
+        val inventory = collect(input)
+        val stream = stream(input, inventory)
+        val canonicalRecords = stream.flatMap { shard ->
+            if (shard.kind == "metadata") shard.records.map(::semanticMetadata) else shard.records
+        } + JsonObject(mapOf("objectLayout" to JsonNull))
+        val recordCount = canonicalRecords.size.toLong()
+        val byteCount = canonicalRecords.sumOf { OracleJson.canonicalBytes(it).size.toLong() }
+        fun nodes(value: JsonElement): Long = 1L + when (value) {
+            is JsonObject -> value.values.sumOf(::nodes)
+            is JsonArray -> value.sumOf(::nodes)
+            else -> 0L
+        }
+        val nodeCount = canonicalRecords.sumOf(::nodes)
+        val exact = BoundedDwarfObservationInventoryLimits(maximumRecords = recordCount,
+            maximumCanonicalBytes = byteCount, maximumCanonicalNodes = nodeCount)
+        assertEquals(inventory.manifest, collect(input, limits = exact).manifest)
+        verify(inventory.manifest, stream, limits = exact)
+        for (limits in listOf(exact.copy(maximumRecords = recordCount - 1),
+            exact.copy(maximumCanonicalBytes = byteCount - 1), exact.copy(maximumCanonicalNodes = nodeCount - 1),
+            exact.copy(maximumWorkSteps = 1), exact.copy(maximumRecordBytes = 1), exact.copy(maximumRecordNodes = 1))) {
+            assertFailsWith<IllegalArgumentException> { collect(input, limits = limits) }
+            assertFailsWith<IllegalArgumentException> { verify(inventory.manifest, stream, limits = limits) }
+        }
+        val bounded = collect(input, limits = exact.copy(shardLimits = BoundedDwarfShardLimits(maximumShards = 1)))
+        assertFailsWith<IllegalArgumentException> { bounded.visitCanonicalShards { _, _, _, _ -> } }
+        assertFailsWith<IllegalArgumentException> {
+            verify(inventory.manifest, stream, limits = exact.copy(shardLimits = BoundedDwarfShardLimits(maximumShards = 1)))
+        }
+    }
+
+    private data class Shard(val kind: String, val ordinal: Int, val bytes: ByteArray, val records: List<JsonObject>)
+
+    private fun stream(input: BoundedDwarfInterfaceFacts, inventory: BoundedDwarfObservationInventory,
+                       objects: List<FullTreeElfObjectSymbol> = emptyList()): List<Shard> = buildList {
+        val retain: (String, Int, ByteArray, Int) -> Unit = { kind, ordinal, bytes, count ->
+            add(Shard(kind, ordinal, bytes, parseCanonicalDwarfShard(bytes, expectedKind = kind,
+                expectedOrdinal = ordinal, expectedRecordCount = count).records))
+        }
+        input.visitCanonicalShards(retain)
+        BoundedDwarfCanonicalShardWriter(consumer = retain).apply {
+            write("strippedObjects", objects.asSequence().map { it.toJson() }); finish()
+        }
+        inventory.visitCanonicalShards(retain)
+    }
+
+    private fun replaceGroup(stream: List<Shard>, kind: String, records: List<JsonObject>): List<Shard> {
+        val replacements = mutableListOf<Shard>()
+        BoundedDwarfCanonicalShardWriter { observedKind, ordinal, bytes, count ->
+            replacements += Shard(observedKind, ordinal, bytes, parseCanonicalDwarfShard(bytes,
+                expectedKind = kind, expectedOrdinal = ordinal, expectedRecordCount = count).records)
+        }.apply { write(kind, records.asSequence()); finish() }
+        val index = stream.indexOfFirst { it.kind == kind }
+        return stream.take(index) + replacements + stream.drop(index).filter { it.kind != kind }
+    }
+
+    private fun verify(manifest: JsonObject, stream: List<Shard>, layout: JsonObject? = null,
+                       limits: BoundedDwarfObservationInventoryLimits = BoundedDwarfObservationInventoryLimits()) {
+        val verifier = BoundedDwarfObservationInventoryV1.verifier(manifest, limits)
+        verifier.acceptStrippedLayout(layout)
+        stream.forEach { verifier.accept(it.kind, it.ordinal, it.bytes, it.records.size) }
+        verifier.finish()
+    }
+
+    private fun replaceCommitment(manifest: JsonObject, field: String, kind: String, records: List<JsonObject>): JsonObject =
+        rehash(JsonObject(manifest + (field to JsonArray(array(manifest, field).map { entry ->
+            if (string(entry as JsonObject, "kind") == kind) commitment(kind, records) else entry
+        }))))
+
+    private fun rehash(manifest: JsonObject): JsonObject {
+        val unsigned = JsonObject(manifest - "inventorySha256")
+        val hash = MessageDigest.getInstance("SHA-256").digest(OracleJson.canonicalBytes(unsigned))
+            .joinToString("") { "%02x".format(it.toInt() and 255) }
+        return JsonObject(unsigned + ("inventorySha256" to JsonPrimitive(hash)))
+    }
+
+    // Independent expected semantic projection: operational scan counters and ceilings are not observations.
+    private fun semanticMetadata(raw: JsonObject): JsonObject = JsonObject(linkedMapOf(
+        *listOf("schema", "inputSha256", "inputBytes", "elfType", "imageBase", "executableRanges", "dwarfPresent",
+            "recordCounts", "ordering", "typeChildEncoding", "typePromotedFactFallbacks", "typePromotedFactRule")
+            .map { it to raw.getValue(it) }.toTypedArray(),
+        "objectLayout" to raw.getValue("objectLayout").let { if (it == JsonNull) it else JsonObject((it as JsonObject) - "scannedSymbols") },
+        "typeGraphScope" to (raw.getValue("limits") as JsonObject).getValue("typeGraphScope"),
+    ))
+
+    private fun collect(
+        facts: BoundedDwarfInterfaceFacts,
+        inputs: List<BoundedDwarfObservationInput> = listOf(richInput()),
+        strippedObjects: List<FullTreeElfObjectSymbol> = emptyList(),
+        strippedLayout: FullTreeElfObjectLayoutObservation? = null,
+        selections: List<BoundedDwarfFunctionSelection> = emptyList(),
+        limits: BoundedDwarfObservationInventoryLimits = BoundedDwarfObservationInventoryLimits(),
+    ): BoundedDwarfObservationInventory = BoundedDwarfObservationInventoryV1.collect(
+        facts, strippedObjects, strippedLayout, inputs, selections, limits,
+    )
+
+    private fun records(inventory: BoundedDwarfObservationInventory, kind: String): List<JsonObject> {
+        val result = mutableListOf<JsonObject>()
+        inventory.visitCanonicalShards { observedKind, ordinal, bytes, count ->
+            val shard = parseCanonicalDwarfShard(bytes, expectedKind = observedKind, expectedOrdinal = ordinal,
+                expectedRecordCount = count)
+            if (kind == observedKind) result += shard.records
+        }
+        return result
+    }
+
+    private fun shards(inventory: BoundedDwarfObservationInventory): List<ByteArray> = buildList {
+        inventory.visitCanonicalShards { _, _, bytes, _ -> add(bytes) }
+    }
+
+    private fun commitments(inventory: BoundedDwarfObservationInventory, field: String): Map<String, JsonObject> =
+        array(inventory.manifest, field).map { it as JsonObject }.associateBy { string(it, "kind") }
+
+    private fun assertCommitment(kind: String, records: List<JsonObject>, commitment: JsonObject) {
+        assertEquals(commitment(kind, records), commitment, kind)
+    }
+
+    private fun commitment(kind: String, records: List<JsonObject>): JsonObject {
+        val digest = MessageDigest.getInstance("SHA-256")
+        digest.update("bounded-dwarf-observation-records-v1\n$kind\n".toByteArray(Charsets.UTF_8))
+        var totalBytes = 0L
+        records.forEach {
+            val bytes = OracleJson.canonicalBytes(it)
+            digest.update(1.toByte())
+            digest.update(ByteBuffer.allocate(8).putLong(bytes.size.toLong()).array())
+            digest.update(bytes)
+            totalBytes += bytes.size
+        }
+        digest.update(0.toByte())
+        digest.update(ByteBuffer.allocate(8).putLong(records.size.toLong()).array())
+        val hash = digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) }
+        return JsonObject(mapOf("kind" to JsonPrimitive(kind), "sha256" to JsonPrimitive(hash),
+            "recordCount" to JsonPrimitive(records.size), "canonicalBytes" to JsonPrimitive(totalBytes)))
+    }
+
+    private fun facts(
+        functions: List<DwarfInterfaceFunctionFacts> = emptyList(),
+        types: List<DwarfInterfaceTypeNode> = emptyList(),
+        globals: List<DwarfGlobalVariableFacts> = emptyList(),
+    ) = BoundedDwarfInterfaceFacts(inputSha256 = RICH_SHA, inputBytes = 1L, elfType = "ET_EXEC",
+        imageBase = 0x400000UL, executableRanges = emptyList(), functions = functions,
+        types = types.associateBy { it.id }, scannedDies = functions.size.toLong() + types.size + globals.size,
+        compilationUnits = 1, dwarfPresent = true, limits = BoundedDwarfInterfaceFactLimits(), globals = globals)
+
+    private fun function(
+        locator: String,
+        returnType: DwarfInterfaceFact<String>,
+        parameters: List<DwarfInterfaceParameterFacts> = emptyList(),
+        parameterLists: List<DwarfInterfaceParameterList> = emptyList(),
+    ) = DwarfInterfaceFunctionFacts(rva = 0x1000UL, absoluteAddress = 0x401000UL, executable = true,
+        locator = locator, sourceName = known("same_function", "function-name"), linkageName = absent(),
+        language = absent(), callingConvention = absent(), prototyped = absent(), artificial = absent(),
+        declaration = absent(), returnType = returnType, parameters = parameters, parameterList = absent(),
+        parameterLists = parameterLists, variadic = absent(), origins = emptyList(), reasons = emptyList())
+
+    private fun parameter(locator: String, ordinal: Int, type: DwarfInterfaceFact<String>) =
+        DwarfInterfaceParameterFacts(ordinal, locator, known("same_parameter", "parameter-name"), type,
+            absent(), emptyList(), emptyList())
+
+    private fun variable(locator: String, type: DwarfInterfaceFact<String>, storage: String = "static-storage") =
+        DwarfGlobalVariableFacts(locator = locator, sourceName = known("same_variable", "variable-name"),
+            linkageName = absent(), language = absent(), type = type, external = absent(), declaration = absent(),
+            artificial = absent(), visibility = absent(), byteSize = absent(), alignment = absent(), constant = absent(),
+            scope = absent(), location = absent(), address = absent(), rva = absent(), tlsOffset = absent(),
+            storage = known(storage, "storage"), scopes = emptyList(), origins = emptyList(), reasons = emptyList())
+
+    private fun type(
+        id: String,
+        target: DwarfInterfaceFact<String> = absent(),
+        attributes: Map<Long, DwarfInterfaceFact<String>> = emptyMap(),
+        children: List<DwarfInterfaceTypeChild> = emptyList(),
+    ) = DwarfInterfaceTypeNode(id, 0x13L, known("SameType", "type-name"), known("4", "type-size"),
+        absent(), target, attributes, children, emptyList())
+
+    private fun layout(osAbi: Int) = FullTreeElfObjectLayoutObservation(2, 1, "ET_EXEC", 62, osAbi, 0,
+        0x400000UL, emptyList(), 0L, emptyList(), emptyList())
+
+    private fun symbol(locator: String, name: String) = FullTreeElfObjectSymbol(name, locator, 1, 1, 0, 0,
+        1, 1L, FullTreeElfSymbolSectionKind.DEFINED, ".data", 0x402000UL, 4UL, 0x2000UL,
+        FullTreeElfObjectStorage.MAPPED_LOAD, 3UL, 1L, 0x402000UL, 4UL, listOf(0), emptyList())
+
+    private fun <T> absent(): DwarfInterfaceFact<T> = DwarfInterfaceFact(DwarfInterfaceFactState.ABSENT)
+    private fun known(value: String, evidence: String, vararg reasons: String) =
+        DwarfInterfaceFact(DwarfInterfaceFactState.KNOWN, listOf(value), listOf(evidence), reasons.toList())
+    private fun string(objectValue: JsonObject, field: String): String = (objectValue.getValue(field) as JsonPrimitive).content
+    private fun boolean(objectValue: JsonObject, field: String): Boolean = string(objectValue, field).toBooleanStrict()
+    private fun array(objectValue: JsonObject, field: String): JsonArray = objectValue.getValue(field) as JsonArray
+    private fun richInput() = BoundedDwarfObservationInput("rich", RICH_SHA, 1L)
+
+    private companion object {
+        const val RICH_SHA = "0000000000000000000000000000000000000000000000000000000000000000"
+        const val STRIPPED_SHA = "1111111111111111111111111111111111111111111111111111111111111111"
+    }
+}
