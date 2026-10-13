@@ -1076,7 +1076,8 @@ def ensure_source_artifact_contract(candidate: dict, contract: dict | None = Non
         raise ProvisionError("candidate self-digest mismatch")
 
 
-def verify_candidate_data(candidate_root: Path, candidate: dict, contract: dict, keyring: Path) -> list[dict]:
+def verify_candidate_data(candidate_root: Path, candidate: dict, contract: dict, keyring: Path,
+                          extra_binary_package_names: set[str] | None = None) -> list[dict]:
     """Recheck signed metadata and all acquired bytes before rootfs provisioning."""
     profile = contract["profile"]
     ensure_source_artifact_contract(candidate, contract)
@@ -1126,6 +1127,7 @@ def verify_candidate_data(candidate_root: Path, candidate: dict, contract: dict,
                     raise ProvisionError(f"candidate index record changed for {suite}/{table_path}")
                 wanted_source = profile["sourcePackage"]["name"]
                 wanted_roots = {row["name"] for row in profile["binaryRoots"]}
+                wanted_roots.update(extra_binary_package_names or set())
                 for row in iter_compressed_index(candidate_root / index_pathname):
                     if index["kind"] == "source" and row.get("Package") != wanted_source:
                         continue
@@ -1261,6 +1263,157 @@ def parse_invocations(text: str, forms: set[str]) -> list[tuple[str, list[str]]]
     return invocations
 
 
+def _mask_cxx_comments_and_literals(text: str) -> str:
+    """Keep source layout while masking comments and quoted bytes from brace scanning."""
+    output = list(text)
+    index = 0
+    state = "code"
+    quote = ""
+    while index < len(text):
+        char = text[index]
+        next_char = text[index + 1] if index + 1 < len(text) else ""
+        if state == "line-comment":
+            if char == "\n":
+                state = "code"
+            else:
+                output[index] = " "
+        elif state == "block-comment":
+            if char == "*" and next_char == "/":
+                output[index] = output[index + 1] = " "
+                index += 1
+                state = "code"
+            elif char != "\n":
+                output[index] = " "
+        elif state == "literal":
+            if char != "\n":
+                output[index] = " "
+            if char == "\\":
+                if index + 1 < len(text) and text[index + 1] != "\n":
+                    output[index + 1] = " "
+                index += 1
+            elif char == quote:
+                state = "code"
+        elif char == "/" and next_char == "/":
+            output[index] = output[index + 1] = " "
+            index += 1
+            state = "line-comment"
+        elif char == "/" and next_char == "*":
+            output[index] = output[index + 1] = " "
+            index += 1
+            state = "block-comment"
+        elif char in ('"', "'"):
+            quote = char
+            output[index] = " "
+            state = "literal"
+        index += 1
+    return "".join(output)
+
+
+def _cxx_member_declarator_names(statement: str) -> list[str]:
+    statement = re.sub(r"\b(?:public|protected|private)\s*:\s*", " ", statement).strip()
+    tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*|::|&&|->|\S", statement)
+    if not tokens:
+        return []
+    if tokens[0] in {"using", "typedef", "friend", "static_assert", "class", "struct", "union", "enum", "template"}:
+        return []
+
+    declarators = []
+    angle_depth = 0
+    for token in tokens:
+        if token == "<":
+            angle_depth += 1
+        elif token == ">" and angle_depth:
+            angle_depth -= 1
+        if angle_depth == 0 and token in ("=", "{"):
+            break
+        declarators.append(token)
+    if "(" in declarators:
+        return []
+
+    chunks = []
+    current = []
+    angle_depth = 0
+    for token in declarators:
+        if token == "<":
+            angle_depth += 1
+        elif token == ">" and angle_depth:
+            angle_depth -= 1
+        if token == "," and angle_depth == 0:
+            chunks.append(current)
+            current = []
+        else:
+            current.append(token)
+    if current:
+        chunks.append(current)
+    names = []
+    for chunk in chunks:
+        if ":" in chunk:
+            chunk = chunk[:chunk.index(":")]
+        identifiers = [token for token in chunk if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token)]
+        if len(identifiers) >= 2:
+            names.append(identifiers[-1])
+    return names
+
+
+def extract_cxx_class_data_members(text: str, class_name: str) -> list[str]:
+    """Enumerate direct data-member declarations in one C++ class definition."""
+    masked = _mask_cxx_comments_and_literals(text)
+    match = re.search(r"\bclass\s+" + re.escape(class_name) + r"\b[^;{}]*\{", masked)
+    if match is None:
+        raise ProvisionError(f"header does not contain the {class_name} class definition")
+    open_brace = match.end() - 1
+    depth = 1
+    close_brace = open_brace + 1
+    while close_brace < len(masked) and depth:
+        if masked[close_brace] == "{":
+            depth += 1
+        elif masked[close_brace] == "}":
+            depth -= 1
+        close_brace += 1
+    if depth:
+        raise ProvisionError(f"header contains an unterminated {class_name} class definition")
+    body = masked[open_brace + 1:close_brace - 1]
+    names = []
+    statement = []
+    initializer_depth = 0
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if char == "{" and initializer_depth == 0:
+            prefix = "".join(statement)
+            declaration_head = prefix.split("=", 1)[0]
+            is_type_body = re.search(r"\b(?:class|struct|union|enum)\b", declaration_head)
+            is_function_body = "(" in declaration_head
+            if is_type_body or is_function_body:
+                nested = 1
+                index += 1
+                while index < len(body) and nested:
+                    if body[index] == "{":
+                        nested += 1
+                    elif body[index] == "}":
+                        nested -= 1
+                    index += 1
+                if nested:
+                    raise ProvisionError(f"header contains an unterminated {class_name} member body")
+                statement = ["__nested_member_type "] if is_type_body else []
+                continue
+            initializer_depth = 1
+            statement.append(char)
+        elif char == "{" and initializer_depth:
+            initializer_depth += 1
+            statement.append(char)
+        elif char == "}" and initializer_depth:
+            initializer_depth -= 1
+            statement.append(char)
+        elif char == ";" and initializer_depth == 0:
+            names.extend(_cxx_member_declarator_names("".join(statement)))
+            statement = []
+        else:
+            statement.append(char)
+        index += 1
+    return names
+
+
 def audit_langoptions(def_path: Path, header_path: Path, contract: dict) -> dict:
     spec = contract["langOptions"]
     text = def_path.read_text(encoding="utf-8")
@@ -1281,14 +1434,16 @@ def audit_langoptions(def_path: Path, header_path: Path, contract: dict) -> dict
         raise ProvisionError("LangOptions.def generated field count or uniqueness check failed")
     if any(form in counts for form in spec["rejectedProductionFamilies"]):
         raise ProvisionError("pinned LangOptions.def contains a rejected production macro family")
-    header_text = header_path.read_text(encoding="utf-8")
-    manual_start = header_text.find("class LangOptions : public LangOptionsBase")
-    if manual_start < 0:
-        raise ProvisionError("LangOptions.h does not contain the pinned LangOptions class")
-    manual = header_text[manual_start:]
-    missing = [name for name in spec["manualFields"] if re.search(r"\b" + re.escape(name) + r"\s*(?:[;{=])", manual) is None]
-    if missing:
-        raise ProvisionError("LangOptions.h manual member inventory is missing: " + ", ".join(missing))
+    actual_manual_fields = extract_cxx_class_data_members(header_path.read_text(encoding="utf-8"), "LangOptions")
+    expected_manual_fields = spec["manualFields"]
+    if (len(actual_manual_fields) != spec["manualFieldsCount"] or
+            len(set(actual_manual_fields)) != len(actual_manual_fields) or
+            set(actual_manual_fields) != set(expected_manual_fields)):
+        missing = sorted(set(expected_manual_fields) - set(actual_manual_fields))
+        extra = sorted(set(actual_manual_fields) - set(expected_manual_fields))
+        raise ProvisionError(
+            f"LangOptions.h direct manual member inventory mismatch: missing={missing}, extra={extra}"
+        )
     return {
         "inventoryEvidence": spec["inventoryEvidence"],
         "generatedFields": len(rows),
@@ -1613,7 +1768,18 @@ def load_candidate(candidate_root: Path, contract: dict, keyring: Path,
             if build_record.get(section) != expected:
                 raise ProvisionError(f"acquisition candidate {section} differs from the build record")
     verify_candidate_download_inventory(candidate_root, candidate)
-    parsed = verify_candidate_data(candidate_root, candidate, contract, keyring)
+    extra_package_names = None
+    if build_record is not None:
+        extra_package_names = {
+            row["name"]
+            for section in ("packages", "downloadedPackages")
+            for row in build_record.get(section, [])
+            if isinstance(row, dict) and isinstance(row.get("name"), str)
+        }
+    parsed = verify_candidate_data(
+        candidate_root, candidate, contract, keyring,
+        extra_binary_package_names=extra_package_names,
+    )
     audit_path = candidate_root / "patch-audit.json"
     audit = read_provenance_report(audit_path, "patch audit")
     if audit.get("status") != "compatible" or candidate.get("patchAudit") != {
@@ -1666,6 +1832,33 @@ def package_metadata_map(indexes: list[dict]) -> dict[tuple[str, str, str], dict
         if old is None:
             result[key] = entry
     return result
+
+
+def validate_record_package_metadata(record: dict, signed_metadata: dict[tuple[str, str, str], dict],
+                                     installed_keys: set[tuple[str, str, str]] | None = None) -> None:
+    """Bind every package row and the installed closure to authenticated Packages metadata."""
+    package_rows = record.get("packages", [])
+    downloaded_rows = record.get("downloadedPackages", [])
+    package_keys = [(row.get("name"), row.get("version"), row.get("architecture"))
+                    for row in package_rows if isinstance(row, dict)]
+    downloaded_keys = [(row.get("name"), row.get("version"), row.get("architecture"))
+                       for row in downloaded_rows if isinstance(row, dict)]
+    if (len(package_keys) != len(package_rows) or len(set(package_keys)) != len(package_keys) or
+            len(downloaded_keys) != len(downloaded_rows) or len(set(downloaded_keys)) != len(downloaded_keys)):
+        raise ProvisionError("build record package closure contains malformed or duplicate identities")
+    package_key_set = set(package_keys)
+    if installed_keys is not None and package_key_set != installed_keys:
+        raise ProvisionError("build record package closure differs from the installed rootfs package set")
+    if not set(downloaded_keys).issubset(package_key_set):
+        raise ProvisionError("downloaded package rows are outside the installed package closure")
+    for section, rows in (("packages", package_rows), ("downloadedPackages", downloaded_rows)):
+        for row in rows:
+            key = (row["name"], row["version"], row["architecture"])
+            expected = signed_metadata.get(key)
+            if expected is None or row != expected:
+                raise ProvisionError(
+                    f"build record {section} tuple differs from signed Packages metadata: {key[0]}={key[1]}"
+                )
 
 
 def package_metadata_for_keys(candidate_root: Path, candidate: dict,
@@ -1992,6 +2185,12 @@ def verify_recorded_resource_manifest(rootfs: Path, record: dict) -> dict:
     if actual != record.get("resources"):
         raise ProvisionError("resource-directory bytes differ from the authenticated build-record manifest")
     return actual
+
+
+def verified_frontend_runtime_library_digests(rootfs: Path, record: dict) -> list[dict[str, str]]:
+    """Recheck the exact typed runtime closure before projecting its authenticated regular files."""
+    verify_recorded_runtime_manifest(rootfs, record)
+    return frontend_runtime_library_digests(record)
 
 
 def normalize_rootfs(rootfs: Path, epoch: int) -> None:
@@ -2765,8 +2964,7 @@ def command_write_loader_input(args: argparse.Namespace) -> int:
         raise ProvisionError("C++ driver executable mode changed before A-loader smoke")
     path_value = contract["environment"]["PATH"]
     profile_digest = sha256(canonical_json(record["profile"]))
-    verify_recorded_runtime_manifest(rootfs_dir, record)
-    runtime_rows = [(row["path"], row["sha256"]) for row in frontend_runtime_library_digests(record)]
+    runtime_rows = verified_frontend_runtime_library_digests(rootfs_dir, record)
     values = {
         "rootfs": str(rootfs_dir),
         "buildRecordSha256": sha256(args.record.read_bytes()),
@@ -2793,9 +2991,9 @@ def command_write_loader_input(args: argparse.Namespace) -> int:
     for index, (link_path, target_sha) in enumerate(chain):
         values[f"symlink.{index}.path"] = link_path
         values[f"symlink.{index}.sha256"] = target_sha
-    for index, (path, digest) in enumerate(runtime_rows):
-        values[f"runtime.{index}.path"] = path
-        values[f"runtime.{index}.sha256"] = digest
+    for index, row in enumerate(runtime_rows):
+        values[f"runtime.{index}.path"] = row["path"]
+        values[f"runtime.{index}.sha256"] = row["sha256"]
     encoded = "".join(f"{key}={value}\n" for key, value in sorted(values.items()))
     if any("\n" in value or "\r" in value for value in values.values()):
         raise ProvisionError("A-loader input contains a line break")
@@ -2941,7 +3139,8 @@ def frontend_profile_projection_sha256(preimage: dict) -> str:
     )
 
 
-def validate_provenance_loader_report(report: dict, record: dict, record_sha256: str) -> None:
+def validate_provenance_loader_report(report: dict, record: dict, record_sha256: str,
+                                      rootfs: Path) -> None:
     resources = record["resources"]
     expected_resource_sha = frontend_resource_manifest_sha256(record["resourceDirectory"], resources)
     if (report.get("scope") != "infrastructure-loader-smoke-only" or
@@ -2960,6 +3159,7 @@ def validate_provenance_loader_report(report: dict, record: dict, record_sha256:
     projection = report.get("infrastructureProfileProjection")
     if not isinstance(projection, dict):
         raise ProvisionError("A-loader smoke report lacks its frontend profile projection preimage")
+    verified_frontend_runtime_library_digests(rootfs, record)
     expected_projection = frontend_profile_projection_preimage(record, record_sha256)
     if projection != expected_projection:
         raise ProvisionError("A-loader smoke report frontend profile projection differs from the build record")
@@ -3058,13 +3258,19 @@ def command_package_provenance(args: argparse.Namespace) -> int:
     patch_audit = args.acquisition / "patch-audit.json"
     if not candidate.is_file() or not patch_audit.is_file() or not (args.acquisition / "downloads").is_dir():
         raise ProvisionError("provenance package is missing authenticated acquisition inputs")
-    load_candidate(args.acquisition, contract, args.keyring, build_record=record)
+    if args.rootfs.is_symlink() or not args.rootfs.is_dir():
+        raise ProvisionError("provenance packaging requires the retained final rootfs directory")
+    _, parsed_indexes = load_candidate(args.acquisition, contract, args.keyring, build_record=record)
+    signed_package_metadata = package_metadata_map(parsed_indexes)
+    validate_record_package_metadata(
+        record, signed_package_metadata, installed_package_keys(args.rootfs, contract),
+    )
     record_sha256 = sha256_file(args.record)
     probe_report = read_provenance_report(args.probe_report, "LibTooling probe")
     loader_report = read_provenance_report(args.loader_report, "A-loader")
     negative_report = read_provenance_report(args.negative_report, "Clang 22.1.6 negative")
     validate_provenance_probe_report(probe_report, record)
-    validate_provenance_loader_report(loader_report, record, record_sha256)
+    validate_provenance_loader_report(loader_report, record, record_sha256, args.rootfs)
     comparator_manifest, comparator_manifest_sha256 = validate_provenance_negative_report(
         negative_report, record, contract,
     )
@@ -3314,6 +3520,8 @@ def build_parser() -> argparse.ArgumentParser:
     provenance.add_argument("--contract", type=Path, default=CONTRACT_PATH)
     provenance.add_argument("--acquisition", type=Path, required=True)
     provenance.add_argument("--record", type=Path, required=True)
+    provenance.add_argument("--rootfs", type=Path, required=True,
+                             help="retained final rootfs used to recheck package and runtime closure")
     provenance.add_argument("--probe-report", type=Path, required=True)
     provenance.add_argument("--loader-report", type=Path, required=True)
     provenance.add_argument("--negative-report", type=Path, required=True)

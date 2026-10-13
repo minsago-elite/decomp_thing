@@ -18,6 +18,20 @@ sys.path.insert(0, str(ROOT / "scripts/oracle"))
 import provision_clang_18_1_3 as provision
 
 
+def signed_package_rows_for_fixture(record):
+    rows = {}
+    for section in ("packages", "downloadedPackages"):
+        for package in record[section]:
+            key = (package["name"], package["version"], package["architecture"])
+            rows[key] = {
+                "Package": package["name"], "Version": package["version"],
+                "Architecture": package["architecture"], "Filename": package["file"],
+                "Size": str(package["bytes"]), "SHA256": package["sha256"],
+                "_suite": package["suite"], "_component": package["component"],
+            }
+    return list(rows.values())
+
+
 class ProvisioningNegativeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -59,6 +73,8 @@ class ProvisioningNegativeTests(unittest.TestCase):
             {"path": "/usr/lib/llvm-18/lib/libclang-cpp.so", "bytes": 1, "sha256": digest,
              "kind": "regular-file", "target": None},
             {"path": "/usr/lib/llvm-18/lib/libLLVM-18.so", "bytes": 2, "sha256": "b" * 64,
+             "kind": "regular-file", "target": None},
+            {"path": "/usr/lib/llvm-18/lib/libclang.so", "bytes": 3, "sha256": "c" * 64,
              "kind": "regular-file", "target": None},
         ])
         resources = provision.manifest([{"path": "/usr/lib/llvm-18/lib/clang/18.1.3/include/stddef.h",
@@ -129,7 +145,33 @@ class ProvisioningNegativeTests(unittest.TestCase):
             "libclang-cpp18-dev", "libclang-cpp18",
         })
 
-    def valid_loader_report(self, record, record_sha):
+    def prepare_runtime_rootfs(self, record, rootfs):
+        rootfs.mkdir(parents=True, exist_ok=True)
+        compiler = next(tool for tool in record["tools"] if tool["role"] == "cxx-driver")
+        original_compiler_sha = compiler["sha256"]
+        for row in record["runtime"]["entries"]:
+            if row["kind"] != "regular-file":
+                continue
+            payload = (b"synthetic compiler/runtime bytes" if row["sha256"] == original_compiler_sha
+                       else ("synthetic runtime bytes: " + row["path"]).encode())
+            path = rootfs / row["path"].lstrip("/")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+            if row["sha256"] == original_compiler_sha:
+                compiler["bytes"] = len(payload)
+                compiler["sha256"] = provision.sha256(payload)
+        for row in record["runtime"]["entries"]:
+            if row["kind"] != "symlink":
+                continue
+            path = rootfs / row["path"].lstrip("/")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.symlink_to(row["target"])
+        record["runtime"] = provision.manifest([
+            provision.runtime_file_entry(rootfs, row["path"]) for row in record["runtime"]["entries"]
+        ])
+
+    def valid_loader_report(self, record, record_sha, rootfs):
+        provision.verified_frontend_runtime_library_digests(rootfs, record)
         projection = provision.frontend_profile_projection_preimage(record, record_sha)
         return {
             "scope": "infrastructure-loader-smoke-only",
@@ -176,6 +218,9 @@ class ProvisioningNegativeTests(unittest.TestCase):
         self.assertEqual(qualify_text.count('-PfrontendNodeHome="$CLANG_WORK/frontend-node"'),
                          qualify_text.count('./gradlew'))
         self.assertLess(qualify_text.index('bash scripts/install-frontend-node.sh'), qualify_text.index('./gradlew'))
+        self.assertIn('--rootfs "$CLANG_WORK/rootfs-run2"', qualify_text)
+        self.assertLess(qualify_text.index("package-provenance"),
+                        qualify_text.index('sudo rm -rf "$CLANG_WORK/rootfs-run2"'))
 
     def test_workflow_offline_job_gates_native_setup_without_suppressing_failures(self):
         workflow = (ROOT / ".github/workflows/generic-template-toolchain.yml").read_text(encoding="utf-8")
@@ -550,6 +595,14 @@ class ProvisioningNegativeTests(unittest.TestCase):
             self.assertEqual(by_path["/usr/lib/llvm-18/lib/libclang-cpp.so"]["target"], "libclang-cpp.so.18.1")
             self.assertEqual(by_path["/usr/lib/llvm-18/lib/libclang-cpp.so.18.1"]["kind"], "regular-file")
             self.assertIsNone(by_path["/usr/lib/llvm-18/lib/libclang-cpp.so.18.1"]["target"])
+            record = {
+                "tools": [{"role": "cxx-driver", "sha256": provision.sha256(b"clang library")}],
+                "runtime": provision.manifest(rows),
+            }
+            self.assertEqual(provision.verified_frontend_runtime_library_digests(rootfs, record), [{
+                "path": "toolchain/usr/lib/llvm-18/lib/libLLVM-18.so.1",
+                "sha256": provision.sha256(b"llvm library"),
+            }])
 
     def test_loader_projection_rejects_rehashed_runtime_omissions_extra_duplicate_and_order_changes(self):
         record = self.valid_build_record()
@@ -562,14 +615,19 @@ class ProvisioningNegativeTests(unittest.TestCase):
             {"path": "/usr/lib/llvm-18/lib/libclang-cpp.so", "bytes": len(target),
              "sha256": provision.sha256(b"symlink\0" + target.encode()), "kind": "symlink", "target": target},
         ])
+        rootfs = Path(self.temp_root) / "rehashed-runtime-rootfs"
+        shutil.rmtree(rootfs, ignore_errors=True)
+        self.prepare_runtime_rootfs(record, rootfs)
         record_sha = provision.sha256(provision.canonical_json(record))
-        report = self.valid_loader_report(record, record_sha)
+        report = self.valid_loader_report(record, record_sha, rootfs)
         expected_rows = [
-            {"path": "toolchain/usr/lib/llvm-18/lib/libLLVM-18.so.1", "sha256": "b" * 64},
-            {"path": "toolchain/usr/lib/llvm-18/lib/libclang-cpp.so.18.1", "sha256": "c" * 64},
+            {"path": "toolchain/usr/lib/llvm-18/lib/libLLVM-18.so.1",
+             "sha256": provision.sha256(b"synthetic runtime bytes: /usr/lib/llvm-18/lib/libLLVM-18.so.1")},
+            {"path": "toolchain/usr/lib/llvm-18/lib/libclang-cpp.so.18.1",
+             "sha256": provision.sha256(b"synthetic runtime bytes: /usr/lib/llvm-18/lib/libclang-cpp.so.18.1")},
         ]
         self.assertEqual(report["infrastructureProfileProjection"]["runtimeLibraryDigests"], expected_rows)
-        provision.validate_provenance_loader_report(report, record, record_sha)
+        provision.validate_provenance_loader_report(report, record, record_sha, rootfs)
         symlink = next(row for row in record["runtime"]["entries"] if row["kind"] == "symlink")
         mutations = {
             "omitted": expected_rows[:1],
@@ -585,7 +643,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
             projection["runtimeLibraryDigests"] = rows
             changed["infrastructureProfileProjectionSha256"] = provision.frontend_profile_projection_sha256(projection)
             with self.subTest(label=label), self.assertRaisesRegex(provision.ProvisionError, "projection differs"):
-                provision.validate_provenance_loader_report(changed, record, record_sha)
+                provision.validate_provenance_loader_report(changed, record, record_sha, rootfs)
 
     def test_runtime_manifest_rejects_missing_classification_and_inconsistent_symlink_bytes(self):
         target = "library.so.1"
@@ -797,28 +855,56 @@ class ProvisioningNegativeTests(unittest.TestCase):
             ROOT / self.contract["negativeControl"]["fixture"])
         provision.validate_provenance_probe_report(dict(record["probe"]), record)
 
+        rootfs = Path(self.temp_root) / "loader-report-rootfs"
+        shutil.rmtree(rootfs, ignore_errors=True)
+        self.prepare_runtime_rootfs(record, rootfs)
         record_sha = "b" * 64
-        loader_report = self.valid_loader_report(record, record_sha)
-        provision.validate_provenance_loader_report(loader_report, record, record_sha)
+        loader_report = self.valid_loader_report(record, record_sha, rootfs)
+        provision.validate_provenance_loader_report(loader_report, record, record_sha, rootfs)
         for field in ("cxxDriverIdentitySha256", "imageDigest", "resourceManifestSha256"):
             changed = dict(loader_report, **{field: "0" * 64})
             with self.subTest(field=field), self.assertRaises(provision.ProvisionError):
-                provision.validate_provenance_loader_report(changed, record, record_sha)
+                provision.validate_provenance_loader_report(changed, record, record_sha, rootfs)
         for field in ("infrastructureProfileProjectionSha256", "pathTransformSha256"):
             digest = loader_report[field]
             wrong_digest = ("1" if digest[0] == "0" else "0") + digest[1:]
             changed = dict(loader_report, **{field: wrong_digest})
             with self.subTest(field=field), self.assertRaises(provision.ProvisionError):
-                provision.validate_provenance_loader_report(changed, record, record_sha)
+                provision.validate_provenance_loader_report(changed, record, record_sha, rootfs)
+        omitted = json.loads(json.dumps(loader_report))
+        omitted_projection = omitted["infrastructureProfileProjection"]
+        omitted_projection["runtimeLibraryDigests"].pop()
+        omitted["infrastructureProfileProjectionSha256"] = provision.frontend_profile_projection_sha256(
+            omitted_projection)
+        with self.assertRaisesRegex(provision.ProvisionError, "frontend profile projection differs"):
+            provision.validate_provenance_loader_report(omitted, record, record_sha, rootfs)
+        added = json.loads(json.dumps(loader_report))
+        added_projection = added["infrastructureProfileProjection"]
+        added_projection["runtimeLibraryDigests"].append({
+            "path": "toolchain/usr/lib/llvm-18/lib/unrecorded.so", "sha256": "d" * 64,
+        })
+        added["infrastructureProfileProjectionSha256"] = provision.frontend_profile_projection_sha256(
+            added_projection)
+        with self.assertRaisesRegex(provision.ProvisionError, "frontend profile projection differs"):
+            provision.validate_provenance_loader_report(added, record, record_sha, rootfs)
+        duplicated = json.loads(json.dumps(loader_report))
+        duplicate_projection = duplicated["infrastructureProfileProjection"]
+        duplicate_projection["runtimeLibraryDigests"].append(
+            dict(duplicate_projection["runtimeLibraryDigests"][0]))
+        duplicate_projection["runtimeLibraryDigests"].sort(key=lambda row: row["path"])
+        duplicated["infrastructureProfileProjectionSha256"] = provision.frontend_profile_projection_sha256(
+            duplicate_projection)
+        with self.assertRaisesRegex(provision.ProvisionError, "frontend profile projection differs"):
+            provision.validate_provenance_loader_report(duplicated, record, record_sha, rootfs)
         for field, changed_value in (("sha256", "0" * 64), ("bytes", 2), ("mode", "0755"),
                                      ("symlinkChain", ["/usr/bin/clang++-18 -> changed-target"])):
             changed_record = json.loads(json.dumps(record))
             next(row for row in changed_record["tools"] if row["role"] == "cxx-driver")[field] = changed_value
             with self.subTest(driver_field=field), self.assertRaisesRegex(provision.ProvisionError, "C\\+\\+ driver identity"):
-                provision.validate_provenance_loader_report(loader_report, changed_record, record_sha)
+                provision.validate_provenance_loader_report(loader_report, changed_record, record_sha, rootfs)
         loader_report["buildRecordSha256"] = "f" * 64
         with self.assertRaisesRegex(provision.ProvisionError, "does not bind the build record"):
-            provision.validate_provenance_loader_report(loader_report, record, record_sha)
+            provision.validate_provenance_loader_report(loader_report, record, record_sha, rootfs)
 
         lock_path = ROOT / self.contract["negativeControl"]["artifactLock"]
         lock = json.loads(lock_path.read_text(encoding="utf-8"))
@@ -1453,6 +1539,39 @@ class ProvisioningNegativeTests(unittest.TestCase):
         with self.assertRaisesRegex(provision.ProvisionError, "differs from the installed signed package"):
             provision.validate_build_record(record, self.contract)
 
+    def test_build_record_package_closure_binds_every_tuple_to_signed_metadata(self):
+        record = self.valid_build_record()
+        signed = provision.package_metadata_map(signed_package_rows_for_fixture(record))
+        installed_keys = {
+            (row["name"], row["version"], row["architecture"]) for row in record["packages"]
+        }
+        provision.validate_record_package_metadata(record, signed, installed_keys)
+
+        bootstrap = next(row for row in record["packages"] if row["name"] == "ca-certificates")
+        for field, value in (
+                ("name", "ca-certificates-forged"), ("version", "0:0"), ("architecture", "amd64"),
+                ("suite", "noble-security"), ("component", "universe"),
+                ("file", "pool/main/c/ca-certificates/forged.deb"), ("bytes", 2), ("sha256", "f" * 64)):
+            changed = json.loads(json.dumps(record))
+            row = next(item for item in changed["packages"] if item["name"] == "ca-certificates")
+            row[field] = value
+            changed_keys = {
+                (item["name"], item["version"], item["architecture"]) for item in changed["packages"]
+            }
+            with self.subTest(field=field), self.assertRaises(provision.ProvisionError):
+                provision.validate_record_package_metadata(changed, signed, changed_keys)
+
+        omitted = json.loads(json.dumps(record))
+        omitted["packages"] = [row for row in omitted["packages"] if row["name"] != "ca-certificates"]
+        with self.assertRaisesRegex(provision.ProvisionError, "differs from the installed rootfs"):
+            provision.validate_record_package_metadata(omitted, signed, installed_keys)
+        added = json.loads(json.dumps(record))
+        extra = dict(bootstrap, name="unindexed-bootstrap-package")
+        added["packages"].append(extra)
+        added_keys = installed_keys | {(extra["name"], extra["version"], extra["architecture"])}
+        with self.assertRaisesRegex(provision.ProvisionError, "differs from signed Packages metadata"):
+            provision.validate_record_package_metadata(added, signed, added_keys)
+
     def test_build_record_rejects_missing_or_malformed_source_inventory_digests(self):
         for field in ("definitionSha256", "headerSha256"):
             for omit in (True, False):
@@ -1465,21 +1584,28 @@ class ProvisioningNegativeTests(unittest.TestCase):
                     with self.assertRaisesRegex(provision.ProvisionError, "probe bytes are not authenticated"):
                         provision.validate_build_record(record, self.contract)
 
+    def langoptions_definition_fixture(self, base):
+        definitions = []
+        serial = 0
+        for family, count in self.contract["langOptions"]["familyCounts"].items():
+            for _ in range(count):
+                name = "C99" if serial == 0 else f"Field{serial}"
+                definitions.append(f"{family}({name}, x)\n")
+                serial += 1
+        definition = base / "LangOptions.def"
+        definition.write_text("".join(definitions), encoding="utf-8")
+        return definition
+
     def test_langoptions_source_audit_accepts_exact_pinned_inventory(self):
         with self.temporary_directory() as temp:
             base = Path(temp)
-            definitions = []
-            serial = 0
-            for family, count in self.contract["langOptions"]["familyCounts"].items():
-                for _ in range(count):
-                    name = "C99" if serial == 0 else f"Field{serial}"
-                    definitions.append(f"{family}({name}, x)\n")
-                    serial += 1
-            definition = base / "LangOptions.def"
-            definition.write_text("".join(definitions), encoding="utf-8")
+            definition = self.langoptions_definition_fixture(base)
             header = base / "LangOptions.h"
             members = "\n".join(f"  int {name};" for name in self.contract["langOptions"]["manualFields"])
-            header.write_text("class LangOptions : public LangOptionsBase {\n" + members + "\n};\n", encoding="utf-8")
+            header.write_text(
+                "class LangOptions : public LangOptionsBase {\npublic:\n" + members +
+                "\n  void localMethod() { int localOnly; }\n  struct Nested { int nestedOnly; };\n};\n"
+                "class Unrelated { int unrelatedOnly; };\n", encoding="utf-8")
             inventory = provision.audit_langoptions(definition, header, self.contract)
             self.assertEqual(inventory["generatedFields"], 298)
             self.assertEqual(inventory["inventoryEvidence"], self.contract["langOptions"]["inventoryEvidence"])
@@ -1496,6 +1622,27 @@ class ProvisioningNegativeTests(unittest.TestCase):
             checked = provision.validate_probe_report(report, inventory, self.contract)
             self.assertEqual(checked["inventoryEvidence"], self.contract["langOptions"]["inventoryEvidence"])
             self.assertEqual(checked["runtimeLangOptionsChecks"], self.contract["langOptions"]["runtimeChecks"])
+
+    def test_langoptions_source_audit_rejects_added_or_removed_manual_members(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            definition = self.langoptions_definition_fixture(base)
+            fields = list(self.contract["langOptions"]["manualFields"])
+            mutations = (
+                ("added", "\n".join(f"int {name};" for name in fields) + "\nint UnexpectedManualField;"),
+                ("added-nested-member", "\n".join(f"int {name};" for name in fields) +
+                 "\nstruct Additional { int nestedOnly; } nestedField;"),
+                ("removed", "\n".join(f"int {name};" for name in fields[:-1])),
+            )
+            for label, members in mutations:
+                header = base / f"LangOptions-{label}.h"
+                declarations = "\n".join("  " + line for line in members.splitlines())
+                header.write_text(
+                    "class LangOptions : public LangOptionsBase {\npublic:\n" + declarations + "\n};\n",
+                    encoding="utf-8")
+                with self.subTest(change=label), self.assertRaisesRegex(
+                        provision.ProvisionError, "direct manual member inventory mismatch"):
+                    provision.audit_langoptions(definition, header, self.contract)
 
     def test_source_patch_audit_emits_rejection_for_contract_file_difference(self):
         with self.temporary_directory() as temp:
@@ -1899,7 +2046,10 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                 actual, parsed = provision.load_candidate(root, self.contract, keyring, record)
             self.assertEqual(actual, candidate)
             self.assertEqual(parsed, [])
-            signed.assert_called_once_with(root, candidate, self.contract, keyring)
+            expected_names = {row["name"] for section in ("packages", "downloadedPackages")
+                              for row in record[section]}
+            signed.assert_called_once_with(root, candidate, self.contract, keyring,
+                                           extra_binary_package_names=expected_names)
             self.assertEqual(list(root.glob("patch-audit-replay-*")), [])
 
     def test_candidate_replay_rejects_stale_self_digest_and_different_candidate(self):
@@ -1971,15 +2121,21 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
         with self.temporary_directory() as temp:
             base = Path(temp)
             root, candidate, record, keyring = self.candidate_fixture(base)
+            rootfs = base / "rootfs"
+            rootfs.mkdir()
             record_path = base / "record.json"
             record_path.write_bytes(provision.canonical_json(record))
             args = provision.argparse.Namespace(contract=provision.CONTRACT_PATH, record=record_path,
-                                               acquisition=root, keyring=keyring, output=base / "provenance.tar")
+                                               acquisition=root, rootfs=rootfs, keyring=keyring,
+                                               output=base / "provenance.tar")
             with mock.patch.object(provision, "verify_candidate_data",
                                    side_effect=provision.ProvisionError("signature rejected")) as signed:
                 with self.assertRaisesRegex(provision.ProvisionError, "signature rejected"):
                     provision.command_package_provenance(args)
-                signed.assert_called_once_with(root, candidate, self.contract, keyring)
+                expected_names = {row["name"] for section in ("packages", "downloadedPackages")
+                                  for row in record[section]}
+                signed.assert_called_once_with(root, candidate, self.contract, keyring,
+                                               extra_binary_package_names=expected_names)
             self.assertFalse(args.output.exists())
 
     def test_packaging_accepts_bound_local_evidence_and_selected_contract(self):
@@ -1991,11 +2147,16 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
             record["recipe"] = provision.recipe_identity(selected)
             record["probe"]["fixtureSha256"] = provision.sha256_file(
                 ROOT / self.contract["negativeControl"]["fixture"])
+            rootfs = base / "rootfs"
+            ProvisioningNegativeTests.prepare_runtime_rootfs(self, record, rootfs)
             record_path = base / "record.json"
             record_path.write_bytes(provision.canonical_json(record))
             record_sha = provision.sha256_file(record_path)
-            resources = record["resources"]
-            loader = ProvisioningNegativeTests.valid_loader_report(self, record, record_sha)
+            loader = ProvisioningNegativeTests.valid_loader_report(self, record, record_sha, rootfs)
+            signed_rows = signed_package_rows_for_fixture(record)
+            installed_keys = {
+                (row["name"], row["version"], row["architecture"]) for row in record["packages"]
+            }
             negative_contract = self.contract["negativeControl"]
             lock_path = ROOT / negative_contract["artifactLock"]
             artifact = json.loads(lock_path.read_bytes())["artifacts"][negative_contract["artifactRole"]]
@@ -2016,11 +2177,16 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                 report_paths[name] = base / f"{name}.json"
                 report_paths[name].write_bytes(provision.canonical_json(report))
             args = provision.argparse.Namespace(contract=selected, record=record_path, acquisition=root,
-                                               keyring=keyring, output=base / "provenance.tar", **report_paths)
-            with mock.patch.object(provision, "verify_candidate_data", return_value=[]) as signed, \
+                                               rootfs=rootfs, keyring=keyring,
+                                               output=base / "provenance.tar", **report_paths)
+            with mock.patch.object(provision, "verify_candidate_data", return_value=signed_rows) as signed, \
+                    mock.patch.object(provision, "installed_package_keys", return_value=installed_keys), \
                     mock.patch.object(provision.BoundedDownloader, "get") as network:
                 self.assertEqual(provision.command_package_provenance(args), 0)
-                signed.assert_called_once_with(root, candidate, self.contract, keyring)
+                expected_names = {row["name"] for section in ("packages", "downloadedPackages")
+                                  for row in record[section]}
+                signed.assert_called_once_with(root, candidate, self.contract, keyring,
+                                               extra_binary_package_names=expected_names)
                 network.assert_not_called()
             with tarfile.open(args.output) as archive:
                 self.assertEqual(archive.extractfile("provisioning-contract.json").read(), selected.read_bytes())

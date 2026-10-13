@@ -225,17 +225,18 @@ jobs:
             --init-script oracle/clang/18.1.3/clang1813-loader-smoke.init.gradle \
             clang1813AProfileLoaderSmoke \
             -Pclang1813.loaderInput="$CLANG_WORK/a-loader-smoke.properties"
-          sudo rm -rf "$CLANG_WORK/rootfs-run2"
 
       - name: Package bounded provenance evidence
         run: |
           python3 scripts/oracle/provision_clang_18_1_3.py package-provenance \
             --acquisition "$CLANG_WORK/acquisition" \
             --record "$CLANG_WORK/build-record.json" \
+            --rootfs "$CLANG_WORK/rootfs-run2" \
             --probe-report "$CLANG_WORK/run2/probe-report.json" \
             --loader-report "$CLANG_WORK/a-loader-smoke.json" \
             --negative-report "$CLANG_WORK/clang-22.1.6-negative-smoke.json" \
             --output "$CLANG_WORK/clang-18.1.3-provenance.tar"
+          sudo rm -rf "$CLANG_WORK/rootfs-run2"
 
       - name: Upload the immutable toolchain image
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
