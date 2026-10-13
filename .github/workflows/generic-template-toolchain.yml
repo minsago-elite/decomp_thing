@@ -17,6 +17,7 @@ on:
       - 'oracle/clang/18.1.3/**'
       - 'oracle/llvm/22.1.6/release-artifacts.json'
       - 'scripts/oracle/provision_clang_18_1_3.py'
+      - 'src/main/kotlin/decompengine/oracle/fulltree/FullTreeGenericTemplateFrontendProfileV1.kt'
   push:
     branches: [master]
     paths:
@@ -24,6 +25,7 @@ on:
       - 'oracle/clang/18.1.3/**'
       - 'oracle/llvm/22.1.6/release-artifacts.json'
       - 'scripts/oracle/provision_clang_18_1_3.py'
+      - 'src/main/kotlin/decompengine/oracle/fulltree/FullTreeGenericTemplateFrontendProfileV1.kt'
 
 permissions:
   contents: read

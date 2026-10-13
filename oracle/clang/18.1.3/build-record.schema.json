@@ -55,13 +55,14 @@
     },
     "commands": {
       "type": "object", "additionalProperties": false,
-      "required": ["debootstrap", "writeAptSources", "aptUpdate", "aptDownloadOnly", "aptInstall", "clangCVersion", "clangCxxVersion", "clangResourceDirectory", "llvmConfigLibdir", "llvmConfigCxxflags", "probeCompile", "probeRun", "rootfsTar", "ociArchive"],
+      "required": ["debootstrap", "writeAptSources", "aptUpdate", "aptDownloadOnly", "aptInstall", "aptCheck", "clangCVersion", "clangCxxVersion", "clangResourceDirectory", "llvmConfigLibdir", "llvmConfigCxxflags", "probeCompile", "probeRun", "rootfsTar", "ociArchive"],
       "properties": {
         "debootstrap": {"$ref": "#/$defs/argv"},
         "writeAptSources": {"$ref": "#/$defs/argv"},
         "aptUpdate": {"$ref": "#/$defs/argv"},
         "aptDownloadOnly": {"$ref": "#/$defs/argv"},
         "aptInstall": {"$ref": "#/$defs/argv"},
+        "aptCheck": {"$ref": "#/$defs/argv"},
         "clangCVersion": {"$ref": "#/$defs/argv"},
         "clangCxxVersion": {"$ref": "#/$defs/argv"},
         "clangResourceDirectory": {"$ref": "#/$defs/argv"},
@@ -272,13 +273,14 @@
     },
     "recipe": {
       "type": "object", "additionalProperties": false,
-      "required": ["contractSha256", "schemaSha256", "provisionerSha256", "probeSha256", "fixtureSha256", "aLoaderSmokeSha256", "aLoaderInitSha256", "workflowSha256"],
+      "required": ["contractSha256", "schemaSha256", "provisionerSha256", "probeSha256", "fixtureSha256", "aLoaderSha256", "aLoaderSmokeSha256", "aLoaderInitSha256", "workflowSha256"],
       "properties": {
         "contractSha256": {"$ref": "#/$defs/sha256"},
         "schemaSha256": {"$ref": "#/$defs/sha256"},
         "provisionerSha256": {"$ref": "#/$defs/sha256"},
         "probeSha256": {"$ref": "#/$defs/sha256"},
         "fixtureSha256": {"$ref": "#/$defs/sha256"},
+        "aLoaderSha256": {"$ref": "#/$defs/sha256"},
         "aLoaderSmokeSha256": {"$ref": "#/$defs/sha256"},
         "aLoaderInitSha256": {"$ref": "#/$defs/sha256"},
         "workflowSha256": {"$ref": "#/$defs/sha256"}

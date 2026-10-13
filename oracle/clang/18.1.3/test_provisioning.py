@@ -41,6 +41,11 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 "file": f"pool/universe/l/llvm-toolchain-18/{pin['name']}.deb",
                 "bytes": 1, "sha256": digest,
             })
+        packages.append({
+            "name": "ca-certificates", "version": "synthetic-test-only", "architecture": "all",
+            "suite": "noble", "component": "main", "file": "pool/main/c/ca-certificates/fixture.deb",
+            "bytes": 1, "sha256": digest,
+        })
         tool = lambda role: {
             "role": role, "path": "/usr/bin/clang-18" if role == "c-driver" else "/usr/bin/clang++-18",
             "symlinkChain": [], "resolvedPath": "/usr/lib/llvm-18/bin/clang",
@@ -102,11 +107,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
             "resourceDirectory": "/usr/lib/llvm-18/lib/clang/18.1.3",
             "probe": probe, "environment": self.contract["environment"],
             "recipe": provision.recipe_identity(),
-            "commands": {name: ["command", name] for name in {
-                "debootstrap", "writeAptSources", "aptUpdate", "aptDownloadOnly", "aptInstall",
-                "clangCVersion", "clangCxxVersion", "clangResourceDirectory", "llvmConfigLibdir",
-                "llvmConfigCxxflags", "probeCompile", "probeRun", "rootfsTar", "ociArchive",
-            }},
+            "commands": provision.canonical_commands(self.contract, digest),
             "rootfs": {"bytes": 1, "sha256": digest},
             "image": {"format": "oci-image-layout-v1", "manifestSha256": digest,
                       "imageDigest": "sha256:" + digest},
@@ -162,6 +163,120 @@ class ProvisioningNegativeTests(unittest.TestCase):
         self.assertIn("--keyring=workspace-keys/selected archive-keyring.gpg", executed)
         self.assertEqual(recorded, ["<PROFILE_ROOT>" if value == "/workspace/profile-root" else value
                                     for value in executed])
+        self.assertIn("--include=ca-certificates", executed)
+
+    def test_build_record_commands_reject_changed_omitted_inserted_and_reordered_arguments(self):
+        baseline = self.valid_build_record()
+        provision.validate_build_record(baseline, self.contract)
+        for name, argv in baseline["commands"].items():
+            mutations = {
+                "changed": ["unreviewed-command", *argv[1:]],
+                "omitted": argv[:-1],
+                "inserted": [*argv, "--unreviewed-argument"],
+                "reordered": [argv[1], argv[0], *argv[2:]],
+            }
+            for mutation, replacement in mutations.items():
+                record = self.valid_build_record()
+                record["commands"][name] = replacement
+                with self.subTest(command=name, mutation=mutation), self.assertRaisesRegex(
+                    provision.ProvisionError, "canonical recipe"
+                ):
+                    provision.validate_build_record(record, self.contract)
+        for mutation in ("missing", "extra"):
+            record = self.valid_build_record()
+            if mutation == "missing":
+                record["commands"].pop("aptCheck")
+            else:
+                record["commands"]["extra"] = ["unreviewed"]
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(provision.ProvisionError, "canonical recipe"):
+                provision.validate_build_record(record, self.contract)
+
+    def test_build_record_commands_bind_keyring_environment_and_package_pins(self):
+        record = self.valid_build_record()
+        commands = record["commands"]
+        digest = record["acquisition"]["ubuntuKeyring"]["sha256"]
+        self.assertIn(f"--keyring=<UBUNTU_ARCHIVE_KEYRING_SHA256:{digest}>", commands["debootstrap"])
+        self.assertIn("-fno-exceptions", commands["probeCompile"])
+        self.assertIn("-fno-rtti", commands["probeCompile"])
+        mutations = {
+            "debootstrap": (f"--keyring=<UBUNTU_ARCHIVE_KEYRING_SHA256:{digest}>", "--keyring=/unbound/keyring"),
+            "aptInstall": ("clang-18=1:18.1.3-1ubuntu1", "clang-18=1:22.1.6-unreviewed"),
+            "aptUpdate": (f"PATH={self.contract['environment']['PATH']}", "PATH=/unreviewed/bin"),
+            "rootfsTar": (f"--mtime=@{self.contract['environment']['SOURCE_DATE_EPOCH']}", "--mtime=@0"),
+            "probeCompile": ("-fno-rtti", "-fplugin=/unreviewed/plugin.so"),
+        }
+        for name, (old, new) in mutations.items():
+            record = self.valid_build_record()
+            self.assertIn(old, record["commands"][name])
+            record["commands"][name] = [new if arg == old else arg for arg in record["commands"][name]]
+            with self.subTest(command=name), self.assertRaisesRegex(provision.ProvisionError, "canonical recipe"):
+                provision.validate_build_record(record, self.contract)
+        for digest in (None, 123, int("1" * 64)):
+            record = self.valid_build_record()
+            record["acquisition"]["ubuntuKeyring"]["sha256"] = digest
+            with self.subTest(digest=digest), self.assertRaisesRegex(provision.ProvisionError, "keyring"):
+                provision.validate_build_record(record, self.contract)
+
+    def test_selected_environment_changes_canonical_chroot_and_archive_commands(self):
+        contract = json.loads(json.dumps(self.contract))
+        contract["environment"]["PATH"] = "/custom/bin"
+        contract["environment"]["SOURCE_DATE_EPOCH"] = "7"
+        commands = provision.canonical_commands(contract, "b" * 64)
+        for name in ("aptUpdate", "aptDownloadOnly", "aptInstall", "aptCheck", "clangCVersion",
+                     "clangCxxVersion", "clangResourceDirectory", "llvmConfigLibdir", "llvmConfigCxxflags",
+                     "probeCompile", "probeRun"):
+            self.assertIn("PATH=/custom/bin", commands[name], name)
+            self.assertIn("SOURCE_DATE_EPOCH=7", commands[name], name)
+        self.assertIn("SOURCE_DATE_EPOCH=7", commands["debootstrap"])
+        for name in ("rootfsTar", "ociArchive"):
+            self.assertIn("--mtime=@7", commands[name])
+
+    def test_bootstrap_ca_check_requires_package_and_nonempty_contained_bundle(self):
+        packages = {("ca-certificates", "synthetic-test-only", "all")}
+        with self.temporary_directory() as temp:
+            rootfs = Path(temp)
+            bundle = rootfs / "etc/ssl/certs/ca-certificates.crt"
+            bundle.parent.mkdir(parents=True)
+            for payload in (None, b""):
+                if payload is not None:
+                    bundle.write_bytes(payload)
+                with self.subTest(payload=payload), self.assertRaisesRegex(provision.ProvisionError, "CA bundle"):
+                    provision.require_bootstrap_ca_certificates(rootfs, packages)
+            bundle.write_bytes(b"synthetic nonempty bundle; no TLS performed\n")
+            with self.assertRaisesRegex(provision.ProvisionError, "package closure"):
+                provision.require_bootstrap_ca_certificates(rootfs, set())
+            provision.require_bootstrap_ca_certificates(rootfs, packages)
+            bundle.unlink()
+            bundle.symlink_to(Path(temp).parent)
+            with self.assertRaisesRegex(provision.ProvisionError, "escapes"):
+                provision.require_bootstrap_ca_certificates(rootfs, packages)
+
+    def test_provisioning_checks_bootstrap_ca_before_any_apt_command(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            args = provision.argparse.Namespace(
+                contract=provision.CONTRACT_PATH, workdir=base, rootfs=base / "rootfs",
+                output=base / "output", acquisition=base / "acquisition", keyring=base / "keyring")
+            with mock.patch.object(provision, "load_candidate", return_value=({}, [])), \
+                    mock.patch.object(provision.shutil, "rmtree"), \
+                    mock.patch.object(provision, "check_runner_bounds"), \
+                    mock.patch.object(provision, "run_checked") as bootstrap, \
+                    mock.patch.object(provision, "installed_package_keys", return_value=set()), \
+                    mock.patch.object(provision, "rootfs_run") as apt, \
+                    mock.patch.object(provision.BoundedDownloader, "get") as network:
+                with self.assertRaisesRegex(provision.ProvisionError, "package closure"):
+                    provision.provision_rootfs(args)
+                self.assertIn("--include=ca-certificates", bootstrap.call_args.args[0])
+                bootstrap.assert_called_once()
+                apt.assert_not_called()
+                network.assert_not_called()
+            self.assertFalse(args.output.exists())
+
+    def test_build_record_requires_bootstrap_ca_package_in_authenticated_closure(self):
+        record = self.valid_build_record()
+        record["packages"] = [row for row in record["packages"] if row["name"] != "ca-certificates"]
+        with self.assertRaisesRegex(provision.ProvisionError, "bootstrap ca-certificates"):
+            provision.validate_build_record(record, self.contract)
 
     def test_downloaded_package_key_parses_labeled_dpkg_deb_fields(self):
         result = mock.Mock(stdout="Package: clang-18\nVersion: 1:18.1.3-1ubuntu1\nArchitecture: amd64\n")
@@ -1207,6 +1322,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
         self.write_candidate(root, candidate)
         record = self.valid_build_record()
         record.update(provision.candidate_build_evidence(candidate, self.contract))
+        record["commands"] = provision.canonical_commands(self.contract, candidate["trustedKeyring"]["sha256"])
         return root, candidate, record, keyring
 
     def write_candidate(self, root, candidate):
@@ -1226,6 +1342,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
             self.assertEqual(actual, {**default, "contractSha256": provision.sha256_file(selected)})
             record = self.valid_build_record()
             record["environment"] = contract["environment"]
+            record["commands"] = provision.canonical_commands(contract, record["acquisition"]["ubuntuKeyring"]["sha256"])
             with self.assertRaisesRegex(provision.ProvisionError, "recipe hashes"):
                 provision.validate_build_record(record, contract, selected)
             record["recipe"] = actual
@@ -1233,6 +1350,22 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
             selected.write_bytes(selected.read_bytes() + b" ")
             with self.assertRaisesRegex(provision.ProvisionError, "recipe hashes"):
                 provision.validate_build_record(record, contract, selected)
+
+    def test_recipe_binds_production_a_loader_bytes_and_rejects_stale_records(self):
+        loader = ROOT / "src/main/kotlin/decompengine/oracle/fulltree/FullTreeGenericTemplateFrontendProfileV1.kt"
+        self.assertEqual(provision.RECIPE_FILES["aLoaderSha256"], loader)
+        record = self.valid_build_record()
+        self.assertEqual(record["recipe"]["aLoaderSha256"], provision.sha256_file(loader))
+        provision.validate_build_record(record, self.contract)
+        with self.temporary_directory() as temp:
+            changed_loader = Path(temp) / loader.name
+            changed_loader.write_bytes(loader.read_bytes() + b"\n// changed loader semantics\n")
+            with mock.patch.dict(provision.RECIPE_FILES, {"aLoaderSha256": changed_loader}):
+                with self.assertRaisesRegex(provision.ProvisionError, "recipe hashes"):
+                    provision.validate_build_record(record, self.contract)
+        del record["recipe"]["aLoaderSha256"]
+        with self.assertRaisesRegex(provision.ProvisionError, "recipe hashes"):
+            provision.validate_build_record(record, self.contract)
 
     def test_record_commands_propagate_selected_contract_to_verification(self):
         with self.temporary_directory() as temp:
@@ -1419,6 +1552,10 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                 self.assertEqual(archive.extractfile("provisioning-contract.json").read(), selected.read_bytes())
                 self.assertEqual(archive.extractfile("build-record.schema.json").read(),
                                  provision.RECIPE_FILES["schemaSha256"].read_bytes())
+                loader_path = "src/main/kotlin/decompengine/oracle/fulltree/FullTreeGenericTemplateFrontendProfileV1.kt"
+                loader_bytes = archive.extractfile(loader_path).read()
+                self.assertEqual(loader_bytes, (ROOT / loader_path).read_bytes())
+                self.assertEqual(provision.sha256(loader_bytes), record["recipe"]["aLoaderSha256"])
                 self.assertEqual(archive.extractfile("acquisition/acquisition-candidate.json").read(),
                                  (root / "acquisition-candidate.json").read_bytes())
 

@@ -20,7 +20,6 @@ from pathlib import Path, PurePosixPath
 import platform
 import re
 import shutil
-import shlex
 import subprocess
 import sys
 import tarfile
@@ -40,6 +39,7 @@ RECIPE_FILES = {
     "provisionerSha256": ROOT / "scripts/oracle/provision_clang_18_1_3.py",
     "probeSha256": ROOT / "oracle/clang/18.1.3/libtooling-probe.cpp",
     "fixtureSha256": ROOT / "oracle/clang/18.1.3/fixtures/libtooling-positive.cpp",
+    "aLoaderSha256": ROOT / "src/main/kotlin/decompengine/oracle/fulltree/FullTreeGenericTemplateFrontendProfileV1.kt",
     "aLoaderSmokeSha256": ROOT / "oracle/clang/18.1.3/Clang1813AProfileLoaderSmoke.java",
     "aLoaderInitSha256": ROOT / "oracle/clang/18.1.3/clang1813-loader-smoke.init.gradle",
     "workflowSha256": ROOT / ".github/workflows/generic-template-toolchain.yml",
@@ -1015,7 +1015,8 @@ def ensure_source_artifact_contract(candidate: dict, contract: dict | None = Non
     if candidate.get("profileId") != contract["profile"]["id"]:
         raise ProvisionError("candidate profile ID mismatch")
     keyring = candidate.get("trustedKeyring", {})
-    if keyring.get("bytes", 0) < 1 or not re.fullmatch(r"[0-9a-f]{64}", str(keyring.get("sha256", ""))):
+    if (keyring.get("bytes", 0) < 1 or not isinstance(keyring.get("sha256"), str) or
+            not re.fullmatch(r"[0-9a-f]{64}", keyring["sha256"])):
         raise ProvisionError("candidate does not bind the exact archive-verification keyring bytes")
     names = [row["name"] for row in candidate["binaryRoots"]]
     required = ["clang-18", "libclang-18-dev", "libclang-cpp18", "libclang-cpp18-dev", "llvm-18-dev"]
@@ -2073,8 +2074,70 @@ def debootstrap_command(contract: dict, profile_root: str, keyring: Path) -> lis
     return [
         "sudo", "env", "LC_ALL=C", "TZ=UTC", f"SOURCE_DATE_EPOCH={contract['environment']['SOURCE_DATE_EPOCH']}",
         "debootstrap", "--arch=amd64", "--variant=minbase", "--components=main,universe",
+        "--include=ca-certificates",
         f"--keyring={keyring}", "noble", profile_root, contract["profile"]["snapshotBase"],
     ]
+
+
+def apt_command_prefix() -> list[str]:
+    return ["/usr/bin/apt-get", "-o", "Acquire::Check-Valid-Until=false", "-o", "Acquire::Retries=0",
+            "-o", "APT::Get::AllowUnauthenticated=false", "-o", "APT::Install-Recommends=false"]
+
+
+def probe_compile_command() -> list[str]:
+    return ["/usr/bin/clang++-18", "-I/usr/lib/llvm-18/include", "--target=x86_64-pc-linux-gnu",
+            "-std=c++17", "-fno-exceptions", "-fno-rtti", "-D_GNU_SOURCE", "-D__STDC_CONSTANT_MACROS",
+            "-D__STDC_FORMAT_MACROS", "-D__STDC_LIMIT_MACROS",
+            "/tmp/clang18-libtooling-probe.cpp", "-L/usr/lib/llvm-18/lib",
+            "-Wl,-rpath,/usr/lib/llvm-18/lib", "-lclang-cpp", "-lLLVM-18", "-o", "/tmp/clang18-libtooling-probe"]
+
+
+def canonical_commands(contract: dict, keyring_sha256: str) -> dict[str, list[str]]:
+    """Reviewed argv with workspace paths and verified artifact paths normalized."""
+    apt = apt_command_prefix()
+    pinned = [f"{row['name']}={row['version']}" for row in contract["profile"]["binaryRoots"]]
+    epoch = int(contract["environment"]["SOURCE_DATE_EPOCH"])
+
+    def in_root(command: list[str], apt_environment: bool = False) -> list[str]:
+        extra = {"DEBIAN_FRONTEND": "noninteractive"} if apt_environment else None
+        return ["sudo", "chroot", "<PROFILE_ROOT>", *rootfs_env_args(contract, extra), *command]
+
+    return {
+        "debootstrap": debootstrap_command(
+            contract, "<PROFILE_ROOT>", Path(f"<UBUNTU_ARCHIVE_KEYRING_SHA256:{keyring_sha256}>")),
+        "writeAptSources": ["sudo", "install", "-m", "0644", "<SOURCE_LIST>",
+                            "<PROFILE_ROOT>/etc/apt/sources.list"],
+        "aptUpdate": in_root([*apt, "update"], True),
+        "aptDownloadOnly": in_root([*apt, "install", "--yes", "--no-install-recommends", "--download-only", *pinned], True),
+        "aptInstall": in_root([*apt, "install", "--yes", "--no-install-recommends", *pinned], True),
+        "aptCheck": in_root([*apt, "check"], True),
+        "clangCVersion": in_root(["/usr/bin/clang-18", "--version"]),
+        "clangCxxVersion": in_root(["/usr/bin/clang++-18", "--version"]),
+        "clangResourceDirectory": in_root(["/usr/bin/clang-18", "-print-resource-dir"]),
+        "llvmConfigLibdir": in_root(["/usr/bin/llvm-config-18", "--libdir"]),
+        "llvmConfigCxxflags": in_root(["/usr/bin/llvm-config-18", "--cxxflags"]),
+        "probeCompile": in_root(probe_compile_command()),
+        "probeRun": in_root(["/tmp/clang18-libtooling-probe", "/tmp/clang18-positive.cpp"]),
+        "rootfsTar": ["sudo", "env", "LC_ALL=C", "tar", "--sort=name", "--format=posix",
+                      "--numeric-owner", "--owner=0", "--group=0", f"--mtime=@{epoch}",
+                      "--pax-option=delete=atime,delete=ctime", "-cf", "<ROOTFS_TAR>", "-C", "<PROFILE_ROOT>", "."],
+        "ociArchive": ["tar", "--sort=name", "--format=posix", "--numeric-owner", "--owner=0",
+                       "--group=0", f"--mtime=@{epoch}", "--pax-option=delete=atime,delete=ctime",
+                       "-cf", "<OCI_ARCHIVE>", "-C", "<OCI_LAYOUT>", "blobs/sha256/<CONFIG_SHA256>",
+                       "blobs/sha256/<LAYER_SHA256>", "blobs/sha256/<MANIFEST_SHA256>", "index.json", "oci-layout"],
+    }
+
+
+def require_bootstrap_ca_certificates(rootfs: Path, packages: set[tuple[str, str, str]]) -> None:
+    if not any(name == "ca-certificates" for name, _, _ in packages):
+        raise ProvisionError("bootstrap package closure is missing ca-certificates before HTTPS APT")
+    try:
+        bundle = rootfs_path(rootfs, "/etc/ssl/certs/ca-certificates.crt")
+        available = bundle.is_file() and bundle.stat().st_size > 0
+    except OSError as error:
+        raise ProvisionError("bootstrap CA bundle is unavailable before HTTPS APT") from error
+    if not available:
+        raise ProvisionError("bootstrap CA bundle is unavailable before HTTPS APT")
 
 
 def downloaded_package_key(deb: Path) -> tuple[str, str, str]:
@@ -2101,6 +2164,7 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     snapshot = profile["snapshotBase"]
     run_checked(debootstrap_command(contract, str(profile_root), args.keyring), timeout=900)
     bootstrap_package_keys = installed_package_keys(profile_root, contract)
+    require_bootstrap_ca_certificates(profile_root, bootstrap_package_keys)
 
     sources = "\n".join(
         f"deb [check-valid-until=no signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] {snapshot} {suite} main universe"
@@ -2109,8 +2173,7 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     sources_path = args.workdir / f"clang-source-list-{args.label}.list"
     atomic_write(sources_path, sources.encode())
     run_checked(["sudo", "install", "-m", "0644", str(sources_path), str(profile_root / "etc/apt/sources.list")])
-    apt_prefix = ["/usr/bin/apt-get", "-o", "Acquire::Check-Valid-Until=false", "-o", "Acquire::Retries=0",
-                  "-o", "APT::Get::AllowUnauthenticated=false", "-o", "APT::Install-Recommends=false"]
+    apt_prefix = apt_command_prefix()
     rootfs_run(profile_root, [*apt_prefix, "update"], contract, timeout=600,
                environment={"DEBIAN_FRONTEND": "noninteractive"})
     pinned_args = [f"{row['name']}={row['version']}" for row in profile["binaryRoots"]]
@@ -2176,10 +2239,13 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     probe_in_root.chmod(0o444)
     fixture_in_root.chmod(0o444)
     libdir = rootfs_run(profile_root, ["/usr/bin/llvm-config-18", "--libdir"], contract).strip()
-    cxxflags = shlex.split(rootfs_run(profile_root, ["/usr/bin/llvm-config-18", "--cxxflags"], contract).strip())
+    if libdir != "/usr/lib/llvm-18/lib":
+        raise ProvisionError("llvm-config library directory differs from the versioned probe recipe")
+    # Retain the diagnostic command, but use the fixed reviewed probe arguments.
+    # Tool-reported flags cannot inject additional compiler/linker operations.
+    rootfs_run(profile_root, ["/usr/bin/llvm-config-18", "--cxxflags"], contract)
     probe_path = "/tmp/clang18-libtooling-probe"
-    compile_command = ["/usr/bin/clang++-18", *cxxflags, "--target=x86_64-pc-linux-gnu", "-std=c++17", "/tmp/clang18-libtooling-probe.cpp",
-                       f"-L{libdir}", f"-Wl,-rpath,{libdir}", "-lclang-cpp", "-lLLVM-18", "-o", probe_path]
+    compile_command = probe_compile_command()
     rootfs_run(profile_root, compile_command, contract, timeout=600)
     runtime_report = rootfs_run(profile_root, [probe_path, "/tmp/clang18-positive.cpp"], contract, timeout=120)
     runtime_json = json.loads(runtime_report)
@@ -2229,42 +2295,7 @@ def provision_rootfs(args: argparse.Namespace) -> int:
         "probe": probe_checked,
         "recipe": recipe_identity(args.contract),
         "environment": contract["environment"],
-        "commands": {
-            "debootstrap": debootstrap_command(contract, "<PROFILE_ROOT>", args.keyring),
-            "writeAptSources": ["sudo", "install", "-m", "0644", "<SOURCE_LIST>",
-                                 "<PROFILE_ROOT>/etc/apt/sources.list"],
-            "aptUpdate": ["chroot", "<PROFILE_ROOT>",
-                          *rootfs_env_args(contract, {"DEBIAN_FRONTEND": "noninteractive"}),
-                          *apt_prefix, "update"],
-            "aptDownloadOnly": ["chroot", "<PROFILE_ROOT>",
-                                *rootfs_env_args(contract, {"DEBIAN_FRONTEND": "noninteractive"}),
-                                *apt_prefix, "install", "--yes", "--no-install-recommends", "--download-only", *pinned_args],
-            "aptInstall": ["chroot", "<PROFILE_ROOT>",
-                           *rootfs_env_args(contract, {"DEBIAN_FRONTEND": "noninteractive"}),
-                           *apt_prefix, "install", "--yes", "--no-install-recommends", *pinned_args],
-            "clangCVersion": ["chroot", "<PROFILE_ROOT>", *rootfs_env_args(contract),
-                              "/usr/bin/clang-18", "--version"],
-            "clangCxxVersion": ["chroot", "<PROFILE_ROOT>", *rootfs_env_args(contract),
-                                "/usr/bin/clang++-18", "--version"],
-            "clangResourceDirectory": ["chroot", "<PROFILE_ROOT>", *rootfs_env_args(contract),
-                                       "/usr/bin/clang-18", "-print-resource-dir"],
-            "llvmConfigLibdir": ["chroot", "<PROFILE_ROOT>", *rootfs_env_args(contract),
-                                 "/usr/bin/llvm-config-18", "--libdir"],
-            "llvmConfigCxxflags": ["chroot", "<PROFILE_ROOT>", *rootfs_env_args(contract),
-                                   "/usr/bin/llvm-config-18", "--cxxflags"],
-            "probeCompile": ["chroot", "<PROFILE_ROOT>", *rootfs_env_args(contract), *compile_command],
-            "probeRun": ["chroot", "<PROFILE_ROOT>", *rootfs_env_args(contract),
-                         probe_path, "/tmp/clang18-positive.cpp"],
-            "rootfsTar": ["sudo", "env", "LC_ALL=C", "tar", "--sort=name", "--format=posix",
-                          "--numeric-owner", "--owner=0", "--group=0", f"--mtime=@{epoch}",
-                          "--pax-option=delete=atime,delete=ctime", "-cf", "<ROOTFS_TAR>",
-                          "-C", "<PROFILE_ROOT>", "."],
-            "ociArchive": ["tar", "--sort=name", "--format=posix", "--numeric-owner", "--owner=0",
-                           "--group=0", f"--mtime=@{epoch}", "--pax-option=delete=atime,delete=ctime",
-                           "-cf", "<OCI_ARCHIVE>", "-C", "<OCI_LAYOUT>",
-                           "blobs/sha256/<CONFIG_SHA256>", "blobs/sha256/<LAYER_SHA256>",
-                           "blobs/sha256/<MANIFEST_SHA256>", "index.json", "oci-layout"],
-        },
+        "commands": canonical_commands(contract, candidate["trustedKeyring"]["sha256"]),
         "rootfs": rootfs_identity,
         "image": {"format": image_record["format"], "manifestSha256": image_record["manifestSha256"], "imageDigest": image_record["imageDigest"]},
         "imageArtifact": image_artifact_identity,
@@ -2341,6 +2372,8 @@ def validate_build_record(record: dict, contract: dict, contract_path: Path = CO
         row = package_by_name.get(pin["name"])
         if row is None or row.get("version") != pin["version"]:
             raise ProvisionError(f"build record is missing the pinned package {pin['name']}={pin['version']}")
+    if "ca-certificates" not in package_by_name:
+        raise ProvisionError("build record package closure is missing bootstrap ca-certificates")
     if package_by_name["libclang-cpp18-dev"]["version"] != package_by_name["libclang-cpp18"]["version"]:
         raise ProvisionError("build record libclang-cpp18-dev and runtime package versions differ")
     downloaded_rows = record.get("downloadedPackages", [])
@@ -2439,17 +2472,6 @@ def validate_build_record(record: dict, contract: dict, contract_path: Path = CO
         raise ProvisionError("build record environment differs from fixed UTC/source-date profile")
     if record.get("recipe") != recipe_identity(contract_path):
         raise ProvisionError("build record recipe hashes do not match the reviewed contract, tooling, and workflow bytes")
-    command_names = {
-        "debootstrap", "writeAptSources", "aptUpdate", "aptDownloadOnly", "aptInstall",
-        "clangCVersion", "clangCxxVersion", "clangResourceDirectory", "llvmConfigLibdir",
-        "llvmConfigCxxflags", "probeCompile", "probeRun", "rootfsTar", "ociArchive",
-    }
-    commands = record.get("commands", {})
-    if not isinstance(commands, dict) or set(commands) != command_names or any(
-        not isinstance(value, list) or not value or any(not isinstance(part, str) for part in value)
-        for value in commands.values()
-    ):
-        raise ProvisionError("build record command map is incomplete or malformed")
     repositories = record.get("acquisition", {}).get("repositories", [])
     if {row.get("suite") for row in repositories} != set(profile["suites"]):
         raise ProvisionError("build record does not bind every pinned signed repository suite")
@@ -2462,8 +2484,11 @@ def validate_build_record(record: dict, contract: dict, contract_path: Path = CO
         if row.get("inRelease") != expected_url:
             raise ProvisionError("build record InRelease URL differs from the pinned immutable Snapshot")
     keyring = record["acquisition"].get("ubuntuKeyring", {})
-    if keyring.get("bytes", 0) < 1 or not re.fullmatch(r"[0-9a-f]{64}", str(keyring.get("sha256", ""))):
+    if (keyring.get("bytes", 0) < 1 or not isinstance(keyring.get("sha256"), str) or
+            not re.fullmatch(r"[0-9a-f]{64}", keyring["sha256"])):
         raise ProvisionError("build record does not bind the archive-verification keyring")
+    if record.get("commands") != canonical_commands(contract, keyring["sha256"]):
+        raise ProvisionError("build record command map differs from the reviewed canonical recipe")
     candidate_digest = record["acquisition"].get("candidateSha256")
     if not isinstance(candidate_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", candidate_digest):
         raise ProvisionError("build record does not bind the authenticated acquisition candidate")
@@ -2729,6 +2754,7 @@ def command_package_provenance(args: argparse.Namespace) -> int:
         ROOT / "oracle/clang/18.1.3/libtooling-probe.cpp",
         ROOT / "oracle/clang/18.1.3/fixtures/libtooling-positive.cpp",
         ROOT / "scripts/oracle/provision_clang_18_1_3.py",
+        RECIPE_FILES["aLoaderSha256"],
         ROOT / "oracle/clang/18.1.3/Clang1813AProfileLoaderSmoke.java",
         ROOT / "oracle/clang/18.1.3/clang1813-loader-smoke.init.gradle",
         ROOT / "oracle/clang/18.1.3/test_provisioning.py",
@@ -2788,6 +2814,8 @@ def command_package_provenance(args: argparse.Namespace) -> int:
                         arcname = "fixtures/libtooling-positive.cpp"
                     elif source == ROOT / "scripts/oracle/provision_clang_18_1_3.py":
                         arcname = "provision_clang_18_1_3.py"
+                    elif source == RECIPE_FILES["aLoaderSha256"]:
+                        arcname = "src/main/kotlin/decompengine/oracle/fulltree/FullTreeGenericTemplateFrontendProfileV1.kt"
                     elif source == ROOT / "oracle/clang/18.1.3/Clang1813AProfileLoaderSmoke.java":
                         arcname = "Clang1813AProfileLoaderSmoke.java"
                     elif source == ROOT / "oracle/clang/18.1.3/clang1813-loader-smoke.init.gradle":
