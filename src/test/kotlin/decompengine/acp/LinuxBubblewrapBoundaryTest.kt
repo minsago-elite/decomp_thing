@@ -452,6 +452,7 @@ class LinuxBubblewrapBoundaryTest {
             catch (_: IOException) { }
             catch (_: AcpExpectedError) { }
         }
+        var probeFailure: Throwable? = null
         try {
             val first = newControl()
             val firstPath = controlPath(first)
@@ -700,13 +701,37 @@ class LinuxBubblewrapBoundaryTest {
             val mountSource = Files.createDirectory(workspace.resolve("mount-event-source"))
             val mountInitial = alias(mountSource, "mount-event-initial")
             val mountMoved = Files.createDirectory(base.resolve("mount-event-moved"))
-            checks = 0
+            fun mountIdentity(path: Path) = requireNotNull(LinuxFilesystemSyscalls.openAbsolutePathOrNull(path))
+                .use { LinuxFilesystemSyscalls.identity(it.fd) }
+            val movedIdentity = mountIdentity(mountInitial)
+            val mountSlot = mounts.indexOf(mountInitial)
+            fun moveMount(source: Path, destination: Path) {
+                assertEquals(source, mounts[mountSlot])
+                assertEquals(movedIdentity.mountId, mountIdentity(source).mountId)
+                val result = nativeLibrary.getFunction("mount").invokeInt(arrayOf(
+                    source.toString(), destination.toString(), null, com.sun.jna.NativeLong(0x2000), null,
+                ))
+                val errno = com.sun.jna.Native.getLastError()
+                assertEquals(0, result, "native MS_MOVE $source to $destination failed: errno=$errno")
+                // Transfer cleanup ownership immediately after the successful kernel operation.
+                mounts[mountSlot] = destination
+                val relocated = mountIdentity(destination)
+                assertEquals(movedIdentity.mountId, relocated.mountId, "MS_MOVE must retain the exact mount")
+                assertEquals(movedIdentity.key, relocated.key, "MS_MOVE must retain the exact bind root")
+                assertNotEquals(movedIdentity.mountId, mountIdentity(source).mountId, "source must no longer own the moved mount")
+            }
             var mountChanged = false
             val mountFailure = assertFailsWith<IOException> {
                 calculateAcpRuntimeManifestSha256(closure, scaleLimits) {
-                    if (++checks == 400) {
-                        command("mount", "--move", mountInitial.toString(), mountMoved.toString())
-                        command("mount", "--move", mountMoved.toString(), mountInitial.toString())
+                    // Mutate after the immutable snapshot is retained, before this checkpoint's
+                    // poll. Counting callbacks also counts mount-table records and is host-dependent.
+                    val scopeFrames = Thread.currentThread().stackTrace.filter {
+                        it.className == "decompengine.acp.RuntimePrivateControlScope"
+                    }
+                    if (!mountChanged && scopeFrames.any { it.methodName == "checkpoint" } &&
+                        scopeFrames.any { it.methodName == "requireDescriptor" }) {
+                        moveMount(mountInitial, mountMoved)
+                        moveMount(mountMoved, mountInitial)
                         mountChanged = true
                     }
                 }
@@ -757,15 +782,27 @@ class LinuxBubblewrapBoundaryTest {
             assertEquals(scaleDigest, calculateAcpRuntimeManifestSha256(closure, scaleLimits))
             println("private-control-bind-probe: scoped manifest scale, concurrent registry, mount restore, bind rename passed")
             println("private-control-bind-probe: all native controls passed")
+        } catch (failure: Throwable) {
+            probeFailure = failure
+            throw failure
         } finally {
-            mounts.asReversed().forEach { command("umount", it.toString()) }
-            controls.asReversed().forEach { control ->
-                val path = controlPath(control)
-                try { invokePrivate(control, type.getDeclaredMethod("deleteAndProve")) }
-                catch (failure: AcpCleanupProofFailure) {
-                    assertFalse(Files.exists(path), "failed cleanup must retain controls until a later proved removal")
+            var cleanupFailure: Throwable? = null
+            fun clean(action: () -> Unit) {
+                try { action() } catch (failure: Throwable) {
+                    cleanupFailure?.addSuppressed(failure) ?: run { cleanupFailure = failure }
                 }
             }
+            mounts.asReversed().forEach { mount -> clean { command("umount", mount.toString()) } }
+            controls.asReversed().forEach { control ->
+                clean {
+                    val path = controlPath(control)
+                    try { invokePrivate(control, type.getDeclaredMethod("deleteAndProve")) }
+                    catch (failure: AcpCleanupProofFailure) {
+                        assertFalse(Files.exists(path), "failed cleanup must retain controls until a later proved removal")
+                    }
+                }
+            }
+            cleanupFailure?.let { failure -> probeFailure?.addSuppressed(failure) ?: throw failure }
         }
         // A deleted control cannot retain a stale-inode restriction on later ordinary directories.
         requireAcpPrivateControlsUnexposed(workspace, true)
