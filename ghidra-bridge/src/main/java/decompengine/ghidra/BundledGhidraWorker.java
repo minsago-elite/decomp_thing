@@ -20,6 +20,17 @@ public final class BundledGhidraWorker {
 
     public static void main(String[] arguments) {
         try {
+            if (arguments.length > 1 && arguments[1].equals("await-parent-launch")) {
+                // A native launch may return its process handle after the parent's deadline.
+                // Do not initialize Ghidra or touch project/output files without ownership.
+                if (System.in.read() != '1' || System.in.read() != '\n') {
+                    throw new IllegalStateException("Parent did not authorize bundled analysis launch");
+                }
+                String[] admitted = new String[arguments.length - 1];
+                admitted[0] = arguments[0];
+                System.arraycopy(arguments, 2, admitted, 1, arguments.length - 2);
+                arguments = admitted;
+            }
             run(arguments);
             System.exit(0);
         } catch (Exception failure) {

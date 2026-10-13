@@ -45,7 +45,7 @@ internal class BundledGhidraVerificationProcess(
                     "bundled Ghidra verifier command is empty or ambiguous"
                 }
                 processStarter(command, normalizedRoot)
-            }, LAUNCH_EXECUTOR)
+            }, ANALYSIS_PROCESS_LAUNCH_EXECUTOR)
         } catch (failure: RejectedExecutionException) {
             throw GhidraAnalysisException("bundled Ghidra verifier launch capacity is exhausted", failure)
         }
@@ -230,11 +230,6 @@ internal class BundledGhidraVerificationProcess(
         const val FORCE_EXIT_WAIT_MILLIS = 5_000L
         const val CAPTURE_DRAIN_MILLIS = 5_000L
         val POLL_NANOS = TimeUnit.MILLISECONDS.toNanos(25)
-        private val LAUNCH_EXECUTOR = ThreadPoolExecutor(
-            0, 2, 60L, TimeUnit.SECONDS, SynchronousQueue(),
-            { task -> Thread(task, "bundled-ghidra-verifier-launch").apply { isDaemon = true } },
-            ThreadPoolExecutor.AbortPolicy(),
-        )
         private val CAPTURE_EXECUTOR = ThreadPoolExecutor(
             0, 16, 60L, TimeUnit.SECONDS, SynchronousQueue(),
             { task -> Thread(task, "bundled-ghidra-verifier-capture").apply { isDaemon = true } },
