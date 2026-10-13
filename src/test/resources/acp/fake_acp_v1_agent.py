@@ -990,6 +990,13 @@ if MODE == "terminal-near-wall":
     raise SystemExit(0)
 if READY and MODE != "cancel-after-response":
     write_workspace_file(READY, "ready\n", 801)
+    if MODE == "wait-for-cancel":
+        # The host must wait for the successful callback acknowledgement, rather than the
+        # earlier filesystem publication that can still be rolled back on cancellation.
+        update({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "cooperative-cancellation-ready"},
+        })
 
 if MODE == "physical-newline-in-string":
     # This is an actual LF byte inside the JSON string, not the valid two-byte JSON escape `\\n`.
@@ -1050,6 +1057,13 @@ if MODE == "eof-prompt":
 if MODE in ("wait-for-cancel", "ignore-cancel"):
     if MODE == "ignore-cancel":
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        if READY:
+            # The ready write has been acknowledged and TERM is now ignored. Only then can
+            # the host cancel while proving the uncooperative process needs termination.
+            update({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "uncooperative-cancellation-ready"},
+            })
         time.sleep(30)
         raise SystemExit(0)
     while True:
