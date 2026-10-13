@@ -10,6 +10,7 @@ the build-record verifier can accept them.
 from __future__ import annotations
 
 import argparse
+import datetime
 import gzip
 import hashlib
 import json
@@ -101,8 +102,9 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def recipe_identity() -> dict[str, str]:
-    return {name: sha256_file(path) for name, path in RECIPE_FILES.items()}
+def recipe_identity(contract_path: Path = CONTRACT_PATH) -> dict[str, str]:
+    files = {**RECIPE_FILES, "contractSha256": contract_path}
+    return {name: sha256_file(path) for name, path in files.items()}
 
 
 def canonical_json(value: object) -> bytes:
@@ -662,7 +664,7 @@ def _metadata_binary_row(row: dict) -> dict:
 
 def snapshot_metadata_selection(contract: dict, profile: dict, repositories: list[dict], indexes: list[dict],
                                 source_rows: list[dict], binary_rows: list[dict], metadata_bytes: int,
-                                keyring: Path) -> dict:
+                                keyring: Path, contract_path: Path = CONTRACT_PATH) -> dict:
     """Describe only the pinned source package and five binary roots from signed indexes."""
     source_pin = profile["sourcePackage"]
     roots = profile["binaryRoots"]
@@ -725,8 +727,8 @@ def snapshot_metadata_selection(contract: dict, profile: dict, repositories: lis
         "candidateSnapshot": profile["snapshot"],
         "candidateSnapshotBase": profile["snapshotBase"],
         "configuredSnapshot": contract["profile"]["snapshot"],
-        "contractSha256": sha256_file(CONTRACT_PATH),
-        "recipe": recipe_identity(),
+        "contractSha256": sha256_file(contract_path),
+        "recipe": recipe_identity(contract_path),
         "trustedUbuntuKeyring": {"bytes": keyring.stat().st_size, "sha256": sha256_file(keyring)},
         "repositories": repositories,
         "indexes": indexes,
@@ -748,7 +750,8 @@ def snapshot_metadata_selection(contract: dict, profile: dict, repositories: lis
     }
 
 
-def probe_snapshot_metadata(contract: dict, snapshot: str, output: Path, keyring: Path) -> dict:
+def probe_snapshot_metadata(contract: dict, snapshot: str, output: Path, keyring: Path,
+                            contract_path: Path = CONTRACT_PATH) -> dict:
     """Authenticate one approved Snapshot's signed indexes without fetching package payloads."""
     if snapshot != SNAPSHOT_METADATA_PROBE:
         raise ProvisionError(f"metadata-only probe is pinned to {SNAPSHOT_METADATA_PROBE}")
@@ -817,7 +820,7 @@ def probe_snapshot_metadata(contract: dict, snapshot: str, output: Path, keyring
                 })
 
     evidence = snapshot_metadata_selection(contract, profile, repositories, index_records,
-                                           source_rows, binary_rows, downloader.total, keyring)
+                                           source_rows, binary_rows, downloader.total, keyring, contract_path)
     evidence["evidenceSha256"] = sha256(canonical_json(evidence))
     atomic_write(output / "snapshot-metadata-report.json", canonical_json(evidence))
     return evidence
@@ -1411,7 +1414,7 @@ def command_acquire(args: argparse.Namespace) -> int:
 
 def command_probe_snapshot_metadata(args: argparse.Namespace) -> int:
     contract = read_contract(args.contract)
-    report = probe_snapshot_metadata(contract, args.snapshot, args.output, args.keyring)
+    report = probe_snapshot_metadata(contract, args.snapshot, args.output, args.keyring, args.contract)
     print(f"signed Snapshot metadata probe: {report['status']}")
     print(f"evidence sha256:{report['evidenceSha256']}")
     print(f"report: {args.output / 'snapshot-metadata-report.json'}")
@@ -1495,12 +1498,91 @@ def rootfs_run(rootfs: Path, command: list[str], contract: dict, timeout: int = 
     ).stdout
 
 
-def load_candidate(candidate_root: Path, contract: dict, keyring: Path) -> tuple[dict, list[dict]]:
+def candidate_build_evidence(candidate: dict, contract: dict) -> dict:
+    repositories = [{
+        "suite": row["suite"], "inRelease": row["inRelease"]["finalUrl"],
+        "sha256": row["inRelease"]["sha256"], "bytes": row["inRelease"]["bytes"],
+        "signerPrimaryFingerprint": row["signerPrimaryFingerprint"],
+    } for row in candidate["repositories"]]
+    source_files = [{
+        "name": row["name"], "bytes": row["bytes"], "sha256": row["sha256"],
+        "role": "dsc" if row["name"].endswith(".dsc") else (
+            "debian-patches" if ".debian." in row["name"] else "upstream-source"),
+    } for row in candidate["source"]["files"]]
+    dsc_rows = [row for row in source_files if row["role"] == "dsc"]
+    if len(dsc_rows) != 1:
+        raise ProvisionError("authenticated source inputs do not identify one .dsc")
+    return {
+        "acquisition": {
+            "repositories": repositories,
+            "ubuntuKeyring": candidate["trustedKeyring"],
+            "candidateSha256": candidate["candidateSha256"],
+            "sourceIndexesSha256": sha256(canonical_json([
+                row for row in candidate["indexes"] if row["kind"] == "source"])),
+            "binaryIndexesSha256": sha256(canonical_json([
+                row for row in candidate["indexes"] if row["kind"] == "binary-amd64"])),
+            "signatureFingerprints": [row["signerPrimaryFingerprint"] for row in candidate["repositories"]],
+        },
+        "source": {
+            "package": candidate["source"]["name"], "version": candidate["source"]["version"],
+            "upstreamTag": contract["profile"]["upstream"]["tag"],
+            "dsc": {key: dsc_rows[0][key] for key in ("bytes", "sha256")},
+            "files": source_files,
+            **{field: {key: candidate["source"][field][key] for key in ("bytes", "sha256")}
+               for field in ("upstreamArchive", "upstreamSignature", "upstreamKeyring")},
+        },
+        "patchAudit": candidate["patchAudit"],
+    }
+
+
+def verify_candidate_download_inventory(candidate_root: Path, candidate: dict) -> None:
+    """Require every packaged download to have a unique candidate-bound identity."""
+    source = candidate["source"]
+    rows = [*[row["inRelease"] for row in candidate["repositories"]],
+            *candidate["indexes"], *source["files"], source["upstreamKeyring"],
+            {**source["upstreamArchive"], "path": source["upstreamArchivePath"]},
+            {**source["upstreamSignature"], "path": source["upstreamSignaturePath"]}]
+    expected_paths: set[str] = set()
+    for row in rows:
+        relative = PurePosixPath(row["path"])
+        if (relative.is_absolute() or ".." in relative.parts or len(relative.parts) < 2 or
+                relative.parts[0] != "downloads" or relative.as_posix() != row["path"] or
+                row["path"] in expected_paths):
+            raise ProvisionError("candidate download inventory contains an unsafe or duplicate path")
+        expected_paths.add(row["path"])
+        path = candidate_root.joinpath(*relative.parts)
+        if (any(candidate_root.joinpath(*relative.parts[:index]).is_symlink()
+                for index in range(1, len(relative.parts) + 1)) or not path.is_file()):
+            raise ProvisionError("candidate download inventory contains a missing or non-regular file")
+        if path.stat().st_size != row["bytes"] or sha256_file(path) != row["sha256"]:
+            raise ProvisionError(f"candidate download bytes changed: {row['path']}")
+    actual_paths: set[str] = set()
+    for directory, dirnames, filenames in os.walk(candidate_root / "downloads", followlinks=False):
+        current = Path(directory)
+        if any((current / name).is_symlink() for name in dirnames):
+            raise ProvisionError("candidate download inventory contains a symlink directory")
+        for name in filenames:
+            path = current / name
+            if path.is_symlink() or not path.is_file():
+                raise ProvisionError("candidate download inventory contains a non-regular file")
+            actual_paths.add(path.relative_to(candidate_root).as_posix())
+    if actual_paths != expected_paths:
+        raise ProvisionError("candidate download inventory contains unrecorded files")
+
+
+def load_candidate(candidate_root: Path, contract: dict, keyring: Path,
+                   build_record: dict | None = None) -> tuple[dict, list[dict]]:
     candidate_path = candidate_root / "acquisition-candidate.json"
-    candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+    candidate = read_provenance_report(candidate_path, "acquisition candidate")
+    ensure_source_artifact_contract(candidate, contract)
+    if build_record is not None:
+        for section, expected in candidate_build_evidence(candidate, contract).items():
+            if build_record.get(section) != expected:
+                raise ProvisionError(f"acquisition candidate {section} differs from the build record")
+    verify_candidate_download_inventory(candidate_root, candidate)
     parsed = verify_candidate_data(candidate_root, candidate, contract, keyring)
     audit_path = candidate_root / "patch-audit.json"
-    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    audit = read_provenance_report(audit_path, "patch audit")
     if audit.get("status") != "compatible" or candidate.get("patchAudit") != {
         key: audit[key] for key in ("status", "patchCount", "patchInventorySha256", "relevantFileCount", "relevantFileManifestSha256")
     }:
@@ -1525,10 +1607,9 @@ def load_candidate(candidate_root: Path, contract: dict, keyring: Path) -> tuple
         )
     elif not source_root.is_dir() or not upstream_root.is_dir():
         raise ProvisionError("only one audited source tree is present; refusing partial source state")
-    reaudited_path = candidate_root / f"patch-audit.reverified-{os.getpid()}.json"
-    reaudited = audit_patches(source_root, upstream_root, reaudited_path, contract)
-    for key in ("patchCount", "patchInventorySha256", "relevantFileCount", "relevantFileManifestSha256"):
-        if reaudited[key] != audit[key]:
+    with tempfile.TemporaryDirectory(prefix="patch-audit-replay-", dir=candidate_root) as replay_root:
+        reaudited = audit_patches(source_root, upstream_root, Path(replay_root) / "patch-audit.json", contract)
+        if canonical_json(reaudited) != canonical_json(audit):
             raise ProvisionError("patch audit inventory changed between acquisition and provisioning")
     return candidate, parsed
 
@@ -1828,29 +1909,37 @@ def deterministic_rootfs_tar(rootfs: Path, destination: Path, epoch: int) -> dic
     return {"bytes": len(payload), "sha256": sha256(payload)}
 
 
-def create_oci_layout(rootfs_tar: Path, output: Path, profile_id: str, epoch: int) -> dict:
+def expected_oci_config(profile_id: str, environment: dict[str, str], rootfs_sha256: str) -> dict:
+    try:
+        created = datetime.datetime.fromtimestamp(
+            int(environment["SOURCE_DATE_EPOCH"]), datetime.timezone.utc,
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (KeyError, ValueError, OverflowError, OSError) as error:
+        raise ProvisionError("OCI environment has an invalid SOURCE_DATE_EPOCH") from error
+    if any(not isinstance(key, str) or not isinstance(value, str) or "=" in key or "\0" in key + value
+           for key, value in environment.items()):
+        raise ProvisionError("OCI environment has a malformed variable")
+    return {
+        "architecture": "amd64", "os": "linux", "created": created,
+        "config": {
+            "Env": [f"{key}={value}" for key, value in sorted(environment.items())],
+            "Labels": {"org.opencontainers.image.title": profile_id, "org.opencontainers.image.version": "18.1.3"},
+            "WorkingDir": "/",
+        },
+        "rootfs": {"type": "layers", "diff_ids": ["sha256:" + rootfs_sha256]},
+        "history": [{"created": created, "created_by": "authenticated Noble snapshot package closure"}],
+    }
+
+
+def create_oci_layout(rootfs_tar: Path, output: Path, profile_id: str, environment: dict[str, str]) -> dict:
     output.mkdir(parents=True, exist_ok=False)
     blobs = output / "blobs/sha256"
     blobs.mkdir(parents=True)
     rootfs_payload = rootfs_tar.read_bytes()
-    diff_id = "sha256:" + sha256(rootfs_payload)
     layer = gzip.compress(rootfs_payload, compresslevel=9, mtime=0)
     layer_digest = sha256(layer)
     (blobs / layer_digest).write_bytes(layer)
-    created = "2024-04-25T00:00:00Z"
-    config = {
-        "architecture": "amd64", "os": "linux", "created": created,
-        "config": {
-            "Env": [
-                "LC_ALL=C", "TZ=UTC", "SOURCE_DATE_EPOCH=1714003200",
-                "PATH=/usr/lib/llvm-18/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            ],
-            "Labels": {"org.opencontainers.image.title": profile_id, "org.opencontainers.image.version": "18.1.3"},
-            "WorkingDir": "/",
-        },
-        "rootfs": {"type": "layers", "diff_ids": [diff_id]},
-        "history": [{"created": created, "created_by": "authenticated Noble snapshot package closure"}],
-    }
+    config = expected_oci_config(profile_id, environment, sha256(rootfs_payload))
     config_bytes = canonical_json(config)
     config_digest = sha256(config_bytes)
     (blobs / config_digest).write_bytes(config_bytes)
@@ -1942,6 +2031,8 @@ def verify_oci_archive(path: Path, record: dict, max_bytes: int) -> None:
             expected_diff_id = "sha256:" + rootfs_identity["sha256"]
             if config.get("rootfs", {}).get("diff_ids") != [expected_diff_id]:
                 raise ProvisionError("OCI rootfs diff ID differs from the deterministic rootfs tar identity")
+            if config != expected_oci_config(record["profile"]["id"], record["environment"], rootfs_identity["sha256"]):
+                raise ProvisionError("OCI config semantics differ from the selected build-record profile and environment")
             layer = layers[0]
             layer_digest = layer.get("digest", "")
             layer_name = "blobs/sha256/" + layer_digest.removeprefix("sha256:")
@@ -1978,6 +2069,23 @@ def verify_oci_archive(path: Path, record: dict, max_bytes: int) -> None:
         raise ProvisionError(f"could not verify OCI image artifact: {error}") from error
 
 
+def debootstrap_command(contract: dict, profile_root: str, keyring: Path) -> list[str]:
+    return [
+        "sudo", "env", "LC_ALL=C", "TZ=UTC", f"SOURCE_DATE_EPOCH={contract['environment']['SOURCE_DATE_EPOCH']}",
+        "debootstrap", "--arch=amd64", "--variant=minbase", "--components=main,universe",
+        f"--keyring={keyring}", "noble", profile_root, contract["profile"]["snapshotBase"],
+    ]
+
+
+def downloaded_package_key(deb: Path) -> tuple[str, str, str]:
+    output = run_checked(["dpkg-deb", "--field", str(deb), "Package", "Version", "Architecture"]).stdout
+    records = parse_deb822(output)
+    names = ("Package", "Version", "Architecture")
+    if len(records) != 1 or set(records[0]) != set(names) or any(not records[0][name] for name in names):
+        raise ProvisionError(f"could not read package identity from {deb.name}")
+    return tuple(records[0][name] for name in names)
+
+
 def provision_rootfs(args: argparse.Namespace) -> int:
     contract = read_contract(args.contract)
     profile = contract["profile"]
@@ -1991,12 +2099,7 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     profile_root = args.rootfs
     profile_root.parent.mkdir(parents=True, exist_ok=True)
     snapshot = profile["snapshotBase"]
-    debootstrap_command = [
-        "sudo", "env", "LC_ALL=C", "TZ=UTC", f"SOURCE_DATE_EPOCH={contract['environment']['SOURCE_DATE_EPOCH']}",
-        "debootstrap", "--arch=amd64", "--variant=minbase", "--components=main,universe",
-        f"--keyring={args.keyring}", "noble", str(profile_root), snapshot,
-    ]
-    run_checked(debootstrap_command, timeout=900)
+    run_checked(debootstrap_command(contract, str(profile_root), args.keyring), timeout=900)
     bootstrap_package_keys = installed_package_keys(profile_root, contract)
 
     sources = "\n".join(
@@ -2018,10 +2121,7 @@ def provision_rootfs(args: argparse.Namespace) -> int:
         raise ProvisionError("APT download-only phase produced no package archives")
     downloaded_identities = []
     for deb in downloaded_debs:
-        fields = run_checked(["dpkg-deb", "--field", str(deb), "Package", "Version", "Architecture"]).stdout.splitlines()
-        if len(fields) != 3:
-            raise ProvisionError(f"could not read package identity from {deb.name}")
-        downloaded_identities.append((deb, tuple(fields)))
+        downloaded_identities.append((deb, downloaded_package_key(deb)))
     downloaded_keys = {key for _, key in downloaded_identities}
     if len(downloaded_keys) != len(downloaded_identities):
         raise ProvisionError("APT download-only phase produced duplicate package identities")
@@ -2102,7 +2202,7 @@ def provision_rootfs(args: argparse.Namespace) -> int:
         raise ProvisionError("canonical rootfs tar exceeds the artifact byte budget")
     args.output.mkdir(parents=True, exist_ok=False)
     oci_path = args.output / "oci-layout"
-    image_record = create_oci_layout(rootfs_tar_path, oci_path, profile["id"], epoch)
+    image_record = create_oci_layout(rootfs_tar_path, oci_path, profile["id"], contract["environment"])
     oci_archive = args.output / "clang-18.1.3-noble-amd64.oci.tar"
     run_checked(["tar", "--sort=name", "--format=posix", "--numeric-owner", "--owner=0", "--group=0",
                  f"--mtime=@{epoch}", "--pax-option=delete=atime,delete=ctime", "-cf", str(oci_archive),
@@ -2114,43 +2214,12 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     image_artifact_identity = {"bytes": oci_archive.stat().st_size, "sha256": sha256_file(oci_archive)}
     shutil.rmtree(oci_path)
 
-    repos = []
-    for row in candidate["repositories"]:
-        rel = row["inRelease"]
-        repos.append({
-            "suite": row["suite"], "inRelease": rel["finalUrl"], "sha256": rel["sha256"],
-            "bytes": rel["bytes"], "signerPrimaryFingerprint": row["signerPrimaryFingerprint"],
-        })
-    source_files = []
-    dsc_entry = None
-    for row in candidate["source"]["files"]:
-        name = row["name"]
-        role = "dsc" if name.endswith(".dsc") else ("debian-patches" if ".debian." in name else "upstream-source")
-        converted = {"name": name, "bytes": row["bytes"], "sha256": row["sha256"], "role": role}
-        source_files.append(converted)
-        if role == "dsc":
-            dsc_entry = {"bytes": row["bytes"], "sha256": row["sha256"]}
     record = {
         "schemaVersion": 1,
         "buildSystem": "ubuntu-snapshot-debootstrap-apt",
         "profile": {"id": profile["id"], "architecture": profile["architecture"], "target": profile["target"],
                     "snapshot": profile["snapshot"], "codename": profile["codename"]},
-        "acquisition": {
-            "repositories": repos,
-            "ubuntuKeyring": candidate["trustedKeyring"],
-            "candidateSha256": candidate["candidateSha256"],
-            "sourceIndexesSha256": sha256(canonical_json([row for row in candidate["indexes"] if row["kind"] == "source"])),
-            "binaryIndexesSha256": sha256(canonical_json([row for row in candidate["indexes"] if row["kind"] == "binary-amd64"])),
-            "signatureFingerprints": [row["signerPrimaryFingerprint"] for row in candidate["repositories"]],
-        },
-        "source": {"package": "llvm-toolchain-18", "version": "1:18.1.3-1ubuntu1",
-                   "upstreamTag": contract["profile"]["upstream"]["tag"], "dsc": dsc_entry,
-                   "files": source_files,
-                   "upstreamArchive": {"bytes": candidate["source"]["upstreamArchive"]["bytes"], "sha256": candidate["source"]["upstreamArchive"]["sha256"]},
-                   "upstreamSignature": {"bytes": candidate["source"]["upstreamSignature"]["bytes"], "sha256": candidate["source"]["upstreamSignature"]["sha256"]},
-                   "upstreamKeyring": {"bytes": candidate["source"]["upstreamKeyring"]["bytes"],
-                                       "sha256": candidate["source"]["upstreamKeyring"]["sha256"]}},
-        "patchAudit": candidate["patchAudit"],
+        **candidate_build_evidence(candidate, contract),
         "packages": package_rows,
         "downloadedPackages": downloaded_rows,
         "tools": tools,
@@ -2158,13 +2227,10 @@ def provision_rootfs(args: argparse.Namespace) -> int:
         "resources": resource_files,
         "resourceDirectory": resource_dir,
         "probe": probe_checked,
-        "recipe": recipe_identity(),
+        "recipe": recipe_identity(args.contract),
         "environment": contract["environment"],
         "commands": {
-            "debootstrap": ["sudo", "env", "LC_ALL=C", "TZ=UTC",
-             f"SOURCE_DATE_EPOCH={contract['environment']['SOURCE_DATE_EPOCH']}",
-             "debootstrap", "--arch=amd64", "--variant=minbase", "--components=main,universe",
-             "--keyring=/usr/share/keyrings/ubuntu-archive-keyring.gpg", "noble", "<PROFILE_ROOT>", snapshot],
+            "debootstrap": debootstrap_command(contract, "<PROFILE_ROOT>", args.keyring),
             "writeAptSources": ["sudo", "install", "-m", "0644", "<SOURCE_LIST>",
                                  "<PROFILE_ROOT>/etc/apt/sources.list"],
             "aptUpdate": ["chroot", "<PROFILE_ROOT>",
@@ -2222,7 +2288,7 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     return 0
 
 
-def validate_build_record(record: dict, contract: dict) -> None:
+def validate_build_record(record: dict, contract: dict, contract_path: Path = CONTRACT_PATH) -> None:
     profile = contract["profile"]
     if record.get("schemaVersion") != 1 or record.get("buildSystem") != "ubuntu-snapshot-debootstrap-apt" or record.get("profile") != {
         "id": profile["id"], "architecture": "amd64", "target": "x86_64-linux-gnu",
@@ -2371,7 +2437,7 @@ def validate_build_record(record: dict, contract: dict) -> None:
         raise ProvisionError("build record OCI archive checksum or size is invalid")
     if record.get("environment") != contract["environment"]:
         raise ProvisionError("build record environment differs from fixed UTC/source-date profile")
-    if record.get("recipe") != recipe_identity():
+    if record.get("recipe") != recipe_identity(contract_path):
         raise ProvisionError("build record recipe hashes do not match the reviewed contract, tooling, and workflow bytes")
     command_names = {
         "debootstrap", "writeAptSources", "aptUpdate", "aptDownloadOnly", "aptInstall",
@@ -2398,17 +2464,23 @@ def validate_build_record(record: dict, contract: dict) -> None:
     keyring = record["acquisition"].get("ubuntuKeyring", {})
     if keyring.get("bytes", 0) < 1 or not re.fullmatch(r"[0-9a-f]{64}", str(keyring.get("sha256", ""))):
         raise ProvisionError("build record does not bind the archive-verification keyring")
-    if not re.fullmatch(r"[0-9a-f]{64}", str(record["acquisition"].get("candidateSha256", ""))):
+    candidate_digest = record["acquisition"].get("candidateSha256")
+    if not isinstance(candidate_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", candidate_digest):
         raise ProvisionError("build record does not bind the authenticated acquisition candidate")
+    for field in ("sourceIndexesSha256", "binaryIndexesSha256"):
+        digest = record["acquisition"].get(field)
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ProvisionError(f"build record lacks a valid signed index digest: {field}")
     if record["acquisition"].get("signatureFingerprints") != [row["signerPrimaryFingerprint"] for row in repositories]:
         raise ProvisionError("build record repository signer summary is inconsistent")
 
 
-def compare_build_runs(first_path: Path, second_path: Path, output_path: Path, contract: dict) -> dict:
+def compare_build_runs(first_path: Path, second_path: Path, output_path: Path, contract: dict,
+                       contract_path: Path = CONTRACT_PATH) -> dict:
     first = json.loads(first_path.read_text(encoding="utf-8"))
     second = json.loads(second_path.read_text(encoding="utf-8"))
-    validate_build_record(first, contract)
-    validate_build_record(second, contract)
+    validate_build_record(first, contract, contract_path)
+    validate_build_record(second, contract, contract_path)
     if canonical_json(first) != canonical_json(second):
         raise ProvisionError("two clean rootfs/image/probe runs did not reproduce identical identity")
     record = dict(first)
@@ -2423,7 +2495,7 @@ def compare_build_runs(first_path: Path, second_path: Path, output_path: Path, c
 
 def command_compare_runs(args: argparse.Namespace) -> int:
     contract = read_contract(args.contract)
-    record = compare_build_runs(args.first, args.second, args.output, contract)
+    record = compare_build_runs(args.first, args.second, args.output, contract, args.contract)
     print(f"two clean runs reproduced rootfs {record['rootfs']['sha256']} and image {record['image']['imageDigest']}")
     return 0
 
@@ -2431,7 +2503,7 @@ def command_compare_runs(args: argparse.Namespace) -> int:
 def command_verify_record(args: argparse.Namespace) -> int:
     contract = read_contract(args.contract)
     record = json.loads(args.record.read_text(encoding="utf-8"))
-    validate_build_record(record, contract)
+    validate_build_record(record, contract, args.contract)
     if record.get("reproducibility") != {
         "cleanBuilds": 2, "matchingRootfsSha256": True, "matchingImageDigest": True,
     }:
@@ -2448,7 +2520,7 @@ def command_verify_record(args: argparse.Namespace) -> int:
 def command_write_loader_input(args: argparse.Namespace) -> int:
     contract = read_contract(args.contract)
     record = json.loads(args.record.read_text(encoding="utf-8"))
-    validate_build_record(record, contract)
+    validate_build_record(record, contract, args.contract)
     if record.get("reproducibility") != {
         "cleanBuilds": 2, "matchingRootfsSha256": True, "matchingImageDigest": True,
     }:
@@ -2532,7 +2604,7 @@ def command_write_loader_input(args: argparse.Namespace) -> int:
 def command_verify_image(args: argparse.Namespace) -> int:
     contract = read_contract(args.contract)
     record = json.loads(args.record.read_text(encoding="utf-8"))
-    validate_build_record(record, contract)
+    validate_build_record(record, contract, args.contract)
     if record.get("reproducibility") != {
         "cleanBuilds": 2, "matchingRootfsSha256": True, "matchingImageDigest": True,
     }:
@@ -2633,7 +2705,7 @@ def validate_provenance_negative_report(report: dict, record: dict, contract: di
 def command_package_provenance(args: argparse.Namespace) -> int:
     contract = read_contract(args.contract)
     record = json.loads(args.record.read_text(encoding="utf-8"))
-    validate_build_record(record, contract)
+    validate_build_record(record, contract, args.contract)
     if record.get("reproducibility") != {
         "cleanBuilds": 2, "matchingRootfsSha256": True, "matchingImageDigest": True,
     }:
@@ -2642,6 +2714,7 @@ def command_package_provenance(args: argparse.Namespace) -> int:
     patch_audit = args.acquisition / "patch-audit.json"
     if not candidate.is_file() or not patch_audit.is_file() or not (args.acquisition / "downloads").is_dir():
         raise ProvisionError("provenance package is missing authenticated acquisition inputs")
+    load_candidate(args.acquisition, contract, args.keyring, build_record=record)
     record_sha256 = sha256_file(args.record)
     probe_report = read_provenance_report(args.probe_report, "LibTooling probe")
     loader_report = read_provenance_report(args.loader_report, "A-loader")
@@ -2652,7 +2725,7 @@ def command_package_provenance(args: argparse.Namespace) -> int:
     expected_artifacts = [
         candidate, patch_audit, args.acquisition / "downloads",
         args.record, args.probe_report, args.loader_report, args.negative_report,
-        args.contract, args.contract.parent / "build-record.schema.json",
+        args.contract, RECIPE_FILES["schemaSha256"],
         ROOT / "oracle/clang/18.1.3/libtooling-probe.cpp",
         ROOT / "oracle/clang/18.1.3/fixtures/libtooling-positive.cpp",
         ROOT / "scripts/oracle/provision_clang_18_1_3.py",

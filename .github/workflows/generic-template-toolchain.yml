@@ -15,12 +15,14 @@ on:
     paths:
       - '.github/workflows/generic-template-toolchain.yml'
       - 'oracle/clang/18.1.3/**'
+      - 'oracle/llvm/22.1.6/release-artifacts.json'
       - 'scripts/oracle/provision_clang_18_1_3.py'
   push:
     branches: [master]
     paths:
       - '.github/workflows/generic-template-toolchain.yml'
       - 'oracle/clang/18.1.3/**'
+      - 'oracle/llvm/22.1.6/release-artifacts.json'
       - 'scripts/oracle/provision_clang_18_1_3.py'
 
 permissions:
@@ -107,15 +109,18 @@ jobs:
           python3 scripts/oracle/provision_clang_18_1_3.py acquire \
             --output "$CLANG_WORK/acquisition"
 
+      - name: Install pinned frontend Node after source authentication
+        run: bash scripts/install-frontend-node.sh "$CLANG_WORK/frontend-node"
+
       - name: Run the accepted A profile and provenance loader tests
         run: |
-          ./gradlew --no-daemon test \
+          ./gradlew --no-daemon -PfrontendNodeHome="$CLANG_WORK/frontend-node" test \
             --tests 'decompengine.oracle.fulltree.generictemplatefrontend.FullTreeGenericTemplateFrontendV1Test'
 
       - name: Execute the locked Clang 22.1.6 negative comparator
         run: |
           mkdir -p "$CLANG_WORK"
-          ./gradlew --no-daemon fetchLlvmReleaseArtifacts \
+          ./gradlew --no-daemon -PfrontendNodeHome="$CLANG_WORK/frontend-node" fetchLlvmReleaseArtifacts \
             --args="--lock oracle/llvm/22.1.6/release-artifacts.json $CLANG_WORK/llvm22-artifacts"
           chmod 0555 "$CLANG_WORK/llvm22-artifacts/artifacts/clang-driver.full"
           python3 scripts/oracle/provision_clang_18_1_3.py negative-version-smoke \
@@ -165,7 +170,8 @@ jobs:
             --record "$CLANG_WORK/build-record.json" \
             --rootfs "$CLANG_WORK/rootfs-run2" \
             --output "$CLANG_WORK/a-loader-smoke.json"
-          ./gradlew --no-daemon --init-script oracle/clang/18.1.3/clang1813-loader-smoke.init.gradle \
+          ./gradlew --no-daemon -PfrontendNodeHome="$CLANG_WORK/frontend-node" \
+            --init-script oracle/clang/18.1.3/clang1813-loader-smoke.init.gradle \
             clang1813AProfileLoaderSmoke \
             -Pclang1813.loaderInput="$CLANG_WORK/a-loader-smoke.properties"
           sudo rm -rf "$CLANG_WORK/rootfs-run2"

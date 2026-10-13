@@ -137,6 +137,13 @@ class ProvisioningNegativeTests(unittest.TestCase):
                       qualify_text)
         self.assertLess(qualify_text.index("Run offline fail-closed provisioning tests"),
                         qualify_text.index("Authenticate Ubuntu Snapshot source and patch compatibility first"))
+        trigger_text = workflow[:workflow.index("permissions:")]
+        self.assertEqual(trigger_text.count("'oracle/llvm/22.1.6/release-artifacts.json'"), 2)
+        self.assertLess(qualify_text.index("Authenticate Ubuntu Snapshot source and patch compatibility first"),
+                        qualify_text.index('bash scripts/install-frontend-node.sh'))
+        self.assertEqual(qualify_text.count('-PfrontendNodeHome="$CLANG_WORK/frontend-node"'),
+                         qualify_text.count('./gradlew'))
+        self.assertLess(qualify_text.index('bash scripts/install-frontend-node.sh'), qualify_text.index('./gradlew'))
 
     def test_rootfs_command_uses_the_selected_contract_environment(self):
         contract = {"environment": {"LC_ALL": "C", "TZ": "UTC", "SOURCE_DATE_EPOCH": "7",
@@ -147,6 +154,39 @@ class ProvisioningNegativeTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertIn("PATH=/custom/bin", command)
         self.assertIn("SOURCE_DATE_EPOCH=7", command)
+
+    def test_debootstrap_command_records_the_selected_keyring(self):
+        keyring = Path("workspace-keys/selected archive-keyring.gpg")
+        executed = provision.debootstrap_command(self.contract, "/workspace/profile-root", keyring)
+        recorded = provision.debootstrap_command(self.contract, "<PROFILE_ROOT>", keyring)
+        self.assertIn("--keyring=workspace-keys/selected archive-keyring.gpg", executed)
+        self.assertEqual(recorded, ["<PROFILE_ROOT>" if value == "/workspace/profile-root" else value
+                                    for value in executed])
+
+    def test_downloaded_package_key_parses_labeled_dpkg_deb_fields(self):
+        result = mock.Mock(stdout="Package: clang-18\nVersion: 1:18.1.3-1ubuntu1\nArchitecture: amd64\n")
+        with mock.patch.object(provision, "run_checked", return_value=result):
+            self.assertEqual(provision.downloaded_package_key(Path("fixture.deb")),
+                             ("clang-18", "1:18.1.3-1ubuntu1", "amd64"))
+        for output in ("clang-18\n1:18.1.3-1ubuntu1\namd64\n",
+                       "Package: clang-18\nVersion: 1:18.1.3-1ubuntu1\n",
+                       "Package: clang-18\nPackage: substituted\nVersion: 1:18.1.3-1ubuntu1\nArchitecture: amd64\n"):
+            with self.subTest(output=output), mock.patch.object(provision, "run_checked", return_value=mock.Mock(stdout=output)):
+                with self.assertRaises(provision.ProvisionError):
+                    provision.downloaded_package_key(Path("fixture.deb"))
+
+    def test_build_record_rejects_missing_or_malformed_acquisition_digests(self):
+        for field in ("candidateSha256", "sourceIndexesSha256", "binaryIndexesSha256"):
+            for value in (None, "", "wrong", "F" * 64, int("1" * 64)):
+                record = self.valid_build_record()
+                if value is None:
+                    record["acquisition"].pop(field)
+                else:
+                    record["acquisition"][field] = value
+                with self.subTest(field=field, value=value), self.assertRaisesRegex(
+                    provision.ProvisionError, "acquisition candidate|signed index digest",
+                ):
+                    provision.validate_build_record(record, self.contract)
 
     def test_driver_symlink_resolved_path_is_canonical_but_chain_is_preserved(self):
         with self.temporary_directory() as temp:
@@ -951,6 +991,70 @@ class ProvisioningNegativeTests(unittest.TestCase):
             self.assertEqual([row["path"] for row in result["unresolvedContractRelevantDifferences"]],
                              [visitor_header])
 
+    def test_oci_selected_environment_and_config_semantics_are_bound(self):
+        environment = {**self.contract["environment"], "PATH": "/selected/bin", "SOURCE_DATE_EPOCH": "7"}
+        changes = [
+            ("architecture", lambda c: c.update(architecture="arm64")),
+            ("os", lambda c: c.update(os="windows")),
+            ("created", lambda c: c.update(created="2024-04-25T00:00:00Z")),
+            ("history", lambda c: c.update(history=[])),
+            ("environment", lambda c: c["config"].update(Env=["PATH=/different/bin"])),
+            ("labels", lambda c: c["config"].update(Labels={})),
+            ("working directory", lambda c: c["config"].update(WorkingDir="/tmp")),
+            ("entrypoint", lambda c: c["config"].update(Entrypoint=["/bin/sh"])),
+            ("command", lambda c: c["config"].update(Cmd=["unrecorded"])),
+            ("user", lambda c: c["config"].update(User="1000")),
+            ("rootfs type", lambda c: c["rootfs"].update(type="unrecorded")),
+            ("extra field", lambda c: c.update(unrecorded=True)),
+        ]
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            payload = b"synthetic rootfs bytes; not a qualified image"
+            rootfs_tar = base / "rootfs.tar"
+            rootfs_tar.write_bytes(payload)
+            for label, mutate in [("valid", None), *changes]:
+                with self.subTest(label=label):
+                    layout = base / label
+                    image = provision.create_oci_layout(rootfs_tar, layout, "fixture", environment)
+                    manifest_path = layout / "blobs/sha256" / image["manifestSha256"]
+                    manifest = json.loads(manifest_path.read_text())
+                    config_path = layout / "blobs/sha256" / manifest["config"]["digest"].removeprefix("sha256:")
+                    config = json.loads(config_path.read_text())
+                    self.assertEqual(config["created"], "1970-01-01T00:00:07Z")
+                    self.assertEqual(config["config"]["Env"], [f"{key}={value}" for key, value in sorted(environment.items())])
+                    if mutate:
+                        mutate(config)
+                        config_bytes = provision.canonical_json(config)
+                        config_digest = provision.sha256(config_bytes)
+                        config_path.unlink()
+                        (config_path.parent / config_digest).write_bytes(config_bytes)
+                        manifest["config"].update(digest="sha256:" + config_digest, size=len(config_bytes))
+                        manifest_bytes = provision.canonical_json(manifest)
+                        manifest_digest = provision.sha256(manifest_bytes)
+                        manifest_path.unlink()
+                        (manifest_path.parent / manifest_digest).write_bytes(manifest_bytes)
+                        index_path = layout / "index.json"
+                        index = json.loads(index_path.read_text())
+                        index["manifests"][0].update(digest="sha256:" + manifest_digest, size=len(manifest_bytes))
+                        index_path.write_bytes(provision.canonical_json(index))
+                        image.update(manifestSha256=manifest_digest, imageDigest="sha256:" + manifest_digest)
+                    archive_path = base / (label + ".tar")
+                    with tarfile.open(archive_path, "w") as archive:
+                        for path in sorted(layout.rglob("*")):
+                            if path.is_file():
+                                archive.add(path, arcname=path.relative_to(layout).as_posix())
+                    record = {
+                        "profile": {"id": "fixture"}, "environment": environment,
+                        "rootfs": {"bytes": len(payload), "sha256": provision.sha256(payload)},
+                        "image": image,
+                        "imageArtifact": {"bytes": archive_path.stat().st_size, "sha256": provision.sha256_file(archive_path)},
+                    }
+                    if mutate:
+                        with self.assertRaisesRegex(provision.ProvisionError, "config semantics"):
+                            provision.verify_oci_archive(archive_path, record, 1024 * 1024)
+                    else:
+                        provision.verify_oci_archive(archive_path, record, 1024 * 1024)
+
     def test_oci_image_verifier_rejects_unrecorded_blob(self):
         with self.temporary_directory() as temp:
             base = Path(temp)
@@ -958,7 +1062,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
             payload = b"bounded synthetic rootfs tar payload"
             rootfs_tar.write_bytes(payload)
             layout = base / "layout"
-            image = provision.create_oci_layout(rootfs_tar, layout, "fixture", 1714003200)
+            image = provision.create_oci_layout(rootfs_tar, layout, "fixture", self.contract["environment"])
             archive_path = base / "image.tar"
             names = sorted(path.relative_to(layout).as_posix() for path in layout.rglob("*") if path.is_file())
             provision.run_checked([
@@ -966,7 +1070,8 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 "--mtime=@1714003200", "--pax-option=delete=atime,delete=ctime", "-cf", str(archive_path),
                 "-C", str(layout), *names,
             ])
-            record = {"rootfs": {"bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()},
+            record = {"profile": {"id": "fixture"}, "environment": self.contract["environment"],
+                      "rootfs": {"bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()},
                       "image": image,
                       "imageArtifact": {"bytes": archive_path.stat().st_size,
                                         "sha256": provision.sha256_file(archive_path)}}
@@ -990,7 +1095,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
             payload = b"bounded synthetic rootfs tar payload"
             rootfs_tar.write_bytes(payload)
             layout = base / "layout"
-            image = provision.create_oci_layout(rootfs_tar, layout, "fixture", 1714003200)
+            image = provision.create_oci_layout(rootfs_tar, layout, "fixture", self.contract["environment"])
 
             manifest_path = layout / "blobs/sha256" / image["manifestSha256"]
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1016,6 +1121,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 "-C", str(layout), *names,
             ])
             record = {
+                "profile": {"id": "fixture"}, "environment": self.contract["environment"],
                 "rootfs": {"bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()},
                 "image": {**image, "manifestSha256": manifest_sha256,
                           "imageDigest": "sha256:" + manifest_sha256},
@@ -1024,6 +1130,297 @@ class ProvisioningNegativeTests(unittest.TestCase):
             }
             with self.assertRaisesRegex(provision.ProvisionError, "config descriptor size differs"):
                 provision.verify_oci_archive(archive_path, record, 1024 * 1024)
+
+
+class RecipeAndCandidateBindingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.contract = provision.read_contract()
+        cls.temp_root = ROOT / "build/clang1813-binding-tests"
+        cls.temp_root.mkdir(parents=True, exist_ok=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.temp_root, ignore_errors=True)
+
+    def temporary_directory(self):
+        return tempfile.TemporaryDirectory(dir=self.temp_root)
+
+    def valid_build_record(self):
+        return ProvisioningNegativeTests.valid_build_record(self)
+
+    def candidate_fixture(self, base):
+        root = base / "acquisition"
+        root.mkdir()
+        keyring = base / "ubuntu-keyring.gpg"
+        keyring.write_bytes(b"synthetic keyring; signatures are mocked")
+
+        def artifact(relative):
+            payload = ("synthetic bytes for " + relative).encode()
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+            return {"path": relative, "bytes": len(payload), "sha256": provision.sha256(payload)}
+
+        profile = self.contract["profile"]
+        repositories, indexes = [], []
+        for suite in profile["suites"]:
+            repositories.append({
+                "suite": suite,
+                "inRelease": {**artifact(f"downloads/{suite}/InRelease"),
+                              "finalUrl": f"{profile['snapshotBase']}dists/{suite}/InRelease"},
+                "signerPrimaryFingerprint": profile["ubuntuArchivePrimaryFingerprints"][0],
+            })
+            for component in profile["components"]:
+                for kind in ("source", "binary-amd64"):
+                    indexes.append({**artifact(f"downloads/{suite}/{component}/{kind}/index.gz"),
+                                    "suite": suite, "component": component, "kind": kind})
+        package_source = root / "source/package-source"
+        upstream_source = root / "source/upstream/llvm-project-18.1.3.src"
+        (package_source / "debian/patches").mkdir(parents=True)
+        (package_source / "debian/patches/series").write_bytes(b"")
+        for relative in self.contract["relevantFiles"]:
+            for source_root in (package_source, upstream_source):
+                path = source_root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"matching synthetic source\n")
+        audit = provision.audit_patches(package_source, upstream_source, root / "patch-audit.json", self.contract)
+        candidate = {
+            "schemaVersion": 1, "status": "authenticated-candidate-awaiting-repository-lock-review",
+            "profileId": profile["id"], "snapshot": profile["snapshot"],
+            "trustedKeyring": {"bytes": keyring.stat().st_size, "sha256": provision.sha256_file(keyring)},
+            "repositories": repositories, "indexes": indexes,
+            "source": {
+                **profile["sourcePackage"],
+                "files": [{**artifact("downloads/source/source.dsc"), "name": "source.dsc"}],
+                "upstreamArchive": artifact("downloads/upstream/source.tar.xz"),
+                "upstreamArchivePath": "downloads/upstream/source.tar.xz",
+                "upstreamSignature": artifact("downloads/upstream/source.tar.xz.sig"),
+                "upstreamSignaturePath": "downloads/upstream/source.tar.xz.sig",
+                "upstreamKeyring": artifact("downloads/upstream/llvm-release-keyring.gpg"),
+            },
+            "patchAudit": {key: audit[key] for key in (
+                "status", "patchCount", "patchInventorySha256", "relevantFileCount", "relevantFileManifestSha256")},
+            "binaryRoots": sorted(profile["binaryRoots"], key=lambda row: row["name"]),
+            "downloadedBytes": 1,
+        }
+        self.write_candidate(root, candidate)
+        record = self.valid_build_record()
+        record.update(provision.candidate_build_evidence(candidate, self.contract))
+        return root, candidate, record, keyring
+
+    def write_candidate(self, root, candidate):
+        candidate.pop("candidateSha256", None)
+        candidate["candidateSha256"] = provision.sha256(provision.canonical_json(candidate))
+        (root / "acquisition-candidate.json").write_bytes(provision.canonical_json(candidate))
+
+    def test_recipe_hashes_selected_contract_bytes_and_preserves_other_recipe_files(self):
+        with self.temporary_directory() as temp:
+            selected = Path(temp) / "custom-contract.json"
+            contract = json.loads(json.dumps(self.contract))
+            contract["environment"]["PATH"] = "/custom/bin"
+            selected.write_bytes(provision.canonical_json(contract))
+            actual = provision.recipe_identity(selected)
+            default = provision.recipe_identity()
+            self.assertNotEqual(actual["contractSha256"], default["contractSha256"])
+            self.assertEqual(actual, {**default, "contractSha256": provision.sha256_file(selected)})
+            record = self.valid_build_record()
+            record["environment"] = contract["environment"]
+            with self.assertRaisesRegex(provision.ProvisionError, "recipe hashes"):
+                provision.validate_build_record(record, contract, selected)
+            record["recipe"] = actual
+            provision.validate_build_record(record, contract, selected)
+            selected.write_bytes(selected.read_bytes() + b" ")
+            with self.assertRaisesRegex(provision.ProvisionError, "recipe hashes"):
+                provision.validate_build_record(record, contract, selected)
+
+    def test_record_commands_propagate_selected_contract_to_verification(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            selected, record_path = base / "contract.json", base / "record.json"
+            selected.write_bytes(provision.canonical_json(self.contract))
+            record_path.write_bytes(provision.canonical_json(self.valid_build_record()))
+            commands = (provision.command_verify_record, provision.command_write_loader_input,
+                        provision.command_verify_image, provision.command_package_provenance)
+            for command in commands:
+                args = provision.argparse.Namespace(contract=selected, record=record_path)
+                with self.subTest(command=command.__name__), mock.patch.object(
+                    provision, "validate_build_record", side_effect=provision.ProvisionError("stop before work")
+                ) as validate:
+                    with self.assertRaisesRegex(provision.ProvisionError, "stop before work"):
+                        command(args)
+                    self.assertEqual(validate.call_args.args[2], selected)
+
+    def test_compare_runs_and_metadata_report_bind_selected_contract(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            selected = base / "contract.json"
+            selected.write_bytes(provision.canonical_json(self.contract))
+            record = self.valid_build_record()
+            record["recipe"] = provision.recipe_identity(selected)
+            first, second = base / "first.json", base / "second.json"
+            first.write_bytes(provision.canonical_json(record))
+            second.write_bytes(provision.canonical_json(record))
+            args = provision.argparse.Namespace(contract=selected, first=first, second=second,
+                                               output=base / "final.json")
+            self.assertEqual(provision.command_compare_runs(args), 0)
+            self.assertEqual(json.loads(args.output.read_bytes())["recipe"], record["recipe"])
+            keyring = base / "keyring"
+            keyring.write_bytes(b"fixture")
+            report = provision.snapshot_metadata_selection(
+                self.contract, self.contract["profile"], [], [], [], [], 0, keyring, selected)
+            self.assertEqual(report["contractSha256"], provision.sha256_file(selected))
+            self.assertEqual(report["recipe"], record["recipe"])
+
+    def test_candidate_replay_accepts_bound_evidence_and_cleans_temporary_audit(self):
+        with self.temporary_directory() as temp:
+            root, candidate, record, keyring = self.candidate_fixture(Path(temp))
+            with mock.patch.object(provision, "verify_candidate_data", return_value=[]) as signed:
+                actual, parsed = provision.load_candidate(root, self.contract, keyring, record)
+            self.assertEqual(actual, candidate)
+            self.assertEqual(parsed, [])
+            signed.assert_called_once_with(root, candidate, self.contract, keyring)
+            self.assertEqual(list(root.glob("patch-audit-replay-*")), [])
+
+    def test_candidate_replay_rejects_stale_self_digest_and_different_candidate(self):
+        with self.temporary_directory() as temp:
+            root, candidate, record, keyring = self.candidate_fixture(Path(temp))
+            candidate["downloadedBytes"] += 1
+            (root / "acquisition-candidate.json").write_bytes(provision.canonical_json(candidate))
+            with self.assertRaisesRegex(provision.ProvisionError, "self-digest mismatch"):
+                provision.load_candidate(root, self.contract, keyring, record)
+            self.write_candidate(root, candidate)
+            with self.assertRaisesRegex(provision.ProvisionError, "acquisition differs from the build record"):
+                provision.load_candidate(root, self.contract, keyring, record)
+
+    def test_candidate_replay_rejects_unrelated_record_sections(self):
+        with self.temporary_directory() as temp:
+            root, candidate, record, keyring = self.candidate_fixture(Path(temp))
+            for section, field in (("acquisition", "sourceIndexesSha256"),
+                                   ("acquisition", "binaryIndexesSha256"),
+                                   ("source", "dsc"), ("patchAudit", "patchInventorySha256")):
+                changed = json.loads(json.dumps(record))
+                changed[section][field] = "f" * 64
+                with self.subTest(section=section, field=field), self.assertRaisesRegex(
+                    provision.ProvisionError, f"{section} differs from the build record"
+                ):
+                    provision.load_candidate(root, self.contract, keyring, changed)
+
+    def test_candidate_download_inventory_rejects_changed_missing_extra_and_symlink_files(self):
+        for mutation in ("same-size", "length", "missing", "extra", "symlink"):
+            with self.subTest(mutation=mutation), self.temporary_directory() as temp:
+                root, candidate, record, keyring = self.candidate_fixture(Path(temp))
+                path = root / candidate["source"]["upstreamArchivePath"]
+                if mutation == "same-size":
+                    path.write_bytes(b"x" * path.stat().st_size)
+                elif mutation == "length":
+                    path.write_bytes(path.read_bytes() + b"x")
+                elif mutation == "missing":
+                    path.unlink()
+                elif mutation == "extra":
+                    (root / "downloads/unrecorded.txt").write_bytes(b"unrelated evidence")
+                else:
+                    path.unlink()
+                    path.symlink_to(keyring)
+                with mock.patch.object(provision, "verify_candidate_data") as signed:
+                    with self.assertRaises(provision.ProvisionError):
+                        provision.load_candidate(root, self.contract, keyring, record)
+                    signed.assert_not_called()
+
+    def test_candidate_replay_rejects_changed_patch_audit_and_source_tree(self):
+        for mutation in ("audit", "audit-details", "source"):
+            with self.subTest(mutation=mutation), self.temporary_directory() as temp:
+                root, candidate, record, keyring = self.candidate_fixture(Path(temp))
+                if mutation in ("audit", "audit-details"):
+                    path = root / "patch-audit.json"
+                    audit = json.loads(path.read_bytes())
+                    if mutation == "audit":
+                        audit["patchInventorySha256"] = "f" * 64
+                    else:
+                        audit["patchInventory"] = []
+                    path.write_bytes(provision.canonical_json(audit))
+                else:
+                    relative = self.contract["relevantFiles"][0]
+                    (root / "source/package-source" / relative).write_bytes(b"changed source")
+                with mock.patch.object(provision, "verify_candidate_data", return_value=[]):
+                    with self.assertRaises(provision.ProvisionError):
+                        provision.load_candidate(root, self.contract, keyring, record)
+                self.assertEqual(list(root.glob("patch-audit-replay-*")), [])
+
+    def test_packaging_authenticates_candidate_before_creating_archive(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            root, candidate, record, keyring = self.candidate_fixture(base)
+            record_path = base / "record.json"
+            record_path.write_bytes(provision.canonical_json(record))
+            args = provision.argparse.Namespace(contract=provision.CONTRACT_PATH, record=record_path,
+                                               acquisition=root, keyring=keyring, output=base / "provenance.tar")
+            with mock.patch.object(provision, "verify_candidate_data",
+                                   side_effect=provision.ProvisionError("signature rejected")) as signed:
+                with self.assertRaisesRegex(provision.ProvisionError, "signature rejected"):
+                    provision.command_package_provenance(args)
+                signed.assert_called_once_with(root, candidate, self.contract, keyring)
+            self.assertFalse(args.output.exists())
+
+    def test_packaging_accepts_bound_local_evidence_and_selected_contract(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            root, candidate, record, keyring = self.candidate_fixture(base)
+            selected = base / "selected-contract.json"
+            selected.write_bytes(provision.canonical_json(self.contract))
+            record["recipe"] = provision.recipe_identity(selected)
+            record["probe"]["fixtureSha256"] = provision.sha256_file(
+                ROOT / self.contract["negativeControl"]["fixture"])
+            record_path = base / "record.json"
+            record_path.write_bytes(provision.canonical_json(record))
+            record_sha = provision.sha256_file(record_path)
+            resources = record["resources"]
+            loader = {
+                "scope": "infrastructure-loader-smoke-only", "buildRecordSha256": record_sha,
+                "imageDigest": record["image"]["imageDigest"],
+                "resourceDirectory": "toolchain" + record["resourceDirectory"],
+                "resourceFileCount": resources["entryCount"],
+                "resourceTreeBytes": sum(row["bytes"] for row in resources["entries"]),
+                "resourceManifestSha256": provision.frontend_resource_manifest_sha256(
+                    record["resourceDirectory"], resources),
+                "cxxDriverIdentitySha256": provision.frontend_cxx_driver_identity_sha256(record, record_sha),
+                "infrastructureProfileProjectionSha256": "c" * 64, "pathTransformSha256": "d" * 64,
+                **{field: True for field in (
+                    "rejectedWrongImage", "rejectedWrongCxxDriverBytes", "rejectedChangedResourceIdentity",
+                    "rejectedChangedRuntimeLibraryIdentity", "rejectedMissingResourceDirectory")},
+            }
+            negative_contract = self.contract["negativeControl"]
+            lock_path = ROOT / negative_contract["artifactLock"]
+            artifact = json.loads(lock_path.read_bytes())["artifacts"][negative_contract["artifactRole"]]
+            fixture = ROOT / negative_contract["fixture"]
+            negative = {
+                "scope": "negative-version-gate-only; not a Clang 18.1.3 identity",
+                "artifactOracleId": negative_contract["oracleId"],
+                "artifactLockSha256": provision.sha256_file(lock_path),
+                "compilerBytes": artifact["bytes"], "compilerSha256": artifact["sha256"],
+                "compilerVersionOutput": "clang version 22.1.6",
+                "fixtureBytes": fixture.stat().st_size, "fixtureSha256": provision.sha256_file(fixture),
+                "fixtureAcceptedByClang22": True,
+                "compiler18GateRejected": "probe compiler version or target mismatch",
+            }
+            report_paths = {}
+            for name, report in (("probe_report", record["probe"]), ("loader_report", loader),
+                                 ("negative_report", negative)):
+                report_paths[name] = base / f"{name}.json"
+                report_paths[name].write_bytes(provision.canonical_json(report))
+            args = provision.argparse.Namespace(contract=selected, record=record_path, acquisition=root,
+                                               keyring=keyring, output=base / "provenance.tar", **report_paths)
+            with mock.patch.object(provision, "verify_candidate_data", return_value=[]) as signed, \
+                    mock.patch.object(provision.BoundedDownloader, "get") as network:
+                self.assertEqual(provision.command_package_provenance(args), 0)
+                signed.assert_called_once_with(root, candidate, self.contract, keyring)
+                network.assert_not_called()
+            with tarfile.open(args.output) as archive:
+                self.assertEqual(archive.extractfile("provisioning-contract.json").read(), selected.read_bytes())
+                self.assertEqual(archive.extractfile("build-record.schema.json").read(),
+                                 provision.RECIPE_FILES["schemaSha256"].read_bytes())
+                self.assertEqual(archive.extractfile("acquisition/acquisition-candidate.json").read(),
+                                 (root / "acquisition-candidate.json").read_bytes())
 
 
 if __name__ == "__main__":
