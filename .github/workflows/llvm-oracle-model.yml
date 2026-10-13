@@ -659,20 +659,32 @@ jobs:
             source "$root/sandbox.environment"
             export XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
           fi
+          runtime_cleanup_status=0
+          profile_cleanup_status=0
           if test -f "$root/owned-runtime.py"; then
-            timeout --kill-after=5s 50s python3 "$root/owned-runtime.py" cleanup "$root"
+            if timeout --kill-after=5s 50s python3 "$root/owned-runtime.py" cleanup "$root"; then :
+            else runtime_cleanup_status=$?; fi
           fi
           if test -f "$root/profile-load-intent"; then
-            profile="$(cat "$root/profile-name")"
-            [[ "$profile" =~ ^decomp-native-measurement-[0-9]+-[0-9]+$ ]]
-            timeout --kill-after=5s 10s sudo -n cat /sys/kernel/security/apparmor/profiles > "$root/evidence/apparmor-before-cleanup.txt"
-            if grep --fixed-strings --line-regexp "$profile (unconfined)" "$root/evidence/apparmor-before-cleanup.txt"; then
-              timeout --kill-after=5s 20s sudo -n apparmor_parser --remove "$root/rootlesskit.apparmor" \
-                > "$root/evidence/apparmor-remove.txt" 2>&1
-            fi
-            timeout --kill-after=5s 10s sudo -n cat /sys/kernel/security/apparmor/profiles > "$root/evidence/apparmor-after-cleanup.txt"
-            if grep --fixed-strings --line-regexp "$profile (unconfined)" "$root/evidence/apparmor-after-cleanup.txt"; then exit 1; fi
+            # A separate errexit-enabled shell ensures a failed owned-process proof cannot skip policy cleanup.
+            if timeout --kill-after=5s 55s bash -euo pipefail <<'CLEANUP_PROFILE'
+          root="$NATIVE_MEASUREMENT_ROOT"
+          profile="$(cat "$root/profile-name")"
+          [[ "$profile" =~ ^decomp-native-measurement-[0-9]+-[0-9]+$ ]]
+          timeout --kill-after=5s 10s sudo -n cat /sys/kernel/security/apparmor/profiles > "$root/evidence/apparmor-before-cleanup.txt"
+          if grep --fixed-strings --line-regexp "$profile (unconfined)" "$root/evidence/apparmor-before-cleanup.txt"; then
+            timeout --kill-after=5s 20s sudo -n apparmor_parser --remove "$root/rootlesskit.apparmor" \
+              > "$root/evidence/apparmor-remove.txt" 2>&1
           fi
+          timeout --kill-after=5s 10s sudo -n cat /sys/kernel/security/apparmor/profiles > "$root/evidence/apparmor-after-cleanup.txt"
+          if grep --fixed-strings --line-regexp "$profile (unconfined)" "$root/evidence/apparmor-after-cleanup.txt"; then exit 1; fi
+          CLEANUP_PROFILE
+            then :
+            else profile_cleanup_status=$?; fi
+          fi
+          printf '{"ownedRuntimeExitCode":%s,"profileExitCode":%s}\n' \
+            "$runtime_cleanup_status" "$profile_cleanup_status" > "$root/evidence/cleanup-step-status.json"
+          test "$runtime_cleanup_status" = 0 && test "$profile_cleanup_status" = 0
       - uses: actions/upload-artifact@v7
         if: always()
         with:

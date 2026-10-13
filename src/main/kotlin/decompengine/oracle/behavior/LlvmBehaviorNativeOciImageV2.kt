@@ -427,6 +427,7 @@ internal object LlvmBehaviorNativeOciImageV2 {
     internal class LayoutOwner private constructor(
         private val root: Path,
         private val rootDescriptor: LinuxDescriptor,
+        private val producerIngest: LinuxDescriptor?,
         private val names: Set<String>,
         val files: Map<String, StableControlFile>,
     ) : AutoCloseable {
@@ -457,6 +458,14 @@ internal object LlvmBehaviorNativeOciImageV2 {
                 }
             }
             if (currentNames(checkpoint) != names) imageFail("raw OCI namespace members changed")
+            producerIngest?.let { retained ->
+                if (LinuxFilesystemSyscalls.identity(retained.fd) != retained.identity) imageFail("raw OCI producer ingest directory metadata changed")
+                rootDescriptor.whileOpen { LinuxFilesystemSyscalls.openDirectoryAt(it, "ingest") }.use { named ->
+                    if (LinuxFilesystemSyscalls.identity(named.fd) != retained.identity) imageFail("raw OCI producer ingest directory identity changed")
+                    requireEmptyProducerIngest(named, checkpoint)
+                }
+                requireEmptyProducerIngest(retained, checkpoint)
+            }
             checkpoint("after raw OCI layout namespace identity check")
         }
 
@@ -474,6 +483,7 @@ internal object LlvmBehaviorNativeOciImageV2 {
             if (closed) return
             closed = true
             files.values.toList().asReversed().forEach { it.close() }
+            producerIngest?.close()
             rootDescriptor.close()
         }
 
@@ -483,10 +493,15 @@ internal object LlvmBehaviorNativeOciImageV2 {
                 checkpoint("before raw OCI directory selection")
                 val retainedRoot = LinuxFilesystemSyscalls.openRoot(root)
                 val guards = LinkedHashMap<String, StableControlFile>()
+                var producerIngest: LinuxDescriptor? = null
                 try {
                     val names = listLayout(root, checkpoint)
+                    if (PRODUCER_INGEST_MARKER in names) {
+                        producerIngest = retainedRoot.whileOpen { LinuxFilesystemSyscalls.openDirectoryAt(it, "ingest") }
+                        requireEmptyProducerIngest(producerIngest, checkpoint)
+                    }
                     var total = 0L
-                    names.sorted().forEach { name ->
+                    names.filterNot { it == PRODUCER_INGEST_MARKER }.sorted().forEach { name ->
                         checkpoint("before raw OCI member selection: $name")
                         val guard = StableControlFile.openWithCheckpoint(root.resolve(name), MAXIMUM_RAW_BYTES, "raw OCI member $name", checkpoint)
                         guards[name] = guard
@@ -496,9 +511,10 @@ internal object LlvmBehaviorNativeOciImageV2 {
                             imageFail("raw OCI blob name does not authenticate its exact bytes")
                         }
                     }
-                    return LayoutOwner(root, retainedRoot, immutableSet(names), immutableMap(guards)).also { it.requireCurrent(checkpoint) }
+                    return LayoutOwner(root, retainedRoot, producerIngest, immutableSet(names), immutableMap(guards)).also { it.requireCurrent(checkpoint) }
                 } catch (failure: Throwable) {
                     guards.values.toList().asReversed().forEach { it.close() }
+                    producerIngest?.close()
                     retainedRoot.close()
                     throw failure
                 }
@@ -515,11 +531,19 @@ internal object LlvmBehaviorNativeOciImageV2 {
                 if (relative.isEmpty()) return@forEach
                 if (Files.isSymbolicLink(path)) imageFail("raw OCI layout contains a host symlink")
                 if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
-                    if (relative !in setOf("blobs", "blobs/sha256")) imageFail("raw OCI layout contains an unsupported directory")
+                    if (relative == "ingest") {
+                        // The pinned Buildx OCI directory exporter uses containerd's local store.
+                        // Successful blob commits remove the per-ref ingest subdirectories but
+                        // retain exactly this empty root directory. No producer metadata is read.
+                        LinuxFilesystemSyscalls.openRoot(path).use { requireEmptyProducerIngest(it, checkpoint) }
+                        names.add(PRODUCER_INGEST_MARKER)
+                    } else if (relative !in setOf("blobs", "blobs/sha256")) {
+                        imageFail("raw OCI layout contains an unsupported directory: $relative")
+                    }
                 } else {
                     if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) imageFail("raw OCI layout contains a non-regular blob")
                     if (relative !in setOf("oci-layout", "index.json") && !BLOB_PATH.matches(relative)) imageFail("raw OCI layout member is not a SHA-256 blob")
-                    if (!names.add(relative) || names.size > MAXIMUM_BLOBS) imageFail("raw OCI layout member count exceeds its limit")
+                    if (!names.add(relative) || names.size - (if (PRODUCER_INGEST_MARKER in names) 1 else 0) > MAXIMUM_BLOBS) imageFail("raw OCI layout member count exceeds its limit")
                 }
             }
         }
@@ -527,6 +551,13 @@ internal object LlvmBehaviorNativeOciImageV2 {
             imageFail("raw OCI layout is incomplete")
         }
         return names
+    }
+
+    private fun requireEmptyProducerIngest(directory: LinuxDescriptor, checkpoint: (String) -> Unit) {
+        if (LinuxFilesystemSyscalls.directoryEntryNames(directory, maximumEntries = 1) {
+                checkpoint("while checking raw OCI producer ingest directory emptiness")
+            }.isNotEmpty()
+        ) imageFail("raw OCI producer ingest directory must be empty")
     }
 
     private fun selectManifest(index: JsonObject, owner: LayoutOwner, checkpoint: (String) -> Unit, depth: Int): Pair<StableControlFile, JsonObject> {
@@ -1275,6 +1306,7 @@ internal object LlvmBehaviorNativeOciImageV2 {
     private const val MAXIMUM_SYMLINKS = 40
     private const val MAXIMUM_PATH_COMPONENTS = 256
     private const val MAXIMUM_INDEX_DEPTH = 8
+    private const val PRODUCER_INGEST_MARKER = "ingest/"
     private const val MAXIMUM_ZSTD_WINDOW_BYTES = 8L * 1024 * 1024
     private const val MAXIMUM_ZSTD_BLOCK_BYTES = 128 * 1024
     private const val HEX = "0123456789abcdef"

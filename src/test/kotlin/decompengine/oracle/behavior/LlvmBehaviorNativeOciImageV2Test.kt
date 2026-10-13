@@ -412,6 +412,66 @@ class LlvmBehaviorNativeOciImageV2Test {
     }
 
     @Test
+    fun `completed Buildx OCI content store accepts only its retained empty ingest directory`() {
+        Fixture().use { fixture ->
+            val layer = tar(Item("file", "producer artifact"))
+            val plain = fixture.layout(listOf(layer))
+            val exported = fixture.layout(listOf(layer))
+            Files.createDirectory(exported.resolve("ingest"))
+            LlvmBehaviorNativeOciImageV2.openLayout(plain).use { baseline ->
+                LlvmBehaviorNativeOciImageV2.openLayout(exported).use { image ->
+                    assertEquals(baseline.indexSha256, image.indexSha256)
+                    assertEquals(baseline.manifestSha256, image.manifestSha256)
+                    assertEquals(baseline.configSha256, image.configSha256)
+                    assertEquals(baseline.layers, image.layers)
+                    assertEquals(baseline.namespaceSha256, image.namespaceSha256)
+                    assertContentEquals("producer artifact".encodeToByteArray(), image.readFile("/file", 100))
+                    image.requireCurrent()
+                    Files.writeString(exported.resolve("ingest/unfinished"), "uncommitted producer bytes")
+                    assertFailsWith<LlvmBehaviorNativeOciImageV2Exception> { image.requireCurrent() }
+                }
+            }
+            val unfinished = fixture.layout(listOf(layer))
+            Files.createDirectories(unfinished.resolve("ingest/transaction"))
+            assertFailsWith<LlvmBehaviorNativeOciImageV2Exception> { LlvmBehaviorNativeOciImageV2.openLayout(unfinished) }
+            val symlink = fixture.layout(listOf(layer))
+            Files.createSymbolicLink(symlink.resolve("ingest"), fixture.directory("empty-producer-target"))
+            assertFailsWith<LlvmBehaviorNativeOciImageV2Exception> { LlvmBehaviorNativeOciImageV2.openLayout(symlink) }
+            val file = fixture.layout(listOf(layer))
+            Files.writeString(file.resolve("ingest"), "not a directory")
+            assertFailsWith<LlvmBehaviorNativeOciImageV2Exception> { LlvmBehaviorNativeOciImageV2.openLayout(file) }
+            val unknown = fixture.layout(listOf(layer))
+            Files.createDirectory(unknown.resolve("unknown-empty-producer-directory"))
+            assertFailsWith<LlvmBehaviorNativeOciImageV2Exception> { LlvmBehaviorNativeOciImageV2.openLayout(unknown) }
+        }
+    }
+
+    @Test
+    fun `empty producer ingest presence and inode identity remain bound through terminal checks`() {
+        Fixture().use { fixture ->
+            val layer = tar(Item("file", "x"))
+            val absent = fixture.layout(listOf(layer))
+            LlvmBehaviorNativeOciImageV2.openLayout(absent).use { image ->
+                Files.createDirectory(absent.resolve("ingest"))
+                assertFailsWith<LlvmBehaviorNativeOciImageV2Exception> { image.requireCurrent() }
+            }
+            val removed = fixture.layout(listOf(layer))
+            Files.createDirectory(removed.resolve("ingest"))
+            LlvmBehaviorNativeOciImageV2.openLayout(removed).use { image ->
+                Files.delete(removed.resolve("ingest"))
+                assertFailsWith<LlvmBehaviorNativeOciImageV2Exception> { image.requireCurrent() }
+            }
+            val replaced = fixture.layout(listOf(layer))
+            Files.createDirectory(replaced.resolve("ingest"))
+            LlvmBehaviorNativeOciImageV2.openLayout(replaced).use { image ->
+                Files.move(replaced.resolve("ingest"), fixture.root.resolve("retained-empty-ingest"))
+                Files.createDirectory(replaced.resolve("ingest"))
+                assertFailsWith<LlvmBehaviorNativeOciImageV2Exception> { image.requireCurrent() }
+            }
+        }
+    }
+
+    @Test
     fun `named layout file replacement and added members invalidate retained inputs`() {
         Fixture().use { fixture ->
             val layout = fixture.layout(listOf(tar(Item("file", "x"))))

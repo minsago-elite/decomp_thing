@@ -214,37 +214,55 @@ internal class PinnedDockerRuntimeBindings private constructor(
         closeControlBindings()
     }
 
+    /** Retains every binding across the fixed read-only measurement without exporting endpoint state. */
+    @Synchronized
+    private fun measureNativeRuntimeV2Owned(
+        image: LlvmBehaviorNativeOciImageV2.MeasuredImage,
+        deadline: AnalysisDeadline,
+    ): JsonObject {
+        requireOpen()
+        deadline.checkpoint("before fixed native runtime measurement")
+        requireCurrentBindings(deadline::checkpoint)
+        image.requireCurrent(deadline::checkpoint)
+        val measure = PinnedDockerEndpointState::class.java.declaredMethods.single {
+            it.name == "measureNativeRuntimeV2"
+        }
+        check(measure.trySetAccessible())
+        val facts = try {
+            measure.invoke(endpointState, image, deadline) as JsonObject
+        } catch (failure: InvocationTargetException) {
+            throw failure.targetException
+        }
+        image.requireCurrent(deadline::checkpoint)
+        requireCurrentBindings(deadline::checkpoint)
+        deadline.checkpoint("after fixed native runtime measurement terminal checks")
+        return JsonObject(facts + linkedMapOf(
+            "controlClientBytes" to JsonPrimitive(controlClientBytes),
+            "controlClientSha256" to JsonPrimitive(controlClientSha256),
+            "controlClientIdentitySha256" to JsonPrimitive(controlClientIdentitySha256),
+            "dockerConfigIdentitySha256" to JsonPrimitive(dockerConfigIdentitySha256),
+            "runtimeSocketIdentitySha256" to JsonPrimitive(runtimeSocketIdentitySha256),
+            "runtimeSocketParentIdentitySha256" to JsonPrimitive(runtimeSocketParentIdentitySha256),
+        ))
+    }
+
     companion object {
         /** Measurement alone consumes no lease and cannot arm an operational journal. */
         private fun measureNativeRuntimeV2(
             bindings: PinnedDockerRuntimeBindings,
             image: LlvmBehaviorNativeOciImageV2.MeasuredImage,
             deadline: AnalysisDeadline,
-        ): JsonObject = synchronized(bindings) {
-            bindings.requireOpen()
-            deadline.checkpoint("before fixed native runtime measurement")
-            bindings.requireCurrentBindings(deadline::checkpoint)
-            image.requireCurrent(deadline::checkpoint)
-            val measure = PinnedDockerEndpointState::class.java.declaredMethods.single {
-                it.name == "measureNativeRuntimeV2"
+        ): JsonObject {
+            // A direct companion field read would emit a public JVM accessor for the retained endpoint.
+            val measure = PinnedDockerRuntimeBindings::class.java.declaredMethods.single {
+                it.name == "measureNativeRuntimeV2Owned"
             }
             check(measure.trySetAccessible())
-            val facts = try {
-                measure.invoke(bindings.endpointState, image, deadline) as JsonObject
+            return try {
+                measure.invoke(bindings, image, deadline) as JsonObject
             } catch (failure: InvocationTargetException) {
                 throw failure.targetException
             }
-            image.requireCurrent(deadline::checkpoint)
-            bindings.requireCurrentBindings(deadline::checkpoint)
-            deadline.checkpoint("after fixed native runtime measurement terminal checks")
-            JsonObject(facts + linkedMapOf(
-                "controlClientBytes" to JsonPrimitive(bindings.controlClientBytes),
-                "controlClientSha256" to JsonPrimitive(bindings.controlClientSha256),
-                "controlClientIdentitySha256" to JsonPrimitive(bindings.controlClientIdentitySha256),
-                "dockerConfigIdentitySha256" to JsonPrimitive(bindings.dockerConfigIdentitySha256),
-                "runtimeSocketIdentitySha256" to JsonPrimitive(bindings.runtimeSocketIdentitySha256),
-                "runtimeSocketParentIdentitySha256" to JsonPrimitive(bindings.runtimeSocketParentIdentitySha256),
-            ))
         }
 
         /**

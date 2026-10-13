@@ -651,9 +651,16 @@ private class StaticElfFixture : AutoCloseable {
         run(listOf("cc", "-shared", "-fPIC", "-Wl,-soname,libmissing.so", sources.resolve("cached.c").toString(), "-o", payload.resolve("lib/libmissing.so").toString()))
         write("subject/executable", syntheticElf(1024))
         Files.writeString(payload.resolve("etc/ld.so.conf"), "/lib\n")
+        val cacheTool = listOf("/usr/sbin/ldconfig", "/sbin/ldconfig", "/usr/bin/ldconfig")
+            .map { Path.of(it) }.firstOrNull { Files.isRegularFile(it) && Files.isExecutable(it) }
+            ?: error("real cache control requires ldconfig at a fixed supported distribution path")
+        val resolvedCacheTool = cacheTool.toRealPath()
+        assertTrue(Files.size(resolvedCacheTool) in 1L..16L * 1024 * 1024)
+        println("LDCONFIG_CONTROL_TOOL selected=$cacheTool resolved=$resolvedCacheTool " +
+            "bytes=${Files.size(resolvedCacheTool)} sha256=${OracleArtifacts.sha256(Files.readAllBytes(resolvedCacheTool))} format=$format")
         // Both the main cache and optional auxiliary cache are beneath this new controlled root;
         // chroot_canon remains rooted there even when unprivileged chroot itself is unavailable.
-        run(listOf("/usr/bin/ldconfig", "-r", payload.toString(), "-C", "/etc/ld.so.cache", "-f", "/etc/ld.so.conf", "-X", "-i", "--format=$format"))
+        run(listOf(resolvedCacheTool.toString(), "-r", payload.toString(), "-C", "/etc/ld.so.cache", "-f", "/etc/ld.so.conf", "-X", "-i", "--format=$format"))
         assertTrue(Files.isRegularFile(payload.resolve("etc/ld.so.cache")))
     }
 
