@@ -1,6 +1,9 @@
 package decompengine.oracle.behavior
 
+import decompengine.analysis.AnalysisDeadline
 import decompengine.oracle.core.OracleArtifacts
+import java.lang.reflect.InvocationTargetException
+import java.lang.reflect.Modifier
 import java.net.StandardProtocolFamily
 import java.net.UnixDomainSocketAddress
 import java.nio.channels.ServerSocketChannel
@@ -8,6 +11,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.PosixFilePermission
+import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -76,6 +80,68 @@ class PinnedDockerRuntimeBindingsTest {
                 )
                 assertFalse(bindings.environment.containsKey("PYTHONPATH"))
             }
+        }
+    }
+
+    @Test
+    fun `native terminal verification remains private without publishing endpoint or watch access`() {
+        val runtime = PinnedDockerRuntimeBindings::class.java
+        val companion = PinnedDockerRuntimeBindings.Companion::class.java
+        val bridge = companion.declaredMethods.single { it.name == "verifyNativeRuntimeV2Terminal" }
+        val owned = runtime.declaredMethods.single { it.name == "verifyNativeRuntimeV2TerminalOwned" }
+        assertTrue(Modifier.isPrivate(bridge.modifiers), bridge.toString())
+        assertTrue(Modifier.isPrivate(owned.modifiers), owned.toString())
+        assertEquals(Void.TYPE, bridge.returnType)
+        assertEquals(Void.TYPE, owned.returnType)
+        assertContentEquals(arrayOf(runtime, AnalysisDeadline::class.java), bridge.parameterTypes)
+        assertContentEquals(arrayOf(AnalysisDeadline::class.java), owned.parameterTypes)
+
+        val endpoint = runtime.declaredClasses.single { it.simpleName == "PinnedDockerEndpointState" }
+        val privateStateNames = setOf(endpoint.name,
+            endpoint.declaredClasses.single { it.simpleName == "EndpointDirectoryMutationWatch" }.name)
+        for (type in listOf(runtime, companion, endpoint)) {
+            val exposed = type.declaredMethods.filter { method ->
+                Modifier.isPublic(method.modifiers) && (
+                    method.returnType.name in privateStateNames ||
+                        (method.isSynthetic && (method.name.startsWith("access\$get") || method.name.startsWith("access\$set")) &&
+                            (method.name.contains("EndpointState") || method.name.contains("Watch"))) ||
+                        method.name.contains("verifyNativeRuntimeV2Terminal") ||
+                        method.name.contains("measureNativeRuntimeV2") ||
+                        method.name.lowercase() in setOf("run", "exec", "execute", "start", "request", "exchange")
+                    )
+            }
+            assertTrue(exposed.isEmpty(), "native endpoint/watch or generic API became public: $exposed")
+        }
+    }
+
+    @Test
+    fun `terminal native verification rejects a valid binding before its fixed measurement`() {
+        RuntimeBindingFixture().use { fixture ->
+            fixture.capture().use { bindings ->
+                bindings.requireCurrent()
+                val failure = assertFailsWith<PinnedDockerRuntimeBindingsException> {
+                    verifyNativeTerminalForTest(bindings)
+                }
+                assertTrue(failure.message.orEmpty().contains("measurement") ||
+                    failure.message.orEmpty().contains("watch"), failure.message)
+                fixture.assertNoPendingConnection()
+            }
+        }
+    }
+
+    @Test
+    fun `terminal native verification cannot reopen closed bindings or owned resources`() {
+        RuntimeBindingFixture().use { fixture ->
+            val bindings = fixture.capture()
+            bindings.close()
+            val terminal = assertFailsWith<PinnedDockerRuntimeBindingsException> {
+                verifyNativeTerminalForTest(bindings)
+            }
+            assertTrue(terminal.message.orEmpty().contains("closed"), terminal.message)
+            val ordinary = assertFailsWith<PinnedDockerRuntimeBindingsException> { bindings.requireCurrent() }
+            assertTrue(ordinary.message.orEmpty().contains("closed"), ordinary.message)
+            bindings.close()
+            fixture.assertNoPendingConnection()
         }
     }
 
@@ -200,6 +266,19 @@ class PinnedDockerRuntimeBindingsTest {
     }
 }
 
+private fun verifyNativeTerminalForTest(bindings: PinnedDockerRuntimeBindings) {
+    val bridge = PinnedDockerRuntimeBindings.Companion::class.java.declaredMethods.single {
+        it.name == "verifyNativeRuntimeV2Terminal"
+    }
+    assertTrue(bridge.trySetAccessible())
+    try {
+        bridge.invoke(PinnedDockerRuntimeBindings.Companion, bindings,
+            AnalysisDeadline.start(TimeUnit.SECONDS.toNanos(2), "test native terminal binding verification"))
+    } catch (failure: InvocationTargetException) {
+        throw failure.targetException
+    }
+}
+
 private class RuntimeBindingFixture : AutoCloseable {
     val root: Path = Files.createTempDirectory("pinned-docker-runtime-").toAbsolutePath().normalize()
     val controlClient: Path = root.resolve("docker-client")
@@ -230,6 +309,13 @@ private class RuntimeBindingFixture : AutoCloseable {
             dockerConfigPath = dockerConfig,
             runtimeSocketPath = runtimeSocket,
         )
+
+    fun assertNoPendingConnection() {
+        socketServer.configureBlocking(false)
+        val pending = socketServer.accept()
+        pending?.close()
+        assertTrue(pending == null, "terminal verification contacted the native runtime socket")
+    }
 
     fun replaceRuntimeSocket() {
         socketServer.close()
