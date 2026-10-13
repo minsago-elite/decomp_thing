@@ -31,6 +31,10 @@ import kotlinx.serialization.json.JsonPrimitive
  */
 object LlvmBehaviorNativeHelperBuildV2 {
     fun build(compilerPath: Path, sourcePath: Path, outputDirectory: Path): Path {
+        require(System.getProperty("os.name") == "Linux" &&
+            System.getProperty("os.arch") in setOf("amd64", "x86_64")) {
+            "the Kotlin LLVM behavior-helper producer requires the pinned Linux x86-64 oracle native profile"
+        }
         val compiler = exactHelperPath(compilerPath, "compiler")
         val source = exactHelperPath(sourcePath, "source")
         val root = exactHelperPath(outputDirectory, "output directory")
@@ -39,8 +43,6 @@ object LlvmBehaviorNativeHelperBuildV2 {
         requireOwnerDirectory(root)
         require(!source.startsWith(root) && !compiler.startsWith(root)) { "helper output overlaps a build input" }
         require(Files.isExecutable(compiler)) { "helper compiler is not executable" }
-        require(System.getProperty("os.name") == "Linux" &&
-            System.getProperty("os.arch") in setOf("amd64", "x86_64", "aarch64")) { "unsupported helper build host" }
         val temporary = Files.createTempDirectory(root, ".native-helper-build-",
             PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
         try {

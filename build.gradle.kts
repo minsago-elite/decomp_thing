@@ -1063,8 +1063,8 @@ val buildLlvmBehaviorHelper = tasks.register<JavaExec>("buildLlvmBehaviorHelper"
     doFirst {
         val osName = System.getProperty("os.name", "").lowercase()
         val architecture = System.getProperty("os.arch", "")
-        require("linux" in osName && architecture in setOf("amd64", "x86_64", "aarch64")) {
-            "the LLVM behavior helper supports only Linux x86-64 or aarch64"
+        require("linux" in osName && architecture in setOf("amd64", "x86_64")) {
+            "the Kotlin LLVM behavior-helper producer requires the pinned Linux x86-64 oracle native profile"
         }
         val configuredCompiler = file(llvmBehaviorHelperCompiler.get()).toPath().toAbsolutePath().normalize()
         val compiler = configuredCompiler.toRealPath()

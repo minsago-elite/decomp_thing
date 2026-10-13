@@ -87,6 +87,10 @@ private data class InstalledNativeHelper(val root: Path, val jar: StableControlF
     val reference: NativeHelperReference, val referenceBytes: ByteArray, val files: Map<String, StableControlFile>)
 
 private fun openInstalledNativeHelper(): InstalledNativeHelper {
+    require(System.getProperty("os.name") == "Linux" &&
+        System.getProperty("os.arch") in setOf("amd64", "x86_64")) {
+        "installed Kotlin native-helper provenance requires the pinned Linux x86-64 oracle native profile"
+    }
     val overrides = listOf("nativeHelperExecutable", "nativeHelperChecksum", "nativeHelperSource", "nativeHelperBuildRecord",
         "nativeHelperReference", "nativeHelperRoot")
     require(overrides.none { System.getProperty("decompengine.oracle.behavior.$it") != null }) {
