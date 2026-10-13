@@ -1,6 +1,7 @@
 package decompengine.project
 
 import decompengine.repair.readStableRegularFile
+import decompengine.repair.repairAtomicTemporaryName
 import decompengine.validation.BehaviorEvidence
 import decompengine.validation.BehaviorProjectContext
 import decompengine.validation.boolean
@@ -18,6 +19,152 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.util.Locale
+
+private const val MAXIMUM_AUDIT_REPORT_DEPTH = 32
+private const val MAXIMUM_AUDIT_REPORT_SCAN_ENTRIES = 1_000_000
+private val REPAIR_ATOMIC_TEMPORARY_NAME =
+    Regex("^(?:\\..+\\.repair-atomic\\.tmp|\\.repair-atomic-sha256-[0-9a-f]{64}\\.tmp)$")
+
+internal fun isRepairAtomicTemporary(path: Path): Boolean =
+    path.fileName?.toString()?.matches(REPAIR_ATOMIC_TEMPORARY_NAME) == true
+
+private fun rejectProfileProjectionPreimages(projectDir: Path, profile: ReconstructionProfile) {
+    val root = projectDir.toAbsolutePath().normalize()
+    val manifestTemporary = root.resolve(repairAtomicTemporaryName("source_tree_manifest.json"))
+    require(!Files.exists(manifestTemporary, LinkOption.NOFOLLOW_LINKS)) {
+        "repair audit retains a source-manifest atomic temporary: ${root.relativize(manifestTemporary)}"
+    }
+    for (declarationId in listOf("confidence-evidence", "unresolved-evidence")) {
+        val declaredPath = root.resolve(profile.layout.declaration(declarationId).materialize()).normalize()
+        require(declaredPath.startsWith(root)) { "repair projection evidence path escapes the project" }
+        val targetName = requireNotNull(declaredPath.fileName).toString()
+        val temporary = declaredPath.resolveSibling(repairAtomicTemporaryName(targetName))
+        require(!Files.exists(temporary, LinkOption.NOFOLLOW_LINKS)) {
+            "repair audit retains a profile-declared atomic temporary: ${root.relativize(temporary)}"
+        }
+    }
+}
+
+private data class VerifiedAuditRepairState(
+    val lineage: ArchivedRepairReleaseLineage,
+    val totalBytes: Long,
+    val totalEntries: Int,
+    val inventory: List<String>,
+    val directoryPaths: Set<String>,
+    val additionalDigests: Map<String, String>,
+    val inventoryEntryLimit: Int,
+)
+
+private fun auditRepairInventory(
+    projectDir: Path,
+    maximumAdditionalEntries: Int,
+    manifestPaths: Set<String>,
+): List<Path> {
+    require(maximumAdditionalEntries >= 0) { "repair audit exceeds its inventory entry bound" }
+    val reportsRoot = projectDir.resolve("reports")
+    if (!Files.exists(reportsRoot, LinkOption.NOFOLLOW_LINKS)) return emptyList()
+    val repairRoot = reportsRoot.resolve("repair-revisions")
+    val history = projectDir.resolve("reports/repair_history.json")
+    val candidates = ArrayList<Path>()
+    var scannedEntries = 0
+    var additionalFiles = 0
+    Files.walk(reportsRoot, MAXIMUM_AUDIT_REPORT_DEPTH).use { stream ->
+        val paths = stream.iterator()
+        while (paths.hasNext()) {
+            val path = paths.next()
+            scannedEntries = Math.addExact(scannedEntries, 1)
+            require(scannedEntries <= MAXIMUM_AUDIT_REPORT_SCAN_ENTRIES) {
+                "repair audit report inventory exceeds its independent scan bound"
+            }
+            require(!isRepairAtomicTemporary(path)) {
+                "repair audit report inventory contains a retained atomic temporary: $path"
+            }
+            if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) &&
+                reportsRoot.relativize(path).nameCount >= MAXIMUM_AUDIT_REPORT_DEPTH
+            ) {
+                require(Files.newDirectoryStream(path).use { !it.iterator().hasNext() }) {
+                    "repair audit report inventory exceeds its depth bound"
+                }
+            }
+            val selected = path.startsWith(repairRoot) || path == history ||
+                path.fileName.toString().endsWith(".validation.json")
+            if (selected) {
+                candidates.add(path)
+                val relative = projectDir.relativize(path).toString().replace('\\', '/')
+                if (Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) && relative !in manifestPaths) {
+                    additionalFiles = Math.addExact(additionalFiles, 1)
+                    require(additionalFiles <= maximumAdditionalEntries) {
+                        "repair audit report inventory exceeds the remaining entry bound"
+                    }
+                }
+            }
+        }
+    }
+    return candidates.sorted()
+}
+
+private fun verifiedAuditRepairLineage(
+    projectDir: Path,
+    profile: ReconstructionProfile,
+    manifest: SourceTreeManifest,
+    manifestSizes: Map<String, Long>,
+    consumedBytes: Long,
+    limits: ArchivalBundleLimits,
+): VerifiedAuditRepairState {
+    rejectProfileProjectionPreimages(projectDir, profile)
+    if (manifest.files.any { it.generator == "repair-revision" }) {
+        require(Files.isDirectory(projectDir.resolve("reports/repair-revisions"), LinkOption.NOFOLLOW_LINKS)) {
+            "accepted repair source has no authenticated repair state"
+        }
+    }
+    val digests = manifest.files.associate { it.path to it.sha256 }.toMutableMap()
+    val sizes = manifestSizes.toMutableMap()
+    val additionalDigests = linkedMapOf<String, String>()
+    val directoryPaths = linkedSetOf<String>()
+    var retainedBytes = consumedBytes
+    var retainedEntries = manifest.files.size + 1 // The source manifest is also an audited input.
+    val inventoryEntryLimit = limits.maximumEntries - retainedEntries
+    val manifestPaths = manifest.files.mapTo(hashSetOf()) { it.path }
+    val inventory = auditRepairInventory(projectDir, inventoryEntryLimit, manifestPaths)
+    inventory.forEach { path ->
+        require(!Files.isSymbolicLink(path)) { "repair audit state contains a symbolic link" }
+        val relative = projectDir.relativize(path).toString().replace('\\', '/')
+        if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
+            directoryPaths += relative
+            return@forEach
+        }
+        require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+            "repair audit state contains a non-regular entry: $path"
+        }
+        // Manifest inputs were already hashed and charged by the caller. A profile may
+        // legitimately place a manifest-bound report at a validation-suffixed path.
+        if (relative in digests) return@forEach
+        retainedEntries = Math.addExact(retainedEntries, 1)
+        require(retainedEntries <= limits.maximumEntries) { "repair audit state exceeds the entry bound" }
+        val remainingBytes = limits.maximumTotalBytes - retainedBytes
+        require(remainingBytes > 0L) { "repair audit state exceeds the aggregate byte bound" }
+        val snapshot = readStableRegularFile(projectDir, relative, minOf(limits.maximumFileBytes, remainingBytes))
+        retainedBytes = Math.addExact(retainedBytes, snapshot.bytes.size.toLong())
+        require(retainedBytes <= limits.maximumTotalBytes) { "repair audit state exceeds the aggregate byte bound" }
+        digests[relative] = snapshot.sha256
+        sizes[relative] = snapshot.bytes.size.toLong()
+        additionalDigests[relative] = snapshot.sha256
+    }
+    val lineage = RepairAcpEvidenceArchiveVerifier.verifyIfPresent(
+        projectDir, digests, sizes, manifest, profile,
+        ReconstructionAdapters.resolve(profile).repairIndexProfile(profile),
+    )
+    // Unresolved agent sources and their repaired descendants require an authentic
+    // undispatched budget fallback, even when no repair has occurred.
+    ReconstructionAcpEvidenceArchiveVerifier.verify(projectDir, digests, sizes, manifest, profile, lineage)
+    return VerifiedAuditRepairState(
+        lineage, retainedBytes, retainedEntries,
+        inventory.map { projectDir.relativize(it).toString().replace('\\', '/') },
+        directoryPaths.toSet(),
+        additionalDigests.toMap(),
+        inventoryEntryLimit,
+    )
+}
 
 data class ArchivePublicationLimits(
     val maximumEntries: Int,
@@ -210,8 +357,27 @@ object ArchivalProjectAuditor {
         val planPath = profile.layout.declaration("module-plan-evidence").materialize()
         val confidencePath = profile.layout.declaration("confidence-evidence").materialize()
         val files = manifest.files.associateBy { it.path }
+        val agentFallbackPaths = linkedSetOf<String>()
+        val fallbackCheckpointSources = linkedMapOf<String, String>()
+        for (source in manifest.files.filter {
+            ProjectFileRole.MODULE_IMPLEMENTATION in it.roles && it.acceptedImplementation != true
+        }) {
+            val moduleId = profile.layout.declaration("module-implementation").moduleIdForPath(source.path)
+            val checkpointPath = profile.layout.declaration("module-evidence").materialize(mapOf("module" to moduleId))
+            require(checkpointPath in files) {
+                "agent evidence checkpoint is absent from the source manifest: $checkpointPath"
+            }
+            require(fallbackCheckpointSources.put(checkpointPath, source.path) == null) {
+                "audit module checkpoint ownership is duplicated: $checkpointPath"
+            }
+            if (moduleClaimsAgentExecution(source.generator, "")) agentFallbackPaths += source.path
+        }
         val hashes = linkedMapOf<String, String>()
+        val manifestSizes = linkedMapOf<String, Long>()
         var totalBytes = manifestSnapshot.bytes.size.toLong()
+        var totalEntries = manifest.files.size + 1
+        require(totalBytes <= effectiveLimits.maximumTotalBytes) { "audit manifest exceeds the aggregate byte bound" }
+        require(totalEntries <= effectiveLimits.maximumEntries) { "audit manifest and payload exceed the entry bound" }
         var modelText: String? = null
         var planText: String? = null
         var confidenceText: String? = null
@@ -221,6 +387,15 @@ object ArchivalProjectAuditor {
             require(totalBytes <= effectiveLimits.maximumTotalBytes) { "audit input exceeds the aggregate byte bound" }
             require(snapshot.sha256 == file.sha256) { "audit manifest hash differs from current file: ${file.path}" }
             hashes[file.path] = snapshot.sha256
+            manifestSizes[file.path] = snapshot.bytes.size.toLong()
+            // Inspect the same bounded, hash-checked bytes used by the audit. A mutable
+            // manifest label cannot erase checkpoint provenance, including unplanned sources.
+            fallbackCheckpointSources[file.path]?.let { sourcePath ->
+                if (sourcePath !in agentFallbackPaths &&
+                    ReconstructionAcpEvidenceArchiveVerifier.checkpointClaimsAgentExecution(snapshot.bytes)) {
+                    agentFallbackPaths += sourcePath
+                }
+            }
             if (file.path == modelPath) modelText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
             if (file.path == planPath) planText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
             if (file.path == confidencePath) confidenceText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
@@ -252,9 +427,20 @@ object ArchivalProjectAuditor {
         val compilationEvidence = linkedMapOf<String, JsonObject>()
         val compilationUnresolved = mutableSetOf<String>()
         val acceptedOwners = linkedMapOf<String, List<String>>()
+        val repairedOwners = linkedMapOf<String, List<String>>()
+        val fallbackSourcePaths = linkedMapOf<String, String>()
         val acceptedSourcePaths = linkedMapOf<String, String>()
         val acceptedInputFingerprints = linkedMapOf<String, String>()
         val plannedModuleEntityIds = linkedMapOf<String, List<String>>()
+        val repairState = lazy {
+            verifiedAuditRepairLineage(projectDir, profile, manifest, manifestSizes, totalBytes, effectiveLimits).also {
+                totalBytes = it.totalBytes
+                totalEntries = it.totalEntries
+            }
+        }
+        if (manifest.files.any { it.generator == "repair-revision" }) {
+            repairState.value
+        }
         for (element in planJson.getValue("modules").jsonArray) {
             val module = element.jsonObject
             require(module.keys == setOf("id", "sourcePath", "headerPath", "functionIds", "globalIds", "typeIds", "boundaryEvidence")) {
@@ -290,7 +476,21 @@ object ArchivalProjectAuditor {
             require(ProjectFileRole.PUBLIC_INTERFACE in header.roles) { "audit module header has no declared interface role" }
             require(moduleRevisions.put(identifier, hashes.getValue(source)) == null) { "audit module IDs are duplicated" }
             plannedModuleEntityIds[identifier] = owned + types
+            if (source in agentFallbackPaths) {
+                fallbackSourcePaths[identifier] = source
+            }
             if (file.acceptedImplementation == true) {
+                if (file.generator == "repair-revision") {
+                    val repaired = requireNotNull(repairState.value.lineage.repairedSource(source)) {
+                        "accepted repair source lacks authenticated repair lineage: $source"
+                    }
+                    require(repaired.headSha256 == hashes.getValue(source)) {
+                        "accepted repair source differs from authenticated repair lineage: $source"
+                    }
+                    repairedOwners[identifier] = owned
+                    acceptedSourcePaths[identifier] = source
+                    continue
+                }
                 acceptedOwners[identifier] = owned
                 acceptedSourcePaths[identifier] = source
                 try {
@@ -376,7 +576,12 @@ object ArchivalProjectAuditor {
                 }
             }
         }
-        if (acceptedOwners.isNotEmpty()) {
+        if (agentFallbackPaths.isNotEmpty()) {
+            repairState.value
+        }
+        val confidenceMustBeValid = acceptedOwners.isEmpty() || repairedOwners.isNotEmpty() ||
+            fallbackSourcePaths.isNotEmpty()
+        run {
             val confidence = try {
                 val text = requireNotNull(confidenceText) { "accepted modules require manifest-bound confidence evidence" }
                 UniqueJsonObjectKeyValidator(text).validate()
@@ -439,10 +644,53 @@ object ArchivalProjectAuditor {
                     requireScore(module.getValue("score"), expectedScore(owned))
                     requireIds(module, "unresolvedRecoveryEntityIds", owned.filter { it in recoveryUnresolved })
                     requireIds(module, "unresolvedImplementationIds", owned.filter { it in implementationUnresolved })
+                    if (id in repairedOwners || id in fallbackSourcePaths) {
+                        val revisionKind = if (id in repairedOwners) "repaired" else "fallback"
+                        val revision = module.getValue("revisionEvidence").jsonObject
+                        val checkpointPath = profile.layout.declaration("module-evidence")
+                            .materialize(mapOf("module" to id))
+                        val checkpointSnapshot = readStableRegularFile(projectDir, checkpointPath, maximumFileBytes)
+                        require(checkpointSnapshot.sha256 == hashes.getValue(checkpointPath)) {
+                            "$revisionKind module checkpoint changed during confidence verification"
+                        }
+                        val checkpointText = checkpointSnapshot.bytes.decodeToString(throwOnInvalidSequence = true)
+                        UniqueJsonObjectKeyValidator(checkpointText).validate()
+                        val checkpoint = Json.parseToJsonElement(checkpointText).jsonObject
+                        if (id in fallbackSourcePaths) {
+                            require(checkpoint.getValue("accepted") == JsonPrimitive(false) &&
+                                checkpoint.string("sourceSha256") == moduleRevisions.getValue(id)) {
+                                "fallback module checkpoint differs from its unresolved source"
+                            }
+                        }
+                        require(revision.keys == setOf("sourcePath", "sourceSha256", "inputFingerprint",
+                            "inputFingerprintProvider", "inputBinarySha256", "modelSchemaVersion", "checkpointPath",
+                            "checkpointSha256", "acceptedImplementation", "compilation", "behavior") &&
+                            revision.string("sourcePath") == (acceptedSourcePaths[id] ?: fallbackSourcePaths.getValue(id)) &&
+                            revision.string("sourceSha256") == checkpoint.string("sourceSha256") &&
+                            revision.string("inputFingerprint") == checkpoint.string("fingerprint") &&
+                            revision.string("inputFingerprintProvider") == "module-reconstruction-input-v2" &&
+                            revision.string("inputBinarySha256") == model.inputSha256 &&
+                            revision.getValue("modelSchemaVersion") == JsonPrimitive(model.schemaVersion) &&
+                            revision.string("checkpointPath") == checkpointPath &&
+                            revision.string("checkpointSha256") == hashes.getValue(checkpointPath) &&
+                            revision.getValue("acceptedImplementation") == checkpoint.getValue("accepted") &&
+                            revision.getValue("compilation") == checkpoint.getValue("compilation")) {
+                            "$revisionKind module confidence evidence differs from its historical reconstruction checkpoint"
+                        }
+                        val behavior = revision.getValue("behavior").jsonObject
+                        require(behavior.keys == setOf("status", "reason", "coverage", "outputAgreement", "unobservedBehavior") &&
+                            behavior.string("status") == "unknown" && behavior.getValue("coverage") == JsonNull &&
+                            behavior.getValue("outputAgreement") == JsonNull &&
+                            behavior.string("reason") == "no revision-bound behavioral measurements attached" &&
+                            behavior.string("unobservedBehavior") == "unknown") {
+                            "$revisionKind module confidence evidence overstates unobserved behavior"
+                        }
+                    }
                 }
                 byId
             } catch (failure: Exception) {
                 if (failure is InterruptedException) throw failure
+                if (confidenceMustBeValid) throw failure
                 val reason = failure.message.orEmpty().take(512).ifEmpty { failure.javaClass.simpleName }
                 acceptedOwners.forEach { (id, owners) ->
                     if (id !in compilationEvidence) return@forEach
@@ -481,11 +729,13 @@ object ArchivalProjectAuditor {
                     require(behavior.keys == setOf("status", "reason", "coverage", "outputAgreement", "unobservedBehavior") &&
                         behavior.string("status") == "unknown" && behavior.getValue("coverage") == JsonNull &&
                         behavior.getValue("outputAgreement") == JsonNull &&
+                        behavior.string("reason") == "no revision-bound behavioral measurements attached" &&
                         behavior.string("unobservedBehavior") == "unknown") {
                         "accepted module confidence evidence overstates unobserved behavior"
                     }
                 } catch (failure: Exception) {
                     if (failure is InterruptedException) throw failure
+                    if (confidenceMustBeValid) throw failure
                     val reason = failure.message.orEmpty().take(512).ifEmpty { failure.javaClass.simpleName }
                     confidenceProblems[id] = reason
                     compilationProblems.putIfAbsent(id, reason)
@@ -514,14 +764,16 @@ object ArchivalProjectAuditor {
             val reports = projectDir.resolve("reports")
             if (!Files.exists(reports, LinkOption.NOFOLLOW_LINKS)) return emptyList()
             require(!Files.isSymbolicLink(reports)) { "behavior reports directory is a symbolic link" }
-            return Files.walk(reports, 32).use { stream ->
+            return Files.walk(reports, MAXIMUM_AUDIT_REPORT_DEPTH).use { stream ->
                 val entries = stream.limit(effectiveLimits.maximumEntries.toLong() + 1L).toList()
                 require(entries.size <= effectiveLimits.maximumEntries) { "behavior report inventory exceeds its bound" }
                 for (entry in entries) {
                     require(!Files.isSymbolicLink(entry) || entry.fileName.toString().endsWith(".behavior.json")) {
                         "behavior report inventory contains a link: $entry"
                     }
-                    if (Files.isDirectory(entry, LinkOption.NOFOLLOW_LINKS) && reports.relativize(entry).nameCount >= 32) {
+                    if (Files.isDirectory(entry, LinkOption.NOFOLLOW_LINKS) &&
+                        reports.relativize(entry).nameCount >= MAXIMUM_AUDIT_REPORT_DEPTH
+                    ) {
                         require(Files.newDirectoryStream(entry).use { !it.iterator().hasNext() }) {
                             "behavior report inventory exceeds its depth bound"
                         }
@@ -540,10 +792,24 @@ object ArchivalProjectAuditor {
         var behaviorBytes = 0L
         for (path in behaviorPaths) {
             val relative = projectDir.relativize(path).toString()
+            val alreadyAudited = relative in hashes ||
+                (repairState.isInitialized() && relative in repairState.value.additionalDigests)
+            if (!alreadyAudited) {
+                totalEntries = Math.addExact(totalEntries, 1)
+                require(totalEntries <= effectiveLimits.maximumEntries) {
+                    "behavior reports exceed the remaining entry bound"
+                }
+            }
+            val remainingBehaviorBytes = effectiveLimits.maximumTotalBytes - totalBytes - behaviorBytes
+            require(alreadyAudited || remainingBehaviorBytes > 0L) {
+                "behavior reports exceed the remaining aggregate bound"
+            }
             try {
-                val snapshot = readStableRegularFile(projectDir, relative, minOf(maximumFileBytes, BehaviorEvidence.MAXIMUM_REPORT_BYTES))
-                behaviorBytes = Math.addExact(behaviorBytes, snapshot.bytes.size.toLong())
-                require(behaviorBytes <= profile.budgets.archiveMaximumTotalBytes - totalBytes) {
+                val snapshot = readStableRegularFile(projectDir, relative,
+                    if (alreadyAudited) minOf(maximumFileBytes, BehaviorEvidence.MAXIMUM_REPORT_BYTES)
+                    else minOf(maximumFileBytes, BehaviorEvidence.MAXIMUM_REPORT_BYTES, remainingBehaviorBytes))
+                if (!alreadyAudited) behaviorBytes = Math.addExact(behaviorBytes, snapshot.bytes.size.toLong())
+                require(behaviorBytes <= effectiveLimits.maximumTotalBytes - totalBytes) {
                     "behavior report bytes exceed the remaining aggregate bound"
                 }
                 val record = BehaviorEvidence.decode(snapshot.bytes)
@@ -618,12 +884,35 @@ object ArchivalProjectAuditor {
                 "audit input changed before publication: $relative"
             }
         }
+        if (repairState.isInitialized()) {
+            val verified = repairState.value
+            val currentInventory = auditRepairInventory(projectDir, verified.inventoryEntryLimit, hashes.keys).map {
+                projectDir.relativize(it).toString().replace('\\', '/')
+            }
+            require(currentInventory == verified.inventory) { "repair audit inventory changed before publication" }
+            for (relative in currentInventory) {
+                val path = projectDir.resolve(relative)
+                require(!Files.isSymbolicLink(path) && if (relative in verified.directoryPaths) {
+                    Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)
+                } else {
+                    Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)
+                }) {
+                    "repair audit entry changed type before publication: $relative"
+                }
+            }
+            for ((relative, expectedHash) in verified.additionalDigests) {
+                require(readStableRegularFile(projectDir, relative, maximumFileBytes).sha256 == expectedHash) {
+                    "repair audit state changed before publication: $relative"
+                }
+            }
+        }
         require(discoverBehaviorReports() == behaviorPaths) { "behavior report inventory changed during audit" }
         for ((relative, expectedHash) in behaviorHashes) {
             val snapshot = readStableRegularFile(projectDir, relative, minOf(maximumFileBytes, BehaviorEvidence.MAXIMUM_REPORT_BYTES))
             require(snapshot.sha256 == expectedHash) { "behavior report changed before audit publication" }
         }
         currentProjectRecord?.let { BehaviorEvidence.requireProjectCurrent(it, BehaviorProjectContext(projectDir, profile)) }
+        if (repairState.isInitialized()) rejectProfileProjectionPreimages(projectDir, profile)
         if (publish) writeProjectEvidenceAtomically(projectDir.resolve("reports/archival_audit.json"), audit.toJson())
         return audit
     }

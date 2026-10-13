@@ -128,20 +128,10 @@ class AcpAgentHarnessTest {
                     val path = sourceRoot.resolve(
                         profile.layout.declaration(role).materialize(mapOf("module" to "decomp")),
                     )
-                    val diagnostic = runCatching {
-                        if (!Files.isRegularFile(path)) "<missing>" else {
-                            val maximumBytes = 64 * 1024
-                            val bytes = Files.newInputStream(path).use { it.readNBytes(maximumBytes + 1) }
-                            if (bytes.size > maximumBytes) "<exceeds $maximumBytes bytes>" else {
-                                val document = Json.parseToJsonElement(bytes.toString(Charsets.UTF_8)) as JsonObject
-                                val selected = if (label == "execution") {
-                                    JsonObject(document.filterKeys { it == "outcome" || it == "lifecycle" })
-                                } else document
-                                val rendered = selected.toString()
-                                rendered.take(16 * 1024) + if (rendered.length > 16 * 1024) "<truncated>" else ""
-                            }
-                        }
-                    }.getOrElse { "<unreadable: ${it.javaClass.simpleName}>" }
+                    val diagnostic = retainedArchivalDiagnostic(
+                        path,
+                        fields = if (label == "execution") setOf("outcome", "lifecycle") else null,
+                    )
                     "$label=$diagnostic"
                 }
                 throw AssertionError(
@@ -168,6 +158,24 @@ class AcpAgentHarnessTest {
                 ArchivalProjectAuditor.audit(extracted, profile).toJson())
         }
     }
+
+    private fun retainedArchivalDiagnostic(path: Path, fields: Set<String>? = null): String = runCatching {
+        if (!Files.isRegularFile(path)) "<missing>" else {
+            val maximumRendered = 16 * 1024
+            val maximumBytes = if (fields == null) maximumRendered else 64 * 1024
+            val bytes = Files.newInputStream(path).use { it.readNBytes(maximumBytes + 1) }
+            if (fields == null) {
+                bytes.take(maximumBytes).toByteArray().toString(Charsets.UTF_8) +
+                    if (bytes.size > maximumBytes) "\n<truncated>" else ""
+            } else if (bytes.size > maximumBytes) {
+                "<exceeds $maximumBytes bytes>"
+            } else {
+                val document = Json.parseToJsonElement(bytes.toString(Charsets.UTF_8)) as JsonObject
+                val rendered = JsonObject(document.filterKeys { it in fields }).toString()
+                rendered.take(maximumRendered) + if (rendered.length > maximumRendered) "<truncated>" else ""
+            }
+        }
+    }.getOrElse { "<unreadable: ${it.javaClass.simpleName}>" }
 
     @Test
     fun `public harness fails closed before launch when the outer sandbox is absent`() {
@@ -659,14 +667,25 @@ class AcpAgentHarnessTest {
             val second = secondFuture.get(75, TimeUnit.SECONDS)
             val firstEvidence = assertIs<AcpInvocationEvidenceSnapshot>(first.providerEvidence)
             val secondEvidence = assertIs<AcpInvocationEvidenceSnapshot>(second.providerEvidence)
+            val outcomes = listOf("first" to first, "second" to second).joinToString("; ") { (label, receipt) ->
+                val failure = (receipt.outcome as? AgentExecutionOutcome.Failed)?.failure
+                val evidence = receipt.providerEvidence as AcpInvocationEvidenceSnapshot
+                val diagnostics = evidence.diagnostics
+                "$label: failureKind=${failure?.kind} failureMessage=${failure?.message} failureDetails=${failure?.details} " +
+                    "${evidence.summaryForTest()} exitCode=${diagnostics?.exitCode} " +
+                    "forcedTermination=${diagnostics?.forcedTermination} " +
+                    "rootTerminationRequested=${diagnostics?.rootTerminationRequested} " +
+                    "remainingProcesses=${diagnostics?.remainingProcessIds?.size} " +
+                    "outputLimitExceeded=${diagnostics?.outputLimitExceeded}"
+            }
 
             assertEquals(AgentExecutionRequestBinding.capture(firstRequest), first.requestBinding)
             assertEquals(AgentExecutionRequestBinding.capture(secondRequest), second.requestBinding)
             assertEquals(expectedWirePromptSha256(firstRequest), firstEvidence.wirePromptSha256)
             assertEquals(expectedWirePromptSha256(secondRequest), secondEvidence.wirePromptSha256)
             assertFalse(firstEvidence.wirePromptSha256 == secondEvidence.wirePromptSha256)
-            assertEquals(AgentStopReason.COMPLETED, completedStopReasonForTest("first", first, firstEvidence))
-            assertEquals(AgentStopReason.COMPLETED, completedStopReasonForTest("second", second, secondEvidence))
+            assertEquals(AgentStopReason.COMPLETED, completedStopReasonForTest("first", first, firstEvidence, outcomes))
+            assertEquals(AgentStopReason.COMPLETED, completedStopReasonForTest("second", second, secondEvidence, outcomes))
             assertEquals(
                 firstEvidence.wirePromptSha256,
                 assertNotNull(firstEvidence.completeExecutionEvidence, "first: ${firstEvidence.summaryForTest()}").wirePromptSha256,
@@ -691,6 +710,7 @@ class AcpAgentHarnessTest {
         label: String,
         receipt: AgentExecutionReceipt,
         evidence: AcpInvocationEvidenceSnapshot,
+        outcomes: String,
     ): AgentStopReason {
         val failure = (receipt.outcome as? AgentExecutionOutcome.Failed)?.failure
         return assertIs<AgentExecutionOutcome.Returned>(
@@ -699,7 +719,7 @@ class AcpAgentHarnessTest {
                 "failureKind=${failure?.kind} failureMessage=${failure?.message} " +
                 "failureDetails=${failure?.details} " +
                 "causeType=${receipt.failureCause?.javaClass?.name} " +
-                "nestedCauseType=${receipt.failureCause?.cause?.javaClass?.name}",
+                "nestedCauseType=${receipt.failureCause?.cause?.javaClass?.name}; outcomes=$outcomes",
         ).result.stopReason
     }
 

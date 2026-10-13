@@ -42,6 +42,22 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class SourceTreeTest {
     @Test
+    fun `reconstruction cannot claim the reserved repair generator`() {
+        val project = createTempDirectory("source-tree-reserved-repair-generator-")
+        val model = oneModuleModel()
+        val reconstructor = ModuleReconstructor { request ->
+            validReconstructor().reconstruct(request).copy(generator = "repair-revision")
+        }
+
+        val manifest = SourceTreeGenerator.generate(model, project, reconstructor = reconstructor)
+        val source = manifest.files.single { it.path == "src/modules/parse.c" }
+        assertEquals(false, source.acceptedImplementation)
+        assertTrue(manifest.unresolvedImplementationIds.isNotEmpty())
+        val checkpoint = project.resolve("reports/modules/parse.json").readText()
+        assertTrue("reserved-generator" in checkpoint)
+    }
+
+    @Test
     fun `rerun with the other profile removes the stale build definition`() {
         val project = createTempDirectory("source-tree-profile-rerun-")
         val model = oneModuleModel()
