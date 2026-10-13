@@ -1541,6 +1541,9 @@ public:
   std::function<void()> AddedCallback{};
   void setLangDefaults(int value = defaultValue()) { int methodLocal; }
   template <typename T> void setTemplatedDefaults(T value = T{}) { int templateLocal; }
+  decltype(auto) inferredBody() { int inferredLocal; }
+  auto trailingReturnBody() -> decltype(0 + 1) { int trailingLocal; }
+  bool operator<(int other) { int operatorLocal; return false; }
   int FollowingField;
 };
 """
@@ -1548,6 +1551,30 @@ public:
             provision.extract_cxx_class_data_members(header, "LangOptions"),
             ["AddedCallback", "FollowingField"],
         )
+
+    def test_langoptions_source_audit_rejects_parenthesized_type_and_member_declarators(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            definition = self.langoptions_definition_fixture(base)
+            fields = list(self.contract["langOptions"]["manualFields"])
+            injections = (
+                "decltype(0 + 1) stealth{};",
+                "static decltype(0 + 1) staticStealth{};",
+                "int (stealth){};",
+                "alignas(8) int (alignedStealth){};",
+                "typeof(0 + 1) typeofStealth{};",
+                "__typeof__(0 + 1) gnuTypeofStealth{};",
+            )
+            for index, declaration in enumerate(injections):
+                header = base / f"LangOptions-parenthesized-{index}.h"
+                header.write_text(
+                    "class LangOptions : public LangOptionsBase {\npublic:\n  " +
+                    "\n  ".join(f"int {name};" for name in fields) +
+                    "\n  " + declaration + "\n};\n",
+                    encoding="utf-8")
+                with self.subTest(declaration=declaration), self.assertRaisesRegex(
+                        provision.ProvisionError, "unsupported or ambiguous parenthesized"):
+                    provision.audit_langoptions(definition, header, self.contract)
 
     def test_langoptions_source_audit_fails_closed_on_function_pointer_member(self):
         with self.temporary_directory() as temp:

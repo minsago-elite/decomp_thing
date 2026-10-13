@@ -1403,9 +1403,17 @@ def _cxx_member_declarator_names(statement: str, class_name: str) -> list[str]:
         index += 1
 
     declarators = []
-    paren_depth = bracket_depth = brace_depth = angle_depth = 0
-    for token in tokens:
-        if not (paren_depth or bracket_depth or brace_depth or angle_depth) and token in ("=", "{"):
+    paren_depth = bracket_depth = brace_depth = 0
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "<":
+            template_close = _cxx_template_close(tokens, index)
+            if template_close is not None:
+                declarators.extend(tokens[index:template_close + 1])
+                index = template_close + 1
+                continue
+        if not (paren_depth or bracket_depth or brace_depth) and token in ("=", "{"):
             break
         declarators.append(token)
         if token == "(":
@@ -1420,35 +1428,36 @@ def _cxx_member_declarator_names(statement: str, class_name: str) -> list[str]:
             brace_depth += 1
         elif token == "}" and brace_depth:
             brace_depth -= 1
-        elif token == "<":
-            angle_depth += 1
-        elif token == ">" and angle_depth:
-            angle_depth -= 1
+        index += 1
 
     # Distinguish ordinary member functions from data members with a
     # parenthesized declarator. Function-pointer/data-member forms are not
     # silently discarded: unsupported forms fail closed below.
-    paren_depth = angle_depth = bracket_depth = 0
+    paren_depth = bracket_depth = 0
     top_level_parens: list[tuple[int, int]] = []
     open_index: int | None = None
-    for token_index, token in enumerate(declarators):
+    token_index = 0
+    while token_index < len(declarators):
+        token = declarators[token_index]
         if token == "<":
-            angle_depth += 1
-        elif token == ">" and angle_depth:
-            angle_depth -= 1
-        elif not angle_depth and token == "[":
+            template_close = _cxx_template_close(declarators, token_index)
+            if template_close is not None:
+                token_index = template_close + 1
+                continue
+        if token == "[":
             bracket_depth += 1
-        elif not angle_depth and token == "]" and bracket_depth:
+        elif token == "]" and bracket_depth:
             bracket_depth -= 1
-        elif not (angle_depth or bracket_depth) and token == "(":
+        elif not bracket_depth and token == "(":
             if paren_depth == 0:
                 open_index = token_index
             paren_depth += 1
-        elif not (angle_depth or bracket_depth) and token == ")" and paren_depth:
+        elif not bracket_depth and token == ")" and paren_depth:
             paren_depth -= 1
             if paren_depth == 0 and open_index is not None:
                 top_level_parens.append((open_index, token_index))
                 open_index = None
+        token_index += 1
     if top_level_parens:
         first_open, first_close = top_level_parens[0]
         first_before = declarators[:first_open]
@@ -1460,24 +1469,7 @@ def _cxx_member_declarator_names(statement: str, class_name: str) -> list[str]:
         if (any(token in {"*", "&", "&&"} for token in declarators[first_open + 1:first_close]) and
                 not first_is_method_parameters):
             raise ProvisionError("unsupported function-pointer/member-pointer declarator in LangOptions class")
-        signature_open, signature_close = top_level_parens[-1]
-        before = declarators[:signature_open]
-        after = declarators[signature_close + 1:]
-        before_name = before[-1] if before else ""
-        is_constructor = before_name == class_name and len(before) == 1
-        has_return_type = (len(before) >= 2 and
-                           re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", before_name) is not None)
-        is_operator = "operator" in before
-        # A method declarator has its function name immediately before its
-        # parameter list and no trailing member name. A field using decltype,
-        # std::function, or an unknown parenthesized declarator is ambiguous;
-        # reject it instead of treating it as a non-field.
-        method_suffix_words = {"const", "volatile", "noexcept", "override", "final", "requires"}
-        suffix_is_method = not after or all(
-            token in method_suffix_words or token in {"&", "&&", "=", "0", ";"}
-            for token in after
-        ) or "->" in after
-        if (is_constructor or has_return_type or is_operator) and suffix_is_method:
+        if _cxx_prefix_has_method_parameter_list(" ".join(declarators), class_name):
             return []
         raise ProvisionError("unsupported or ambiguous parenthesized LangOptions member declarator")
 
@@ -1489,51 +1481,86 @@ def _cxx_member_declarator_names(statement: str, class_name: str) -> list[str]:
     return []
 
 
-def _cxx_prefix_has_method_parameter_list(prefix: str) -> bool:
-    """Recognize a completed method parameter list before a class member body.
+_CXX_NON_FUNCTION_IDENTIFIERS = frozenset("""
+alignas alignof asm auto bool break case catch char char8_t char16_t char32_t
+class compl concept const consteval constexpr constinit const_cast continue
+co_await co_return co_yield decltype default delete do double dynamic_cast else
+enum explicit export extern false float for friend goto if inline int long
+mutable namespace new noexcept not not_eq nullptr operator private protected
+public register reinterpret_cast requires return short signed sizeof static
+static_assert static_cast struct switch template this thread_local throw true
+try typedef typeid typename union unsigned using virtual void volatile wchar_t
+while typeof __typeof __typeof__ __alignof__ __attribute__ __declspec
+""".split())
+_CXX_DECLARATION_SPECIFIERS = frozenset("""
+const consteval constexpr constinit explicit export extern friend inline
+mutable register static thread_local typedef virtual
+""".split())
+
+
+def _cxx_prefix_has_method_parameter_list(prefix: str, class_name: str) -> bool:
+    """Recognize only a supported function declarator before a member body.
 
     Parentheses inside a template-id (for example ``std::function<void()>``)
     are deliberately nested under angle delimiters and do not identify a
-    method. Default-argument equals signs remain nested under the method's
-    parameter parentheses.
+    method. A parameter-list pair must have a callable name and a preceding
+    return type, constructor/destructor name, or operator name. This keeps
+    type operators such as ``decltype(expr)`` and parenthesized fields such as
+    ``int (field) {}`` out of the function-body path. Default-argument equals
+    signs remain nested under the method's parameter parentheses.
     """
     tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*|::|&&|->|<=|>=|==|!=|\S", prefix)
-    paren_depth = bracket_depth = angle_depth = 0
+    paren_depth = bracket_depth = 0
     top_level_parens: list[tuple[int, int]] = []
     open_index: int | None = None
     top_level_initializer = False
-    for token_index, token in enumerate(tokens):
+    token_index = 0
+    while token_index < len(tokens):
+        token = tokens[token_index]
         if token == "<":
-            angle_depth += 1
-        elif token == ">" and angle_depth:
-            angle_depth -= 1
-        elif not angle_depth and token == "[":
+            template_close = _cxx_template_close(tokens, token_index)
+            if template_close is not None:
+                token_index = template_close + 1
+                continue
+        if token == "[":
             bracket_depth += 1
-        elif not angle_depth and token == "]" and bracket_depth:
+        elif token == "]" and bracket_depth:
             bracket_depth -= 1
-        elif not (angle_depth or bracket_depth) and token == "(":
+        elif not bracket_depth and token == "(":
             if paren_depth == 0:
                 open_index = token_index
             paren_depth += 1
-        elif not (angle_depth or bracket_depth) and token == ")" and paren_depth:
+        elif not bracket_depth and token == ")" and paren_depth:
             paren_depth -= 1
             if paren_depth == 0 and open_index is not None:
                 top_level_parens.append((open_index, token_index))
                 open_index = None
-        elif not (paren_depth or bracket_depth or angle_depth) and token == "=":
+        elif not (paren_depth or bracket_depth) and token == "=":
             top_level_initializer = True
-    if (top_level_initializer or paren_depth or bracket_depth or angle_depth or
-            not top_level_parens):
+        token_index += 1
+    if top_level_initializer or paren_depth or bracket_depth or not top_level_parens:
         return False
 
-    # An ordinary field's template function type has its parentheses nested
-    # beneath '<...>', so it never reaches this branch. For a true method the
-    # final completed top-level pair has a callable name immediately before it.
-    signature_open, _ = top_level_parens[-1]
-    before = tokens[:signature_open]
-    callable_name = before[-1] if before else ""
-    return (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", callable_name) is not None or
-            callable_name == ")")
+    # A trailing return type or noexcept expression can add more top-level
+    # parenthesis pairs after the actual parameter list, so inspect every
+    # candidate pair. Requiring a return type before the callable name avoids
+    # interpreting decltype(expr), alignas(expr), or an unknown parenthesized
+    # declarator as a method body.
+    for signature_open, _ in top_level_parens:
+        before = tokens[:signature_open]
+        callable_name = before[-1] if before else ""
+        if "operator" in before:
+            return True
+        if callable_name == class_name or (
+                len(before) >= 2 and before[-2:] == ["~", class_name]):
+            return True
+        if (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", callable_name) is not None and
+                callable_name not in _CXX_NON_FUNCTION_IDENTIFIERS and
+                any(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token) and
+                    token not in _CXX_DECLARATION_SPECIFIERS
+                    for token in before[:-1])):
+            return True
+    return False
 
 
 def extract_cxx_class_data_members(text: str, class_name: str) -> list[str]:
@@ -1563,7 +1590,7 @@ def extract_cxx_class_data_members(text: str, class_name: str) -> list[str]:
         if char == "{" and initializer_depth == 0:
             prefix = "".join(statement)
             is_type_body = re.search(r"\b(?:class|struct|union|enum)\b", prefix)
-            is_function_body = _cxx_prefix_has_method_parameter_list(prefix)
+            is_function_body = _cxx_prefix_has_method_parameter_list(prefix, class_name)
             if is_type_body or is_function_body:
                 nested = 1
                 index += 1
