@@ -221,6 +221,10 @@ class ProvisioningNegativeTests(unittest.TestCase):
         self.assertIn('--rootfs "$CLANG_WORK/rootfs-run2"', qualify_text)
         self.assertLess(qualify_text.index("package-provenance"),
                         qualify_text.index('sudo rm -rf "$CLANG_WORK/rootfs-run2"'))
+        self.assertIn('--oci-archive "$CLANG_WORK/run2/clang-18.1.3-noble-amd64.oci.tar"',
+                      qualify_text)
+        self.assertLess(qualify_text.index("package-provenance"),
+                        qualify_text.index('rm "$CLANG_WORK/run2/clang-18.1.3-noble-amd64.oci.tar"'))
 
     def test_workflow_offline_job_gates_native_setup_without_suppressing_failures(self):
         workflow = (ROOT / ".github/workflows/generic-template-toolchain.yml").read_text(encoding="utf-8")
@@ -423,6 +427,26 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 else:
                     provision.validate_build_record(record, self.contract)
 
+    def test_rootfs_archive_budget_fails_before_writing_when_walk_cannot_read_a_subtree(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            rootfs = base / "rootfs"
+            rootfs.mkdir()
+            archive = base / "rootfs.tar"
+
+            def denied_walk(root, followlinks=False, onerror=None):
+                error = PermissionError("unreadable retained rootfs subtree")
+                if onerror is not None:
+                    onerror(error)
+                return iter(())
+
+            with mock.patch.object(provision.os, "walk", side_effect=denied_walk), \
+                    mock.patch.object(provision, "run_checked") as tar:
+                with self.assertRaisesRegex(provision.ProvisionError, "could not inspect retained rootfs"):
+                    provision.deterministic_rootfs_tar(rootfs, archive, 0, normalize=False, max_bytes=1024 * 1024)
+                tar.assert_not_called()
+            self.assertFalse(archive.exists())
+
     def test_rootfs_archive_preserves_numeric_package_ownership(self):
         with self.temporary_directory() as temp:
             base = Path(temp)
@@ -585,7 +609,12 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 (library_dir / name).write_bytes(content)
             (library_dir / "libclang-cpp.so").symlink_to("libclang-cpp.so.18.1")
             (library_dir / "libLLVM-18.so").symlink_to("libLLVM-18.so.1")
-            rows = provision.runtime_dependencies(rootfs, [], self.contract)
+            with mock.patch.object(provision, "rootfs_run", return_value="") as ldd:
+                rows = provision.runtime_dependencies(rootfs, [], self.contract)
+            self.assertEqual([call.args[1] for call in ldd.call_args_list], [
+                ["/usr/bin/ldd", "/usr/lib/llvm-18/lib/libclang-cpp.so"],
+                ["/usr/bin/ldd", "/usr/lib/llvm-18/lib/libLLVM-18.so"],
+            ])
             by_path = {row["path"]: row for row in rows}
             self.assertEqual(by_path["/usr/lib/llvm-18/lib/libclang-cpp.so.18.1"]["sha256"],
                              provision.sha256(b"clang library"))
@@ -782,7 +811,8 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 "/usr/lib/llvm-18/lib/libclang-cpp.so -> intermediate",
                 "/usr/lib/llvm-18/lib/intermediate -> library-bytes",
             ])
-            rows = provision.runtime_dependencies(rootfs, [], self.contract)
+            with mock.patch.object(provision, "rootfs_run", return_value=""):
+                rows = provision.runtime_dependencies(rootfs, [], self.contract)
             self.assertEqual({row["path"] for row in rows}, {
                 "/usr/lib/llvm-18/lib/libclang-cpp.so", "/usr/lib/llvm-18/lib/libLLVM-18.so",
                 "/usr/lib/llvm-18/lib/intermediate", "/usr/lib/llvm-18/lib/library-bytes",
@@ -1623,6 +1653,16 @@ class ProvisioningNegativeTests(unittest.TestCase):
             self.assertEqual(checked["inventoryEvidence"], self.contract["langOptions"]["inventoryEvidence"])
             self.assertEqual(checked["runtimeLangOptionsChecks"], self.contract["langOptions"]["runtimeChecks"])
 
+    def test_langoptions_full_audit_accepts_public_llvmorg_18_1_3_fixtures(self):
+        fixtures = ROOT / "oracle/clang/18.1.3/fixtures"
+        definition = fixtures / "llvmorg-18.1.3-LangOptions.def"
+        header = fixtures / "llvmorg-18.1.3-LangOptions.h"
+        inventory = provision.audit_langoptions(definition, header, self.contract)
+        self.assertEqual(inventory["generatedFields"], self.contract["langOptions"]["generatedFieldCount"])
+        self.assertEqual(inventory["familyCounts"], self.contract["langOptions"]["familyCounts"])
+        self.assertEqual(inventory["manualFields"], self.contract["langOptions"]["manualFields"])
+        self.assertEqual(inventory["manualFieldsCount"], 28)
+
     def test_langoptions_source_audit_rejects_added_or_removed_manual_members(self):
         with self.temporary_directory() as temp:
             base = Path(temp)
@@ -1700,6 +1740,69 @@ class ProvisioningNegativeTests(unittest.TestCase):
             with self.subTest(declaration=declaration), self.assertRaisesRegex(
                     provision.ProvisionError, "unsupported direct|unterminated direct"):
                 provision.extract_cxx_class_data_members("class LangOptions {" + declaration + "};", "LangOptions")
+
+    def test_langoptions_source_audit_rejects_comma_declarator_injection(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            definition = self.langoptions_definition_fixture(base)
+            members = list(self.contract["langOptions"]["manualFields"])
+            declarations = [
+                f"bool {name} = false, Injected = false;" if name == "SanitizeCoverage"
+                else f"bool {name};"
+                for name in members
+            ]
+            header = base / "LangOptions-comma-injection.h"
+            header.write_text(
+                "class LangOptions : public LangOptionsBase {\npublic:\n  " +
+                "\n  ".join(declarations) + "\n};\n", encoding="utf-8")
+            with self.assertRaisesRegex(provision.ProvisionError, "direct manual member inventory mismatch"):
+                provision.audit_langoptions(definition, header, self.contract)
+
+    def test_langoptions_member_parser_preserves_nested_initializer_commas(self):
+        header = """class LangOptions {
+public:
+  std::pair<int, int> templateField = std::pair<int, int>{1, 2};
+  bool functionField = consume(1, 2);
+  int unqualifiedTemplateField = consume<int, long>(1, 2);
+  std::function<void(int, int)> callbackField;
+  int bracedField{1, 2};
+  int commaExpressionField = (1, 2);
+  void methodWithPointerParameter(void (*callback)(int, int)) const;
+  decltype(auto) inferredMethod();
+};
+"""
+        self.assertEqual(
+            provision.extract_cxx_class_data_members(header, "LangOptions"),
+            ["templateField", "functionField", "unqualifiedTemplateField", "callbackField",
+             "bracedField", "commaExpressionField"],
+        )
+
+    def test_langoptions_member_parser_handles_default_argument_methods_and_templated_function_braces(self):
+        header = """class LangOptions {
+public:
+  std::function<void()> AddedCallback{};
+  void setLangDefaults(int value = defaultValue()) { int methodLocal; }
+  template <typename T> void setTemplatedDefaults(T value = T{}) { int templateLocal; }
+  int FollowingField;
+};
+"""
+        self.assertEqual(
+            provision.extract_cxx_class_data_members(header, "LangOptions"),
+            ["AddedCallback", "FollowingField"],
+        )
+
+    def test_langoptions_source_audit_fails_closed_on_function_pointer_member(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            definition = self.langoptions_definition_fixture(base)
+            fields = self.contract["langOptions"]["manualFields"]
+            header = base / "LangOptions-function-pointer.h"
+            header.write_text(
+                "class LangOptions : public LangOptionsBase {\npublic:\n  " +
+                "\n  ".join(f"int {name};" for name in fields) +
+                "\n  void (*AddedCallback)(int);\n};\n", encoding="utf-8")
+            with self.assertRaisesRegex(provision.ProvisionError, "unsupported direct parenthesized"):
+                provision.audit_langoptions(definition, header, self.contract)
 
     def test_source_patch_audit_emits_rejection_for_contract_file_difference(self):
         with self.temporary_directory() as temp:
@@ -2016,6 +2119,44 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
         record["commands"] = provision.canonical_commands(self.contract, candidate["trustedKeyring"]["sha256"])
         return root, candidate, record, keyring
 
+    def retained_rootfs_image_fixture(self, base, record):
+        rootfs = base / "rootfs"
+        ProvisioningNegativeTests.prepare_runtime_rootfs(self, record, rootfs)
+        rootfs_tar = base / "rootfs.tar"
+
+        def local_tar(command, timeout=None):
+            return subprocess.run(command[1:], check=False, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, text=True, timeout=timeout)
+
+        with mock.patch.object(provision, "run_checked", side_effect=local_tar):
+            rootfs_identity = provision.deterministic_rootfs_tar(
+                rootfs, rootfs_tar, int(self.contract["environment"]["SOURCE_DATE_EPOCH"]),
+                normalize=False, max_bytes=self.contract["profile"]["bounds"]["maxArtifactBytes"],
+            )
+        record["rootfs"] = rootfs_identity
+        layout = base / "image-layout"
+        image = provision.create_oci_layout(
+            rootfs_tar, layout, record["profile"]["id"], self.contract["environment"],
+        )
+        record["image"] = {
+            "format": image["format"], "manifestSha256": image["manifestSha256"],
+            "imageDigest": image["imageDigest"],
+        }
+        oci_archive = base / "run2.oci.tar"
+        with tarfile.open(oci_archive, mode="w", format=tarfile.PAX_FORMAT) as archive:
+            for path in sorted(item for item in layout.rglob("*") if item.is_file()):
+                data = path.read_bytes()
+                member = tarfile.TarInfo(path.relative_to(layout).as_posix())
+                member.size = len(data)
+                member.mode = 0o644
+                member.uid = member.gid = 0
+                member.mtime = int(self.contract["environment"]["SOURCE_DATE_EPOCH"])
+                archive.addfile(member, io.BytesIO(data))
+        record["imageArtifact"] = {
+            "bytes": oci_archive.stat().st_size, "sha256": provision.sha256_file(oci_archive),
+        }
+        return rootfs, oci_archive
+
     def write_candidate(self, root, candidate):
         candidate.pop("candidateSha256", None)
         candidate["candidateSha256"] = provision.sha256(provision.canonical_json(candidate))
@@ -2195,6 +2336,35 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                                                extra_binary_package_names=expected_names)
             self.assertFalse(args.output.exists())
 
+    def test_package_provenance_rechecks_retained_rootfs_identity(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            _, _, record, _ = self.candidate_fixture(base)
+            rootfs, oci_archive = self.retained_rootfs_image_fixture(base, record)
+            changed = rootfs / record["runtime"]["entries"][0]["path"].lstrip("/")
+            original_bytes = changed.read_bytes()
+            changed.write_bytes(original_bytes + b"tamper")
+
+            def local_tar(command, timeout=None):
+                return subprocess.run(command[1:], check=False, stdout=subprocess.PIPE,
+                                      stderr=subprocess.STDOUT, text=True, timeout=timeout)
+
+            with mock.patch.object(provision, "run_checked", side_effect=local_tar):
+                with self.assertRaisesRegex(provision.ProvisionError, "retained rootfs differs"):
+                    provision.verify_retained_rootfs_and_image(rootfs, oci_archive, record, self.contract)
+
+            changed.write_bytes(original_bytes)
+            with tarfile.open(oci_archive, mode="a") as archive:
+                extra = tarfile.TarInfo("unrecorded-evidence")
+                extra.size = 1
+                archive.addfile(extra, io.BytesIO(b"x"))
+            record["imageArtifact"] = {
+                "bytes": oci_archive.stat().st_size, "sha256": provision.sha256_file(oci_archive),
+            }
+            with mock.patch.object(provision, "run_checked", side_effect=local_tar):
+                with self.assertRaisesRegex(provision.ProvisionError, "unrecorded files or blobs"):
+                    provision.verify_retained_rootfs_and_image(rootfs, oci_archive, record, self.contract)
+
     def test_packaging_accepts_bound_local_evidence_and_selected_contract(self):
         with self.temporary_directory() as temp:
             base = Path(temp)
@@ -2204,8 +2374,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
             record["recipe"] = provision.recipe_identity(selected)
             record["probe"]["fixtureSha256"] = provision.sha256_file(
                 ROOT / self.contract["negativeControl"]["fixture"])
-            rootfs = base / "rootfs"
-            ProvisioningNegativeTests.prepare_runtime_rootfs(self, record, rootfs)
+            rootfs, oci_archive = self.retained_rootfs_image_fixture(base, record)
             record_path = base / "record.json"
             record_path.write_bytes(provision.canonical_json(record))
             record_sha = provision.sha256_file(record_path)
@@ -2234,16 +2403,25 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                 report_paths[name] = base / f"{name}.json"
                 report_paths[name].write_bytes(provision.canonical_json(report))
             args = provision.argparse.Namespace(contract=selected, record=record_path, acquisition=root,
-                                               rootfs=rootfs, keyring=keyring,
+                                               rootfs=rootfs, oci_archive=oci_archive, keyring=keyring,
                                                output=base / "provenance.tar", **report_paths)
+
+            def local_tar(command, timeout=None):
+                return subprocess.run(command[1:], check=False, stdout=subprocess.PIPE,
+                                      stderr=subprocess.STDOUT, text=True, timeout=timeout)
+
             with mock.patch.object(provision, "verify_candidate_data", return_value=signed_rows) as signed, \
                     mock.patch.object(provision, "installed_package_keys", return_value=installed_keys), \
+                    mock.patch.object(provision, "runtime_dependencies",
+                                      return_value=record["runtime"]["entries"]) as runtime, \
+                    mock.patch.object(provision, "run_checked", side_effect=local_tar), \
                     mock.patch.object(provision.BoundedDownloader, "get") as network:
                 self.assertEqual(provision.command_package_provenance(args), 0)
                 expected_names = {row["name"] for section in ("packages", "downloadedPackages")
                                   for row in record[section]}
                 signed.assert_called_once_with(root, candidate, self.contract, keyring,
                                                extra_binary_package_names=expected_names)
+                runtime.assert_called_once_with(rootfs, list(provision.FRONTEND_RUNTIME_ROOTS), self.contract)
                 network.assert_not_called()
             with tarfile.open(args.output) as archive:
                 self.assertEqual(archive.extractfile("provisioning-contract.json").read(), selected.read_bytes())
@@ -2262,6 +2440,38 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                                  comparator_lock["oracle"]["artifactManifestSha256"])
                 self.assertEqual(comparator_manifest,
                                  (lock_path.parent / comparator_lock["oracle"]["artifactManifestPath"]).read_bytes())
+
+            # A self-consistent record and report cannot define a smaller runtime
+            # closure than the one re-derived from the retained rootfs.
+            original_runtime = record["runtime"]
+            remove_path = next(
+                row["path"] for row in original_runtime["entries"]
+                if row["sha256"] != next(tool["sha256"] for tool in record["tools"]
+                                         if tool["role"] == "cxx-driver")
+            )
+            record["runtime"] = provision.manifest([
+                row for row in original_runtime["entries"] if row["path"] != remove_path
+            ])
+            record_path.write_bytes(provision.canonical_json(record))
+            omitted_record_sha = provision.sha256_file(record_path)
+            omitted_loader = ProvisioningNegativeTests.valid_loader_report(
+                self, record, omitted_record_sha, rootfs,
+            )
+            provision.validate_provenance_loader_report(
+                omitted_loader, record, omitted_record_sha, rootfs,
+            )
+            omitted_loader_path = base / "loader-report-omitted-runtime.json"
+            omitted_loader_path.write_bytes(provision.canonical_json(omitted_loader))
+            args.loader_report = omitted_loader_path
+            args.output = base / "provenance-omitted-runtime.tar"
+            with mock.patch.object(provision, "verify_candidate_data", return_value=signed_rows), \
+                    mock.patch.object(provision, "installed_package_keys", return_value=installed_keys), \
+                    mock.patch.object(provision, "runtime_dependencies",
+                                      return_value=original_runtime["entries"]), \
+                    mock.patch.object(provision, "run_checked", side_effect=local_tar):
+                with self.assertRaisesRegex(provision.ProvisionError, "runtime closure differs"):
+                    provision.command_package_provenance(args)
+            self.assertFalse(args.output.exists())
 
 
 if __name__ == "__main__":

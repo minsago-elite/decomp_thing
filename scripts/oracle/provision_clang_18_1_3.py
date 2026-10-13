@@ -21,6 +21,7 @@ from pathlib import Path, PurePosixPath
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -39,6 +40,12 @@ OCI_INDEX_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json"
 OCI_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
 OCI_CONFIG_MEDIA_TYPE = "application/vnd.oci.image.config.v1+json"
 OCI_GZIP_LAYER_MEDIA_TYPE = "application/vnd.oci.image.layer.v1.tar+gzip"
+FRONTEND_RUNTIME_ROOTS = (
+    "/usr/bin/clang-18",
+    "/usr/bin/clang++-18",
+    "/usr/lib/llvm-18/lib/libclang-cpp.so",
+    "/usr/lib/llvm-18/lib/libLLVM-18.so",
+)
 RECIPE_FILES = {
     "contractSha256": CONTRACT_PATH,
     "schemaSha256": CONTRACT_PATH.parent / "build-record.schema.json",
@@ -1309,12 +1316,94 @@ def _mask_cxx_comments_and_literals(text: str) -> str:
     return "".join(output)
 
 
+def _cxx_template_close(tokens: list[str], start: int) -> int | None:
+    """Return a plausible template-id's closing angle without treating nested commas as fields."""
+    if start == 0 or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", tokens[start - 1]):
+        return None
+    angle_depth = 1
+    paren_depth = bracket_depth = brace_depth = 0
+    for index in range(start + 1, len(tokens)):
+        token = tokens[index]
+        if token == "(":
+            paren_depth += 1
+        elif token == ")" and paren_depth:
+            paren_depth -= 1
+        elif token == "[":
+            bracket_depth += 1
+        elif token == "]" and bracket_depth:
+            bracket_depth -= 1
+        elif token == "{":
+            brace_depth += 1
+        elif token == "}" and brace_depth:
+            brace_depth -= 1
+        elif not (paren_depth or bracket_depth or brace_depth):
+            if token == "<":
+                angle_depth += 1
+            elif token == ">":
+                angle_depth -= 1
+                if angle_depth == 0:
+                    return index
+    return None
+
+def _cxx_prefix_has_method_parameter_list(prefix: str) -> bool:
+    """Recognize a completed method parameter list before a class member body.
+
+    Parentheses inside a template-id (for example ``std::function<void()>``)
+    are deliberately nested under angle delimiters and do not identify a
+    method. Default-argument equals signs remain nested under the method's
+    parameter parentheses.
+    """
+    tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*|::|&&|->|<=|>=|==|!=|\S", prefix)
+    paren_depth = bracket_depth = angle_depth = 0
+    top_level_parens: list[tuple[int, int]] = []
+    open_index: int | None = None
+    top_level_initializer = False
+    for token_index, token in enumerate(tokens):
+        if token == "<":
+            angle_depth += 1
+        elif token == ">" and angle_depth:
+            angle_depth -= 1
+        elif not angle_depth and token == "[":
+            bracket_depth += 1
+        elif not angle_depth and token == "]" and bracket_depth:
+            bracket_depth -= 1
+        elif not (angle_depth or bracket_depth) and token == "(":
+            if paren_depth == 0:
+                open_index = token_index
+            paren_depth += 1
+        elif not (angle_depth or bracket_depth) and token == ")" and paren_depth:
+            paren_depth -= 1
+            if paren_depth == 0 and open_index is not None:
+                top_level_parens.append((open_index, token_index))
+                open_index = None
+        elif not (paren_depth or bracket_depth or angle_depth) and token == "=":
+            top_level_initializer = True
+    if (top_level_initializer or paren_depth or bracket_depth or angle_depth or
+            not top_level_parens):
+        return False
+
+    # An ordinary field's template function type has its parentheses nested
+    # beneath '<...>', so it never reaches this branch. For a true method the
+    # final completed top-level pair has a callable name immediately before it.
+    signature_open, _ = top_level_parens[-1]
+    before = tokens[:signature_open]
+    callable_name = before[-1] if before else ""
+    return (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", callable_name) is not None or
+            callable_name == ")")
+
+
 def _cxx_member_declarator_names(statement: str, class_name: str) -> list[str]:
     """Scan the supported pinned-header declarators; reject ambiguous direct state."""
     statement = re.sub(r"\b(?:public|protected|private)\s*:\s*", " ", statement).strip()
-    tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*|::|&&|->|\S", statement)
+    tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*|::|&&|->|<=|>=|==|!=|\S", statement)
     if not tokens:
         return []
+    templated = tokens[0] == "template"
+    if templated:
+        close = _cxx_template_close(tokens, 1) if len(tokens) > 1 and tokens[1] == "<" else None
+        if close is None or close + 1 >= len(tokens):
+            raise ProvisionError("unsupported direct template state declaration in pinned LangOptions header")
+        tokens = tokens[close + 1:]
     identifier = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
     reserved = {"void", "bool", "char", "short", "int", "long", "signed", "unsigned",
                 "float", "double", "const", "volatile", "static", "constexpr", "mutable", "auto"}
@@ -1324,11 +1413,13 @@ def _cxx_member_declarator_names(statement: str, class_name: str) -> list[str]:
         if len(tokens) == 2 and identifier.fullmatch(tokens[1]):
             return []  # A type-only forward declaration cannot add direct data state.
         raise ProvisionError("unsupported direct state declaration in pinned LangOptions header")
-    if (tokens[0] == "template" or any(token in {"__attribute__", "__declspec"} for token in tokens) or
+    if (any(token in {"__attribute__", "__declspec"} for token in tokens) or
             any(tokens[index:index + 2] == ["[", "["] for index in range(len(tokens)))):
         raise ProvisionError("unsupported direct state declaration in pinned LangOptions header")
 
     def supported_return_type(prefix: list[str]) -> bool:
+        if prefix == ["decltype", "(", "auto", ")"]:
+            return True
         qualifiers = {"const", "volatile", "static", "constexpr", "consteval", "inline", "virtual", "explicit", "typename"}
         builtin_types = {"void", "bool", "char", "short", "int", "long", "signed", "unsigned", "float", "double", "auto"}
         atoms = 0
@@ -1381,6 +1472,12 @@ def _cxx_member_declarator_names(statement: str, class_name: str) -> list[str]:
         elif token == "]" and bracket_depth:
             bracket_depth -= 1
     if first_paren < initializer_start:
+        if tokens[:first_paren] == ["decltype"]:
+            # Support the pinned method return spelling without treating a decltype field as a method.
+            if tokens[first_paren:first_paren + 3] == ["(", "auto", ")"]:
+                next_open = first_paren + 4
+                if next_open < len(tokens) and tokens[next_open] == "(":
+                    first_paren = next_open
         prefix = tokens[:first_paren]
         group_prefix = " ".join(tokens[first_paren + 1:])
         if re.match(r"^(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*[*&]", group_prefix):
@@ -1400,6 +1497,9 @@ def _cxx_member_declarator_names(statement: str, class_name: str) -> list[str]:
                     raise ProvisionError("unsupported direct mixed method/state declaration in pinned LangOptions header")
             return []  # Only a supported method prefix may discard a parameter list.
         raise ProvisionError("unsupported direct parenthesized state declarator in pinned LangOptions header")
+
+    if templated:
+        raise ProvisionError("unsupported direct template state declaration in pinned LangOptions header")
 
     # Split each declarator before stripping its own initializer. Nested initializer commas
     # and template arguments stay within their declarator rather than hiding later fields.
@@ -1457,7 +1557,16 @@ def _cxx_member_declarator_names(statement: str, class_name: str) -> list[str]:
 
 def extract_cxx_class_data_members(text: str, class_name: str) -> list[str]:
     """Enumerate supported pinned-header fields, rejecting unrecognized direct state."""
-    masked = _mask_cxx_comments_and_literals(text)
+    # This exact pinned accessor block expands only methods. Other directives inside
+    # the class remain unsupported rather than being silently omitted from the audit.
+    accessor_block = r"""#define LANGOPT(Name, Bits, Default, Description)
+#define ENUM_LANGOPT(Name, Type, Bits, Default, Description) \
+  Type get##Name() const { return static_cast<Type>(Name); } \
+  void set##Name(Type Value) { Name = static_cast<unsigned>(Value); }
+#include "clang/Basic/LangOptions.def"
+"""
+    scanned_text = text.replace(accessor_block, "".join("\n" if char == "\n" else " " for char in accessor_block))
+    masked = _mask_cxx_comments_and_literals(scanned_text)
     match = re.search(r"\bclass\s+" + re.escape(class_name) + r"\b[^;{}]*\{", masked)
     if match is None:
         raise ProvisionError(f"header does not contain the {class_name} class definition")
@@ -1473,6 +1582,8 @@ def extract_cxx_class_data_members(text: str, class_name: str) -> list[str]:
     if depth:
         raise ProvisionError(f"header contains an unterminated {class_name} class definition")
     body = masked[open_brace + 1:close_brace - 1]
+    if "#" in body:
+        raise ProvisionError("unsupported direct preprocessor state declaration in pinned LangOptions header")
     names = []
     statement = []
     initializer_depth = 0
@@ -1488,7 +1599,7 @@ def extract_cxx_class_data_members(text: str, class_name: str) -> list[str]:
                     r"(?:class|struct|union|enum(?:\s+(?:class|struct))?)\s+[A-Za-z_][A-Za-z0-9_]*(?:\s*:\s*[^{};]+)?",
                     type_head) is None:
                 raise ProvisionError("unsupported direct anonymous or ambiguous type/state declaration in pinned LangOptions header")
-            is_function_body = "(" in declaration_head
+            is_function_body = _cxx_prefix_has_method_parameter_list(prefix)
             if is_function_body and not is_type_body:
                 # Do not discard an unrecognized state declarator as if it were a method body.
                 is_function_body = not _cxx_member_declarator_names(prefix, class_name)
@@ -1554,8 +1665,12 @@ def audit_langoptions(def_path: Path, header_path: Path, contract: dict) -> dict
             set(actual_manual_fields) != set(expected_manual_fields)):
         missing = sorted(set(expected_manual_fields) - set(actual_manual_fields))
         extra = sorted(set(actual_manual_fields) - set(expected_manual_fields))
+        duplicates = sorted({name for name in actual_manual_fields
+                             if actual_manual_fields.count(name) > 1})
         raise ProvisionError(
-            f"LangOptions.h direct manual member inventory mismatch: missing={missing}, extra={extra}"
+            "LangOptions.h direct manual member inventory mismatch: "
+            f"count={len(actual_manual_fields)} expected={spec['manualFieldsCount']}, "
+            f"duplicates={duplicates}, missing={missing}, extra={extra}"
         )
     return {
         "inventoryEvidence": spec["inventoryEvidence"],
@@ -1783,6 +1898,36 @@ def check_runner_bounds(workdir: Path, profile: dict) -> None:
         raise ProvisionError("standard runner has less than the pinned free-disk budget")
     if memory_total_bytes() < limits["minMemoryBytes"]:
         raise ProvisionError("standard runner has less than the pinned memory budget")
+
+
+def check_rootfs_tar_budget(rootfs: Path, maximum_bytes: int) -> None:
+    """Conservatively bound canonical tar input size and entry count before writing it."""
+    entry_count = 1  # tar includes the root directory as '.'
+    payload_bytes = 0
+    max_entries = maximum_bytes // 8192
+    def reject_walk_error(error: OSError) -> None:
+        raise error
+
+    try:
+        for directory, dirnames, filenames in os.walk(rootfs, followlinks=False, onerror=reject_walk_error):
+            dirnames.sort()
+            filenames.sort()
+            current = Path(directory)
+            for name in [*dirnames, *filenames]:
+                entry_count += 1
+                if entry_count > max_entries:
+                    raise ProvisionError("rootfs entry count exceeds the canonical archive budget")
+                entry = current / name
+                mode = entry.lstat().st_mode
+                if stat.S_ISREG(mode):
+                    payload_bytes += entry.lstat().st_size
+                elif not (stat.S_ISDIR(mode) or stat.S_ISLNK(mode) or stat.S_ISCHR(mode) or
+                          stat.S_ISBLK(mode) or stat.S_ISFIFO(mode)):
+                    raise ProvisionError("rootfs contains an unsupported filesystem entry")
+                if payload_bytes + entry_count * 8192 > maximum_bytes:
+                    raise ProvisionError("rootfs contents exceed the canonical archive byte budget")
+    except OSError as error:
+        raise ProvisionError(f"could not inspect retained rootfs for archive bounds: {error}") from error
 
 
 def rootfs_env_args(contract: dict, extra: dict[str, str] | None = None) -> list[str]:
@@ -2226,7 +2371,10 @@ def driver_record(rootfs: Path, logical_path: str, role: str, version_output: st
 
 def runtime_dependencies(rootfs: Path, logical_paths: list[str], contract: dict) -> list[dict]:
     paths: set[str] = set()
-    for logical in logical_paths:
+    roots = list(dict.fromkeys([*logical_paths,
+                                "/usr/lib/llvm-18/lib/libclang-cpp.so",
+                                "/usr/lib/llvm-18/lib/libLLVM-18.so"]))
+    for logical in roots:
         output = rootfs_run(rootfs, ["/usr/bin/ldd", logical], contract)
         for line in output.splitlines():
             match = re.search(r"=>\s+(/\S+)", line)
@@ -2236,7 +2384,8 @@ def runtime_dependencies(rootfs: Path, logical_paths: list[str], contract: dict)
                 match = re.match(r"\s*(/\S+)\s+\(0x[0-9a-fA-F]+\)", line)
                 if match:
                     paths.add(match.group(1))
-    # The linker-facing C++ API is a separate authenticated shared-library input.
+    # Retain the direct linker-facing C++ API libraries even when their ldd
+    # output reports only resolved dependency paths.
     paths.add("/usr/lib/llvm-18/lib/libclang-cpp.so")
     paths.add("/usr/lib/llvm-18/lib/libLLVM-18.so")
     entries = []
@@ -2322,16 +2471,22 @@ def normalize_rootfs(rootfs: Path, epoch: int) -> None:
     run_checked(["sudo", "find", str(rootfs), "-xdev", "-exec", "touch", "-h", "-d", f"@{epoch}", "{}", "+"], timeout=300)
 
 
-def deterministic_rootfs_tar(rootfs: Path, destination: Path, epoch: int) -> dict:
-    normalize_rootfs(rootfs, epoch)
+def deterministic_rootfs_tar(rootfs: Path, destination: Path, epoch: int, *,
+                              normalize: bool = True, max_bytes: int | None = None) -> dict:
+    if normalize:
+        normalize_rootfs(rootfs, epoch)
+    if max_bytes is not None:
+        check_rootfs_tar_budget(rootfs, max_bytes)
     command = [
         "sudo", "env", "LC_ALL=C", "tar", "--sort=name", "--format=posix", "--numeric-owner",
         f"--mtime=@{epoch}", "--pax-option=delete=atime,delete=ctime",
         "-cf", str(destination), "-C", str(rootfs), ".",
     ]
     run_checked(command, timeout=600)
-    payload = destination.read_bytes()
-    return {"bytes": len(payload), "sha256": sha256(payload)}
+    identity = {"bytes": destination.stat().st_size, "sha256": sha256_file(destination)}
+    if max_bytes is not None and identity["bytes"] > max_bytes:
+        raise ProvisionError("canonical rootfs tar exceeds the artifact byte budget")
+    return identity
 
 
 def expected_oci_config(profile_id: str, environment: dict[str, str], rootfs_sha256: str) -> dict:
@@ -2497,6 +2652,40 @@ def verify_oci_archive(path: Path, record: dict, max_bytes: int) -> None:
                 raise ProvisionError("OCI archive contains unrecorded files or blobs")
     except (OSError, tarfile.TarError, EOFError, gzip.BadGzipFile, zlib.error, json.JSONDecodeError) as error:
         raise ProvisionError(f"could not verify OCI image artifact: {error}") from error
+
+
+def verify_retained_rootfs_and_image(rootfs: Path, oci_archive: Path,
+                                     record: dict, contract: dict) -> None:
+    """Independently bind the retained directory, deterministic tar, and OCI layer."""
+    if rootfs.is_symlink() or not rootfs.is_dir():
+        raise ProvisionError("provenance packaging requires a retained regular rootfs directory")
+    if oci_archive.is_symlink() or not oci_archive.is_file():
+        raise ProvisionError("provenance packaging requires the retained OCI image archive")
+    limits = contract["profile"]["bounds"]
+    expected = record.get("rootfs", {})
+    if (type(expected.get("bytes")) is not int or expected["bytes"] < 1 or
+            expected["bytes"] > limits["maxArtifactBytes"]):
+        raise ProvisionError("build record rootfs identity exceeds the bounded artifact contract")
+    epoch = int(contract["environment"]["SOURCE_DATE_EPOCH"])
+    try:
+        with tempfile.TemporaryDirectory(prefix="clang1813-rootfs-verify-", dir=rootfs.parent) as temporary:
+            archive = Path(temporary) / "rootfs.tar"
+            actual = deterministic_rootfs_tar(
+                rootfs, archive, epoch, normalize=False, max_bytes=limits["maxArtifactBytes"],
+            )
+    except OSError as error:
+        raise ProvisionError(f"could not create bounded rootfs verification archive: {error}") from error
+    if actual != expected:
+        raise ProvisionError("retained rootfs differs from the deterministic rootfs identity in the build record")
+    verify_oci_archive(oci_archive, record, limits["maxArtifactBytes"])
+
+
+def verify_recorded_runtime_closure(rootfs: Path, record: dict, contract: dict) -> dict:
+    """Re-derive the complete compiler/API shared-library closure from the verified rootfs."""
+    actual = manifest(runtime_dependencies(rootfs, list(FRONTEND_RUNTIME_ROOTS), contract))
+    if actual != record.get("runtime"):
+        raise ProvisionError("build record runtime closure differs from the retained rootfs dependency closure")
+    return actual
 
 
 def debootstrap_command(contract: dict, profile_root: str, keyring: Path) -> list[str]:
@@ -2713,11 +2902,13 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     probe_checked["apiChecks"] = runtime_json["apiChecks"]
     probe_checked["fixtureSha256"] = sha256(fixture.read_bytes())
 
-    runtime_files = runtime_dependencies(profile_root, ["/usr/bin/clang-18", "/usr/bin/clang++-18", probe_path], contract)
+    runtime_files = runtime_dependencies(profile_root, list(FRONTEND_RUNTIME_ROOTS), contract)
     runtime_manifest = manifest(runtime_files)
     epoch = int(contract["environment"]["SOURCE_DATE_EPOCH"])
     rootfs_tar_path = args.workdir / f"clang-rootfs-{args.label}.tar"
-    rootfs_identity = deterministic_rootfs_tar(profile_root, rootfs_tar_path, epoch)
+    rootfs_identity = deterministic_rootfs_tar(
+        profile_root, rootfs_tar_path, epoch, max_bytes=profile["bounds"]["maxArtifactBytes"],
+    )
     if rootfs_identity["bytes"] > profile["bounds"]["maxArtifactBytes"]:
         raise ProvisionError("canonical rootfs tar exceeds the artifact byte budget")
     args.output.mkdir(parents=True, exist_ok=False)
@@ -3374,10 +3565,14 @@ def command_package_provenance(args: argparse.Namespace) -> int:
     if args.rootfs.is_symlink() or not args.rootfs.is_dir():
         raise ProvisionError("provenance packaging requires the retained final rootfs directory")
     _, parsed_indexes = load_candidate(args.acquisition, contract, args.keyring, build_record=record)
+    if args.oci_archive.is_symlink() or not args.oci_archive.is_file():
+        raise ProvisionError("provenance packaging requires the retained run-two OCI image archive")
+    verify_retained_rootfs_and_image(args.rootfs, args.oci_archive, record, contract)
     signed_package_metadata = package_metadata_map(parsed_indexes)
     validate_record_package_metadata(
         record, signed_package_metadata, installed_package_keys(args.rootfs, contract),
     )
+    verify_recorded_runtime_closure(args.rootfs, record, contract)
     record_sha256 = sha256_file(args.record)
     probe_report = read_provenance_report(args.probe_report, "LibTooling probe")
     loader_report = read_provenance_report(args.loader_report, "A-loader")
@@ -3635,6 +3830,8 @@ def build_parser() -> argparse.ArgumentParser:
     provenance.add_argument("--record", type=Path, required=True)
     provenance.add_argument("--rootfs", type=Path, required=True,
                              help="retained final rootfs used to recheck package and runtime closure")
+    provenance.add_argument("--oci-archive", type=Path, required=True,
+                             help="retained run-two OCI image to bind to the verified rootfs")
     provenance.add_argument("--probe-report", type=Path, required=True)
     provenance.add_argument("--loader-report", type=Path, required=True)
     provenance.add_argument("--negative-report", type=Path, required=True)
