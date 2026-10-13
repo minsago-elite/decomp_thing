@@ -1,3 +1,4 @@
+import base64
 import gzip
 import hashlib
 import io
@@ -298,6 +299,64 @@ class ProvisioningNegativeTests(unittest.TestCase):
             self.assertFalse(output.exists())
             self.assertEqual(record["resources"],
                              provision.resource_manifest(rootfs, record["resourceDirectory"]))
+
+    def test_loader_input_java_reader_roundtrips_escaped_linux_paths(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            java_source = base / "PropertiesRoundTrip.java"
+            java_source.write_text(textwrap.dedent("""
+                import java.io.InputStreamReader;
+                import java.nio.charset.CodingErrorAction;
+                import java.nio.charset.StandardCharsets;
+                import java.nio.file.Files;
+                import java.nio.file.Path;
+                import java.util.Base64;
+                import java.util.Properties;
+                class PropertiesRoundTrip {
+                  public static void main(String[] args) throws Exception {
+                    Properties input = new Properties();
+                    try (var stream = Files.newInputStream(Path.of(args[0]));
+                         var reader = new InputStreamReader(stream, StandardCharsets.UTF_8.newDecoder()
+                           .onMalformedInput(CodingErrorAction.REPORT)
+                           .onUnmappableCharacter(CodingErrorAction.REPORT))) {
+                      input.load(reader);
+                    }
+                    for (String key : new String[]{"rootfs", "smokeOutput"}) {
+                      System.out.println(Base64.getEncoder().encodeToString(
+                        input.getProperty(key).getBytes(StandardCharsets.UTF_8)));
+                    }
+                  }
+                }
+            """), encoding="utf-8")
+            labels = (r"back\bar", r"literal\u1234\t\n\r\f\end",
+                      " spaces=colon:#!\t\f한글-é")
+            for label in labels:
+                with self.subTest(label=label):
+                    _, rootfs, _, output, properties = self.prepare_loader_input_fixture(base, label)
+                    result = subprocess.run([
+                        "java", "-XX:-UsePerfData", "-XX:-CreateCoredumpOnCrash",
+                        "-Djava.io.tmpdir=" + str(base), "-Duser.home=" + str(base),
+                        "-XX:ErrorFile=" + str(base / "jvm-error-%p.log"),
+                        str(java_source), str(properties),
+                    ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+                    self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
+                    loaded = [base64.b64decode(line).decode("utf-8") for line in result.stdout.splitlines()]
+                    self.assertEqual(loaded, [str(rootfs.resolve()), str(output)])
+                    self.assertFalse(output.exists())
+
+    def test_loader_input_still_rejects_line_breaks_before_properties_write(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            _, rootfs, record_path, _, _ = self.prepare_loader_input_fixture(base, "ordinary")
+            for delimiter in ("\n", "\r"):
+                output = base / ("report" + delimiter + "injected=value.json")
+                args = provision.argparse.Namespace(contract=provision.CONTRACT_PATH,
+                    record=record_path, rootfs=rootfs, output=output)
+                with self.subTest(delimiter=delimiter), mock.patch.object(provision, "atomic_write") as write:
+                    with self.assertRaisesRegex(provision.ProvisionError, "contains a line break"):
+                        provision.command_write_loader_input(args)
+                    write.assert_not_called()
+                self.assertFalse(output.with_suffix(".properties").exists())
 
     def test_compare_runs_rejects_canonical_and_physical_aliases_before_validation(self):
         with self.temporary_directory() as temp:
@@ -2042,6 +2101,55 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 with self.assertRaisesRegex(provision.ProvisionError, "paths must not exist"):
                     provision.provision_rootfs(args)
                 candidate.assert_not_called()
+
+    def test_provisioning_rejects_output_containing_workdir_before_all_mutations(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            canary = base / "unrelated"
+            canary.write_bytes(b"must remain unchanged")
+            real = base / "real"
+            real.mkdir()
+            alias = base / "alias"
+            alias.symlink_to(real, target_is_directory=True)
+            output = base / "absent/run"
+            pairs = ((output, output), (output, output / "work"),
+                     (Path(os.path.relpath(output, Path.cwd())), output / "work"),
+                     (real / "run", alias / "run/work"), (alias / "run", real / "run/work"),
+                     (base / "missing/../absent/run", output / "work"),
+                     (output, base / "missing/../absent/run/work"))
+            for index, (output, workdir) in enumerate(pairs):
+                args = provision.argparse.Namespace(contract=provision.CONTRACT_PATH,
+                    workdir=workdir, rootfs=base / ("rootfs-" + str(index)), output=output,
+                    acquisition=base / "acquisition", keyring=base / "keyring")
+                with self.subTest(output=output, workdir=workdir), \
+                        mock.patch.object(provision, "read_contract") as contract, \
+                        mock.patch.object(Path, "mkdir") as mkdir, \
+                        mock.patch.object(provision, "load_candidate") as candidate, \
+                        mock.patch.object(provision, "remove_optional_source_caches") as cleanup, \
+                        mock.patch.object(provision, "run_checked") as bootstrap, \
+                        mock.patch.object(provision.BoundedDownloader, "get") as network:
+                    with self.assertRaisesRegex(provision.ProvisionError, "must not equal or contain the work directory"):
+                        provision.provision_rootfs(args)
+                    for action in (contract, mkdir, candidate, cleanup, bootstrap, network):
+                        action.assert_not_called()
+                self.assertFalse(workdir.exists())
+                self.assertFalse(args.rootfs.exists())
+                self.assertFalse(output.exists())
+                self.assertEqual(canary.read_bytes(), b"must remain unchanged")
+
+    def test_provisioning_accepts_absent_output_nested_under_workdir(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            args = provision.argparse.Namespace(contract=provision.CONTRACT_PATH, workdir=base / "work",
+                rootfs=base / "rootfs", output=base / "work/output", acquisition=base / "acquisition",
+                keyring=base / "keyring")
+            with mock.patch.object(provision, "load_candidate", side_effect=provision.ProvisionError("fixture stop")) as candidate:
+                with self.assertRaisesRegex(provision.ProvisionError, "fixture stop"):
+                    provision.provision_rootfs(args)
+                candidate.assert_called_once()
+            self.assertTrue(args.workdir.is_dir())
+            self.assertFalse(args.rootfs.exists())
+            self.assertFalse(args.output.exists())
 
     def test_acquisition_status_is_read_only_and_cannot_be_enabled_by_environment(self):
         stdout = io.StringIO()

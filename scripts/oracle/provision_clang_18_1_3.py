@@ -3160,11 +3160,14 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     try:
         canonical_rootfs = args.rootfs.resolve()
         canonical_output = args.output.resolve()
+        canonical_workdir = args.workdir.resolve()
     except (OSError, RuntimeError) as error:
-        raise ProvisionError("could not resolve rootfs and evidence output paths") from error
+        raise ProvisionError("could not resolve rootfs, evidence output and work directory paths") from error
     if (canonical_rootfs == canonical_output or canonical_rootfs in canonical_output.parents or
             canonical_output in canonical_rootfs.parents):
         raise ProvisionError("rootfs and evidence output trees must be disjoint")
+    if canonical_output == canonical_workdir or canonical_output in canonical_workdir.parents:
+        raise ProvisionError("evidence output must not equal or contain the work directory")
     if (args.rootfs.exists() or args.rootfs.is_symlink() or
             args.output.exists() or args.output.is_symlink()):
         raise ProvisionError("rootfs and evidence output paths must not exist")
@@ -3686,9 +3689,14 @@ def command_write_loader_input(args: argparse.Namespace) -> int:
     for index, row in enumerate(runtime_rows):
         values[f"runtime.{index}.path"] = row["path"]
         values[f"runtime.{index}.sha256"] = row["sha256"]
-    encoded = "".join(f"{key}={value}\n" for key, value in sorted(values.items()))
     if any("\n" in value or "\r" in value for value in values.values()):
         raise ProvisionError("A-loader input contains a line break")
+    # Properties.load(Reader) interprets escapes even with a UTF-8 reader. Keep
+    # literal Unicode, but escape metacharacters and value whitespace so legal
+    # Linux filenames (especially backslashes) retain their exact meaning.
+    escapes = str.maketrans({"\\": "\\\\", "\t": "\\t", "\f": "\\f", " ": "\\ ",
+                            "=": "\\=", ":": "\\:", "#": "\\#", "!": "\\!"})
+    encoded = "".join(f"{key}={value.translate(escapes)}\n" for key, value in sorted(values.items()))
     atomic_write(args.output.with_suffix(".properties"), encoded.encode("utf-8"))
     return 0
 
