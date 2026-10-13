@@ -124,6 +124,9 @@ jobs:
       - name: Run offline fail-closed provisioning tests
         run: python3 -m unittest discover -s oracle/clang/18.1.3 -p 'test_*.py' -v
 
+      - name: Verify inert root-owned archive preflight without acquisition
+        run: python3 oracle/clang/18.1.3/test_provisioning.py --privilege-smoke sudo
+
   qualify:
     name: Native toolchain qualification
     needs: offline-validation

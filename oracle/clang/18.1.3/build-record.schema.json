@@ -55,7 +55,7 @@
     },
     "commands": {
       "type": "object", "additionalProperties": false,
-      "required": ["debootstrap", "installAptKeyring", "writeAptSources", "aptUpdate", "aptDownloadOnly", "aptInstall", "aptCheck", "clangCVersion", "clangCxxVersion", "clangResourceDirectory", "llvmConfigLibdir", "llvmConfigCxxflags", "probeCompile", "probeRun", "rootfsTar", "ociArchive"],
+      "required": ["debootstrap", "installAptKeyring", "writeAptSources", "aptUpdate", "aptDownloadOnly", "aptInstall", "aptCheck", "clangCVersion", "clangCxxVersion", "clangResourceDirectory", "llvmConfigLibdir", "llvmConfigCxxflags", "probeCompile", "probeRun", "rootfsTarBudget", "rootfsTar", "ociArchive"],
       "properties": {
         "debootstrap": {"$ref": "#/$defs/argv"},
         "installAptKeyring": {"$ref": "#/$defs/argv"},
@@ -71,6 +71,7 @@
         "llvmConfigCxxflags": {"$ref": "#/$defs/argv"},
         "probeCompile": {"$ref": "#/$defs/argv"},
         "probeRun": {"$ref": "#/$defs/argv"},
+        "rootfsTarBudget": {"$ref": "#/$defs/argv"},
         "rootfsTar": {"$ref": "#/$defs/argv"},
         "ociArchive": {"$ref": "#/$defs/argv"}
       }

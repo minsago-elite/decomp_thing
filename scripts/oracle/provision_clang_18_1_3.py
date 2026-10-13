@@ -65,6 +65,7 @@ MAX_DEB822_PARAGRAPH_BYTES = 16 * 1024 * 1024
 MAX_SOURCE_DIAGNOSTIC_ROWS = 256
 MAX_UPSTREAM_ARCHIVE_MEMBERS = 300_000
 MAX_UPSTREAM_EXPANDED_BYTES = 3 * 1024 * 1024 * 1024
+ROOTFS_TAR_BUDGET_TIMEOUT_SECONDS = 120
 SNAPSHOT_METADATA_PROBE = "20240702T000000Z"
 PAUSED_UPSTREAM_SIGNATURE_URL = (
     "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.3/"
@@ -1950,8 +1951,29 @@ def check_runner_bounds(workdir: Path, profile: dict) -> None:
         raise ProvisionError("standard runner has less than the pinned memory budget")
 
 
+def rootfs_tar_budget_command(rootfs: Path, maximum_bytes: int) -> list[str]:
+    if type(maximum_bytes) is not int or maximum_bytes < 1:
+        raise ProvisionError("rootfs archive budget must be a positive integer")
+    return ["sudo", "-n", "/usr/bin/python3", "-I", "-B", str(RECIPE_FILES["provisionerSha256"]),
+            "check-rootfs-tar-budget", "--rootfs", str(rootfs.absolute()), "--max-bytes", str(maximum_bytes)]
+
+
+def command_check_rootfs_tar_budget(args: argparse.Namespace) -> int:
+    rootfs = args.rootfs
+    if (not rootfs.is_absolute() or ".." in rootfs.parts or rootfs.is_symlink() or not rootfs.is_dir()):
+        raise ProvisionError("rootfs budget inspection requires an absolute non-symlink directory")
+    if type(args.max_bytes) is not int or args.max_bytes < 1:
+        raise ProvisionError("rootfs archive budget must be a positive integer")
+    check_rootfs_tar_budget(rootfs, args.max_bytes)
+    print("read-only rootfs archive budget passed; native qualification remains incomplete")
+    return 0
+
+
 def check_rootfs_tar_budget(rootfs: Path, maximum_bytes: int) -> None:
     """Conservatively bound canonical tar input size and entry count before writing it."""
+    # The canonical GNU tar command writes at least one default 20 x 512-byte record.
+    if maximum_bytes < 20 * 512:
+        raise ProvisionError("rootfs archive budget is below the minimum canonical tar record size")
     entry_count = 1  # tar includes the root directory as '.'
     payload_bytes = 0
     max_entries = maximum_bytes // 8192
@@ -2526,7 +2548,7 @@ def deterministic_rootfs_tar(rootfs: Path, destination: Path, epoch: int, *,
     if normalize:
         normalize_rootfs(rootfs, epoch)
     if max_bytes is not None:
-        check_rootfs_tar_budget(rootfs, max_bytes)
+        run_checked(rootfs_tar_budget_command(rootfs, max_bytes), timeout=ROOTFS_TAR_BUDGET_TIMEOUT_SECONDS)
     command = [
         "sudo", "env", "LC_ALL=C", "tar", "--sort=name", "--format=posix", "--numeric-owner",
         f"--mtime=@{epoch}", "--pax-option=delete=atime,delete=ctime",
@@ -2789,6 +2811,9 @@ def canonical_commands(contract: dict, keyring_sha256: str) -> dict[str, list[st
     pinned = [f"{row['name']}={row['version']}" for row in contract["profile"]["binaryRoots"]]
     epoch = int(contract["environment"]["SOURCE_DATE_EPOCH"])
     source_list_sha256 = sha256(apt_source_list(contract))
+    budget_command = rootfs_tar_budget_command(Path("<PROFILE_ROOT>"), contract["profile"]["bounds"]["maxArtifactBytes"])
+    budget_command[5] = f"<PROVISIONER_SHA256:{sha256_file(RECIPE_FILES['provisionerSha256'])}>"
+    budget_command[8] = "<PROFILE_ROOT>"
 
     def in_root(command: list[str], apt_environment: bool = False) -> list[str]:
         extra = {"DEBIAN_FRONTEND": "noninteractive"} if apt_environment else None
@@ -2813,6 +2838,7 @@ def canonical_commands(contract: dict, keyring_sha256: str) -> dict[str, list[st
         "llvmConfigCxxflags": in_root(["/usr/bin/llvm-config-18", "--cxxflags"]),
         "probeCompile": in_root(probe_compile_command()),
         "probeRun": in_root(["/tmp/clang18-libtooling-probe", "/tmp/clang18-positive.cpp"]),
+        "rootfsTarBudget": budget_command,
         "rootfsTar": ["sudo", "env", "LC_ALL=C", "tar", "--sort=name", "--format=posix",
                       "--numeric-owner", f"--mtime=@{epoch}",
                       "--pax-option=delete=atime,delete=ctime", "-cf", "<ROOTFS_TAR>", "-C", "<PROFILE_ROOT>", "."],
@@ -3815,6 +3841,10 @@ def build_parser() -> argparse.ArgumentParser:
     metadata.add_argument("--output", type=Path, required=True)
     metadata.add_argument("--keyring", type=Path, default=DEFAULT_KEYRING)
     metadata.set_defaults(run=command_probe_snapshot_metadata)
+    budget = sub.add_parser("check-rootfs-tar-budget", help="read-only archive budget inspection; not native qualification")
+    budget.add_argument("--rootfs", type=Path, required=True)
+    budget.add_argument("--max-bytes", type=int, required=True)
+    budget.set_defaults(run=command_check_rootfs_tar_budget)
     acquire = sub.add_parser("acquire", help="authenticate pinned Snapshot indexes and source artifacts")
     acquire.add_argument("--contract", type=Path, default=CONTRACT_PATH)
     acquire.add_argument("--output", type=Path, required=True)

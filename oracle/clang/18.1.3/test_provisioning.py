@@ -2,6 +2,7 @@ import gzip
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -440,12 +441,86 @@ class ProvisioningNegativeTests(unittest.TestCase):
                     onerror(error)
                 return iter(())
 
-            with mock.patch.object(provision.os, "walk", side_effect=denied_walk), \
-                    mock.patch.object(provision, "run_checked") as tar:
+            with mock.patch.object(provision.os, "walk", side_effect=denied_walk):
                 with self.assertRaisesRegex(provision.ProvisionError, "could not inspect retained rootfs"):
-                    provision.deterministic_rootfs_tar(rootfs, archive, 0, normalize=False, max_bytes=1024 * 1024)
-                tar.assert_not_called()
+                    provision.check_rootfs_tar_budget(rootfs, 1024 * 1024)
             self.assertFalse(archive.exists())
+
+    def test_privileged_budget_command_is_fixed_isolated_and_bound_to_the_record(self):
+        with self.temporary_directory() as temp:
+            rootfs = Path(temp) / "rootfs"
+            rootfs.mkdir()
+            budget = self.contract["profile"]["bounds"]["maxArtifactBytes"]
+            expected = ["sudo", "-n", "/usr/bin/python3", "-I", "-B", str(provision.RECIPE_FILES["provisionerSha256"]),
+                        "check-rootfs-tar-budget", "--rootfs", str(rootfs), "--max-bytes", str(budget)]
+            self.assertEqual(provision.rootfs_tar_budget_command(rootfs, budget), expected)
+            recorded = provision.canonical_commands(self.contract, "a" * 64)["rootfsTarBudget"]
+            expected[5] = "<PROVISIONER_SHA256:" + provision.sha256_file(provision.RECIPE_FILES["provisionerSha256"]) + ">"
+            expected[8] = "<PROFILE_ROOT>"
+            self.assertEqual(recorded, expected)
+            for value in (0, -1, True, 1.0):
+                with self.subTest(value=value), self.assertRaises(provision.ProvisionError):
+                    provision.rootfs_tar_budget_command(rootfs, value)
+
+    def test_privileged_budget_failure_and_timeout_precede_tar_and_archive_output(self):
+        with self.temporary_directory() as temp:
+            rootfs = Path(temp) / "rootfs"
+            rootfs.mkdir()
+            archive = Path(temp) / "rootfs.tar"
+            errors = [provision.ProvisionError("could not inspect retained rootfs"),
+                      subprocess.TimeoutExpired("read-only preflight", 120)]
+            for error in errors:
+                with self.subTest(error=type(error).__name__), \
+                        mock.patch.object(provision, "run_checked", side_effect=error) as execute:
+                    with self.assertRaises(type(error)):
+                        provision.deterministic_rootfs_tar(rootfs, archive, 0, normalize=False, max_bytes=1024 * 1024)
+                    execute.assert_called_once_with(provision.rootfs_tar_budget_command(rootfs, 1024 * 1024),
+                                                    timeout=provision.ROOTFS_TAR_BUDGET_TIMEOUT_SECONDS)
+                    self.assertFalse(archive.exists())
+
+    def test_empty_rootfs_tiny_budget_fails_preflight_before_traversal_and_tar_output(self):
+        with self.temporary_directory() as temp:
+            rootfs = Path(temp) / "rootfs"
+            rootfs.mkdir()
+            archive = Path(temp) / "rootfs.tar"
+            for budget in (1, 8192, 20 * 512 - 1):
+                expected = provision.rootfs_tar_budget_command(rootfs, budget)
+
+                def inspect(command, *, timeout):
+                    self.assertEqual(command, expected)
+                    self.assertEqual(timeout, provision.ROOTFS_TAR_BUDGET_TIMEOUT_SECONDS)
+                    return provision.command_check_rootfs_tar_budget(
+                        provision.argparse.Namespace(rootfs=rootfs, max_bytes=budget))
+
+                with self.subTest(budget=budget), mock.patch.object(provision.os, "walk") as walk, \
+                        mock.patch.object(provision, "run_checked", side_effect=inspect) as execute:
+                    with self.assertRaisesRegex(provision.ProvisionError, "minimum canonical tar record size"):
+                        provision.deterministic_rootfs_tar(rootfs, archive, 0, normalize=False, max_bytes=budget)
+                    execute.assert_called_once_with(expected, timeout=provision.ROOTFS_TAR_BUDGET_TIMEOUT_SECONDS)
+                    walk.assert_not_called()
+                    self.assertFalse(archive.exists())
+
+    def test_budget_cli_is_read_only_and_rejects_relative_symlink_and_invalid_budget(self):
+        with self.temporary_directory() as temp:
+            rootfs = Path(temp) / "rootfs"
+            rootfs.mkdir()
+            link = Path(temp) / "rootfs-link"
+            link.symlink_to(rootfs, target_is_directory=True)
+            invalid = [(Path("relative/rootfs"), 1), (link, 1), (rootfs, 0), (rootfs, True)]
+            for path, value in invalid:
+                with self.subTest(path=path, value=value), mock.patch.object(provision, "check_rootfs_tar_budget") as inspect:
+                    with self.assertRaises(provision.ProvisionError):
+                        provision.command_check_rootfs_tar_budget(provision.argparse.Namespace(rootfs=path, max_bytes=value))
+                    inspect.assert_not_called()
+            with mock.patch.object(provision, "run_checked") as execute, \
+                    mock.patch.object(provision.BoundedDownloader, "get") as network, \
+                    mock.patch.object(provision, "atomic_write") as write, \
+                    mock.patch.object(provision, "check_rootfs_tar_budget") as inspect:
+                self.assertEqual(provision.main(["check-rootfs-tar-budget", "--rootfs", str(rootfs), "--max-bytes", "65536"]), 0)
+                inspect.assert_called_once_with(rootfs, 65536)
+                execute.assert_not_called()
+                network.assert_not_called()
+                write.assert_not_called()
 
     def test_rootfs_archive_preserves_numeric_package_ownership(self):
         with self.temporary_directory() as temp:
@@ -2152,7 +2227,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
         rootfs_tar = base / "rootfs.tar"
 
         def local_tar(command, timeout=None):
-            return subprocess.run(command[1:], check=False, stdout=subprocess.PIPE,
+            return subprocess.run(command[2:] if command[:2] == ["sudo", "-n"] else command[1:], check=False, stdout=subprocess.PIPE,
                                   stderr=subprocess.STDOUT, text=True, timeout=timeout)
 
         with mock.patch.object(provision, "run_checked", side_effect=local_tar):
@@ -2373,7 +2448,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
             changed.write_bytes(original_bytes + b"tamper")
 
             def local_tar(command, timeout=None):
-                return subprocess.run(command[1:], check=False, stdout=subprocess.PIPE,
+                return subprocess.run(command[2:] if command[:2] == ["sudo", "-n"] else command[1:], check=False, stdout=subprocess.PIPE,
                                       stderr=subprocess.STDOUT, text=True, timeout=timeout)
 
             with mock.patch.object(provision, "run_checked", side_effect=local_tar):
@@ -2434,7 +2509,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                                                output=base / "provenance.tar", **report_paths)
 
             def local_tar(command, timeout=None):
-                return subprocess.run(command[1:], check=False, stdout=subprocess.PIPE,
+                return subprocess.run(command[2:] if command[:2] == ["sudo", "-n"] else command[1:], check=False, stdout=subprocess.PIPE,
                                       stderr=subprocess.STDOUT, text=True, timeout=timeout)
 
             with mock.patch.object(provision, "verify_candidate_data", return_value=signed_rows) as signed, \
@@ -2501,5 +2576,90 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
             self.assertFalse(args.output.exists())
 
 
+def run_rootfs_privilege_smoke(privilege: str) -> None:
+    """Exercise only inert repository-local files; never acquire or qualify a toolchain."""
+    if privilege not in ("sudo", "doas"):
+        raise ValueError("unsupported smoke privilege command")
+    workdir = ROOT / "build/clang1813-privilege-smoke"
+    workdir.mkdir(parents=True, exist_ok=True)
+    original_execute = provision.run_checked
+    budget = 256 * 1024
+    setup_code = r"""
+import os, socket, sys
+from pathlib import Path
+private = Path(sys.argv[1])
+mode = sys.argv[2]
+budget = int(sys.argv[3])
+private.mkdir(mode=0o700, exist_ok=True)
+private.chmod(0o700)
+(private / "payload").write_bytes(b"x" * (budget + 1 if mode == "oversized" else 1024))
+if mode == "socket":
+    os.chdir(private)
+    handle = socket.socket(socket.AF_UNIX)
+    handle.bind("unsupported.sock")
+    handle.close()
+"""
+    with tempfile.TemporaryDirectory(prefix="inert-", dir=workdir) as temporary:
+        base = Path(temporary)
+        rootfs = base / "rootfs"
+        rootfs.mkdir()
+        private = rootfs / "private"
+        observed = []
+
+        def fixture_execute(command, *, timeout=900, **kwargs):
+            observed.append(list(command))
+            if command[:2] == ["sudo", "-n"]:
+                assert command == provision.rootfs_tar_budget_command(rootfs, budget)
+                assert timeout == provision.ROOTFS_TAR_BUDGET_TIMEOUT_SECONDS
+                actual = [privilege, "-n", *command[2:]]
+            else:
+                assert command[:4] == ["sudo", "env", "LC_ALL=C", "tar"]
+                actual = [privilege, "-n", *command[1:]]
+            return original_execute(actual, timeout=timeout, **kwargs)
+
+        try:
+            original_execute([privilege, "-n", "/usr/bin/python3", "-I", "-B", "-c", setup_code,
+                              str(private), "normal", str(budget)], timeout=30)
+            metadata = private.stat()
+            assert metadata.st_uid == 0 and metadata.st_mode & 0o777 == 0o700
+            if os.geteuid() != 0:
+                try:
+                    (private / "payload").read_bytes()
+                except PermissionError:
+                    pass
+                else:
+                    raise AssertionError("ordinary user unexpectedly read the private fixture")
+            archive = base / "normal.tar"
+            with mock.patch.object(provision, "run_checked", side_effect=fixture_execute):
+                provision.deterministic_rootfs_tar(rootfs, archive, 0, normalize=False, max_bytes=budget)
+            assert len(observed) == 2 and observed[0][6] == "check-rootfs-tar-budget"
+            with tarfile.open(archive) as content:
+                assert content.getmember("./private/payload").uid == 0
+                assert content.getmember("./private").mode == 0o700
+            for mode, diagnostic in (("oversized", "archive byte budget"), ("socket", "unsupported filesystem entry")):
+                original_execute([privilege, "-n", "/usr/bin/python3", "-I", "-B", "-c", setup_code,
+                                  str(private), mode, str(budget)], timeout=30)
+                observed.clear()
+                rejected_archive = base / (mode + ".tar")
+                with mock.patch.object(provision, "run_checked", side_effect=fixture_execute):
+                    try:
+                        provision.deterministic_rootfs_tar(rootfs, rejected_archive, 0,
+                                                          normalize=False, max_bytes=budget)
+                    except provision.ProvisionError as error:
+                        assert diagnostic in str(error)
+                    else:
+                        raise AssertionError(mode + " preflight unexpectedly succeeded")
+                assert len(observed) == 1 and observed[0][6] == "check-rootfs-tar-budget"
+                assert not rejected_archive.exists()
+        finally:
+            original_execute([privilege, "-n", "/usr/bin/rm", "-rf", "--", str(rootfs)], timeout=30)
+    assert not base.exists()
+    print("inert root-owned 0700 preflight/tar passed; oversized/socket rejected before output; cleanup passed")
+    print("scope=offline-privilege-smoke; nativeQualification=not-run; qualified=false")
+
+
 if __name__ == "__main__":
-    unittest.main()
+    if len(sys.argv) == 3 and sys.argv[1] == "--privilege-smoke":
+        run_rootfs_privilege_smoke(sys.argv[2])
+    else:
+        unittest.main()
