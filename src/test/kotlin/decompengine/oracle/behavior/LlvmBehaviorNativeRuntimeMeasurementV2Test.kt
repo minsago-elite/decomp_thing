@@ -3,8 +3,12 @@ package decompengine.oracle.behavior
 import decompengine.analysis.AnalysisDeadline
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
+import decompengine.oracle.fulltree.FullTreeControlException
+import com.sun.jna.Native
+import com.sun.jna.NativeLong
 import java.io.ByteArrayOutputStream
 import java.lang.reflect.InvocationTargetException
+import java.lang.reflect.Proxy
 import java.net.StandardProtocolFamily
 import java.net.UnixDomainSocketAddress
 import java.nio.ByteBuffer
@@ -21,11 +25,13 @@ import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFails
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -33,6 +39,175 @@ import kotlinx.serialization.json.JsonPrimitive
 
 /** Real Unix sockets and GNU tar controls, deliberately not scored Docker or containment evidence. */
 class LlvmBehaviorNativeRuntimeMeasurementV2Test {
+    @Test
+    fun `quiet endpoint watch remains owned after all five requests until final verification and close`() {
+        NativeMeasurementFixture().use { fixture ->
+            fixture.start()
+            fixture.image().use { image -> fixture.bindings().use { binding ->
+                val deadline = AnalysisDeadline.start(TimeUnit.SECONDS.toNanos(5), "retained quiet terminal fixture")
+                privateMeasurement(binding, image, deadline = deadline)
+                fixture.requireFinished()
+                privateTerminal(binding, deadline)
+                privateTerminal(binding, deadline)
+                assertEquals(5, fixture.requests.size)
+            } }
+        }
+    }
+
+    @Test
+    fun `post exchange socket ABA client replacement and config contamination refuse final candidate binding`() {
+        listOf("socket", "client", "config").forEach { kind ->
+            NativeMeasurementFixture().use { fixture ->
+                fixture.start()
+                fixture.image().use { image -> fixture.bindings().use { binding ->
+                    val deadline = AnalysisDeadline.start(TimeUnit.SECONDS.toNanos(5), "late $kind mutation")
+                    privateMeasurement(binding, image, deadline = deadline)
+                    fixture.requireFinished()
+                    fixture.mutateAfterExchange(kind)
+                    val mutation = if (kind == "client") {
+                        assertFailsWith<FullTreeControlException>(kind) { privateTerminal(binding, deadline) }
+                    } else {
+                        assertFailsWith<PinnedDockerRuntimeBindingsException>(kind) { privateTerminal(binding, deadline) }
+                    }
+                    assertTrue(mutation.message.orEmpty().contains(kind), mutation.message)
+                    val poisoned = assertFailsWith<PinnedDockerRuntimeBindingsException> { privateTerminal(binding, deadline) }
+                    assertTrue(poisoned.message.orEmpty().contains("poisoned"))
+                    assertEquals(5, fixture.requests.size)
+                } }
+            }
+        }
+    }
+
+    @Test
+    fun `missing or closed retained watch refuses final verification`() {
+        listOf("missing", "closed").forEach { kind ->
+            NativeMeasurementFixture().use { fixture ->
+                fixture.start()
+                fixture.image().use { image -> fixture.bindings().use { binding ->
+                    val deadline = AnalysisDeadline.start(TimeUnit.SECONDS.toNanos(5), "unknown watch fixture")
+                    privateMeasurement(binding, image, deadline = deadline)
+                    fixture.requireFinished()
+                    val stateField = binding.javaClass.getDeclaredField("endpointState").apply { isAccessible = true }
+                    val state = stateField.get(binding)
+                    val watchField = state.javaClass.getDeclaredField("nativeMeasurementWatch").apply { isAccessible = true }
+                    val watch = watchField.get(state) as AutoCloseable
+                    try {
+                        if (kind == "missing") watchField.set(state, null) else watch.close()
+                        assertFailsWith<PinnedDockerRuntimeBindingsException>(kind) { privateTerminal(binding, deadline) }
+                        assertEquals(5, fixture.requests.size)
+                    } finally {
+                        // Restore only the test's saved owner so ordinary close can release it.
+                        if (kind == "missing") watchField.set(state, watch)
+                    }
+                } }
+            }
+        }
+    }
+
+    @Test
+    fun `terminal verification uses the original deadline after completed HTTP exchange`() {
+        NativeMeasurementFixture().use { fixture ->
+            fixture.start()
+            fixture.image().use { image -> fixture.bindings().use { binding ->
+                val deadline = AnalysisDeadline.start(TimeUnit.SECONDS.toNanos(2), "shared terminal deadline")
+                privateMeasurement(binding, image, deadline = deadline)
+                fixture.requireFinished()
+                Thread.sleep(2100)
+                assertFails { privateTerminal(binding, deadline) }
+                assertEquals(5, fixture.requests.size)
+            } }
+        }
+    }
+
+    @Test
+    fun `terminal caller cancellation refuses publication after completed HTTP exchange`() {
+        NativeMeasurementFixture().use { fixture ->
+            fixture.start()
+            fixture.image().use { image -> fixture.bindings().use { binding ->
+                val deadline = AnalysisDeadline.start(TimeUnit.SECONDS.toNanos(5), "terminal cancellation")
+                privateMeasurement(binding, image, deadline = deadline)
+                fixture.requireFinished()
+                try {
+                    Thread.currentThread().interrupt()
+                    assertFailsWith<InterruptedException> { privateTerminal(binding, deadline) }
+                } finally {
+                    Thread.interrupted()
+                }
+                assertEquals(5, fixture.requests.size)
+            } }
+        }
+    }
+
+    @Test
+    fun `late watch close failure preserves original exception and releases control descriptors`() {
+        NativeMeasurementFixture().use { fixture ->
+            fixture.start()
+            fixture.image().use { image ->
+                val binding = fixture.bindings()
+                val descriptorPath = binding.executableDescriptorPath
+                val original = IllegalStateException("original measurement failure")
+                val failure = assertFailsWith<IllegalStateException> {
+                    binding.use {
+                        privateMeasurement(binding, image)
+                        fixture.requireFinished()
+                        fixture.mutateAfterExchange("socket")
+                        throw original
+                    }
+                }
+                assertSame(original, failure)
+                assertTrue(failure.suppressed.any { it is PinnedDockerRuntimeBindingsException })
+                assertFalse(Files.exists(descriptorPath))
+                binding.close()
+            }
+        }
+    }
+
+    @Test
+    fun `sustained interrupted nonblocking watch reads refuse terminal return and still close owned descriptors`() {
+        NativeMeasurementFixture().use { fixture ->
+            fixture.start()
+            fixture.image().use { image ->
+                val binding = fixture.bindings()
+                val descriptorPath = binding.executableDescriptorPath
+                val deadline = AnalysisDeadline.start(TimeUnit.SECONDS.toNanos(5), "bounded interrupted watch")
+                privateMeasurement(binding, image, deadline = deadline)
+                fixture.requireFinished()
+                val stateField = binding.javaClass.getDeclaredField("endpointState").apply { isAccessible = true }
+                val state = stateField.get(binding)
+                val watchField = state.javaClass.getDeclaredField("nativeMeasurementWatch").apply { isAccessible = true }
+                val watch = watchField.get(state)
+                val libcField = watch.javaClass.getDeclaredField("libc").apply { isAccessible = true }
+                val originalLibc = libcField.get(watch)
+                val reads = AtomicInteger()
+                val closes = AtomicInteger()
+                // Private, unscored reflection replaces only read outcomes; close still calls real libc.
+                val interrupted = Proxy.newProxyInstance(libcField.type.classLoader, arrayOf(libcField.type)) { _, method, args ->
+                    if (method.name == "read") {
+                        reads.incrementAndGet()
+                        Native.setLastError(4) // Linux EINTR.
+                        NativeLong(-1)
+                    } else {
+                        if (method.name == "close") closes.incrementAndGet()
+                        check(method.trySetAccessible())
+                        try { method.invoke(originalLibc, *(args ?: emptyArray())) }
+                        catch (failure: InvocationTargetException) { throw failure.targetException }
+                    }
+                }
+                libcField.set(watch, interrupted)
+                val failure = assertFailsWith<PinnedDockerRuntimeBindingsException> {
+                    binding.use { privateTerminal(binding, deadline) }
+                }
+                assertTrue(failure.message.orEmpty().contains("bounded interruption"))
+                assertEquals(8, reads.get(), "four terminal attempts and four close attempts")
+                assertEquals(1, closes.get(), "real owned inotify fd must close despite drain failure")
+                assertTrue(failure.suppressed.any { it is PinnedDockerRuntimeBindingsException })
+                assertFalse(Files.exists(descriptorPath))
+                binding.close()
+                assertEquals(5, fixture.requests.size)
+            }
+        }
+    }
+
     @Test
     fun `actual Unix export bytes are bound to raw GNU tar OCI with only five fixed read requests`() {
         NativeMeasurementFixture().use { fixture ->
@@ -370,6 +545,7 @@ private fun privateMeasurement(
     binding: PinnedDockerRuntimeBindings,
     image: LlvmBehaviorNativeOciImageV2.MeasuredImage,
     maximumMillis: Long = 5000,
+    deadline: AnalysisDeadline = AnalysisDeadline.start(TimeUnit.MILLISECONDS.toNanos(maximumMillis), "test raw runtime measurement"),
 ): JsonObject {
     // Test-only reflection into the exact private consuming bridge allows a tiny fake client pin.
     // The production factory accepts only the independently fixed Docker release executable bytes.
@@ -378,8 +554,20 @@ private fun privateMeasurement(
     }
     assertTrue(bridge.trySetAccessible())
     return try {
-        bridge.invoke(PinnedDockerRuntimeBindings.Companion, binding, image,
-            AnalysisDeadline.start(TimeUnit.MILLISECONDS.toNanos(maximumMillis), "test raw runtime measurement")) as JsonObject
+        bridge.invoke(PinnedDockerRuntimeBindings.Companion, binding, image, deadline) as JsonObject
+    } catch (failure: InvocationTargetException) {
+        throw failure.targetException
+    }
+}
+
+private fun privateTerminal(binding: PinnedDockerRuntimeBindings, deadline: AnalysisDeadline) {
+    // Test-only reflection reaches the exact private production terminal gate, never a new hook.
+    val bridge = PinnedDockerRuntimeBindings.Companion::class.java.declaredMethods.single {
+        it.name == "verifyNativeRuntimeV2Terminal"
+    }
+    assertTrue(bridge.trySetAccessible())
+    try {
+        bridge.invoke(PinnedDockerRuntimeBindings.Companion, binding, deadline)
     } catch (failure: InvocationTargetException) {
         throw failure.targetException
     }
@@ -452,6 +640,23 @@ private class NativeMeasurementFixture(private val behavior: String = "good") : 
     fun image() = LlvmBehaviorNativeOciImageV2.openLayout(layout)
     fun bindings() = PinnedDockerRuntimeBindings.capture(client, Files.size(client),
         OracleArtifacts.sha256(Files.readAllBytes(client)), 1024, config, socket)
+
+    fun mutateAfterExchange(kind: String) {
+        when (kind) {
+            "socket" -> {
+                val displaced = runtime.resolve("moved")
+                Files.move(socket, displaced, StandardCopyOption.ATOMIC_MOVE)
+                Files.move(displaced, socket, StandardCopyOption.ATOMIC_MOVE)
+            }
+            "client" -> {
+                Files.move(client, root.resolve("client-displaced"), StandardCopyOption.ATOMIC_MOVE)
+                Files.writeString(client, "substituted fixture client\n")
+                Files.setPosixFilePermissions(client, PosixFilePermissions.fromString("r-x------"))
+            }
+            "config" -> Files.writeString(config.resolve("config.json"), "{}")
+            else -> error("unknown private fixture mutation")
+        }
+    }
 
     fun start() {
         worker = Thread {

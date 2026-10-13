@@ -99,6 +99,7 @@ internal class PinnedDockerRuntimeBindings private constructor(
 ) : AutoCloseable {
     private var closed = false
     private var ownsEndpointState = true
+    private var nativeMeasurementTerminalFailed = false
 
     @Synchronized
     fun requireCurrent() = translateBindingFailures("verify pinned Docker runtime bindings") {
@@ -209,9 +210,15 @@ internal class PinnedDockerRuntimeBindings private constructor(
     override fun close() {
         if (closed) return
         closed = true
-        if (ownsEndpointState) endpointState.close()
+        var failure: Throwable? = null
+        if (ownsEndpointState) runCatching { endpointState.close() }.exceptionOrNull()?.let { failure = it }
         ownsEndpointState = false
-        closeControlBindings()
+        listOf(dockerConfigDescriptor, controlClientDescriptor, controlClientGuard).forEach { owned ->
+            runCatching { owned.close() }.exceptionOrNull()?.let { closeFailure ->
+                failure = failure?.also { it.addSuppressed(closeFailure) } ?: closeFailure
+            }
+        }
+        failure?.let { throw it }
     }
 
     /** Retains every binding across the fixed read-only measurement without exporting endpoint state. */
@@ -246,6 +253,32 @@ internal class PinnedDockerRuntimeBindings private constructor(
         ))
     }
 
+    @Synchronized
+    private fun verifyNativeRuntimeV2TerminalOwned(deadline: AnalysisDeadline) {
+        requireOpen()
+        if (nativeMeasurementTerminalFailed) bindingFail("native runtime terminal authentication is poisoned")
+        val verify = PinnedDockerEndpointState::class.java.declaredMethods.single {
+            it.name == "requireNativeMeasurementQuiet"
+        }
+        check(verify.trySetAccessible())
+        fun requireQuiet() {
+            try {
+                verify.invoke(endpointState, deadline)
+            } catch (failure: InvocationTargetException) {
+                throw failure.targetException
+            }
+        }
+        try {
+            requireQuiet()
+            requireCurrentBindings(deadline::checkpoint)
+            requireQuiet()
+            deadline.checkpoint("after final native runtime tuple authentication")
+        } catch (failure: Throwable) {
+            nativeMeasurementTerminalFailed = true
+            throw failure
+        }
+    }
+
     companion object {
         /** Measurement alone consumes no lease and cannot arm an operational journal. */
         private fun measureNativeRuntimeV2(
@@ -260,6 +293,21 @@ internal class PinnedDockerRuntimeBindings private constructor(
             check(measure.trySetAccessible())
             return try {
                 measure.invoke(bindings, image, deadline) as JsonObject
+            } catch (failure: InvocationTargetException) {
+                throw failure.targetException
+            }
+        }
+
+        private fun verifyNativeRuntimeV2Terminal(
+            bindings: PinnedDockerRuntimeBindings,
+            deadline: AnalysisDeadline,
+        ) {
+            val verify = PinnedDockerRuntimeBindings::class.java.declaredMethods.single {
+                it.name == "verifyNativeRuntimeV2TerminalOwned"
+            }
+            check(verify.trySetAccessible())
+            try {
+                verify.invoke(bindings, deadline)
             } catch (failure: InvocationTargetException) {
                 throw failure.targetException
             }
@@ -621,6 +669,8 @@ private class PinnedDockerEndpointState private constructor(
 ) : AutoCloseable {
     private var closed = false
     private var headPingAttempted = false
+    private var nativeMeasurementWatch: EndpointDirectoryMutationWatch? = null
+    private var nativeMeasurementCompleted = false
 
     @Synchronized
     fun requireCurrent() {
@@ -871,7 +921,9 @@ private class PinnedDockerEndpointState private constructor(
     ): JsonObject {
         if (closed || headPingAttempted) bindingFail("fixed native measurement endpoint was already consumed")
         val checkpoint: (String) -> Unit = deadline::checkpoint
-        return EndpointDirectoryMutationWatch.open(runtimeSocketParent).use { watch ->
+        val watch = EndpointDirectoryMutationWatch.open(runtimeSocketParent)
+        nativeMeasurementWatch = watch
+        return run {
             watch.requireQuiet()
             requireCurrent()
             performFixedHeadPing(FixedHeadPingDeadline.start(deadline))
@@ -919,7 +971,7 @@ private class PinnedDockerEndpointState private constructor(
             requireCurrent()
             watch.requireQuiet()
             checkpoint("after actual Docker image export authentication")
-            JsonObject(linkedMapOf(
+            val facts = JsonObject(linkedMapOf(
                 "apiVersion" to JsonPrimitive("1.55"),
                 "serverVersion" to JsonPrimitive("29.7.2"),
                 "fixedReadOnlyRequests" to JsonArray(listOf(
@@ -939,7 +991,21 @@ private class PinnedDockerEndpointState private constructor(
                 "exportBytes" to JsonPrimitive(exported.exportBytes),
                 "exportMergedNamespaceSha256" to JsonPrimitive(exported.namespaceSha256),
             ))
+            watch.requireQuiet()
+            nativeMeasurementCompleted = true
+            facts
         }
+    }
+
+    @Synchronized
+    private fun requireNativeMeasurementQuiet(deadline: AnalysisDeadline) {
+        deadline.checkpoint("during final native endpoint watch authentication")
+        if (closed || !nativeMeasurementCompleted) bindingFail("fixed native measurement has no completed retained exchange")
+        val watch = nativeMeasurementWatch ?: bindingFail("fixed native measurement has no retained endpoint watch")
+        watch.requireQuiet()
+        requireCurrent()
+        watch.requireQuiet()
+        deadline.checkpoint("after final native endpoint watch authentication")
     }
 
     private enum class NativeMeasurementGet {
@@ -1162,7 +1228,11 @@ private class PinnedDockerEndpointState private constructor(
         if (closed) return
         closed = true
         var failure: Throwable? = null
-        runCatching { runtimeSocketDescriptor.close() }.exceptionOrNull()?.let { failure = it }
+        runCatching { nativeMeasurementWatch?.close() }.exceptionOrNull()?.let { failure = it }
+        nativeMeasurementWatch = null
+        runCatching { runtimeSocketDescriptor.close() }.exceptionOrNull()?.let { closeFailure ->
+            failure = failure?.also { it.addSuppressed(closeFailure) } ?: closeFailure
+        }
         runCatching { runtimeSocketParent.close() }.exceptionOrNull()?.let { closeFailure ->
             failure = failure?.also { it.addSuppressed(closeFailure) } ?: closeFailure
         }
@@ -1216,7 +1286,7 @@ private class PinnedDockerEndpointState private constructor(
     ) : AutoCloseable {
         fun requireQuiet() {
             val buffer = Memory(INOTIFY_READ_BYTES.toLong())
-            while (true) {
+            repeat(4) {
                 val count = libc.read(descriptor, buffer, NativeLong(INOTIFY_READ_BYTES.toLong())).toLong()
                 val error = if (count < 0L) Native.getLastError() else 0
                 when {
@@ -1226,13 +1296,14 @@ private class PinnedDockerEndpointState private constructor(
                     count == 0L -> bindingFail(
                         "fixed Docker Engine socket directory watch ended during HEAD /_ping",
                     )
-                    error == EINTR -> continue
+                    error == EINTR -> Unit
                     error == EAGAIN -> return
                     else -> bindingFail(
                         "cannot read the fixed Docker Engine socket directory watch (errno=$error)",
                     )
                 }
             }
+            bindingFail("fixed Docker Engine socket directory watch exceeded bounded interruption retries")
         }
 
         override fun close() {

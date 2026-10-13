@@ -78,7 +78,7 @@ internal object LlvmBehaviorNativeRuntimeMeasurementV2 {
             LlvmBehaviorNativeOciImageV2.openLayout(ociLayout, checkpoint).use { image ->
                 val recipe = ownRecipeBinding(deploymentPath, image, checkpoint)
                 val bindings = captureFixed(controlClient, emptyPrivateDockerConfig, privateRuntimeSocket, deadline)
-                try {
+                bindings.use {
                     val measured = consumeFixed(bindings, image, deadline)
                     val subject = image.resolve("/subject/executable")
                     if (subject.kind != "regular" || subject.size != 84_561_368L ||
@@ -93,7 +93,7 @@ internal object LlvmBehaviorNativeRuntimeMeasurementV2 {
                         deployment.authenticatedSha256
                     ) measurementFail("measurement deployment bytes changed")
                     checkpoint("before native measurement candidate rendering")
-                    return LlvmBehaviorNativeRuntimeMeasurementV2Candidate.measured(
+                    val candidate = LlvmBehaviorNativeRuntimeMeasurementV2Candidate.measured(
                         JsonObject(linkedMapOf(
                             "schemaVersion" to JsonPrimitive(2),
                             "artifactKind" to JsonPrimitive("native-runtime-measurement-candidate"),
@@ -129,8 +129,14 @@ internal object LlvmBehaviorNativeRuntimeMeasurementV2 {
                             "subjectStaticElfClosure" to elfClosure,
                         )), checkpoint,
                     )
-                } finally {
-                    bindings.close()
+                    image.requireCurrent(checkpoint)
+                    codecs.requireCurrent(checkpoint)
+                    deployment.verifyUnchanged("native measurement deployment final candidate check")
+                    if (deployment.sha256(checkpoint, "native measurement deployment final candidate bytes") !=
+                        deployment.authenticatedSha256
+                    ) measurementFail("measurement deployment bytes changed before candidate return")
+                    verifyFixedTerminal(bindings, deadline)
+                    return candidate
                 }
             }
             }
@@ -160,6 +166,18 @@ internal object LlvmBehaviorNativeRuntimeMeasurementV2 {
         check(bridge.trySetAccessible())
         return try {
             bridge.invoke(PinnedDockerRuntimeBindings.Companion, client, config, socket, deadline) as PinnedDockerRuntimeBindings
+        } catch (failure: InvocationTargetException) {
+            throw failure.targetException
+        }
+    }
+
+    private fun verifyFixedTerminal(bindings: PinnedDockerRuntimeBindings, deadline: AnalysisDeadline) {
+        val bridge = PinnedDockerRuntimeBindings.Companion::class.java.declaredMethods.single {
+            it.name == "verifyNativeRuntimeV2Terminal"
+        }
+        check(bridge.trySetAccessible())
+        try {
+            bridge.invoke(PinnedDockerRuntimeBindings.Companion, bindings, deadline)
         } catch (failure: InvocationTargetException) {
             throw failure.targetException
         }
