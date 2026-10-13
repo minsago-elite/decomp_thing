@@ -552,6 +552,10 @@ internal class LinuxBubblewrapBoundary private constructor(
         cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
     ): AcpTerminalBroker {
         closeFailure.get()?.let { throw it }
+        request.workspaceRoots.forEach { root ->
+            cancellationCheck()
+            controlDirectory.requireUnexposed(root.path)
+        }
         val effectivePolicy = configuredPolicy?.takeIf {
             AgentOperation.EXECUTE_COMMAND in request.accessPolicy.allowedOperations
         }
@@ -643,7 +647,13 @@ internal class LinuxBubblewrapBoundary private constructor(
         closeFailure.get()?.let { throw it }
         if (closed.get()) throw IOException("ACP sandbox boundary is closed")
         requireAcpSandboxLaunchPolicy(configuration, launch, mergeError, cancellationCheck)
+        launch.emptyDirectories.forEach { directory ->
+            cancellationCheck()
+            controlDirectory.requireUnexposed(directory)
+        }
         launch.stagingRoots.forEach { grant ->
+            cancellationCheck()
+            controlDirectory.requireUnexposed(grant.stagingRoot.path)
             if (grant.mode == AcpSandboxRootMode.READ_WRITE && grant.stagingRoot.quotaProof == null) {
                 throw IOException("writable sandbox staging root lacks verified aggregate quota authority")
             }
@@ -1297,6 +1307,7 @@ internal class LinuxBubblewrapBoundary private constructor(
             cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
         ): LinuxBubblewrapBoundary {
             cancellationCheck()
+            val controlTemporaryParent = sandboxControlTemporaryParent()
             requireLinuxCgroupV2()
             LinuxFilesystemSyscalls.requirePidfdSupported()
             cancellationCheck()
@@ -1337,7 +1348,7 @@ internal class LinuxBubblewrapBoundary private constructor(
             val version = probeBubblewrap(bubblewrap.path, cancellationCheck)
             probeResourceLimiter(resourceLimiter.path, cancellationCheck)
             probeSystemd(scopeSupervisor, scopeInspector, bus, cancellationCheck)
-            probeEnvironmentFdOpener(environmentFdOpener.path, cancellationCheck)
+            probeEnvironmentFdOpener(environmentFdOpener.path, controlTemporaryParent, cancellationCheck)
             val forbidden = forbiddenRuntimeFiles(
                 cancellationCheck,
                 bubblewrap,
@@ -1351,7 +1362,7 @@ internal class LinuxBubblewrapBoundary private constructor(
                 ACP_SANDBOX_GATE_HELPER_PATH,
                 configuration.expectedSandboxGateHelperManifestSha256,
             )
-            val controlDirectory = createControlDirectory(configuration.runtimeClosureLimits)
+            val controlDirectory = createControlDirectory(configuration.runtimeClosureLimits, controlTemporaryParent)
             val pinnedLauncher = mutableListOf<PinnedReadOnlyMount>()
             var helperValidation: PinnedReadOnlyMount? = null
             var helperMode = 0
@@ -1484,8 +1495,8 @@ internal class LinuxBubblewrapBoundary private constructor(
             }
         }
 
-        private fun createControlDirectory(limits: AcpRuntimeClosureLimits): PinnedControlDirectory =
-            PinnedControlDirectory.create(limits)
+        private fun createControlDirectory(limits: AcpRuntimeClosureLimits, parentPath: Path): PinnedControlDirectory =
+            PinnedControlDirectory.create(limits, parentPath)
     }
 }
 
@@ -1640,6 +1651,12 @@ private class PinnedControlDirectory private constructor(
     private var deleted = false
     private var cleanupFailure: AcpCleanupProofFailure? = null
 
+    fun requireUnexposed(source: Path) {
+        if (pathsOverlap(path, source)) {
+            throw IOException("sandbox authority may not expose its private control directory")
+        }
+    }
+
     fun requireCurrent() {
         if (deleted) throw IOException("sandbox control directory is already deleted")
         requireDirectoryDescriptorIdentity(descriptor, expectedKey, expectedMountId, CONTROL_DIRECTORY_MODE)
@@ -1757,8 +1774,7 @@ private class PinnedControlDirectory private constructor(
     }
 
     companion object {
-        fun create(cleanupLimits: AcpRuntimeClosureLimits): PinnedControlDirectory {
-            val parentPath = Path.of("/tmp")
+        fun create(cleanupLimits: AcpRuntimeClosureLimits, parentPath: Path): PinnedControlDirectory {
             val parent = LinuxFilesystemSyscalls.openRoot(parentPath)
             var descriptor: LinuxDescriptor? = null
             var createdName: String? = null
@@ -1774,7 +1790,7 @@ private class PinnedControlDirectory private constructor(
                 if (openedIdentity.uid != currentUid() ||
                     openedIdentity.mode.permissions != CONTROL_DIRECTORY_MODE ||
                     openedIdentity.mountId != parent.identity.mountId
-                ) throw IOException("sandbox control directory is not a private mode-0700 child of /tmp")
+                ) throw IOException("sandbox control directory is not a private mode-0700 child of its temporary parent")
                 LinuxFilesystemSyscalls.openRoot(directory).use { byPath ->
                     if (byPath.identity.key != opened.identity.key ||
                         byPath.identity.mountId != opened.identity.mountId
@@ -3999,6 +4015,7 @@ private fun pinMounts(
     val unique = LinkedHashMap<Path, AcpSandboxReadOnlyMount>()
     mounts.forEach { mount ->
         cancellationCheck()
+        controlDirectory.requireUnexposed(mount.source)
         val existing = unique.putIfAbsent(mount.destination, mount)
         if (existing != null && (
                 existing.source != mount.source ||
@@ -4576,10 +4593,11 @@ internal fun isValidSystemdManagerVersionOutput(output: String): Boolean {
 /** Proves that the fixed launcher opens only the supplied environment descriptor path as fd 4. */
 private fun probeEnvironmentFdOpener(
     path: Path,
+    parentPath: Path,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
 ) {
     cancellationCheck()
-    LinuxFilesystemSyscalls.openRoot(Path.of("/tmp")).use { parent ->
+    LinuxFilesystemSyscalls.openRoot(parentPath).use { parent ->
         LinuxFilesystemSyscalls.createTemporaryAt(parent.fd).use { probeFile ->
             LinuxFilesystemSyscalls.chmod(probeFile, SANDBOX_ENVIRONMENT_FILE_MODE)
             LinuxFilesystemSyscalls.write(
@@ -4614,6 +4632,21 @@ private fun probeEnvironmentFdOpener(
             }
         }
     }
+}
+
+/** Both host-side control resources use one existing canonical JVM temporary parent. */
+private fun sandboxControlTemporaryParent(): Path {
+    val configured = System.getProperty("java.io.tmpdir")
+        ?: throw IOException("sandbox temporary parent is not configured")
+    val parent = try {
+        Path.of(configured)
+    } catch (failure: RuntimeException) {
+        throw IOException("sandbox temporary parent is invalid", failure)
+    }
+    if (!parent.isAbsolute || parent != parent.normalize() ||
+        !Files.isDirectory(parent, LinkOption.NOFOLLOW_LINKS) || parent.toRealPath() != parent
+    ) throw IOException("sandbox temporary parent must be an existing absolute canonical directory")
+    return parent
 }
 
 private data class CommandResult(val exitCode: Int, val output: String)

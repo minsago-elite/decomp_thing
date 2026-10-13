@@ -27,6 +27,91 @@ import kotlin.test.assertTrue
 
 class LinuxBubblewrapBoundaryTest {
     @Test
+    fun `configured temporary parent pins private controls and exact fd probe beside a disjoint workspace`() {
+        val base = createTempDirectory("acp-private-control-parent-").toAbsolutePath().normalize()
+        val parent = Files.createDirectory(base.resolve("control-parent"))
+        Files.setPosixFilePermissions(parent, OWNER_ONLY)
+        val workspace = Files.createDirectory(base.resolve("workspace"))
+        try {
+            withTemporaryParent(parent.toString()) {
+                val validated = invokeBoundaryPrivate("sandboxControlTemporaryParent", emptyArray()) as Path
+                assertEquals(parent, validated)
+                val type = Class.forName("decompengine.acp.PinnedControlDirectory")
+                val companion = type.getDeclaredField("Companion").apply { isAccessible = true }.get(null)
+                val control = invokePrivate(
+                    companion,
+                    companion.javaClass.getDeclaredMethod("create", AcpRuntimeClosureLimits::class.java, Path::class.java),
+                    AcpRuntimeClosureLimits(32, 1024, 4), validated,
+                )!!
+                val controlPath = invokePrivate(control, type.getDeclaredMethod("getPath")) as Path
+                try {
+                    assertEquals(parent, controlPath.parent)
+                    assertEquals(OWNER_ONLY, Files.getPosixFilePermissions(controlPath))
+                    LinuxFilesystemSyscalls.openRoot(parent).use { pinnedParent ->
+                        LinuxFilesystemSyscalls.openRoot(controlPath).use { pinnedChild ->
+                            assertEquals(pinnedParent.identity.mountId, pinnedChild.identity.mountId)
+                            assertEquals(
+                                (Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toInt(),
+                                pinnedChild.identity.uid,
+                            )
+                        }
+                    }
+                    invokePrivate(control, type.getDeclaredMethod("requireCurrent"))
+                    val exposure = type.getDeclaredMethod("requireUnexposed", Path::class.java)
+                    invokePrivate(control, exposure, workspace)
+                    listOf(base, parent, controlPath, controlPath.resolve("child")).forEach { exposed ->
+                        assertFailsWith<IOException> { invokePrivate(control, exposure, exposed) }
+                    }
+                    Files.writeString(controlPath.resolve("cleanup-marker"), "private-control-canary")
+                    assertTrue(Files.list(workspace).use { it.findAny().isEmpty })
+                    invokeBoundaryPrivate(
+                        "probeEnvironmentFdOpener",
+                        arrayOf(Path::class.java, Path::class.java, Function0::class.java),
+                        BASH, validated, {},
+                    )
+                    assertEquals(setOf(controlPath), Files.list(parent).use { it.toList().toSet() })
+                } finally {
+                    invokePrivate(control, type.getDeclaredMethod("deleteAndProve"))
+                }
+                assertTrue(Files.list(parent).use { it.findAny().isEmpty })
+            }
+            // Default Linux compatibility can be checked without creating any host-/tmp files.
+            withTemporaryParent("/tmp") {
+                assertEquals(Path.of("/tmp"), invokeBoundaryPrivate("sandboxControlTemporaryParent", emptyArray()))
+            }
+        } finally {
+            clearStaging(base)
+            Files.delete(base)
+        }
+    }
+
+    @Test
+    fun `temporary parent rejects missing relative noncanonical file and symlink paths before host probes`() {
+        val base = createTempDirectory("acp-invalid-control-parent-").toAbsolutePath().normalize()
+        val parent = Files.createDirectory(base.resolve("real"))
+        val file = Files.writeString(base.resolve("file"), "not a directory")
+        val link = Files.createSymbolicLink(base.resolve("link"), parent)
+        val nested = Files.createDirectory(parent.resolve("nested"))
+        try {
+            listOf(null, "", "relative", "\u0000", base.resolve("missing").toString(), file.toString(),
+                link.toString(), link.resolve("nested").toString(), nested.resolve("..").toString()).forEach { value ->
+                withTemporaryParent(value) {
+                    val failure = assertFailsWith<IOException> {
+                        LinuxBubblewrapBoundary.prepare(
+                            syntheticConfiguration(Path.of("/definitely-absent/decomp-bwrap"), "0".repeat(64)),
+                        )
+                    }
+                    assertTrue(failure.message.orEmpty().contains("temporary parent"), value.orEmpty())
+                    assertTrue(Files.list(nested).use { it.findAny().isEmpty })
+                }
+            }
+        } finally {
+            clearStaging(base)
+            Files.delete(base)
+        }
+    }
+
+    @Test
     fun `systemd runtime ceiling uses one authenticated millisecond value`() {
         val cleanup = acpSandboxCleanupTimeoutMicros()
         assertEquals(cleanup + 1_000L, acpSandboxRuntimeMaximumMicros(Duration.ofNanos(1)))
@@ -750,8 +835,8 @@ class LinuxBubblewrapBoundaryTest {
         )
         launchAndAwait(abaBoundary, listOf("netns"))
         val control = requireNotNull(runtimeSource.get()).parent.parent
-        val originalHolding = Path.of("/tmp", ".decomp-acp-original-${UUID.randomUUID()}")
-        val replacementHolding = Path.of("/tmp", ".decomp-acp-replacement-${UUID.randomUUID()}")
+        val originalHolding = control.parent.resolve(".decomp-acp-original-${UUID.randomUUID()}")
+        val replacementHolding = control.parent.resolve(".decomp-acp-replacement-${UUID.randomUUID()}")
         Files.move(control, originalHolding)
         Files.createDirectory(control)
         val marker = control.resolve("replacement-marker").also { it.writeText("preserve") }
@@ -1224,9 +1309,30 @@ class LinuxBubblewrapBoundaryTest {
             ninjaCompdbRuntimeMounts = ninjaCompdbRuntimeMounts,
         )
 
-    private fun controlDirectories(): Set<Path> = Files.list(Path.of("/tmp")).use { entries ->
+    private fun controlDirectories(): Set<Path> = Files.list(Path.of(System.getProperty("java.io.tmpdir"))).use { entries ->
         entries.filter { it.fileName.toString().startsWith(".decomp-acp-control-") }.toList().toSet()
     }
+
+    private fun withTemporaryParent(value: String?, action: () -> Unit) {
+        val previous = System.getProperty("java.io.tmpdir")
+        try {
+            if (value == null) System.clearProperty("java.io.tmpdir") else System.setProperty("java.io.tmpdir", value)
+            action()
+        } finally {
+            if (previous == null) System.clearProperty("java.io.tmpdir") else System.setProperty("java.io.tmpdir", previous)
+        }
+    }
+
+    private fun invokeBoundaryPrivate(name: String, types: Array<Class<*>>, vararg arguments: Any?): Any? =
+        invokePrivate(null, Class.forName("decompengine.acp.LinuxBubblewrapBoundaryKt").getDeclaredMethod(name, *types), *arguments)
+
+    private fun invokePrivate(receiver: Any?, method: java.lang.reflect.Method, vararg arguments: Any?): Any? =
+        try {
+            method.isAccessible = true
+            method.invoke(receiver, *arguments)
+        } catch (failure: java.lang.reflect.InvocationTargetException) {
+            throw failure.targetException
+        }
 
     private fun assertUnitAbsent(unitName: String) {
         val process = ProcessBuilder(
