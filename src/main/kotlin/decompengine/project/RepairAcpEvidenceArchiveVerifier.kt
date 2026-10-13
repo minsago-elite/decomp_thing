@@ -14,6 +14,7 @@ import decompengine.repair.TRACE_REPAIR_ACP_RECEIPT_KIND
 import decompengine.repair.TRACE_REPAIR_ACP_TASK_FIELD
 import decompengine.repair.readStableRepairFile
 import decompengine.repair.requireRepairGraphByteBudget
+import decompengine.repair.requireSingleLegacyRollbackOrigin
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 import java.util.Collections
@@ -1341,6 +1342,7 @@ private fun parseReleaseRun(element: JsonElement): ReleaseRepairRun {
 
 /** Independent run admission; serialized success flags cannot supply missing validation authority. */
 private fun verifyRunContract(graph: ReleaseRepairGraph) {
+    requireSingleLegacyRollbackOrigin(graph.nodes.mapNotNull { it.rollbackRecord?.legacyPendingStateUnknown })
     require(graph.runs.isNotEmpty() && graph.runs.size <= graph.budget.maximumRevisionNodes) {
         "repair release requires bounded durable run evidence"
     }

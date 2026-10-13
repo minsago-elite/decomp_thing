@@ -1873,24 +1873,24 @@ internal class ModuleRevisionGraph private constructor(
     private fun upgradeGraphToRollbackContract(allowPending: Boolean) {
         if (state.schemaVersion >= 4) return
         require(allowPending || state.pending == null)
-        val legacyRunContract = state.schemaVersion < 3
-        if (legacyRunContract) preserveLegacyRunState()
-        val upgradedNodes = if (legacyRunContract) state.nodes.map { node ->
+        if (state.schemaVersion < 3) preserveLegacyRunState()
+        persist(rollbackContractState())
+    }
+
+    /** Construct the exact upgrade without publishing it, so rejection can preflight all bytes. */
+    private fun rollbackContractState(): RevisionGraphState {
+        if (state.schemaVersion >= 4) return state
+        val upgradedNodes = if (state.schemaVersion < 3) state.nodes.map { node ->
             if (node.status == ModuleRevisionStatus.ACCEPTED) node.copy(status = ModuleRevisionStatus.LEGACY_UNVERIFIED)
             else node
         } else state.nodes
         val upgradedPending = state.pending?.let { pending ->
-            val legacyPending = pending.legacyRecoveryRequired || state.schemaVersion < 4
             pending.copy(
-                legacyRecoveryRequired = legacyPending,
-                rollbackRecord = pending.rollbackRecord ?: initialRollbackRecord(
-                    state,
-                    pending,
-                    legacyPending,
-                ),
+                legacyRecoveryRequired = true,
+                rollbackRecord = pending.rollbackRecord ?: initialRollbackRecord(state, pending, true),
             )
         }
-        persist(state.copy(schemaVersion = 4, nodes = upgradedNodes, pending = upgradedPending))
+        return state.copy(schemaVersion = 4, nodes = upgradedNodes, pending = upgradedPending)
     }
 
     private fun preserveLegacyRunState() {
@@ -2573,6 +2573,13 @@ internal class ModuleRevisionGraph private constructor(
         val pending = requirePending(attempt)
         // Invalid caller evidence must not publish a rollback marker or change source bytes.
         validateEvidence(evidence)
+        val rollbackState = rollbackContractState()
+        val previewPending = requireNotNull(rollbackState.pending)
+        val reservedOutcome = reservedRollbackRecord(rollbackState, previewPending)
+            .copy(state = RepairRollbackState.RESTORED_AFTER_FAILURE)
+        val reservedNode = finalizeNode(previewPending, ModuleRevisionStatus.REJECTED, evidence,
+            recovered = false, rollbackRecord = reservedOutcome)
+        requireCommitReadyState(rollbackState.copy(nodes = rollbackState.nodes + reservedNode, pending = null))
         val rollbackRecord = rollbackPending(pending)
         val recoveredPending = requirePending(attempt)
         val node = finalizeNode(
@@ -2995,9 +3002,8 @@ internal class ModuleRevisionGraph private constructor(
                     RepairRollbackState.RESTORED_AFTER_FAILURE,
                     RepairRollbackState.NOT_REQUIRED_VERIFIED,
                 )) { "finalized rollback has a non-final outcome: ${node.id}" }
-                val permittedTargets = setOfNotNull(node.parentId, derivedHeadId)
-                require(record.targetRevisionId in permittedTargets) {
-                    "rollback target is unrelated to the rejected attempt: ${node.id}"
+                require(record.targetRevisionId == derivedHeadId) {
+                    "rollback target differs from the published head: ${node.id}"
                 }
                 val targetSources = revisionSourcesAt(state.nodes.take(indexInGraph), record.targetRevisionId)
                 require(record.expectedSourceRevisionSha256 == revisionSha256(targetSources.values)) {
@@ -3312,16 +3318,20 @@ internal class ModuleRevisionGraph private constructor(
         )
     }
 
+    private fun reservedRollbackRecord(candidate: RevisionGraphState, pending: PendingAttempt): RepairRollbackRecord {
+        val record = pending.rollbackRecord ?: initialRollbackRecord(candidate, pending, pending.legacyRecoveryRequired)
+        return record.copy(
+            state = RepairRollbackState.RESTORE_FAILED_UNRESOLVED,
+            failureStage = RepairRollbackStage.SOURCE_VERIFICATION,
+            failureCode = RepairRollbackFailureCode.UNRECOGNIZED_SOURCE_STATE,
+            observedSourceRevisionSha256 = record.expectedSourceRevisionSha256,
+        )
+    }
+
     private fun requireRecoverablePendingState(candidate: RevisionGraphState) {
         val pending = requireNotNull(candidate.pending) { "recoverability check requires a pending repair" }
         val recoveryRecord = if (candidate.schemaVersion >= 4) {
-            val record = pending.rollbackRecord ?: initialRollbackRecord(candidate, pending, pending.legacyRecoveryRequired)
-            val failed = record.copy(
-                state = RepairRollbackState.RESTORE_FAILED_UNRESOLVED,
-                failureStage = RepairRollbackStage.SOURCE_VERIFICATION,
-                failureCode = RepairRollbackFailureCode.UNRECOGNIZED_SOURCE_STATE,
-                observedSourceRevisionSha256 = record.expectedSourceRevisionSha256,
-            )
+            val failed = reservedRollbackRecord(candidate, pending)
             // Reserve both a durable failure marker and a terminal recovery outcome before any
             // candidate installation can make either publication necessary.
             prepareStateForPersistence(candidate.copy(pending = pending.copy(rollbackRecord = failed)))
@@ -4548,7 +4558,9 @@ private fun validateGraphBeforeRecovery(
                 RepairRollbackState.RESTORED_AFTER_FAILURE,
                 RepairRollbackState.NOT_REQUIRED_VERIFIED,
             ))
-            require(record.targetRevisionId in setOfNotNull(node.parentId, derivedHead))
+            require(record.targetRevisionId == derivedHead) {
+                "rollback target differs from the published head: ${node.id}"
+            }
             val targetSources = revisionSourcesAt(state.nodes.take(nodeIndex), record.targetRevisionId)
             require(record.expectedSourceRevisionSha256 == revisionSha256(targetSources.values))
             if (record.state == RepairRollbackState.NOT_REQUIRED_VERIFIED) {
@@ -5514,8 +5526,16 @@ internal fun requireRepairGraphByteBudget(payload: ByteArray, budget: RepairReso
     requireRevisionGraphByteBudget(state, payload.size.toLong())
 }
 
+/** A legacy graph has only one pending attempt, and no rollback records before that migration. */
+internal fun requireSingleLegacyRollbackOrigin(legacyFlags: List<Boolean>) {
+    require(legacyFlags.count { it } <= 1 && (legacyFlags.none { it } || legacyFlags.first())) {
+        "repair graph has multiple or out-of-order legacy rollback origins"
+    }
+}
+
 private fun requireRevisionGraphByteBudget(state: RevisionGraphState, bytes: Long) {
     val records = state.nodes.mapNotNull { it.rollbackRecord } + listOfNotNull(state.pending?.rollbackRecord)
+    requireSingleLegacyRollbackOrigin(records.map { it.legacyPendingStateUnknown })
     records.forEach { record ->
         require(record.toJson().toByteArray(Charsets.UTF_8).size.toLong() <= MAXIMUM_ROLLBACK_RECORD_BYTES) {
             "repair rollback record exceeds its fixed byte bound"
@@ -5525,23 +5545,36 @@ private fun requireRevisionGraphByteBudget(state: RevisionGraphState, bytes: Lon
     var allowance = 0L
     if (state.schemaVersion == 4 && records.any { it.legacyPendingStateUnknown }) {
         fun size(candidate: RevisionGraphState) = renderGraph(candidate).toByteArray(Charsets.UTF_8).size.toLong()
-        val schema3 = state.copy(schemaVersion = 3)
-        // New records from native schema-4 attempts remain fully charged; only legacy recovery
-        // records and the format's new field names/default nulls receive migration headroom.
-        allowance = bytes - size(schema3) - records.filterNot { it.legacyPendingStateUnknown }
-            .sumOf { it.toJson().toByteArray(Charsets.UTF_8).size.toLong() - 4 }
+        val migratedPending = state.pending?.rollbackRecord?.legacyPendingStateUnknown == true
+        val migratedNodeCount = if (migratedPending) state.nodes.size else
+            state.nodes.indexOfFirst { it.rollbackRecord?.legacyPendingStateUnknown == true } + 1
+        require(migratedNodeCount > 0)
+        fun formatOverhead(newVersion: Int, oldVersion: Int): Long {
+            var added = size(state.copy(schemaVersion = newVersion)) - size(state.copy(schemaVersion = oldVersion))
+            // Later native attempts were never migrated. Charge their entire encoding, including
+            // default fields, instead of growing the one migration's allowance with new history.
+            state.nodes.drop(migratedNodeCount).forEach { node ->
+                added -= node.toJson(newVersion).prependIndent("    ").toByteArray(Charsets.UTF_8).size -
+                    node.toJson(oldVersion).prependIndent("    ").toByteArray(Charsets.UTF_8).size
+            }
+            if (!migratedPending) state.pending?.let { pending ->
+                added -= pending.toJson(newVersion).toByteArray(Charsets.UTF_8).size -
+                    pending.toJson(oldVersion).toByteArray(Charsets.UTF_8).size
+            }
+            return added
+        }
+        allowance = formatOverhead(4, 3)
         val metadata = state.nodes.mapNotNull { it.repairMetadata } + listOfNotNull(state.pending?.repairMetadata)
         if (state.runs.isEmpty() && state.provisionalHeadId == null && state.fullyAcceptedHeadId == null &&
             state.acceptedProof == null && state.nodes.all { it.validationProof == null } &&
             metadata.all { it.runId == null } && state.pending?.detached != true &&
             state.pending?.promotionChanges.orEmpty().isEmpty()
         ) {
-            val schema2 = state.copy(schemaVersion = 2)
-            allowance += size(schema3) - size(schema2)
-            allowance += state.nodes.count { it.status == ModuleRevisionStatus.LEGACY_UNVERIFIED } *
+            allowance += formatOverhead(3, 2)
+            allowance += state.nodes.take(migratedNodeCount).count { it.status == ModuleRevisionStatus.LEGACY_UNVERIFIED } *
                 ("legacy_unverified".length - "accepted".length)
             if (metadata.all { it.agentInvocation == null && it.publicationMode == RepairPublicationMode.TEST_ONLY_NON_RELEASE }) {
-                allowance += size(schema2) - size(state.copy(schemaVersion = 1))
+                allowance += formatOverhead(2, 1)
             }
         }
         require(allowance in 0..((state.nodes.size.toLong() + 1) * MAXIMUM_MIGRATION_BYTES_PER_NODE)) {

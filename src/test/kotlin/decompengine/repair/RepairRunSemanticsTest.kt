@@ -6,6 +6,7 @@ import decompengine.jobs.AgentProgressJournal
 import decompengine.validation.*
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.BasicFileAttributes
 import java.time.Duration
 import kotlin.io.path.*
 import kotlin.test.*
@@ -288,6 +289,56 @@ class RepairRunSemanticsTest {
             assertEquals(false, rollback.candidateSourceInstallStarted)
             assertEquals(publishedSourceRevision, rollback.expectedSourceRevisionSha256)
             assertEquals("broken", fixture.root.resolve("code.c").readText())
+        }
+    }
+
+    @Test
+    fun `finalized rollback targeting a provisional parent cannot reopen or mutate canonical state`() {
+        val fixture = fixture("pass0", "pass1", "pass0")
+        val result = fixture.loop.runRepair(fixture.root, fixture.original, inputs, maxIterations = 2)
+        assertEquals(RepairRunStatus.ITERATION_EXHAUSTED, result.runState.status)
+        val state = ModuleRevisionGraph.open(fixture.root, profile).use { it.snapshot }
+        val provisional = state.nodes.single { it.status == ModuleRevisionStatus.PROVISIONAL }
+        val rejected = state.nodes.last()
+        val rollback = requireNotNull(rejected.rollbackRecord)
+        assertEquals(provisional.id, rejected.parentId)
+        assertEquals(state.headId, rollback.targetRevisionId)
+        assertTrue(rollback.expectedSourceRevisionSha256 != provisional.sourceRevisionSha256)
+
+        val graphPath = fixture.root.resolve("reports/repair-revisions/graph.json")
+        val cleanGraph = graphPath.readBytes()
+        val tamperedGraph = cleanGraph.toString(Charsets.UTF_8)
+            .replaceFirst("\"targetRevisionId\":\"${rollback.targetRevisionId}\"",
+                "\"targetRevisionId\":\"${provisional.id}\"")
+            .replaceFirst("\"expectedSourceRevisionSha256\":\"${rollback.expectedSourceRevisionSha256}\"",
+                "\"expectedSourceRevisionSha256\":\"${provisional.sourceRevisionSha256}\"")
+            .replaceFirst("\"observedSourceRevisionSha256\":\"${rollback.observedSourceRevisionSha256}\"",
+                "\"observedSourceRevisionSha256\":\"${provisional.sourceRevisionSha256}\"")
+            .toByteArray(Charsets.UTF_8)
+        assertFalse(cleanGraph.contentEquals(tamperedGraph))
+        graphPath.writeBytes(tamperedGraph)
+        val sourcePath = fixture.root.resolve("code.c")
+        val sourceBefore = sourcePath.readBytes()
+        val sourceAttributes = Files.readAttributes(sourcePath, BasicFileAttributes::class.java)
+        val graphAttributes = Files.readAttributes(graphPath, BasicFileAttributes::class.java)
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ModuleRevisionGraph.open(fixture.root, profile).use { }
+        }
+        assertTrue(failure.message.orEmpty().contains("rollback target differs from the published head"))
+        assertContentEquals(sourceBefore, sourcePath.readBytes())
+        assertContentEquals(tamperedGraph, graphPath.readBytes())
+        val sourceAfter = Files.readAttributes(sourcePath, BasicFileAttributes::class.java)
+        val graphAfter = Files.readAttributes(graphPath, BasicFileAttributes::class.java)
+        assertEquals(sourceAttributes.fileKey(), sourceAfter.fileKey())
+        assertEquals(sourceAttributes.lastModifiedTime(), sourceAfter.lastModifiedTime())
+        assertEquals(graphAttributes.fileKey(), graphAfter.fileKey())
+        assertEquals(graphAttributes.lastModifiedTime(), graphAfter.lastModifiedTime())
+
+        graphPath.writeBytes(cleanGraph)
+        ModuleRevisionGraph.open(fixture.root, profile).use { graph ->
+            assertEquals(state, graph.snapshot)
+            assertEquals("pass0", sourcePath.readText())
         }
     }
 
