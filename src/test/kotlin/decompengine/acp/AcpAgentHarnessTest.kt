@@ -164,6 +164,108 @@ class AcpAgentHarnessTest {
         }
     }
 
+    @Test
+    fun `shutdown close cannot invalidate EOF returned before its publication`() = withReturnedStdoutEof { control, release, execution, closes ->
+        val (type, running) = control
+        val close = type.getDeclaredMethod("tryCloseStdout").apply { isAccessible = true }
+        assertEquals(false, close.invoke(running), "a returned read still owns the publication boundary")
+        assertEquals(0, closes.get())
+        assertFalse((stdoutControlField(control, "stdoutClosedForUnblocking") as AtomicBoolean).get())
+        assertFalse((stdoutControlField(control, "stdoutNaturallyDrained") as AtomicBoolean).get())
+        assertFalse((stdoutControlField(control, "stdoutDrainFinished") as java.util.concurrent.CompletableFuture<*>).isDone)
+
+        release.countDown()
+        execution.get(3, TimeUnit.SECONDS)
+
+        assertTrue((stdoutControlField(control, "stdoutNaturallyDrained") as AtomicBoolean).get())
+        assertTrue((stdoutControlField(control, "stdoutDrainFinished") as java.util.concurrent.CompletableFuture<*>).isDone)
+        assertEquals(true, close.invoke(running))
+        assertEquals(1, closes.get())
+        assertFalse((stdoutControlField(control, "stdoutClosedForUnblocking") as AtomicBoolean).get())
+    }
+
+    @Test
+    fun `actual stdout closure before a read never certifies synthetic EOF`() {
+        val closed = AtomicBoolean()
+        val reads = AtomicInteger()
+        val input = object : java.io.InputStream() {
+            override fun read(): Int { reads.incrementAndGet(); return if (closed.get()) -1 else 42 }
+            override fun close() { closed.set(true) }
+        }
+        val control = newStdoutAccountingControl(input)
+        val (type, running) = control
+        assertEquals(true, type.getDeclaredMethod("tryCloseStdout").apply { isAccessible = true }.invoke(running))
+        assertTrue(closed.get())
+        (stdoutControlField(control, "closing") as AtomicBoolean).set(true)
+        collectStdoutControl(control)
+        (stdoutControlField(control, "stdoutDrainFinished") as java.util.concurrent.CompletableFuture<*>).get(1, TimeUnit.SECONDS)
+        assertFalse((stdoutControlField(control, "stdoutNaturallyDrained") as AtomicBoolean).get())
+        assertEquals(0, reads.get(), "a closed stream cannot supply a positive EOF witness")
+    }
+
+    @Test
+    fun `unfinished stdout owner requires cleanup failure and retains admission`() = withReturnedStdoutEof { control, release, execution, _ ->
+        val (type, running) = control
+        val cleanup = type.getDeclaredMethod("stdoutReaderCleanupFailure").apply { isAccessible = true }
+        val failure = assertIs<AgentExecutionException>(cleanup.invoke(running))
+        assertEquals(AgentFailureKind.INTERNAL, failure.failure.kind)
+        assertEquals(mapOf("phase" to "stdout-drain", "reason" to "readerUnfinished"), failure.failure.details)
+        val scheduler = AcpExecutionScheduler(AcpSchedulingLimits(maximumActive = 1))
+        val permit = assertNotNull(scheduler.acquire("held-stdout", AgentCancellation.NONE) { false })
+        // The production cleanup latch charges this unfinished owner even after its native
+        // process absence proof. This state control exercises the retained admission policy.
+        permit.finish(cleanupUnverified = true)
+        val rejected = assertFailsWith<AgentExecutionException> {
+            scheduler.acquire("another-workspace", AgentCancellation.NONE) { false }
+        }
+        assertEquals(AgentFailureKind.UNAVAILABLE, rejected.failure.kind)
+        assertEquals("cleanupUnverified", rejected.failure.details["reason"])
+        release.countDown()
+        execution.get(3, TimeUnit.SECONDS)
+        assertNull(cleanup.invoke(running), "the owner eventually relinquishes its stream")
+        assertEquals(1, scheduler.snapshot().quarantined, "late completion cannot release a retained slot")
+    }
+
+    private fun stdoutControlField(control: Pair<Class<*>, Any>, name: String): Any =
+        control.first.getDeclaredField(name).apply { isAccessible = true }.get(control.second)
+
+    private fun collectStdoutControl(control: Pair<Class<*>, Any>) {
+        val method = control.first.getDeclaredMethod("stdoutFrames", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+            .apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val flow = method.invoke(control.second, 4096, 128) as kotlinx.coroutines.flow.Flow<String>
+        kotlinx.coroutines.runBlocking { flow.collect { error("a closing reader must not dispatch protocol frames") } }
+    }
+
+    private fun withReturnedStdoutEof(
+        block: (Pair<Class<*>, Any>, CountDownLatch, java.util.concurrent.Future<*>, AtomicInteger) -> Unit,
+    ) {
+        val returnedEof = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val closes = AtomicInteger()
+        val input = object : java.io.InputStream() {
+            override fun read(): Int = -1
+            override fun close() { closes.incrementAndGet() }
+        }
+        val control = newStdoutAccountingControl(input)
+        (stdoutControlField(control, "closing") as AtomicBoolean).set(true)
+        val observer: () -> Unit = {
+            returnedEof.countDown()
+            if (!release.await(3, TimeUnit.SECONDS)) throw java.io.IOException("post-read EOF barrier was not released")
+        }
+        control.first.getDeclaredField("stdoutEofPublicationObserver").apply { isAccessible = true }
+            .set(control.second, observer)
+        val executor = Executors.newSingleThreadExecutor()
+        val execution = executor.submit { collectStdoutControl(control) }
+        try {
+            assertTrue(returnedEof.await(3, TimeUnit.SECONDS), "the raw read never returned EOF")
+            block(control, release, execution, closes)
+        } finally {
+            release.countDown()
+            try { execution.get(3, TimeUnit.SECONDS) } finally { executor.shutdownNow() }
+        }
+    }
+
     private data class StdoutDrainObservation(
         val naturallyDrained: Boolean,
         val output: AcpProducedOutputEvidence,
@@ -364,7 +466,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(76, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(79, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
