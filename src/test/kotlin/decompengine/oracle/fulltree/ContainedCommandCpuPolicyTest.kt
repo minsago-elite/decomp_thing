@@ -81,9 +81,22 @@ class ContainedCommandCpuPolicyTest {
             })
         }
         assertEquals(listOf("kill", "control"), events)
+        assertEquals(
+            "contained command exhausted its aggregate CPU allowance and cleanup reserve: " +
+                "usageUsec=68000000 stopThresholdUsec=68000000",
+            failure.message,
+        )
         assertEquals("systemd control did not complete", failure.suppressed.single().message)
         assertFailsWith<IllegalStateException> {
             monitor.observe(68_000_001L, { error("must not resume") }, { error("must not resume") })
         }
+        val overshoot = assertFailsWith<IllegalArgumentException> {
+            ContainedCommandCpuBudgetMonitor(100L, 4, 8_000L).observe(68_123_456L, {}, {})
+        }
+        assertEquals(
+            "contained command exhausted its aggregate CPU allowance and cleanup reserve: " +
+                "usageUsec=68123456 stopThresholdUsec=68000000",
+            overshoot.message,
+        )
     }
 }

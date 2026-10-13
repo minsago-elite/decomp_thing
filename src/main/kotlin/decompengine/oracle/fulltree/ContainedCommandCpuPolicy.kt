@@ -140,7 +140,10 @@ internal class ContainedCommandCpuBudgetMonitor(cpuSeconds: Long, processors: In
         previousUsec = usageUsec
         if (usageUsec < stopThreshold) return
         rejected = true
-        val failure = IllegalArgumentException("contained command exhausted its aggregate CPU allowance and cleanup reserve")
+        val failure = IllegalArgumentException(
+            "contained command exhausted its aggregate CPU allowance and cleanup reserve: " +
+                "usageUsec=$usageUsec stopThresholdUsec=$stopThreshold",
+        )
         // Do not wait for systemd calls before stopping the pinned namespace init: its death
         // terminates every process in the worker PID namespace, including native decompilers.
         runCatching(terminatePinnedTree).exceptionOrNull()?.let(failure::addSuppressed)
