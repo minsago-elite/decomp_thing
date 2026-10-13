@@ -342,6 +342,79 @@ class LinuxBubblewrapBoundaryTest {
         command("mount", "--make-rprivate", "/")
         val parent = Files.createDirectory(base.resolve("controls"))
         val workspace = Files.createDirectory(base.resolve("workspace"))
+        val identityType = LinuxFilesystemSyscalls::class.java
+        val legacyIdentity = identityType.getDeclaredMethod("descriptorProcIdentity", Int::class.javaPrimitiveType)
+        val statxIdentity = identityType.getDeclaredMethod("descriptorStatxIdentity", Int::class.javaPrimitiveType)
+        var identityParityCases = 0
+        var nativeStatxCases = 0
+        fun identityParity(fd: Int) {
+            val legacy = invokePrivate(LinuxFilesystemSyscalls, legacyIdentity, fd)
+            val native = invokePrivate(LinuxFilesystemSyscalls, statxIdentity, fd)
+            assertEquals(legacy, LinuxFilesystemSyscalls.identity(fd))
+            if (native != null) {
+                assertEquals(legacy, native)
+                nativeStatxCases++
+            }
+            identityParityCases++
+        }
+        val identityFile = Files.writeString(workspace.resolve("identity-file"), "identity-parity")
+        val identityLink = Files.createSymbolicLink(workspace.resolve("identity-link"), identityFile.fileName)
+        val identityFifo = workspace.resolve("identity-fifo")
+        command("mkfifo", identityFifo.toString())
+        for (path in listOf(identityFile, workspace, identityLink, identityFifo, Path.of("/proc/self/mountinfo"))) {
+            requireNotNull(LinuxFilesystemSyscalls.openAbsolutePathOrNull(path)).use { descriptor ->
+                descriptor.whileOpen(::identityParity)
+            }
+        }
+        val unlinked = Files.writeString(workspace.resolve("identity-unlinked"), "unlinked-parity")
+        requireNotNull(LinuxFilesystemSyscalls.openAbsolutePathOrNull(unlinked)).use { descriptor ->
+            Files.delete(unlinked)
+            descriptor.whileOpen(::identityParity)
+        }
+        LinuxFilesystemSyscalls.openRoot(workspace).use { directory ->
+            try {
+                LinuxFilesystemSyscalls.createTemporaryAt(directory.fd).use { temporary -> temporary.whileOpen(::identityParity) }
+            } catch (failure: LinuxSyscallException) {
+                if (failure.errno !in setOf(21, 22, 95)) throw failure
+                println("private-control-bind-probe: O_TMPFILE identity parity unsupported errno=${failure.errno}")
+            }
+        }
+        val nativeLibrary = com.sun.jna.NativeLibrary.getInstance(com.sun.jna.Platform.C_LIBRARY_NAME)
+        com.sun.jna.Memory(8).use { pipes ->
+            assertEquals(0, nativeLibrary.getFunction("pipe2").invokeInt(arrayOf(pipes, 0x80000)))
+            try {
+                identityParity(pipes.getInt(0))
+                identityParity(pipes.getInt(4))
+            } finally {
+                assertEquals(0, nativeLibrary.getFunction("close").invokeInt(arrayOf(pipes.getInt(0))))
+                assertEquals(0, nativeLibrary.getFunction("close").invokeInt(arrayOf(pipes.getInt(4))))
+            }
+        }
+        val decodeIdentity = identityType.getDeclaredMethod("decodeDescriptorStatxIdentity", com.sun.jna.Memory::class.java)
+        com.sun.jna.Memory(256).use { incomplete ->
+            incomplete.clear()
+            incomplete.setInt(0, 0x11f) // Complete basic identity with MNT_ID explicitly missing.
+            assertEquals(null, invokePrivate(LinuxFilesystemSyscalls, decodeIdentity, incomplete))
+            incomplete.setInt(0, 0x111f)
+            assertFailsWith<IOException> { invokePrivate(LinuxFilesystemSyscalls, decodeIdentity, incomplete) }
+        }
+        val invalidIdentity = assertFailsWith<IOException> { LinuxFilesystemSyscalls.identity(-1) }
+        if (nativeStatxCases > 0) assertEquals(9, (invalidIdentity as LinuxSyscallException).errno)
+        val statxQuery = identityType.getDeclaredMethod("descriptorStatxQueryOrNull", Function0::class.java)
+        val retryQuery = identityType.getDeclaredMethod("retryOnInterrupted", String::class.java, Function0::class.java)
+        fun failedStatxQuery(errno: Int) = invokePrivate(LinuxFilesystemSyscalls, statxQuery, {
+            invokePrivate(LinuxFilesystemSyscalls, retryQuery, "statx errno dispatch regression", {
+                com.sun.jna.Native.setLastError(errno)
+                -1L
+            })
+        })
+        for (errno in listOf(38, 95)) assertEquals(null, failedStatxQuery(errno))
+        for (errno in listOf(5, 9, 13)) {
+            val genuine = assertFailsWith<LinuxSyscallException> { failedStatxQuery(errno) }
+            assertEquals(errno, genuine.errno)
+        }
+        println("private-control-bind-probe: identityParityCases=$identityParityCases nativeStatxCases=$nativeStatxCases missingMaskFallback=true invalidFdRefused=true")
+        println("private-control-bind-probe: syntheticErrnoFallbackCases=2 syntheticRealErrorsPropagated=3 actualRetryHelperExercised=true")
         val type = Class.forName("decompengine.acp.PinnedControlDirectory")
         val parentType = Class.forName("decompengine.acp.PinnedSandboxControlTemporaryParent")
         val companion = type.getDeclaredField("Companion").apply { isAccessible = true }.get(null)
@@ -350,10 +423,10 @@ class LinuxBubblewrapBoundaryTest {
         val controls = mutableListOf<Any>()
         val mounts = mutableListOf<Path>()
         var verifiedScaleDigest: String? = null
-        fun newControl(): Any = withTemporaryParent(parent.toString()) {
+        fun newControl(cleanupLimits: AcpRuntimeClosureLimits = AcpRuntimeClosureLimits(64, 4096, 8)): Any = withTemporaryParent(parent.toString()) {
             val pinnedParent = requireNotNull(invokeBoundaryPrivate("sandboxControlTemporaryParent", emptyArray()))
             try {
-                requireNotNull(invokePrivate(companion, create, AcpRuntimeClosureLimits(64, 4096, 8), pinnedParent))
+                requireNotNull(invokePrivate(companion, create, cleanupLimits, pinnedParent))
                     .also(controls::add)
             } finally {
                 invokePrivate(pinnedParent, AutoCloseable::class.java.getMethod("close"))
@@ -555,6 +628,72 @@ class LinuxBubblewrapBoundaryTest {
             assertTrue(registryChanged)
             assertTrue(registryFailure.message.orEmpty().contains("private controls changed"), registryFailure.toString())
             assertEquals(retainedDescriptorCount, openDescriptorCount(), "registry drift must release retained descriptors")
+
+            checks = 0
+            var controlModeChanged = false
+            try {
+                val modeFailure = assertFailsWith<IOException> {
+                    calculateAcpRuntimeManifestSha256(closure, scaleLimits) {
+                        if (++checks == 400) {
+                            Files.setPosixFilePermissions(firstPath, OWNER_ONLY + PosixFilePermission.GROUP_READ)
+                            controlModeChanged = true
+                        }
+                    }
+                }
+                assertTrue(controlModeChanged)
+                assertTrue(modeFailure.message.orEmpty().contains("private directory descriptor identity changed"), modeFailure.toString())
+            } finally {
+                if (controlModeChanged) Files.setPosixFilePermissions(firstPath, OWNER_ONLY)
+            }
+            assertEquals(retainedDescriptorCount, openDescriptorCount(), "control metadata drift must release retained descriptors")
+
+            val largeSource = workspace.resolve("guarded-large-runtime")
+            val largeBlock = ByteArray(1024 * 1024) { index -> (index and 0xff).toByte() }
+            Files.newOutputStream(largeSource, StandardOpenOption.CREATE_NEW).use { output ->
+                repeat(64) { output.write(largeBlock) }
+            }
+            val largeLimits = AcpRuntimeClosureLimits(10000, 536870912, 32)
+            assertEquals(64L * 1024 * 1024, Files.size(largeSource))
+            val largeDigest = calculateAcpRuntimeManifestSha256(largeSource, largeLimits)
+            assertTrue(largeDigest.matches(Regex("[0-9a-f]{64}")))
+            var byteCheckpoints = 0
+            controlModeChanged = false
+            try {
+                val chunkFailure = assertFailsWith<IOException> {
+                    calculateAcpRuntimeManifestSha256(largeSource, largeLimits) {
+                        if (Thread.currentThread().stackTrace.any { it.methodName == "copyReadableTo" } && ++byteCheckpoints == 16) {
+                            Files.setPosixFilePermissions(firstPath, OWNER_ONLY + PosixFilePermission.GROUP_READ)
+                            controlModeChanged = true
+                        }
+                    }
+                }
+                assertTrue(controlModeChanged)
+                assertTrue(chunkFailure.message.orEmpty().contains("private directory descriptor identity changed"), chunkFailure.toString())
+            } finally {
+                if (controlModeChanged) Files.setPosixFilePermissions(firstPath, OWNER_ONLY)
+            }
+            val copyControl = newControl(largeLimits)
+            byteCheckpoints = 0
+            var controlDuringCopy = false
+            val copyFailure = assertFailsWith<IOException> {
+                invokeBoundaryPrivate("stagePrivateRuntimeSnapshot", arrayOf(Path::class.java,
+                    AcpRuntimeClosureLimits::class.java, type, Function0::class.java), largeSource, largeLimits, copyControl, {
+                        if (Thread.currentThread().stackTrace.any { it.methodName == "copyReadableTo" } && ++byteCheckpoints == 16) {
+                            val concurrent = newControl()
+                            invokePrivate(concurrent, type.getDeclaredMethod("deleteAndProve"))
+                            controls.remove(concurrent)
+                            controlDuringCopy = true
+                        }
+                    })
+            }
+            assertTrue(controlDuringCopy)
+            assertTrue(copyFailure.message.orEmpty().contains("private controls changed"), copyFailure.toString())
+            assertTrue(Files.list(controlPath(copyControl)).use { it.findAny().isEmpty }, "rejected copy must prove cleanup of its partial snapshot")
+            assertEquals(largeDigest, calculateAcpRuntimeManifestSha256(largeSource, largeLimits))
+            invokePrivate(copyControl, type.getDeclaredMethod("deleteAndProve"))
+            controls.remove(copyControl)
+            assertEquals(retainedDescriptorCount, openDescriptorCount(), "large hash/copy refusal must release retained descriptors")
+            println("private-control-bind-probe: actual64MiBHashPassed=true liveChunkModeDriftRefused=true partialCopyRegistryDriftRefused=true")
 
             // Keep the original mountinfo handle: moving an existing bind and restoring it before
             // the final table comparison must still leave a detectable kernel event.

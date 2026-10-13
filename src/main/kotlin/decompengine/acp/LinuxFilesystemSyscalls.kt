@@ -713,7 +713,49 @@ internal object LinuxFilesystemSyscalls {
         }
     }
 
-    fun identity(fd: Int): LinuxFileIdentity {
+    fun identity(fd: Int): LinuxFileIdentity = descriptorStatxIdentity(fd) ?: descriptorProcIdentity(fd)
+
+    /** One descriptor-relative query preserves live checks without repeated stat/fdinfo reads. */
+    private fun descriptorStatxIdentity(fd: Int): LinuxFileIdentity? = Memory(STATX_BYTES).use { statistics ->
+        statistics.clear()
+        descriptorStatxQueryOrNull {
+            retryOnInterrupted("inspect pinned descriptor identity") {
+                libc.statx(fd, "", AT_EMPTY_PATH or AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS or STATX_MNT_ID, statistics).toLong()
+            }
+        } ?: return@use null
+        decodeDescriptorStatxIdentity(statistics)
+    }
+
+    private inline fun descriptorStatxQueryOrNull(query: () -> Long): Long? = try {
+        query()
+    } catch (_: UnsatisfiedLinkError) {
+        // Older libc implementations may lack the statx entry point altogether.
+        null
+    } catch (failure: LinuxSyscallException) {
+        // The interrupted-syscall helper throws for every other negative result.
+        if (failure.errno == ENOSYS || failure.errno == EOPNOTSUPP) null else throw failure
+    }
+
+    private fun decodeDescriptorStatxIdentity(statistics: Memory): LinuxFileIdentity? {
+        if (statistics.getInt(0) and STATX_IDENTITY_MASK != STATX_IDENTITY_MASK) return null
+        val mountId = statistics.getLong(0x90)
+        if (mountId <= 0) throw IOException("descriptor statx returned an invalid mount identity")
+        val major = statistics.getInt(0x88).toLong() and 0xffffffffL
+        val minor = statistics.getInt(0x8c).toLong() and 0xffffffffL
+        // Linux dev_t encoding, including synthetic Btrfs subvolume st_dev identities.
+        val device = ((major and 0xfffL) shl 8) or ((major and 0xfffff000L) shl 32) or
+            (minor and 0xffL) or ((minor and 0xffffff00L) shl 12)
+        val mode = statistics.getShort(0x1c).toInt() and 0xffff
+        val type = mode and 0xf000
+        return LinuxFileIdentity(
+            LinuxFileKey(device, statistics.getLong(0x20)), mode,
+            statistics.getInt(0x14), statistics.getInt(0x18), statistics.getInt(0x10), mountId,
+            isRegularFile = type == 0x8000, isDirectory = type == 0x4000, isSymbolicLink = type == 0xa000,
+        )
+    }
+
+    /** Compatibility path for kernels/libc that cannot return all requested statx identity fields. */
+    private fun descriptorProcIdentity(fd: Int): LinuxFileIdentity {
         val path = descriptorPath(fd)
         val basic = Files.readAttributes(path, BasicFileAttributes::class.java)
         val unix = Files.readAttributes(path, "unix:dev,ino,mode,uid,gid,nlink")
@@ -942,6 +984,7 @@ internal object LinuxFilesystemSyscalls {
         fun listxattr(path: String, list: Pointer?, size: NativeLong): NativeLong
         fun getxattr(path: String, name: String, value: Pointer?, size: NativeLong): NativeLong
         fun fstatvfs(fd: Int, statistics: LinuxStatVfs): Int
+        fun statx(fd: Int, path: String, flags: Int, mask: Int, statistics: Pointer): Int
     }
 
     /** Linux/glibc 64-bit `struct statvfs`; older spare[6] layouts have the same size/alignment. */
@@ -991,10 +1034,17 @@ internal object LinuxFilesystemSyscalls {
     private const val O_TMPFILE = 0x410000
     private const val OWNER_READ_WRITE = 0x180 // 0600
     private const val AT_EMPTY_PATH = 0x1000
+    private const val AT_SYMLINK_NOFOLLOW = 0x100
+    private const val STATX_BYTES = 256L
+    private const val STATX_BASIC_STATS = 0x7ff
+    private const val STATX_MNT_ID = 0x1000
+    private const val STATX_IDENTITY_MASK = 0x111f // TYPE | MODE | NLINK | UID | GID | INO | MNT_ID
     private const val AT_REMOVEDIR = 0x200
     private const val RENAME_NOREPLACE = 1
     private const val RENAME_EXCHANGE = 2
     private const val EINTR = 4
+    private const val ENOSYS = 38
+    private const val EOPNOTSUPP = 95
     private const val EWOULDBLOCK = 11
     private const val LOCK_EX = 2
     private const val LOCK_NB = 4
