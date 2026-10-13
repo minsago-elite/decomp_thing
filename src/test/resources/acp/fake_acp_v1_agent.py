@@ -1057,6 +1057,13 @@ if MODE == "eof-prompt":
 if MODE in ("wait-for-cancel", "ignore-cancel"):
     if MODE == "ignore-cancel":
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        if READY:
+            # The ready write has been acknowledged and TERM is now ignored. Only then can
+            # the host cancel while proving the uncooperative process needs termination.
+            update({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "uncooperative-cancellation-ready"},
+            })
         time.sleep(30)
         raise SystemExit(0)
     while True:
