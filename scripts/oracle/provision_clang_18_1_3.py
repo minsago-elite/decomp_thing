@@ -1309,54 +1309,154 @@ def _mask_cxx_comments_and_literals(text: str) -> str:
     return "".join(output)
 
 
-def _cxx_member_declarator_names(statement: str) -> list[str]:
+def _cxx_member_declarator_names(statement: str, class_name: str) -> list[str]:
+    """Scan the supported pinned-header declarators; reject ambiguous direct state."""
     statement = re.sub(r"\b(?:public|protected|private)\s*:\s*", " ", statement).strip()
     tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*|::|&&|->|\S", statement)
     if not tokens:
         return []
-    if tokens[0] in {"using", "typedef", "friend", "static_assert", "class", "struct", "union", "enum", "template"}:
+    identifier = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+    reserved = {"void", "bool", "char", "short", "int", "long", "signed", "unsigned",
+                "float", "double", "const", "volatile", "static", "constexpr", "mutable", "auto"}
+    if tokens[0] in {"using", "typedef", "friend", "static_assert"}:
         return []
+    if tokens[0] in {"class", "struct", "union", "enum"}:
+        if len(tokens) == 2 and identifier.fullmatch(tokens[1]):
+            return []  # A type-only forward declaration cannot add direct data state.
+        raise ProvisionError("unsupported direct state declaration in pinned LangOptions header")
+    if (tokens[0] == "template" or any(token in {"__attribute__", "__declspec"} for token in tokens) or
+            any(tokens[index:index + 2] == ["[", "["] for index in range(len(tokens)))):
+        raise ProvisionError("unsupported direct state declaration in pinned LangOptions header")
 
-    declarators = []
-    angle_depth = 0
-    for token in tokens:
+    def supported_return_type(prefix: list[str]) -> bool:
+        qualifiers = {"const", "volatile", "static", "constexpr", "consteval", "inline", "virtual", "explicit", "typename"}
+        builtin_types = {"void", "bool", "char", "short", "int", "long", "signed", "unsigned", "float", "double", "auto"}
+        atoms = 0
+        builtin = False
+        index = 0
+        while index < len(prefix):
+            token = prefix[index]
+            if token in qualifiers or token in {"*", "&", "&&"}:
+                index += 1
+            elif token in builtin_types:
+                builtin = True
+                index += 1
+            elif identifier.fullmatch(token):
+                atoms += 1
+                index += 1
+                while index + 1 < len(prefix) and prefix[index] == "::" and identifier.fullmatch(prefix[index + 1]):
+                    index += 2
+                if index < len(prefix) and prefix[index] == "<":
+                    depth = 0
+                    while index < len(prefix):
+                        if prefix[index] == "<":
+                            depth += 1
+                        elif prefix[index] == ">":
+                            depth -= 1
+                        index += 1
+                        if depth == 0:
+                            break
+                    if depth:
+                        return False
+            else:
+                return False
+        return (builtin and atoms == 0) or (not builtin and atoms == 1)
+
+    initializer_start = first_paren = len(tokens)
+    angle_depth = bracket_depth = 0
+    for index, token in enumerate(tokens):
+        if not angle_depth and not bracket_depth:
+            if token in ("=", "{"):
+                initializer_start = index
+                break
+            if token == "(":
+                first_paren = index
+                break
         if token == "<":
             angle_depth += 1
         elif token == ">" and angle_depth:
             angle_depth -= 1
-        if angle_depth == 0 and token in ("=", "{"):
-            break
-        declarators.append(token)
-    if "(" in declarators:
-        return []
+        elif token == "[":
+            bracket_depth += 1
+        elif token == "]" and bracket_depth:
+            bracket_depth -= 1
+    if first_paren < initializer_start:
+        prefix = tokens[:first_paren]
+        group_prefix = " ".join(tokens[first_paren + 1:])
+        if re.match(r"^(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*[*&]", group_prefix):
+            raise ProvisionError("unsupported direct parenthesized state declarator in pinned LangOptions header")
+        if prefix in ([class_name], ["~", class_name]):
+            return []
+        if (prefix and identifier.fullmatch(prefix[-1]) and prefix[-1] not in reserved and
+                supported_return_type(prefix[:-1])):
+            nesting = {"<": 0, "(": 0, "[": 0, "{": 0}
+            matching = {">": "<", ")": "(", "]": "[", "}": "{"}
+            for token in tokens[first_paren:]:
+                if token in nesting:
+                    nesting[token] += 1
+                elif token in matching and nesting[matching[token]]:
+                    nesting[matching[token]] -= 1
+                elif token == "," and not any(nesting.values()):
+                    raise ProvisionError("unsupported direct mixed method/state declaration in pinned LangOptions header")
+            return []  # Only a supported method prefix may discard a parameter list.
+        raise ProvisionError("unsupported direct parenthesized state declarator in pinned LangOptions header")
 
+    # Split each declarator before stripping its own initializer. Nested initializer commas
+    # and template arguments stay within their declarator rather than hiding later fields.
     chunks = []
     current = []
-    angle_depth = 0
-    for token in declarators:
-        if token == "<":
-            angle_depth += 1
-        elif token == ">" and angle_depth:
-            angle_depth -= 1
-        if token == "," and angle_depth == 0:
+    depths = {"<": 0, "(": 0, "[": 0, "{": 0}
+    closing = {">": "<", ")": "(", "]": "[", "}": "{"}
+    for token in tokens:
+        if token in depths:
+            depths[token] += 1
+        elif token in closing:
+            opener = closing[token]
+            if not depths[opener]:
+                raise ProvisionError("unsupported direct unbalanced declarator in pinned LangOptions header")
+            depths[opener] -= 1
+        if token == "," and not any(depths.values()):
             chunks.append(current)
             current = []
         else:
             current.append(token)
-    if current:
-        chunks.append(current)
+    if any(depths.values()) or not current:
+        raise ProvisionError("unsupported direct unbalanced declarator in pinned LangOptions header")
+    chunks.append(current)
+
     names = []
-    for chunk in chunks:
-        if ":" in chunk:
-            chunk = chunk[:chunk.index(":")]
-        identifiers = [token for token in chunk if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token)]
-        if len(identifiers) >= 2:
-            names.append(identifiers[-1])
+    for index, chunk in enumerate(chunks):
+        head = []
+        angle_depth = 0
+        for token in chunk:
+            if not angle_depth and token in ("=", "{", "[", ":"):
+                break
+            if token == "<":
+                angle_depth += 1
+            elif token == ">":
+                angle_depth -= 1
+            head.append(token)
+        root_identifiers = []
+        angle_depth = 0
+        for token in head:
+            if token == "<":
+                angle_depth += 1
+            elif token == ">":
+                angle_depth -= 1
+            elif not angle_depth and identifier.fullmatch(token):
+                root_identifiers.append(token)
+            elif token not in {"::", "*", "&", "&&", ","} and not angle_depth:
+                raise ProvisionError("unsupported direct state declarator in pinned LangOptions header")
+        if (not head or not identifier.fullmatch(head[-1]) or head[-1] in reserved or
+                len(root_identifiers) < (2 if index == 0 else 1) or
+                (index > 0 and len(root_identifiers) != 1)):
+            raise ProvisionError("unsupported direct state declarator in pinned LangOptions header")
+        names.append(head[-1])
     return names
 
 
 def extract_cxx_class_data_members(text: str, class_name: str) -> list[str]:
-    """Enumerate direct data-member declarations in one C++ class definition."""
+    """Enumerate supported pinned-header fields, rejecting unrecognized direct state."""
     masked = _mask_cxx_comments_and_literals(text)
     match = re.search(r"\bclass\s+" + re.escape(class_name) + r"\b[^;{}]*\{", masked)
     if match is None:
@@ -1382,8 +1482,16 @@ def extract_cxx_class_data_members(text: str, class_name: str) -> list[str]:
         if char == "{" and initializer_depth == 0:
             prefix = "".join(statement)
             declaration_head = prefix.split("=", 1)[0]
-            is_type_body = re.search(r"\b(?:class|struct|union|enum)\b", declaration_head)
+            type_head = re.sub(r"\b(?:public|protected|private)\s*:\s*", " ", declaration_head).strip()
+            is_type_body = re.match(r"^(?:class|struct|union|enum)\b", type_head)
+            if is_type_body and re.fullmatch(
+                    r"(?:class|struct|union|enum(?:\s+(?:class|struct))?)\s+[A-Za-z_][A-Za-z0-9_]*(?:\s*:\s*[^{};]+)?",
+                    type_head) is None:
+                raise ProvisionError("unsupported direct anonymous or ambiguous type/state declaration in pinned LangOptions header")
             is_function_body = "(" in declaration_head
+            if is_function_body and not is_type_body:
+                # Do not discard an unrecognized state declarator as if it were a method body.
+                is_function_body = not _cxx_member_declarator_names(prefix, class_name)
             if is_type_body or is_function_body:
                 nested = 1
                 index += 1
@@ -1406,11 +1514,16 @@ def extract_cxx_class_data_members(text: str, class_name: str) -> list[str]:
             initializer_depth -= 1
             statement.append(char)
         elif char == ";" and initializer_depth == 0:
-            names.extend(_cxx_member_declarator_names("".join(statement)))
+            # An already scanned nested type body with no following instance adds no state.
+            if "".join(statement).strip() != "__nested_member_type":
+                names.extend(_cxx_member_declarator_names("".join(statement), class_name))
             statement = []
         else:
             statement.append(char)
         index += 1
+    tail = re.sub(r"\b(?:public|protected|private)\s*:\s*", " ", "".join(statement)).strip()
+    if tail:
+        raise ProvisionError("unterminated direct state declaration in pinned LangOptions header")
     return names
 
 

@@ -1644,6 +1644,63 @@ class ProvisioningNegativeTests(unittest.TestCase):
                         provision.ProvisionError, "direct manual member inventory mismatch"):
                     provision.audit_langoptions(definition, header, self.contract)
 
+    def test_langoptions_source_audit_rejects_added_state_hidden_in_declarator_shapes(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            definition = self.langoptions_definition_fixture(base)
+            fields = self.contract["langOptions"]["manualFields"]
+            members = "\n".join(f"int {name};" for name in fields)
+            mutations = {
+                "function-pointer": members + "\nint (*AddedCallback)(int);",
+                "comma-declarator": members.replace(f"int {fields[0]};", f"int {fields[0]}, AddedMember;"),
+                "comma-initializers": members.replace(f"int {fields[0]};", f"int {fields[0]}=0, AddedMember=1;"),
+                "array-size-expression": members + "\nint Added[sizeof(int)];",
+                "template-size-expression": members + "\nstd::array<int, sizeof(int)> Added;",
+                "braced-array-size-expression": members + "\nint Added[sizeof(int)]{};",
+                "braced-template-size-expression": members + "\nstd::array<int, sizeof(int)> Added{};",
+                "gnu-attribute": members + "\nint Added __attribute__((aligned(16)));",
+                "annotation-macro": members + "\nint Added MEMBER_ATTRIBUTE(16);",
+                "mixed-method-and-field": members + "\nint method(), Added;",
+                "anonymous-union-state": members + "\nunion { int Added; };",
+            }
+            for label, changed in mutations.items():
+                header = base / f"LangOptions-{label}.h"
+                header.write_text("class LangOptions {\n" + changed + "\n};\n")
+                with self.subTest(label=label), self.assertRaisesRegex(
+                        provision.ProvisionError, "direct manual member inventory mismatch|unsupported direct"):
+                    provision.audit_langoptions(definition, header, self.contract)
+
+    def test_langoptions_member_scanner_preserves_supported_initializers_and_method_boundaries(self):
+        header = """class LangOptions {
+          int First = 0, Second = makeValue(1, 2);
+          std::vector<int> Third{1, 2}, Fourth = {3, 4};
+          unsigned Bits : 1, OtherBits : 2;
+          int Array[sizeof(int)]{};
+          std::array<int, sizeof(int)> Sized{};
+          const char *Text = "braces { commas , and fake int Added; }";
+          LangOptions() { int localOnly; }
+          ~LangOptions() {}
+          void method(int *parameter) const { int localOnly; }
+          void declaredMethod(int *parameter) const;
+          const std::vector<int> &items() const;
+          unsigned long long flags() const;
+          struct Nested { int nestedOnly; };
+        };"""
+        self.assertEqual(provision.extract_cxx_class_data_members(header, "LangOptions"),
+                         ["First", "Second", "Third", "Fourth", "Bits", "OtherBits", "Array", "Sized", "Text"])
+
+    def test_langoptions_member_scanner_rejects_unrecognized_direct_state_declarations(self):
+        for declaration in ("DECLARE_STATE(Added);", "MYSTERY_STATE;", "int (*Added)(int);",
+                            "int (LangOptions::*Added)(int);", "int [[gnu::aligned(16)]] Added;",
+                            "int Added __attribute__((aligned(16)));", "int Added __declspec(align(16));",
+                            "int Added MEMBER_ATTRIBUTE(16);",
+                            "int method(), Added;",
+                            "union { int Added; };",
+                            "template <typename T> static T Added;", "int MissingSemicolon"):
+            with self.subTest(declaration=declaration), self.assertRaisesRegex(
+                    provision.ProvisionError, "unsupported direct|unterminated direct"):
+                provision.extract_cxx_class_data_members("class LangOptions {" + declaration + "};", "LangOptions")
+
     def test_source_patch_audit_emits_rejection_for_contract_file_difference(self):
         with self.temporary_directory() as temp:
             base = Path(temp)
