@@ -1778,13 +1778,93 @@ def file_entry(rootfs: Path, absolute_path: str) -> dict:
     return {"path": absolute_path, "bytes": len(data), "sha256": sha256(data)}
 
 
+def runtime_file_entry(rootfs: Path, absolute_path: str) -> dict:
+    """Retain file kind and symlink bytes so the recorded closure is independently projectable."""
+    _, path = symlink_chain(rootfs, absolute_path, follow_leaf=False)
+    if path.is_symlink():
+        # Interpret absolute targets in the rootfs, never against the host filesystem.
+        symlink_chain(rootfs, absolute_path, allow_directory_target=True)
+        target = os.readlink(path)
+        try:
+            target_bytes = target.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as error:
+            raise ProvisionError("runtime symlink target is not valid UTF-8") from error
+        if len(target_bytes) > 4096:
+            raise ProvisionError("runtime symlink target is outside filesystem bounds")
+        return {"path": absolute_path, "bytes": len(target_bytes), "sha256": sha256(b"symlink\0" + target_bytes),
+                "kind": "symlink", "target": target}
+    data = path.read_bytes()
+    return {"path": absolute_path, "bytes": len(data), "sha256": sha256(data),
+            "kind": "regular-file", "target": None}
+
+
 def manifest(entries: list[dict]) -> dict:
     entries.sort(key=lambda row: row["path"])
     content = canonical_json({"entries": entries})
     return {"entryCount": len(entries), "bytes": len(content), "sha256": sha256(content), "entries": entries}
 
 
-def symlink_chain(rootfs: Path, logical_path: str) -> tuple[list[str], Path]:
+def validated_runtime_entries(runtime: object) -> list[dict]:
+    if not isinstance(runtime, dict) or set(runtime) != {"entryCount", "bytes", "sha256", "entries"}:
+        raise ProvisionError("build record runtime manifest is malformed")
+    if (type(runtime["entryCount"]) is not int or runtime["entryCount"] < 1 or
+            type(runtime["bytes"]) is not int or runtime["bytes"] < 1 or
+            not isinstance(runtime["sha256"], str) or re.fullmatch(r"[0-9a-f]{64}", runtime["sha256"]) is None):
+        raise ProvisionError("build record runtime manifest has invalid count or byte identity")
+    entries = runtime.get("entries")
+    if not isinstance(entries, list) or not entries:
+        raise ProvisionError("build record runtime manifest is empty or malformed")
+    paths = []
+    for row in entries:
+        if isinstance(row, dict) and set(row) - {"path", "bytes", "sha256", "kind", "target"}:
+            raise ProvisionError("build record violates checked-in schema at runtime entry: unknown field")
+        if not isinstance(row, dict) or set(row) != {"path", "bytes", "sha256", "kind", "target"}:
+            raise ProvisionError("build record runtime entry lacks exact file classification metadata")
+        path, size, digest, kind, target = (row[key] for key in ("path", "bytes", "sha256", "kind", "target"))
+        if (not isinstance(path, str) or not path.startswith("/") or path.startswith("//") or
+                any(part in ("", ".", "..") for part in path[1:].split("/")) or "\0" in path or "\\" in path or
+                type(size) is not int or size < 0 or not isinstance(digest, str) or
+                re.fullmatch(r"[0-9a-f]{64}", digest) is None):
+            raise ProvisionError("build record runtime entry has invalid file identity")
+        try:
+            path_bytes = path.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as error:
+            raise ProvisionError("build record runtime path is not valid UTF-8") from error
+        if len(path_bytes) > 4096 or any(len(part.encode("utf-8")) > 255 for part in path[1:].split("/")):
+            raise ProvisionError("build record runtime path is outside filesystem bounds")
+        if kind == "regular-file":
+            if target is not None:
+                raise ProvisionError("regular runtime file must not carry a symlink target")
+            if len(b"toolchain") + len(path_bytes) > 4096:
+                raise ProvisionError("regular runtime projection path is outside the A-loader bound")
+        elif kind == "symlink":
+            if not isinstance(target, str) or not target or "\0" in target:
+                raise ProvisionError("runtime symlink target is malformed")
+            try:
+                target_bytes = target.encode("utf-8", errors="strict")
+            except UnicodeEncodeError as error:
+                raise ProvisionError("runtime symlink target is not valid UTF-8") from error
+            if len(target_bytes) > 4096 or size != len(target_bytes) or digest != sha256(b"symlink\0" + target_bytes):
+                raise ProvisionError("runtime symlink target differs from its recorded byte identity")
+        else:
+            raise ProvisionError("build record runtime file kind is unsupported")
+        paths.append(path)
+    if paths != sorted(set(paths), key=lambda path: path.encode("utf-8")):
+        raise ProvisionError("build record runtime paths are duplicated or not in canonical order")
+    expected = manifest(list(entries))
+    if any(runtime[key] != expected[key] for key in ("entryCount", "bytes", "sha256")):
+        raise ProvisionError("build record runtime manifest digest/count mismatch")
+    return entries
+
+
+def verify_recorded_runtime_manifest(rootfs: Path, record: dict) -> None:
+    for row in validated_runtime_entries(record.get("runtime")):
+        if runtime_file_entry(rootfs, row["path"]) != row:
+            raise ProvisionError(f"runtime file classification or bytes changed before A-loader smoke: {row['path']}")
+
+
+def symlink_chain(rootfs: Path, logical_path: str, follow_leaf: bool = True,
+                  allow_directory_target: bool = False) -> tuple[list[str], Path]:
     rootfs = rootfs.resolve(strict=True)
     pure = PurePosixPath(logical_path)
     if not pure.is_absolute() or ".." in pure.parts:
@@ -1803,7 +1883,7 @@ def symlink_chain(rootfs: Path, logical_path: str) -> tuple[list[str], Path]:
             current = current.parent
             continue
         candidate = current / part
-        if candidate.is_symlink():
+        if candidate.is_symlink() and (pending or follow_leaf):
             rel = candidate.relative_to(rootfs).as_posix()
             if rel in visited or len(chain) >= 16:
                 raise ProvisionError(f"symlink cycle/depth overflow for {logical_path}")
@@ -1819,7 +1899,8 @@ def symlink_chain(rootfs: Path, logical_path: str) -> tuple[list[str], Path]:
             current = candidate
             if pending and not current.is_dir():
                 raise ProvisionError(f"driver symlink chain contains a missing/non-directory component: {logical_path}")
-    if not current.is_file():
+    if (not current.is_file() and not (not follow_leaf and current.is_symlink()) and
+            not (allow_directory_target and current.is_dir())):
         raise ProvisionError(f"driver resolves to non-regular file: {logical_path}")
     return chain, current
 
@@ -1856,11 +1937,10 @@ def runtime_dependencies(rootfs: Path, logical_paths: list[str], contract: dict)
     for path in sorted(paths):
         chain, target = symlink_chain(rootfs, path)
         if target.is_file():
-            content = target.read_bytes()
             target_path = "/" + target.relative_to(rootfs).as_posix()
-            entries.append({"path": target_path, "bytes": len(content), "sha256": sha256(content)})
+            entries.append(runtime_file_entry(rootfs, target_path))
             for link in chain:
-                entries.append(file_entry(rootfs, link.split(" -> ", 1)[0]))
+                entries.append(runtime_file_entry(rootfs, link.split(" -> ", 1)[0]))
     # Same file path can appear through multiple executable mappings; retain one row.
     by_path = {row["path"]: row for row in entries}
     return sorted(by_path.values(), key=lambda row: row["path"])
@@ -2545,6 +2625,9 @@ def validate_build_record(record: dict, contract: dict, contract_path: Path = CO
         raise ProvisionError("build record probe bytes are not authenticated")
 
     for name in ("runtime", "resources"):
+        if name == "runtime":
+            validated_runtime_entries(record.get("runtime"))
+            continue
         value = record.get(name, {})
         entries = value.get("entries", [])
         expected = manifest(list(entries))
@@ -2682,20 +2765,8 @@ def command_write_loader_input(args: argparse.Namespace) -> int:
         raise ProvisionError("C++ driver executable mode changed before A-loader smoke")
     path_value = contract["environment"]["PATH"]
     profile_digest = sha256(canonical_json(record["profile"]))
-    runtime_rows = []
-    for row in record["runtime"]["entries"]:
-        runtime_file = rootfs_path(rootfs_dir, row["path"])
-        if runtime_file.is_symlink():
-            actual = file_entry(rootfs_dir, row["path"])
-            if actual["bytes"] != row["bytes"] or actual["sha256"] != row["sha256"]:
-                raise ProvisionError(f"runtime symlink bytes changed before A-loader smoke: {row['path']}")
-            continue
-        if not runtime_file.is_file() or sha256_file(runtime_file) != row["sha256"]:
-            raise ProvisionError(f"runtime library bytes changed before A-loader smoke: {row['path']}")
-        normalized = "toolchain" + row["path"]
-        if row["sha256"] != tool["sha256"]:
-            runtime_rows.append((normalized, row["sha256"]))
-    runtime_rows.sort(key=lambda row: row[0].encode("utf-8"))
+    verify_recorded_runtime_manifest(rootfs_dir, record)
+    runtime_rows = [(row["path"], row["sha256"]) for row in frontend_runtime_library_digests(record)]
     values = {
         "rootfs": str(rootfs_dir),
         "buildRecordSha256": sha256(args.record.read_bytes()),
@@ -2830,34 +2901,24 @@ def frontend_path_transform_sha256(record: dict) -> str:
     return domain_hash("decomp-thing/generic-template/path-transform/v1", transform)
 
 
-def frontend_profile_projection_preimage(record: dict, record_sha256: str,
-                                          runtime_rows: object) -> dict:
-    """Build A's exact profile preimage, binding its runtime rows to the recorded closure."""
-    if not isinstance(runtime_rows, list) or not runtime_rows:
-        raise ProvisionError("A-loader profile projection has no runtime-library rows")
+def frontend_runtime_library_digests(record: dict) -> list[dict]:
+    """Project the complete regular-file closure from authenticated classification metadata."""
     tool = next((row for row in record.get("tools", []) if row.get("role") == "cxx-driver"), None)
     if not isinstance(tool, dict):
         raise ProvisionError("build record has no C++ driver for the A-loader projection")
-    recorded_runtime = {
-        ("toolchain" + row["path"], row["sha256"])
-        for row in record.get("runtime", {}).get("entries", [])
-        if isinstance(row, dict) and isinstance(row.get("path"), str) and isinstance(row.get("sha256"), str)
-    }
-    normalized_runtime = []
-    seen_paths = set()
-    for row in runtime_rows:
-        if not isinstance(row, dict) or set(row) != {"path", "sha256"}:
-            raise ProvisionError("A-loader profile projection runtime row is malformed")
-        path, digest = row.get("path"), row.get("sha256")
-        if (not isinstance(path, str) or not isinstance(digest, str) or
-                not re.fullmatch(r"toolchain/[^\x00]+", path) or
-                not re.fullmatch(r"[0-9a-f]{64}", digest) or digest == tool["sha256"] or
-                (path, digest) not in recorded_runtime or path in seen_paths):
-            raise ProvisionError("A-loader profile projection runtime row differs from the build-record closure")
-        seen_paths.add(path)
-        normalized_runtime.append({"path": path, "sha256": digest})
-    if normalized_runtime != sorted(normalized_runtime, key=lambda row: row["path"].encode("utf-8")):
-        raise ProvisionError("A-loader profile projection runtime rows are not in canonical path order")
+    rows = [{"path": "toolchain" + row["path"], "sha256": row["sha256"]}
+            for row in validated_runtime_entries(record.get("runtime"))
+            if row["kind"] == "regular-file" and row["sha256"] != tool["sha256"]]
+    if not rows:
+        raise ProvisionError("A-loader profile projection has no runtime-library rows")
+    return rows
+
+
+def frontend_profile_projection_preimage(record: dict, record_sha256: str) -> dict:
+    """Build A's exact profile preimage independently of a supplied loader report."""
+    tool = next((row for row in record.get("tools", []) if row.get("role") == "cxx-driver"), None)
+    if not isinstance(tool, dict):
+        raise ProvisionError("build record has no C++ driver for the A-loader projection")
     return {
         "adapterApiVersion": "clang-libtooling-18.1.3-v1",
         "adapterSha256": sha256_file(ROOT / "oracle/clang/18.1.3/Clang1813AProfileLoaderSmoke.java"),
@@ -2868,7 +2929,7 @@ def frontend_profile_projection_preimage(record: dict, record_sha256: str,
         "resourceHeaderManifestSha256": frontend_resource_manifest_sha256(
             record["resourceDirectory"], record["resources"]),
         "resolvedResourceDirectory": "toolchain" + record["resourceDirectory"],
-        "runtimeLibraryDigests": normalized_runtime,
+        "runtimeLibraryDigests": frontend_runtime_library_digests(record),
         "targetTriple": record["probe"]["target"],
         "toolchainProfileSha256": sha256(canonical_json(record["profile"])),
     }
@@ -2899,9 +2960,7 @@ def validate_provenance_loader_report(report: dict, record: dict, record_sha256:
     projection = report.get("infrastructureProfileProjection")
     if not isinstance(projection, dict):
         raise ProvisionError("A-loader smoke report lacks its frontend profile projection preimage")
-    expected_projection = frontend_profile_projection_preimage(
-        record, record_sha256, projection.get("runtimeLibraryDigests"),
-    )
+    expected_projection = frontend_profile_projection_preimage(record, record_sha256)
     if projection != expected_projection:
         raise ProvisionError("A-loader smoke report frontend profile projection differs from the build record")
     if report.get("infrastructureProfileProjectionSha256") != frontend_profile_projection_sha256(expected_projection):

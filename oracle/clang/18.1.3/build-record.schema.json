@@ -38,7 +38,7 @@
       "type": "array", "minItems": 2, "maxItems": 2,
       "items": {"$ref": "#/$defs/tool"}
     },
-    "runtime": {"$ref": "#/$defs/manifest"},
+    "runtime": {"$ref": "#/$defs/runtimeManifest"},
     "resources": {"$ref": "#/$defs/manifest"},
     "resourceDirectory": {"type": "string", "pattern": "^/usr/lib/llvm-18/.*$"},
     "probe": {"$ref": "#/$defs/probe"},
@@ -118,6 +118,32 @@
       "type": "object", "additionalProperties": false,
       "required": ["path", "bytes", "sha256"],
       "properties": {"path": {"type": "string", "minLength": 1}, "bytes": {"type": "integer", "minimum": 0}, "sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "runtimeManifest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["entryCount", "bytes", "sha256", "entries"],
+      "properties": {
+        "entryCount": {"type": "integer", "minimum": 1},
+        "bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "entries": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/runtimeEntry"}}
+      }
+    },
+    "runtimeEntry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "bytes", "sha256", "kind", "target"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "bytes": {"type": "integer", "minimum": 0},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "kind": {"enum": ["regular-file", "symlink"]},
+        "target": {"type": ["string", "null"], "minLength": 1, "maxLength": 4096}
+      },
+      "allOf": [
+        {"if": {"properties": {"kind": {"const": "regular-file"}}},
+         "then": {"properties": {"target": {"type": "null"}}},
+         "else": {"properties": {"target": {"type": "string"}}}}
+      ]
     },
     "package": {
       "type": "object", "additionalProperties": false,

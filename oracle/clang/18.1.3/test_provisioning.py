@@ -56,8 +56,10 @@ class ProvisioningNegativeTests(unittest.TestCase):
             "versionOutput": "clang version 18.1.3\n",
         }
         file_manifest = provision.manifest([
-            {"path": "/usr/lib/llvm-18/lib/libclang-cpp.so", "bytes": 1, "sha256": digest},
-            {"path": "/usr/lib/llvm-18/lib/libLLVM-18.so", "bytes": 2, "sha256": "b" * 64},
+            {"path": "/usr/lib/llvm-18/lib/libclang-cpp.so", "bytes": 1, "sha256": digest,
+             "kind": "regular-file", "target": None},
+            {"path": "/usr/lib/llvm-18/lib/libLLVM-18.so", "bytes": 2, "sha256": "b" * 64,
+             "kind": "regular-file", "target": None},
         ])
         resources = provision.manifest([{"path": "/usr/lib/llvm-18/lib/clang/18.1.3/include/stddef.h",
                                          "bytes": 1, "sha256": digest}])
@@ -128,12 +130,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
         })
 
     def valid_loader_report(self, record, record_sha):
-        compiler_sha = next(tool["sha256"] for tool in record["tools"] if tool["role"] == "cxx-driver")
-        runtime_rows = [
-            {"path": "toolchain" + row["path"], "sha256": row["sha256"]}
-            for row in record["runtime"]["entries"] if row["sha256"] != compiler_sha
-        ]
-        projection = provision.frontend_profile_projection_preimage(record, record_sha, runtime_rows)
+        projection = provision.frontend_profile_projection_preimage(record, record_sha)
         return {
             "scope": "infrastructure-loader-smoke-only",
             "buildRecordSha256": record_sha,
@@ -549,6 +546,167 @@ class ProvisioningNegativeTests(unittest.TestCase):
                              provision.sha256(b"clang library"))
             self.assertEqual(by_path["/usr/lib/llvm-18/lib/libclang-cpp.so"]["sha256"],
                              provision.sha256(b"symlink\0libclang-cpp.so.18.1"))
+            self.assertEqual(by_path["/usr/lib/llvm-18/lib/libclang-cpp.so"]["kind"], "symlink")
+            self.assertEqual(by_path["/usr/lib/llvm-18/lib/libclang-cpp.so"]["target"], "libclang-cpp.so.18.1")
+            self.assertEqual(by_path["/usr/lib/llvm-18/lib/libclang-cpp.so.18.1"]["kind"], "regular-file")
+            self.assertIsNone(by_path["/usr/lib/llvm-18/lib/libclang-cpp.so.18.1"]["target"])
+
+    def test_loader_projection_rejects_rehashed_runtime_omissions_extra_duplicate_and_order_changes(self):
+        record = self.valid_build_record()
+        target = "libclang-cpp.so.18.1"
+        record["runtime"] = provision.manifest([
+            {"path": "/usr/lib/llvm-18/lib/libLLVM-18.so.1", "bytes": 2, "sha256": "b" * 64,
+             "kind": "regular-file", "target": None},
+            {"path": "/usr/lib/llvm-18/lib/libclang-cpp.so.18.1", "bytes": 3, "sha256": "c" * 64,
+             "kind": "regular-file", "target": None},
+            {"path": "/usr/lib/llvm-18/lib/libclang-cpp.so", "bytes": len(target),
+             "sha256": provision.sha256(b"symlink\0" + target.encode()), "kind": "symlink", "target": target},
+        ])
+        record_sha = provision.sha256(provision.canonical_json(record))
+        report = self.valid_loader_report(record, record_sha)
+        expected_rows = [
+            {"path": "toolchain/usr/lib/llvm-18/lib/libLLVM-18.so.1", "sha256": "b" * 64},
+            {"path": "toolchain/usr/lib/llvm-18/lib/libclang-cpp.so.18.1", "sha256": "c" * 64},
+        ]
+        self.assertEqual(report["infrastructureProfileProjection"]["runtimeLibraryDigests"], expected_rows)
+        provision.validate_provenance_loader_report(report, record, record_sha)
+        symlink = next(row for row in record["runtime"]["entries"] if row["kind"] == "symlink")
+        mutations = {
+            "omitted": expected_rows[:1],
+            "extra": [*expected_rows, {"path": "toolchain/usr/lib/llvm-18/lib/unrecorded.so", "sha256": "d" * 64}],
+            "duplicate": [*expected_rows, expected_rows[-1]],
+            "reordered": list(reversed(expected_rows)),
+            "symlink-added": [*expected_rows, {"path": "toolchain" + symlink["path"], "sha256": symlink["sha256"]}],
+            "wrong-bytes": [expected_rows[0], {**expected_rows[1], "sha256": "d" * 64}],
+        }
+        for label, rows in mutations.items():
+            changed = json.loads(json.dumps(report))
+            projection = changed["infrastructureProfileProjection"]
+            projection["runtimeLibraryDigests"] = rows
+            changed["infrastructureProfileProjectionSha256"] = provision.frontend_profile_projection_sha256(projection)
+            with self.subTest(label=label), self.assertRaisesRegex(provision.ProvisionError, "projection differs"):
+                provision.validate_provenance_loader_report(changed, record, record_sha)
+
+    def test_runtime_manifest_rejects_missing_classification_and_inconsistent_symlink_bytes(self):
+        target = "library.so.1"
+        baseline = provision.manifest([
+            {"path": "/usr/lib/library.so.1", "bytes": 2, "sha256": "b" * 64,
+             "kind": "regular-file", "target": None},
+            {"path": "/usr/lib/library.so", "bytes": len(target),
+             "sha256": provision.sha256(b"symlink\0" + target.encode()), "kind": "symlink", "target": target},
+        ])
+        provision.validated_runtime_entries(baseline)
+        mutations = {
+            "missing-kind": lambda rows: rows[0].pop("kind"),
+            "missing-target": lambda rows: rows[0].pop("target"),
+            "unknown-kind": lambda rows: rows[0].update(kind="unknown"),
+            "regular-target": lambda rows: rows[1].update(target=target),
+            "symlink-null-target": lambda rows: rows[0].update(target=None),
+            "changed-target": lambda rows: rows[0].update(target="different.so"),
+            "changed-size": lambda rows: rows[0].update(bytes=1),
+            "changed-sha": lambda rows: rows[0].update(sha256="d" * 64),
+            "nul-target": lambda rows: rows[0].update(target="bad\0target"),
+            "surrogate-target": lambda rows: rows[0].update(target="\ud800"),
+            "oversize-target": lambda rows: rows[0].update(target="x" * 4097),
+            "duplicate": lambda rows: rows.append(dict(rows[-1])),
+            "reordered": lambda rows: rows.reverse(),
+            "unknown-field": lambda rows: rows[0].update(accepted=True),
+        }
+        for label, mutate in mutations.items():
+            changed = json.loads(json.dumps(baseline))
+            mutate(changed["entries"])
+            with self.subTest(label=label), self.assertRaises(provision.ProvisionError):
+                provision.validated_runtime_entries(changed)
+
+    def test_recorded_runtime_rechecks_kind_targets_and_bytes_in_rootfs(self):
+        with self.temporary_directory() as temp:
+            rootfs = Path(temp) / "rootfs"
+            directory = rootfs / "usr/lib"
+            directory.mkdir(parents=True)
+            library = directory / "library.so.1"
+            library.write_bytes(b"library bytes")
+            link = directory / "library.so"
+            link.symlink_to("/usr/lib/library.so.1")
+            rows = [provision.runtime_file_entry(rootfs, "/usr/lib/library.so.1"),
+                    provision.runtime_file_entry(rootfs, "/usr/lib/library.so")]
+            record = {"runtime": provision.manifest(rows)}
+            provision.verify_recorded_runtime_manifest(rootfs, record)
+
+            link.unlink()
+            link.write_bytes(b"library bytes")
+            with self.assertRaisesRegex(provision.ProvisionError, "classification or bytes changed"):
+                provision.verify_recorded_runtime_manifest(rootfs, record)
+            link.unlink()
+            link.symlink_to("library.so.1")
+            with self.assertRaisesRegex(provision.ProvisionError, "classification or bytes changed"):
+                provision.verify_recorded_runtime_manifest(rootfs, record)
+            link.unlink()
+            link.symlink_to("/usr/lib/library.so.1")
+            library.write_bytes(b"changed library bytes")
+            with self.assertRaisesRegex(provision.ProvisionError, "classification or bytes changed"):
+                provision.verify_recorded_runtime_manifest(rootfs, record)
+            library.write_bytes(b"library bytes")
+            duplicate = directory / "identical.so.1"
+            duplicate.write_bytes(b"library bytes")
+            library.unlink()
+            library.symlink_to("identical.so.1")
+            with self.assertRaisesRegex(provision.ProvisionError, "classification or bytes changed"):
+                provision.verify_recorded_runtime_manifest(rootfs, record)
+
+    def test_runtime_classification_preserves_resources_manifest_wire(self):
+        with self.temporary_directory() as temp:
+            rootfs = Path(temp) / "rootfs"
+            file = rootfs / "usr/lib/library.so.1"
+            file.parent.mkdir(parents=True)
+            file.write_bytes(b"library bytes")
+            self.assertEqual(set(provision.file_entry(rootfs, "/usr/lib/library.so.1")), {"path", "bytes", "sha256"})
+            self.assertEqual(set(provision.runtime_file_entry(rootfs, "/usr/lib/library.so.1")),
+                             {"path", "bytes", "sha256", "kind", "target"})
+
+    def test_runtime_dependencies_retain_directory_aliases_without_projecting_them_as_libraries(self):
+        with self.temporary_directory() as temp:
+            rootfs = Path(temp) / "rootfs"
+            llvm_lib = rootfs / "usr/lib/llvm-18/lib"
+            llvm_lib.mkdir(parents=True)
+            (llvm_lib / "libclang-cpp.so").write_bytes(b"clang library")
+            (llvm_lib / "libLLVM-18.so").write_bytes(b"llvm library")
+            libc = rootfs / "usr/lib/x86_64-linux-gnu/libc.so.6"
+            libc.parent.mkdir(parents=True)
+            libc.write_bytes(b"libc library")
+            (rootfs / "lib").symlink_to("usr/lib")
+            with mock.patch.object(provision, "rootfs_run", return_value="libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x1234)"):
+                rows = provision.runtime_dependencies(rootfs, ["/usr/bin/clang-18"], self.contract)
+            by_path = {row["path"]: row for row in rows}
+            self.assertEqual(by_path["/lib"], {
+                "path": "/lib", "bytes": len("usr/lib"), "sha256": provision.sha256(b"symlink\0usr/lib"),
+                "kind": "symlink", "target": "usr/lib",
+            })
+            self.assertEqual(by_path["/usr/lib/x86_64-linux-gnu/libc.so.6"]["kind"], "regular-file")
+            record = self.valid_build_record()
+            record["runtime"] = provision.manifest(rows)
+            provision.verify_recorded_runtime_manifest(rootfs, record)
+            self.assertEqual(len(provision.frontend_runtime_library_digests(record)), 3)
+            self.assertNotIn("toolchain/lib", [row["path"] for row in provision.frontend_runtime_library_digests(record)])
+            # Driver resolution still requires a regular file, even though runtime alias metadata permits directories.
+            with self.assertRaisesRegex(provision.ProvisionError, "non-regular file"):
+                provision.symlink_chain(rootfs, "/lib")
+
+    def test_runtime_manifest_headers_and_projection_paths_match_schema_and_a_loader_bounds(self):
+        entry = {"path": "/usr/lib/library.so.1", "bytes": 2, "sha256": "b" * 64,
+                 "kind": "regular-file", "target": None}
+        baseline = provision.manifest([entry])
+        for field, value in (("entryCount", True), ("entryCount", 1.0), ("entryCount", 0),
+                             ("bytes", float(baseline["bytes"])), ("bytes", False), ("bytes", 0)):
+            changed = dict(baseline, **{field: value})
+            with self.subTest(field=field, value=value), self.assertRaises(provision.ProvisionError):
+                provision.validated_runtime_entries(changed)
+        exact_path = "/" + ("a" * 255 + "/") * 15 + "b" * 246
+        self.assertEqual(len(("toolchain" + exact_path).encode()), 4096)
+        provision.validated_runtime_entries(provision.manifest([{**entry, "path": exact_path}]))
+        for path in (exact_path + "b", "/usr/lib/back\\slash.so", "/usr/lib/../library.so", "/usr//lib/library.so"):
+            changed = provision.manifest([{**entry, "path": path}])
+            with self.subTest(path=path), self.assertRaises(provision.ProvisionError):
+                provision.validated_runtime_entries(changed)
 
     def test_driver_and_runtime_symlinks_retain_every_hop_and_enforce_limit(self):
         with self.temporary_directory() as temp:
