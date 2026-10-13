@@ -36,6 +36,15 @@ ROOT = Path(__file__).resolve().parents[2]
 CONTRACT_PATH = ROOT / "oracle/clang/18.1.3/provisioning-contract.json"
 DEFAULT_KEYRING = Path("/usr/share/keyrings/ubuntu-archive-keyring.gpg")
 APT_KEYRING_IN_ROOT = "/usr/share/keyrings/decomp-thing-ubuntu-archive-keyring.gpg"
+PROBE_RETAIN_DIRECTORY = "/usr/local/libexec/decomp-thing/clang-18.1.3"
+PROBE_SOURCE_IN_ROOT = PROBE_RETAIN_DIRECTORY + "/libtooling-probe.cpp"
+PROBE_BINARY_IN_ROOT = PROBE_RETAIN_DIRECTORY + "/libtooling-probe"
+PROBE_FIXTURE_IN_ROOT = PROBE_RETAIN_DIRECTORY + "/libtooling-positive.cpp"
+PROBE_SANDBOX_BLOCK_REASON = (
+    "Clang probe execution is disabled: this provisioning CLI has no reviewed unprivileged "
+    "bubblewrap/cgroup-v2 adapter with capability dropping, CPU/RSS/process/disk/output/wall-time "
+    "limits, and descendant cleanup; do not substitute sudo chroot"
+)
 OCI_INDEX_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json"
 OCI_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
 OCI_CONFIG_MEDIA_TYPE = "application/vnd.oci.image.config.v1+json"
@@ -2035,27 +2044,29 @@ def check_rootfs_tar_budget(rootfs: Path, maximum_bytes: int) -> None:
     entry_count = 1  # tar includes the root directory as '.'
     payload_bytes = 0
     max_entries = maximum_bytes // 8192
-    def reject_walk_error(error: OSError) -> None:
-        raise error
-
     try:
-        for directory, dirnames, filenames in os.walk(rootfs, followlinks=False, onerror=reject_walk_error):
-            dirnames.sort()
-            filenames.sort()
-            current = Path(directory)
-            for name in [*dirnames, *filenames]:
-                entry_count += 1
-                if entry_count > max_entries:
-                    raise ProvisionError("rootfs entry count exceeds the canonical archive budget")
-                entry = current / name
-                mode = entry.lstat().st_mode
-                if stat.S_ISREG(mode):
-                    payload_bytes += entry.lstat().st_size
-                elif not (stat.S_ISDIR(mode) or stat.S_ISLNK(mode) or stat.S_ISCHR(mode) or
-                          stat.S_ISBLK(mode) or stat.S_ISFIFO(mode)):
-                    raise ProvisionError("rootfs contains an unsupported filesystem entry")
-                if payload_bytes + entry_count * 8192 > maximum_bytes:
-                    raise ProvisionError("rootfs contents exceed the canonical archive byte budget")
+        pending = [rootfs]
+        while pending:
+            current = pending.pop()
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    name = entry.name
+                    if name in (".", ".."):
+                        raise ProvisionError("rootfs contains an invalid directory entry")
+                    entry_count += 1
+                    if entry_count > max_entries:
+                        raise ProvisionError("rootfs entry count exceeds the canonical archive budget")
+                    metadata = entry.stat(follow_symlinks=False)
+                    mode = metadata.st_mode
+                    if stat.S_ISREG(mode):
+                        payload_bytes += metadata.st_size
+                    elif stat.S_ISDIR(mode):
+                        pending.append(current / name)
+                    elif not (stat.S_ISLNK(mode) or stat.S_ISCHR(mode) or
+                              stat.S_ISBLK(mode) or stat.S_ISFIFO(mode)):
+                        raise ProvisionError("rootfs contains an unsupported filesystem entry")
+                    if payload_bytes + entry_count * 8192 > maximum_bytes:
+                        raise ProvisionError("rootfs contents exceed the canonical archive byte budget")
     except OSError as error:
         raise ProvisionError(f"could not inspect retained rootfs for archive bounds: {error}") from error
 
@@ -2072,6 +2083,16 @@ def rootfs_run(rootfs: Path, command: list[str], contract: dict, timeout: int = 
     return run_checked(
         ["sudo", "chroot", str(rootfs), *env_args, *command], timeout=timeout,
     ).stdout
+
+
+def run_probe_sandboxed(rootfs: Path, command: list[str], contract: dict,
+                        timeout: int = 120) -> str:
+    """Fail closed until the reviewed unprivileged resource-bounded adapter is available.
+
+    This intentionally has no fallback to rootfs_run/run_checked: sudo chroot does not
+    contain a candidate probe or descendants and their output is not bounded there.
+    """
+    raise ProvisionError(PROBE_SANDBOX_BLOCK_REASON)
 
 
 def candidate_build_evidence(candidate: dict, contract: dict) -> dict:
@@ -2146,6 +2167,100 @@ def verify_candidate_download_inventory(candidate_root: Path, candidate: dict) -
         raise ProvisionError("candidate download inventory contains unrecorded files")
 
 
+def copy_verified_source_payload(source: Path, destination: Path, expected_bytes: int,
+                                 expected_sha256: str) -> None:
+    """Copy one already-authenticated retained payload into fresh scratch, rechecking bytes."""
+    if (type(expected_bytes) is not int or expected_bytes < 0 or not isinstance(expected_sha256, str) or
+            not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)):
+        raise ProvisionError("authenticated source payload identity is malformed")
+    digest = hashlib.sha256()
+    copied = 0
+    try:
+        source_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+        with os.fdopen(os.open(source, source_flags), "rb") as incoming:
+            if not stat.S_ISREG(os.fstat(incoming.fileno()).st_mode):
+                raise ProvisionError("authenticated source payload is not a regular file")
+            with destination.open("xb") as outgoing:
+                while True:
+                    block = incoming.read(1024 * 1024)
+                    if not block:
+                        break
+                    copied += len(block)
+                    if copied > expected_bytes:
+                        raise ProvisionError("verified source payload grew while copying to audit scratch")
+                    digest.update(block)
+                    outgoing.write(block)
+    except ProvisionError:
+        destination.unlink(missing_ok=True)
+        raise
+    except OSError as error:
+        destination.unlink(missing_ok=True)
+        raise ProvisionError(f"could not copy verified source payload to audit scratch: {error}") from error
+    if copied != expected_bytes or digest.hexdigest() != expected_sha256:
+        destination.unlink(missing_ok=True)
+        raise ProvisionError("verified source payload changed while copying to audit scratch")
+
+
+def audit_fresh_source_payloads(candidate_root: Path, candidate: dict,
+                                scratch_root: Path, contract: dict) -> dict:
+    """Recreate both source trees from verified payload bytes; never reuse caller-owned trees."""
+    source = candidate.get("source")
+    files = source.get("files") if isinstance(source, dict) else None
+    if not isinstance(files, list):
+        raise ProvisionError("authenticated source inputs are malformed for audit replay")
+    dsc_rows = [row for row in files if isinstance(row, dict) and row.get("name", "").endswith(".dsc")]
+    if len(dsc_rows) != 1:
+        raise ProvisionError("authenticated source inputs do not identify one .dsc for audit replay")
+
+    payload_dir = scratch_root / "verified-source-payloads"
+    payload_dir.mkdir()
+    dsc_path: Path | None = None
+    seen_names: set[str] = set()
+    for row in files:
+        if (not isinstance(row, dict) or not isinstance(row.get("name"), str) or
+                PurePosixPath(row["name"]).name != row["name"] or row["name"] in seen_names or
+                not isinstance(row.get("path"), str)):
+            raise ProvisionError("authenticated source payload inventory is malformed")
+        seen_names.add(row["name"])
+        relative = PurePosixPath(row["path"])
+        if relative.is_absolute() or ".." in relative.parts or relative.parts[:1] != ("downloads",):
+            raise ProvisionError("authenticated source payload path is unsafe")
+        original = candidate_root.joinpath(*relative.parts)
+        copied = payload_dir / row["name"]
+        copy_verified_source_payload(original, copied, row.get("bytes"), row.get("sha256"))
+        if row is dsc_rows[0]:
+            dsc_path = copied
+    if dsc_path is None:
+        raise ProvisionError("authenticated source inputs do not contain their pinned .dsc")
+
+    upstream_path = source.get("upstreamArchivePath")
+    if not isinstance(upstream_path, str):
+        raise ProvisionError("authenticated upstream source archive path is malformed")
+    upstream_relative = PurePosixPath(upstream_path)
+    upstream_identity = source.get("upstreamArchive")
+    if (upstream_relative.is_absolute() or ".." in upstream_relative.parts or
+            upstream_relative.parts[:1] != ("downloads",) or not isinstance(upstream_identity, dict)):
+        raise ProvisionError("authenticated upstream source archive path is unsafe")
+    copied_upstream = scratch_root / "upstream-source.tar.xz"
+    copy_verified_source_payload(
+        candidate_root.joinpath(*upstream_relative.parts), copied_upstream,
+        upstream_identity.get("bytes"), upstream_identity.get("sha256"),
+    )
+
+    package_source = scratch_root / "package-source"
+    extract = subprocess.run(
+        ["dpkg-source", "-x", str(dsc_path), str(package_source)],
+        cwd=payload_dir, check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, timeout=900,
+    )
+    if extract.returncode != 0:
+        raise ProvisionError(
+            "dpkg-source rejected the verified .dsc/payload during audit replay: " + extract.stdout[-4000:]
+        )
+    upstream_root = safe_extract_xz_tar(copied_upstream, scratch_root / "upstream")
+    return audit_patches(package_source, upstream_root, scratch_root / "patch-audit.json", contract)
+
+
 def load_candidate(candidate_root: Path, contract: dict, keyring: Path,
                    build_record: dict | None = None) -> tuple[dict, list[dict]]:
     candidate_path = candidate_root / "acquisition-candidate.json"
@@ -2174,28 +2289,8 @@ def load_candidate(candidate_root: Path, contract: dict, keyring: Path,
         key: audit[key] for key in ("status", "patchCount", "patchInventorySha256", "relevantFileCount", "relevantFileManifestSha256")
     }:
         raise ProvisionError("patch audit is missing, incompatible, or changed after acquisition")
-    source_root = candidate_root / "source/package-source"
-    upstream_root = candidate_root / "source/upstream/llvm-project-18.1.3.src"
-    if not source_root.is_dir() and not upstream_root.exists():
-        dsc_rows = [row for row in candidate["source"]["files"] if row["name"].endswith(".dsc")]
-        if len(dsc_rows) != 1:
-            raise ProvisionError("authenticated source inputs do not identify one .dsc for audit replay")
-        dsc_path = candidate_root / dsc_rows[0]["path"]
-        source_root.parent.mkdir(parents=True, exist_ok=True)
-        extract = subprocess.run(
-            ["dpkg-source", "-x", str(dsc_path), str(source_root)],
-            cwd=dsc_path.parent, check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, timeout=900,
-        )
-        if extract.returncode != 0:
-            raise ProvisionError("dpkg-source rejected the authenticated .dsc/payload during audit replay: " + extract.stdout[-4000:])
-        upstream_root = safe_extract_xz_tar(
-            candidate_root / candidate["source"]["upstreamArchivePath"], candidate_root / "source/upstream",
-        )
-    elif not source_root.is_dir() or not upstream_root.is_dir():
-        raise ProvisionError("only one audited source tree is present; refusing partial source state")
     with tempfile.TemporaryDirectory(prefix="patch-audit-replay-", dir=candidate_root) as replay_root:
-        reaudited = audit_patches(source_root, upstream_root, Path(replay_root) / "patch-audit.json", contract)
+        reaudited = audit_fresh_source_payloads(candidate_root, candidate, Path(replay_root), contract)
         if canonical_json(reaudited) != canonical_json(audit):
             raise ProvisionError("patch audit inventory changed between acquisition and provisioning")
     return candidate, parsed
@@ -2886,8 +2981,21 @@ def probe_compile_command() -> list[str]:
     return ["/usr/bin/clang++-18", "-I/usr/lib/llvm-18/include", "--target=x86_64-pc-linux-gnu",
             "-std=c++17", "-fno-exceptions", "-fno-rtti", "-D_GNU_SOURCE", "-D__STDC_CONSTANT_MACROS",
             "-D__STDC_FORMAT_MACROS", "-D__STDC_LIMIT_MACROS",
-            "/tmp/clang18-libtooling-probe.cpp", "-L/usr/lib/llvm-18/lib",
-            "-Wl,-rpath,/usr/lib/llvm-18/lib", "-lclang-cpp", "-lLLVM-18", "-o", "/tmp/clang18-libtooling-probe"]
+            PROBE_SOURCE_IN_ROOT, "-L/usr/lib/llvm-18/lib",
+            "-Wl,-rpath,/usr/lib/llvm-18/lib", "-lclang-cpp", "-lLLVM-18", "-o", PROBE_BINARY_IN_ROOT]
+
+
+def stage_probe_inputs(rootfs: Path) -> tuple[Path, Path]:
+    """Install immutable probe inputs under /usr/local so /tmp normalization cannot erase them."""
+    if rootfs.is_symlink() or not rootfs.is_dir():
+        raise ProvisionError("probe staging requires the fresh non-symlink rootfs")
+    source = RECIPE_FILES["probeSha256"]
+    fixture = RECIPE_FILES["fixtureSha256"]
+    source_target = rootfs.joinpath(*PurePosixPath(PROBE_SOURCE_IN_ROOT).parts[1:])
+    fixture_target = rootfs.joinpath(*PurePosixPath(PROBE_FIXTURE_IN_ROOT).parts[1:])
+    run_checked(["sudo", "install", "-D", "-m", "0444", str(source), str(source_target)])
+    run_checked(["sudo", "install", "-D", "-m", "0444", str(fixture), str(fixture_target)])
+    return source_target, fixture_target
 
 
 def canonical_commands(contract: dict, keyring_sha256: str) -> dict[str, list[str]]:
@@ -2922,7 +3030,7 @@ def canonical_commands(contract: dict, keyring_sha256: str) -> dict[str, list[st
         "llvmConfigLibdir": in_root(["/usr/bin/llvm-config-18", "--libdir"]),
         "llvmConfigCxxflags": in_root(["/usr/bin/llvm-config-18", "--cxxflags"]),
         "probeCompile": in_root(probe_compile_command()),
-        "probeRun": in_root(["/tmp/clang18-libtooling-probe", "/tmp/clang18-positive.cpp"]),
+        "probeRun": in_root([PROBE_BINARY_IN_ROOT, PROBE_FIXTURE_IN_ROOT]),
         "rootfsTarBudget": budget_command,
         "rootfsTar": ["sudo", "env", "LC_ALL=C", "tar", "--sort=name", "--format=posix",
                       "--numeric-owner", f"--mtime=@{epoch}",
@@ -3034,24 +3142,21 @@ def provision_rootfs(args: argparse.Namespace) -> int:
         raise ProvisionError(f"resolved Clang resource directory is not a versioned LLVM 18 directory: {resource_dir}")
     resource_files = resource_manifest(profile_root, resource_dir)
 
-    probe_source = ROOT / "oracle/clang/18.1.3/libtooling-probe.cpp"
-    fixture = ROOT / "oracle/clang/18.1.3/fixtures/libtooling-positive.cpp"
-    probe_in_root = profile_root / "tmp/clang18-libtooling-probe.cpp"
-    fixture_in_root = profile_root / "tmp/clang18-positive.cpp"
-    shutil.copyfile(probe_source, probe_in_root)
-    shutil.copyfile(fixture, fixture_in_root)
-    probe_in_root.chmod(0o444)
-    fixture_in_root.chmod(0o444)
+    probe_source = RECIPE_FILES["probeSha256"]
+    fixture = RECIPE_FILES["fixtureSha256"]
+    probe_in_root, fixture_in_root = stage_probe_inputs(profile_root)
     libdir = rootfs_run(profile_root, ["/usr/bin/llvm-config-18", "--libdir"], contract).strip()
     if libdir != "/usr/lib/llvm-18/lib":
         raise ProvisionError("llvm-config library directory differs from the versioned probe recipe")
     # Retain the diagnostic command, but use the fixed reviewed probe arguments.
     # Tool-reported flags cannot inject additional compiler/linker operations.
     rootfs_run(profile_root, ["/usr/bin/llvm-config-18", "--cxxflags"], contract)
-    probe_path = "/tmp/clang18-libtooling-probe"
+    probe_path = PROBE_BINARY_IN_ROOT
     compile_command = probe_compile_command()
     rootfs_run(profile_root, compile_command, contract, timeout=600)
-    runtime_report = rootfs_run(profile_root, [probe_path, "/tmp/clang18-positive.cpp"], contract, timeout=120)
+    runtime_report = run_probe_sandboxed(
+        profile_root, [probe_path, PROBE_FIXTURE_IN_ROOT], contract, timeout=120,
+    )
     runtime_json = json.loads(runtime_report)
     inventory = audit_langoptions(
         rootfs_path(profile_root, "/usr/lib/llvm-18/include/clang/Basic/LangOptions.def"),
@@ -3521,10 +3626,12 @@ def preflight_provenance_output(output: Path, input_roots: list[Path], input_fil
 def validate_provenance_probe_report(report: dict, record: dict, rootfs: Path, contract: dict) -> tuple[Path, Path, int]:
     if canonical_json(report) != canonical_json(record.get("probe")):
         raise ProvisionError("probe provenance report differs from the reproducible build-record probe")
-    probe_path, probe_mode = rootfs_regular_file(
-        rootfs, "/tmp/clang18-libtooling-probe", executable=True,
-    )
-    fixture_path, _ = rootfs_regular_file(rootfs, "/tmp/clang18-positive.cpp")
+    probe_path, probe_mode = rootfs_regular_file(rootfs, PROBE_BINARY_IN_ROOT, executable=True)
+    fixture_path, _ = rootfs_regular_file(rootfs, PROBE_FIXTURE_IN_ROOT)
+    source_path, _ = rootfs_regular_file(rootfs, PROBE_SOURCE_IN_ROOT)
+    source_digest = sha256_file(source_path)
+    if source_digest != record["probe"]["sourceSha256"]:
+        raise ProvisionError("retained probe source bytes differ from the build-record sourceSha256")
     probe_digest = sha256_file(probe_path)
     expected_probe_digest = record["probe"]["binarySha256"]
     if probe_digest != expected_probe_digest:
@@ -3534,11 +3641,8 @@ def validate_provenance_probe_report(report: dict, record: dict, rootfs: Path, c
             fixture_digest != record["recipe"]["fixtureSha256"]):
         raise ProvisionError("retained probe fixture bytes differ from the authenticated fixture identity")
 
-    # Replay only through the fixed chroot command bound by canonical_commands;
-    # never execute the candidate binary in the host namespace.
-    replay_output = rootfs_run(
-        rootfs, ["/tmp/clang18-libtooling-probe", "/tmp/clang18-positive.cpp"],
-        contract, timeout=120,
+    replay_output = run_probe_sandboxed(
+        rootfs, [PROBE_BINARY_IN_ROOT, PROBE_FIXTURE_IN_ROOT], contract, timeout=120,
     )
     try:
         replay_report = json.loads(replay_output)
@@ -3557,7 +3661,7 @@ def validate_provenance_probe_report(report: dict, record: dict, rootfs: Path, c
     checked["fixtureSha256"] = fixture_digest
     if canonical_json(checked) != canonical_json(record["probe"]):
         raise ProvisionError("retained probe replay differs from the reproducible build-record probe")
-    return probe_path, fixture_path, probe_mode
+    return probe_path, fixture_path, source_path, probe_mode
 
 
 def frontend_cxx_driver_identity_sha256(record: dict, record_sha256: str) -> str:
@@ -3828,7 +3932,7 @@ def command_package_provenance(args: argparse.Namespace) -> int:
     probe_report = read_provenance_report(args.probe_report, "LibTooling probe")
     loader_report = read_provenance_report(args.loader_report, "A-loader")
     negative_report = read_provenance_report(args.negative_report, "Clang 22.1.6 negative")
-    probe_binary, probe_fixture, probe_mode = validate_provenance_probe_report(
+    probe_binary, probe_fixture, probe_source, probe_mode = validate_provenance_probe_report(
         probe_report, record, args.rootfs, contract,
     )
     validate_provenance_loader_report(loader_report, record, record_sha256, args.rootfs)
@@ -3917,19 +4021,25 @@ def command_package_provenance(args: argparse.Namespace) -> int:
                         ),
                     )
             current_probe_binary, current_probe_mode = rootfs_regular_file(
-                args.rootfs, "/tmp/clang18-libtooling-probe", executable=True,
+                args.rootfs, PROBE_BINARY_IN_ROOT, executable=True,
             )
-            current_probe_fixture, _ = rootfs_regular_file(args.rootfs, "/tmp/clang18-positive.cpp")
+            current_probe_fixture, _ = rootfs_regular_file(args.rootfs, PROBE_FIXTURE_IN_ROOT)
+            current_probe_source, _ = rootfs_regular_file(args.rootfs, PROBE_SOURCE_IN_ROOT)
             if (current_probe_mode != probe_mode or sha256_file(current_probe_binary) != record["probe"]["binarySha256"] or
-                    sha256_file(current_probe_fixture) != record["probe"]["fixtureSha256"]):
-                raise ProvisionError("retained probe binary/fixture changed after bounded replay")
+                    sha256_file(current_probe_fixture) != record["probe"]["fixtureSha256"] or
+                    sha256_file(current_probe_source) != record["probe"]["sourceSha256"]):
+                raise ProvisionError("retained probe source/binary/fixture changed after sandbox replay")
             _add_provenance_file(
-                archive, probe_binary, "rootfs/tmp/clang18-libtooling-probe", epoch,
+                archive, probe_binary, "rootfs" + PROBE_BINARY_IN_ROOT, epoch,
                 expected_sha256=record["probe"]["binarySha256"], mode=probe_mode,
             )
             _add_provenance_file(
-                archive, probe_fixture, "rootfs/tmp/clang18-positive.cpp", epoch,
+                archive, probe_fixture, "rootfs" + PROBE_FIXTURE_IN_ROOT, epoch,
                 expected_sha256=record["probe"]["fixtureSha256"], mode=0o444,
+            )
+            _add_provenance_file(
+                archive, probe_source, "rootfs" + PROBE_SOURCE_IN_ROOT, epoch,
+                expected_sha256=record["probe"]["sourceSha256"], mode=0o444,
             )
     except ProvisionError:
         if archive_created:

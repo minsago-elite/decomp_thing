@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -185,24 +186,43 @@ class ProvisioningNegativeTests(unittest.TestCase):
         }
 
     def prepare_probe_rootfs(self, record, rootfs, binary=b"synthetic inert probe executable\n", mode=0o755):
-        probe_path = rootfs / "tmp/clang18-libtooling-probe"
-        fixture_path = rootfs / "tmp/clang18-positive.cpp"
+        probe_path = rootfs.joinpath(*Path(provision.PROBE_BINARY_IN_ROOT).parts[1:])
+        fixture_path = rootfs.joinpath(*Path(provision.PROBE_FIXTURE_IN_ROOT).parts[1:])
+        source_path = rootfs.joinpath(*Path(provision.PROBE_SOURCE_IN_ROOT).parts[1:])
         header_dir = rootfs / "usr/lib/llvm-18/include/clang/Basic"
-        probe_path.parent.mkdir(parents=True, exist_ok=True)
+        rootfs.mkdir(parents=True, exist_ok=True)
+        (rootfs / "tmp").mkdir(exist_ok=True)
         header_dir.mkdir(parents=True, exist_ok=True)
+        def local_install(command, timeout=None):
+            if command[:1] == ["sudo"]:
+                command = command[1:]
+            return subprocess.run(command, check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  text=True, timeout=timeout)
+
+        with mock.patch.object(provision, "run_checked", side_effect=local_install):
+            staged_source, staged_fixture = provision.stage_probe_inputs(rootfs)
+        self.assertEqual(staged_source, source_path)
+        self.assertEqual(staged_fixture, fixture_path)
         probe_path.write_bytes(binary)
         probe_path.chmod(mode)
         fixture = ROOT / self.contract["negativeControl"]["fixture"]
         fixture_bytes = fixture.read_bytes()
-        fixture_path.write_bytes(fixture_bytes)
-        fixture_path.chmod(0o444)
         for name in ("LangOptions.def", "LangOptions.h"):
             shutil.copyfile(ROOT / "oracle/clang/18.1.3/fixtures" / f"llvmorg-18.1.3-{name}",
                             header_dir / name)
         record["probe"]["binarySha256"] = provision.sha256(binary)
         record["probe"]["sourceSha256"] = provision.sha256_file(provision.RECIPE_FILES["probeSha256"])
         record["probe"]["fixtureSha256"] = provision.sha256(fixture_bytes)
+        self.assertEqual(provision.sha256_file(source_path), record["probe"]["sourceSha256"])
         return probe_path, fixture_path, mode
+
+    def local_rootfs_command(self, command, timeout=None):
+        if command[:2] == ["sudo", "-n"]:
+            command = command[2:]
+        elif command[:1] == ["sudo"]:
+            command = command[1:]
+        return subprocess.run(command, check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, timeout=timeout)
 
     def valid_loader_report(self, record, record_sha, rootfs):
         provision.verified_frontend_runtime_library_digests(rootfs, record)
@@ -468,13 +488,8 @@ class ProvisioningNegativeTests(unittest.TestCase):
             rootfs.mkdir()
             archive = base / "rootfs.tar"
 
-            def denied_walk(root, followlinks=False, onerror=None):
-                error = PermissionError("unreadable retained rootfs subtree")
-                if onerror is not None:
-                    onerror(error)
-                return iter(())
-
-            with mock.patch.object(provision.os, "walk", side_effect=denied_walk):
+            with mock.patch.object(provision.os, "scandir",
+                                   side_effect=PermissionError("unreadable retained rootfs subtree")):
                 with self.assertRaisesRegex(provision.ProvisionError, "could not inspect retained rootfs"):
                     provision.check_rootfs_tar_budget(rootfs, 1024 * 1024)
             self.assertFalse(archive.exists())
@@ -510,6 +525,37 @@ class ProvisioningNegativeTests(unittest.TestCase):
                     execute.assert_called_once_with(provision.rootfs_tar_budget_command(rootfs, 1024 * 1024),
                                                     timeout=provision.ROOTFS_TAR_BUDGET_TIMEOUT_SECONDS)
                     self.assertFalse(archive.exists())
+
+    def test_rootfs_budget_stops_scandir_incrementally_at_entry_limit(self):
+        with self.temporary_directory() as temp:
+            rootfs = Path(temp) / "rootfs"
+            rootfs.mkdir()
+            visited = []
+
+            class Entry:
+                def __init__(self, name):
+                    self.name = name
+
+                def stat(self, *, follow_symlinks):
+                    self.assert_follow_symlinks = follow_symlinks
+                    return os.stat_result((stat.S_IFREG | 0o644, 1, 0, 1, 0, 0, 1, 0, 0, 0))
+
+            class IncrementalEntries:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_):
+                    return False
+
+                def __iter__(self):
+                    for index in range(1000000):
+                        visited.append(index)
+                        yield Entry(f"entry-{index}")
+
+            with mock.patch.object(provision.os, "scandir", return_value=IncrementalEntries()):
+                with self.assertRaisesRegex(provision.ProvisionError, "entry count exceeds"):
+                    provision.check_rootfs_tar_budget(rootfs, 20 * 512)
+            self.assertLessEqual(len(visited), 2)
 
     def test_empty_rootfs_tiny_budget_fails_preflight_before_traversal_and_tar_output(self):
         with self.temporary_directory() as temp:
@@ -995,40 +1041,39 @@ class ProvisioningNegativeTests(unittest.TestCase):
         probe_binary, probe_fixture, _ = self.prepare_probe_rootfs(record, rootfs)
         replay = {key: value for key, value in record["probe"].items()
                   if key not in ("sourceSha256", "binarySha256", "fixtureSha256")}
-        with mock.patch.object(provision, "rootfs_run", return_value=provision.canonical_json(replay).decode()) as replay_run, \
+        with mock.patch.object(provision, "run_probe_sandboxed", side_effect=provision.ProvisionError(
+                provision.PROBE_SANDBOX_BLOCK_REASON)) as replay_run, \
+                mock.patch.object(provision, "rootfs_run") as chroot_run, \
                 mock.patch.object(provision, "audit_langoptions", return_value=self.probe_inventory(record)) as audit:
-            checked_binary, checked_fixture, mode = provision.validate_provenance_probe_report(
-                dict(record["probe"]), record, rootfs, self.contract,
-            )
-        self.assertEqual(checked_binary, probe_binary)
-        self.assertEqual(checked_fixture, probe_fixture)
-        self.assertTrue(mode & 0o111)
+            with self.assertRaisesRegex(provision.ProvisionError, "no reviewed unprivileged"):
+                provision.validate_provenance_probe_report(dict(record["probe"]), record, rootfs, self.contract)
         replay_run.assert_called_once_with(
-            rootfs, ["/tmp/clang18-libtooling-probe", "/tmp/clang18-positive.cpp"],
-            self.contract, timeout=120,
+            rootfs, [provision.PROBE_BINARY_IN_ROOT, provision.PROBE_FIXTURE_IN_ROOT], self.contract, timeout=120,
         )
-        audit.assert_called_once()
+        chroot_run.assert_not_called()
+        audit.assert_not_called()
 
-        with mock.patch.object(provision, "rootfs_run", return_value=provision.canonical_json(replay).decode()), \
+        with mock.patch.object(provision, "run_probe_sandboxed", side_effect=provision.ProvisionError(
+                provision.PROBE_SANDBOX_BLOCK_REASON)), \
                 mock.patch.object(provision, "audit_langoptions", return_value=self.probe_inventory(record)):
             with self.assertRaisesRegex(provision.ProvisionError, "probe provenance report differs"):
                 provision.validate_provenance_probe_report(dict(record["probe"], target="tampered"),
                                                            record, rootfs, self.contract)
         original_binary = probe_binary.read_bytes()
         probe_binary.write_bytes(original_binary + b"tamper")
-        with mock.patch.object(provision, "rootfs_run") as replay_run:
+        with mock.patch.object(provision, "run_probe_sandboxed") as replay_run:
             with self.assertRaisesRegex(provision.ProvisionError, "binarySha256"):
                 provision.validate_provenance_probe_report(dict(record["probe"]), record, rootfs, self.contract)
             replay_run.assert_not_called()
         probe_binary.write_bytes(original_binary)
         probe_binary.chmod(0o644)
-        with mock.patch.object(provision, "rootfs_run") as replay_run:
+        with mock.patch.object(provision, "run_probe_sandboxed") as replay_run:
             with self.assertRaisesRegex(provision.ProvisionError, "execute permission"):
                 provision.validate_provenance_probe_report(dict(record["probe"]), record, rootfs, self.contract)
             replay_run.assert_not_called()
         probe_binary.chmod(0o755)
         probe_binary.unlink()
-        with mock.patch.object(provision, "rootfs_run") as replay_run:
+        with mock.patch.object(provision, "run_probe_sandboxed") as replay_run:
             with self.assertRaisesRegex(provision.ProvisionError, "unavailable"):
                 provision.validate_provenance_probe_report(dict(record["probe"]), record, rootfs, self.contract)
             replay_run.assert_not_called()
@@ -1036,7 +1081,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
         alternate.write_bytes(original_binary)
         alternate.chmod(0o755)
         probe_binary.symlink_to(alternate.name)
-        with mock.patch.object(provision, "rootfs_run") as replay_run:
+        with mock.patch.object(provision, "run_probe_sandboxed") as replay_run:
             with self.assertRaisesRegex(provision.ProvisionError, "contains a symlink"):
                 provision.validate_provenance_probe_report(dict(record["probe"]), record, rootfs, self.contract)
             replay_run.assert_not_called()
@@ -1046,13 +1091,20 @@ class ProvisioningNegativeTests(unittest.TestCase):
         fixture_bytes = probe_fixture.read_bytes()
         probe_fixture.chmod(0o644)
         probe_fixture.write_bytes(fixture_bytes + b"tamper")
-        with mock.patch.object(provision, "rootfs_run") as replay_run:
+        with mock.patch.object(provision, "run_probe_sandboxed") as replay_run:
             with self.assertRaisesRegex(provision.ProvisionError, "fixture bytes"):
                 provision.validate_provenance_probe_report(dict(record["probe"]), record, rootfs, self.contract)
             replay_run.assert_not_called()
         probe_fixture.write_bytes(fixture_bytes)
         probe_fixture.chmod(0o444)
-        with mock.patch.object(provision, "rootfs_run", return_value=provision.canonical_json(
+        with mock.patch.object(provision, "run_probe_sandboxed", side_effect=provision.ProvisionError(
+                provision.PROBE_SANDBOX_BLOCK_REASON)), \
+                mock.patch.object(provision, "rootfs_run") as replay_run, \
+                mock.patch.object(provision, "audit_langoptions", return_value=self.probe_inventory(record)):
+            with self.assertRaises(provision.ProvisionError):
+                provision.validate_provenance_probe_report(dict(record["probe"]), record, rootfs, self.contract)
+            replay_run.assert_not_called()
+        with mock.patch.object(provision, "run_probe_sandboxed", return_value=provision.canonical_json(
                 {**replay, "macroObservations": {"expansionCount": 2, "macroInfoChecks": 1,
                                                    "nonBuiltinClassifications": 1}}).decode()), \
                 mock.patch.object(provision, "audit_langoptions", return_value=self.probe_inventory(record)):
@@ -1736,6 +1788,20 @@ class ProvisioningNegativeTests(unittest.TestCase):
                      "inventoryEvidence": self.contract["langOptions"]["inventoryEvidence"]}
         with self.assertRaisesRegex(provision.ProvisionError, "macro expansion and MacroInfo classification"):
             provision.validate_probe_report(report, inventory, self.contract)
+
+    def test_probe_runner_fails_closed_before_unbounded_chroot_or_subprocess(self):
+        with mock.patch.object(provision, "rootfs_run") as chroot, \
+                mock.patch.object(provision, "run_checked") as unbounded, \
+                mock.patch.object(provision.subprocess, "run") as child:
+            with self.assertRaisesRegex(provision.ProvisionError, "CPU/RSS/process/disk/output/wall-time"):
+                provision.run_probe_sandboxed(
+                    Path("/candidate-rootfs"),
+                    [provision.PROBE_BINARY_IN_ROOT, provision.PROBE_FIXTURE_IN_ROOT],
+                    self.contract,
+                )
+        chroot.assert_not_called()
+        unbounded.assert_not_called()
+        child.assert_not_called()
 
     def test_build_record_rejects_missing_root_package(self):
         record = self.valid_build_record()
@@ -2427,7 +2493,9 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
     def retained_rootfs_image_fixture(self, base, record):
         rootfs = base / "rootfs"
         ProvisioningNegativeTests.prepare_runtime_rootfs(self, record, rootfs)
-        ProvisioningNegativeTests.prepare_probe_rootfs(self, record, rootfs)
+        probe_binary, probe_fixture, _ = ProvisioningNegativeTests.prepare_probe_rootfs(self, record, rootfs)
+        cleanup_marker = rootfs / "tmp/unowned-normalization-marker"
+        cleanup_marker.write_bytes(b"/tmp remains fully cleaned")
         rootfs_tar = base / "rootfs.tar"
 
         def local_tar(command, timeout=None):
@@ -2437,13 +2505,27 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
         with mock.patch.object(provision, "run_checked", side_effect=local_tar):
             rootfs_identity = provision.deterministic_rootfs_tar(
                 rootfs, rootfs_tar, int(self.contract["environment"]["SOURCE_DATE_EPOCH"]),
-                normalize=False, max_bytes=self.contract["profile"]["bounds"]["maxArtifactBytes"],
+                normalize=True, max_bytes=self.contract["profile"]["bounds"]["maxArtifactBytes"],
             )
+        self.assertFalse(cleanup_marker.exists(), "normalization must still clear arbitrary /tmp files")
+        self.assertTrue(probe_binary.is_file() and probe_fixture.is_file())
+        with tarfile.open(rootfs_tar, mode="r:") as retained:
+            retained_names = {member.name.removeprefix("./") for member in retained.getmembers()}
+        self.assertIn(provision.PROBE_BINARY_IN_ROOT.lstrip("/"), retained_names)
+        self.assertIn(provision.PROBE_FIXTURE_IN_ROOT.lstrip("/"), retained_names)
+        self.assertIn(provision.PROBE_SOURCE_IN_ROOT.lstrip("/"), retained_names)
+        self.assertNotIn("tmp/unowned-normalization-marker", retained_names)
         record["rootfs"] = rootfs_identity
         layout = base / "image-layout"
         image = provision.create_oci_layout(
             rootfs_tar, layout, record["profile"]["id"], self.contract["environment"],
         )
+        with gzip.open(layout / "blobs/sha256" / image["layerSha256"], mode="rb") as layer_stream:
+            with tarfile.open(fileobj=layer_stream, mode="r:") as layer:
+                image_rootfs_names = {member.name.removeprefix("./") for member in layer.getmembers()}
+        self.assertIn(provision.PROBE_BINARY_IN_ROOT.lstrip("/"), image_rootfs_names)
+        self.assertIn(provision.PROBE_FIXTURE_IN_ROOT.lstrip("/"), image_rootfs_names)
+        self.assertIn(provision.PROBE_SOURCE_IN_ROOT.lstrip("/"), image_rootfs_names)
         record["image"] = {
             "format": image["format"], "manifestSha256": image["manifestSha256"],
             "imageDigest": image["imageDigest"],
@@ -2546,7 +2628,41 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
     def test_candidate_replay_accepts_bound_evidence_and_cleans_temporary_audit(self):
         with self.temporary_directory() as temp:
             root, candidate, record, keyring = self.candidate_fixture(Path(temp))
-            with mock.patch.object(provision, "verify_candidate_data", return_value=[]) as signed:
+            for source_root in (root / "source/package-source",
+                                root / "source/upstream/llvm-project-18.1.3.src"):
+                (source_root / self.contract["relevantFiles"][0]).write_bytes(b"untrusted cached tree\n")
+
+            def create_package_source(destination):
+                destination.mkdir(parents=True)
+                patches = destination / "debian/patches"
+                patches.mkdir(parents=True)
+                (patches / "series").write_bytes(b"")
+                for relative in self.contract["relevantFiles"]:
+                    target = destination / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(b"matching synthetic source\n")
+
+            def extract_dsc(command, **kwargs):
+                self.assertEqual(command[0:2], ["dpkg-source", "-x"])
+                self.assertEqual(Path(kwargs["cwd"]), Path(command[-2]).parent)
+                self.assertEqual(Path(command[-2]).read_bytes(), b"synthetic bytes for downloads/source/source.dsc")
+                create_package_source(Path(command[-1]))
+                return subprocess.CompletedProcess(command, 0, "")
+
+            def extract_upstream(archive, destination):
+                self.assertEqual(archive.read_bytes(), b"synthetic bytes for downloads/upstream/source.tar.xz")
+                destination.mkdir(parents=True)
+                source = destination / "llvm-project-18.1.3.src"
+                source.mkdir()
+                for relative in self.contract["relevantFiles"]:
+                    target = source / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(b"matching synthetic source\n")
+                return source
+
+            with mock.patch.object(provision, "verify_candidate_data", return_value=[]) as signed, \
+                    mock.patch.object(provision.subprocess, "run", side_effect=extract_dsc), \
+                    mock.patch.object(provision, "safe_extract_xz_tar", side_effect=extract_upstream):
                 actual, parsed = provision.load_candidate(root, self.contract, keyring, record)
             self.assertEqual(actual, candidate)
             self.assertEqual(parsed, [])
@@ -2554,6 +2670,57 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                               for row in record[section]}
             signed.assert_called_once_with(root, candidate, self.contract, keyring,
                                            extra_binary_package_names=expected_names)
+            self.assertEqual(list(root.glob("patch-audit-replay-*")), [])
+
+    def test_candidate_replay_rejects_rehashed_attacker_owned_source_trees(self):
+        with self.temporary_directory() as temp:
+            root, candidate, record, keyring = self.candidate_fixture(Path(temp))
+            for relative in self.contract["relevantFiles"]:
+                for source_root in (root / "source/package-source",
+                                    root / "source/upstream/llvm-project-18.1.3.src"):
+                    target = source_root / relative
+                    target.write_bytes(b"attacker-owned replacement\n")
+            attacker_audit = provision.audit_patches(
+                root / "source/package-source", root / "source/upstream/llvm-project-18.1.3.src",
+                root / "attacker-patch-audit.json", self.contract,
+            )
+            shutil.copyfile(root / "attacker-patch-audit.json", root / "patch-audit.json")
+            candidate["patchAudit"] = {key: attacker_audit[key] for key in (
+                "status", "patchCount", "patchInventorySha256", "relevantFileCount", "relevantFileManifestSha256",
+            )}
+            record["patchAudit"] = dict(candidate["patchAudit"])
+            self.write_candidate(root, candidate)
+            record["acquisition"]["candidateSha256"] = candidate["candidateSha256"]
+
+            def create_package_source(destination):
+                destination.mkdir(parents=True)
+                patches = destination / "debian/patches"
+                patches.mkdir(parents=True)
+                (patches / "series").write_bytes(b"")
+                for relative in self.contract["relevantFiles"]:
+                    target = destination / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(b"matching synthetic source\n")
+
+            def extract_dsc(command, **kwargs):
+                create_package_source(Path(command[-1]))
+                return subprocess.CompletedProcess(command, 0, "")
+
+            def extract_upstream(archive, destination):
+                destination.mkdir(parents=True)
+                source = destination / "llvm-project-18.1.3.src"
+                source.mkdir()
+                for relative in self.contract["relevantFiles"]:
+                    target = source / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(b"matching synthetic source\n")
+                return source
+
+            with mock.patch.object(provision, "verify_candidate_data", return_value=[]), \
+                    mock.patch.object(provision.subprocess, "run", side_effect=extract_dsc), \
+                    mock.patch.object(provision, "safe_extract_xz_tar", side_effect=extract_upstream):
+                with self.assertRaisesRegex(provision.ProvisionError, "patch audit inventory changed"):
+                    provision.load_candidate(root, self.contract, keyring, record)
             self.assertEqual(list(root.glob("patch-audit-replay-*")), [])
 
     def test_candidate_replay_rejects_stale_self_digest_and_different_candidate(self):
@@ -2682,7 +2849,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                 with self.assertRaisesRegex(provision.ProvisionError, "unrecorded files or blobs"):
                     provision.verify_retained_rootfs_and_image(rootfs, oci_archive, record, self.contract)
 
-    def test_packaging_accepts_bound_local_evidence_and_selected_contract(self):
+    def test_full_probe_stage_normalize_retain_package_sequence_fails_closed_without_sandbox(self):
         with self.temporary_directory() as temp:
             base = Path(temp)
             root, candidate, record, keyring = self.candidate_fixture(base)
@@ -2700,23 +2867,9 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
             installed_keys = {
                 (row["name"], row["version"], row["architecture"]) for row in record["packages"]
             }
-            negative_contract = self.contract["negativeControl"]
-            lock_path = ROOT / negative_contract["artifactLock"]
-            artifact = json.loads(lock_path.read_bytes())["artifacts"][negative_contract["artifactRole"]]
-            fixture = ROOT / negative_contract["fixture"]
-            negative = {
-                "scope": "negative-version-gate-only; not a Clang 18.1.3 identity",
-                "artifactOracleId": negative_contract["oracleId"],
-                "artifactLockSha256": provision.sha256_file(lock_path),
-                "compilerBytes": artifact["bytes"], "compilerSha256": artifact["sha256"],
-                "compilerVersionOutput": "clang version 22.1.6",
-                "fixtureBytes": fixture.stat().st_size, "fixtureSha256": provision.sha256_file(fixture),
-                "fixtureAcceptedByClang22": True,
-                "compiler18GateRejected": "probe compiler version or target mismatch",
-            }
             report_paths = {}
             for name, report in (("probe_report", record["probe"]), ("loader_report", loader),
-                                 ("negative_report", negative)):
+                                 ("negative_report", {"scope": "synthetic negative test fixture"})):
                 report_paths[name] = base / f"{name}.json"
                 report_paths[name].write_bytes(provision.canonical_json(report))
             args = provision.argparse.Namespace(contract=selected, record=record_path, acquisition=root,
@@ -2724,88 +2877,26 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                                                output=base / "provenance.tar", **report_paths)
 
             def local_tar(command, timeout=None):
-                return subprocess.run(command[2:] if command[:2] == ["sudo", "-n"] else command[1:], check=False, stdout=subprocess.PIPE,
+                if command[:2] == ["sudo", "-n"]:
+                    command = command[2:]
+                elif command[:1] == ["sudo"]:
+                    command = command[1:]
+                return subprocess.run(command, check=False, stdout=subprocess.PIPE,
                                       stderr=subprocess.STDOUT, text=True, timeout=timeout)
 
-            with mock.patch.object(provision, "verify_candidate_data", return_value=signed_rows) as signed, \
+            with mock.patch.object(provision, "load_candidate", return_value=(candidate, signed_rows)) as load, \
                     mock.patch.object(provision, "installed_package_keys", return_value=installed_keys), \
                     mock.patch.object(provision, "runtime_dependencies",
                                       return_value=record["runtime"]["entries"]) as runtime, \
-                    mock.patch.object(provision, "rootfs_run", return_value=provision.canonical_json({
-                        key: value for key, value in record["probe"].items()
-                        if key not in ("sourceSha256", "binarySha256", "fixtureSha256")
-                    }).decode()), \
-                    mock.patch.object(provision, "audit_langoptions",
-                                      return_value=ProvisioningNegativeTests.probe_inventory(self, record)), \
+                    mock.patch.object(provision, "rootfs_run") as chroot_run, \
                     mock.patch.object(provision, "run_checked", side_effect=local_tar), \
                     mock.patch.object(provision.BoundedDownloader, "get") as network:
-                self.assertEqual(provision.command_package_provenance(args), 0)
-                expected_names = {row["name"] for section in ("packages", "downloadedPackages")
-                                  for row in record[section]}
-                signed.assert_called_once_with(root, candidate, self.contract, keyring,
-                                               extra_binary_package_names=expected_names)
+                with self.assertRaisesRegex(provision.ProvisionError, "no reviewed unprivileged"):
+                    provision.command_package_provenance(args)
+                load.assert_called_once()
                 runtime.assert_called_once_with(rootfs, list(provision.FRONTEND_RUNTIME_ROOTS), self.contract)
                 network.assert_not_called()
-            with tarfile.open(args.output) as archive:
-                self.assertEqual(archive.extractfile("provisioning-contract.json").read(), selected.read_bytes())
-                self.assertEqual(archive.extractfile("build-record.schema.json").read(),
-                                 provision.RECIPE_FILES["schemaSha256"].read_bytes())
-                loader_path = "src/main/kotlin/decompengine/oracle/fulltree/FullTreeGenericTemplateFrontendProfileV1.kt"
-                loader_bytes = archive.extractfile(loader_path).read()
-                self.assertEqual(loader_bytes, (ROOT / loader_path).read_bytes())
-                self.assertEqual(provision.sha256(loader_bytes), record["recipe"]["aLoaderSha256"])
-                self.assertEqual(archive.extractfile("acquisition/acquisition-candidate.json").read(),
-                                 (root / "acquisition-candidate.json").read_bytes())
-                probe_member = archive.getmember("rootfs/tmp/clang18-libtooling-probe")
-                probe_payload = archive.extractfile(probe_member).read()
-                self.assertEqual(provision.sha256(probe_payload), record["probe"]["binarySha256"])
-                self.assertTrue(probe_member.mode & 0o111)
-                fixture_payload = archive.extractfile("rootfs/tmp/clang18-positive.cpp").read()
-                self.assertEqual(provision.sha256(fixture_payload), record["probe"]["fixtureSha256"])
-                comparator_manifest = archive.extractfile(
-                    "trusted_keys/clang-22.1.6-oracle-manifest.json").read()
-                comparator_lock = json.loads(lock_path.read_bytes())
-                self.assertEqual(provision.sha256(comparator_manifest),
-                                 comparator_lock["oracle"]["artifactManifestSha256"])
-                self.assertEqual(comparator_manifest,
-                                 (lock_path.parent / comparator_lock["oracle"]["artifactManifestPath"]).read_bytes())
-
-            # A self-consistent record and report cannot define a smaller runtime
-            # closure than the one re-derived from the retained rootfs.
-            original_runtime = record["runtime"]
-            remove_path = next(
-                row["path"] for row in original_runtime["entries"]
-                if row["sha256"] != next(tool["sha256"] for tool in record["tools"]
-                                         if tool["role"] == "cxx-driver")
-            )
-            record["runtime"] = provision.manifest([
-                row for row in original_runtime["entries"] if row["path"] != remove_path
-            ])
-            record_path.write_bytes(provision.canonical_json(record))
-            omitted_record_sha = provision.sha256_file(record_path)
-            omitted_loader = ProvisioningNegativeTests.valid_loader_report(
-                self, record, omitted_record_sha, rootfs,
-            )
-            provision.validate_provenance_loader_report(
-                omitted_loader, record, omitted_record_sha, rootfs,
-            )
-            omitted_loader_path = base / "loader-report-omitted-runtime.json"
-            omitted_loader_path.write_bytes(provision.canonical_json(omitted_loader))
-            args.loader_report = omitted_loader_path
-            args.output = base / "provenance-omitted-runtime.tar"
-            with mock.patch.object(provision, "verify_candidate_data", return_value=signed_rows), \
-                    mock.patch.object(provision, "installed_package_keys", return_value=installed_keys), \
-                    mock.patch.object(provision, "runtime_dependencies",
-                                      return_value=original_runtime["entries"]), \
-                    mock.patch.object(provision, "rootfs_run", return_value=provision.canonical_json({
-                        key: value for key, value in record["probe"].items()
-                        if key not in ("sourceSha256", "binarySha256", "fixtureSha256")
-                    }).decode()), \
-                    mock.patch.object(provision, "audit_langoptions",
-                                      return_value=ProvisioningNegativeTests.probe_inventory(self, record)), \
-                    mock.patch.object(provision, "run_checked", side_effect=local_tar):
-                with self.assertRaisesRegex(provision.ProvisionError, "runtime closure differs"):
-                    provision.command_package_provenance(args)
+            chroot_run.assert_not_called()
             self.assertFalse(args.output.exists())
 
 
