@@ -36,8 +36,8 @@ The writer uses an 8 KiB output buffer, emits UTF-8 and JSON escapes incremental
 and checks byte capacity before each write. It bounds scalar length before
 encoding, counts collection items before emitting them and checks nesting before
 opening a container. String and writer operations reach cooperative cancellation
-and elapsed checks at bounded intervals. A blocked native filesystem operation
-cannot be preempted by these checks.
+and elapsed checks at bounded intervals. Production output transfers bounded
+chunks to a fixed helper JVM; the caller does not perform native staging writes.
 
 Direct callers can construct `GhidraAnalysis` without the bounded ELF reader.
 Supplemental preparation therefore independently bounds symbol count and name
@@ -54,10 +54,17 @@ then published with `ATOMIC_MOVE` and `REPLACE_EXISTING`. Cancellation and elaps
 time are checked immediately before the move. There is no non-atomic fallback.
 A rendering, budget or cancellation failure before that move leaves the previous
 report intact; cleanup makes no callbacks and preserves the original failure.
-An unsupported atomic move fails the publication.
+An unsupported atomic move fails the publication. A rename already issued to the
+filesystem cannot be revoked by a deadline check, interruption or helper stop.
+The final move remains outside the enforced native staging guarantee. A timeout
+observed after that commit starts does not prove the previous target remained
+unchanged; complete in-flight publication remains open in
+[#1066](https://github.com/minsago-elite/decomp_thing/issues/1066).
 
 This is ordinary application output in the supplied parent directory, not an
-oracle path-authority boundary. Staged and final files have POSIX owner read/write
+oracle path-authority boundary. The supplied directory must remain stable while
+publishing; path-based file-key comparisons do not authenticate an opened inode
+against concurrent hostile parent/path replacement. Staged and final files have POSIX owner read/write
 permissions (`0600`), including when replacing an older report with broader
 permissions. The repository's Linux execution environment supports those file
 attributes. There is no fsync durability claim or transaction spanning all three
@@ -72,6 +79,37 @@ replacement characters are retained. Indentation is now consistently two spaces,
 so report bytes/hashes change. `reportPublication` is appended after the existing
 fields. Field names in these fixed schemas are unique; the streaming writer does
 not maintain a separate set to enforce uniqueness for arbitrary callers.
+
+## Enforced native staging
+
+The fixed report helper receives only its unique candidate path and byte allowance;
+it has no final report name or rename operation. Native directory creation,
+candidate creation/open/write/flush/close belong to that helper. A one-chunk queue
+and capped sender tasks keep native stdin backpressure off the analysis caller;
+queue waits reach the same caller checkpoint and independent report deadline.
+The helper has a 16 MiB heap and a 64 MiB Linux RSS ceiling. Its response must
+contain bounded creation identity, exact byte count/digest, complete footer/EOF,
+successful exit and closed transfer/capture streams before publication is admitted.
+Provider paths such as ZipFS are refused before helper admission: transferring
+their text to the helper's default filesystem would otherwise name a different
+host path. The existing 32 MiB independent report host ceiling is unchanged;
+smaller configured report/profile allowances are passed through exactly.
+
+Two retained invocation owners cap sender, capture and control resources. Late
+handles remain owned; unknown launches and unconfirmed native creation cannot
+release capacity merely because a caller returned. Creation is announced before
+native mutation, and the candidate identity is announced after creation. Missing
+creation identity retains the candidate/owner rather than deleting a colliding
+file or assuming process absence settled an unfinished filesystem transaction.
+Candidate deletion runs on the retained capped control task. A blocked close or
+deletion keeps its references and slot after the single five-second caller cleanup
+allowance; later proven quiescence can release it. No cancelled Future serves as
+absence proof. Injected output-stream fixtures retain the existing cooperative
+test seam and do not qualify arbitrary native filesystem operations.
+
+These guarantees preserve the previous report on refusal before the final rename
+starts. They do not qualify script/resource writes, fixed-path diagnostic
+publication, final rename cancellation, fsync durability or multi-report atomicity.
 
 ## Verification
 
@@ -89,7 +127,8 @@ not maintain a separate set to enforce uniqueness for arbitrary callers.
   --tests 'decompengine.analysis.GhidraJvmExportBudgetTest'
 ```
 
-All 30 selected tests pass with zero failures, errors or skips. They use small
+The original publication checkpoint executed all 30 selected tests with zero
+failures, errors or skips. They use small
 authored metadata, names and local Make/Ninja
 fixtures. They check all three schemas, UTF-8/escaping, exact byte accounting,
 independent small limits, cancellation/deadline behavior, old-file preservation,
