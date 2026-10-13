@@ -38,9 +38,9 @@ unshare -Ur -m bash -c '
   mount -t tmpfs -o rw,nodev,nosuid,noexec,size=1M,nr_inodes=128,uid=0,gid=0,mode=0700 \
     decomp-repair-output "$repair_output_mount"
   # Reuse the dependency closure prepared above; only the quota-backed test runs in this namespace.
-  # Checksum/resource/distribution checks remain enabled; the compiler producer alone is excluded.
+  # Checksum/resource/distribution checks remain enabled; only the prepared compiler producers are excluded.
   repair_gradle_args=(cleanTest test --tests decompengine.project.GeneratedCValidationSnapshotFixtureTest
-    -x :buildLlvmBehaviorHelper --no-daemon)
+    -x :buildLlvmBehaviorHelper -x :buildAnalysisIoHelper --no-daemon)
   if [[ -n "$repair_node_home" ]]; then
     repair_gradle_args+=("-PfrontendNodeHome=$repair_node_home")
   fi

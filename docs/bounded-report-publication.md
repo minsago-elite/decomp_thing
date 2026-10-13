@@ -37,7 +37,7 @@ and checks byte capacity before each write. It bounds scalar length before
 encoding, counts collection items before emitting them and checks nesting before
 opening a container. String and writer operations reach cooperative cancellation
 and elapsed checks at bounded intervals. Production output transfers bounded
-chunks to a fixed helper JVM; the caller does not perform native staging writes.
+chunks to a fixed native helper; the caller does not perform native staging writes.
 
 Direct callers can construct `GhidraAnalysis` without the bounded ELF reader.
 Supplemental preparation therefore independently bounds symbol count and name
@@ -87,13 +87,57 @@ it has no final report name or rename operation. Native directory creation,
 candidate creation/open/write/flush/close belong to that helper. A one-chunk queue
 and capped sender tasks keep native stdin backpressure off the analysis caller;
 queue waits reach the same caller checkpoint and independent report deadline.
-The helper has a 16 MiB heap and a 64 MiB Linux RSS ceiling. Its response must
+Before executing its payload, the static helper sets and reads back a hard and
+soft `RLIMIT_AS` of 64 MiB. The limit covers all mapped user address space,
+including shared mappings, rather than sampling RSS after allocations. It does
+not bound kernel allocations, page cache or the parent JVM. Cgroup charged memory
+is a different quantity: a shared page may be charged to another cgroup. The
+fixed bootstrap contains no process-creation calls and performs only a same-PID
+descriptor self-exec. Before protocol or path I/O, the payload installs kernel
+denial of process creation, further exec, limit changes and rename operations.
+Core size is zero and the
+helper is non-dumpable. There is no unrestricted JVM fallback. Its response must
 contain bounded creation identity, exact byte count/digest, complete footer/EOF,
 successful exit and closed transfer/capture streams before publication is admitted.
 Provider paths such as ZipFS are refused before helper admission: transferring
 their text to the helper's default filesystem would otherwise name a different
 host path. The existing 32 MiB independent report host ceiling is unchanged;
 smaller configured report/profile allowances are passed through exactly.
+
+The model reader uses the same authenticated static endpoint, with its existing
+512 MiB streamed byte ceiling and the lower of the selected parent memory budget
+and 256 MiB as its address-space limit. A budget below its existing 64 MiB minimum
+is refused. These child limits do not reduce the model byte allowance: the reader
+streams fixed-size chunks, while the parent owns the returned model bytes.
+
+Source, fixed build policy, actual bounded compiler/build record and executable
+digests belong to the defining application JAR. Installed sidecars must match
+those resources byte for byte; coherent replacement of mutable sidecars cannot
+authorize another helper. Only the qualified Linux x86-64 static ELF and OpenJDK
+21 descriptor layout are accepted. Unsupported enforcement is refused before
+payload I/O. Compatibility JVM fixture entrypoints retain diagnostic RSS checks
+and are not the bounded production path.
+
+An opened, authenticated executable descriptor remains owned through the actual
+OpenJDK 21 `ProcessBuilder.start` acknowledgement. The command executes
+`/proc/<parent-pid>/fd/<descriptor>`, so atomic pathname replacement cannot select
+another image. The JDK's child exec-error pipe is close-on-exec and its parent
+waits for EOF before returning the process; generic injected `Process` objects
+cannot supply that acknowledgement. See the
+[qualified JDK child exec protocol](https://github.com/adoptium/jdk21u/blob/1c417fbfc2f7/src/java.base/unix/native/libjava/childproc.c#L390)
+and [parent acknowledgement](https://github.com/adoptium/jdk21u/blob/1c417fbfc2f7/src/java.base/unix/native/libjava/ProcessImpl_md.c#L762).
+Two shared executable pins cap pending launches. An unknown launch, failed close
+or blocked close retains its descriptor and refuses fresh admission; a returned
+close callback is insufficient unless the actual channel is closed.
+
+This deployment verification assumes the installed application JAR and helper
+inode are trusted application artifacts, and verified helper inodes are never
+modified in place. Deployment updates must publish a new inode. An opened descriptor pins an inode, not
+immutable contents: hostile same-inode writes during verification and launch are
+outside that deployment assumption. This is not authority to execute caller-owned
+or oracle-provided mutable binaries. It does not change the existing requirement
+for stable output directories or authenticate report paths against hostile parent
+replacement.
 
 Two retained invocation owners cap sender, capture and control resources. Late
 handles remain owned; unknown launches and unconfirmed native creation cannot

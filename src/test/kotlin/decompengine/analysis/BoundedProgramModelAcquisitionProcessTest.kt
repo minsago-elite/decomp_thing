@@ -16,6 +16,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.FileTime
 import java.security.MessageDigest
 import java.util.concurrent.CompletableFuture
@@ -36,7 +37,11 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
-/** Tests use a benign child for blocked native I/O, never a production-worker test mode. */
+/**
+ * Default-command controls run the bounded native helper. Explicit modes inject a legacy JVM
+ * compatibility fixture for framing, blocked native I/O, and ownership; they do not qualify the
+ * production helper's memory bound or expose a production-worker test mode.
+ */
 class BoundedProgramModelAcquisitionProcessTest {
     @Test
     fun `ZipFS model and work paths refuse admission without reading different canonical host bytes`() = fixture { f ->
@@ -114,12 +119,9 @@ class BoundedProgramModelAcquisitionProcessTest {
         val observedWork = AtomicReference<Path?>()
         val reader = f.reader(starter = { command, work ->
             starts.incrementAndGet()
-            assertEquals(BoundedProgramModelAcquisitionWorker::class.java.name, command[command.size - 4])
-            observedPath.set(command[command.size - 3])
+            assertNativeModelCommand(command, suppliedModel, actualBytes.size.toLong(), RESIDENT_BYTES)
+            observedPath.set(command[2])
             observedWork.set(work)
-            assertTrue(command.contains("-Djava.io.tmpdir=$suppliedWork"))
-            assertTrue(command.contains("-Djna.tmpdir=$suppliedWork"))
-            assertTrue(command.contains("-Duser.home=$suppliedWork"))
             f.start(command, work)
         })
         val acquired = reader.read(suppliedModel, suppliedWork, actualBytes.size.toLong(), RESIDENT_BYTES, deadline(5_000))
@@ -149,7 +151,85 @@ class BoundedProgramModelAcquisitionProcessTest {
         assertEquals(model, ProgramModelJson.readCanonical(acquired))
         assertContentEquals(bytes, Files.readAllBytes(f.model), "acquisition must preserve the authored canonical model")
         assertContentEquals(PRIOR_REPORT, Files.readAllBytes(f.report))
+        f.assertChildAbsent()
         f.assertReleased()
+    }
+
+    @Test
+    fun `default native helper streams the maximum 512MiB input at the minimum 64MiB limit`() = fixture { f ->
+        val maximum = BoundedProgramModelAcquisitionProcess.MAXIMUM_MODEL_BYTES
+        val largeModel = f.root.resolve("maximum-model.json")
+        // This is a valid JSON byte-stream fixture, not a parser or supported-scale qualification.
+        // Generate it on disk with one small chunk; the acquired result is the only 512MiB array.
+        val prefix = "{\"reader_fixture\":\"".toByteArray()
+        val suffix = "\"}\n".toByteArray()
+        val chunk = ByteArray(64 * 1024) { ('a'.code + it % 26).toByte() }
+        val expectedDigest = MessageDigest.getInstance("SHA-256")
+        Files.newOutputStream(largeModel, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE).use { output ->
+            output.write(prefix)
+            expectedDigest.update(prefix)
+            var remaining = maximum - prefix.size - suffix.size
+            while (remaining > 0) {
+                val count = minOf(remaining, chunk.size.toLong()).toInt()
+                output.write(chunk, 0, count)
+                expectedDigest.update(chunk, 0, count)
+                remaining -= count
+            }
+            output.write(suffix)
+            expectedDigest.update(suffix)
+        }
+        assertEquals(maximum, Files.size(largeModel))
+        val before = Files.readAttributes(largeModel, BasicFileAttributes::class.java)
+        val starts = AtomicInteger()
+        val reader = f.reader(starter = { command, work ->
+            starts.incrementAndGet()
+            assertNativeModelCommand(command, largeModel, maximum, RESIDENT_BYTES)
+            assertEquals(f.root, work)
+            f.start(command, work)
+        })
+        val acquired = reader.read(largeModel, f.root, maximum, RESIDENT_BYTES, deadline(30_000))
+        assertEquals(1, starts.get())
+        assertEquals(maximum, acquired.size.toLong())
+        assertContentEquals(expectedDigest.digest(), MessageDigest.getInstance("SHA-256").digest(acquired))
+        assertContentEquals(prefix, acquired.copyOfRange(0, prefix.size))
+        assertContentEquals(suffix, acquired.copyOfRange(acquired.size - suffix.size, acquired.size))
+        val after = Files.readAttributes(largeModel, BasicFileAttributes::class.java)
+        assertEquals(before.fileKey(), after.fileKey(), "streaming acquisition must preserve its input identity")
+        assertEquals(before.size(), after.size(), "streaming acquisition must preserve its input length")
+        assertEquals(before.lastModifiedTime(), after.lastModifiedTime(), "streaming acquisition must not modify its input")
+        f.assertChildAbsent()
+        f.assertReleased()
+        f.assertPriorEvidence()
+    }
+
+    @Test
+    fun `default native helper retains stricter parent budgets and caps the selected limit at 256MiB`() = fixture { f ->
+        val model = pathControlModel("budgeted", 'b')
+        val bytes = model.toJson().toByteArray()
+        val input = f.root.resolve("budget-model.json")
+        Files.write(input, bytes, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
+        val selectedLimits = ArrayList<Long>()
+        val reader = f.reader(starter = { command, work ->
+            val selected = command[4].toLong()
+            assertNativeModelCommand(command, input, bytes.size.toLong(), selected)
+            assertEquals(f.root, work)
+            selectedLimits.add(selected)
+            f.start(command, work)
+        })
+        val cases = listOf(RESIDENT_BYTES to RESIDENT_BYTES,
+            2 * RESIDENT_BYTES to 2 * RESIDENT_BYTES,
+            Long.MAX_VALUE to BoundedProgramModelAcquisitionProcess.MAXIMUM_WORKER_RESIDENT_BYTES)
+        for ((parentLimit, expectedLimit) in cases) {
+            val acquired = reader.read(input, f.root, bytes.size.toLong(), parentLimit, deadline(5_000))
+            assertEquals(expectedLimit, selectedLimits.last())
+            assertContentEquals(bytes, acquired)
+            assertEquals(model, ProgramModelJson.readCanonical(acquired))
+            f.assertChildAbsent()
+            f.assertReleased()
+            f.assertPriorEvidence()
+        }
+        assertEquals(cases.map { it.second }, selectedLimits)
+        assertContentEquals(bytes, Files.readAllBytes(input))
     }
 
     @Test
@@ -568,7 +648,7 @@ class BoundedProgramModelAcquisitionProcessTest {
     }
 
     @Test
-    fun `worker terminal stability rejects replacement growth shrink and same-size mutation`() {
+    fun `legacy JVM compatibility worker terminal stability rejects replacement growth shrink and same-size mutation`() {
         for (mutation in listOf("replace", "grow", "shrink", "modify")) fixture { f ->
             val bytes = ByteArray(3 * 64 * 1024) { (it % 251).toByte() }
             Files.write(f.model, bytes)
@@ -599,7 +679,7 @@ class BoundedProgramModelAcquisitionProcessTest {
     }
 
     @Test
-    fun `worker streams exact bytes and digest with bounded chunks without writing model or report`() = fixture { f ->
+    fun `legacy JVM compatibility worker streams exact bytes and digest with bounded chunks without writing model or report`() = fixture { f ->
         val bytes = ByteArray(3 * 64 * 1024 + 19) { (it % 251).toByte() }
         Files.write(f.model, bytes)
         val output = ByteArrayOutputStream()
@@ -732,7 +812,7 @@ class BoundedProgramModelAcquisitionProcessTest {
     }
 }
 
-/** Only the test classpath exposes scenarios; the production worker has no test controls. */
+/** Injected legacy JVM compatibility scenarios exist only on the test classpath. */
 internal object ModelAcquisitionBenignTestWorker {
     @JvmStatic fun main(arguments: Array<String>) {
         val mode = arguments[0]
@@ -800,6 +880,18 @@ private fun workerCommand(root: Path, mode: String): List<String> {
     return listOf(javaExecutable, "-Xms8m", "-Xmx32m", "-XX:-UsePerfData", "-XX:+DisableAttachMechanism",
         "-Djava.io.tmpdir=$root", "-Djna.tmpdir=$root", "-Duser.home=$root", "-cp", classpath,
         ModelAcquisitionBenignTestWorker::class.java.name, mode, root.toString())
+}
+private fun assertNativeModelCommand(command: List<String>, path: Path, maximumBytes: Long, residentBytes: Long) {
+    assertEquals(5, command.size, "the default command must invoke the fixed native model mode")
+    val executable = Path.of(command[0])
+    assertEquals(Path.of("/proc", ProcessHandle.current().pid().toString(), "fd"), executable.parent,
+        "the native command must use this caller's open executable descriptor pin")
+    val descriptor = assertNotNull(executable.fileName.toString().toIntOrNull(), "the executable pin must name a descriptor")
+    assertTrue(descriptor >= 0)
+    assertEquals(descriptor.toString(), executable.fileName.toString())
+    assertTrue(Files.isRegularFile(executable) && Files.isExecutable(executable),
+        "the open descriptor must still refer to a regular executable artifact at native start")
+    assertEquals(listOf("model", path.toString(), maximumBytes.toString(), residentBytes.toString()), command.drop(1))
 }
 private fun awaitCondition(milliseconds: Long, message: String, condition: () -> Boolean) {
     val limit = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(milliseconds)

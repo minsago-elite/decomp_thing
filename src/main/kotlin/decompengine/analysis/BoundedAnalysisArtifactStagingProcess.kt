@@ -4,7 +4,6 @@ import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
-import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -85,8 +84,18 @@ internal class BoundedAnalysisArtifactStagingProcess(
                         }
                     }
                 } catch (failure: Throwable) { owner.launchFailed(failure); throw failure }
-                try { processStarter(command).also(owner::accept) }
-                catch (failure: Throwable) { owner.launchUnknown(failure); throw failure }
+                try {
+                    AnalysisNativeIoHelper.beforeLaunch(command)
+                    processStarter(command).also { process ->
+                        owner.accept(process)
+                        AnalysisNativeIoHelper.launchReturned(command, process)
+                    }
+                }
+                catch (failure: Throwable) {
+                    AnalysisNativeIoHelper.launchUnknown(command)
+                    owner.launchUnknown(failure)
+                    throw failure
+                }
             }, { owner.abandon() }, owner::launchFailed)
             // Settle candidate creation before invoking rendering callbacks. An ordinary render
             // or quota refusal must not race an unfinished native create and poison capacity.
@@ -248,6 +257,11 @@ internal class AnalysisArtifactStagingOwner(
         markUnconfirmed(cause)
     }
 
+    private fun isQualifiedProcessPipe(stream: OutputStream): Boolean =
+        System.getProperty("os.name").equals("Linux", ignoreCase = true) && Runtime.version().feature() == 21 &&
+            stream.javaClass.name == "java.lang.ProcessImpl\$ProcessPipeOutputStream" &&
+            stream.javaClass.classLoader == null && stream.javaClass.module.name == "java.base"
+
     fun startTransfer(executor: Executor) {
         transferSubmitted.set(true)
         try { executor.execute {
@@ -279,7 +293,23 @@ internal class AnalysisArtifactStagingOwner(
                 failure.compareAndSet(null, problem)
             } finally {
                 try { stream?.close(); stdinClosed.set(true); retainedStdin.set(null) }
-                catch (caught: Throwable) { cleanupProblem.compareAndSet(null, caught); if (problem == null) problem = caught else problem.addSuppressed(caught) }
+                catch (caught: Throwable) {
+                    cleanupProblem.compareAndSet(null, caught)
+                    if (problem == null) problem = caught else if (problem !== caught) problem.addSuppressed(caught)
+                    // A killed JDK process can replace its pipe with a closed stream while
+                    // buffered bytes remain. Its first close fails while flushing; one further
+                    // close in this same retained task can acknowledge actual closure for that
+                    // qualified JDK pipe. Generic filters can return a no-op second close after
+                    // an underlying failure, so their closure remains unconfirmed. A blocked
+                    // or persistently failing close never renews cleanup.
+                    if (caught is Exception && stream != null && isQualifiedProcessPipe(stream)) try {
+                        stream.close()
+                        stdinClosed.set(true)
+                        retainedStdin.set(null)
+                    } catch (second: Throwable) {
+                        if (second !== caught) caught.addSuppressed(second)
+                    }
+                }
                 transferFinished.set(true)
                 releaseIfQuiescent()
             }
@@ -495,7 +525,10 @@ private fun readStagingReceipt(stream: InputStream, maximumBytes: Long, opening:
     return ReportStagingReceipt(bytes, digest)
 }
 
-/** Fixed nonpublishing endpoint: no destination report name and no rename operation exist here. */
+/**
+ * Compatibility endpoint for direct JVM fixtures. Production uses the pinned native endpoint;
+ * this JVM's periodic RSS observation is diagnostic and does not enforce a native memory cap.
+ */
 internal object BoundedAnalysisArtifactStagingWorker {
     @JvmStatic fun main(arguments: Array<String>) {
         try {
@@ -592,23 +625,11 @@ private fun stagingRemaining(cutoff: Long): Long = (cutoff - System.nanoTime()).
 private fun stagingCause(caught: Throwable): Throwable = if (caught is ExecutionException) caught.cause ?: caught else caught
 
 private fun reportStagingCommand(staged: Path, maximumBytes: Long): List<String> {
-    val java = Path.of(System.getProperty("java.home"), "bin", if (File.separatorChar == '\\') "java.exe" else "java")
-        .toAbsolutePath().normalize()
-    require(Files.isExecutable(java)) { "application JDK has no executable report stager" }
-    val entries = listOf(BoundedAnalysisArtifactStagingWorker::class.java, Unit::class.java)
-        .map { Path.of(it.protectionDomain.codeSource.location.toURI()).toAbsolutePath().normalize().toString() }.distinct()
-    require(entries.none { File.pathSeparatorChar in it || '\u0000' in it }) { "report stager classpath is ambiguous" }
-    val parent = requireNotNull(staged.parent)
-    return listOf(java.toString(), "-Xms8m", "-Xmx16m", "-Xss256k", "-XX:+UseSerialGC",
-        "-XX:MaxMetaspaceSize=32m", "-XX:ReservedCodeCacheSize=16m", "-XX:MaxDirectMemorySize=1m",
-        "-XX:ActiveProcessorCount=1", "-XX:+DisableAttachMechanism", "-XX:-UsePerfData",
-        "-XX:+ErrorFileToStderr", "-XX:-CreateCoredumpOnCrash", "-XX:-DumpReplayDataOnError",
-        "-Djava.io.tmpdir=$parent", "-Djna.tmpdir=$parent", "-Duser.home=$parent", "-Dfile.encoding=UTF-8",
-        "-cp", entries.joinToString(File.pathSeparator), BoundedAnalysisArtifactStagingWorker::class.java.name,
-        staged.toString(), maximumBytes.toString())
+    return AnalysisNativeIoHelper.reportCommand(staged, maximumBytes)
 }
 private fun startReportStaging(command: List<String>): Process = ProcessBuilder(command).apply {
-    listOf("CLASSPATH", "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS").forEach(environment()::remove)
+    // The fixed static endpoint requires no inherited environment or external runtime.
+    environment().clear()
 }.start()
 private fun requireStagingResidentBudget() {
     if (!System.getProperty("os.name").equals("Linux", ignoreCase = true)) return

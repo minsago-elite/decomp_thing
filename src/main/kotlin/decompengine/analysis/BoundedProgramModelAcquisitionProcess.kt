@@ -4,7 +4,6 @@ import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
-import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -28,7 +27,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
-/** Native model acquisition belongs to a killable JVM, not the caller's cooperative parser. */
+/** Native model acquisition belongs to a bounded fixed process, not the caller's cooperative parser. */
 internal class BoundedProgramModelAcquisitionProcess(
     private val commandFactory: (Path, Path, Long, Long) -> List<String> = ::modelAcquisitionCommand,
     private val processStarter: (List<String>, Path) -> Process = ::startModelAcquisition,
@@ -45,7 +44,7 @@ internal class BoundedProgramModelAcquisitionProcess(
         require(maximumBytes in 1..MAXIMUM_MODEL_BYTES)
         val residentLimit = minOf(maximumResidentBytes, MAXIMUM_WORKER_RESIDENT_BYTES)
         require(residentLimit >= MINIMUM_WORKER_RESIDENT_BYTES) {
-            "program-model acquisition resident budget cannot fit its bounded JVM"
+            "program-model acquisition resident budget is below its fixed native minimum"
         }
         require(path.fileSystem === FileSystems.getDefault() && workDirectory.fileSystem === FileSystems.getDefault()) {
             "program-model acquisition requires the default filesystem; provider paths cannot be transferred as host path strings"
@@ -77,9 +76,16 @@ internal class BoundedProgramModelAcquisitionProcess(
                     owner.launchFailed(failure)
                     throw failure
                 }
-                try { processStarter(command, work).also(owner::accept) }
+                try {
+                    AnalysisNativeIoHelper.beforeLaunch(command)
+                    processStarter(command, work).also { process ->
+                        owner.accept(process)
+                        AnalysisNativeIoHelper.launchReturned(command, process)
+                    }
+                }
                 catch (failure: Throwable) {
                     // A native starter can throw after side effects; no returned handle proves no absence.
+                    AnalysisNativeIoHelper.launchUnknown(command)
                     owner.launchUnknown(failure)
                     throw failure
                 }
@@ -400,7 +406,10 @@ internal class ModelAcquisitionOwner(
     }
 }
 
-/** Read-only endpoint. Partial output is speculative until terminal metadata, footer, and exit. */
+/**
+ * Compatibility endpoint for direct JVM fixtures. Production uses the pinned native endpoint;
+ * this JVM's RSS observation is diagnostic. Partial output remains speculative until its footer.
+ */
 internal object BoundedProgramModelAcquisitionWorker {
     @JvmStatic fun main(arguments: Array<String>) {
         try {
@@ -470,31 +479,17 @@ private val MODEL_ACQUISITION_CONTROL = modelExecutor(2, "program-model-acquisit
 private fun remainingUntil(cutoff: Long): Long = (cutoff - System.nanoTime()).coerceAtLeast(0L)
 
 private fun modelAcquisitionCommand(path: Path, work: Path, maximumBytes: Long, residentLimit: Long): List<String> {
-    val java = Path.of(System.getProperty("java.home"), "bin", if (File.separatorChar == '\\') "java.exe" else "java")
-        .toAbsolutePath().normalize()
-    require(Files.isExecutable(java)) { "application JDK has no executable model reader" }
-    val entries = listOf(BoundedProgramModelAcquisitionWorker::class.java, Unit::class.java)
-        .map { Path.of(it.protectionDomain.codeSource.location.toURI()).toAbsolutePath().normalize().toString() }.distinct()
-    require(entries.none { File.pathSeparatorChar in it || '\u0000' in it }) { "model reader classpath is ambiguous" }
-    return listOf(java.toString(), "-Xms8m", "-Xmx16m", "-Xss256k", "-XX:+UseSerialGC",
-        "-XX:MaxMetaspaceSize=32m", "-XX:ReservedCodeCacheSize=16m", "-XX:MaxDirectMemorySize=1m",
-        "-XX:ActiveProcessorCount=1", "-XX:+DisableAttachMechanism", "-XX:-UsePerfData",
-        "-Djava.io.tmpdir=$work", "-Djna.tmpdir=$work", "-Duser.home=$work", "-Dfile.encoding=UTF-8",
-        "-cp", entries.joinToString(File.pathSeparator), BoundedProgramModelAcquisitionWorker::class.java.name,
-        path.toString(), maximumBytes.toString(), residentLimit.toString())
+    require(work.fileSystem === FileSystems.getDefault())
+    return AnalysisNativeIoHelper.modelCommand(path, maximumBytes, residentLimit)
 }
 private fun startModelAcquisition(command: List<String>, work: Path): Process =
     ProcessBuilder(command).directory(work.toFile()).apply {
-        listOf("CLASSPATH", "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS").forEach(environment()::remove)
-        environment()["TMPDIR"] = work.toString()
-        environment()["HOME"] = work.toString()
-        environment()["XDG_CACHE_HOME"] = work.toString()
-        environment()["XDG_CONFIG_HOME"] = work.toString()
+        environment().clear()
     }.start()
 
 private fun requireWorkerResidentBudget(maximumBytes: Long) {
-    // Preserve the existing portable JVM path; the Linux RSS monitor has the same availability
-    // boundary as the exporter's existing /proc observer. JVM and buffer ceilings apply everywhere.
+    // This observation belongs only to the compatibility JVM endpoint. It is not a hard limit;
+    // production's fixed native endpoint inherits a verified address-space cap before exec.
     if (!System.getProperty("os.name").equals("Linux", ignoreCase = true)) return
     val bytes = Files.newInputStream(Path.of("/proc/self/status")).use { it.readNBytes(16 * 1024 + 1) }
     require(bytes.size <= 16 * 1024) { "model worker resident-memory observation exceeds its bound" }
