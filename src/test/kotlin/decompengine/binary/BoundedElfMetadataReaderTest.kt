@@ -147,7 +147,7 @@ class BoundedElfMetadataReaderTest {
     }
 
     @Test
-    fun `isolated metadata worker preserves the exact bounded symbol inventory`() = inControlTemporaryDirectory { root ->
+    fun `isolated metadata worker preserves the exact bounded symbol inventory`(): Unit = inControlTemporaryDirectory { root ->
         val bytes = dynamicFixture(variants.first())
         val input = writeElf(root.resolve("isolated-dynamic\tinput\n.elf"), bytes)
         val direct = BoundedElfMetadataReader.read(input)
