@@ -4,6 +4,7 @@ package decompengine.project
 internal class GeneratedCProjectRendering(private val model: RecoveredProgramModel, plan: ModulePlan) : ProjectRendering {
     private val functions = model.functions.associateBy { it.id }
     private val globals = model.globals.associateBy { it.id }
+    private val declarationContext = GeneratedCDeclarationContext(model.types)
     private val externallyCalled: Set<String>
 
     init {
@@ -11,6 +12,17 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
         externallyCalled = model.functions.flatMap { caller ->
             caller.calls.filter { called -> owners[called] != owners[caller.id] }
         }.toSet()
+        model.functions.forEach { function ->
+            val declaration = recoveredDeclaration(function, declarationContext)
+            // Plain C11 inline does not supply an external definition, even for callers in this
+            // module. The per-module compile gate cannot detect its missing link-time symbol.
+            require(!declaration.hasInlineSpecifier || declaration.hasInternalLinkage || declaration.hasExternSpecifier) {
+                "unsupported generated-C inline definition for ${function.id}: external inline requires an explicit extern declaration"
+            }
+            if (function.id in externallyCalled || safeCName(function.name) in setOf("main", "decomp_engine_main")) {
+                declaration.requireExternalDeclaration("a public module interface")
+            }
+        }
     }
 
     override fun entrypoint(): RenderedEntrypoint? {
@@ -19,19 +31,20 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
             ?: model.functions.firstOrNull { safeCName(it.name) in setOf("entry", "recovered__start") }
             ?: model.functions.minByOrNull { it.address }
         val entryBody = entry?.let {
-            if (normalizedPrototype(it).startsWith("void ")) "${safeCName(it.name)}();\n    return 0;"
-            else "return ${safeCName(it.name)}();"
+            val declaration = recoveredDeclaration(it, declarationContext)
+            require(declaration.explicitNoParameters) {
+                "unsupported generated-C entry call for ${it.id}: an explicit (void) parameter list is required; " +
+                    "entry arguments and ABI have not been recovered"
+            }
+            declaration.entryCall(safeCName(it.name))
         } ?: "return 0;"
-        val mainSource = """
-                #include "decomp_types.h"
-                ${entry?.let { "extern ${normalizedPrototype(it)};" } ?: ""}
-
-                int main(int argc, char **argv) {
-                    (void)argc;
-                    (void)argv;
-                    $entryBody
-                }
-        """.trimIndent() + "\n"
+        val mainSource = buildString {
+            append("#include \"decomp_types.h\"\n")
+            entry?.let { append(normalizedPrototype(it)).append(";\n") }
+            append("\nint main(int argc, char **argv) {\n")
+            append("    (void)argc;\n    (void)argv;\n")
+            append("    ").append(entryBody).append("\n}\n")
+        }
         return RenderedEntrypoint(mainSource, listOfNotNull(entry?.id))
     }
 
@@ -49,7 +62,7 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
         val guard = "DECOMP_MODULE_${module.id.uppercase()}_H"
         append("#ifndef $guard\n#define $guard\n\n#include \"decomp_types.h\"\n\n")
         module.globalIds.map { id -> globals.getValue(id) }.forEach { global ->
-            append(globalDeclaration(global, external = true)).append(" /* ${global.id} @ 0x${global.address.toString(16)} */\n")
+            append(globalDeclaration(global, external = true, context = declarationContext)).append(" /* ${global.id} @ 0x${global.address.toString(16)} */\n")
         }
         if (module.globalIds.isNotEmpty()) append('\n')
         module.functionIds.map { id -> functions.getValue(id) }
@@ -65,11 +78,21 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
         append("#ifndef $guard\n#define $guard\n\n#include \"${module.headerPath.removePrefix("include/")}\"\n\n")
         module.functionIds.map { id -> functions.getValue(id) }
             .filterNot { it.id in externallyCalled || safeCName(it.name) in setOf("main", "decomp_engine_main") }
-            .forEach { function -> append(normalizedPrototype(function)).append("; /* private ${function.id} @ 0x${function.address.toString(16)} */\n") }
+            .forEach { function ->
+                val declaration = recoveredDeclaration(function, declarationContext)
+                // A recovered inventory can retain functions with no callers. Keep their exact
+                // declaration and linkage while suppressing only this function's unused warning.
+                if (declaration.hasInternalLinkage) append("__attribute__((unused))\n")
+                append(declaration.prototype).append("; /* private ${function.id} @ 0x${function.address.toString(16)} */\n")
+            }
         append("\n#endif\n")
     }
 
-    override fun buildDefinition(sources: List<String>, profile: ReconstructionProfile): String {
+    override fun buildDefinition(sources: List<String>, profile: ReconstructionProfile): String =
+        generatedCMakeBuildDefinition(sources, profile)
+}
+
+internal fun generatedCMakeBuildDefinition(sources: List<String>, profile: ReconstructionProfile): String {
         val cflags = profile.adapterConfiguration["compiler-flags"]?.joinToString(" ")
             ?: "-std=c11 -g -Wall -Wextra -Werror -Iinclude"
         val cc = profile.adapterConfiguration["compiler-driver"]?.firstOrNull() ?: "gcc"
@@ -104,5 +127,3 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
         ".PHONY: all clean",
     ).joinToString("\n", postfix = "\n")
     }
-
-}

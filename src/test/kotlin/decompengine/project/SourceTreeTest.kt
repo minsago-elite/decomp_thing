@@ -1384,12 +1384,12 @@ class SourceTreeTest {
     fun `partial agent modules remain unresolved before compiler validation`() {
         val project = createTempDirectory("source-tree-partial-agent-")
         val functions = listOf(
-            model().functions[0].copy(name = "parse_first", calls = emptySet()),
-            model().functions[1].copy(name = "parse_second", referencedGlobals = emptySet()),
+            model().functions[0].copy(name = "parse_first", prototype = "int parse_first(void)", calls = emptySet()),
+            model().functions[1].copy(name = "parse_second", prototype = "int parse_second(void)", referencedGlobals = emptySet()),
         )
         val sameModule = model().copy(functions = functions, globals = emptyList())
         val harness = writingHarness(
-            "/* fn_0000000000401000 */\nundefined8 parse_first(void) { return 17; }\n",
+            "/* fn_0000000000401000 */\nint parse_first(void) { return 17; }\n",
         )
 
         val manifest = SourceTreeGenerator.generate(

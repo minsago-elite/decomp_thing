@@ -152,7 +152,7 @@ private fun verifiedAuditRepairLineage(
     }
     val lineage = RepairAcpEvidenceArchiveVerifier.verifyIfPresent(
         projectDir, digests, sizes, manifest, profile,
-        ReconstructionAdapters.resolve(profile).repairIndexProfile(profile),
+        { ReconstructionAdapters.resolve(profile).repairIndexProfile(profile) },
     )
     // Unresolved agent sources and their repaired descendants require an authentic
     // undispatched budget fallback, even when no repair has occurred.
@@ -348,7 +348,10 @@ object ArchivalProjectAuditor {
             publicationEvidence.effectiveLimits == expectedPublication.effectiveLimits) {
             "archive publication evidence does not match the selected profile or effective budgets"
         }
+        val adapter = ReconstructionAdapters.resolve(profile)
+        val unresolvedOutput = adapter.requiresUnresolvedOutput(profile)
         val requiredCorpora = snapshotRequiredBehaviorCorpora(requiredCorpusSha256)
+        require(!unresolvedOutput || requiredCorpora.isEmpty()) { "diagnostic-only output cannot qualify behavior corpora" }
         val maximumFileBytes = minOf(effectiveLimits.maximumFileBytes, Int.MAX_VALUE.toLong() - 1L)
         val manifestSnapshot = readStableRegularFile(projectDir, "source_tree_manifest.json", maximumFileBytes)
         val manifest = SourceTreeManifestReader.parse(manifestSnapshot.bytes.decodeToString(throwOnInvalidSequence = true), profile)
@@ -387,6 +390,7 @@ object ArchivalProjectAuditor {
             require(totalBytes <= effectiveLimits.maximumTotalBytes) { "audit input exceeds the aggregate byte bound" }
             require(snapshot.sha256 == file.sha256) { "audit manifest hash differs from current file: ${file.path}" }
             hashes[file.path] = snapshot.sha256
+            if (ProjectFileRole.BUILD_INPUT in file.roles) adapter.validateSourceContent(profile, snapshot.bytes, file.path)
             manifestSizes[file.path] = snapshot.bytes.size.toLong()
             // Inspect the same bounded, hash-checked bytes used by the audit. A mutable
             // manifest label cannot erase checkpoint provenance, including unplanned sources.
@@ -399,6 +403,9 @@ object ArchivalProjectAuditor {
             if (file.path == modelPath) modelText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
             if (file.path == planPath) planText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
             if (file.path == confidencePath) confidenceText = snapshot.bytes.decodeToString(throwOnInvalidSequence = true)
+        }
+        if (unresolvedOutput) {
+            ReconstructionAcpEvidenceArchiveVerifier.verify(projectDir, hashes, manifestSizes, manifest, profile)
         }
         require(modelText != null && planText != null) { "audit requires manifest-bound program model and module plan" }
         UniqueJsonObjectKeyValidator(modelText).validate()
@@ -620,7 +627,7 @@ object ArchivalProjectAuditor {
                 val recoveryUnresolved = (model.functions.map { it.id to it.status } +
                     model.globals.map { it.id to it.status } +
                     model.types.map { it.id to it.status })
-                    .filter { (_, status) -> model.isRecoveryUnresolved(status) }.map { it.first }.toSet()
+                    .filter { (_, status) -> unresolvedOutput || model.isRecoveryUnresolved(status) }.map { it.first }.toSet()
                 val implementationUnresolved = manifest.unresolvedImplementationIds.toSet()
                 fun requireIds(record: JsonObject, field: String, expected: Collection<String>) {
                     val actual = record.getValue(field).jsonArray.map { value ->
@@ -783,6 +790,7 @@ object ArchivalProjectAuditor {
             }
         }
         val behaviorPaths = discoverBehaviorReports()
+        require(!unresolvedOutput || behaviorPaths.isEmpty()) { "diagnostic-only output cannot retain behavior qualification reports" }
         val problems = linkedMapOf<String, String>()
         val verifiedBehavior = linkedMapOf<String, Boolean>()
         val behaviorHashes = linkedMapOf<String, String>()
@@ -912,6 +920,7 @@ object ArchivalProjectAuditor {
             require(snapshot.sha256 == expectedHash) { "behavior report changed before audit publication" }
         }
         currentProjectRecord?.let { BehaviorEvidence.requireProjectCurrent(it, BehaviorProjectContext(projectDir, profile)) }
+        if (unresolvedOutput) adapter.verifyArchivePurpose(projectDir, profile, manifest, hashes.keys)
         if (repairState.isInitialized()) rejectProfileProjectionPreimages(projectDir, profile)
         if (publish) writeProjectEvidenceAtomically(projectDir.resolve("reports/archival_audit.json"), audit.toJson())
         return audit

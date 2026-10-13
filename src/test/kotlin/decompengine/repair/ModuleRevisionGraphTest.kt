@@ -175,6 +175,23 @@ class ModuleRevisionGraphTest {
             RepairAgentAssessmentStatus.REJECTED,
             rejected.repairMetadata?.agentInvocation?.assessmentStatus,
         )
+        val rejectedProjection = Json.parseToJsonElement(renderRepairHistoryProjection(
+            graph.derivedRepairIterations(), emptyList(), MAXIMUM_REPAIR_PROJECTION_BYTES,
+            runs = graph.snapshot.runs,
+        )).jsonObject
+        val historyJob = decompengine.jobs.Job("fixture", "fixture", "complete", "now", sizeBytes = 0,
+            binaryPath = project.resolve("fixture.elf"), metadata = decompengine.binary.ElfMetadata("ELF64", "little", 1u,
+                "fixture", "executable", "fixture", 0uL, 0u, 0u, 0u, 0u))
+        val rejectedHtml = decompengine.web.renderRepairHistory(
+            historyJob,
+            reportContext = decompengine.web.WebReportContext(project.resolve("reports")),
+            payload = rejectedProjection,
+        )
+        assertTrue(rejectedHtml.contains("Rollback: Completed; the rejected candidate did not advance the source head."), rejectedHtml)
+        assertTrue(rejectedHtml.contains("ACP receipt is unavailable; release completeness is not established."), rejectedHtml)
+        assertFalse(rejectedHtml.contains("bounded failure"), rejectedHtml)
+        assertFalse(rejectedHtml.contains("provider invocation failed"), rejectedHtml)
+        assertFalse(rejectedHtml.contains(pending.receiptPath), rejectedHtml)
         graph.close()
 
         receiptPath.writeText(receiptPath.readText().replaceFirst("\"schemaVersion\": 2", "\"schemaVersion\": 1"))
@@ -227,6 +244,27 @@ class ModuleRevisionGraphTest {
             assertEquals(RepairAttemptDisposition.LEGACY_UNVERIFIED, iteration.disposition)
             assertEquals(RepairPublicationMode.ACP_RELEASE, iteration.publicationMode)
             assertEquals(binding, iteration.agentInvocation)
+            assertEquals("unverified", repairAttemptLabel(iteration))
+            reopened.enableRunContract()
+            val migrated = reopened.derivedRepairIterations().single()
+            assertEquals(ModuleRevisionStatus.LEGACY_UNVERIFIED, reopened.snapshot.nodes.last().status)
+            assertEquals(RepairAttemptDisposition.LEGACY_UNVERIFIED, migrated.disposition)
+            assertEquals(binding, migrated.agentInvocation)
+            assertEquals(null, reopened.snapshot.fullyAcceptedHeadId)
+            val run = reopened.beginRun(1, 60_000)
+            val cli = decompengine.presentRepairOutcome(RepairRunOutcome(listOf(migrated), null, run))
+            assertTrue(cli.lines.contains("repair iteration 1: unverified"))
+            assertTrue(cli.lines.contains("accepted revision: none"))
+            val payload = Json.parseToJsonElement(renderRepairHistoryProjection(listOf(migrated), emptyList(),
+                MAXIMUM_REPAIR_PROJECTION_BYTES, runs = listOf(run))).jsonObject
+            val job = decompengine.jobs.Job("fixture", "fixture", "complete", "now", sizeBytes = 0,
+                binaryPath = target, metadata = decompengine.binary.ElfMetadata("ELF64", "little", 1u,
+                    "fixture", "executable", "fixture", 0uL, 0u, 0u, 0u, 0u))
+            val html = decompengine.web.renderRepairHistory(job, payload = payload)
+            assertTrue(html.contains("Compile repair — unverified"), html)
+            assertTrue(html.contains("Accepted revision: <code>unavailable</code>"), html)
+            assertFalse(html.contains("Compile repair — accepted"), html)
+            reopened.finishRun(RepairRunStatus.REJECTED, null)
         }
         val graphPath = project.resolve("reports/repair-revisions/graph.json")
         graphPath.writeText(
@@ -4465,7 +4503,7 @@ class ModuleRevisionGraphTest {
         )
     }
 
-    private fun completeAcpReceiptDocument(
+    internal fun completeAcpReceiptDocument(
         project: Path,
         attempt: ModuleRevisionAttempt,
         relativePath: String,

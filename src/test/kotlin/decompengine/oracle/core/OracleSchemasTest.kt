@@ -1,7 +1,10 @@
 package decompengine.oracle.core
 
 import decompengine.oracle.behavior.LLVM_BEHAVIOR_CANDIDATE_ACP_LINEAGE_MAXIMUM_ARCHIVE_BYTES
+import java.nio.file.Files
+import java.nio.file.Path
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
@@ -12,6 +15,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.long
 
 class OracleSchemasTest {
@@ -73,11 +77,79 @@ class OracleSchemasTest {
 
     @Test
     fun `every catalogued schema is bundled and compilable`() {
-        assertEquals(69, OracleSchemas.supportedNames.size)
         OracleSchemas.supportedNames.forEach { name ->
             val identity = OracleSchemas.identity(name)
             assertEquals(name, identity.name)
             assertTrue(identity.sha256.matches(Regex("[0-9a-f]{64}")), name)
+        }
+    }
+
+    @Test
+    fun `versioned schema inventory covers every file and pins its exact format bytes`() {
+        val inventoryBytes = requireNotNull(
+            OracleSchemas::class.java.classLoader.getResourceAsStream("oracle/kotlin-schema-inventory-v1.json"),
+        ).use { it.readAllBytes() }
+        val inventory = OracleJson.parseCanonical(inventoryBytes).jsonObject
+        val entries = inventory.getValue("schemas").jsonArray.map { it.jsonObject }
+
+        assertEquals("kotlin-oracle-schema-inventory", inventory.getValue("kind").jsonPrimitive.content)
+        assertEquals(1, inventory.getValue("schemaInventoryVersion").jsonPrimitive.int)
+        assertEquals(43, inventory.getValue("historicalStartingCount").jsonPrimitive.int)
+        assertEquals(entries.size, inventory.getValue("schemaCount").jsonPrimitive.int)
+        assertEquals(
+            entries.count { it.getValue("registration").jsonPrimitive.content == "shared-kotlin" },
+            inventory.getValue("sharedCatalogCount").jsonPrimitive.int,
+        )
+
+        val sourceSchemaPaths = mutableSetOf<String>()
+        Files.walk(Path.of("oracle")).use { paths ->
+            paths.filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(".schema.json") }
+                .forEach { path -> sourceSchemaPaths += path.toString().replace('\\', '/') }
+        }
+        assertEquals(sourceSchemaPaths, entries.map { it.getValue("path").jsonPrimitive.content }.toSet())
+
+        val registered = entries.filter {
+            it.getValue("registration").jsonPrimitive.content == "shared-kotlin"
+        }
+        assertEquals(registered.map { it.getValue("name").jsonPrimitive.content }.toSet(), OracleSchemas.supportedNames)
+        assertEquals(
+            setOf(
+                "extracted-program-model-v2",
+                "heuristic-score-interpretation",
+                "unassessed-recovery-population",
+            ),
+            entries.filter {
+                it.getValue("registration").jsonPrimitive.content == "retained-outside-shared-catalog"
+            }.map { it.getValue("name").jsonPrimitive.content }.toSet(),
+        )
+        assertEquals(
+            setOf("llvm-behavior-native-sandbox-policy-v2"),
+            entries.filter {
+                it.getValue("registration").jsonPrimitive.content == "separate-non-authoritative-validator"
+            }.map { it.getValue("name").jsonPrimitive.content }.toSet(),
+        )
+
+        entries.forEach { entry ->
+            val name = entry.getValue("name").jsonPrimitive.content
+            val path = entry.getValue("path").jsonPrimitive.content
+            val bytes = Files.readAllBytes(Path.of(path))
+            val bundledBytes = requireNotNull(OracleSchemas::class.java.classLoader.getResourceAsStream(path)) {
+                "schema resource is not packaged: $path"
+            }.use { it.readAllBytes() }
+            assertContentEquals(bytes, bundledBytes, path)
+            assertEquals(entry.getValue("schemaSha256").jsonPrimitive.content, OracleArtifacts.sha256(bundledBytes), path)
+            val schema = OracleJson.parse(bytes).jsonObject
+            val versionProperty = schema.getValue("properties").jsonObject.getValue("schemaVersion").jsonObject
+            val schemaVersions = versionProperty["const"]?.let { listOf(it.jsonPrimitive.int) }
+                ?: versionProperty.getValue("enum").jsonArray.map { it.jsonPrimitive.int }
+            assertEquals(
+                entry.getValue("formatVersions").jsonArray.map { it.jsonPrimitive.int },
+                schemaVersions,
+                path,
+            )
+            if (name in OracleSchemas.supportedNames) {
+                assertEquals(entry.getValue("schemaSha256").jsonPrimitive.content, OracleSchemas.identity(name).sha256)
+            }
         }
     }
 

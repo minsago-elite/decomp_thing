@@ -12,18 +12,46 @@ internal interface ReconstructionAdapter {
     val archiveBuild: ArchiveBuildPolicy
     val behaviorBuild: BehaviorBuildPolicy
     val mvpPatchCompiler: MvpPatchCompilerPolicy
+    fun validateProfile(profile: ReconstructionProfile) = Unit
+    fun evidenceOnlyProfile(profile: ReconstructionProfile): ReconstructionProfile =
+        throw IllegalArgumentException("adapter does not support evidence-only reconstruction: ${profile.id}")
+    fun evidenceOnlyReconstructor(profile: ReconstructionProfile): ModuleReconstructor =
+        throw IllegalArgumentException("adapter does not support evidence-only reconstruction: ${profile.id}")
     fun repairIndexProfile(profile: ReconstructionProfile): RepairIndexProfile
     fun build(
         projectDir: Path,
         profile: ReconstructionProfile,
         hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
     ): BuildReport
-    fun rendering(model: RecoveredProgramModel, plan: ModulePlan): ProjectRendering
+    fun rendering(model: RecoveredProgramModel, plan: ModulePlan, profile: ReconstructionProfile): ProjectRendering
+    fun admitGeneration(projectDir: Path, profile: ReconstructionProfile, reconstructor: ModuleReconstructor) = Unit
+    fun requiresUnresolvedOutput(profile: ReconstructionProfile): Boolean = false
+    fun diagnosticPurposeDescription(profile: ReconstructionProfile): String = "diagnostic-only output"
+    fun requireImplementationPurpose(profile: ReconstructionProfile, operation: String) {
+        require(!requiresUnresolvedOutput(profile)) { "diagnostic-only output cannot authorize $operation" }
+    }
+    fun validateSourceContent(profile: ReconstructionProfile, bytes: ByteArray, label: String) = Unit
+    fun verifyArchivePurpose(projectDir: Path, profile: ReconstructionProfile, manifest: SourceTreeManifest,
+        payloadPaths: Set<String>) = Unit
+    fun validateArchivedCheckpoint(profile: ReconstructionProfile, source: GeneratedFileEvidence,
+        checkpoint: ArchivedModuleCheckpointProvenance) = Unit
     fun modulePrompt(request: ModuleReconstructionRequest): ModulePromptContent
     fun defaultReconstructor(): ModuleReconstructor
     fun assess(module: PlannedModule, model: RecoveredProgramModel, generator: String, source: String): List<ModuleReconstructionIssue>
+    fun assess(module: PlannedModule, model: RecoveredProgramModel, generator: String, source: String, profile: ReconstructionProfile): List<ModuleReconstructionIssue> = assess(module, model, generator, source)
     fun toolchainEvidence(profile: ReconstructionProfile): String
 }
+
+/** Parsed archive facts only; the selected adapter determines what authority they can establish. */
+internal data class ArchivedModuleCheckpointProvenance(
+    val schemaVersion: Long,
+    val generator: String,
+    val reconstructorIdentity: String,
+    val accepted: Boolean,
+    val compilationPresent: Boolean,
+    val executionEvidencePresent: Boolean,
+    val repairLineagePresent: Boolean,
+)
 
 internal data class ModulePromptContent(val objective: String, val evidence: String)
 
@@ -39,15 +67,21 @@ internal data class RenderedEntrypoint(val source: String, val entityIds: List<S
 
 /** Application-owned dispatch; profile data cannot register executable implementations. */
 internal object ReconstructionAdapters {
-    fun resolve(profile: ReconstructionProfile): ReconstructionAdapter = when (profile.id) {
+    fun resolve(profile: ReconstructionProfile): ReconstructionAdapter {
+        val adapter = when (profile.id) {
         GeneratedCMakeReconstructionProfile.PROFILE_ID -> GeneratedCReconstructionAdapter
         GeneratedCNinjaReconstructionProfile.PROFILE_ID -> GeneratedCNinjaReconstructionAdapter
         else -> throw IllegalArgumentException("no reconstruction adapter registered for profile: ${profile.id}")
+        }
+        adapter.validateProfile(profile)
+        return adapter
     }
 }
 
 /** Build-system-specific evidence requirements inside the shared archive transport. */
 internal interface ArchiveBuildPolicy {
+    fun contractPaths(profile: ReconstructionProfile): ArchiveBuildContractPaths
+    fun parseContract(contract: JsonObject, profile: ReconstructionProfile): BuildContractEvidence
     fun requiredPaths(profile: ReconstructionProfile): Set<String>
     fun transportLayout(profile: ReconstructionProfile): ArchiveTransportLayout
     val rebuildInstructions: String
@@ -55,6 +89,8 @@ internal interface ArchiveBuildPolicy {
     fun sourceRevision(projectDir: Path, profile: ReconstructionProfile): BuildSourceRevision
     fun isBuildInput(profile: ReconstructionProfile, relativePath: String): Boolean
 }
+
+internal data class ArchiveBuildContractPaths(val contractPath: String, val artifactPath: String)
 
 /** Validate application-owned transport policy before preparing archive paths. */
 internal fun ArchiveBuildPolicy.checkedTransportLayout(profile: ReconstructionProfile): ArchiveTransportLayout =
@@ -81,8 +117,11 @@ internal data class BehaviorBuildLayout(
     val sourceRoots: List<String>,
 )
 
-internal data class BehaviorBuildContract(
+/** Source/artifact attribution alone grants no behavior qualification. */
+internal data class BuildContractEvidence(
     val sourceRevisionSha256: String,
     val sourceInputs: JsonArray,
     val artifact: JsonObject,
 )
+
+internal typealias BehaviorBuildContract = BuildContractEvidence

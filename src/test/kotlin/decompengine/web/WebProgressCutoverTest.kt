@@ -21,14 +21,14 @@ import kotlin.test.*
 
 /** Owned inert records only: no adapter, analyzer or executor performs workflow work. */
 class WebProgressCutoverTest {
-    private class Fixture(clock: java.time.Clock = java.time.Clock.systemUTC()) : AutoCloseable {
-        val root = Files.createTempDirectory("web-progress-cutover-")
-        val store = JobStore(root)
+    private class Fixture(val controls: ControlledWorkflowFixture = ControlledWorkflowFixture()) : AutoCloseable {
+        val root = Files.createTempDirectory(Files.createDirectories(java.nio.file.Path.of("build/test-fixtures")), "web-progress-cutover-")
+        val store = controls.jobStore(root)
         val job = store.createFromUpload("cutover.elf", elfFixture())
         lateinit var owner: WorkflowAttemptStore
         val service = WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected analysis") },
             JobReconstructor { _, _ -> error("Unexpected reconstruction") },
-            attemptStoreFactory = { WorkflowAttemptStore.open(it, clock).also { value -> owner = value } })
+            attemptStoreFactory = { controls.attemptStore(it).also { value -> owner = value } })
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         val origin = "http://127.0.0.1:${server.address.port}"
         val access = LocalWebAccess(LocalWebAccessConfiguration(origin))
@@ -39,6 +39,7 @@ class WebProgressCutoverTest {
         val journal: java.nio.file.Path
         val path: String
         val cookie: String
+        private val eventTimes = mutableMapOf<Int, String>()
         init {
             service.initializeExistingStorage()
             val original = (owner.inspect(job.id) as WorkflowJobInspection.Available).snapshot
@@ -66,7 +67,8 @@ class WebProgressCutoverTest {
                 put("queueDropped", 0); put("historyDropped", first); put("truncated", first > 0)
                 put("events", buildJsonArray { (first..last).forEach { sequence -> add(buildJsonObject {
                     put("sequence", sequence); put("runId", "writer_cutover_fixture"); put("workflow", "reconstruct")
-                    put("time", "2026-09-08T00:00:00Z"); put("kind", "workflow_phase"); put("phase", "planning")
+                    // Re-publication must preserve the cursor anchor bytes of retained events.
+                    put("time", eventTimes.getOrPut(sequence) { controls.clock.instant().toString() }); put("kind", "workflow_phase"); put("phase", "planning")
                     put("text", "PRIVATE_CUTOVER_PROSE")
                 }) } })
             }.toString()
@@ -115,6 +117,31 @@ class WebProgressCutoverTest {
             if (line.startsWith(':')) continue
             if (line.contains(": ")) result[line.substringBefore(": ")] = line.substringAfter(": ")
         }
+    }
+
+    @Test fun `fresh real HTTP fixtures repeat identities timestamps and replay observations`() {
+        fun scenario(): Pair<JsonObject, List<JsonElement>> = Fixture().use { f ->
+            assertEquals("00000000000000000000000000000001", f.job.id)
+            assertEquals("run_fixture_1", f.run.runId)
+            assertEquals(f.controls.clock.instant(), f.run.createdAt)
+            val before = data(f.get("/snapshot"))
+            val cursor = before.getValue("throughCursor").jsonPrimitive.content
+            f.controls.clock.advance(Duration.ofSeconds(2))
+            f.owner.transition(f.job.id, f.run.runId, f.run.version, WorkflowTransition.Start)
+            f.publish(0, 3)
+            val snapshot = data(f.get("/snapshot"))
+            val run = snapshot.getValue("run").jsonObject
+            assertEquals("2026-09-08T00:00:02Z", run.getValue("startedAt").jsonPrimitive.content)
+            val page = data(f.get("/events?transport=poll&after=$cursor"))
+            assertEquals(listOf("1", "2", "3"), replay(f, cursor))
+            val events = page.getValue("items").jsonArray.map { event ->
+                // Cursors authenticate the real session; compare workflow semantics, never forge them.
+                JsonObject(event.jsonObject - "cursor")
+            }
+            assertTrue(events.all { it.getValue("occurredAt").jsonPrimitive.content == "2026-09-08T00:00:02Z" })
+            run to events
+        }
+        assertEquals(scenario(), scenario())
     }
 
     @Test fun `racing HTTP snapshots and atomic publication have exact bounded replay cutovers`() = Fixture().use { f ->
@@ -217,21 +244,16 @@ class WebProgressCutoverTest {
         } finally { readerWorker.shutdownNow(); assertTrue(readerWorker.awaitTermination(5, TimeUnit.SECONDS)) }
     }
     @Test fun `owned terminal expiry reaches SSE and polling with recoverable empty snapshots`() {
-        var now = java.time.Instant.parse("2026-09-08T00:00:00Z")
-        val clock = object : java.time.Clock() {
-            override fun instant() = now
-            override fun getZone(): java.time.ZoneId = java.time.ZoneOffset.UTC
-            override fun withZone(zone: java.time.ZoneId): java.time.Clock = java.time.Clock.fixed(now, zone)
-        }
-        Fixture(clock).use { f ->
+        val controls = ControlledWorkflowFixture()
+        Fixture(controls).use { f ->
             f.publish(0, 7)
             val started = f.owner.transition(f.job.id, f.run.runId, f.run.version, WorkflowTransition.Start).attempt
             val finished = f.owner.transition(f.job.id, f.run.runId, started.version,
                 WorkflowTransition.Finish(WorkflowRunState.COMPLETED, WorkflowTerminalReason.NO_CHANGES)).attempt
             val original = Files.readAllBytes(f.journal)
-            now = now.plus(Duration.ofHours(24)).minusNanos(1)
+            controls.clock.advance(Duration.ofHours(24).minusNanos(1))
             assertEquals(ProgressRetentionResult.RETAINED, f.service.expireProgressJournal(f.job.id, f.run.runId, false))
-            now = now.plusNanos(1)
+            controls.clock.advance(Duration.ofNanos(1))
             assertEquals(ProgressRetentionResult.RETAINED, f.service.expireProgressJournal(f.job.id, f.run.runId, true))
             val pinned = f.owner.setProgressRetentionPinned(f.job.id, f.run.runId, finished.version, true).attempt
             assertEquals(ProgressRetentionResult.RETAINED, f.service.expireProgressJournal(f.job.id, f.run.runId, false))

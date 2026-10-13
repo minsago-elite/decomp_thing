@@ -53,6 +53,41 @@ object OracleArtifacts {
             (byte.toInt() and 0xff).toString(16).padStart(2, '0')
         }
 
+    /**
+     * Reads an artifact through the authenticated bounded file path and rejects any JSON bytes
+     * that are malformed or differ from [OracleJson]'s canonical encoding. The returned snapshot
+     * hashes those exact canonical bytes.
+     */
+    fun readCanonical(
+        path: Path,
+        limits: OracleArtifactLimits = OracleArtifactLimits(),
+        jsonLimits: StrictJsonLimits = StrictJsonLimits(),
+    ): OracleArtifactSnapshot {
+        val boundedLimits = OracleArtifactLimits(minOf(limits.maximumBytes, jsonLimits.maximumInputBytes))
+        val snapshot = read(path, boundedLimits)
+        requireCanonicalJson(snapshot.bytes, jsonLimits)
+        return snapshot
+    }
+
+    /**
+     * Validates canonical JSON before publishing through the authenticated atomic file path.
+     * A private copy is validated and committed so a caller cannot race publication by mutating
+     * its input array after validation.
+     */
+    fun publishCanonical(
+        path: Path,
+        bytes: ByteArray,
+        limits: OracleArtifactLimits = OracleArtifactLimits(),
+        jsonLimits: StrictJsonLimits = StrictJsonLimits(),
+    ): OracleArtifactSnapshot {
+        if (bytes.size > limits.maximumBytes || bytes.size > jsonLimits.maximumInputBytes) {
+            throw OracleArtifactException("artifact exceeds the configured byte limit")
+        }
+        val payload = bytes.copyOf()
+        requireCanonicalJson(payload, jsonLimits)
+        return publishAtomically(path, payload, limits)
+    }
+
     fun read(path: Path, limits: OracleArtifactLimits = OracleArtifactLimits()): OracleArtifactSnapshot =
         read(path, limits) {}
 
@@ -337,6 +372,14 @@ object OracleArtifacts {
             channel.force(true)
         } catch (failure: Exception) {
             throw OracleArtifactException("could not write and synchronize the artifact temporary", failure)
+        }
+    }
+
+    private fun requireCanonicalJson(bytes: ByteArray, limits: StrictJsonLimits) {
+        try {
+            OracleJson.parseCanonical(bytes, limits)
+        } catch (failure: StrictJsonException) {
+            throw OracleArtifactException("artifact is not canonical bounded JSON", failure)
         }
     }
 

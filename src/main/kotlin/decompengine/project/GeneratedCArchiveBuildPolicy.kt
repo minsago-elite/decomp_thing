@@ -18,6 +18,10 @@ import decompengine.repair.readStableRegularFile
 
 /** Existing generated-C/Make source and artifact verification for archival builds. */
 internal object GeneratedCArchiveBuildPolicy : ArchiveBuildPolicy {
+    override fun contractPaths(profile: ReconstructionProfile): ArchiveBuildContractPaths =
+        ArchiveBuildContractPaths("reports/build_contract.json", "build/reconstructed")
+    override fun parseContract(contract: kotlinx.serialization.json.JsonObject, profile: ReconstructionProfile): BuildContractEvidence =
+        parseGeneratedCBuildContract(contract, profile)
     private val transport = ArchiveTransportLayout(
         setOf("build", ".ninja_log", ".ninja_deps"),
         setOf("reports/build_contract.json"),

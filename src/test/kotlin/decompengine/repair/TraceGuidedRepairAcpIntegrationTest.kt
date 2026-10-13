@@ -132,6 +132,15 @@ class TraceGuidedRepairAcpIntegrationTest {
             assertRejected(fixture, head, before, acp = true, completed = false)
             val iteration = RepairHistory(fixture.reports.resolve("repair_history.json")).all().single()
             assertEquals(terminal, iteration.agentInvocation?.terminalOutcome, mode)
+            val label = when (mode) {
+                "crash" -> "process-crashed"
+                "limit" -> "limit-exhausted"
+                else -> mode
+            }
+            assertEquals(label, repairAttemptLabel(iteration))
+            val projected = Json.parseToJsonElement(fixture.reports.resolve("repair_history.json").readText())
+                .jsonObject.getValue("iterations").jsonArray.single().jsonObject
+            assertEquals(label, repairAttemptLabel(projected))
         }
     }
 
@@ -168,6 +177,7 @@ class TraceGuidedRepairAcpIntegrationTest {
         before.forEach { (path, bytes) -> assertContentEquals(bytes, after.getValue(path), path) }
         val iteration = RepairHistory(fixture.reports.resolve("repair_history.json")).all().single()
         assertFalse(iteration.succeeded)
+        if (completed) assertEquals("rejected", repairAttemptLabel(iteration))
         if (acp) assertReceipt(fixture, iteration, accepted = false, completed = completed)
     }
 

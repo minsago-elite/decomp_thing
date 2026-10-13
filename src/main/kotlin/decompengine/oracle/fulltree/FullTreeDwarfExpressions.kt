@@ -2,8 +2,44 @@ package decompengine.oracle.fulltree
 
 import java.nio.ByteOrder
 
+internal data class FullTreeDwarfLocationAtom(val kind: String, val operand: ULong? = null)
+
 /** Bounded syntax validation for the DWARF expressions used as call-target evidence. */
 internal object FullTreeDwarfExpressions {
+    /**
+     * Decode only an exact supported location atom. Other bounded payloads remain opaque; an
+     * unknown vendor operation cannot acquire address authority by resembling an operand byte.
+     * TLS operands are offsets, never process virtual addresses.
+     */
+    fun locationAtomOrNull(bytes: ByteArray, addressSize: Int, byteOrder: ByteOrder): FullTreeDwarfLocationAtom? {
+        require(addressSize in 1..16)
+        if (bytes.isEmpty()) return null
+        val cursor = ExpressionCursor(bytes, 0, bytes.size, byteOrder)
+        val opcode = cursor.byte()
+        val atom = when (opcode) {
+            DW_OP_ADDR -> FullTreeDwarfLocationAtom("address", cursor.address(addressSize))
+            DW_OP_ADDRX -> FullTreeDwarfLocationAtom("address-index", cursor.uleb())
+            DW_OP_GNU_ADDR_INDEX -> FullTreeDwarfLocationAtom("gnu-address-index", cursor.uleb())
+            DW_OP_FBREG -> { cursor.sleb(); FullTreeDwarfLocationAtom("frame-relative") }
+            in DW_OP_REG0..DW_OP_REG31 -> FullTreeDwarfLocationAtom("register", (opcode - DW_OP_REG0).toULong())
+            DW_OP_REGX -> FullTreeDwarfLocationAtom("register", cursor.uleb())
+            DW_OP_CONST1U, DW_OP_CONST2U, DW_OP_CONST4U, DW_OP_CONST8U, DW_OP_CONSTU -> {
+                val operand = when (opcode) {
+                    DW_OP_CONST1U -> cursor.address(1)
+                    DW_OP_CONST2U -> cursor.address(2)
+                    DW_OP_CONST4U -> cursor.address(4)
+                    DW_OP_CONST8U -> cursor.address(8)
+                    else -> cursor.uleb()
+                }
+                if (cursor.exhausted()) return null
+                if (cursor.byte() !in setOf(DW_OP_FORM_TLS_ADDRESS, DW_OP_GNU_PUSH_TLS_ADDRESS)) return null
+                FullTreeDwarfLocationAtom("tls-offset", operand)
+            }
+            else -> return null
+        }
+        return atom.takeIf { cursor.exhausted() }
+    }
+
     /**
      * Validates the complete expression and returns its address only when it is exactly one
      * `DW_OP_addr`. Unsupported or truncated opcodes fail closed instead of being reclassified as

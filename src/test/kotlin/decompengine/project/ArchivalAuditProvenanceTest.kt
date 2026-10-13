@@ -420,34 +420,23 @@ class ArchivalAuditProvenanceTest {
 
     @Test
     fun `audit follows declared implementation roles rather than C suffixes`() {
-        val project = fixture()
         val original = GeneratedCMakeReconstructionProfile.descriptor
         val profile = ReconstructionProfile(
-            original.schemaVersion, "audit-role-fixture-v1",
+            original.schemaVersion, original.id,
             ProjectLayoutProfile(original.layout.schemaVersion, original.layout.declarations.map { declaration ->
                 if (ProjectFileRole.MODULE_IMPLEMENTATION in declaration.roles) ProjectFileDeclaration(
                     declaration.id, declaration.pathTemplate.removeSuffix(".c") + ".body", declaration.roles, declaration.contentKind,
                 ) else declaration
             }), original.budgets, original.adapterConfiguration,
         )
-        val manifest = SourceTreeManifestReader.read(project, original)
-        val relocated = manifest.files.filter { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }
-            .associate { it.path to it.path.removeSuffix(".c") + ".body" }
-        relocated.forEach { (before, after) -> Files.move(project.resolve(before), project.resolve(after)) }
-        val relative = "reports/module_plan.json"
-        val plan = Json.parseToJsonElement(project.resolve(relative).readText()).jsonObject
-        val modules = plan.getValue("modules").jsonArray.map { element ->
-            val module = element.jsonObject
-            module.withField("sourcePath", JsonPrimitive(relocated.getValue(module.getValue("sourcePath").jsonPrimitive.content)))
+        // Generate with the selected layout so every path and profile-bound receipt
+        // agrees. Moving files afterward leaves confidence/checkpoint evidence stale.
+        val project = fixture(profile = profile)
+        val implementations = SourceTreeManifestReader.read(project, profile).files.filter {
+            ProjectFileRole.MODULE_IMPLEMENTATION in it.roles
         }
-        writeBoundFile(project, relative, plan.withField("modules", JsonArray(modules)).toString())
-        rewriteManifest(project) { root ->
-            root.withField("profileId", JsonPrimitive(profile.id)).withField("profileSha256", JsonPrimitive(profile.sha256))
-                .withField("files", JsonArray(root.getValue("files").jsonArray.map { element ->
-                    val file = element.jsonObject
-                    relocated[file.getValue("path").jsonPrimitive.content]?.let { file.withField("path", JsonPrimitive(it)) } ?: file
-                }.sortedBy { it.getValue("path").jsonPrimitive.content }))
-        }
+        assertTrue(implementations.isNotEmpty())
+        assertTrue(implementations.all { it.path.endsWith(".body") })
         assertTrue(ArchivalProjectAuditor.audit(project, profile).provenanceComplete)
         assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(project) }
     }
@@ -482,7 +471,10 @@ class ArchivalAuditProvenanceTest {
         assertTrue(document.getValue("moduleBehaviorEvidence").jsonArray.isEmpty())
     }
 
-    private fun fixture(accepted: Boolean = false): Path {
+    private fun fixture(
+        accepted: Boolean = false,
+        profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+    ): Path {
         val project = Files.createTempDirectory("archival-audit-provenance-")
         val model = RecoveredProgramModel(
             inputSha256 = "a".repeat(64),
@@ -491,7 +483,7 @@ class ArchivalAuditProvenanceTest {
                 RecoveredFunction("fn_100", "render_two", 0x2000UL, "int render_two(void)", "int render_two(void) { return 2; }"),
             ),
         )
-        SourceTreeGenerator.generate(model, project, reconstructor = EvidenceModuleReconstructor(accepted))
+        SourceTreeGenerator.generate(model, project, reconstructor = EvidenceModuleReconstructor(accepted), profile = profile)
         return project
     }
 
