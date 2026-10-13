@@ -31,6 +31,7 @@ internal class GccBundledGhidraReference private constructor(
     classPath: List<String>,
     val exporterBytes: Long,
     val exporterSha256: String,
+    val nativeCallCollector: GccBundledNativeCallCollectorIdentityV1?,
 ) {
     val entries: Map<String, GccBundledGhidraReferenceEntry> = Collections.unmodifiableMap(LinkedHashMap(entries))
     val classPath: List<String> = Collections.unmodifiableList(ArrayList(classPath))
@@ -63,6 +64,11 @@ internal class GccBundledGhidraReference private constructor(
         require(exporter.path.fileName.toString() == "ExportProgramModel.java" &&
             exporter.bytes == exporterBytes && exporter.sha256 == exporterSha256
         ) { "bundled candidate exporter differs from the independent application resource" }
+        if (runtime.invocationVersion == 8) {
+            require(nativeCallCollector != null && runtime.nativeCallCollector == nativeCallCollector) {
+                "bundled native call collector differs from the independent deployment reference"
+            }
+        }
     }
 
     companion object {
@@ -72,7 +78,7 @@ internal class GccBundledGhidraReference private constructor(
             root.exactFields(setOf(
                 "schemaVersion", "provider", "ghidraVersion", "ghidraRelease", "archive", "rootMode", "entries",
                 "classPath", "bridgePath", "exportGuardPath", "exporter", "closureSha256",
-            ))
+            ) + if ("nativeCallCollector" in root) setOf("nativeCallCollector") else emptySet())
             require(root.number("schemaVersion") == 1L && root.string("provider") == REFERENCE_PROVIDER) {
                 "bundled Ghidra deployment reference version is invalid"
             }
@@ -133,6 +139,20 @@ internal class GccBundledGhidraReference private constructor(
                     "bundled Ghidra reference omits a required application file"
                 }
             }
+            val collector = if ("nativeCallCollector" in root) {
+                val source = root.objectValue("nativeCallCollector")
+                source.exactFields(setOf("resourcePath", "bytes", "sha256", "classPath"))
+                require(source.string("resourcePath") == NATIVE_CALL_COLLECTOR_RESOURCE &&
+                    source.string("classPath") == NATIVE_CALL_COLLECTOR_CLASS_PATH) {
+                    "bundled native call collector layout is invalid"
+                }
+                val compiled = requireNotNull(entries[NATIVE_CALL_COLLECTOR_CLASS_PATH]) {
+                    "bundled native call collector class is missing"
+                }
+                require(compiled.kind == "file") { "bundled native call collector class must be a file" }
+                GccBundledNativeCallCollectorIdentityV1(source.number("bytes"), source.string("sha256"),
+                    checkNotNull(compiled.bytes), checkNotNull(compiled.sha256))
+            } else null
             val declaredClassPath = root.arrayValue("classPath").map { value ->
                 (value as? JsonPrimitive)?.takeIf { it.isString }?.content
                     ?: throw IllegalArgumentException("bundled Ghidra reference classpath must contain strings")
@@ -149,7 +169,7 @@ internal class GccBundledGhidraReference private constructor(
             require(digest == OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(root - "closureSha256"), REFERENCE_LIMITS))) {
                 "bundled Ghidra deployment reference commitment is invalid"
             }
-            return GccBundledGhidraReference(digest, entries, declaredClassPath, exporter.number("bytes"), exporter.string("sha256"))
+            return GccBundledGhidraReference(digest, entries, declaredClassPath, exporter.number("bytes"), exporter.string("sha256"), collector)
         }
     }
 }
@@ -231,6 +251,26 @@ internal class GccBundledGhidraDeploymentReference private constructor(
                 require(exporter.size.toLong() == parsed.exporterBytes && OracleArtifacts.sha256(exporter) == parsed.exporterSha256) {
                     "bundled Ghidra reference exporter differs from the loaded application resource"
                 }
+                parsed.nativeCallCollector?.let { identity ->
+                    val collector = if (development) {
+                        GccBundledGhidraDeploymentReference::class.java.getResourceAsStream(NATIVE_CALL_COLLECTOR_RESOURCE)?.use {
+                            it.readNBytes(MAXIMUM_EXPORTER_BYTES + 1)
+                        } ?: throw IllegalArgumentException("application native call collector resource is unavailable")
+                    } else {
+                        JarFile(codeSource.toFile(), false).use { jar ->
+                            val entries = jar.entries().asSequence().take(200_001).toList()
+                            require(entries.size <= 200_000) { "application JAR exceeds its entry bound" }
+                            val entry = entries.singleOrNull { it.name == NATIVE_CALL_COLLECTOR_RESOURCE.removePrefix("/") }
+                            require(entry != null && !entry.isDirectory && entry.size == identity.sourceBytes) {
+                                "application JAR has no exact unique native call collector resource"
+                            }
+                            jar.getInputStream(entry).use { it.readNBytes(MAXIMUM_EXPORTER_BYTES + 1) }
+                        }.also { checkNotNull(applicationGuard).verifyUnchanged("after reading application JAR native call collector") }
+                    }
+                    require(collector.size.toLong() == identity.sourceBytes && OracleArtifacts.sha256(collector) == identity.sourceSha256) {
+                        "bundled native call collector reference differs from the loaded application resource"
+                    }
+                }
                 return GccBundledGhidraDeploymentReference(parsed, bundleRoot, guard, captured, applicationGuard).also { it.verify("after opening") }
             } catch (failure: Throwable) {
                 runCatching { applicationGuard?.close() }.exceptionOrNull()?.let(failure::addSuppressed)
@@ -263,6 +303,8 @@ private const val REFERENCE_PROVIDER = "gcc-bundled-ghidra-deployment-reference-
 private const val BRIDGE_PATH = "decomp-ghidra-bridge.jar"
 private const val GUARD_PATH = "scripts/RunBundledExports.class"
 private const val EXPORTER_RESOURCE = "/ghidra_scripts/ExportProgramModel.java"
+private const val NATIVE_CALL_COLLECTOR_RESOURCE = "/ghidra_scripts/ExportNativeCallsV1.java"
+private const val NATIVE_CALL_COLLECTOR_CLASS_PATH = "scripts/ExportNativeCallsV1.class"
 private const val ARCHIVE_BYTES = 569445154L
 private const val MAXIMUM_REFERENCE_BYTES = 8 * 1024 * 1024
 private const val MAXIMUM_EXPORTER_BYTES = 4 * 1024 * 1024
