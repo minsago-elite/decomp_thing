@@ -149,20 +149,23 @@ internal fun snapshotControlObject(
     maximumBytes: Int,
     label: String,
     schemaName: String? = null,
+    checkpoint: (String) -> Unit = {},
 ): Pair<JsonObject, ByteArray> {
     val bytes = try {
-        OracleJson.canonicalBytes(value, controlJsonLimits(maximumBytes))
+        OracleJson.canonicalBytes(value, controlJsonLimits(maximumBytes), checkpoint)
     } catch (failure: Exception) {
         throw FullTreeControlException("$label exceeds strict JSON limits", failure)
     }
     val snapshot = try {
-        OracleJson.parseCanonical(bytes, controlJsonLimits(maximumBytes)) as JsonObject
+        OracleJson.parseCanonical(bytes, controlJsonLimits(maximumBytes), checkpoint) as JsonObject
     } catch (failure: Exception) {
         throw FullTreeControlException("$label cannot be snapshotted as strict canonical JSON", failure)
     }
     if (schemaName != null) {
         try {
+            checkpoint("before validating $label schema")
             OracleSchemas.validate(schemaName, snapshot)
+            checkpoint("after validating $label schema")
         } catch (failure: Exception) {
             throw FullTreeControlException("$label fails its bundled schema", failure)
         }
@@ -294,7 +297,12 @@ internal class StableControlFile private constructor(
     }
 
     @Synchronized
-    fun readExactly(offset: Long, length: Int, label: String): ByteArray {
+    fun readExactly(
+        offset: Long,
+        length: Int,
+        label: String,
+        checkpoint: (String) -> Unit = {},
+    ): ByteArray {
         if (offset < 0L || length < 0 || offset > size - length.toLong()) {
             throw FullTreeControlException("$label range exceeds its authenticated input")
         }
@@ -306,7 +314,9 @@ internal class StableControlFile private constructor(
             if (read <= 0) throw FullTreeControlException("$label ended during a bounded read")
             position = Math.addExact(position, read.toLong())
             destinationOffset += read
+            checkpoint("while reading $label")
         }
+        checkpoint("after reading $label")
         return result
     }
 
@@ -1472,8 +1482,17 @@ internal fun JsonObject.controlLong(name: String): Long {
         ?: throw FullTreeControlException("control document field $name exceeds the supported integer range")
 }
 
-internal fun JsonArray.controlObjects(label: String): List<JsonObject> = map { value ->
-    value as? JsonObject ?: throw FullTreeControlException("$label contains a non-object")
+internal fun JsonArray.controlObjects(
+    label: String,
+    checkpoint: (String) -> Unit = {},
+): List<JsonObject> {
+    val result = ArrayList<JsonObject>(size)
+    forEachIndexed { index, value ->
+        if (index % 4_096 == 0) checkpoint("while reading $label")
+        result += value as? JsonObject ?: throw FullTreeControlException("$label contains a non-object")
+    }
+    checkpoint("after reading $label")
+    return result
 }
 
 internal fun JsonElement.controlString(label: String): String {

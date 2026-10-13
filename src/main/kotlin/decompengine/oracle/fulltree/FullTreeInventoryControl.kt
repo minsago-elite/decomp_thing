@@ -88,21 +88,30 @@ object FullTreeInventoryControl {
         value: JsonObject,
         scope: AuthenticatedFullTreeScope,
         limits: FullTreeControlLimits = FullTreeControlLimits(),
+        checkpoint: (String) -> Unit = {},
     ) {
+        checkpoint("before authenticating full-tree inventory scope")
         FullTreeScopeControl.validate(scope, limits)
         val (document, bytes) = snapshotControlObject(
             value,
             limits.maximumInventoryBytes,
             "full-tree inventory",
             "full-tree-inventory",
+            checkpoint,
         )
-        val units = document.controlArray("units").controlObjects("inventory units")
+        val units = document.controlArray("units").controlObjects("inventory units", checkpoint)
         if (units.size > limits.maximumCompilationUnits) {
             throw FullTreeControlException("inventory exceeds its implementation compilation-unit bound")
         }
-        val sortedUnits = units.sortedWith(INVENTORY_UNIT_ORDER)
-        if (units != sortedUnits) throw FullTreeControlException("inventory units are not canonically ordered")
-        if (document.controlString("indexSha256") != inventoryIndexSha256(units, limits)) {
+        val sortedUnits = inventorySorted(units, INVENTORY_UNIT_ORDER, checkpoint, "inventory units")
+        units.indices.forEach { index ->
+            if (index % 4_096 == 0) checkpoint("while checking inventory unit order")
+            if (units[index] !== sortedUnits[index]) {
+                throw FullTreeControlException("inventory units are not canonically ordered")
+            }
+        }
+        checkpoint("after checking inventory unit order")
+        if (document.controlString("indexSha256") != inventoryIndexSha256(units, limits, checkpoint)) {
             throw FullTreeControlException("inventory index hash does not reconcile")
         }
         val expectedOracle = JsonObject(
@@ -120,7 +129,9 @@ object FullTreeInventoryControl {
         val ids = HashSet<String>()
         val paths = HashSet<String>()
         val byShard = TreeMap<String, MutableList<String>>(FULL_TREE_CODE_POINT_ORDER)
-        units.forEach { unit ->
+        var generated = 0L
+        units.forEachIndexed { index, unit ->
+            if (index % 4_096 == 0) checkpoint("while reconciling inventory compilation units")
             val id = unit.controlString("id")
             val path = unit.controlString("sourcePath")
             if (!ids.add(id) || !paths.add(path)) {
@@ -137,23 +148,30 @@ object FullTreeInventoryControl {
             if (unit.controlString("shardId") != expectedShard) {
                 throw FullTreeControlException("inventory unit shard differs from authenticated scope policy")
             }
+            if (expectedKind == "generated") generated = Math.addExact(generated, 1L)
             requireCanonicalHex(unit.controlString("dwarfOffset"), "inventory DWARF offset")
             byShard.getOrPut(expectedShard) { arrayListOf() }.add(id)
         }
+        checkpoint("after reconciling inventory compilation units")
         val expectedShards = JsonArray(
-            byShard.map { (id, unitIds) ->
+            byShard.entries.mapIndexed { index, (id, unitIds) ->
+                if (index % 4_096 == 0) checkpoint("while constructing inventory shard index")
+                val sortedIds = inventorySorted(unitIds, FULL_TREE_CODE_POINT_ORDER, checkpoint, "inventory shard unit IDs")
                 JsonObject(
                     mapOf(
                         "id" to JsonPrimitive(id),
-                        "unitIds" to JsonArray(unitIds.sortedWith(FULL_TREE_CODE_POINT_ORDER).map(::JsonPrimitive)),
+                        "unitIds" to JsonArray(sortedIds.mapIndexed { unitIndex, unitId ->
+                            if (unitIndex % 4_096 == 0) checkpoint("while serializing inventory shard unit IDs")
+                            JsonPrimitive(unitId)
+                        }),
                     ),
                 )
             },
         )
-        if (document.controlArray("shards") != expectedShards) {
+        if (!inventoryShardsMatch(document.controlArray("shards"), expectedShards, checkpoint)) {
             throw FullTreeControlException("inventory shard ownership does not reconcile")
         }
-        val generated = units.count { it.controlString("sourceKind") == "generated" }.toLong()
+        checkpoint("before reconciling inventory counts")
         val expectedCounts = JsonObject(
             mapOf(
                 "compilationUnits" to JsonPrimitive(units.size.toLong()),
@@ -167,8 +185,11 @@ object FullTreeInventoryControl {
         }
         val perShard = scope.document.controlObject("bounds").controlObject("perShard")
             .controlLong("compilationUnits")
-        if (byShard.values.any { it.size.toLong() > perShard }) {
-            throw FullTreeControlException("an inventory shard exceeds its compilation-unit bound")
+        byShard.values.forEachIndexed { index, unitIds ->
+            if (index % 4_096 == 0) checkpoint("while checking inventory shard bounds")
+            if (unitIds.size.toLong() > perShard) {
+                throw FullTreeControlException("an inventory shard exceeds its compilation-unit bound")
+            }
         }
         val whole = scope.document.controlObject("bounds").controlObject("wholeRun")
         if (units.size.toLong() > whole.controlLong("compilationUnits")) {
@@ -177,6 +198,7 @@ object FullTreeInventoryControl {
         if (bytes.size.toLong() > whole.controlLong("serializedBytes")) {
             throw FullTreeControlException("inventory exceeds whole-run serialized-byte bound")
         }
+        checkpoint("after validating full-tree inventory")
     }
 
     internal fun compilationUnitId(sourcePath: String): String =
@@ -274,18 +296,63 @@ object FullTreeInventoryControl {
     private fun inventoryIndexSha256(
         units: List<JsonObject>,
         limits: FullTreeControlLimits,
+        checkpoint: (String) -> Unit = {},
     ): String {
         val digest = MessageDigest.getInstance("SHA-256")
         digest.update(INDEX_DOMAIN)
-        units.forEach { unit ->
+        units.forEachIndexed { index, unit ->
+            if (index % 4_096 == 0) checkpoint("while hashing inventory unit index")
             val canonical = try {
-                OracleJson.canonicalBytes(unit, controlJsonLimits(limits.maximumInventoryBytes))
+                OracleJson.canonicalBytes(unit, controlJsonLimits(limits.maximumInventoryBytes), checkpoint)
             } catch (failure: Exception) {
                 throw FullTreeControlException("inventory unit exceeds strict canonical limits", failure)
             }
             digest.update(MessageDigest.getInstance("SHA-256").digest(canonical))
         }
+        checkpoint("after hashing inventory unit index")
         return digest.digest().hex()
+    }
+
+    private fun <T> inventorySorted(
+        values: List<T>,
+        comparator: Comparator<T>,
+        checkpoint: (String) -> Unit,
+        label: String,
+    ): List<T> {
+        var comparisons = 0
+        val sorted = values.sortedWith { left, right ->
+            if (++comparisons % 4_096 == 0) checkpoint("while sorting $label")
+            comparator.compare(left, right)
+        }
+        checkpoint("after sorting $label")
+        return sorted
+    }
+
+    private fun inventoryShardsMatch(
+        actual: JsonArray,
+        expected: JsonArray,
+        checkpoint: (String) -> Unit,
+    ): Boolean {
+        if (actual.size != expected.size) return false
+        actual.forEachIndexed { shardIndex, rawActual ->
+            if (shardIndex % 4_096 == 0) checkpoint("while comparing inventory shards")
+            val actualShard = rawActual as? JsonObject ?: return false
+            val expectedShard = expected[shardIndex] as? JsonObject ?: return false
+            if (actualShard.controlString("id") != expectedShard.controlString("id")) return false
+            val actualUnits = actualShard.controlArray("unitIds")
+            val expectedUnits = expectedShard.controlArray("unitIds")
+            if (actualUnits.size != expectedUnits.size) return false
+            actualUnits.forEachIndexed { unitIndex, rawActualUnit ->
+                if (unitIndex % 4_096 == 0) checkpoint("while comparing inventory shard unit IDs")
+                if ((rawActualUnit as? JsonPrimitive)?.takeIf { it.isString }?.content !=
+                    (expectedUnits[unitIndex] as? JsonPrimitive)?.takeIf { it.isString }?.content
+                ) {
+                    return false
+                }
+            }
+        }
+        checkpoint("after comparing inventory shards")
+        return true
     }
 
     private fun requireCanonicalHex(value: String, label: String) {

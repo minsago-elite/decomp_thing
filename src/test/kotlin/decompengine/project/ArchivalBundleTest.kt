@@ -59,6 +59,23 @@ class ArchivalBundleTest {
     }
 
     @Test
+    fun `ordinary payload with repair temporary suffix is preserved`() {
+        val temp = createTempDirectory("archive-repair-suffix-")
+        val project = temp.resolve("project")
+        SourceTreeGenerator.generate(model(4), project)
+        MakeProjectBuilder.build(project)
+        val ordinary = project.resolve("notes.repair-atomic.tmp")
+        ordinary.writeText("ordinary user note")
+
+        val bundle = ArchivalPackager.create(project, temp.resolve("ordinary-suffix.zip"))
+        val extracted = temp.resolve("ordinary-suffix-extracted")
+        ArchivalBundleVerifier.extractAndVerify(bundle.archivePath, extracted)
+
+        assertTrue("notes.repair-atomic.tmp" in bundle.payloadFiles)
+        assertEquals("ordinary user note", extracted.resolve("notes.repair-atomic.tmp").readText())
+    }
+
+    @Test
     fun `separately rooted builds produce identical artifacts contracts and archives`() {
         val temp = createTempDirectory("archive-cross-root-")
         val firstProject = temp.resolve("first/project")

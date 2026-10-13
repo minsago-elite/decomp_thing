@@ -130,7 +130,11 @@ export ACP_CONFIG_FILE=/absolute/private/path/acp-v1.json
 llm_bin_patch reconstruct ./input/program --output ./output/program-source
 ```
 
-Functions are assigned to deterministic modules before any LLM request. Each request may replace only its planned C file and is bounded by `--max-context-chars`. A module is accepted only when every owned function has attributable provenance and a non-placeholder definition using portable types. Failed, partial, oversized, and evidence-only results remain buildable when possible but are explicitly marked unresolved; pass `--evidence-only` to request the placeholder tree intentionally.
+Functions are assigned to deterministic modules before any LLM request. Each request may replace only its planned C file and is bounded by `--max-context-chars`. A module is accepted only when every owned function has attributable provenance and a non-placeholder definition using portable types. Failed, partial, and oversized results remain explicitly unresolved.
+
+Pass `--evidence-only` to build a diagnostic inventory while retaining the complete recovered model and module ownership in the archive. Raw type names, prototypes, and initializer displays remain evidence rather than guessed C declarations. The diagnostic executable reports unresolved implementations and does not invoke a recovered entry point. A successful build does not accept implementations or establish recovered ABI or behavior.
+
+For web reconstruction, set `WEB_RECONSTRUCTION_MODE=evidence-only` to select the same diagnostic policy.
 
 The output includes `source-tree/` for normal editing, `source-tree.zip` for archival, and `reconstruction.json` for automation. The tree contains shared types, module headers and implementations, a parallel incremental Makefile, the whole-program recovery model, module ownership plan, unresolved entities, per-module prompt budget, prompt hash, acceptance decision, source hash, confidence limitations, tool versions, and build logs. Checkpoints are reused only when their recorded source hash still matches, so an interrupted run preserves accepted module bytes. `ARCHIVE_MANIFEST.sha256` verifies the archive payload.
 

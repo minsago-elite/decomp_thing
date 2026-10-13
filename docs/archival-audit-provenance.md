@@ -34,6 +34,22 @@ independent source attestation, oracle certification or proof of equivalence.
 Archive build validation and agent execution-evidence verification remain separate
 requirements. No recovery/confidence value becomes a measured behavioral score.
 
+## Explicit evidence-only archives
+
+The versioned evidence-only profile builds diagnostic inventory code while
+retaining the complete raw model and module plan. It does not compile unsupported
+display strings as recovered interfaces. The profile digest binds this purpose,
+and admission requires the fixed carrier strategy, exact deterministic support
+sources, and unaccepted module checkpoints. All function, global, and type IDs
+remain unresolved, including types with no implementation-file owner. An empty
+carrier is also an evidence container rather than a completed reconstruction.
+
+Both GNU Make and Ninja use their existing strict compiler and archive integrity
+checks. Rebuilding this archive verifies its support code and transport; it does
+not establish an input-program ABI or behavior. Project-bound behavior evidence
+and repair promotion reject carrier purpose, and archive admission rejects
+relabeling carrier bytes as ordinary implementation output.
+
 ## Verification scope and remaining behavior work
 
 The focused audit, archive, reconstruction and profile selection passes 30 tests

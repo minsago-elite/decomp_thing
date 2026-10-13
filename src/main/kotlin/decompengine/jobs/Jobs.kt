@@ -23,7 +23,6 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.nio.file.Path
 import java.nio.file.Files
-import java.time.Instant
 import java.util.UUID
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
@@ -69,6 +68,8 @@ class JobStore internal constructor(
     private val uploadPublisher: UploadPublisher,
     private val metadataPublisher: JobMetadataPublisher = AtomicJobMetadataPublisher,
     private val storeDirectories: JobStoreDirectories = ForcedJobStoreDirectories,
+    private val clock: java.time.Clock = java.time.Clock.systemUTC(),
+    private val newJobId: () -> String = { UUID.randomUUID().toString().replace("-", "") },
 ) {
     constructor(root: Path) : this(root, AtomicUploadPublisher)
     private val root = root.toAbsolutePath().normalize()
@@ -99,14 +100,14 @@ class JobStore internal constructor(
         }
 
         storeDirectories.prepare(root)
-        val jobId = UUID.randomUUID().toString().replace("-", "")
+        val jobId = newJobId().also { require(it.matches(Regex("[a-f0-9]{32}"))) }
         val jobDir = root.resolve(jobId)
         val binaryPath = jobDir.resolve("input.elf")
         val job = Job(
             id = jobId,
             filename = Path.of(filename).name.ifBlank { "input.elf" },
             status = "uploaded",
-            createdAt = Instant.now().toString(),
+            createdAt = clock.instant().toString(),
             sizeBytes = input.size,
             binaryPath = binaryPath,
             metadata = metadata,
@@ -194,7 +195,7 @@ class JobStore internal constructor(
         require(status in VALID_STATUSES) { "invalid job status: $status" }
         val updated = get(jobId).copy(
             status = status,
-            updatedAt = Instant.now().toString(),
+            updatedAt = clock.instant().toString(),
             statusMessage = message?.replace(Regex("[\\r\\n]+"), " ")?.take(MAX_STATUS_MESSAGE_CHARACTERS),
         )
         persist(updated)
@@ -362,7 +363,7 @@ class JobStore internal constructor(
                 if (job.status == "queued" || job.status == "analyzing") {
                     val recovered = job.copy(
                         status = "failed",
-                        updatedAt = Instant.now().toString(),
+                        updatedAt = clock.instant().toString(),
                         statusMessage = "Analysis was interrupted before the server restarted",
                     )
                     // Legacy records may parse within the read limit but exceed the rewrite limit.

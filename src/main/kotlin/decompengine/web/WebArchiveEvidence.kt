@@ -39,9 +39,9 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
         val input = identity(store.readInput(jobId))
         val source = sources.read(jobId, reportPrefix).revision()
         val adapter = ReconstructionAdapters.resolve(source.profile)
-        val buildPolicy = adapter.behaviorBuild
+        val buildPolicy = adapter.archiveBuild
         val transport = adapter.archiveBuild.checkedTransportLayout(source.profile)
-        val layout = buildPolicy.layout(source.profile)
+        val layout = buildPolicy.contractPaths(source.profile)
         requireNormalizedProjectPath(layout.contractPath, "archive build contract path")
         requireNormalizedProjectPath(layout.artifactPath, "archive build artifact path")
         require(layout.contractPath != layout.artifactPath) { "archive build evidence paths are duplicated" }

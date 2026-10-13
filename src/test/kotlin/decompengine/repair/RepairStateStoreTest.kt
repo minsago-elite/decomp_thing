@@ -1,6 +1,8 @@
 package decompengine.repair
 
 import decompengine.acp.LinuxFilesystemSyscalls
+import decompengine.project.sha256
+import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
@@ -11,6 +13,36 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 
 class RepairStateStoreTest {
+    @Test
+    fun `hashed projection preimage cannot collide with a hash shaped legacy target`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val project = Files.createTempDirectory(scratch, "repair-state-long-projections-")
+        val longName = "c".repeat(250) + ".json"
+        val shortName = "repair-${sha256(longName.toByteArray(Charsets.UTF_8))}"
+        val longBefore = "long report before repair".toByteArray()
+        val shortBefore = "short report before repair".toByteArray()
+        try {
+            withStore(project) { store ->
+                store.writeReport(longName, longBefore)
+                store.writeReport(shortName, shortBefore)
+                store.writeProjectedEvidence("reports/$longName", "long report after repair".toByteArray())
+                store.writeProjectedEvidence("reports/$shortName", "short report after repair".toByteArray())
+                assertContentEquals(longBefore, store.readProjectedEvidencePreimage("reports/$longName", 1_024))
+                assertContentEquals(shortBefore, store.readProjectedEvidencePreimage("reports/$shortName", 1_024))
+                store.cleanupProjectEvidenceTemporary("reports/$longName")
+                assertContentEquals(shortBefore, store.readProjectedEvidencePreimage("reports/$shortName", 1_024))
+                store.cleanupProjectEvidenceTemporary("reports/$shortName")
+            }
+            assertFalse(project.resolve("reports/${repairAtomicTemporaryName(longName)}").exists())
+            assertFalse(project.resolve("reports/.$shortName.repair-atomic.tmp").exists())
+        } finally {
+            Files.walk(project).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
     @Test
     fun `ordinary precommit failure removes a newly published target`() {
         val project = createTempDirectory("repair-state-new-rollback-")

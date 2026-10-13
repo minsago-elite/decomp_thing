@@ -299,7 +299,11 @@ internal data object FullTreeDwarfUnsupportedExternalStringValue : FullTreeDwarf
 internal data object FullTreeDwarfIgnoredValue : FullTreeDwarfFormValue
 
 /** Exact bounded bytes for a DWARF expression whose attribute contract requires interpretation. */
-internal class FullTreeDwarfExpressionValue(bytes: ByteArray) : FullTreeDwarfFormValue {
+internal class FullTreeDwarfExpressionValue(
+    bytes: ByteArray,
+    val resolvedForm: Long? = null,
+    val indirectDepth: Int = 0,
+) : FullTreeDwarfFormValue {
     private val content = bytes.copyOf()
 
     val bytes: ByteArray
@@ -318,7 +322,17 @@ internal enum class FullTreeDwarfFormContext {
     CONSTANT,
     EXPRESSION,
     RANGE_LIST,
+    LOCATION,
+    DATA_VALUE,
 }
+
+/** Raw location-list references are evidence, never static object addresses. */
+internal data class FullTreeDwarfLocationListValue(
+    override val resolvedForm: Long,
+    override val rawValue: ULong,
+    override val indirectDepth: Int,
+    val indexed: Boolean,
+) : FullTreeDwarfUnsignedFormValue
 
 /** Lossless unsigned form metadata retained for later function-observation readers. */
 internal sealed interface FullTreeDwarfUnsignedFormValue : FullTreeDwarfFormValue {
@@ -414,10 +428,10 @@ internal object FullTreeDwarfForms {
                 indirectDepth = indirectDepth,
             )
             FULL_TREE_DW_FORM_BLOCK2 -> cursor.readUnsigned(2).let { length ->
-                readBlock(cursor, length, limits, context)
+                readBlock(cursor, length, limits, context, form, indirectDepth)
             }
             FULL_TREE_DW_FORM_BLOCK4 -> cursor.readUnsigned(4).let { length ->
-                readBlock(cursor, length, limits, context)
+                readBlock(cursor, length, limits, context, form, indirectDepth)
             }
             FULL_TREE_DW_FORM_DATA2 -> readUnsignedConstant(
                 cursor, form, 2, indirectDepth, context, version, offsetSize,
@@ -432,17 +446,19 @@ internal object FullTreeDwarfForms {
                 cursor.readNullTerminated(limits.maximumDwarfAttributeBytes),
             )
             FULL_TREE_DW_FORM_BLOCK -> cursor.readUleb128().let { length ->
-                readBlock(cursor, length, limits, context)
+                readBlock(cursor, length, limits, context, form, indirectDepth)
             }
             FULL_TREE_DW_FORM_BLOCK1 -> cursor.readUnsigned(1).let { length ->
-                readBlock(cursor, length, limits, context)
+                readBlock(cursor, length, limits, context, form, indirectDepth)
             }
             FULL_TREE_DW_FORM_DATA1 -> readUnsignedConstant(
                 cursor, form, 1, indirectDepth, context, version, offsetSize,
             )
-            FULL_TREE_DW_FORM_FLAG -> FullTreeDwarfNumericValue(cursor.readUnsigned(1))
+            FULL_TREE_DW_FORM_FLAG -> if (context in setOf(FullTreeDwarfFormContext.CONSTANT, FullTreeDwarfFormContext.DATA_VALUE)) {
+                FullTreeDwarfUnsignedConstantValue(form, cursor.readUnsignedBits(1), indirectDepth)
+            } else FullTreeDwarfNumericValue(cursor.readUnsigned(1))
             FULL_TREE_DW_FORM_SDATA -> cursor.readSleb128().let { raw ->
-                if (context == FullTreeDwarfFormContext.CONSTANT) {
+                if (context == FullTreeDwarfFormContext.CONSTANT || context == FullTreeDwarfFormContext.DATA_VALUE) {
                     FullTreeDwarfSignedConstantValue(form, raw, indirectDepth)
                 } else {
                     FullTreeDwarfNumericValue(raw)
@@ -452,7 +468,7 @@ internal object FullTreeDwarfForms {
                 ".debug_str",
                 cursor.readUnsigned(offsetSize),
             )
-            FULL_TREE_DW_FORM_UDATA -> if (context == FullTreeDwarfFormContext.CONSTANT) {
+            FULL_TREE_DW_FORM_UDATA -> if (context == FullTreeDwarfFormContext.CONSTANT || context == FullTreeDwarfFormContext.DATA_VALUE) {
                 FullTreeDwarfUnsignedConstantValue(form, cursor.readUleb128Bits(), indirectDepth)
             } else {
                 FullTreeDwarfNumericValue(cursor.readUleb128())
@@ -501,8 +517,10 @@ internal object FullTreeDwarfForms {
                 rawValue = cursor.readUleb128Bits(),
                 indirectDepth = indirectDepth,
             )
-            FULL_TREE_DW_FORM_LOCLISTX, FULL_TREE_DW_FORM_GNU_ADDR_INDEX ->
-                cursor.readUleb128().let { FullTreeDwarfIgnoredValue }
+            FULL_TREE_DW_FORM_LOCLISTX -> if (context == FullTreeDwarfFormContext.LOCATION) {
+                FullTreeDwarfLocationListValue(form, cursor.readUleb128Bits(), indirectDepth, indexed = true)
+            } else cursor.readUleb128().let { FullTreeDwarfIgnoredValue }
+            FULL_TREE_DW_FORM_GNU_ADDR_INDEX -> cursor.readUleb128().let { FullTreeDwarfIgnoredValue }
             FULL_TREE_DW_FORM_REF_SUP4 -> FullTreeDwarfUnsupportedReferenceValue(
                 resolvedForm = form,
                 rawValue = cursor.readUnsignedBits(4),
@@ -525,7 +543,9 @@ internal object FullTreeDwarfForms {
                 indirectDepth + 1,
                 context,
             )
-            FULL_TREE_DW_FORM_SEC_OFFSET -> if (context == FullTreeDwarfFormContext.RANGE_LIST) {
+            FULL_TREE_DW_FORM_SEC_OFFSET -> if (context == FullTreeDwarfFormContext.LOCATION) {
+                FullTreeDwarfLocationListValue(form, cursor.readUnsignedBits(offsetSize), indirectDepth, indexed = false)
+            } else if (context == FullTreeDwarfFormContext.RANGE_LIST) {
                 FullTreeDwarfRangeSectionOffsetValue(
                     resolvedForm = form,
                     rawValue = cursor.readUnsignedBits(offsetSize),
@@ -536,14 +556,16 @@ internal object FullTreeDwarfForms {
                 FullTreeDwarfNumericValue(cursor.readUnsigned(offsetSize))
             }
             FULL_TREE_DW_FORM_EXPRLOC -> cursor.readUleb128().let { length ->
-                readBlock(cursor, length, limits, context)
+                readBlock(cursor, length, limits, context, form, indirectDepth)
             }
-            FULL_TREE_DW_FORM_FLAG_PRESENT -> FullTreeDwarfNumericValue(1L)
+            FULL_TREE_DW_FORM_FLAG_PRESENT -> if (context in setOf(FullTreeDwarfFormContext.CONSTANT, FullTreeDwarfFormContext.DATA_VALUE)) {
+                FullTreeDwarfUnsignedConstantValue(form, 1UL, indirectDepth)
+            } else FullTreeDwarfNumericValue(1L)
             FULL_TREE_DW_FORM_STRX, FULL_TREE_DW_FORM_GNU_STR_INDEX ->
                 FullTreeDwarfIndexedStringValue(cursor.readUleb128())
             FULL_TREE_DW_FORM_STRP_SUP, FULL_TREE_DW_FORM_GNU_STRP_ALT ->
                 FullTreeDwarfUnsupportedExternalStringValue.also { cursor.skip(offsetSize.toLong()) }
-            FULL_TREE_DW_FORM_DATA16 -> if (context == FullTreeDwarfFormContext.CONSTANT) {
+            FULL_TREE_DW_FORM_DATA16 -> if (context == FullTreeDwarfFormContext.CONSTANT || context == FullTreeDwarfFormContext.DATA_VALUE) {
                 FullTreeDwarfUnsignedConstantValue(form, cursor.readData16(), indirectDepth)
             } else {
                 cursor.skip(16L).let { FullTreeDwarfIgnoredValue }
@@ -555,7 +577,7 @@ internal object FullTreeDwarfForms {
             FULL_TREE_DW_FORM_IMPLICIT_CONST -> {
                 val raw = implicitConstant
                     ?: throw FullTreeControlException("DWARF implicit constant is absent")
-                if (context == FullTreeDwarfFormContext.CONSTANT) {
+                if (context == FullTreeDwarfFormContext.CONSTANT || context == FullTreeDwarfFormContext.DATA_VALUE) {
                     FullTreeDwarfSignedConstantValue(form, raw, indirectDepth)
                 } else {
                     FullTreeDwarfNumericValue(raw)
@@ -601,8 +623,11 @@ internal object FullTreeDwarfForms {
         length: Long,
         limits: FullTreeControlLimits,
         context: FullTreeDwarfFormContext,
-    ): FullTreeDwarfFormValue = if (context == FullTreeDwarfFormContext.EXPRESSION) {
-        FullTreeDwarfExpressionValue(cursor.readBytesBounded(length, limits.maximumDwarfAttributeBytes))
+        resolvedForm: Long,
+        indirectDepth: Int,
+    ): FullTreeDwarfFormValue = if (context in setOf(FullTreeDwarfFormContext.EXPRESSION,
+            FullTreeDwarfFormContext.LOCATION, FullTreeDwarfFormContext.DATA_VALUE)) {
+        FullTreeDwarfExpressionValue(cursor.readBytesBounded(length, limits.maximumDwarfAttributeBytes), resolvedForm, indirectDepth)
     } else {
         cursor.skipBounded(length, limits.maximumDwarfAttributeBytes)
         FullTreeDwarfIgnoredValue
@@ -617,10 +642,12 @@ internal object FullTreeDwarfForms {
         version: Int,
         offsetSize: Int,
     ): FullTreeDwarfFormValue = when {
-        context == FullTreeDwarfFormContext.CONSTANT ->
+        context == FullTreeDwarfFormContext.CONSTANT || context == FullTreeDwarfFormContext.DATA_VALUE ->
             FullTreeDwarfUnsignedConstantValue(form, cursor.readUnsignedBits(width), indirectDepth)
         context == FullTreeDwarfFormContext.RANGE_LIST && version <= 3 && width == offsetSize ->
             FullTreeDwarfRangeSectionOffsetValue(form, cursor.readUnsignedBits(width), indirectDepth)
+        context == FullTreeDwarfFormContext.LOCATION && version <= 3 && width == offsetSize ->
+            FullTreeDwarfLocationListValue(form, cursor.readUnsignedBits(width), indirectDepth, indexed = false)
         else -> FullTreeDwarfNumericValue(cursor.readUnsigned(width))
     }
 
@@ -632,6 +659,7 @@ internal object FullTreeDwarfForms {
         limits: FullTreeControlLimits,
         label: String,
         maximumCharacters: Int = 4096,
+        allowEmpty: Boolean = false,
     ): String {
         if (maximumCharacters !in 1..FULL_TREE_MAXIMUM_DWARF_STRING_CHARACTERS) {
             throw FullTreeControlException("$label character bound is invalid")
@@ -671,7 +699,7 @@ internal object FullTreeDwarfForms {
             throw FullTreeControlException("$label is not UTF-8", failure)
         }
         if (
-            decoded.isEmpty() || '\u0000' in decoded ||
+            (!allowEmpty && decoded.isEmpty()) || '\u0000' in decoded ||
             decoded.codePointCount(0, decoded.length) > maximumCharacters
         ) {
             throw FullTreeControlException(

@@ -119,6 +119,7 @@ internal fun interface WorkflowStoreFaultInjector { fun hit(point: WorkflowStore
 class WorkflowAttemptStore private constructor(
     private val root: Path, private val ownerChannel: FileChannel, private val ownerLock: FileLock,
     private val clock: Clock, private val faultInjector: WorkflowStoreFaultInjector, private val ownerToken: Any,
+    private val newId: (String) -> String,
 ) : AutoCloseable {
     private val lifetime = ReentrantReadWriteLock(true)
     private val stripes = Array(64) { ReentrantLock() }
@@ -307,6 +308,9 @@ class WorkflowAttemptStore private constructor(
         }
     }
 
+    private fun replace(current: WorkflowJobSnapshot, attempt: WorkflowAttempt): WorkflowJobSnapshot =
+        current.copy(version = newId("version"), attempts = immutable(current.attempts.map { if (it.runId == attempt.runId) attempt else it }))
+
     private fun inspectLocked(jobId: String, directory: Path): WorkflowJobInspection = try {
         val (legacy, bytes) = readLegacy(jobId, directory)
         val statePath = directory.resolve(STATE_FILE)
@@ -467,7 +471,10 @@ class WorkflowAttemptStore private constructor(
         private val JVM_OWNERS = ConcurrentHashMap<Path, Any>()
 
         fun open(root: Path, clock: Clock = Clock.systemUTC()): WorkflowAttemptStore = open(root, clock, WorkflowStoreFaultInjector {})
-        internal fun open(root: Path, clock: Clock, faultInjector: WorkflowStoreFaultInjector): WorkflowAttemptStore {
+        internal fun open(
+            root: Path, clock: Clock, faultInjector: WorkflowStoreFaultInjector,
+            newId: (String) -> String = ::newId,
+        ): WorkflowAttemptStore {
             val normalized = root.toAbsolutePath().normalize()
             Files.createDirectories(normalized)
             if (!Files.isDirectory(normalized, NOFOLLOW_LINKS)) fail("INVALID_STORAGE_ROOT", "Workflow storage must be an owned directory.")
@@ -479,7 +486,7 @@ class WorkflowAttemptStore private constructor(
                 channel = FileChannel.open(canonical.resolve(".workflow-owner.lock"), CREATE, WRITE, NOFOLLOW_LINKS)
                 val lock = try { channel.tryLock() } catch (_: OverlappingFileLockException) { null }
                 if (lock == null) fail("OWNERSHIP_CONFLICT", "Another server owns this job storage; stop it before opening workflow storage.")
-                return WorkflowAttemptStore(canonical, channel, lock, clock, faultInjector, token)
+                return WorkflowAttemptStore(canonical, channel, lock, clock, faultInjector, token, newId)
             } catch (failure: Throwable) {
                 try { channel?.close() } finally { JVM_OWNERS.remove(canonical, token) }
                 throw failure
@@ -500,8 +507,6 @@ class WorkflowAttemptStore private constructor(
             throw WorkflowStoreException("INVALID_STORAGE_ENTRY", "A persisted job record could not be read; preserve storage and inspect its permissions or restore a verified backup.", cause = failure)
         }
         private fun forceDirectory(directory: Path) { FileChannel.open(directory, READ).use { it.force(true) } }
-        private fun replace(current: WorkflowJobSnapshot, attempt: WorkflowAttempt): WorkflowJobSnapshot =
-            current.copy(version = newId("version"), attempts = immutable(current.attempts.map { if (it.runId == attempt.runId) attempt else it }))
         private fun checkVersion(actual: String, expected: String) { if (actual != expected) fail("VERSION_CONFLICT", "The persisted workflow version changed; refresh before applying another transition.") }
         private fun validateTerminal(state: WorkflowRunState, reason: WorkflowTerminalReason) {
             val valid = when (state) {

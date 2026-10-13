@@ -223,6 +223,7 @@ object BoundedShardRunVerifier {
         val leafDigest = MessageDigest.getInstance("SHA-256").apply { update(INDEX_DOMAIN) }
         val bindings = ArrayList<BoundedShardOutputBinding>(authenticatedRun.shards.size)
         authenticatedRun.shards.forEachIndexed { position, shard ->
+            FullTreeOracleOperationCheckpoint.withShardPhase(shard.identifier) {
             budget.periodicCheckpoint("while authenticating bounded-shard records")
             val record = indexedRecords[position]
             val checkpointPath = checkpointsDirectory.resolve("${shard.identifier}.json")
@@ -285,6 +286,7 @@ object BoundedShardRunVerifier {
                 outputBytes = authenticatedRecord.outputBytes,
                 entities = authenticatedRecord.entities,
             )
+            }
         }
 
         val counts = index.requiredObject("counts")

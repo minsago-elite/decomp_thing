@@ -1,0 +1,78 @@
+{
+  "counts": {
+    "anchorCandidateCount": 0,
+    "anchorClaims": 0,
+    "anchorCollisionCandidateCount": 0,
+    "emittedRvas": 0,
+    "nonEmitted": 0,
+    "nonEmittedDies": 0,
+    "scannedDies": 1,
+    "sourceEntities": 1,
+    "sourceEntitiesByDenominatorDisposition": {
+      "ambiguous": 0,
+      "emitted-rva-link": 0,
+      "non-scoreable": 0,
+      "unknown": 1
+    },
+    "sourceEntitiesByKind": {
+      "declaration-only": 0,
+      "inline-instance": 0,
+      "no-range-definition": 0,
+      "template-instance": 0,
+      "template-pattern": 0,
+      "unresolved": 1
+    },
+    "sourceEntitiesByObservability": {
+      "ambiguous": 0,
+      "observable": 0,
+      "unknown": 1,
+      "unobservable": 0
+    },
+    "units": 1
+  },
+  "emitted": [],
+  "identityReconciliation": {
+    "algorithm": "full-run-anchor-claims-v1",
+    "candidateCount": 0,
+    "claimCount": 0,
+    "collisionCandidateCount": 0,
+    "populationSha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+  },
+  "nonEmitted": [],
+  "oracle": {
+    "configurationSha256": "5a4b9dc9015fb64ebb8ec038c8ceefa394b1eaaabfbaf0cf9bc3349497e7e116",
+    "inventoryIndexSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "richArtifactSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "scopeSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "schemaVersion": 2,
+  "shard": {
+    "id": "fixture-shard",
+    "inputSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "sourceEntities": [
+    {
+      "candidateCollisionSourceEntityIds": [],
+      "denominatorDisposition": "unknown",
+      "edges": [],
+      "entityKind": "unresolved",
+      "identityObservability": "unknown",
+      "linkedEmittedRva": null,
+      "physicalDie": {
+        "compilationUnitOffset": "0x0",
+        "dieOffset": "0x10",
+        "locator": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc:.debug_info:unit=cu-11111111111111111111111111111111:cu=0x0:die=0x10",
+        "richArtifactSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "section": ".debug_info",
+        "unitId": "cu-11111111111111111111111111111111"
+      },
+      "reasonCodes": [
+        "unsupported-source-identity"
+      ],
+      "resolvedSemanticIdentityId": null,
+      "semanticAnchorCandidateId": null,
+      "semanticAnchorFields": null,
+      "sourceEntityId": "0fc67883fb421eabb1e41bdf8718868234d7c9738d4a59182907644096052c46"
+    }
+  ]
+}

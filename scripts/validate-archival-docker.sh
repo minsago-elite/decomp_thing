@@ -3,7 +3,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-validation_root=$(mktemp -d /tmp/decomp-archival-ci.XXXXXX)
+validation_parent="$PWD/build"
+mkdir -p "$validation_parent"
+validation_root=$(mktemp -d "$validation_parent/decomp-archival-ci.XXXXXX")
 cleanup() {
   local status=$?
   if ((status != 0)) && [[ -d "$validation_root/output" ]]; then
@@ -23,7 +25,7 @@ cleanup() {
     )
   fi
   case "$validation_root" in
-    /tmp/decomp-archival-ci.*) rm -rf -- "$validation_root" ;;
+    "$validation_parent"/decomp-archival-ci.*) rm -rf -- "$validation_root" ;;
     *) echo "refusing to remove unexpected validation path: $validation_root" >&2 ;;
   esac
 }
@@ -72,6 +74,7 @@ cmp "$validation_root/output/stripped-a/source-tree.zip" \
 python3 - "$validation_root/output" <<'PY'
 import json
 import pathlib
+import subprocess
 import sys
 
 root = pathlib.Path(sys.argv[1])
@@ -87,7 +90,29 @@ for name in ("symbols-a", "stripped-a"):
     assert sum(len(item["strings"]) for item in model["functions"]) > 0
     if name == "symbols-a":
         assert len(model["types"]) > 0
-    assert (root / name / "source-tree/build/reconstructed").is_file()
+    project = root / name / "source-tree"
+    assert (project / "reports/program_model.json").read_bytes() == (
+        root / name / "analysis/reports/program_model.json"
+    ).read_bytes()
+    entities = {item["id"] for kind in ("functions", "globals", "types") for item in model[kind]}
+    manifest = json.loads((project / "source_tree_manifest.json").read_text())
+    confidence = json.loads((project / "reports/confidence.json").read_text())
+    selected = confidence["semanticPlanningBudgetEvidence"]["selectedProfile"]
+    assert selected["descriptor"]["adapterConfiguration"]["declaration-purpose"] == ["evidence-carrier-v1"]
+    assert selected["sha256"] == manifest["profileSha256"]
+    assert {identity for item in manifest["files"] for identity in item["entityIds"]} == entities
+    assert set(manifest["unresolvedEntityIds"]) == entities
+    assert set(confidence["unresolvedEntityIds"]) == entities
+    implementations = [item for item in manifest["files"] if "module-implementation" in item["roles"]]
+    assert implementations
+    assert all(item["generator"] == "evidence-carrier:v1" and item["acceptedImplementation"] is False
+               for item in implementations)
+    executable = project / "build/reconstructed"
+    assert executable.is_file()
+    diagnostic = subprocess.run([str(executable)], capture_output=True, text=True, timeout=5, check=False)
+    assert diagnostic.returncode == 1, diagnostic
+    output = (diagnostic.stdout + diagnostic.stderr).lower()
+    assert "evidence-only" in output and "unresolved" in output, output
     assert (root / name / "source-tree.zip").is_file()
 PY
 

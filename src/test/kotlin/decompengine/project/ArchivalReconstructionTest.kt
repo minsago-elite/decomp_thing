@@ -106,7 +106,15 @@ class ArchivalReconstructionTest {
             assertTrue(project.resolve("build/reconstructed").exists())
             assertEquals("0", Json.parseToJsonElement(project.resolve("reports/build_contract.json").readText())
                 .jsonObject.getValue("returnCode").jsonPrimitive.content)
-            assertTrue(ArchivalProjectAuditor.audit(project, profile).unresolvedEntityIds.isNotEmpty())
+            val retained = SourceTreeManifestReader.read(project, profile)
+            assertEquals(listOf("fn_1000"), retained.unresolvedImplementationIds)
+            assertTrue(retained.files.filter { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }
+                .all { it.acceptedImplementation == false })
+            val auditFailure = assertFailsWith<IllegalArgumentException> {
+                ArchivalProjectAuditor.audit(project, profile)
+            }
+            assertTrue(auditFailure.message.orEmpty().contains("agent-generated module is not accepted"))
+            assertFalse(project.resolve("reports/archival_audit.json").exists())
             assertFalse(output.resolve("source-tree.zip").exists())
 
             if (base.id == GeneratedCNinjaReconstructionProfile.descriptor.id) {
@@ -143,7 +151,13 @@ class ArchivalReconstructionTest {
                 assertTrue(alternateProject.resolve("build/reconstructed").exists())
                 assertEquals("0", Json.parseToJsonElement(alternateProject.resolve("reports/build_contract.json").readText())
                     .jsonObject.getValue("returnCode").jsonPrimitive.content)
-                assertTrue(ArchivalProjectAuditor.audit(alternateProject, alternate).unresolvedEntityIds.isNotEmpty())
+                assertEquals(listOf("fn_1000"),
+                    SourceTreeManifestReader.read(alternateProject, alternate).unresolvedImplementationIds)
+                val alternateAuditFailure = assertFailsWith<IllegalArgumentException> {
+                    ArchivalProjectAuditor.audit(alternateProject, alternate)
+                }
+                assertTrue(alternateAuditFailure.message.orEmpty().contains("agent-generated module is not accepted"))
+                assertFalse(alternateProject.resolve("reports/archival_audit.json").exists())
                 assertFalse(alternateOutput.resolve("source-tree.zip").exists())
             }
         }

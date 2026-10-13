@@ -64,6 +64,8 @@ import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import org.junit.jupiter.api.Timeout
 
 @Timeout(value = 60, unit = TimeUnit.SECONDS)
@@ -118,9 +120,23 @@ class AcpAgentHarnessTest {
                     profile = profile,
                 ).reconstruct(binary, output)
             } catch (failure: Exception) {
+                val sourceRoot = output.resolve("source-tree")
+                val retainedDiagnostics = listOf(
+                    "checkpoint" to "module-evidence",
+                    "execution" to "module-agent-execution-evidence",
+                ).joinToString("; ") { (label, role) ->
+                    val path = sourceRoot.resolve(
+                        profile.layout.declaration(role).materialize(mapOf("module" to "decomp")),
+                    )
+                    val diagnostic = retainedArchivalDiagnostic(
+                        path,
+                        fields = if (label == "execution") setOf("outcome", "lifecycle") else null,
+                    )
+                    "$label=$diagnostic"
+                }
                 throw AssertionError(
                     "public ${base.id} ACP reconstruction failed; diagnostics=${harness.latestDiagnostics()}; " +
-                        "sandbox=${harness.latestSandboxEvidence()}",
+                        "sandbox=${harness.latestSandboxEvidence()}; $retainedDiagnostics",
                     failure,
                 )
             }
@@ -128,6 +144,12 @@ class AcpAgentHarnessTest {
             assertEquals(0, result.build.returnCode)
             assertTrue(requireNotNull(result.bundle.audit).unresolvedEntityIds.isEmpty())
             assertTrue(requireNotNull(harness.latestAcpExecutionEvidence()).sandboxEvidence.networkIsolated)
+            val diagnostics = assertNotNull(harness.latestDiagnostics())
+            assertEquals(0, diagnostics.exitCode)
+            assertFalse(diagnostics.rootTerminationRequested)
+            assertFalse(diagnostics.forcedTermination)
+            assertTrue(diagnostics.sandboxCleanupVerified)
+            assertTrue(diagnostics.remainingProcessIds.isEmpty())
             val extracted = temp.resolve("${base.id}-extracted")
             ArchivalBundleVerifier.extractAndVerify(result.bundle.archivePath, extracted, profile = profile)
             val rebuilt = ReconstructionAdapters.resolve(profile).build(extracted, profile)
@@ -136,6 +158,24 @@ class AcpAgentHarnessTest {
                 ArchivalProjectAuditor.audit(extracted, profile).toJson())
         }
     }
+
+    private fun retainedArchivalDiagnostic(path: Path, fields: Set<String>? = null): String = runCatching {
+        if (!Files.isRegularFile(path)) "<missing>" else {
+            val maximumRendered = 16 * 1024
+            val maximumBytes = if (fields == null) maximumRendered else 64 * 1024
+            val bytes = Files.newInputStream(path).use { it.readNBytes(maximumBytes + 1) }
+            if (fields == null) {
+                bytes.take(maximumBytes).toByteArray().toString(Charsets.UTF_8) +
+                    if (bytes.size > maximumBytes) "\n<truncated>" else ""
+            } else if (bytes.size > maximumBytes) {
+                "<exceeds $maximumBytes bytes>"
+            } else {
+                val document = Json.parseToJsonElement(bytes.toString(Charsets.UTF_8)) as JsonObject
+                val rendered = JsonObject(document.filterKeys { it in fields }).toString()
+                rendered.take(maximumRendered) + if (rendered.length > maximumRendered) "<truncated>" else ""
+            }
+        }
+    }.getOrElse { "<unreadable: ${it.javaClass.simpleName}>" }
 
     @Test
     fun `public harness fails closed before launch when the outer sandbox is absent`() {
@@ -604,7 +644,12 @@ class AcpAgentHarnessTest {
         val secondFixture = fixture(idleMillis = 30_000, wallMillis = 60_000)
         val firstRequest = firstFixture.request.withContextMarker("first-turn-marker")
         val secondRequest = secondFixture.request.withContextMarker("second-turn-marker")
-        val harness = harness("success", timeouts = timeouts(startup = 15_000, request = 45_000, shutdown = 3_000))
+        // The fixture holds stdin open after its response so concurrent receipt checks do not race
+        // an immediate successful process exit against final-response delivery.
+        val harness = harness(
+            "overlapping-success",
+            timeouts = timeouts(startup = 15_000, request = 45_000, shutdown = 3_000),
+        )
         val callbacksEntered = CountDownLatch(2)
         val executor = Executors.newFixedThreadPool(2)
 
@@ -627,14 +672,25 @@ class AcpAgentHarnessTest {
             val second = secondFuture.get(75, TimeUnit.SECONDS)
             val firstEvidence = assertIs<AcpInvocationEvidenceSnapshot>(first.providerEvidence)
             val secondEvidence = assertIs<AcpInvocationEvidenceSnapshot>(second.providerEvidence)
+            val outcomes = listOf("first" to first, "second" to second).joinToString("; ") { (label, receipt) ->
+                val failure = (receipt.outcome as? AgentExecutionOutcome.Failed)?.failure
+                val evidence = receipt.providerEvidence as AcpInvocationEvidenceSnapshot
+                val diagnostics = evidence.diagnostics
+                "$label: failureKind=${failure?.kind} failureMessage=${failure?.message} failureDetails=${failure?.details} " +
+                    "${evidence.summaryForTest()} exitCode=${diagnostics?.exitCode} " +
+                    "forcedTermination=${diagnostics?.forcedTermination} " +
+                    "rootTerminationRequested=${diagnostics?.rootTerminationRequested} " +
+                    "remainingProcesses=${diagnostics?.remainingProcessIds?.size} " +
+                    "outputLimitExceeded=${diagnostics?.outputLimitExceeded}"
+            }
 
             assertEquals(AgentExecutionRequestBinding.capture(firstRequest), first.requestBinding)
             assertEquals(AgentExecutionRequestBinding.capture(secondRequest), second.requestBinding)
             assertEquals(expectedWirePromptSha256(firstRequest), firstEvidence.wirePromptSha256)
             assertEquals(expectedWirePromptSha256(secondRequest), secondEvidence.wirePromptSha256)
             assertFalse(firstEvidence.wirePromptSha256 == secondEvidence.wirePromptSha256)
-            assertEquals(AgentStopReason.COMPLETED, completedStopReasonForTest("first", first, firstEvidence))
-            assertEquals(AgentStopReason.COMPLETED, completedStopReasonForTest("second", second, secondEvidence))
+            assertEquals(AgentStopReason.COMPLETED, completedStopReasonForTest("first", first, firstEvidence, outcomes))
+            assertEquals(AgentStopReason.COMPLETED, completedStopReasonForTest("second", second, secondEvidence, outcomes))
             assertEquals(
                 firstEvidence.wirePromptSha256,
                 assertNotNull(firstEvidence.completeExecutionEvidence, "first: ${firstEvidence.summaryForTest()}").wirePromptSha256,
@@ -659,6 +715,7 @@ class AcpAgentHarnessTest {
         label: String,
         receipt: AgentExecutionReceipt,
         evidence: AcpInvocationEvidenceSnapshot,
+        outcomes: String,
     ): AgentStopReason {
         val failure = (receipt.outcome as? AgentExecutionOutcome.Failed)?.failure
         return assertIs<AgentExecutionOutcome.Returned>(
@@ -667,7 +724,7 @@ class AcpAgentHarnessTest {
                 "failureKind=${failure?.kind} failureMessage=${failure?.message} " +
                 "failureDetails=${failure?.details} " +
                 "causeType=${receipt.failureCause?.javaClass?.name} " +
-                "nestedCauseType=${receipt.failureCause?.cause?.javaClass?.name}",
+                "nestedCauseType=${receipt.failureCause?.cause?.javaClass?.name}; outcomes=$outcomes",
         ).result.stopReason
     }
 
