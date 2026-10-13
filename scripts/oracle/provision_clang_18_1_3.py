@@ -1671,26 +1671,40 @@ def manifest(entries: list[dict]) -> dict:
 
 
 def symlink_chain(rootfs: Path, logical_path: str) -> tuple[list[str], Path]:
-    current = rootfs_path(rootfs, logical_path)
+    rootfs = rootfs.resolve(strict=True)
+    pure = PurePosixPath(logical_path)
+    if not pure.is_absolute() or ".." in pure.parts:
+        raise ProvisionError(f"unsafe path reported by toolchain: {logical_path}")
+    current = rootfs
+    pending = list(pure.parts[1:])
     chain = []
     visited = set()
-    while current.is_symlink():
-        rel = current.relative_to(rootfs).as_posix()
-        if rel in visited or len(chain) > 16:
-            raise ProvisionError(f"symlink cycle/depth overflow for {logical_path}")
-        visited.add(rel)
-        target = os.readlink(current)
-        chain.append(f"/{rel} -> {target}")
-        candidate = current.parent / target if not target.startswith("/") else rootfs / target.lstrip("/")
-        resolved = candidate.resolve(strict=True)
-        try:
-            resolved.relative_to(rootfs.resolve(strict=True))
-        except ValueError as error:
-            raise ProvisionError(f"driver symlink chain escapes rootfs: {logical_path}") from error
-        # Keep each lexical link above, but continue traversal from the
-        # canonical in-root target so a relative target containing '..' does
-        # not leak into the authenticated resolvedPath.
-        current = resolved
+    while pending:
+        part = pending.pop(0)
+        if part == ".":
+            continue
+        if part == "..":
+            if current == rootfs:
+                raise ProvisionError(f"driver symlink chain escapes rootfs: {logical_path}")
+            current = current.parent
+            continue
+        candidate = current / part
+        if candidate.is_symlink():
+            rel = candidate.relative_to(rootfs).as_posix()
+            if rel in visited or len(chain) >= 16:
+                raise ProvisionError(f"symlink cycle/depth overflow for {logical_path}")
+            visited.add(rel)
+            target = os.readlink(candidate)
+            chain.append(f"/{rel} -> {target}")
+            target_parts = PurePosixPath(target).parts
+            if target.startswith("/"):
+                current = rootfs
+                target_parts = target_parts[1:]
+            pending = list(target_parts) + pending
+        else:
+            current = candidate
+            if pending and not current.is_dir():
+                raise ProvisionError(f"driver symlink chain contains a missing/non-directory component: {logical_path}")
     if not current.is_file():
         raise ProvisionError(f"driver resolves to non-regular file: {logical_path}")
     return chain, current
@@ -1770,8 +1784,13 @@ def frontend_resource_manifest_sha256(resource_dir: str, resource_record: dict) 
         files.append({"path": "toolchain" + path, "sha256": row["sha256"]})
     files.sort(key=lambda row: row["path"].encode("utf-8"))
     preimage = {"files": files, "resolvedResourceDirectory": "toolchain" + resource_dir}
-    payload = canonical_json(preimage).removesuffix(b"\n")
+    payload = frontend_canonical_json(preimage)
     return sha256(b"decomp-thing/generic-template/resource-directory/v1\0" + payload)
+
+
+def frontend_canonical_json(value: object) -> bytes:
+    """Match A's OracleJson indentation and final newline for frontend hashes."""
+    return (json.dumps(value, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
 
 
 def verify_recorded_resource_manifest(rootfs: Path, record: dict) -> dict:
@@ -2540,6 +2559,34 @@ def validate_provenance_probe_report(report: dict, record: dict) -> None:
         raise ProvisionError("probe provenance report differs from the reproducible build-record probe")
 
 
+def frontend_cxx_driver_identity_sha256(record: dict, record_sha256: str) -> str:
+    """Recompute A's C++ driver identity from the recorded executable and hops."""
+    tool = next(row for row in record["tools"] if row["role"] == "cxx-driver")
+    hops = []
+    for row in tool["symlinkChain"]:
+        match = re.fullmatch(r"(/[^ ]+) -> (.+)", row)
+        if match is None:
+            raise ProvisionError("C++ driver symlink identity is malformed")
+        path, target = match.groups()
+        hops.append({"path": "toolchain" + path, "targetBytesSha256": sha256(target.encode("utf-8"))})
+    chain_payload = frontend_canonical_json(hops)
+    chain_sha = sha256(b"decomp-thing/generic-template/cxx-driver-symlink-chain/v1\0" + chain_payload)
+    preimage = {
+        "buildRecordSha256": record_sha256,
+        "compilerSha256": tool["sha256"],
+        "containerImageDigest": record["image"]["imageDigest"],
+        "configuredPathSha256": sha256(tool["path"].encode("utf-8")),
+        "executableBytes": tool["bytes"],
+        "executableMode": tool["mode"],
+        "executableSha256": tool["sha256"],
+        "resolvedDriverPath": "toolchain" + tool["resolvedPath"],
+        "symlinkChainSha256": chain_sha,
+        "toolchainProfileSha256": sha256(canonical_json(record["profile"])),
+    }
+    payload = frontend_canonical_json(preimage)
+    return sha256(b"decomp-thing/generic-template/cxx-driver-identity/v1\0" + payload)
+
+
 def validate_provenance_loader_report(report: dict, record: dict, record_sha256: str) -> None:
     resources = record["resources"]
     expected_resource_sha = frontend_resource_manifest_sha256(record["resourceDirectory"], resources)
@@ -2551,7 +2598,9 @@ def validate_provenance_loader_report(report: dict, record: dict, record_sha256:
             report.get("resourceFileCount") != resources.get("entryCount") or
             report.get("resourceTreeBytes") != sum(row["bytes"] for row in resources.get("entries", []))):
         raise ProvisionError("A-loader smoke report does not bind the build record, image, and resource manifest")
-    for field in ("infrastructureProfileProjectionSha256", "pathTransformSha256", "cxxDriverIdentitySha256"):
+    if report.get("cxxDriverIdentitySha256") != frontend_cxx_driver_identity_sha256(record, record_sha256):
+        raise ProvisionError("A-loader smoke report C++ driver identity differs from the build record")
+    for field in ("infrastructureProfileProjectionSha256", "pathTransformSha256"):
         if not re.fullmatch(r"[0-9a-f]{64}", str(report.get(field, ""))):
             raise ProvisionError(f"A-loader smoke report has an invalid {field}")
     for field in ("rejectedWrongImage", "rejectedWrongCxxDriverBytes", "rejectedChangedResourceIdentity",

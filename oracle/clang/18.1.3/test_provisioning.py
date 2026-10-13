@@ -177,6 +177,53 @@ class ProvisioningNegativeTests(unittest.TestCase):
             self.assertEqual(by_path["/usr/lib/llvm-18/lib/libclang-cpp.so"]["sha256"],
                              provision.sha256(b"symlink\0libclang-cpp.so.18.1"))
 
+    def test_driver_and_runtime_symlinks_retain_every_hop_and_enforce_limit(self):
+        with self.temporary_directory() as temp:
+            rootfs = Path(temp) / "rootfs"
+            library_dir = rootfs / "usr/lib/llvm-18/lib"
+            library_dir.mkdir(parents=True)
+            target = library_dir / "library-bytes"
+            target.write_bytes(b"library")
+            for name in ("libclang-cpp.so", "libLLVM-18.so"):
+                (library_dir / name).symlink_to("intermediate")
+            (library_dir / "intermediate").symlink_to("library-bytes")
+            chain, resolved = provision.symlink_chain(rootfs, "/usr/lib/llvm-18/lib/libclang-cpp.so")
+            self.assertEqual(resolved, target)
+            self.assertEqual(chain, [
+                "/usr/lib/llvm-18/lib/libclang-cpp.so -> intermediate",
+                "/usr/lib/llvm-18/lib/intermediate -> library-bytes",
+            ])
+            rows = provision.runtime_dependencies(rootfs, [], self.contract)
+            self.assertEqual({row["path"] for row in rows}, {
+                "/usr/lib/llvm-18/lib/libclang-cpp.so", "/usr/lib/llvm-18/lib/libLLVM-18.so",
+                "/usr/lib/llvm-18/lib/intermediate", "/usr/lib/llvm-18/lib/library-bytes",
+            })
+            for index in reversed(range(17)):
+                (library_dir / f"hop{index}").symlink_to("library-bytes" if index == 16 else f"hop{index + 1}")
+            self.assertEqual(len(provision.symlink_chain(rootfs, "/usr/lib/llvm-18/lib/hop1")[0]), 16)
+            with self.assertRaisesRegex(provision.ProvisionError, "cycle/depth overflow"):
+                provision.symlink_chain(rootfs, "/usr/lib/llvm-18/lib/hop0")
+
+    def test_driver_symlinks_resolve_parent_segments_after_directory_links(self):
+        with self.temporary_directory() as temp:
+            rootfs = Path(temp) / "rootfs"
+            directory = rootfs / "usr/lib/llvm-18/bin"
+            (directory / "other/subdir").mkdir(parents=True)
+            (directory / "target").write_bytes(b"wrong lexical target")
+            target = directory / "other/target"
+            target.write_bytes(b"actual compiler")
+            (directory / "alias").symlink_to("other/subdir")
+            (directory / "clang").symlink_to("alias/../target")
+            chain, resolved = provision.symlink_chain(rootfs, "/usr/lib/llvm-18/bin/clang")
+            self.assertEqual(resolved, target)
+            self.assertEqual(chain, [
+                "/usr/lib/llvm-18/bin/clang -> alias/../target",
+                "/usr/lib/llvm-18/bin/alias -> other/subdir",
+            ])
+            (directory / "escape").symlink_to("../../../../../../outside")
+            with self.assertRaisesRegex(provision.ProvisionError, "escapes rootfs"):
+                provision.symlink_chain(rootfs, "/usr/lib/llvm-18/bin/escape")
+
     def test_loader_resource_manifest_is_rechecked_before_emitting_input(self):
         record = self.valid_build_record()
         with self.temporary_directory() as temp:
@@ -189,6 +236,20 @@ class ProvisioningNegativeTests(unittest.TestCase):
             resource_file.write_bytes(b"changed resource header")
             with self.assertRaisesRegex(provision.ProvisionError, "resource-directory bytes differ"):
                 provision.verify_recorded_resource_manifest(rootfs, record)
+
+    def test_frontend_hashes_match_real_a_loader_vectors(self):
+        # Independently emitted by the real Java A loader using synthetic bytes;
+        # these pin its canonical encoding without asserting a qualified compiler.
+        record = self.valid_build_record()
+        self.assertEqual(provision.frontend_cxx_driver_identity_sha256(record, "b" * 64),
+                         "7142e7789d3b8c9714f3468a4f571b40ff9db017ca271fcba3b4a394095af455")
+        header = b"synthetic header\n"
+        resources = provision.manifest([{
+            "path": record["resourceDirectory"] + "/include/stddef.h",
+            "bytes": len(header), "sha256": provision.sha256(header),
+        }])
+        self.assertEqual(provision.frontend_resource_manifest_sha256(record["resourceDirectory"], resources),
+                         "26b8373fc116f0dd9ad8c09f98391092f66e87f254e6cff13d37cb2601208faf")
 
     def test_normalization_removes_inode_bearing_ldconfig_aux_cache(self):
         with self.temporary_directory() as temp:
@@ -218,7 +279,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
             "resourceManifestSha256": resource_digest,
             "infrastructureProfileProjectionSha256": "c" * 64,
             "pathTransformSha256": "d" * 64,
-            "cxxDriverIdentitySha256": "e" * 64,
+            "cxxDriverIdentitySha256": provision.frontend_cxx_driver_identity_sha256(record, record_sha),
             "rejectedWrongImage": True,
             "rejectedWrongCxxDriverBytes": True,
             "rejectedChangedResourceIdentity": True,
@@ -226,6 +287,16 @@ class ProvisioningNegativeTests(unittest.TestCase):
             "rejectedMissingResourceDirectory": True,
         }
         provision.validate_provenance_loader_report(loader_report, record, record_sha)
+        for field in ("cxxDriverIdentitySha256", "imageDigest", "resourceManifestSha256"):
+            changed = dict(loader_report, **{field: "0" * 64})
+            with self.subTest(field=field), self.assertRaises(provision.ProvisionError):
+                provision.validate_provenance_loader_report(changed, record, record_sha)
+        for field, changed_value in (("sha256", "0" * 64), ("bytes", 2), ("mode", "0755"),
+                                     ("symlinkChain", ["/usr/bin/clang++-18 -> changed-target"])):
+            changed_record = json.loads(json.dumps(record))
+            next(row for row in changed_record["tools"] if row["role"] == "cxx-driver")[field] = changed_value
+            with self.subTest(driver_field=field), self.assertRaisesRegex(provision.ProvisionError, "C\\+\\+ driver identity"):
+                provision.validate_provenance_loader_report(loader_report, changed_record, record_sha)
         loader_report["buildRecordSha256"] = "f" * 64
         with self.assertRaisesRegex(provision.ProvisionError, "does not bind the build record"):
             provision.validate_provenance_loader_report(loader_report, record, record_sha)
