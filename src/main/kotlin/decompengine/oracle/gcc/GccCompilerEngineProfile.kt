@@ -408,7 +408,7 @@ internal class GccCompilerEngineProfileLoader(
 
     private fun authenticateAnalysisToolchain(analysis: GccCompilerEngineAnalysisToolchain) {
         if (
-            analysis.exporterId != "decompengine-ghidra-program-model" || analysis.exporterVersion != 15 ||
+            analysis.exporterId != "decompengine-ghidra-program-model" || analysis.exporterVersion != 16 ||
             analysis.exporterMode != "planning" ||
             analysis.plannerId != "deterministic-module-planner" || analysis.plannerVersion != 1
         ) {
@@ -717,7 +717,7 @@ internal class GccCompilerEngineProfileLoader(
     private data class RawArtifact(val path: Path, val bytes: ByteArray, val sha256: String)
 
     private companion object {
-        private const val DRIVER_COMPILER_PROFILE_SHA256 = "8e142e3f2713edbd4b7e842ad0d50f5d806cae181ab3152aebef94fe11de40a7"
+        private const val DRIVER_COMPILER_PROFILE_SHA256 = "dc0ce5fe570e6cedaeb661ae120c04652ca023860598374f4f4bbc5f8aa21c68"
         private const val DRIVER_SOURCE_LOCK_SHA256 = "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc"
         private const val DRIVER_BUILD_RECORD_SHA256 = "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
         private const val DRIVER_TOOLCHAIN_SHA256 = "5c2c159d7287305159a220a1260f6ff6bffe9ec78bb1cbe2fb24f85b68a7d4de"

@@ -267,8 +267,8 @@ class GhidraProgramModelExporterTest {
         assertTrue(progress.contains("\"reused\":${first.functions.size}"), progress)
         val statePath = modelPath.resolveSibling("program_model.json.export/state.json")
         val priorState = statePath.readText()
-        assertTrue("\"exporterVersion\":15" in priorState)
-        val historicalState = priorState.replace("\"exporterVersion\":15", "\"exporterVersion\":14")
+        assertTrue("\"exporterVersion\":16" in priorState)
+        val historicalState = priorState.replace("\"exporterVersion\":16", "\"exporterVersion\":15")
         statePath.writeText(historicalState)
         assertFailsWith<IllegalArgumentException> { analyzer.analyze(binary, work) }
         assertEquals(historicalState, statePath.readText())
@@ -438,6 +438,141 @@ class GhidraProgramModelExporterTest {
                 "CBytes=${after.functions.sumOf { it.decompiledC?.toByteArray()?.size ?: 0 }} " +
                 "largeCBytes=${named.getValue("fixture_large").decompiledC!!.toByteArray().size}")
         }
+    }
+
+    @Test
+    fun `opt in pure rendering preserves all native exporter bytes against committed baseline`() {
+        if (System.getenv("RUN_REAL_GHIDRA") != "true" || System.getenv("RUN_REAL_GHIDRA_PURE_RENDERING") != "true") return
+        val repository = Path.of("").toAbsolutePath().normalize().toRealPath()
+        val baselinePath = Path.of(checkNotNull(System.getProperty("decompengine.ghidra.exporterRenderingBaseline")) {
+            "pure rendering equality requires the retained exporter 15 source"
+        }).toAbsolutePath().normalize().toRealPath()
+        assertTrue(baselinePath.startsWith(repository.resolve("build")), "baseline must be retained under this repository's build directory")
+        val baseline = baselinePath.readText()
+        assertEquals("9c0411b9a6fdf9ad358a93b07b5973d1abbc1b9b3189382cab3630a7d2867612", sha256(baseline.toByteArray()),
+            "baseline must be the exact committed exporter 15 source")
+        val candidate = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java"))
+            .use { it.readBytes().toString(Charsets.UTF_8) }
+        assertTrue("EXPORTER_VERSION = 15;" in baseline)
+        assertTrue("EXPORTER_VERSION = 16;" in candidate)
+        for (exporter in listOf(baseline, candidate)) {
+            assertEquals(1, Regex(Regex.escape("decompiler.toggleSyntaxTree(false);")).findAll(exporter).count())
+            for (setting in listOf("DECOMPILE_TIMEOUT_SECONDS = 60", "DECOMPILE_RETRY_TIMEOUT_SECONDS = 180",
+                "MAXIMUM_DECOMPILE_INSTRUCTIONS = 500_000", "decompileOptions.setMaxInstructions(MAXIMUM_DECOMPILE_INSTRUCTIONS)")) {
+                assertTrue(setting in exporter, "both variants must retain $setting")
+            }
+        }
+        val temp = Files.createTempDirectory(repository.resolve("build/exporter-rendering-v16/native").createDirectories(), "equality-")
+        val source = temp.resolve("rendering.c")
+        val binary = temp.resolve("rendering")
+        source.writeText("""
+            typedef unsigned long rendering_word;
+            typedef enum RenderingKind { KIND_ZERO, KIND_FIRST, KIND_SECOND } RenderingKind;
+            typedef struct RenderingRecord { rendering_word value; RenderingKind kind; char label[16]; } RenderingRecord;
+            RenderingRecord rendering_global = { 17, KIND_FIRST, "rendering-label" };
+            rendering_word rendering_bias = 31;
+            RenderingKind rendering_kind = KIND_SECOND;
+            __attribute__((noinline)) rendering_word rendering_leaf(RenderingRecord *record, int selector) {
+                record->value += rendering_bias;
+                record->kind = selector & 1 ? KIND_FIRST : rendering_kind;
+                return record->value + record->kind + record->label[selector & 7];
+            }
+            __attribute__((noinline)) rendering_word rendering_caller(int selector) {
+                return rendering_leaf(&rendering_global, selector) + rendering_leaf(&rendering_global, selector + 1);
+            }
+            int main(int argc, char **argv) { return (int)(rendering_caller(argc) + argv[0][0]); }
+        """.trimIndent() + "\n")
+        val compilerLog = temp.resolve("compiler.log")
+        val compiler = ProcessBuilder("gcc", "-g", "-gdwarf-4", "-O0", "-fno-inline", "-fno-pie", "-no-pie",
+            source.pathString, "-o", binary.pathString).apply {
+            environment()["TMPDIR"] = temp.resolve("compiler-tmp").createDirectories().pathString
+        }.redirectErrorStream(true).redirectOutput(compilerLog.toFile()).start()
+        try {
+            assertTrue(compiler.waitFor(15, TimeUnit.SECONDS), "native rendering fixture compiler timed out")
+            assertEquals(0, compiler.exitValue(), compilerLog.readText())
+        } finally {
+            if (compiler.isAlive) {
+                val children = compiler.toHandle().descendants().use { it.toList() }
+                children.forEach { it.destroyForcibly() }
+                compiler.destroyForcibly()
+                assertTrue(compiler.waitFor(5, TimeUnit.SECONDS), "rendering fixture compiler survived cleanup")
+                children.forEach { it.onExit().get(5, TimeUnit.SECONDS) }
+            }
+        }
+        println("Native pure rendering input SHA256=${sha256(binary.readBytes())} retained evidence=$temp")
+        fun export(label: String, exporter: String): Pair<RecoveredProgramModel, Path> {
+            val work = temp.resolve(label)
+            val jvmHome = work.resolve("home").createDirectories()
+            val jvmTemp = work.resolve("tmp").createDirectories()
+            val exporterHash = sha256(exporter.toByteArray())
+            val analyzer = GhidraHeadlessProgramModelAnalyzer(
+                commandFactory = { invocation ->
+                    invocation.scripts.resolve("ExportProgramModel.java").writeText(exporter)
+                    val script = invocation.postScripts.single()
+                    val arguments = listOf(exporterHash) + script.arguments.drop(1) + "full-recovery-workers-v1:4"
+                    val command = BundledGhidra.locate().analysisCommand(invocation.copy(
+                        project = Path.of("/proc/self/cwd/ghidra_project"),
+                        postScripts = listOf(script.copy(arguments = arguments)),
+                    ))
+                    listOf("/usr/bin/env", "-u", "JAVA_TOOL_OPTIONS", "-u", "JDK_JAVA_OPTIONS", "-u", "_JAVA_OPTIONS",
+                        "TMPDIR=$jvmTemp", "XDG_CONFIG_HOME=$jvmHome/config", "XDG_CACHE_HOME=$jvmHome/cache", "XDG_DATA_HOME=$jvmHome/data",
+                        command.first(), "-Duser.home=$jvmHome", "-Djava.io.tmpdir=$jvmTemp", "-Djna.tmpdir=$jvmTemp",
+                        "-XX:-UsePerfData", "-XX:ActiveProcessorCount=4") + command.drop(1)
+                },
+                limits = GhidraProgramModelExportLimits(wallClockTimeout = Duration.ofSeconds(90)),
+                analysisToolSha256 = BundledGhidra.ARCHIVE_SHA256,
+            )
+            val start = System.nanoTime()
+            val model = try {
+                analyzer.analyze(binary, work)
+            } catch (failure: Throwable) {
+                listOf("ghidra_stdout.log", "ghidra_stderr.log").forEach { name ->
+                    work.resolve("reports/$name").takeIf { it.exists() }?.let { println(it.readText().takeLast(16_384)) }
+                }
+                throw failure
+            }
+            println("Native rendering $label source SHA256=$exporterHash wallSeconds=${(System.nanoTime() - start) / 1_000_000_000.0} " +
+                "functions=${model.functions.size} globals=${model.globals.size} types=${model.types.size} " +
+                "statuses=${model.functions.groupingBy { it.status }.eachCount()}")
+            return model to work.resolve("reports/program_model.json")
+        }
+        val (before, beforePath) = export("baseline-v15", baseline)
+        val (after, afterPath) = export("candidate-v16", candidate)
+        assertEquals(before, after, "all parsed native function/global/type facts")
+        assertTrue(beforePath.readBytes().contentEquals(afterPath.readBytes()), "complete canonical native model bytes")
+        fun sidecars(modelPath: Path): Map<String, ByteArray> {
+            val root = modelPath.resolveSibling("program_model.json.export")
+            return Files.walk(root).use { files ->
+                files.filter { Files.isRegularFile(it) && it.fileName.toString() != "state.json" }
+                    .toList().associate { root.relativize(it).toString() to it.readBytes() }
+            }
+        }
+        val beforeSidecars = sidecars(beforePath)
+        val afterSidecars = sidecars(afterPath)
+        assertEquals(beforeSidecars.keys, afterSidecars.keys, "all native function/global/type/failure sidecar paths")
+        beforeSidecars.forEach { (name, bytes) -> assertTrue(bytes.contentEquals(afterSidecars.getValue(name)), "native sidecar $name") }
+        val beforeState = beforePath.resolveSibling("program_model.json.export/state.json").readText()
+        val afterState = afterPath.resolveSibling("program_model.json.export/state.json").readText()
+        assertTrue("\"exporterVersion\":15" in beforeState)
+        assertTrue("\"exporterVersion\":16" in afterState)
+        assertTrue("\"decompilationWorkers\":4" in beforeState && "\"decompilationWorkers\":4" in afterState)
+        val sourceIdentity = Regex("\"exporterSha256\":\"[0-9a-f]{64}\"")
+        assertEquals(beforeState.replace(sourceIdentity, "\"exporterSha256\":\"SOURCE\"").replace("\"exporterVersion\":15", "\"exporterVersion\":16"),
+            afterState.replace(sourceIdentity, "\"exporterSha256\":\"SOURCE\""), "checkpoint state differs only by exporter version/source")
+        assertTrue(beforePath.resolveSibling("program_model.json.progress.json").readBytes()
+            .contentEquals(afterPath.resolveSibling("program_model.json.progress.json").readBytes()), "exact native final progress/status bytes")
+        val named = after.functions.associateBy { it.name }
+        for (name in listOf("rendering_leaf", "rendering_caller", "main")) {
+            assertEquals(RecoveryStatus.RECOVERED, named.getValue(name).status, name)
+            assertTrue(!named.getValue(name).decompiledC.isNullOrBlank(), name)
+        }
+        assertTrue(after.globals.any { it.name == "rendering_global" })
+        assertTrue(after.globals.any { it.name == "rendering_bias" })
+        assertTrue(after.types.any { "RenderingRecord" in it.declaration && "struct" in it.declaration })
+        assertTrue(after.types.any { "RenderingKind" in it.declaration && "typedef int" in it.declaration })
+        assertTrue(after.types.any { "rendering_word" in it.declaration && "typedef" in it.declaration })
+        println("Native pure rendering equality PASS model SHA256=${sha256(afterPath.readBytes())} sidecars=${afterSidecars.size} " +
+            "failureSidecars=${afterSidecars.keys.count { it.startsWith("failures/") }} CBytes=${after.functions.sumOf { it.decompiledC?.toByteArray()?.size ?: 0 }}")
     }
 
     private fun fakeGhidraHome(temp: Path, complete: Boolean): (GhidraInvocation) -> List<String> {

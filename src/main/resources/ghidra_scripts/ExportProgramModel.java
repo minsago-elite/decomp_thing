@@ -34,6 +34,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompiledFunction;
 import ghidra.app.decompiler.DecompileOptions;
@@ -591,8 +592,41 @@ final class ExporterSemanticFingerprintV1 {
 }
 // SEMANTIC_FINGERPRINT_TEST_END
 
+// PURE_RENDERING_TEST_BEGIN
+final class ExporterPureRenderingV1 {
+    private static final char[] HEX = "0123456789abcdef".toCharArray();
+    private static final Pattern TYPE_NAME_UNSAFE = Pattern.compile("[^A-Za-z0-9_]");
+
+    private ExporterPureRenderingV1() { }
+
+    static String addressId(String prefix, long offset) {
+        char[] result = new char[prefix.length() + 16];
+        prefix.getChars(0, prefix.length(), result, 0);
+        for (int index = result.length - 1; index >= prefix.length(); index--) {
+            result[index] = HEX[(int) (offset & 0xf)];
+            offset >>>= 4;
+        }
+        return new String(result);
+    }
+
+    static String hexDigest(byte[] digest) {
+        char[] result = new char[digest.length * 2];
+        for (int index = 0; index < digest.length; index++) {
+            int value = digest[index] & 0xff;
+            result[index * 2] = HEX[value >>> 4];
+            result[index * 2 + 1] = HEX[value & 0xf];
+        }
+        return new String(result);
+    }
+
+    static String typeName(String name) {
+        return TYPE_NAME_UNSAFE.matcher(name).replaceAll("_");
+    }
+}
+// PURE_RENDERING_TEST_END
+
 public class ExportProgramModel extends GhidraScript {
-    private static final int EXPORTER_VERSION = 15;
+    private static final int EXPORTER_VERSION = 16;
     private static final int DECOMPILE_TIMEOUT_SECONDS = 60;
     private static final int DECOMPILE_RETRY_TIMEOUT_SECONDS = 180;
     private static final int MAXIMUM_DECOMPILE_INSTRUCTIONS = 500_000;
@@ -966,17 +1000,15 @@ public class ExportProgramModel extends GhidraScript {
     }
 
     private static String functionId(Function function) {
-        return String.format("fn_%016x", function.getEntryPoint().getOffset());
+        return ExporterPureRenderingV1.addressId("fn_", function.getEntryPoint().getOffset());
     }
 
     private static String globalId(Address address) {
-        return String.format("global_%016x", address.getOffset());
+        return ExporterPureRenderingV1.addressId("global_", address.getOffset());
     }
 
     private static String hexDigest(byte[] digest) {
-        StringBuilder result = new StringBuilder();
-        for (byte value : digest) result.append(String.format("%02x", value & 0xff));
-        return result.toString();
+        return ExporterPureRenderingV1.hexDigest(digest);
     }
 
     private static String sha256(Path path) throws Exception {
@@ -1034,7 +1066,7 @@ public class ExportProgramModel extends GhidraScript {
         String key = type.getPathName();
         String id = "type_" + sha256(key.getBytes(StandardCharsets.UTF_8));
         int length = Math.max(type.getLength(), 1);
-        String cName = type.getName().replaceAll("[^A-Za-z0-9_]", "_");
+        String cName = ExporterPureRenderingV1.typeName(type.getName());
         if (cName.isEmpty() || Character.isDigit(cName.charAt(0))) cName = "recovered_" + id;
         // Retain the exact path used for the identity without allowing a comment terminator.
         String prefix = "/* Ghidra type " + json(key).replace("/", "\\/") + " */ ";

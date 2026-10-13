@@ -682,9 +682,9 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         val fixture = oneBatchFixture()
         val current = GccCompilerEngineResumeByteValidator.assessExporterState(fixture.state)
         assertEquals(sha(fixture.state), current.artifactSha256)
-        assertTrue("\"exporterVersion\":15" in fixture.state.decodeToString())
+        assertTrue("\"exporterVersion\":16" in fixture.state.decodeToString())
         val historical = fixture.state.decodeToString()
-            .replace("\"exporterVersion\":15", "\"exporterVersion\":14").toByteArray()
+            .replace("\"exporterVersion\":16", "\"exporterVersion\":15").toByteArray()
         val retained = historical.copyOf()
         val failure = assertFailsWith<GccCompilerEngineResumeEvidenceException> {
             GccCompilerEngineResumeByteValidator.assessExporterState(historical)
@@ -1518,7 +1518,7 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         val partial = spec.functions.count { it.status == "partial" }
         val failed = spec.functions.count { it.status == "failed" }
         append("schemaVersion=1\n")
-        append("exporterVersion=15\n")
+        append("exporterVersion=16\n")
         append("recoveryMode=planning\n")
         append("stateSha256=$stateSha\n")
         append("inventorySha256=$inventorySha\n")
@@ -1547,7 +1547,7 @@ class GccCompilerEngineResumeEvidenceValidationTest {
         semanticSha256: String,
         batchCommitmentSha256: String,
     ): ByteArray = (
-        "{\"schemaVersion\":2,\"exporterVersion\":15,\"exporterSha256\":\"$SHA_B\"," +
+        "{\"schemaVersion\":2,\"exporterVersion\":16,\"exporterSha256\":\"$SHA_B\"," +
             "\"analysisToolSha256\":\"$SHA_C\",\"recoveryMode\":\"planning\"," +
             "\"inputSha256\":\"$SHA_A\",\"language\":\"x86:LE:64:default\",\"compilerSpec\":\"gcc\"," +
             "\"semanticStateBinding\":{\"schemaVersion\":1,\"scope\":\"planning-exporter-visible-program\"," +

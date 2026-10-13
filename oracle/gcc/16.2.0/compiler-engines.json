@@ -16,8 +16,8 @@
     "exporter": {
       "id": "decompengine-ghidra-program-model",
       "recoveryMode": "planning",
-      "sha256": "9c0411b9a6fdf9ad358a93b07b5973d1abbc1b9b3189382cab3630a7d2867612",
-      "version": 15
+      "sha256": "9e1957818c12e5a86e96cb278243cd76970e886565c328aac79e4d986bcf394a",
+      "version": 16
     },
     "fullRecoveryCc1Throughput": {
       "analysisThreadCount": 4,
