@@ -2218,7 +2218,8 @@ internal class ModuleRevisionGraph private constructor(
             null,
             emptyList(),
             portableMetadata,
-            detached = state.schemaVersion >= 3 && state.runs.lastOrNull()?.terminal == false,
+            detached = state.schemaVersion >= 3 &&
+                (state.runs.lastOrNull()?.terminal == false || parent.id == state.provisionalHeadId),
         )
         val run = state.runs.lastOrNull()?.takeUnless { it.terminal }
         run?.let {
@@ -2484,7 +2485,9 @@ internal class ModuleRevisionGraph private constructor(
                     .copy(candidateSourceInstallStarted = true),
             )
             cancellationCheck()
-            persist(state.copy(pending = pending))
+            val promotionState = state.copy(pending = pending)
+            requireRecoverablePendingState(promotionState)
+            persist(promotionState)
             installFiles(promotionBytes,
                 promotion.associate { it.path to requireNotNull(it.beforeSha256) }, pending.id, "promotion")
         }
@@ -2568,6 +2571,8 @@ internal class ModuleRevisionGraph private constructor(
     @Synchronized
     fun reject(attempt: ModuleRevisionAttempt, evidence: RepairEvidence? = null): ModuleRevisionNode = graphOperation {
         val pending = requirePending(attempt)
+        // Invalid caller evidence must not publish a rollback marker or change source bytes.
+        validateEvidence(evidence)
         val rollbackRecord = rollbackPending(pending)
         val recoveredPending = requirePending(attempt)
         val node = finalizeNode(
@@ -2785,8 +2790,7 @@ internal class ModuleRevisionGraph private constructor(
 
     private fun loadOrInitialize(): RevisionGraphState {
         if (stateStore.graphExists()) {
-            val payload = stateStore.readGraph(index.budget.maximumGraphBytes)
-            return parseCanonicalGraph(payload, "reports/repair-revisions/graph.json")
+            return readBoundedRevisionGraph(stateStore, index.budget).second
         }
         val snapshot = index.sourceSnapshot()
         val blobReservation = reserveBlobPublications(snapshot.map { it.sha256 })
@@ -3310,11 +3314,25 @@ internal class ModuleRevisionGraph private constructor(
 
     private fun requireRecoverablePendingState(candidate: RevisionGraphState) {
         val pending = requireNotNull(candidate.pending) { "recoverability check requires a pending repair" }
+        val recoveryRecord = if (candidate.schemaVersion >= 4) {
+            val record = pending.rollbackRecord ?: initialRollbackRecord(candidate, pending, pending.legacyRecoveryRequired)
+            val failed = record.copy(
+                state = RepairRollbackState.RESTORE_FAILED_UNRESOLVED,
+                failureStage = RepairRollbackStage.SOURCE_VERIFICATION,
+                failureCode = RepairRollbackFailureCode.UNRECOGNIZED_SOURCE_STATE,
+                observedSourceRevisionSha256 = record.expectedSourceRevisionSha256,
+            )
+            // Reserve both a durable failure marker and a terminal recovery outcome before any
+            // candidate installation can make either publication necessary.
+            prepareStateForPersistence(candidate.copy(pending = pending.copy(rollbackRecord = failed)))
+            failed.copy(state = RepairRollbackState.RESTORED_AFTER_FAILURE)
+        } else null
         val recoveredNode = finalizeNode(
             pending,
             ModuleRevisionStatus.REJECTED,
             RepairEvidence("crash-recovery", "restored pending repair preimages after restart"),
             recovered = true,
+            rollbackRecord = recoveryRecord,
         )
         requireCommitReadyState(candidate.copy(nodes = candidate.nodes + recoveredNode, pending = null))
     }
@@ -3751,9 +3769,7 @@ internal class ModuleRevisionGraph private constructor(
             state = prior
         }
         val payload = renderGraph(normalized).toByteArray(Charsets.UTF_8)
-        if (payload.size.toLong() > frozenCandidate.budget.maximumGraphBytes) {
-            throw RepairBudgetExceededException("repair revision graph exceeds ${frozenCandidate.budget.maximumGraphBytes} bytes")
-        }
+        requireRevisionGraphByteBudget(normalized, payload.size.toLong())
         return PreparedRevisionGraphState(normalized, payload)
     }
 
@@ -4292,12 +4308,18 @@ private fun validateRepairRunContract(state: RevisionGraphState) {
             }
             require(pending.rollbackRecord.legacyPendingStateUnknown)
         }
-        if (!pending.detached) {
-            require(state.schemaVersion >= 4 && pending.repairMetadata?.runId == null) {
-                "non-detached pending repair is not a supported legacy or standalone attempt"
+        if (pending.repairMetadata?.runId == null) {
+            require(state.schemaVersion >= 4) {
+                "pending repair without a run is not a supported legacy or standalone attempt"
             }
             require(state.runs.none { !it.terminal }) {
-                "non-detached pending repair cannot belong to an active run"
+                "standalone pending repair cannot belong to an active run"
+            }
+            require(pending.detached == (pending.parentId == state.provisionalHeadId)) {
+                "standalone repair must keep its provisional parent detached"
+            }
+            require(pending.promotionChanges.isEmpty()) {
+                "standalone repair cannot publish an unvalidated provisional tree"
             }
             return@let
         }
@@ -4590,6 +4612,8 @@ private fun validateGraphBeforeRecovery(
             val targetSources = revisionSourcesAt(state.nodes, targetId)
             validatePendingRollbackRecord(record, pending, targetId, revisionSha256(targetSources.values))
         }
+        // A present pending attempt may legitimately have no rollback record yet.
+        Unit
     } ?: require(state.nextOrdinal == priorOrdinal + 1)
 
     val referencedBytes = referencedSizes.values.fold(0L, Math::addExact)
@@ -4616,8 +4640,7 @@ private fun restorePendingPreimagesBeforeIndex(
     faultInjector: ModuleRevisionFaultInjector?,
 ) {
     if (!store.graphExists()) return
-    val graphBytes = store.readGraph(requestedBudget.maximumGraphBytes)
-    val loaded = parseCanonicalGraph(graphBytes, "reports/repair-revisions/graph.json")
+    val (graphBytes, loaded) = readBoundedRevisionGraph(store, requestedBudget)
     require(store.bindingExists()) {
         "revision graph is missing its immutable recovery authorization"
     }
@@ -4665,9 +4688,7 @@ private fun restorePendingPreimagesBeforeIndex(
 
     fun persistRecoveryState(next: RevisionGraphState) {
         val payload = renderGraph(next).toByteArray(Charsets.UTF_8)
-        require(payload.size.toLong() <= requestedBudget.maximumGraphBytes) {
-            "repair revision graph exceeds ${requestedBudget.maximumGraphBytes} bytes"
-        }
+        requireRevisionGraphByteBudget(next, payload.size.toLong())
         validateGraphBeforeRecovery(next, profile, binding, store.blobsPath, requestedBudget)
         store.writeGraph(payload)
     }
@@ -5465,6 +5486,72 @@ private fun List<ProcessInput>.toGraphJson(): String = joinToString(prefix = "["
 private fun RepairEvidence.toGraphJson(): String =
     "{\"kind\":\"${kind.jsonEscape()}\",\"summary\":\"${summary.jsonEscape()}\",\"artifactPath\":" +
         (artifactPath?.let { "\"${it.jsonEscape()}\"" } ?: "null") + "}"
+
+// Migration adds only bounded, allowlisted records and default wire-format fields. Keep the
+// authorized budget and profile identity unchanged: ordinary graph content still pays every byte.
+private const val MAXIMUM_ROLLBACK_RECORD_BYTES = 1024L
+private const val MAXIMUM_MIGRATION_BYTES_PER_NODE = 2048L
+
+private fun revisionGraphReadLimit(budget: RepairResourceBudget): Long = minOf(
+    Int.MAX_VALUE.toLong() - 1,
+    budget.maximumGraphBytes + (budget.maximumRevisionNodes.toLong() + 1) * MAXIMUM_MIGRATION_BYTES_PER_NODE,
+)
+
+private fun readBoundedRevisionGraph(store: RepairStateStore, budget: RepairResourceBudget): Pair<ByteArray, RevisionGraphState> {
+    val bytes = store.readGraph(revisionGraphReadLimit(budget))
+    val parsed = parseCanonicalGraph(bytes, "reports/repair-revisions/graph.json")
+    require(parsed.budget == budget) { "revision graph resource budget differs from the requested budget" }
+    requireRevisionGraphByteBudget(parsed, bytes.size.toLong())
+    return bytes to parsed
+}
+
+/** Archive readers retain their independent absolute ceiling and semantic validation. */
+internal fun requireRepairGraphByteBudget(payload: ByteArray, budget: RepairResourceBudget) {
+    if (payload.size.toLong() <= budget.maximumGraphBytes) return
+    require(payload.size.toLong() <= revisionGraphReadLimit(budget)) { "repair graph exceeds migration read bound" }
+    val state = parseCanonicalGraph(payload, "repair release graph")
+    require(state.budget == budget)
+    requireRevisionGraphByteBudget(state, payload.size.toLong())
+}
+
+private fun requireRevisionGraphByteBudget(state: RevisionGraphState, bytes: Long) {
+    val records = state.nodes.mapNotNull { it.rollbackRecord } + listOfNotNull(state.pending?.rollbackRecord)
+    records.forEach { record ->
+        require(record.toJson().toByteArray(Charsets.UTF_8).size.toLong() <= MAXIMUM_ROLLBACK_RECORD_BYTES) {
+            "repair rollback record exceeds its fixed byte bound"
+        }
+    }
+    if (bytes <= state.budget.maximumGraphBytes) return
+    var allowance = 0L
+    if (state.schemaVersion == 4 && records.any { it.legacyPendingStateUnknown }) {
+        fun size(candidate: RevisionGraphState) = renderGraph(candidate).toByteArray(Charsets.UTF_8).size.toLong()
+        val schema3 = state.copy(schemaVersion = 3)
+        // New records from native schema-4 attempts remain fully charged; only legacy recovery
+        // records and the format's new field names/default nulls receive migration headroom.
+        allowance = bytes - size(schema3) - records.filterNot { it.legacyPendingStateUnknown }
+            .sumOf { it.toJson().toByteArray(Charsets.UTF_8).size.toLong() - 4 }
+        val metadata = state.nodes.mapNotNull { it.repairMetadata } + listOfNotNull(state.pending?.repairMetadata)
+        if (state.runs.isEmpty() && state.provisionalHeadId == null && state.fullyAcceptedHeadId == null &&
+            state.acceptedProof == null && state.nodes.all { it.validationProof == null } &&
+            metadata.all { it.runId == null } && state.pending?.detached != true &&
+            state.pending?.promotionChanges.orEmpty().isEmpty()
+        ) {
+            val schema2 = state.copy(schemaVersion = 2)
+            allowance += size(schema3) - size(schema2)
+            allowance += state.nodes.count { it.status == ModuleRevisionStatus.LEGACY_UNVERIFIED } *
+                ("legacy_unverified".length - "accepted".length)
+            if (metadata.all { it.agentInvocation == null && it.publicationMode == RepairPublicationMode.TEST_ONLY_NON_RELEASE }) {
+                allowance += size(schema2) - size(state.copy(schemaVersion = 1))
+            }
+        }
+        require(allowance in 0..((state.nodes.size.toLong() + 1) * MAXIMUM_MIGRATION_BYTES_PER_NODE)) {
+            "repair graph migration overhead exceeds its fixed bound"
+        }
+    }
+    if (bytes - allowance > state.budget.maximumGraphBytes) {
+        throw RepairBudgetExceededException("repair revision graph exceeds ${state.budget.maximumGraphBytes} content bytes")
+    }
+}
 
 private fun parseCanonicalGraph(payload: ByteArray, label: String): RevisionGraphState {
     val state = parseGraph(decodeUtf8Strict(payload, label))

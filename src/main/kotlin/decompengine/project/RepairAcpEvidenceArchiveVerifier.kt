@@ -13,6 +13,7 @@ import decompengine.repair.RepairResourceBudget
 import decompengine.repair.TRACE_REPAIR_ACP_RECEIPT_KIND
 import decompengine.repair.TRACE_REPAIR_ACP_TASK_FIELD
 import decompengine.repair.readStableRepairFile
+import decompengine.repair.requireRepairGraphByteBudget
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 import java.util.Collections
@@ -120,9 +121,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
             payloadSizes,
         )
         val graph = parseGraph(graphBytes)
-        require(graphBytes.size.toLong() <= graph.budget.maximumGraphBytes) {
-            "repair release graph exceeds its persisted byte bound"
-        }
+        requireRepairGraphByteBudget(graphBytes, graph.budget)
         require(graph.schemaVersion in 3..4) {
             "legacy schema-v1/v2 repair evidence is non-release"
         }
@@ -252,7 +251,7 @@ internal object RepairAcpEvidenceArchiveVerifier {
 
         val root = graph.nodes.first()
         require(root.status == "root" && root.parentId == null && root.ordinal == 0 &&
-            root.repairMetadata == null && !root.recoveredAfterCrash
+            root.repairMetadata == null && !root.recoveredAfterCrash && root.rollbackRecord == null
         ) { "repair release graph root is invalid" }
         val rootPaths = root.changes.map(ReleaseRepairDelta::path)
         require(rootPaths.isNotEmpty() && rootPaths == rootPaths.distinct().sorted() &&

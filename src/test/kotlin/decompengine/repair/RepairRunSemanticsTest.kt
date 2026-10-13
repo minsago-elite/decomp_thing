@@ -292,6 +292,61 @@ class RepairRunSemanticsTest {
     }
 
     @Test
+    fun `standalone attempts retain a provisional parent after completed and interrupted runs`() {
+        listOf(false, true).forEach { interrupted ->
+            val fixture = fixture("broken")
+            var provisionalId: String? = null
+            ModuleRevisionGraph.open(fixture.root, profile).use { graph ->
+                graph.enableRunContract()
+                val corpus = graph.retainRegressionInputs(inputs)
+                graph.beginRun(2, 60_000)
+                graph.bindOriginalBinary(sha256("reference".toByteArray()))
+                val attempt = graph.beginAttempt(listOf("code.c"), metadata(corpus))
+                graph.installCandidate(attempt, mapOf("code.c" to "pass1".toByteArray()))
+                val state = graph.snapshot
+                val proof = RepairValidationProof(
+                    repairCandidateSourceSha256(graph.candidateSources(attempt)), state.profileSha256,
+                    state.indexSha256, corpus.sha256, sha256("reference".toByteArray()),
+                    sha256("pass1".toByteArray()), sha256("fixture-runtime".toByteArray()),
+                    sha256("fixture-evidence".toByteArray()), true, RepairValidationAssurance.TEST_ONLY_HOST_PROCESS,
+                )
+                provisionalId = graph.recordProvisional(attempt, RepairEvidence("behavior", "partial"), proof).id
+                if (!interrupted) graph.finishRun(RepairRunStatus.ITERATION_EXHAUSTED, RepairEvidence("exhausted", "fixture"))
+            }
+            var pendingId: String? = null
+            ModuleRevisionGraph.open(fixture.root, profile).use { graph ->
+                assertTrue(graph.snapshot.runs.single().terminal)
+                val publishedHead = graph.snapshot.headId
+                val attempt = graph.beginAttempt(listOf("code.c"))
+                val rejection = graph.reject(attempt, RepairEvidence("rejected", "no candidate installed"))
+                assertEquals(provisionalId, rejection.parentId)
+                assertEquals(publishedHead, rejection.rollbackRecord?.targetRevisionId)
+                assertEquals(RepairRollbackState.NOT_REQUIRED_VERIFIED, rejection.rollbackRecord?.state)
+                assertEquals("broken", fixture.root.resolve("code.c").readText())
+
+                val candidate = graph.beginAttempt(listOf("code.c"))
+                pendingId = candidate.id
+                graph.installCandidate(candidate, mapOf("code.c" to "pass2".toByteArray()))
+                assertEquals("pass2", graph.candidateSources(candidate).getValue("code.c").toString(Charsets.UTF_8))
+                assertEquals("broken", fixture.root.resolve("code.c").readText())
+                assertEquals(publishedHead, graph.snapshot.headId)
+                assertEquals(provisionalId, graph.snapshot.provisionalHeadId)
+            }
+            ModuleRevisionGraph.open(fixture.root, profile).use { graph ->
+                val recovered = graph.snapshot.nodes.last()
+                assertEquals(pendingId, recovered.id)
+                assertEquals(provisionalId, recovered.parentId)
+                assertTrue(recovered.recoveredAfterCrash)
+                assertEquals(RepairRollbackState.NOT_REQUIRED_VERIFIED, recovered.rollbackRecord?.state)
+                assertEquals(false, recovered.rollbackRecord?.legacyPendingStateUnknown)
+                assertEquals(provisionalId, graph.snapshot.provisionalHeadId)
+                assertNull(graph.snapshot.fullyAcceptedHeadId)
+                assertEquals("broken", fixture.root.resolve("code.c").readText())
+            }
+        }
+    }
+
+    @Test
     fun `detached staged candidate has verified no rollback only before source promotion`() {
         val fixture = fixture("broken")
         ModuleRevisionGraph.open(fixture.root, profile).use { graph ->

@@ -2253,6 +2253,7 @@ class ModuleRevisionGraphTest {
                 }
             },
         )
+        graph.enableRunContract()
         val attempt = graph.beginAttempt(listOf("src/modules/alpha.c", "src/modules/beta.c"))
         graph.installCandidate(
             attempt,
@@ -2371,6 +2372,91 @@ class ModuleRevisionGraphTest {
             legacyGraph,
             graphPath.parent.resolve("legacy-graph-${sha256(legacyGraph)}.json").readBytes(),
         )
+    }
+
+    @Test
+    fun `saturated legacy pending graphs retain bounded recovery headroom across marker crash and failure`() {
+        for (schema in 1..3) {
+            val project = generatedProject()
+            val target = project.resolve("src/modules/alpha.c")
+            val original = target.readBytes()
+            val candidate = original + "\n/* saturated legacy recovery */\n".toByteArray()
+            val budget = RepairResourceBudget(maximumGraphBytes = 16 * 1024)
+            val graphPath = project.resolve("reports/repair-revisions/graph.json")
+            val bindingPath = graphPath.parent.resolve("recovery-binding.json")
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { graph ->
+                if (schema == 3) {
+                    graph.enableRunContract()
+                    graph.beginRun(2, 60_000)
+                }
+                val corpus = graph.retainedRegressionCorpus()
+                val metadata = RevisionRepairMetadata(1, "compile", "short", "LEGACY_PADDING", emptyList(),
+                    null, corpus.sha256, publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE)
+                val attempt = graph.beginAttempt(listOf("src/modules/alpha.c"), metadata)
+                graph.installCandidate(attempt, mapOf("src/modules/alpha.c" to candidate))
+            }
+            var legacy = graphPath.readText()
+            if (schema == 1) legacy = legacy.replaceFirst("\"schemaVersion\": 2", "\"schemaVersion\": 1")
+                .replace(",\"agentInvocation\":null,\"publicationMode\":\"test_only_non_release\"", "")
+            if (schema == 3) legacy = legacy.replaceFirst("\"schemaVersion\": 4", "\"schemaVersion\": 3")
+                .replace("      \"rollbackRecord\": null,\n", "")
+                .replace(",\"legacyRecoveryRequired\":false,\"rollbackRecord\":null", "")
+            val fill = (budget.maximumGraphBytes - legacy.toByteArray().size).toInt()
+            assertTrue(fill > 0)
+            legacy = legacy.replace("LEGACY_PADDING", "x".repeat("LEGACY_PADDING".length + fill))
+            graphPath.writeText(legacy)
+            assertEquals(budget.maximumGraphBytes, graphPath.readBytes().size.toLong())
+            val binding = bindingPath.readBytes()
+            val installedBefore = target.readBytes()
+            graphPath.writeText(legacy.replace("\"summary\":\"", "\"summary\":\"z"))
+            assertFailsWith<RepairBudgetExceededException> {
+                ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget)
+            }
+            assertContentEquals(installedBefore, target.readBytes())
+            graphPath.writeText(legacy)
+
+            assertFailsWith<SimulatedRepairCrash> {
+                ModuleRevisionGraph.openForTesting(project, GeneratedCRepairIndexProfile, budget,
+                    ModuleRevisionFaultInjector { point ->
+                        if (point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
+                            point.scope == "revision-state" && point.name == "graph.json") throw SimulatedRepairCrash()
+                    }).close()
+            }
+            val marker = graphPath.readBytes()
+            assertTrue(marker.size.toLong() > budget.maximumGraphBytes)
+            assertContentEquals(installedBefore, target.readBytes())
+            assertContentEquals(binding, bindingPath.readBytes())
+            requireRepairGraphByteBudget(marker, budget)
+            val compactMarker = Json.parseToJsonElement(marker.toString(Charsets.UTF_8)).toString().toByteArray()
+            assertTrue(compactMarker.size.toLong() > budget.maximumGraphBytes)
+            assertFailsWith<IllegalArgumentException> { requireRepairGraphByteBudget(compactMarker, budget) }
+
+            // The read envelope is not admission: ordinary metadata cannot spend the reserved
+            // migration bytes, and rejection still precedes any source exchange.
+            graphPath.writeText(marker.toString(Charsets.UTF_8).replace("\"summary\":\"", "\"summary\":\"" + "y".repeat(2048)))
+            assertFailsWith<RepairBudgetExceededException> {
+                ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget)
+            }
+            assertContentEquals(installedBefore, target.readBytes())
+            graphPath.writeBytes(marker)
+            target.writeText("unrecognized concurrent replacement")
+            assertFailsWith<IllegalStateException> {
+                ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget)
+            }
+            assertTrue(graphPath.readText().contains("restore_failed_unresolved"))
+            target.writeBytes(installedBefore)
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).use { recovered ->
+                assertContentEquals(original, target.readBytes())
+                val rollback = requireNotNull(recovered.snapshot.nodes.last().rollbackRecord)
+                assertEquals(RepairRollbackState.RESTORED_AFTER_FAILURE, rollback.state)
+                assertTrue(rollback.legacyPendingStateUnknown)
+                assertEquals(null, rollback.candidateSourceInstallStarted)
+                assertEquals(RepairRollbackFailureCode.UNRECOGNIZED_SOURCE_STATE, rollback.failureCode)
+            }
+            assertContentEquals(binding, bindingPath.readBytes())
+            requireRepairGraphByteBudget(graphPath.readBytes(), budget)
+            ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile, budget).close()
+        }
     }
 
     @Test
@@ -3169,6 +3255,51 @@ class ModuleRevisionGraphTest {
             ArchivalBundleVerifier.extractAndVerify(tampered, extracted, profile = profile)
         }
         assertTrue(archiveFailure.message.orEmpty().contains("retained repair atomic temporary"))
+        assertFalse(extracted.exists())
+    }
+
+    @Test
+    fun `archive extraction rejects a root rollback claim with valid payload hashes`() {
+        val fixture = releaseRepairFixture()
+        val valid = ArchivalPackager.create(fixture.project, fixture.project.parent.resolve("root-rollback-valid.zip"))
+        val verified = fixture.project.parent.resolve("root-rollback-valid-extracted")
+        ArchivalBundleVerifier.extractAndVerify(valid.archivePath, verified)
+        assertContentEquals(fixture.after, verified.resolve(fixture.relativePath).readBytes())
+
+        val tampered = fixture.project.parent.resolve("root-rollback-tampered.zip")
+        rewriteArchive(valid.archivePath, tampered) { entries ->
+            val graphPath = "reports/repair-revisions/graph.json"
+            val graph = Json.parseToJsonElement(requireNotNull(entries[graphPath]).toString(Charsets.UTF_8)).jsonObject
+            assertEquals(JsonPrimitive(4), graph.getValue("schemaVersion"))
+            val nodes = graph.getValue("nodes").jsonArray
+            val root = nodes.first().jsonObject
+            val accepted = nodes.last().jsonObject
+            assertEquals(JsonNull, root.getValue("rollbackRecord"))
+            val rollback = JsonObject(mapOf(
+                "schemaVersion" to JsonPrimitive(1),
+                "attemptId" to accepted.getValue("id"),
+                "runId" to accepted.getValue("repairMetadata").jsonObject.getValue("runId"),
+                "targetRevisionId" to root.getValue("id"),
+                "expectedSourceRevisionSha256" to root.getValue("sourceRevisionSha256"),
+                "state" to JsonPrimitive("restored_verified"),
+                "failureStage" to JsonNull,
+                "failureCode" to JsonNull,
+                "observedSourceRevisionSha256" to root.getValue("sourceRevisionSha256"),
+                "legacyPendingStateUnknown" to JsonPrimitive(false),
+                "candidateSourceInstallStarted" to JsonPrimitive(true),
+            ))
+            // Keep the source revisions, runs, receipts, and recovery binding intact. The archive
+            // helper recomputes every payload hash, so rejection must come from root semantics.
+            val changedRoot = JsonObject(root + ("rollbackRecord" to rollback))
+            entries[graphPath] = JsonObject(graph + ("nodes" to JsonArray(listOf(changedRoot) + nodes.drop(1))))
+                .toString().toByteArray(Charsets.UTF_8)
+        }
+
+        val extracted = fixture.project.parent.resolve("root-rollback-rejected")
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ArchivalBundleVerifier.extractAndVerify(tampered, extracted)
+        }
+        assertTrue(failure.message.orEmpty().contains("repair release graph root is invalid"), failure.message)
         assertFalse(extracted.exists())
     }
 
