@@ -25,8 +25,11 @@ request. It uses a clean locked npm install, strict type checking, lint, compone
 and state tests, the versioned web schema's positive/negative fixtures, a production
 bundle with size/dependency checks, and the manifest completeness/digest tests.
 It also rejects changes to checked frontend or contract inputs produced by those
-commands. No generated bundle, `node_modules`, or frontend dependency cache is
-restored; Gradle packaging in the other jobs builds its own current bundle.
+commands. CI restores npm's package-download cache keyed to the lockfile, while
+each job still installs clean `node_modules` and builds the current bundle. No
+generated bundle or `node_modules` tree is restored.
+Gradle jobs restore the shared master dependency cache on pull requests; only
+master writes new Gradle cache entries, avoiding one large cache per pull request.
 
 Run the frontend checks locally with the pinned tools:
 

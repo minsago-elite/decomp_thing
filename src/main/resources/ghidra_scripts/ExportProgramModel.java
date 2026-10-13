@@ -28,6 +28,7 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.UUID;
 import ghidra.app.decompiler.DecompInterface;
+import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.address.Address;
@@ -412,8 +413,10 @@ final class ExporterSemanticFingerprintV1 {
 // SEMANTIC_FINGERPRINT_TEST_END
 
 public class ExportProgramModel extends GhidraScript {
-    private static final int EXPORTER_VERSION = 10;
+    private static final int EXPORTER_VERSION = 12;
     private static final int DECOMPILE_TIMEOUT_SECONDS = 60;
+    private static final int DECOMPILE_RETRY_TIMEOUT_SECONDS = 180;
+    private static final int MAXIMUM_DECOMPILE_INSTRUCTIONS = 500_000;
     private static final long MAXIMUM_FULL_FUNCTION_RECORD_BYTES = 64L * 1024 * 1024;
     private static final int PLANNING_BATCH_FUNCTIONS = 512;
     private static final long MAXIMUM_PLANNING_BATCH_FRAGMENT_BYTES = 64L * 1024 * 1024;
@@ -853,7 +856,8 @@ public class ExportProgramModel extends GhidraScript {
         int length = Math.max(type.getLength(), 1);
         String cName = type.getName().replaceAll("[^A-Za-z0-9_]", "_");
         if (cName.isEmpty() || Character.isDigit(cName.charAt(0))) cName = "recovered_" + id;
-        String prefix = "/* Ghidra type " + key.replace("*/", "* /") + " */ ";
+        // Retain the exact path used for the identity without allowing a comment terminator.
+        String prefix = "/* Ghidra type " + json(key).replace("/", "\\/") + " */ ";
         String declaration;
         if (type instanceof Composite) {
             declaration = prefix + "typedef struct " + cName + " { unsigned char _data[" + length + "]; } " + cName + ";";
@@ -887,7 +891,8 @@ public class ExportProgramModel extends GhidraScript {
         Path globalsDirectory,
         Path typesDirectory,
         PlanningBatchEvidence planningEvidence,
-        boolean includeDecompiledC
+        boolean includeDecompiledC,
+        int decompileTimeoutSeconds
     ) throws Exception {
         Set<String> callIds = new TreeSet<>();
         Set<String> referencedGlobals = new TreeSet<>();
@@ -952,7 +957,7 @@ public class ExportProgramModel extends GhidraScript {
         String source = null;
         if (includeDecompiledC) {
             try {
-                DecompileResults result = decompiler.decompileFunction(function, DECOMPILE_TIMEOUT_SECONDS, monitor);
+                DecompileResults result = decompiler.decompileFunction(function, decompileTimeoutSeconds, monitor);
                 if (result.decompileCompleted() && result.getDecompiledFunction() != null) {
                     source = result.getDecompiledFunction().getC();
                 } else {
@@ -1006,7 +1011,7 @@ public class ExportProgramModel extends GhidraScript {
                 // production-sized batch mirrors exact first-owner behavior: a type record's
                 // sourceAddress may legitimately differ at later references to its stable identity.
                 Function function = functions.get(index);
-                FunctionExport exported = exportFunction(function, null, null, null, evidence, false);
+                FunctionExport exported = exportFunction(function, null, null, null, evidence, false, DECOMPILE_TIMEOUT_SECONDS);
                 String id = functionId(function);
                 fingerprint.beginFunction(id, exported.record);
                 functionFragmentBytes = appendBoundedPlanningRecord(
@@ -1806,6 +1811,12 @@ public class ExportProgramModel extends GhidraScript {
         }
     }
 
+    private static boolean isRetryableDecompileTimeout(FunctionExport exported) {
+        return exported.status.equals("failed") && exported.failure != null &&
+            exported.failure.contains("decompilation failed or timed out:") &&
+            exported.failure.contains("process: timeout");
+    }
+
     @Override
     protected void run() throws Exception {
         String[] arguments = getScriptArgs();
@@ -1950,6 +1961,9 @@ public class ExportProgramModel extends GhidraScript {
             writeProgress(progressPath, "decompiling", completed, total, recovered, partial, failed, reused, null);
 
             DecompInterface decompiler = new DecompInterface();
+            DecompileOptions decompileOptions = new DecompileOptions();
+            decompileOptions.setMaxInstructions(MAXIMUM_DECOMPILE_INSTRUCTIONS);
+            decompiler.setOptions(decompileOptions);
             if (!decompiler.openProgram(currentProgram)) {
                 decompiler.dispose();
                 throw new IllegalStateException("Ghidra decompiler could not open the current program");
@@ -1968,8 +1982,23 @@ public class ExportProgramModel extends GhidraScript {
                         globalsDirectory,
                         typesDirectory,
                         null,
-                        true
+                        true,
+                        DECOMPILE_TIMEOUT_SECONDS
                     );
+                    if (isRetryableDecompileTimeout(exported)) {
+                        if (monitor.isCancelled()) throw new InterruptedException("program-model export was cancelled");
+                        println("program-model retrying timed-out function " + id + " with " + DECOMPILE_RETRY_TIMEOUT_SECONDS + " seconds");
+                        FunctionExport retry = exportFunction(
+                            function,
+                            decompiler,
+                            globalsDirectory,
+                            typesDirectory,
+                            null,
+                            true,
+                            DECOMPILE_RETRY_TIMEOUT_SECONDS
+                        );
+                        if (!retry.status.equals("failed")) exported = retry;
+                    }
                     writeFunctionFailure(failuresDirectory, id, exported);
                     if (exported.record.getBytes(StandardCharsets.UTF_8).length > MAXIMUM_FULL_FUNCTION_RECORD_BYTES) {
                         throw new IllegalStateException("full function record exceeds its byte bound: " + id);
@@ -2123,7 +2152,8 @@ public class ExportProgramModel extends GhidraScript {
                         globalsDirectory,
                         typesDirectory,
                         planningEvidence,
-                        false
+                        false,
+                        DECOMPILE_TIMEOUT_SECONDS
                     );
                     if (exported.failure != null) {
                         planningEvidence.retainFailure(id, renderFunctionFailure(id, exported));

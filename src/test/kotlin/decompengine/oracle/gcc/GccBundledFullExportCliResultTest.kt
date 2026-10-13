@@ -6,6 +6,7 @@ import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFails
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -29,7 +30,7 @@ class GccBundledFullExportCliResultTest {
     }
 
     @Test
-    fun `full export CLI result binds retained tree manifest and remains unscored`() {
+    fun `full export CLI result binds either selected target and remains unscored`() {
         val tree = JsonObject(mapOf(
             "kind" to JsonPrimitive("gcc-bundled-full-export-output-tree-v2"),
             "stateSha256" to JsonPrimitive("1".repeat(64)),
@@ -47,7 +48,7 @@ class GccBundledFullExportCliResultTest {
             "tree" to tree,
         )))
         val bindingBytes = fullBindingBytes(treeSha)
-        val root = Path.of("/tmp/structural-result-fixture")
+        val root = Path.of("build/test-tmp/structural-result-fixture").toAbsolutePath().normalize()
         val manifestPath = root.resolve(GccBundledFullExportCliResultV2.TREE_MANIFEST_NAME)
         fun createResult(
             binding: ByteArray = bindingBytes,
@@ -80,6 +81,40 @@ class GccBundledFullExportCliResultTest {
         assertEquals(manifestPath.toString(), result.getValue("outputTreeManifest").jsonPrimitive.content)
         assertEquals(OracleArtifacts.sha256(manifestBytes), result.getValue("outputTreeManifestSha256").jsonPrimitive.content)
         assertEquals(treeSha, result.getValue("outputTreeSha256").jsonPrimitive.content)
+
+        val driverBinding = fullBindingBytes(treeSha, profileId = "gcc-driver-16.2.0", engineId = "driver")
+        val driverResult = OracleJson.parseCanonical(createResult(binding = driverBinding)).jsonObject
+        // Selection stays in the bound provenance: the result retains its closed v2 pointer schema
+        // and all three negative-authority fields for either selected target.
+        assertEquals(result.keys, driverResult.keys)
+        assertEquals(result - "structuralBindingSha256", driverResult - "structuralBindingSha256")
+        assertEquals(OracleArtifacts.sha256(driverBinding), driverResult.getValue("structuralBindingSha256").jsonPrimitive.content)
+
+        for ((profile, engine) in listOf(
+            "gcc-cc1-16.2.0" to "driver",
+            "gcc-driver-16.2.0" to "cc1",
+            "gcc-cc1-16.2.0" to "lto1",
+            "gcc-driver-16.2.0" to "lto1",
+            "gcc-lto1-16.2.0" to "lto1",
+            "gcc-unreviewed-16.2.0" to "cc1",
+        )) {
+            // The fixture recomputes the lineage digest, so rejection must check the selected pair.
+            val failure = assertFailsWith<IllegalArgumentException>("$profile/$engine") {
+                createResult(binding = fullBindingBytes(treeSha, profileId = profile, engineId = engine))
+            }
+            val expected = if (profile in setOf("gcc-cc1-16.2.0", "gcc-driver-16.2.0")) {
+                "receipt lineage"
+            } else "profile does not support"
+            assertTrue(failure.message.orEmpty().contains(expected), "$profile/$engine: ${failure.message}")
+        }
+        for ((profile, engine) in listOf("gcc-cc1-16.2.0" to "cc1", "gcc-driver-16.2.0" to "driver")) {
+            val failure = assertFailsWith<IllegalArgumentException>(profile) {
+                createResult(binding = fullBindingBytes(
+                    treeSha, profileId = profile, engineId = engine, profileVersion = "16.3.0",
+                ))
+            }
+            assertTrue(failure.message.orEmpty().contains("profile version differs"), failure.message)
+        }
 
         val mismatchedBinding = OracleJson.canonicalBytes(JsonObject(
             (OracleJson.parseCanonical(bindingBytes).jsonObject - "outputTreeSha256") +
@@ -160,7 +195,12 @@ class GccBundledFullExportCliResultTest {
         assertFails { createResult(manifest = manifestBytes + byteArrayOf('\n'.code.toByte())) }
     }
 
-    private fun fullBindingBytes(outputTreeSha256: String): ByteArray {
+    private fun fullBindingBytes(
+        outputTreeSha256: String,
+        profileId: String = "gcc-cc1-16.2.0",
+        engineId: String = "cc1",
+        profileVersion: String = "16.2.0",
+    ): ByteArray {
         val target = JsonObject(mapOf(
             "id" to JsonPrimitive("sysv-amd64-elf-v1"),
             "checkedTargetAbiSha256" to JsonPrimitive("a".repeat(64)),
@@ -182,7 +222,7 @@ class GccBundledFullExportCliResultTest {
             "schemaVersion" to JsonPrimitive(1),
             "operationId" to JsonPrimitive("a".repeat(64)),
             "intentSha256" to JsonPrimitive("b".repeat(64)),
-            "engineId" to JsonPrimitive("cc1"),
+            "engineId" to JsonPrimitive(engineId),
             "compilerEngineProfileSha256" to JsonPrimitive("4".repeat(64)),
             "executionReceiptSha256" to JsonPrimitive("e".repeat(64)),
             "executionPayloadSha256" to JsonPrimitive("5".repeat(64)),
@@ -192,8 +232,8 @@ class GccBundledFullExportCliResultTest {
         return OracleJson.canonicalBytes(JsonObject(mapOf(
             "provider" to JsonPrimitive("gcc-compiler-engine-structural-full-export-binding-v2"),
             "schemaVersion" to JsonPrimitive(2),
-            "profileId" to JsonPrimitive("gcc-cc1-16.2.0"),
-            "profileVersion" to JsonPrimitive("16.2.0"),
+            "profileId" to JsonPrimitive(profileId),
+            "profileVersion" to JsonPrimitive(profileVersion),
             "sourceRevision" to JsonPrimitive("7".repeat(40)),
             "compilerEngineProfileSha256" to JsonPrimitive("4".repeat(64)),
             "fullExportProfileSha256" to JsonPrimitive("3".repeat(64)),

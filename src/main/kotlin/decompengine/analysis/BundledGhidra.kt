@@ -32,7 +32,8 @@ class BundledGhidra private constructor(val root: Path) {
     fun probeCommand(): List<String> = probeCommand {}
 
     internal fun probeCommand(checkpoint: (String) -> Unit): List<String> {
-        val command = workerCommand(checkpoint) + "probe"
+        val libraries = BundledGhidraVerificationProcess().verifyAndGetLibraries(root, checkpoint)
+        val command = workerCommand(checkpoint, libraries) + "probe"
         checkpoint("before returning bundled Ghidra probe command")
         return command
     }
@@ -41,29 +42,22 @@ class BundledGhidra private constructor(val root: Path) {
 
     /** The internal callback may abort preparation; it cannot supply verification results. */
     internal fun analysisCommand(invocation: GhidraInvocation, checkpoint: (String) -> Unit): List<String> {
-        val command = workerCommand(checkpoint) + invocation.arguments()
+        val libraries = BundledGhidraVerificationProcess().verifyAndGetLibraries(root, checkpoint)
+        val command = workerCommand(checkpoint, libraries) + invocation.arguments()
         checkpoint("before returning bundled Ghidra analysis command")
         return command
     }
 
-    private fun workerCommand(checkpoint: (String) -> Unit): List<String> {
-        verify(checkpoint)
+    private fun workerCommand(checkpoint: (String) -> Unit, libraries: List<Path>): List<String> {
         val bridge = root.resolve("decomp-ghidra-bridge.jar")
-        val jars = mutableListOf<Path>()
-        visitPaths(release.resolve("Ghidra"), "library inventory", checkpoint) { path ->
-            if (path.parent.fileName.toString() == "lib" && path.fileName.toString().endsWith(".jar")) {
-                jars.add(path)
-            }
-        }
-        checkpoint("before sorting bundled Ghidra libraries")
-        jars.sort()
-        checkpoint("after sorting bundled Ghidra libraries")
-        require(jars.isNotEmpty()) { "Bundled Ghidra libraries are missing; rebuild installDist" }
+        require(libraries.isNotEmpty()) { "Bundled Ghidra libraries are missing; rebuild installDist" }
+        val classPath = listOf(bridge) + libraries
+        classPath.forEach { checkpoint("after visiting bundled Ghidra library inventory path") }
         checkpoint("before checking bundled Ghidra Java worker")
         val java = Path.of(System.getProperty("java.home"), "bin", if (File.separatorChar == '\\') "java.exe" else "java")
         require(Files.isExecutable(java)) { "The application JDK has no executable Java worker: $java" }
         checkpoint("after checking bundled Ghidra Java worker")
-        val command = GhidraWorkerCommand.prefix(java, release, listOf(bridge) + jars)
+        val command = GhidraWorkerCommand.prefix(java, release, classPath)
         checkpoint("after preparing bundled Ghidra worker command")
         return command
     }
@@ -72,6 +66,11 @@ class BundledGhidra private constructor(val root: Path) {
 
     /** Cooperative cancellation only; all bundle validation remains local to this method. */
     internal fun verify(checkpoint: (String) -> Unit) {
+        verifiedLibraryPaths(checkpoint)
+    }
+
+    /** Called only by the short-lived verifier worker; the parent enforces the in-flight deadline. */
+    internal fun verifiedLibraryPaths(checkpoint: (String) -> Unit): List<Path> {
         checkpoint("before bundled Ghidra verification")
         val manifest = root.resolve("bundle.sha256")
         require(Files.isRegularFile(manifest, LinkOption.NOFOLLOW_LINKS) && Files.size(manifest) <= 4L * 1024 * 1024) {
@@ -140,6 +139,16 @@ class BundledGhidra private constructor(val root: Path) {
             "Bundled Ghidra version does not match the application"
         }
         checkpoint("after bundled Ghidra verification")
+        val ghidraTree = Path.of("ghidra_${VERSION}_PUBLIC", "Ghidra")
+        return expectedPaths.asSequence()
+            .map(Path::of)
+            .filter { path ->
+                path.startsWith(ghidraTree) && path.parent?.fileName?.toString() == "lib" &&
+                    path.fileName.toString().endsWith(".jar")
+            }
+            .sortedBy { it.joinToString("/") }
+            .map(root::resolve)
+            .toList()
     }
 
     private fun visitPaths(path: Path, label: String, checkpoint: (String) -> Unit, visit: (Path) -> Unit) {

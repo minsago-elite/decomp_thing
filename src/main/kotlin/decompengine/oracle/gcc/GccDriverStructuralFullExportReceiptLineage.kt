@@ -21,7 +21,11 @@ internal class GccDriverStructuralFullExportReceiptLineageV1 private constructor
         fun validate(
             operation: GccBundledFullExportOperation,
             expectedCompilerEngineProfileSha256: String,
+            expectedEngineId: String = "cc1",
         ): GccDriverStructuralFullExportReceiptLineageV1 {
+            require(expectedEngineId in setOf("cc1", "driver")) {
+                "GCC full-export receipt target must be cc1 or driver"
+            }
             require(!operation.complete && !operation.releaseEligible) {
                 "GCC full-export operation unexpectedly grants completion or release eligibility"
             }
@@ -34,8 +38,8 @@ internal class GccDriverStructuralFullExportReceiptLineageV1 private constructor
             val schemaVersion = intent.long("schemaVersion")
             val provider = intent.string("provider")
             require(schemaVersion == 2L && provider == "gcc-bundled-operation-intent-v2" &&
-                intent.string("engineId") == "cc1"
-            ) { "GCC full-export intent is not the pinned cc1 compiler-engine operation" }
+                intent.string("engineId") == expectedEngineId
+            ) { "GCC full-export intent differs from the authenticated $expectedEngineId operation" }
             val plannerProfile = intent.getValue("plannerProfile").jsonObject
             require(plannerProfile.string("profileSha256") == expectedCompilerEngineProfileSha256) {
                 "GCC full-export intent does not bind the authenticated compiler-engine profile"
@@ -112,7 +116,7 @@ internal class GccDriverStructuralFullExportReceiptLineageV1 private constructor
                 "schemaVersion" to JsonPrimitive(1),
                 "operationId" to JsonPrimitive(operationId),
                 "intentSha256" to JsonPrimitive(intentSha256),
-                "engineId" to JsonPrimitive("cc1"),
+                "engineId" to JsonPrimitive(expectedEngineId),
                 "compilerEngineProfileSha256" to JsonPrimitive(expectedCompilerEngineProfileSha256),
                 "executionReceiptSha256" to JsonPrimitive(OracleArtifacts.sha256(executionBytes)),
                 "executionPayloadSha256" to JsonPrimitive(executionRecord.payloadSha256),

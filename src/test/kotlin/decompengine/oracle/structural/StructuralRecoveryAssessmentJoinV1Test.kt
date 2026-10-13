@@ -32,6 +32,7 @@ class StructuralRecoveryAssessmentJoinV1Test {
             val binding = FixtureStructuralFindingJoinBindingV1.capture(bytes, score, inputs.target)
 
             val joined = StructuralRecoveryAssessmentJoinV1.joinFixture(bytes, score, inputs.target, binding)
+            val population = StructuralRecoveryAssessmentJoinV1.summarizeFixture(joined)
 
             assertEquals("fixture-only", joined.authority)
             assertEquals("unassessed", joined.recoveryAssessmentState)
@@ -46,6 +47,20 @@ class StructuralRecoveryAssessmentJoinV1Test {
             assertTrue(joined.entities.any { it.outcomes.contains("abi-equivalent") })
             assertTrue(joined.oracleOnlyEntities.isNotEmpty())
             assertTrue(joined.oracleOnlyEntities.any { row -> row.facts.any { it.getValue("outcome").jsonPrimitive.content == "recovered-unknown" } })
+            assertEquals("fixture-only", population.authority)
+            assertEquals("unassessed", population.recoveryAssessmentState)
+            assertEquals(joined.entities.size, population.modelEntityCount)
+            assertEquals(joined.entities.count { it.facts.isNotEmpty() }, population.entitiesWithFindings)
+            assertEquals(joined.oracleOnlyEntities.size, population.oracleOnlyEntityCount)
+            val expectedOutcomes = score.getValue("aggregate").jsonObject.getValue("outcomes").jsonObject
+            expectedOutcomes.forEach { (outcome, total) ->
+                assertEquals(total.jsonPrimitive.content.toInt(),
+                    population.recoveredOutcomeCounts.getValue(outcome) +
+                        population.oracleOnlyOutcomeCounts.getValue(outcome), outcome)
+            }
+            assertEquals(3, population.recoveredOutcomeCounts.getValue("fabricated"))
+            assertEquals(2, population.recoveredOutcomeCounts.getValue("contradicted"))
+            assertEquals("unassessed", population.toJson().getValue("recoveryAssessmentState").jsonPrimitive.content)
 
             val observedGlobal = joined.entities.single { it.kind == "global" && it.entityId == "recovered.global.900" }
             assertTrue(observedGlobal.facts.any {
@@ -125,6 +140,10 @@ class StructuralRecoveryAssessmentJoinV1Test {
             val missing = joined.entities.single { it.entityId == "fn_without_finding" }
             assertEquals("unassessed", missing.recoveryAssessment)
             assertTrue(missing.outcomes.isEmpty())
+            val population = StructuralRecoveryAssessmentJoinV1.summarizeFixture(joined)
+            assertTrue("function" to "fn_without_finding" in population.missingFindingEntities)
+            assertEquals(joined.entities.size,
+                population.entitiesWithFindings + population.missingFindingEntities.size)
 
             val entity = score.getValue("entities").jsonArray.first { it.jsonObject["recoveredId"] != null }
             val badEntities = JsonArray(score.getValue("entities").jsonArray.map { row ->

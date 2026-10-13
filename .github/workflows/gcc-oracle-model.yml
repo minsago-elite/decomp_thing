@@ -7,7 +7,7 @@ on:
   pull_request:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event.pull_request.number || github.sha }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && 'pull-request' || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -72,6 +72,8 @@ jobs:
         run: |
           install -d "$RUNNER_TEMP/docker-client"
           curl --fail --silent --show-error --location \
+            --retry 3 --retry-all-errors --retry-max-time 300 \
+            --connect-timeout 15 --max-time 180 \
             https://download.docker.com/linux/static/stable/x86_64/docker-29.7.2.tgz \
             --output "$RUNNER_TEMP/docker-client/docker-29.7.2.tgz"
           echo "803d433f226db4776e1768fd319fc6c6e4935a456acf84fcc0080818b854bc8f  $RUNNER_TEMP/docker-client/docker-29.7.2.tgz" \
@@ -87,6 +89,8 @@ jobs:
           test "$("$RUNNER_TEMP/docker-client/docker/dockerd" --version)" = \
             'Docker version 29.7.2, build 6a43e3d'
           curl --fail --silent --show-error --location \
+            --retry 3 --retry-all-errors --retry-max-time 300 \
+            --connect-timeout 15 --max-time 180 \
             https://download.docker.com/linux/static/stable/x86_64/docker-rootless-extras-29.7.2.tgz \
             --output "$RUNNER_TEMP/docker-client/docker-rootless-extras-29.7.2.tgz"
           echo "15a5cb81f2c5cf15ea21427f2e8241eac0deb2221175f993b5e76926e705ec6a  $RUNNER_TEMP/docker-client/docker-rootless-extras-29.7.2.tgz" \

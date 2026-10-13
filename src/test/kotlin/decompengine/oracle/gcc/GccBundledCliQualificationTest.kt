@@ -26,6 +26,9 @@ class GccBundledCliQualificationTest {
 
     private fun qualify(engine: String) {
         assumeTrue(System.getenv("DECOMP_REQUIRE_GCC_ENGINE_CLI") == "true", "real-engine CLI qualification is opt-in")
+        val selectedEngine = System.getenv("DECOMP_GCC_CLI_ENGINE") ?: "all"
+        require(selectedEngine in setOf("all", "cc1", "lto1")) { "invalid real-engine CLI qualification engine: $selectedEngine" }
+        assumeTrue(selectedEngine == "all" || selectedEngine == engine, "$engine is not selected for this qualification run")
         fun configured(name: String): Path {
             val path = Path.of(requireNotNull(System.getenv(name)) { "required qualification input is missing: $name" })
             require(path.isAbsolute && path.normalize() == path && path.toRealPath() == path) { "$name must be canonical" }
@@ -35,19 +38,20 @@ class GccBundledCliQualificationTest {
         val profile = configured("DECOMP_GCC_CLI_PROFILE")
         val archive = configured("DECOMP_GCC_CLI_ARCHIVE")
         val binary = configured("DECOMP_GCC_CLI_${engine.uppercase()}_BINARY")
-        val allMounts = listOf("CC1", "LTO1").flatMap { name ->
+        val selectedEngines = if (selectedEngine == "all") listOf("CC1", "LTO1") else listOf(engine.uppercase())
+        val selectedMounts = selectedEngines.flatMap { name ->
             listOf("FRESH", "RESUME").map { mode -> configured("DECOMP_GCC_CLI_${name}_${mode}_SCRATCH") }
         }
-        require(allMounts.toSet().size == 4 && allMounts.indices.all { i -> allMounts.indices.all { j ->
-            i == j || !allMounts[i].startsWith(allMounts[j])
-        } }) { "qualification requires four disjoint scratch mounts" }
+        require(selectedMounts.toSet().size == selectedMounts.size && selectedMounts.indices.all { i -> selectedMounts.indices.all { j ->
+            i == j || !selectedMounts[i].startsWith(selectedMounts[j])
+        } }) { "qualification requires disjoint scratch mounts" }
         val freshScratch = configured("DECOMP_GCC_CLI_${engine.uppercase()}_FRESH_SCRATCH")
         val resumedScratch = configured("DECOMP_GCC_CLI_${engine.uppercase()}_RESUME_SCRATCH")
         require(freshScratch != resumedScratch)
         listOf(freshScratch, resumedScratch).forEach { mount -> Files.list(mount).use { require(it.findAny().isEmpty) } }
         val evidenceRoot = configured("DECOMP_GCC_CLI_EVIDENCE_ROOT")
         require(Files.getPosixFilePermissions(evidenceRoot) == PosixFilePermissions.fromString("rwx------"))
-        require((allMounts + listOf(binary, profile, archive)).none { it.startsWith(evidenceRoot) || evidenceRoot.startsWith(it) })
+        require((selectedMounts + listOf(binary, profile, archive)).none { it.startsWith(evidenceRoot) || evidenceRoot.startsWith(it) })
         val destination = Files.createTempDirectory(evidenceRoot, "$engine-")
         println("Real-engine CLI qualification evidence retained at $destination")
         val launcherRecords = mutableListOf<Pair<Path, List<String>>>()
@@ -132,6 +136,28 @@ class GccBundledCliQualificationTest {
         assertEquals(JsonPrimitive(request.modelSha256), exported.getValue("programModelSha256"))
         assertEquals(JsonPrimitive(request.functionCount), exported.getValue("functionCount"))
         if (resumed) {
+            val authorization = OracleJson.parseCanonical(records.getValue("interrupt-authorized.json"))
+                .jsonObject.getValue("authorization").jsonObject
+            val stoppedExecution = OracleJson.parseCanonical(records.getValue("interrupted-execution.json"))
+                .jsonObject.getValue("execution").jsonObject
+            val stoppedOutcome = stoppedExecution.getValue("outcome").jsonObject
+            assertEquals(authorization, stoppedExecution.getValue("interruptionAuthorization"))
+            assertEquals(
+                JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(authorization))),
+                stoppedExecution.getValue("interruptionAuthorizationSha256"),
+            )
+            assertEquals(
+                JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(stoppedOutcome))),
+                stoppedExecution.getValue("outcomeSha256"),
+            )
+            assertEquals(JsonPrimitive("OUTCOME"), stoppedOutcome.getValue("event"))
+            assertEquals(JsonPrimitive("INTERRUPTED"), stoppedOutcome.getValue("status"))
+            assertEquals(authorization.getValue("keeperPid"), stoppedOutcome.getValue("keeperPid"))
+            assertEquals(authorization.getValue("requestSha256"), stoppedOutcome.getValue("requestSha256"))
+            assertEquals(authorization.getValue("requestSha256"), stoppedExecution.getValue("requestSha256"))
+            val keeperPid = stoppedOutcome.getValue("keeperPid").jsonPrimitive.content.toLong()
+            val childPid = stoppedOutcome.getValue("childPid").jsonPrimitive.content.toLong()
+            assertTrue(keeperPid > 0 && childPid > 0 && childPid != keeperPid)
             val prefix = OracleJson.parseCanonical(records.getValue("interrupted-prefix-assessment.json")).jsonObject.getValue("assessment").jsonObject
             assertTrue(prefix.getValue("completed").jsonPrimitive.content.toLong() >= 512)
             assertEquals(prefix.getValue("completed"), exported.getValue("reused"))

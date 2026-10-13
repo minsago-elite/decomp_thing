@@ -79,6 +79,41 @@ class CanonicalProgramModelStreamingTest {
     }
 
     @Test
+    fun `historical defaults remain fixed and explicit full export limits remain bounded`() {
+        val historical = CanonicalProgramModelStreamingLimits()
+        assertEquals(20_000, historical.maximumFunctions)
+        assertEquals(100_000, historical.maximumReferencesPerFunction)
+        assertEquals(4_096, historical.maximumIdentifierCodePoints)
+        assertEquals(1_048_576, historical.maximumPrototypeCodePoints)
+        assertEquals(16 * 1024 * 1024, historical.maximumTextCodePoints)
+        assertEquals(32_000_000L, historical.maximumNodes)
+        assertEquals(64_000_000L, historical.maximumTokens)
+
+        val explicit = historical.copy(
+            maximumFunctions = 131_072,
+            maximumReferencesPerFunction = 1_000_000,
+            maximumIdentifierCodePoints = 64 * 1024 * 1024,
+            maximumPrototypeCodePoints = 64 * 1024 * 1024,
+            maximumTextCodePoints = 64 * 1024 * 1024,
+            maximumNodes = 512L * 1024 * 1024,
+            maximumTokens = 512L * 1024 * 1024,
+        )
+        assertFailsWith<IllegalArgumentException> { explicit.copy(maximumFunctions = 131_073) }
+        assertFailsWith<IllegalArgumentException> { explicit.copy(maximumReferencesPerFunction = 1_000_001) }
+        assertFailsWith<IllegalArgumentException> {
+            explicit.copy(maximumIdentifierCodePoints = explicit.maximumIdentifierCodePoints + 1)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            explicit.copy(maximumPrototypeCodePoints = explicit.maximumPrototypeCodePoints + 1)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            explicit.copy(maximumTextCodePoints = explicit.maximumTextCodePoints + 1)
+        }
+        assertFailsWith<IllegalArgumentException> { explicit.copy(maximumNodes = explicit.maximumNodes + 1) }
+        assertFailsWith<IllegalArgumentException> { explicit.copy(maximumTokens = explicit.maximumTokens + 1) }
+    }
+
+    @Test
     fun `empty input and UTF-8 BOM reject before model parsing`() {
         assertFailsWith<StructuralRecoveryV1Exception> {
             CanonicalProgramModelStreaming.readCanonical(byteArrayOf())
