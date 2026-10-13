@@ -60,6 +60,11 @@ PAUSED_UPSTREAM_SIGNATURE_URL = (
 # Keep candidate acquisition disabled for this profile until the denied
 # upstream signature source is explicitly resolved and the pause is reviewed.
 UPSTREAM_SIGNATURE_ACCESS_ENABLED = False
+ACQUISITION_PAUSE_REASON = (
+    "Clang 18.1.3 candidate acquisition is paused pending explicit resolution of "
+    "the denied upstream signature source; no acquisition requests were made. "
+    f"Blocked target: {PAUSED_UPSTREAM_SIGNATURE_URL}"
+)
 MAX_SNAPSHOT_METADATA_BYTES = 512 * 1024 * 1024
 MAX_SNAPSHOT_INDEX_BYTES = 128 * 1024 * 1024
 ALLOWED_REDIRECT_HOSTS = {
@@ -826,13 +831,28 @@ def probe_snapshot_metadata(contract: dict, snapshot: str, output: Path, keyring
     return evidence
 
 
-def acquire_candidate(contract: dict, output: Path, keyring: Path) -> dict:
+def acquisition_status() -> dict:
+    """Read-only prerequisite state; acquisition permission is never qualification."""
+    return {
+        "schemaVersion": 1,
+        "scope": "acquisition-prerequisite-status-only",
+        "acquisitionEnabled": UPSTREAM_SIGNATURE_ACCESS_ENABLED,
+        "acquisitionStatus": "available" if UPSTREAM_SIGNATURE_ACCESS_ENABLED else "paused",
+        "nativeQualification": "not-run" if UPSTREAM_SIGNATURE_ACCESS_ENABLED else "skipped",
+        "acceptanceStatus": "incomplete",
+        "qualified": False,
+        "reason": ("Acquisition prerequisite enabled; native qualification has not run."
+                   if UPSTREAM_SIGNATURE_ACCESS_ENABLED else ACQUISITION_PAUSE_REASON),
+    }
+
+
+def require_acquisition_access() -> None:
     if not UPSTREAM_SIGNATURE_ACCESS_ENABLED:
-        raise ProvisionError(
-            "Clang 18.1.3 candidate acquisition is paused pending explicit resolution of "
-            "the denied upstream signature source; no acquisition requests were made. "
-            f"Blocked target: {PAUSED_UPSTREAM_SIGNATURE_URL}"
-        )
+        raise ProvisionError(ACQUISITION_PAUSE_REASON)
+
+
+def acquire_candidate(contract: dict, output: Path, keyring: Path) -> dict:
+    require_acquisition_access()
     if output.exists() and any(output.iterdir()):
         raise ProvisionError(f"output directory must be empty: {output}")
     output.mkdir(parents=True, exist_ok=True)
@@ -1404,7 +1424,13 @@ def validate_profile_compiler_identity(compiler_version: str, target: str) -> No
         raise ProvisionError("probe compiler version or target mismatch")
 
 
+def command_acquisition_status(args: argparse.Namespace) -> int:
+    sys.stdout.write(canonical_json(acquisition_status()).decode("utf-8"))
+    return 0
+
+
 def command_acquire(args: argparse.Namespace) -> int:
+    require_acquisition_access()
     contract = read_contract(args.contract)
     candidate = acquire_candidate(contract, args.output, args.keyring)
     ensure_source_artifact_contract(candidate, contract)
@@ -2904,6 +2930,8 @@ def _add_provenance_file(archive: tarfile.TarFile, source: Path, arcname: str, e
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
+    status = sub.add_parser("acquisition-status", help="print read-only acquisition prerequisite state as JSON")
+    status.set_defaults(run=command_acquisition_status)
     metadata = sub.add_parser(
         "probe-snapshot-metadata",
         help="authenticate one pinned Snapshot's indexes and inspect only the Clang 18 source and binary roots",

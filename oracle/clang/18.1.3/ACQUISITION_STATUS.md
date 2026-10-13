@@ -40,8 +40,10 @@ An independent review supplied the Tom Stellard key suffix
 material, or authenticated signature evidence. The 22.1.6 key was created after
 the 18.1.3 release and remains invalid for this purpose.
 
-The owned provisioning workflow performs the acquisition on a standard public
-`ubuntu-24.04` Actions runner. This local run did not establish:
+The owned provisioning workflow targets a standard public `ubuntu-24.04`
+Actions runner for full qualification. Native qualification is currently
+skipped while acquisition is paused, as described below. This local run did
+not establish:
 
 - signed Snapshot `InRelease` → `Sources`/`Packages` SHA-256 metadata chain;
 - Ubuntu source version `1:18.1.3-1ubuntu1`, `.dsc`, payload checksums, and
@@ -209,10 +211,10 @@ against that unchanged production pin: it found no exact source record for
 `1:18.1.3-1ubuntu1`, only `1:18.1.3-1@noble/main`. This prevents the diagnostic
 job's success from being mistaken for production qualification.
 
-For pull requests, the workflow always runs both `qualify` and the separate
-July 2 metadata diagnostic. Manual dispatch defaults to full qualification;
-the metadata-only mode is an explicit diagnostic choice and is not a PR
-acceptance path.
+At that revision, pull requests ran both `qualify` and the separate July 2
+metadata diagnostic. Manual dispatch defaulted to full qualification; the
+metadata-only mode was an explicit diagnostic choice, not a PR acceptance
+path. The current acquisition pause and CI gate are described below.
 
 Matching package version text is not compatibility or provenance evidence.
 The bounded alternative remains a separately reviewed source build from the
@@ -228,15 +230,29 @@ root version pins remain exactly `1:18.1.3-1ubuntu1`. This approval uses signed
 index provenance, not version text alone, and does not approve the distro
 patches or source compatibility.
 
-The full public-runner PR qualification remains a separate mandatory gate. Its
-acquisition step has a fail-closed prerequisite before making any request to
-the official LLVM 18.1.3 detached-signature URL that was denied in this
-environment. When acquisition reaches that prerequisite it stops with the
-exact URL, without trying that URL through Actions, a proxy, mirror, or another
-route. Until the signature is accessible through an authorized path and
-independently reviewed, the upstream source signature, complete 34-file source
-audit, compiler/API probes, loader checks, image/rootfs identity, and two-run
-reproducibility remain unverified. No image or build record from this PR may be
+Every workflow invocation includes an `offline-validation` job for the Python
+offline provisioning suite and the read-only `acquisition-status` command.
+The status comes solely from the provisioner's existing
+`UPSTREAM_SIGNATURE_ACCESS_ENABLED` constant and reports the same pause reason
+and exact denied URL as direct acquisition. Environment variables, workflow
+inputs, and contract contents cannot enable acquisition.
+
+The native `qualify` job requires successful offline validation and
+`acquisition_enabled == true`, in addition to selection of full qualification.
+The constant remains `False`, so this job is currently **skipped** before host
+Java, Gradle, or APT setup. Offline success and skipped native qualification
+leave acceptance **incomplete**; they do not establish an accepted or qualified
+toolchain. The separate Snapshot metadata diagnostic retains its existing
+behavior and establishes no source-signature or toolchain acceptance.
+
+Direct `acquire` still rejects while paused, before creating acquisition output
+or a downloader. It reports the denied official LLVM 18.1.3 detached-signature
+URL without making acquisition requests through Actions, a proxy, mirror, or
+another route. Until the signature is accessible through an authorized path
+and independently reviewed, the upstream source signature, complete 34-file
+source audit, compiler/API probes, loader checks, image/rootfs identity, and
+two-run reproducibility remain unverified. Full public-runner qualification
+remains required for acceptance. No image or build record from this PR may be
 treated as accepted.
 
 The qualification workflow retains the canonical rootfs tar only after its
@@ -246,5 +262,6 @@ OCI layer's expanded bytes against the same rootfs identity. A successful
 qualification will upload the rootfs tar as a one-day artifact for downstream
 extraction; the image and provenance remain separate one-day artifacts. No
 such accepted artifact is available until all preceding gates pass. B's
-integration and the shared registry/inventory are outside this issue's owned
-scope and were not changed or run.
+integration remains outside this issue's owned scope. The build-record schema
+is catalogued in the shared schema inventory as a separate, non-authoritative
+validator; this registration does not accept a toolchain profile.

@@ -74,8 +74,56 @@ jobs:
           compression-level: 0
           retention-days: 1
 
+  offline-validation:
+    name: Offline provisioning validation and acquisition status
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      acquisition_enabled: ${{ steps.acquisition_status.outputs.acquisition_enabled }}
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Report acquisition prerequisite without network requests
+        id: acquisition_status
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+
+          result = subprocess.run(
+              [sys.executable, "scripts/oracle/provision_clang_18_1_3.py", "acquisition-status"],
+              check=True, capture_output=True, text=True,
+          )
+          status = json.loads(result.stdout)
+          if type(status["acquisitionEnabled"]) is not bool or status["qualified"] is not False:
+              raise SystemExit("invalid acquisition prerequisite status")
+          if status["acceptanceStatus"] != "incomplete":
+              raise SystemExit("prerequisite status must not claim acceptance")
+          expected = ("available", "not-run") if status["acquisitionEnabled"] else ("paused", "skipped")
+          if (status["acquisitionStatus"], status["nativeQualification"]) != expected:
+              raise SystemExit("inconsistent acquisition prerequisite status")
+          print(result.stdout, end="")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"acquisition_enabled={str(status['acquisitionEnabled']).lower()}\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("## Clang 18.1.3 acquisition prerequisite\n\n")
+              summary.write(f"Native qualification: **{status['nativeQualification'].upper()}**. ")
+              summary.write("Acceptance: **INCOMPLETE**; this status is not qualification evidence.\n\n")
+              summary.write(status["reason"] + "\n\n")
+              summary.write("Offline validation runs separately and must pass; it does not qualify a toolchain or image.\n")
+          PY
+
+      - name: Run offline fail-closed provisioning tests
+        run: python3 -m unittest discover -s oracle/clang/18.1.3 -p 'test_*.py' -v
+
   qualify:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.mode == 'full-qualification' }}
+    name: Native toolchain qualification
+    needs: offline-validation
+    if: ${{ needs.offline-validation.result == 'success' && needs.offline-validation.outputs.acquisition_enabled == 'true' && (github.event_name != 'workflow_dispatch' || inputs.mode == 'full-qualification') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:
@@ -101,9 +149,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             debootstrap dpkg-dev gpgv gnupg ubuntu-keyring python3
-
-      - name: Run offline fail-closed provisioning tests
-        run: python3 -m unittest discover -s oracle/clang/18.1.3 -p 'test_*.py' -v
 
       - name: Authenticate Ubuntu Snapshot source and patch compatibility first
         run: |

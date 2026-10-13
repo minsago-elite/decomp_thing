@@ -8,6 +8,7 @@ import shutil
 import sys
 import tarfile
 import tempfile
+import textwrap
 import unittest
 from unittest import mock
 
@@ -134,10 +135,11 @@ class ProvisioningNegativeTests(unittest.TestCase):
         qualify_job = re.search(r"(?ms)^  qualify:\n(.*?)(?=^  [A-Za-z0-9_-]+:|\Z)", workflow)
         self.assertIsNotNone(qualify_job)
         qualify_text = qualify_job.group(1)
-        self.assertIn("if: ${{ github.event_name != 'workflow_dispatch' || inputs.mode == 'full-qualification' }}",
+        self.assertIn("needs: offline-validation", qualify_text)
+        self.assertIn("if: ${{ needs.offline-validation.result == 'success' && "
+                      "needs.offline-validation.outputs.acquisition_enabled == 'true' && "
+                      "(github.event_name != 'workflow_dispatch' || inputs.mode == 'full-qualification') }}",
                       qualify_text)
-        self.assertLess(qualify_text.index("Run offline fail-closed provisioning tests"),
-                        qualify_text.index("Authenticate Ubuntu Snapshot source and patch compatibility first"))
         trigger_text = workflow[:workflow.index("permissions:")]
         self.assertEqual(trigger_text.count("'oracle/llvm/22.1.6/release-artifacts.json'"), 2)
         self.assertLess(qualify_text.index("Authenticate Ubuntu Snapshot source and patch compatibility first"),
@@ -145,6 +147,47 @@ class ProvisioningNegativeTests(unittest.TestCase):
         self.assertEqual(qualify_text.count('-PfrontendNodeHome="$CLANG_WORK/frontend-node"'),
                          qualify_text.count('./gradlew'))
         self.assertLess(qualify_text.index('bash scripts/install-frontend-node.sh'), qualify_text.index('./gradlew'))
+
+    def test_workflow_offline_job_gates_native_setup_without_suppressing_failures(self):
+        workflow = (ROOT / ".github/workflows/generic-template-toolchain.yml").read_text(encoding="utf-8")
+        offline = re.search(r"(?ms)^  offline-validation:\n(.*?)(?=^  [A-Za-z0-9_-]+:|\Z)", workflow).group(1)
+        self.assertIn("acquisition_enabled: ${{ steps.acquisition_status.outputs.acquisition_enabled }}", offline)
+        self.assertIn('"acquisition-status"', offline)
+        self.assertIn("run: python3 -m unittest discover -s oracle/clang/18.1.3 -p 'test_*.py' -v", offline)
+        self.assertNotIn("continue-on-error", workflow)
+        self.assertNotIn("if:", offline)
+        for costly_setup in ("setup-java", "setup-gradle", "apt-get", "./gradlew", "install-frontend-node"):
+            self.assertNotIn(costly_setup, offline)
+        self.assertNotIn(" || ", offline)
+        self.assertNotIn("always()", offline)
+
+    def test_workflow_status_report_accepts_prerequisite_fixtures_without_claiming_qualification(self):
+        workflow = (ROOT / ".github/workflows/generic-template-toolchain.yml").read_text(encoding="utf-8")
+        offline = re.search(r"(?ms)^  offline-validation:\n(.*?)(?=^  [A-Za-z0-9_-]+:|\Z)", workflow).group(1)
+        source = textwrap.dedent(re.search(r"python3 - <<'PY'\n(.*?)          PY\n", offline, re.DOTALL).group(1))
+        for enabled in (False, True):
+            # The enabled branch is only a mocked status fixture, never acquisition permission.
+            with mock.patch.object(provision, "UPSTREAM_SIGNATURE_ACCESS_ENABLED", enabled):
+                status = provision.acquisition_status()
+            with self.subTest(enabled=enabled), self.temporary_directory() as temp:
+                output, summary = Path(temp) / "outputs", Path(temp) / "summary"
+                with mock.patch.dict(provision.os.environ, {"GITHUB_OUTPUT": str(output), "GITHUB_STEP_SUMMARY": str(summary)}), \
+                        mock.patch.object(provision.subprocess, "run", return_value=mock.Mock(stdout=json.dumps(status))) as run, \
+                        mock.patch.object(provision.sys, "stdout", io.StringIO()):
+                    exec(compile(source, "<workflow-acquisition-status>", "exec"), {})
+                self.assertEqual(output.read_text(), f"acquisition_enabled={str(enabled).lower()}\n")
+                self.assertIn("**INCOMPLETE**", summary.read_text())
+                self.assertIn("**NOT-RUN**" if enabled else "**SKIPPED**", summary.read_text())
+                self.assertIn(status["reason"], summary.read_text())
+                self.assertEqual(run.call_args.args[0][-1], "acquisition-status")
+                self.assertTrue(run.call_args.kwargs["check"])
+        for changes in ({"acquisitionEnabled": "true"}, {"qualified": True},
+                        {"acceptanceStatus": "accepted"}, {"nativeQualification": "passed"}):
+            status = {**provision.acquisition_status(), **changes}
+            with self.subTest(changes=changes), mock.patch.object(
+                provision.subprocess, "run", return_value=mock.Mock(stdout=json.dumps(status))
+            ), self.assertRaises(SystemExit):
+                exec(compile(source, "<workflow-acquisition-status>", "exec"), {})
 
     def test_rootfs_command_uses_the_selected_contract_environment(self):
         contract = {"environment": {"LC_ALL": "C", "TZ": "UTC", "SOURCE_DATE_EPOCH": "7",
@@ -911,6 +954,53 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 with self.assertRaises(provision.ProvisionError):
                     downloader.get("https://snapshot.ubuntu.com/object", expected_sha256="0" * 64)
 
+    def test_acquisition_status_is_read_only_and_cannot_be_enabled_by_environment(self):
+        stdout = io.StringIO()
+        with mock.patch.dict(provision.os.environ, {"UPSTREAM_SIGNATURE_ACCESS_ENABLED": "true",
+                                                   "INPUT_ACQUISITION_ENABLED": "true",
+                                                   "INPUT_MODE": "full-qualification"}), \
+                mock.patch.object(provision.sys, "stdout", stdout), \
+                mock.patch.object(provision, "read_contract") as contract, \
+                mock.patch.object(provision.BoundedDownloader, "__init__") as downloader, \
+                mock.patch.object(provision, "atomic_write") as write, \
+                mock.patch.object(Path, "mkdir") as mkdir:
+            self.assertEqual(provision.main(["acquisition-status"]), 0)
+        status = json.loads(stdout.getvalue())
+        self.assertEqual(status, {
+            "schemaVersion": 1, "scope": "acquisition-prerequisite-status-only",
+            "acquisitionEnabled": False, "acquisitionStatus": "paused",
+            "nativeQualification": "skipped", "acceptanceStatus": "incomplete", "qualified": False,
+            "reason": provision.ACQUISITION_PAUSE_REASON,
+        })
+        contract.assert_not_called()
+        downloader.assert_not_called()
+        write.assert_not_called()
+        mkdir.assert_not_called()
+        self.assertEqual(stdout.getvalue().encode(), provision.canonical_json(status))
+
+    def test_acquisition_status_has_no_contract_output_or_enable_override(self):
+        for extra in (["--contract", "unreviewed.json"], ["--output", "unrequested-output"], ["--enable"]):
+            with self.subTest(extra=extra), mock.patch.object(provision.sys, "stderr", io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    provision.main(["acquisition-status", *extra])
+                self.assertEqual(error.exception.code, 2)
+
+    def test_direct_acquire_cli_fails_with_status_reason_before_reading_contract_or_creating_output(self):
+        with self.temporary_directory() as temp:
+            output = Path(temp) / "acquisition"
+            stderr = io.StringIO()
+            with mock.patch.dict(provision.os.environ, {"UPSTREAM_SIGNATURE_ACCESS_ENABLED": "true"}), \
+                    mock.patch.object(provision.sys, "stderr", stderr), \
+                    mock.patch.object(provision, "read_contract") as contract, \
+                    mock.patch.object(provision.BoundedDownloader, "__init__") as downloader:
+                self.assertEqual(provision.main([
+                    "acquire", "--output", str(output), "--contract", str(Path(temp) / "missing-contract.json"),
+                ]), 1)
+            self.assertEqual(stderr.getvalue(), "provisioning failed: " + provision.acquisition_status()["reason"] + "\n")
+            contract.assert_not_called()
+            downloader.assert_not_called()
+            self.assertFalse(output.exists())
+
     def test_upstream_signature_pause_rejects_exact_and_changed_urls_before_download(self):
         with self.temporary_directory() as temp:
             upstream = self.contract["profile"]["upstream"]
@@ -931,8 +1021,9 @@ class ProvisioningNegativeTests(unittest.TestCase):
                     output = Path(temp) / f"acquisition-{index}"
                     with mock.patch.object(provision.BoundedDownloader, "__init__") as init, \
                             mock.patch.object(provision.BoundedDownloader, "get") as get:
-                        with self.assertRaisesRegex(provision.ProvisionError, "no acquisition requests were made"):
+                        with self.assertRaisesRegex(provision.ProvisionError, "no acquisition requests were made") as error:
                             provision.acquire_candidate(contract, output, Path(temp) / "missing-keyring.gpg")
+                    self.assertEqual(str(error.exception), provision.acquisition_status()["reason"])
                     init.assert_not_called()
                     get.assert_not_called()
                     self.assertFalse(output.exists())
