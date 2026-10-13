@@ -550,14 +550,11 @@ internal class LinuxBubblewrapBoundary private constructor(
         agentEnvironment: Map<String, AcpEnvironmentValue>,
         audit: AcpTerminalAuditRecorder,
         cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
-        filesystemHostPathAuthority: Boolean = true,
     ): AcpTerminalBroker {
         closeFailure.get()?.let { throw it }
         // Workspace roots are not terminal bind sources, but active filesystem callback grants can
         // expose host paths outside bubblewrap. Reject only grants that can reach private controls.
-        if (filesystemHostPathAuthority) {
-            requireFilesystemCallbacksDoNotExposeControlDirectory(request, cancellationCheck)
-        }
+        requireFilesystemCallbacksDoNotExposeControlDirectory(request, cancellationCheck)
         val effectivePolicy = configuredPolicy?.takeIf {
             AgentOperation.EXECUTE_COMMAND in request.accessPolicy.allowedOperations
         }
