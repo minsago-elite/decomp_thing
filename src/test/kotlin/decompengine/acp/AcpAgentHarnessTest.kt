@@ -64,10 +64,152 @@ import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.flow.collect
 import org.junit.jupiter.api.Timeout
 
 @Timeout(value = 60, unit = TimeUnit.SECONDS)
 class AcpAgentHarnessTest {
+    @Test
+    fun `stdout owner retains accounted EOF without a second read after teardown`() {
+        val bytes = "trailing output already accounted".toByteArray()
+        val input = object : java.io.InputStream() {
+            val reads = AtomicInteger()
+            override fun read(): Int {
+                val index = reads.getAndIncrement()
+                if (index < bytes.size) return bytes[index].toInt() and 0xff
+                if (index == bytes.size) return -1
+                throw java.io.IOException("a second EOF read is unavailable after teardown")
+            }
+        }
+
+        val observation = observeClosingStdout(input)
+
+        assertTrue(observation.naturallyDrained)
+        assertEquals(bytes.size + 1, input.reads.get(), "proved EOF must suppress a redundant reader")
+        assertEquals(bytes.size.toLong(), observation.output.observedBytes)
+        assertFalse(observation.output.limitExceeded)
+    }
+
+    @Test
+    fun `stdout read failure without EOF never proves produced output drained`() {
+        val input = object : java.io.InputStream() {
+            override fun read(): Int = throw java.io.IOException("no EOF was observed")
+        }
+
+        val observation = observeClosingStdout(input)
+
+        assertFalse(observation.naturallyDrained)
+        assertEquals(0L, observation.output.observedBytes)
+        assertFalse(observation.output.limitExceeded)
+    }
+
+    @Test
+    fun `stdout EOF after forced descriptor closure never certifies unread output`() {
+        val observation = observeClosingStdout(java.io.ByteArrayInputStream(byteArrayOf()), forcedClose = true)
+
+        assertFalse(observation.naturallyDrained)
+        assertEquals(0L, observation.output.observedBytes)
+    }
+
+    @Test
+    fun `stdout EOF proof cannot finish before terminal latch and owner release`() {
+        val bytes = "unterminated JSON-RPC frame".toByteArray()
+        val eofObserved = CountDownLatch(1)
+        val releaseEof = CountDownLatch(1)
+        lateinit var control: Pair<Class<*>, Any>
+        val input = object : java.io.InputStream() {
+            var index = 0
+            override fun read(): Int {
+                if (index < bytes.size) return bytes[index++].toInt() and 0xff
+                // Hold the existing EOF-publication boundary before the consumer can process
+                // its terminal frame and finally block. This is a non-native state control.
+                control.first.getDeclaredMethod("recordStdoutEof").apply { isAccessible = true }
+                    .invoke(control.second)
+                eofObserved.countDown()
+                if (!releaseEof.await(3, TimeUnit.SECONDS)) throw java.io.IOException("EOF barrier was not released")
+                return -1
+            }
+        }
+        control = newStdoutAccountingControl(input)
+        val (type, running) = control
+        fun field(name: String): Any = type.getDeclaredField(name).apply { isAccessible = true }.get(running)
+        val finished = field("stdoutDrainFinished") as java.util.concurrent.CompletableFuture<*>
+        val terminal = field("failure") as java.util.concurrent.atomic.AtomicReference<*>
+        val owner = field("stdoutOwnership") as java.util.concurrent.atomic.AtomicReference<*>
+        val frames = type.getDeclaredMethod("stdoutFrames", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+            .apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val flow = frames.invoke(running, 4096, 128) as kotlinx.coroutines.flow.Flow<String>
+        val executor = Executors.newSingleThreadExecutor()
+        val execution = executor.submit {
+            kotlinx.coroutines.runBlocking { flow.collect { error("an unterminated frame must not dispatch") } }
+        }
+        try {
+            assertTrue(eofObserved.await(3, TimeUnit.SECONDS))
+            assertTrue((field("stdoutNaturallyDrained") as AtomicBoolean).get())
+            assertFalse(finished.isDone, "EOF proof must not finish the still-owned consumer")
+            assertNull(terminal.get(), "terminal processing is held behind the EOF barrier")
+            assertEquals("FRAME_CONSUMER", owner.get().toString())
+
+            releaseEof.countDown()
+            execution.get(3, TimeUnit.SECONDS)
+
+            assertTrue(finished.isDone)
+            assertEquals("UNCLAIMED", owner.get().toString())
+            assertEquals("AcpMalformedFrameFailure", assertNotNull(terminal.get()).javaClass.simpleName)
+            assertTrue((terminal.get() as Throwable).message.orEmpty().contains("unterminated"))
+        } finally {
+            releaseEof.countDown()
+            try { execution.get(3, TimeUnit.SECONDS) } finally { executor.shutdownNow() }
+        }
+    }
+
+    private data class StdoutDrainObservation(
+        val naturallyDrained: Boolean,
+        val output: AcpProducedOutputEvidence,
+    )
+
+    /** Invokes existing private stream accounting; it cannot launch or control a native process. */
+    private fun observeClosingStdout(input: java.io.InputStream, forcedClose: Boolean = false): StdoutDrainObservation {
+        val (type, running) = newStdoutAccountingControl(input)
+        fun field(name: String): Any = type.getDeclaredField(name).apply { isAccessible = true }.get(running)
+        (field("closing") as AtomicBoolean).set(true)
+        if (forcedClose) (field("stdoutClosedForUnblocking") as AtomicBoolean).set(true)
+        val frames = type.getDeclaredMethod("stdoutFrames", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+            .apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val flow = frames.invoke(running, 4096, 128) as kotlinx.coroutines.flow.Flow<String>
+        kotlinx.coroutines.runBlocking { flow.collect { error("closing accounting must not dispatch protocol frames") } }
+        (field("stdoutDrainFinished") as java.util.concurrent.CompletableFuture<*>).get(1, TimeUnit.SECONDS)
+        (field("stderrDrainFinished") as java.util.concurrent.CompletableFuture<*>).get(1, TimeUnit.SECONDS)
+        val output = type.getDeclaredMethod("outputEvidence").apply { isAccessible = true }
+            .invoke(running) as AcpProducedOutputEvidence
+        return StdoutDrainObservation((field("stdoutNaturallyDrained") as AtomicBoolean).get(), output)
+    }
+
+    private fun newStdoutAccountingControl(input: java.io.InputStream): Pair<Class<*>, Any> {
+        val process = object : Process() {
+            override fun getInputStream(): java.io.InputStream = input
+            override fun getErrorStream(): java.io.InputStream = java.io.ByteArrayInputStream(byteArrayOf())
+            override fun getOutputStream(): java.io.OutputStream = java.io.ByteArrayOutputStream()
+            override fun waitFor(): Int = 0
+            override fun waitFor(timeout: Long, unit: TimeUnit): Boolean = true
+            override fun exitValue(): Int = 0
+            override fun isAlive(): Boolean = false
+            override fun destroy() = Unit
+            override fun destroyForcibly(): Process = this
+            override fun pid(): Long = Long.MAX_VALUE
+            override fun toHandle(): ProcessHandle = throw UnsupportedOperationException("not a native process")
+            override fun onExit(): java.util.concurrent.CompletableFuture<Process> = java.util.concurrent.CompletableFuture()
+        }
+        val type = Class.forName("decompengine.acp.RunningAcpProcess")
+        val constructor = type.declaredConstructors.single().apply { isAccessible = true }
+        val running = constructor.newInstance(
+            process, null, AcpProcessContainment.LINUX_BUBBLEWRAP_CGROUP_V2, 64, 4096L, ProtocolActivity(),
+        )
+        return type to running
+    }
+
     @Test
     fun `public Make and Ninja archival reconstruction follows ACP file roles through verified rebuild`() {
         val temp = createTempDirectory("acp-archival-role-workflow-")
@@ -222,7 +364,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(68, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(72, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {

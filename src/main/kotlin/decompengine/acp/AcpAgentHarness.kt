@@ -2093,6 +2093,7 @@ private class RunningAcpProcess(
     private val stdoutOwnership = AtomicReference(StdoutOwnership.UNCLAIMED)
     private val stdoutNaturallyDrained = AtomicBoolean(false)
     private val stdoutDrainFinished = CompletableFuture<Unit>()
+    private val stdoutClosedForUnblocking = AtomicBoolean(false)
     private val stderrCapture = BoundedStderrCapture(maximumStderrBytes, producedOutput)
     private val stderrNaturallyDrained = AtomicBoolean(false)
     private val stderrDrainFinished = CompletableFuture<Unit>()
@@ -2136,6 +2137,7 @@ private class RunningAcpProcess(
         }
         val frame = ByteArrayOutputStream()
         var observedProtocolFrames = 0
+        var observedEof = false
         try {
             while (true) {
                 val next = try {
@@ -2147,6 +2149,8 @@ private class RunningAcpProcess(
                     throw terminal
                 }
                 if (next < 0) {
+                    observedEof = true
+                    recordStdoutEof()
                     if (!closing.get()) {
                         val terminal = if (frame.size() == 0) {
                             AcpEofFailure("ACP stdout reached EOF")
@@ -2216,6 +2220,7 @@ private class RunningAcpProcess(
             }
         } finally {
             stdoutOwnership.compareAndSet(StdoutOwnership.FRAME_CONSUMER, StdoutOwnership.UNCLAIMED)
+            if (observedEof && stdoutNaturallyDrained.get()) stdoutDrainFinished.complete(Unit)
             if (closing.get()) startShutdownStdoutDrain()
         }
     }
@@ -2313,6 +2318,7 @@ private class RunningAcpProcess(
         if (!stdoutDrainFinished.isDone) {
             // A still-blocked frame consumer owns the same raw stream. Closing it releases that
             // sole owner; its finally block performs the ordered handoff and completes the drain.
+            stdoutClosedForUnblocking.set(true)
             runCatching { stdoutInput.close() }
             startShutdownStdoutDrain()
             val finalStdoutMillis = minOf(sliceMillis, shutdownDeadline.remainingMillis())
@@ -2386,7 +2392,7 @@ private class RunningAcpProcess(
     )
 
     private fun startShutdownStdoutDrain() {
-        if (!closing.get() ||
+        if (!closing.get() || stdoutNaturallyDrained.get() ||
             !stdoutOwnership.compareAndSet(StdoutOwnership.UNCLAIMED, StdoutOwnership.SHUTDOWN_DRAIN)
         ) return
         Thread.ofVirtual().name("decomp-engine-acp-stdout-drain-${process.pid()}").start {
@@ -2395,7 +2401,7 @@ private class RunningAcpProcess(
                 while (true) {
                     val count = stdoutInput.read(buffer)
                     if (count < 0) {
-                        stdoutNaturallyDrained.set(true)
+                        recordStdoutEof()
                         break
                     }
                     producedOutput.record(count)
@@ -2406,6 +2412,13 @@ private class RunningAcpProcess(
                 stdoutDrainFinished.complete(Unit)
             }
         }
+    }
+
+    private fun recordStdoutEof() {
+        // The owning reader has already accounted for every consumed byte. Retain its EOF
+        // proof instead of requiring another read, which may fail after stream teardown.
+        // A descriptor closed to unblock a reader cannot prove that its unread bytes drained.
+        if (!stdoutClosedForUnblocking.get()) stdoutNaturallyDrained.set(true)
     }
 
     private fun terminateForOutputLimit(maximumBytes: Long) {
