@@ -1,5 +1,12 @@
 package decompengine.acp
 
+import decompengine.agent.AgentAccessPolicy
+import decompengine.agent.AgentCancellation
+import decompengine.agent.AgentExecutionRequest
+import decompengine.agent.AgentOperation
+import decompengine.agent.AgentPathRule
+import decompengine.agent.AgentWorkspacePath
+import decompengine.agent.AgentWorkspaceRoot
 import java.io.IOException
 import java.io.OutputStream
 import java.nio.ByteBuffer
@@ -56,10 +63,9 @@ class LinuxBubblewrapBoundaryTest {
                         }
                     }
                     invokePrivate(control, type.getDeclaredMethod("requireCurrent"))
-                    val exposure = type.getDeclaredMethod("requireUnexposed", Path::class.java)
-                    invokePrivate(control, exposure, workspace)
+                    val mountSourceGuard = type.getDeclaredMethod("requireMountSourceUnexposed", Path::class.java)
                     listOf(base, parent, controlPath, controlPath.resolve("child")).forEach { exposed ->
-                        assertFailsWith<IOException> { invokePrivate(control, exposure, exposed) }
+                        assertFailsWith<IOException> { invokePrivate(control, mountSourceGuard, exposed) }
                     }
                     Files.writeString(controlPath.resolve("cleanup-marker"), "private-control-canary")
                     assertTrue(Files.list(workspace).use { it.findAny().isEmpty })
@@ -108,6 +114,136 @@ class LinuxBubblewrapBoundaryTest {
                     }
                     assertTrue(failure.message.orEmpty().contains("temporary parent"), value.orEmpty())
                     assertTrue(Files.list(nested).use { it.findAny().isEmpty })
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `repository-local workspace anchor hides controls while host mount sources remain rejected`() {
+        requireLiveHost()
+        withRepositoryTemporaryDirectory("acp-repository-local-anchor-") { workspace ->
+            val controlParent = Files.createDirectory(workspace.resolve("private-tmp"))
+            withTemporaryParent(controlParent.toString()) {
+                val controlsBefore = controlDirectories()
+                val boundary = LinuxBubblewrapBoundary.prepare(liveConfiguration())
+                try {
+                    val controlPath = (controlDirectories() - controlsBefore).single()
+                    assertTrue(controlPath.startsWith(workspace))
+
+                    val request = AgentExecutionRequest(
+                        objective = "verify sandbox-only workspace anchors",
+                        workspaceRoots = listOf(AgentWorkspaceRoot("repository", workspace)),
+                        accessPolicy = AgentAccessPolicy(emptyList()),
+                    )
+                    val filesystemWithoutGrants = AcpFilesystemBroker.open(
+                        request,
+                        AcpFilesystemLimits(),
+                        AcpFilesystemAuditRecorder(),
+                    )
+                    try {
+                        assertEquals(null, filesystemWithoutGrants.capability)
+                        val broker = boundary.openTerminalBroker(
+                            request,
+                            AgentCancellation.NONE,
+                            configuredPolicy = null,
+                            agentEnvironment = emptyMap(),
+                            audit = AcpTerminalAuditRecorder(),
+                        )
+                        try {
+                            assertFalse(broker.capability)
+                        } finally {
+                            broker.close()
+                        }
+                    } finally {
+                        filesystemWithoutGrants.close()
+                    }
+
+                    val controlCanary = controlPath.resolve("callback-canary.txt").also {
+                        Files.writeString(it, "private")
+                    }
+                    val callbackPath = AgentWorkspacePath(
+                        "repository",
+                        "private-tmp/${controlPath.fileName}/callback-canary.txt",
+                    )
+                    val callbackRule = AgentPathRule(
+                        AgentWorkspacePath("repository", "private-tmp"),
+                        setOf(AgentOperation.READ_FILE),
+                        recursive = true,
+                    )
+                    val callbackRequest = AgentExecutionRequest(
+                        objective = "reject callback access to private controls",
+                        workspaceRoots = request.workspaceRoots,
+                        accessPolicy = AgentAccessPolicy(listOf(callbackRule)),
+                    )
+                    assertTrue(callbackRequest.accessPolicy.allows(callbackPath, AgentOperation.READ_FILE))
+                    val filesystemBroker = AcpFilesystemBroker.open(
+                        callbackRequest,
+                        AcpFilesystemLimits(),
+                        AcpFilesystemAuditRecorder(),
+                    )
+                    try {
+                        assertTrue(requireNotNull(filesystemBroker.capability).readTextFile)
+                        val failure = assertFailsWith<IOException> {
+                            boundary.openTerminalBroker(
+                                callbackRequest,
+                                AgentCancellation.NONE,
+                                configuredPolicy = null,
+                                agentEnvironment = emptyMap(),
+                                audit = AcpTerminalAuditRecorder(),
+                            )
+                        }
+                        assertTrue(failure.message.orEmpty().contains("filesystem callback authority"))
+                    } finally {
+                        filesystemBroker.close()
+                    }
+
+                    val hostFile = workspace.resolve("host-only.txt").also {
+                        Files.writeString(it, "must stay hidden")
+                    }
+                    launchAndAwait(
+                        boundary,
+                        listOf("visibility", workspace.toString(), hostFile.toString()),
+                        emptyDirectories = listOf(workspace),
+                    )
+                    launchAndAwait(
+                        boundary,
+                        listOf("visibility", workspace.toString(), controlPath.toString()),
+                        emptyDirectories = listOf(workspace),
+                    )
+                    assertTrue(Files.exists(controlCanary))
+                    val successfulLaunches = boundary.evidence(null).launches.size
+
+                    val controlMount = AcpSandboxReadOnlyMount(
+                        controlPath,
+                        Path.of("/acp-private-control"),
+                        "0".repeat(64),
+                    )
+                    val mountFailure = assertFailsWith<IOException> {
+                        val launch = probeLaunch(listOf("netns"))
+                        boundary.launch(launch.copy(readOnlyMounts = launch.readOnlyMounts + controlMount), true) {}
+                    }
+                    assertTrue(mountFailure.message.orEmpty().contains("private control directory"))
+
+                    val controlStaging = AcpWorkflowStagingRoot.createReadOnly("privateControl", controlPath)
+                    try {
+                        val stagingFailure = assertFailsWith<IOException> {
+                            boundary.launch(
+                                probeLaunch(listOf("netns")).copy(
+                                    stagingRoots = listOf(
+                                        AcpSandboxRootGrant(controlStaging, AcpSandboxRootMode.READ_ONLY),
+                                    ),
+                                ),
+                                true,
+                            ) {}
+                        }
+                        assertTrue(stagingFailure.message.orEmpty().contains("private control directory"))
+                    } finally {
+                        Files.deleteIfExists(controlStaging.path)
+                    }
+                    assertEquals(successfulLaunches, boundary.evidence(null).launches.size)
+                } finally {
+                    boundary.close()
                 }
             }
         }

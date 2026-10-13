@@ -900,6 +900,7 @@ class AcpAgentHarness(
             configuredPolicy = configuration.terminalPolicy,
             agentEnvironment = configuration.environment,
             audit = terminalAuditRecorder,
+            filesystemHostPathAuthority = filesystem is AcpFilesystemBroker,
         )
         terminalReference.set(terminal)
         val permission = AcpPermissionBroker(
@@ -2011,6 +2012,7 @@ private class ProductionAcpSandboxExecution(
         configuredPolicy: AcpTerminalExecutionPolicy?,
         agentEnvironment: Map<String, AcpEnvironmentValue>,
         audit: AcpTerminalAuditRecorder,
+        filesystemHostPathAuthority: Boolean = true,
     ): AcpTerminalBroker = boundary.openTerminalBroker(
         request,
         cancellation,
@@ -2018,6 +2020,7 @@ private class ProductionAcpSandboxExecution(
         agentEnvironment,
         audit,
         executionCheck,
+        filesystemHostPathAuthority,
     )
 
     fun evidence(

@@ -550,11 +550,13 @@ internal class LinuxBubblewrapBoundary private constructor(
         agentEnvironment: Map<String, AcpEnvironmentValue>,
         audit: AcpTerminalAuditRecorder,
         cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+        filesystemHostPathAuthority: Boolean = true,
     ): AcpTerminalBroker {
         closeFailure.get()?.let { throw it }
-        request.workspaceRoots.forEach { root ->
-            cancellationCheck()
-            controlDirectory.requireUnexposed(root.path)
+        // Workspace roots are not terminal bind sources, but active filesystem callback grants can
+        // expose host paths outside bubblewrap. Reject only grants that can reach private controls.
+        if (filesystemHostPathAuthority) {
+            requireFilesystemCallbacksDoNotExposeControlDirectory(request, cancellationCheck)
         }
         val effectivePolicy = configuredPolicy?.takeIf {
             AgentOperation.EXECUTE_COMMAND in request.accessPolicy.allowedOperations
@@ -607,6 +609,34 @@ internal class LinuxBubblewrapBoundary private constructor(
         )
     }
 
+    private fun requireFilesystemCallbacksDoNotExposeControlDirectory(
+        request: AgentExecutionRequest,
+        cancellationCheck: () -> Unit,
+    ) {
+        val filesystemOperations = setOf(
+            AgentOperation.READ_FILE,
+            AgentOperation.WRITE_FILE,
+            AgentOperation.CREATE_FILE,
+        )
+        request.accessPolicy.pathRules.forEach { rule ->
+            cancellationCheck()
+            if (rule.operations.none { operation ->
+                    operation in filesystemOperations && operation in request.accessPolicy.allowedOperations
+                }
+            ) return@forEach
+            val root = request.workspaceRoots.single { it.id == rule.path.rootId }
+            val grantedPath = root.path.resolve(rule.path.relativePath).normalize()
+            val canReachControlDirectory = if (rule.recursive) {
+                pathsOverlap(grantedPath, controlDirectory.path)
+            } else {
+                grantedPath.startsWith(controlDirectory.path)
+            }
+            if (canReachControlDirectory) {
+                throw IOException("ACP filesystem callback authority may reach the private control directory")
+            }
+        }
+    }
+
     private inner class VerifiedTerminalBroker(
         request: AgentExecutionRequest,
         cancellation: AgentCancellation,
@@ -647,13 +677,10 @@ internal class LinuxBubblewrapBoundary private constructor(
         closeFailure.get()?.let { throw it }
         if (closed.get()) throw IOException("ACP sandbox boundary is closed")
         requireAcpSandboxLaunchPolicy(configuration, launch, mergeError, cancellationCheck)
-        launch.emptyDirectories.forEach { directory ->
-            cancellationCheck()
-            controlDirectory.requireUnexposed(directory)
-        }
+        // Empty-directory anchors become target-side bubblewrap --dir entries, not host sources.
         launch.stagingRoots.forEach { grant ->
             cancellationCheck()
-            controlDirectory.requireUnexposed(grant.stagingRoot.path)
+            controlDirectory.requireMountSourceUnexposed(grant.stagingRoot.path)
             if (grant.mode == AcpSandboxRootMode.READ_WRITE && grant.stagingRoot.quotaProof == null) {
                 throw IOException("writable sandbox staging root lacks verified aggregate quota authority")
             }
@@ -1651,7 +1678,7 @@ private class PinnedControlDirectory private constructor(
     private var deleted = false
     private var cleanupFailure: AcpCleanupProofFailure? = null
 
-    fun requireUnexposed(source: Path) {
+    fun requireMountSourceUnexposed(source: Path) {
         if (pathsOverlap(path, source)) {
             throw IOException("sandbox authority may not expose its private control directory")
         }
@@ -4015,7 +4042,7 @@ private fun pinMounts(
     val unique = LinkedHashMap<Path, AcpSandboxReadOnlyMount>()
     mounts.forEach { mount ->
         cancellationCheck()
-        controlDirectory.requireUnexposed(mount.source)
+        controlDirectory.requireMountSourceUnexposed(mount.source)
         val existing = unique.putIfAbsent(mount.destination, mount)
         if (existing != null && (
                 existing.source != mount.source ||
