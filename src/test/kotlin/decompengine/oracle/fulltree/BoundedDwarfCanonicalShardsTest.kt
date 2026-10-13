@@ -15,11 +15,35 @@ import kotlinx.serialization.json.JsonPrimitive
 
 class BoundedDwarfCanonicalShardsTest {
     @Test
+    fun `physical census kinds retain independent bounded envelopes without semantic graph promotion`() {
+        val unit = DwarfPhysicalUnitCensus(0, 11, 15, ".debug_info:cu=0x0:die=0xb", 3, 1, 2)
+        val dies = listOf(DwarfPhysicalDieCensus(0, 11, 12, 0x11, 0, null, true),
+            DwarfPhysicalDieCensus(0, 12, 14, 0x4080, 1, 11, false))
+        val facts = BoundedDwarfInterfaceFacts("0".repeat(64), 1L, "ET_EXEC", 0x400000UL,
+            emptyList(), emptyList(), emptyMap(), 3L, 1, true, BoundedDwarfInterfaceFactLimits(),
+            physicalUnits = listOf(unit), physicalDies = dies, physicalCensusPresent = true)
+        val parts = collectTypeShards(facts)
+        assertEquals(listOf(unit.toJson()), parts.filter { it.first.kind == "physicalUnits" }.flatMap { it.first.records })
+        assertEquals(dies.map { it.toJson() }, parts.filter { it.first.kind == "physicalDies" }.flatMap { it.first.records })
+        assertTrue(parts.filter { it.first.kind in setOf("functions", "types", "typeChildren") }.all { it.first.records.isEmpty() })
+        val encoded = parts.single { it.first.kind == "physicalDies" }.second
+        assertFailsWith<IllegalArgumentException> {
+            parseCanonicalDwarfShard(encoded, expectedKind = "types", expectedOrdinal = 0, expectedRecordCount = 2)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            parseCanonicalDwarfShard(encoded, expectedKind = "physicalDies", expectedOrdinal = 0, expectedRecordCount = 1)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            parseCanonicalDwarfShard(encoded, BoundedDwarfShardLimits(maximumShardBytes = encoded.size - 1))
+        }
+    }
+
+    @Test
     fun `type headers and ordered child rows reconstruct every original type fact`() {
         val nodes = detailedTypes()
         val facts = typeFacts(nodes.reversed().associateBy { it.id })
         val parts = collectTypeShards(facts)
-        assertEquals(listOf("metadata", "functions", "types", "typeChildren", "globals", "objectSymbols"),
+        assertEquals(listOf("metadata", "functions", "types", "typeChildren", "globals", "objectSymbols", "physicalUnits", "physicalDies"),
             parts.map { it.first.kind })
         val metadata = parts.single { it.first.kind == "metadata" }.first.records.single()
         assertEquals(JsonPrimitive("type-headers-with-ordered-child-locators-v2"), metadata["typeChildEncoding"])
@@ -30,7 +54,8 @@ class BoundedDwarfCanonicalShardsTest {
         assertEquals(JsonPrimitive("only-exact-JSON-duplicates-omitted;absent-promoted-field-resolves-to-required-attribute;" +
             "explicit-field-takes-precedence"), metadata["typePromotedFactRule"])
         assertEquals(JsonPrimitive("functions-by-address-locator;types-by-locator;" +
-            "typeChildren-by-parent-locator-physical-child;globals-by-physical-DIE;objects-by-table-entry"), metadata["ordering"])
+            "typeChildren-by-parent-locator-physical-child;globals-by-physical-DIE;objects-by-table-entry;" +
+            "physicalUnits-by-CU-offset;physicalDies-by-CU-offset-physical-offset"), metadata["ordering"])
         assertEquals(JsonPrimitive(nodes.sumOf { it.children.size }),
             (metadata.getValue("recordCounts") as JsonObject)["typeChildren"])
         val headers = parts.single { it.first.kind == "types" }.first.records

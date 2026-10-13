@@ -13,6 +13,125 @@ import kotlin.test.assertTrue
 
 class BoundedDwarfInterfaceFactsTest {
     @Test
+    fun `source replay target lookups share the aggregate parse work budget`() =
+        inInterfaceFixtureDirectory { root ->
+            val declarations = (0 until 32).map { index ->
+                die("node$index", 0x16, listOf(reference(0x49, if (index == 31) "int" else "node${index + 1}")))
+            }
+            val fixture = typeElf(*(declarations + integerType()).toTypedArray())
+            val artifact = writeElf(root.resolve("lookup-budget.elf"), fixture.bytes)
+            val facts = scanInterfaceFixture(artifact, root)
+            StableControlFile.open(artifact, Files.size(artifact), "bounded lookup source replay").use { input ->
+                BoundedDwarfInterfaceFactScanner.verifyPhysicalCensus(input, root, facts)
+                val failure = assertFailsWith<FullTreeControlException> {
+                    BoundedDwarfInterfaceFactScanner.verifyPhysicalCensus(input, root, facts,
+                        FullTreeControlLimits(maximumDwarfParseSteps = 512))
+                }
+                assertTrue(failure.message.orEmpty().contains("aggregate parse-step bound"), failure.message)
+                assertTrue(failure.message.orEmpty().contains("physical replay target lookup"), failure.message)
+            }
+        }
+
+    @Test
+    fun `physical census retains declarations unreachable types locals vendor tags and raw unresolved edges`() =
+        inInterfaceFixtureDirectory { root ->
+            val fixture = typeElf(
+                emitted("entry", "reachable"),
+                die("declaration", DW_TAG_SUBPROGRAM, listOf(flag(DW_AT_DECLARATION), reference(0x49, "unreachable-a"))),
+                integerType("reachable"),
+                die("unreachable-a", 0x13, listOf(text(DW_AT_NAME, "Same"), reference(0x49, "unreachable-b")),
+                    children = listOf(die("member", 0x0d, listOf(reference(0x49, "unreachable-a"))))),
+                die("unreachable-b", 0x13, listOf(text(DW_AT_NAME, "Same"), reference(0x49, "unreachable-a"))),
+                die("scope", 0x0b, children = listOf(die("local", 0x34, listOf(text(DW_AT_NAME, "local"),
+                    reference(0x49, "unreachable-b"))))),
+                die("vendor", 0x4080, listOf(reference(0x49, "reachable", addend = 1),
+                    raw(0x31, FULL_TREE_DW_FORM_REF_SIG8, ByteArray(8)),
+                    raw(0x47, FULL_TREE_DW_FORM_REF4, ByteArray(4) { 0x7f }))),
+            )
+            val artifact = writeElf(root.resolve("physical-universe.elf"), fixture.bytes)
+            val facts = scanInterfaceFixture(artifact, root, BoundedDwarfInterfaceFactLimits(typeGraphScope = BoundedDwarfTypeGraphScope.ABI_LAYOUT))
+            assertTrue(facts.physicalCensusPresent)
+            assertEquals(setOf(fixture.locator("entry")), facts.functions.map { it.locator }.toSet())
+            assertEquals(setOf(fixture.locator("reachable")), facts.types.keys)
+            val census = facts.physicalDies.associateBy { it.locator }
+            assertEquals(10, census.size)
+            assertEquals("function", census.getValue(fixture.locator("declaration")).category)
+            assertEquals("type", census.getValue(fixture.locator("unreachable-a")).category)
+            assertEquals("type", census.getValue(fixture.locator("unreachable-b")).category)
+            assertEquals("variable", census.getValue(fixture.locator("local")).category)
+            assertEquals(fixture.locator("scope"), census.getValue(fixture.locator("local")).parentLocator)
+            val vendor = census.getValue(fixture.locator("vendor"))
+            assertEquals("unknown", vendor.category)
+            assertEquals(listOf("missing-target", "unsupported-reference", "out-of-range-reference"), vendor.references.map { it.state })
+            assertTrue(vendor.references.first().targetLocator != null, "interior target retains its raw physical locator")
+            assertTrue(facts.physicalDies.flatMap { it.references }.any { "reference-cycle" in it.reasons })
+            val unit = facts.physicalUnits.single()
+            assertEquals(census.size.toLong(), unit.nonNullRecordCount)
+            assertEquals(3L, unit.nullRecordCount)
+            assertEquals(unit.nonNullRecordCount + unit.nullRecordCount, facts.scannedDies)
+            val repeated = scanInterfaceFixture(artifact, root, facts.limits)
+            assertContentEquals(facts.canonicalBytes(), repeated.canonicalBytes())
+            StableControlFile.open(artifact, Files.size(artifact), "physical replay fixture").use { input ->
+                BoundedDwarfInterfaceFactScanner.verifyPhysicalCensus(input, root, facts)
+                fun changed(dies: List<DwarfPhysicalDieCensus>, units: List<DwarfPhysicalUnitCensus> = facts.physicalUnits) =
+                    BoundedDwarfInterfaceFacts(facts.inputSha256, facts.inputBytes, facts.elfType, facts.imageBase,
+                        facts.executableRanges, facts.functions, facts.types, facts.scannedDies, facts.compilationUnits,
+                        facts.dwarfPresent, facts.limits, physicalUnits = units, physicalDies = dies, physicalCensusPresent = true)
+                assertFailsWith<Exception> { BoundedDwarfInterfaceFactScanner.verifyPhysicalCensus(input, root, changed(facts.physicalDies.dropLast(1))) }
+                assertFailsWith<Exception> { BoundedDwarfInterfaceFactScanner.verifyPhysicalCensus(input, root, changed(facts.physicalDies + facts.physicalDies.last())) }
+                val altered = facts.physicalDies.map { if (it.locator == fixture.locator("vendor"))
+                    DwarfPhysicalDieCensus(it.compilationUnitOffset, it.offset, it.endOffset, 0x34, it.depth, it.parentOffset,
+                        it.hasChildren, it.references) else it }
+                assertFailsWith<Exception> { BoundedDwarfInterfaceFactScanner.verifyPhysicalCensus(input, root, changed(altered)) }
+                val realDeclaration = census.getValue(fixture.locator("declaration"))
+                val realReference = realDeclaration.references.single()
+                val forgedReference = DwarfPhysicalReferenceCensus(realReference.attributeOrdinal, realReference.attribute,
+                    realReference.declaredForm, realReference.resolvedForm, realReference.indirectDepth, realReference.rawOperand,
+                    realReference.targetLocator, "missing-target").also { it.bindTargets(census.keys) }
+                val forgedState = facts.physicalDies.map { if (it === realDeclaration)
+                    DwarfPhysicalDieCensus(it.compilationUnitOffset, it.offset, it.endOffset, it.tag, it.depth, it.parentOffset,
+                        it.hasChildren, listOf(forgedReference)) else it }
+                assertFailsWith<IllegalArgumentException> {
+                    BoundedDwarfInterfaceFactScanner.verifyPhysicalCensus(input, root, changed(forgedState))
+                }
+                val forgedCycleReference = DwarfPhysicalReferenceCensus(realReference.attributeOrdinal, realReference.attribute,
+                    realReference.declaredForm, realReference.resolvedForm, realReference.indirectDepth, realReference.rawOperand,
+                    realReference.targetLocator).also { it.bindTargets(census.keys); it.markCycle() }
+                val forgedCycle = facts.physicalDies.map { if (it === realDeclaration)
+                    DwarfPhysicalDieCensus(it.compilationUnitOffset, it.offset, it.endOffset, it.tag, it.depth, it.parentOffset,
+                        it.hasChildren, listOf(forgedCycleReference)) else it }
+                assertFailsWith<IllegalArgumentException> {
+                    BoundedDwarfInterfaceFactScanner.verifyPhysicalCensus(input, root, changed(forgedCycle))
+                }
+            }
+        }
+
+    @Test
+    fun `physical census keeps cross unit references and exact separate unit counts`() =
+        inInterfaceFixtureDirectory { root ->
+            val fixture = typeElfUnits(listOf(
+                TypeGraphCompilationUnit("one", listOf(die("declaration", DW_TAG_SUBPROGRAM,
+                    listOf(TypeGraphAttribute(0x49, FULL_TREE_DW_FORM_REF_ADDR, ByteArray(4), "other-type"))))),
+                TypeGraphCompilationUnit("two", listOf(integerType("other-type"))),
+            ))
+            val artifact = writeElf(root.resolve("physical-units.elf"), fixture.bytes)
+            val facts = scanInterfaceFixture(artifact, root)
+            assertEquals(2, facts.physicalUnits.size)
+            assertEquals(4, facts.physicalDies.size)
+            assertEquals(facts.scannedDies, facts.physicalUnits.sumOf { it.physicalRecordCount })
+            assertEquals(2L, facts.physicalUnits.sumOf { it.nullRecordCount })
+            val reference = facts.physicalDies.single { it.locator == fixture.locator("declaration") }.references.single()
+            assertEquals(fixture.locator("other-type"), reference.targetLocator)
+            assertEquals("retained-target", reference.state)
+            assertFailsWith<IllegalStateException> { reference.markCycle() }
+            assertFailsWith<IllegalStateException> { reference.bindTargets(setOf(fixture.locator("other-type"))) }
+            assertFailsWith<UnsupportedOperationException> {
+                @Suppress("UNCHECKED_CAST")
+                (facts.physicalDies as MutableList<DwarfPhysicalDieCensus>).clear()
+            }
+        }
+
+    @Test
     fun `converging function origins charge the retained name once without losing provenance`() =
         inInterfaceFixtureDirectory { root ->
             val longName = "F".repeat(4096)

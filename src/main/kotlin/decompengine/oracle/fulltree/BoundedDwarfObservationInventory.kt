@@ -75,12 +75,12 @@ internal class BoundedDwarfObservationInventory internal constructor(
 }
 
 internal object BoundedDwarfObservationInventoryV1 {
-    const val SCHEMA = "dwarf-pre-policy-inventory-v1"
+    const val SCHEMA = "dwarf-pre-policy-inventory-v2"
     val RECORD_KINDS: List<String> = Collections.unmodifiableList(listOf(
         "inventoryRoots", "inventoryReferences", "inventoryTypeCompleteness", "inventoryFindings", "inventorySelections",
     ))
     val RAW_RECORD_KINDS: List<String> = Collections.unmodifiableList(listOf(
-        "metadata", "functions", "types", "typeChildren", "globals", "objectSymbols", "strippedObjects",
+        "metadata", "functions", "types", "typeChildren", "globals", "objectSymbols", "physicalUnits", "physicalDies", "strippedObjects",
     ))
 
     fun collect(
@@ -103,8 +103,11 @@ internal object BoundedDwarfObservationInventoryV1 {
         val source = InventorySource(facts, Collections.unmodifiableList(ArrayList(strippedObjects)), strippedLayout,
             Collections.unmodifiableList(ArrayList(selections)))
         val budget = InventoryBudget(limits)
+        val physicalCensus = physicalCensusMetadata(facts)
+        val physical = PhysicalCensusVerifier(physicalCensus, budget)
         val raw = ArrayList<JsonObject>()
-        source.visitRaw { kind, records -> raw += commitRecords(kind, records, budget) }
+        source.visitRaw { kind, records -> raw += commitRecords(kind, records, budget) { physical.observe(kind, it) } }
+        physical.finish()
         val inventory = ArrayList<JsonObject>()
         val counts = InventoryCounts()
         source.visitInventory(budget) { kind, records ->
@@ -117,6 +120,7 @@ internal object BoundedDwarfObservationInventoryV1 {
             "typeGraphScope" to JsonPrimitive(facts.limits.typeGraphScope.wireName),
             "inputs" to JsonArray(inputs.sortedBy { it.role }.map { it.toJson() }),
             "requiredTypePopulationComplete" to JsonPrimitive(false),
+            "physicalCensus" to physicalCensus,
             "rawCommitments" to JsonArray(raw), "inventoryCommitments" to JsonArray(inventory), "counts" to counts.toJson(),
         ))
         val manifest = JsonObject(unsigned + ("inventorySha256" to JsonPrimitive(inventorySha(OracleJson.canonicalBytes(unsigned, INVENTORY_MANIFEST_LIMITS)))))
@@ -125,6 +129,41 @@ internal object BoundedDwarfObservationInventoryV1 {
 
     fun verifier(manifest: JsonObject, limits: BoundedDwarfObservationInventoryLimits = BoundedDwarfObservationInventoryLimits()):
         BoundedDwarfObservationInventoryVerifier = BoundedDwarfObservationInventoryVerifier(manifest, limits)
+
+    /** The caller authenticates the scan and input; this independently binds its physical census. */
+    fun authenticatedVerifier(
+        manifest: JsonObject,
+        trustedFacts: BoundedDwarfInterfaceFacts,
+        limits: BoundedDwarfObservationInventoryLimits = BoundedDwarfObservationInventoryLimits(),
+    ): BoundedDwarfObservationInventoryVerifier {
+        require(trustedFacts.physicalCensusPresent) { "authenticated scan has no physical census" }
+        // Bind authentication and stream verification to one defensive snapshot of caller data.
+        val bound = OracleJson.parseCanonical(OracleJson.canonicalBytes(manifest, INVENTORY_MANIFEST_LIMITS),
+            INVENTORY_MANIFEST_LIMITS) as JsonObject
+        val verifier = BoundedDwarfObservationInventoryVerifier(bound, limits)
+        val budget = InventoryBudget(limits)
+        val metadata = physicalCensusMetadata(trustedFacts)
+        val physical = PhysicalCensusVerifier(metadata, budget)
+        val commitments = LinkedHashMap<String, JsonObject>()
+        trustedFacts.visitCanonicalRecordGroups { kind, records ->
+            if (kind == "metadata" || kind == "physicalUnits" || kind == "physicalDies") {
+                val normalized = if (kind == "metadata") records.map(::normalizeMetadata) else records
+                val commitment = commitRecords(kind, normalized, budget) { physical.observe(kind, it) }
+                if (kind != "metadata") commitments[kind] = commitment
+            }
+        }
+        physical.finish()
+        val rich = array(bound, "inputs").map(::obj).single { text(it, "role") == "rich" }
+        require(rich["sha256"] == JsonPrimitive(trustedFacts.inputSha256) && rich["bytes"] == JsonPrimitive(trustedFacts.inputBytes)) {
+            "inventory input differs from authenticated scan"
+        }
+        require(bound["physicalCensus"] == metadata) { "inventory physical census differs from authenticated scan" }
+        val expected = readCommitments(bound, "rawCommitments", RAW_RECORD_KINDS + "strippedMetadata")
+        require(commitments.all { (kind, commitment) -> expected[kind] == commitment }) {
+            "inventory physical records differ from authenticated scan"
+        }
+        return verifier
+    }
 }
 
 /**
@@ -150,6 +189,7 @@ internal class BoundedDwarfObservationInventoryVerifier internal constructor(
     private var shardCount = 0
     private val boundManifest: JsonObject
     private val hasStrippedInput: Boolean
+    private val physical: PhysicalCensusVerifier
     private val kinds = BoundedDwarfObservationInventoryV1.RAW_RECORD_KINDS + BoundedDwarfObservationInventoryV1.RECORD_KINDS
 
     init {
@@ -175,6 +215,7 @@ internal class BoundedDwarfObservationInventoryVerifier internal constructor(
         val raw = readCommitments(boundManifest, "rawCommitments", BoundedDwarfObservationInventoryV1.RAW_RECORD_KINDS + "strippedMetadata")
         val inventory = readCommitments(boundManifest, "inventoryCommitments", BoundedDwarfObservationInventoryV1.RECORD_KINDS)
         expected = raw + inventory
+        physical = PhysicalCensusVerifier(obj(boundManifest.getValue("physicalCensus")), budget)
         exact(obj(boundManifest.getValue("counts")), InventoryCounts.KEYS)
         obj(boundManifest.getValue("counts")).keys.forEach { number(obj(boundManifest.getValue("counts")), it) }
     }
@@ -207,7 +248,10 @@ internal class BoundedDwarfObservationInventoryVerifier internal constructor(
                 val rich = array(boundManifest, "inputs").map(::obj).single { text(it, "role") == "rich" }
                 require(normalized["inputSha256"] == rich["sha256"] && normalized["inputBytes"] == rich["bytes"])
             }
-            committer.add(budget.encode(normalized))
+            val encoded = budget.encode(normalized)
+            // Charge canonical records before retaining compact structural descriptors.
+            physical.observe(kind, normalized)
+            committer.add(encoded)
         }
         ordinals[kind] = ordinal + 1
         lastKind = index
@@ -226,6 +270,7 @@ internal class BoundedDwarfObservationInventoryVerifier internal constructor(
         require(layoutAccepted && lastKind == kinds.lastIndex && commitments.keys == expected.keys) { "inventory records are incomplete" }
         for ((kind, value) in expected) require(commitments.getValue(kind).finish() == value) { "inventory $kind commitment differs from its records" }
         require(counts.toJson() == boundManifest["counts"]) { "inventory counts differ from the records" }
+        physical.finish()
         finished = true
     }
 
@@ -256,6 +301,18 @@ internal class InventorySource(
         consumer("inventoryFindings", sequence {
             yield(finding("inventory", "inventory", "required-type-population-unresolved"))
             yield(finding("inventory", "inventory", "member-cardinality-unresolved"))
+            if (!facts.physicalCensusPresent) yield(finding("physical-census", "physical-census", "physical-census-absent"))
+            for (die in facts.physicalDies) {
+                budget.work()
+                if (die.category == "unknown") yield(finding("physical-DIE", die.locator, "physical-DIE-tag-unresolved", "0x${die.tag.toString(16)}"))
+                for (reference in die.references) {
+                    budget.work()
+                    if (reference.state != "retained-target") yield(finding("physical-reference", die.locator,
+                        "physical-reference-${reference.state}", reference.attributeOrdinal.toString()))
+                    if ("reference-cycle" in reference.reasons) yield(finding("physical-reference", die.locator,
+                        "physical-reference-cycle", reference.attributeOrdinal.toString()))
+                }
+            }
             if (facts.limits.typeGraphScope != BoundedDwarfTypeGraphScope.FULL_REFERENCES) {
                 yield(finding("inventory", "inventory", "type-graph-scope-is-abi-layout"))
             }
@@ -445,7 +502,11 @@ internal class InventoryBudget(val limits: BoundedDwarfObservationInventoryLimit
     private var records = 0L
     private var bytes = 0L
     private var nodes = 0L
-    fun work() { if (steps >= limits.maximumWorkSteps) inventoryFail("traversal work exceeds bounds"); steps++ }
+    fun work(count: Long = 1L) {
+        require(count >= 0)
+        if (count > limits.maximumWorkSteps - steps) inventoryFail("traversal work exceeds bounds")
+        steps += count
+    }
     fun encode(record: JsonObject): ByteArray {
         work()
         if (records >= limits.maximumRecords) inventoryFail("record count exceeds bounds")
@@ -479,8 +540,250 @@ private class InventoryCommitter(private val kind: String) {
     }
 }
 
-private fun commitRecords(kind: String, records: Sequence<JsonObject>, budget: InventoryBudget): JsonObject =
-    InventoryCommitter(kind).also { commitment -> records.forEach { commitment.add(budget.encode(it)) } }.finish()
+private fun commitRecords(kind: String, records: Sequence<JsonObject>, budget: InventoryBudget,
+                          observe: (JsonObject) -> Unit = {}): JsonObject =
+    InventoryCommitter(kind).also { commitment -> records.forEach {
+        val encoded = budget.encode(it)
+        observe(it)
+        commitment.add(encoded)
+    } }.finish()
+
+private fun physicalCensusMetadata(facts: BoundedDwarfInterfaceFacts): JsonObject = facts.physicalCensusJson()
+
+/** Keeps identities and compact tree state, never raw JSON records or a second attribute graph. */
+private class PhysicalCensusVerifier(metadata: JsonObject, private val budget: InventoryBudget) {
+    private val boundMetadata = metadata
+    private class UnitState(
+        val locator: String, val compilationUnitOffset: Long, val firstDieOffset: Long, val endOffset: Long,
+        val rootLocator: String, val physicalRecordCount: Long, val nullRecordCount: Long, val nonNullRecordCount: Long,
+    ) {
+        var observedDies = 0L
+        var previousEndOffset = firstDieOffset
+        var betweenNulls = 0L
+        val parents = ArrayDeque<String>()
+    }
+    private val present: Boolean
+    private val expectedUnits: Long
+    private val expectedPhysical: Long
+    private val expectedNulls: Long
+    private val expectedNonNulls: Long
+    private val units = LinkedHashMap<String, UnitState>()
+    private val unitOrder = ArrayList<UnitState>()
+    private val dies = HashSet<String>()
+    // Repeated references to one target need one descriptor; mixed states still fail reconciliation.
+    private val targetStates = HashMap<String, Int>()
+    private var previousUnit: UnitState? = null
+    private var currentUnit: UnitState? = null
+    private var nextUnitOrdinal = 0
+    private var summedPhysical = 0L
+    private var summedNulls = 0L
+    private var summedNonNulls = 0L
+    private var metadataCounts: Pair<Long, Long>? = null
+
+    init {
+        exact(metadata, PHYSICAL_CENSUS_KEYS)
+        require(metadata["schema"] == JsonPrimitive("bounded-physical-die-census-v1") &&
+            metadata["scope"] == JsonPrimitive("all-non-null-physical-debug-info-DIEs") &&
+            metadata["semanticPopulationComplete"] == JsonPrimitive(false) &&
+            metadata["verificationBoundary"] == JsonPrimitive("authenticated-input-scan-replay-required;bundle-hashes-alone-are-not-coverage-proof")) {
+            "unsupported physical census metadata"
+        }
+        present = boolean(metadata, "present")
+        require(boolean(metadata, "complete") == present) { "physical census completeness differs from presence" }
+        expectedUnits = number(metadata, "compilationUnitCount")
+        expectedPhysical = number(metadata, "physicalRecordCount")
+        expectedNulls = number(metadata, "nullRecordCount")
+        expectedNonNulls = number(metadata, "nonNullRecordCount")
+        require(expectedUnits <= budget.limits.maximumRecords && expectedNonNulls <= budget.limits.maximumRecords &&
+            expectedPhysical <= budget.limits.maximumWorkSteps) { "physical census population exceeds bounds" }
+        require(expectedNulls <= expectedPhysical && expectedNonNulls <= expectedPhysical &&
+            expectedPhysical == expectedNulls + expectedNonNulls) { "physical census counts do not reconcile" }
+        if (!present) require(expectedUnits == 0L && expectedPhysical == 0L) { "absent physical census has records" }
+    }
+
+    fun observe(kind: String, record: JsonObject) {
+        when (kind) {
+            "metadata" -> {
+                require(metadataCounts == null) { "physical census raw metadata repeats" }
+                require(record["physicalCensus"] == boundMetadata) { "raw metadata physical census differs from the manifest" }
+                val counts = obj(record.getValue("recordCounts"))
+                metadataCounts = number(counts, "physicalUnits") to number(counts, "physicalDies")
+            }
+            "physicalUnits" -> observeUnit(record)
+            "physicalDies" -> observeDie(record)
+        }
+    }
+
+    private fun observeUnit(record: JsonObject) {
+        require(present) { "absent physical census contains a compilation unit" }
+        exact(record, PHYSICAL_UNIT_KEYS)
+        budget.work()
+        val offset = physicalOffset(record, "compilationUnitOffset")
+        val locator = text(record, "locator")
+        val first = physicalOffset(record, "firstDieOffset")
+        val end = physicalOffset(record, "endOffset")
+        val root = text(record, "rootLocator")
+        val physical = number(record, "physicalRecordCount")
+        val nulls = number(record, "nullRecordCount")
+        val nonNulls = number(record, "nonNullRecordCount")
+        require(locator == unitLocator(offset) && root == dieLocator(offset, first)) { "physical compilation unit identity differs from offsets" }
+        require(offset < first && first < end && (previousUnit == null || offset >= previousUnit!!.endOffset)) {
+            "physical compilation unit ranges overlap or are reordered"
+        }
+        require(physical <= expectedPhysical && nulls <= physical && nonNulls in 1..physical && physical == nulls + nonNulls) {
+            "physical compilation unit counts do not reconcile"
+        }
+        require(units.size.toLong() < expectedUnits && summedPhysical <= expectedPhysical - physical &&
+            summedNulls <= expectedNulls - nulls && summedNonNulls <= expectedNonNulls - nonNulls) {
+            "physical compilation unit counts exceed the census"
+        }
+        // Null records are not retained as DIE records, but their traversal consumes the same work budget.
+        budget.work(nulls)
+        val unit = UnitState(locator, offset, first, end, root, physical, nulls, nonNulls)
+        require(units.putIfAbsent(locator, unit) == null) { "physical compilation unit locator repeats" }
+        unitOrder += unit
+        previousUnit = unit
+        summedPhysical += physical; summedNulls += nulls; summedNonNulls += nonNulls
+    }
+
+    private fun observeDie(record: JsonObject) {
+        require(present) { "absent physical census contains a DIE" }
+        exact(record, PHYSICAL_DIE_KEYS)
+        budget.work()
+        val locator = text(record, "locator")
+        val unitLocator = text(record, "compilationUnitLocator")
+        val unit = units[unitLocator] ?: inventoryFail("physical DIE compilation unit is missing")
+        if (currentUnit !== unit) {
+            currentUnit?.let(::finishUnit)
+            require(nextUnitOrdinal < unitOrder.size && unitOrder[nextUnitOrdinal] === unit) {
+                "physical DIE compilation units are missing or reordered"
+            }
+            nextUnitOrdinal++
+            currentUnit = unit
+        }
+        val offset = physicalOffset(record, "offset")
+        val end = physicalOffset(record, "endOffset")
+        val tag = physicalOffset(record, "tag")
+        require(text(record, "category") == physicalCategory(tag)) { "physical DIE category differs from its tag" }
+        val depth = number(record, "depth").also { require(it <= Int.MAX_VALUE) }.toInt()
+        val parent = nullableText(record.getValue("parentLocator"))
+        val children = boolean(record, "hasChildren")
+        require(locator == dieLocator(unit.compilationUnitOffset, offset) && offset >= unit.firstDieOffset && end > offset && end <= unit.endOffset) {
+            "physical DIE identity or range differs from its compilation unit"
+        }
+        require(unit.observedDies < unit.nonNullRecordCount && dies.add(locator)) { "physical DIE locator repeats or exceeds unit count" }
+        if (unit.observedDies == 0L) {
+            require(locator == unit.rootLocator && offset == unit.firstDieOffset && depth == 0 && parent == null) {
+                "physical compilation unit root is missing or inconsistent"
+            }
+        } else {
+            require(depth > 0 && depth <= unit.parents.size) { "physical DIE parent depth is inconsistent" }
+            val closures = unit.parents.size - depth
+            repeat(closures) { budget.work(); unit.parents.removeLast() }
+            require(parent == unit.parents.lastOrNull()) { "physical DIE parent is missing or inconsistent" }
+            requireNullBytes(offset - unit.previousEndOffset, closures.toLong())
+            unit.betweenNulls = Math.addExact(unit.betweenNulls, closures.toLong())
+        }
+        if (children) unit.parents.addLast(locator)
+        unit.observedDies++
+        unit.previousEndOffset = end
+        var previousOrdinal = -1L
+        for (element in array(record, "references")) {
+            budget.work()
+            val reference = obj(element)
+            exact(reference, PHYSICAL_REFERENCE_KEYS)
+            val ordinal = number(reference, "attributeOrdinal")
+            require(ordinal <= Int.MAX_VALUE && ordinal > previousOrdinal) { "physical reference attribute ordinals repeat or are reordered" }
+            previousOrdinal = ordinal
+            physicalOffset(reference, "attribute")
+            val declared = physicalOffset(reference, "declaredForm")
+            val resolved = physicalOffset(reference, "resolvedForm")
+            val operand = physicalHex(reference, "rawOperand")
+            val indirectDepth = number(reference, "indirectDepth")
+            require(if (declared == FULL_TREE_DW_FORM_INDIRECT) indirectDepth in 1L..4L else declared == resolved && indirectDepth == 0L) {
+                "physical reference declared and resolved forms differ"
+            }
+            require(resolved in PHYSICAL_REFERENCE_FORMS) { "physical reference uses a non-reference form" }
+            val maximumOperand = when (resolved) {
+                FULL_TREE_DW_FORM_REF1 -> 0xffUL
+                FULL_TREE_DW_FORM_REF2 -> 0xffffUL
+                FULL_TREE_DW_FORM_REF4, FULL_TREE_DW_FORM_REF_SUP4 -> 0xffffffffUL
+                else -> ULong.MAX_VALUE
+            }
+            require(operand <= maximumOperand) { "physical reference operand exceeds its form width" }
+            val target = nullableText(reference.getValue("targetLocator"))
+            val state = text(reference, "state")
+            val reasons = stringArray(reference, "reasons")
+            val unsupported = resolved in PHYSICAL_UNSUPPORTED_REFERENCE_FORMS
+            val derivedTarget = if (unsupported) null else referenceTarget(unit, resolved, operand)
+            require(target == derivedTarget) { "physical reference target differs from its form and operand" }
+            require(if (unsupported) state == "unsupported-reference" else if (target == null) state == "out-of-range-reference"
+                else state == "retained-target" || state == "missing-target") { "physical reference state differs from its form and range" }
+            require(reasons == (if (state == "retained-target") emptyList<String>() else listOf(state)) ||
+                state == "retained-target" && reasons == listOf("reference-cycle")) { "physical reference reasons differ from its state" }
+            when (state) {
+                "retained-target", "missing-target" -> {
+                    require(target != null && PHYSICAL_DIE_LOCATOR.matches(target)) { "physical reference target identity is missing or malformed" }
+                    if (state == "missing-target") require(reasons.isNotEmpty()) { "missing physical reference target has no reason" }
+                    targetStates[target] = (targetStates[target] ?: 0) or if (state == "retained-target") 1 else 2
+                }
+                "unsupported-reference", "out-of-range-reference" -> require(target == null && reasons.isNotEmpty()) {
+                    "unresolved physical reference has a target or no reason"
+                }
+                else -> inventoryFail("unsupported physical reference state")
+            }
+        }
+    }
+
+    private fun referenceTarget(unit: UnitState, form: Long, operand: ULong): String? {
+        if (operand > Long.MAX_VALUE.toULong()) return null
+        val raw = operand.toLong()
+        if (form != FULL_TREE_DW_FORM_REF_ADDR) {
+            if (raw > Long.MAX_VALUE - unit.compilationUnitOffset) return null
+            val offset = unit.compilationUnitOffset + raw
+            return if (offset in unit.firstDieOffset until unit.endOffset) dieLocator(unit.compilationUnitOffset, offset) else null
+        }
+        var low = 0
+        var high = unitOrder.lastIndex
+        while (low <= high) {
+            budget.work()
+            val middle = low + (high - low) / 2
+            val candidate = unitOrder[middle]
+            when {
+                raw < candidate.firstDieOffset -> high = middle - 1
+                raw >= candidate.endOffset -> low = middle + 1
+                else -> return dieLocator(candidate.compilationUnitOffset, raw)
+            }
+        }
+        return null
+    }
+
+    private fun finishUnit(unit: UnitState) {
+        require(unit.observedDies == unit.nonNullRecordCount) { "physical compilation unit DIE count differs from its records" }
+        require(unit.betweenNulls <= unit.nullRecordCount) { "physical compilation unit null count is inconsistent" }
+        val remaining = unit.nullRecordCount - unit.betweenNulls
+        require(remaining >= unit.parents.size.toLong()) { "physical compilation unit tree is unterminated" }
+        // The parser admits trailing null records and up to ten bytes per zero ULEB128 operand.
+        requireNullBytes(unit.endOffset - unit.previousEndOffset, remaining)
+        unit.parents.clear()
+    }
+
+    fun finish() {
+        currentUnit?.let(::finishUnit)
+        require(units.size.toLong() == expectedUnits && nextUnitOrdinal == units.size &&
+            dies.size.toLong() == expectedNonNulls && summedPhysical == expectedPhysical &&
+            summedNulls == expectedNulls && summedNonNulls == expectedNonNulls) { "physical census counts differ from its records" }
+        require(metadataCounts == (expectedUnits to expectedNonNulls)) { "raw metadata physical counts differ from the census" }
+        for ((target, states) in targetStates) {
+            budget.work()
+            require(states == if (target in dies) 1 else 2) { "physical reference state differs from target availability" }
+        }
+    }
+
+    private fun requireNullBytes(bytes: Long, count: Long) {
+        require(bytes >= count && bytes <= Math.multiplyExact(count, 10L)) { "physical DIE byte gaps differ from null-record counts" }
+    }
+}
 
 private class InventoryCounts {
     private val values = KEYS.associateWith { 0L }.toMutableMap()
@@ -504,7 +807,7 @@ private class InventoryCounts {
 
 private fun normalizeMetadata(raw: JsonObject): JsonObject {
     val required = setOf("schema", "inputSha256", "inputBytes", "elfType", "imageBase", "executableRanges", "dwarfPresent",
-        "recordCounts", "ordering", "objectLayout", "typeChildEncoding", "typePromotedFactFallbacks", "typePromotedFactRule")
+        "recordCounts", "ordering", "objectLayout", "typeChildEncoding", "typePromotedFactFallbacks", "typePromotedFactRule", "physicalCensus")
     require(raw.keys.containsAll(required)) { "raw metadata omits semantic observation fields" }
     val result = raw.filterKeys { it in required }.toMutableMap()
     result["objectLayout"] = raw.getValue("objectLayout").let { if (it == JsonNull) it else JsonObject(obj(it) - "scannedSymbols") }
@@ -596,11 +899,37 @@ private fun nullableText(value: JsonElement): String? {
 private fun stringArray(value: JsonObject, key: String): List<String> = array(value, key).map { nullableText(it) ?: inventoryFail("null string entry") }
 private fun number(value: JsonObject, key: String): Long = (value[key] as? JsonPrimitive)?.takeUnless { it.isString }?.longOrNull
     ?.takeIf { it >= 0 } ?: inventoryFail("expected nonnegative $key integer")
+private fun boolean(value: JsonObject, key: String): Boolean = (value[key] as? JsonPrimitive)?.takeUnless { it.isString }?.booleanOrNull
+    ?: inventoryFail("expected $key boolean")
+private fun physicalHex(value: JsonObject, key: String): ULong {
+    val encoded = text(value, key)
+    require(PHYSICAL_HEX.matches(encoded)) { "physical $key is not canonical hexadecimal" }
+    return encoded.removePrefix("0x").toULongOrNull(16) ?: inventoryFail("physical $key exceeds unsigned range")
+}
+private fun physicalOffset(value: JsonObject, key: String): Long = physicalHex(value, key).let {
+    require(it <= Long.MAX_VALUE.toULong()) { "physical $key exceeds offset range" }
+    it.toLong()
+}
+private fun unitLocator(offset: Long): String = ".debug_info:cu=0x${offset.toString(16)}"
+private fun dieLocator(unit: Long, offset: Long): String = "${unitLocator(unit)}:die=0x${offset.toString(16)}"
 private fun inventoryFail(message: String): Nothing = throw FullTreeControlException("DWARF observation inventory: $message")
 private val ROOT_KINDS = setOf("function-return", "function-parameter", "selected-parameter-unmatched", "variable")
 private val INVENTORY_SHA = Regex("[0-9a-f]{64}")
 private const val INVENTORY_COMMITMENT_ENCODING = "sha256-domain-kind-record-marker-u64be-length-canonical-json-end-marker-u64be-count-v1"
 private val MANIFEST_KEYS = setOf("schema", "scannerProducer", "rawRecordEncoding", "commitmentEncoding", "typeGraphScope", "inputs",
-    "requiredTypePopulationComplete", "rawCommitments", "inventoryCommitments", "counts", "inventorySha256")
+    "requiredTypePopulationComplete", "physicalCensus", "rawCommitments", "inventoryCommitments", "counts", "inventorySha256")
+private val PHYSICAL_CENSUS_KEYS = setOf("schema", "present", "complete", "scope", "compilationUnitCount", "physicalRecordCount",
+    "nullRecordCount", "nonNullRecordCount", "semanticPopulationComplete", "verificationBoundary")
+private val PHYSICAL_UNIT_KEYS = setOf("locator", "compilationUnitOffset", "firstDieOffset", "endOffset", "rootLocator",
+    "physicalRecordCount", "nullRecordCount", "nonNullRecordCount")
+private val PHYSICAL_DIE_KEYS = setOf("locator", "compilationUnitLocator", "offset", "endOffset", "tag", "category", "depth",
+    "parentLocator", "hasChildren", "references")
+private val PHYSICAL_REFERENCE_KEYS = setOf("attributeOrdinal", "attribute", "declaredForm", "resolvedForm", "indirectDepth",
+    "rawOperand", "targetLocator", "state", "reasons")
+private val PHYSICAL_UNSUPPORTED_REFERENCE_FORMS = setOf(FULL_TREE_DW_FORM_REF_SIG8, FULL_TREE_DW_FORM_REF_SUP4, FULL_TREE_DW_FORM_REF_SUP8)
+private val PHYSICAL_REFERENCE_FORMS = setOf(FULL_TREE_DW_FORM_REF_ADDR, FULL_TREE_DW_FORM_REF1, FULL_TREE_DW_FORM_REF2,
+    FULL_TREE_DW_FORM_REF4, FULL_TREE_DW_FORM_REF8, FULL_TREE_DW_FORM_REF_UDATA) + PHYSICAL_UNSUPPORTED_REFERENCE_FORMS
+private val PHYSICAL_HEX = Regex("0x(?:0|[1-9a-f][0-9a-f]{0,15})")
+private val PHYSICAL_DIE_LOCATOR = Regex("\\.debug_info:cu=0x(?:0|[1-9a-f][0-9a-f]{0,15}):die=0x(?:0|[1-9a-f][0-9a-f]{0,15})")
 private val INVENTORY_MANIFEST_LIMITS = StrictJsonLimits(maximumInputBytes = 1024 * 1024, maximumCanonicalBytes = 1024 * 1024,
     maximumNodes = 10_000, maximumStringBytes = 16_384, maximumTotalStringBytes = 512 * 1024)

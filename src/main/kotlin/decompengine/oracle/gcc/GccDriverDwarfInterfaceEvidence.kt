@@ -46,7 +46,7 @@ internal object GccDriverDwarfInterfaceEvidence {
     const val QUALIFICATION_NAME = "qualification.json"
     const val MAXIMUM_EVIDENCE_BYTES = 1024 * 1024
     internal val SHARD_LIMITS = BoundedDwarfShardLimits()
-    private val PART_KINDS = listOf("metadata", "functions", "types", "typeChildren", "globals", "objectSymbols",
+    private val PART_KINDS = listOf("metadata", "functions", "types", "typeChildren", "globals", "objectSymbols", "physicalUnits", "physicalDies",
         "strippedObjects", "projectedTypes", "projectedFunctions", "projectedGlobalTypes", "oracleFunctions", "unmatchedFunctions", "globalProjection") +
         BoundedDwarfObservationInventoryV1.RECORD_KINDS
     private const val PREFIX = "oracle/gcc/16.2.0/"
@@ -177,7 +177,7 @@ internal object GccDriverDwarfInterfaceEvidence {
             )
             val document = publication(documents, mapping, projection, globalProjection.summary,
                 globalProjection.configuration, strippedLayout, inventory.manifest)
-            val artifact = pack(document) { consume ->
+            val artifact = pack(document, authenticatedScan = facts) { consume ->
                 facts.visitCanonicalShards(consume)
                 val writer = BoundedDwarfCanonicalShardWriter(SHARD_LIMITS, consume)
                 writer.write("strippedObjects", strippedObjects.asSequence().map { it.toJson() })
@@ -191,6 +191,7 @@ internal object GccDriverDwarfInterfaceEvidence {
                 writer.finish()
                 inventory.visitCanonicalShards(consume)
             }
+            BoundedDwarfInterfaceFactScanner.verifyPhysicalCensus(guards.getValue("rich"), scratch, facts, CONTROL_LIMITS, checkpoint)
             checkpoint("before publishing checked GCC driver interfaces")
             guards.forEach { (role, guard) -> guard.verifyUnchanged("after GCC driver interface publication: $role") }
             return artifact
@@ -281,7 +282,7 @@ internal object GccDriverDwarfInterfaceEvidence {
                             globals: JsonObject, globalConfiguration: JsonObject,
                             strippedLayout: FullTreeElfObjectLayoutObservation,
                             inventory: JsonObject): JsonObject = JsonObject(linkedMapOf(
-        "schemaVersion" to JsonPrimitive(3), "provider" to JsonPrimitive("gcc-driver-dwarf-interface-evidence-v3"),
+        "schemaVersion" to JsonPrimitive(4), "provider" to JsonPrimitive("gcc-driver-dwarf-interface-evidence-v4"),
         "oracleId" to JsonPrimitive(ORACLE_ID), "sourceRevision" to JsonPrimitive(SOURCE_REVISION),
         "complete" to JsonPrimitive(false), "scored" to JsonPrimitive(false),
         "productionVerified" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
@@ -334,6 +335,7 @@ internal object GccDriverDwarfInterfaceEvidence {
 
     /** Pure integrity packer. Only capture authenticates checked input controls. */
     internal fun pack(document: JsonObject,
+                      authenticatedScan: BoundedDwarfInterfaceFacts? = null,
                       emit: ((String, Int, ByteArray, Int) -> Unit) -> Unit): GccDriverDwarfInterfaceArtifact {
         val parts = arrayListOf<Pair<String, ByteArray>>()
         val descriptors = arrayListOf<JsonObject>()
@@ -353,21 +355,22 @@ internal object GccDriverDwarfInterfaceEvidence {
         }
         val manifest = JsonObject(document + mapOf("parts" to JsonArray(descriptors)))
         val encoded = OracleJson.canonicalBytes(manifest, EVIDENCE_JSON_LIMITS)
-        verifyBundle(encoded, parts)
+        verifyBundle(encoded, parts, authenticatedScan)
         return GccDriverDwarfInterfaceArtifact(encoded, parts)
     }
 
     /** Validates exact canonical part order/completeness and all hashes; it grants no provenance. */
-    internal fun verifyBundle(manifestBytes: ByteArray, parts: List<Pair<String, ByteArray>>) {
+    internal fun verifyBundle(manifestBytes: ByteArray, parts: List<Pair<String, ByteArray>>,
+                              authenticatedScan: BoundedDwarfInterfaceFacts? = null) {
         val manifest = OracleJson.parseCanonical(manifestBytes, EVIDENCE_JSON_LIMITS).jsonObject
-        require(manifest["schemaVersion"] == JsonPrimitive(3) &&
-            manifest["provider"] == JsonPrimitive("gcc-driver-dwarf-interface-evidence-v3")) { "unsupported GCC interface bundle" }
+        require(manifest["schemaVersion"] == JsonPrimitive(4) &&
+            manifest["provider"] == JsonPrimitive("gcc-driver-dwarf-interface-evidence-v4")) { "unsupported GCC interface bundle" }
         for (flag in listOf("complete", "scored", "productionVerified", "releaseEligible")) {
             require(manifest[flag] == JsonPrimitive(false)) { "interface bundle claims unsupported authority" }
         }
-        val inventoryVerifier = BoundedDwarfObservationInventoryV1.verifier(
-            manifest.getValue("prePolicyInventory").jsonObject,
-        )
+        val inventoryManifest = manifest.getValue("prePolicyInventory").jsonObject
+        val inventoryVerifier = if (authenticatedScan == null) BoundedDwarfObservationInventoryV1.verifier(inventoryManifest)
+            else BoundedDwarfObservationInventoryV1.authenticatedVerifier(inventoryManifest, authenticatedScan)
         inventoryVerifier.acceptStrippedLayout(manifest["strippedObjectLayout"]?.takeUnless { it == JsonNull }?.jsonObject)
         val descriptors = manifest.getValue("parts").jsonArray
         require(descriptors.size == parts.size && parts.size <= SHARD_LIMITS.maximumShards) { "missing or unexpected interface parts" }
