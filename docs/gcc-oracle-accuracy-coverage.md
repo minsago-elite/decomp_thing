@@ -68,15 +68,17 @@ unresolved. The rules follow the
 [x86-64 psABI](https://gitlab.com/x86-psABIs/x86-64-ABI/-/raw/master/x86-64-ABI/low-level-sys-info.tex)
 and [DWARF 5](https://dwarfstd.org/doc/DWARF5.pdf).
 
-The projector identity is `dwarf-sysv-amd64-lp64-projection-v3`. This semantic
-correction rejects a complete aggregate when its byte size is not divisible by
-its explicit alignment, preserving the raw observation as unresolved ABI
-evidence. The rule profile records this in `aggregateRules` and is bound by
-SHA-256 `021b9e246e8c0cd250dbd660e03b0baba41338ba4c23e0fe4831fc11570c35df`.
-The evidence bundle schema and provider remain version 2 because their wire
-shape is unchanged. The pinned GCC census rows were unchanged by this
-correction; the projector version and rule-profile hash still identify the
-updated semantics.
+The projector identity is `dwarf-sysv-amd64-lp64-projection-v4`. It retains the
+v3 aggregate size/alignment check and also requires clean provenance for each
+selected parameter before projecting its type. A directly known type cannot
+override a cycle, tag mismatch or unsupported origin/specification reference
+in that parameter's provenance. The affected slot remains null with scoped
+reasons; independently proved arity, variadic state and other clean types are
+retained. The rule profile is bound by SHA-256
+`76387963923f75b839885d6ec13ba2cf25fb0770f3361d0be7585d3584223da1`.
+These semantic changes are versioned independently of the evidence bundle
+format. The historical v3 census counts below do not establish current v4
+counts; fresh retained-driver qualification and row reconciliation are required.
 
 Global candidates join retained ELF object observations using proved storage
 addresses or TLS offsets, sizes, and storage domains. Symbol names alone do
@@ -98,6 +100,35 @@ for promoted name, size, encoding, and type facts: a promoted field is
 omitted only when its full value and evidence equal that attribute. An
 explicit promoted field takes precedence, preserving differing or missing
 attributes without loss.
+
+The version 3 evidence bundle adds a `dwarf-pre-policy-inventory-v1` manifest
+and bounded observation-inventory shards. The manifest binds the checked
+input roles, scanner producer, raw record encoding and type-graph scope. Its
+independent SHA-256 commitment frames each canonical record with its kind,
+byte length and final record count, so it does not depend on shard boundaries
+or ABI projection results. Raw record publication is unchanged. Only semantic
+metadata participates in this commitment; operational scan counters and
+resource ceilings remain in the outer evidence without changing observation
+identity.
+
+The inventory retains every captured return type, candidate parameter-list
+type and variable type, including automatic locals and unresolved or deferred
+references. It also retains type and child type references, containing-type
+references, and physical type identities without deduplicating equal names or
+layouts. The reviewed function selections remain visible even when excluded
+or missing DWARF candidates. Cycle, missing-target, deferred-expansion and
+member-population findings stay explicit. Observed member counts are not
+required member cardinalities: `requiredMemberCardinality` is null, and both
+per-type completeness and `requiredTypePopulationComplete` remain false.
+
+Bundle verification checks closed schemas, stream order, input bindings,
+commitments and inventory counts. It does not authenticate the supplied
+manifest or independently rederive root/reference coverage from the raw
+streams. Recomputing a changed inventory produces a different identity that
+requires external authentication and review. This pre-policy checkpoint does
+not define admitted global/shared-type entities, fold aliases or declarations,
+prove member completeness, bind a recovered model, or replace the reviewed
+population ledger required before ABI scoring.
 
 The driver profile separately bounds the retained fact model at 1 GiB using
 fixed record/container allowances and UTF-16 string payload sizes. This is
@@ -179,9 +210,12 @@ types; 12,844 oracle functions; 2 unmatched functions; and 25,628 derived
 global-projection records.
 
 These are source-observation and projection counts, not recovered-accuracy
-scores. The reviewed function population is 12,844 oracle rows: 3,284 physical
-functions plus 9,560 explicit exclusions. Of the 3,284 physical functions,
-2,245 had observable source facts and 1,039 remained unresolved. The 24,231
+scores. The reviewed function population is 12,844 oracle rows: 3,284 scoreable
+physical functions plus 9,560 explicit exclusions. The exclusions comprise
+140 additional physical functions and 9,420 inline-only rows, so the total
+physical population is 3,424. Of the 3,284 scoreable physical functions,
+2,245 had fully observable neutral ABI projections and 1,039 remained
+unresolved; an unresolved projection can still contain known source facts. The 24,231
 `globals` rows are raw global observations; there is no reviewed global oracle
 denominator in this artifact, and neither these rows nor the derived
 `globalProjection` rows establish global recovery accuracy. The evidence does
@@ -192,12 +226,27 @@ No Actions workflow ran on merge SHA
 `378a2266ac4a793e5a8c23f740e95741c7326c54`. Its squash commit message
 inherited a `[skip ci]` directive, so the push event was skipped. The five
 workflow runs above and the GCC qualification artifact are pre-merge evidence;
-they are not post-merge checks. Post-merge verification remains pending until a
-normal, non-skipping default-branch push has completed on its exact resulting
-SHA. Record that SHA and its push run IDs here only after those runs complete;
-do not attribute them to `378a2266ac4a793e5a8c23f740e95741c7326c54`.
+they are not post-merge checks.
 
-Issue [#1463](https://github.com/minsago-elite/decomp_thing/issues/1463) tracks
-that post-merge boundary. This reference is documentation only; a native
-parent/sub-issue relationship has not been established. The evidence above
-does not close #692 or #876 and grants no production or release authority.
+The documentation-only follow-up merged as
+`ac6db9a13cc5c782a60a24f5dd2b6b4bc37bd3f4`, with implementation, tests,
+workflows and fixtures unchanged from `378a2266`. All five normal push
+workflows completed successfully on that exact later default-branch revision:
+
+| Workflow | Push run |
+| --- | ---: |
+| [Full CI](https://github.com/minsago-elite/decomp_thing/actions/runs/37147427536) | 37147427536 |
+| [Built-in core](https://github.com/minsago-elite/decomp_thing/actions/runs/37147427585) | 37147427585 |
+| [ACP contract](https://github.com/minsago-elite/decomp_thing/actions/runs/37147427530) | 37147427530 |
+| [LLVM oracle](https://github.com/minsago-elite/decomp_thing/actions/runs/37147427576) | 37147427576 |
+| [GCC oracle](https://github.com/minsago-elite/decomp_thing/actions/runs/37147427554) | 37147427554 |
+
+The opt-in retained-driver capture was skipped on that push. Its retained
+qualification remains the separate candidate/producer artifact recorded
+above. No checks are attributed to the original skipped merge `378a2266`.
+
+Issue [#1464](https://github.com/minsago-elite/decomp_thing/issues/1464) records
+this completed post-merge verification boundary; the function-census foundation
+is tracked separately by [#1463](https://github.com/minsago-elite/decomp_thing/issues/1463).
+These references do not establish a native parent/sub-issue relationship. The
+evidence does not close #692 or #876 and grants no production or release authority.

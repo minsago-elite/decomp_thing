@@ -17,6 +17,36 @@ import kotlin.test.assertTrue
 
 class BoundedDwarfInterfaceTypesTest {
     @Test
+    fun `wide data16 layout constants remain exact source facts and unsupported ABI layouts`(): Unit =
+        inInterfaceFixtureDirectory { root ->
+            val minimumWide = ByteArray(8) + fixed(1, 8)
+            val maximum = ByteArray(16) { 0xff.toByte() }
+            val fixture = typeElf(
+                emitted("wideEntry", "wide"),
+                emitted("maximumEntry", "maximum", 1),
+                emitted("followingEntry", "int", 2),
+                die("wide", 0x24, listOf(raw(0x0b, FULL_TREE_DW_FORM_DATA16, minimumWide), number(0x3e, 5))),
+                die("maximum", 0x24, listOf(raw(0x0b, FULL_TREE_DW_FORM_INDIRECT,
+                    uleb(FULL_TREE_DW_FORM_DATA16) + maximum), number(0x3e, 5))),
+                integerType(),
+                version = 5,
+            )
+            val facts = scan(root, fixture)
+            known(facts.types.getValue(fixture.locator("wide")).byteSize, "18446744073709551616")
+            known(facts.types.getValue(fixture.locator("maximum")).byteSize,
+                "340282366920938463463374607431768211455")
+            val projected = DwarfSysvAmd64InterfaceProjection.project(facts, target()).functions
+                .associateBy { it.locator }
+            for ((entry, reason) in listOf("wideEntry" to "numeric-fact-out-of-range",
+                "maximumEntry" to "invalid-or-oversized-numeric-fact")) {
+                val result = requireNotNull(projected.getValue(fixture.locator(entry)).returnType)
+                assertFalse(result.observable)
+                assertTrue(reason in result.reasons)
+            }
+            assertEquals(true, projected.getValue(fixture.locator("followingEntry")).returnType?.observable)
+        }
+
+    @Test
     fun `imported declarations retain member and subprogram references without expanding their targets`(): Unit =
         inInterfaceFixtureDirectory { root ->
             val fixture = typeElf(

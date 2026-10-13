@@ -419,6 +419,40 @@ class BoundedDwarfGlobalSyntheticFactsTest {
         }
 
     @Test
+    fun `wide data16 global constants retain exact facts and allow subsequent capture`(): Unit =
+        inInterfaceFixtureDirectory { root ->
+            val minimumWide = ByteArray(8) + fixed(1, 8)
+            val maximum = ByteArray(16) { 0xff.toByte() }
+            val fixture = typeElf(
+                variable("wideDeclaration", listOf(flag(0x3c), raw(0x0b, FULL_TREE_DW_FORM_DATA16, minimumWide))),
+                variable("wide", listOf(reference(0x47, "wideDeclaration"),
+                    raw(0x1c, FULL_TREE_DW_FORM_DATA16, minimumWide))),
+                variable("indirectWide", listOf(raw(0x1c, FULL_TREE_DW_FORM_INDIRECT,
+                    uleb(FULL_TREE_DW_FORM_DATA16) + maximum))),
+                variable("following", listOf(number(0x1c, 7), absoluteLocation(0x400180))),
+                emitted("followingFunction", "int"),
+                integerType(),
+                version = 5,
+            )
+            val facts = scan(root, fixture)
+            assertEquals(4, facts.globals.size)
+            for ((label, decimal) in listOf("wide" to "18446744073709551616",
+                "indirectWide" to "340282366920938463463374607431768211455")) {
+                val constant = facts.global(fixture, label).constant
+                known(constant, "unsigned:$decimal")
+                assertEquals(listOf("${fixture.locator(label)}:attribute=0x1c"), constant.evidence)
+                assertTrue(constant.reasons.isEmpty())
+            }
+            known(facts.global(fixture, "wide").byteSize, "18446744073709551616")
+            assertEquals(listOf("${fixture.locator("wideDeclaration")}:attribute=0xb"),
+                facts.global(fixture, "wide").byteSize.evidence)
+            known(facts.global(fixture, "following").constant, "unsigned:7")
+            known(facts.global(fixture, "following").address, "0x400180")
+            assertEquals(fixture.locator("followingFunction"), facts.functions.single().locator)
+            known(facts.types.getValue(fixture.locator("int")).byteSize, "4")
+        }
+
+    @Test
     fun `explicit variable attributes are retained as source facts`(): Unit =
         inInterfaceFixtureDirectory { root ->
             val fixture = typeElf(variable("object", listOf(text(0x6e, "object_symbol"), flag(0x3f), flag(0x34),

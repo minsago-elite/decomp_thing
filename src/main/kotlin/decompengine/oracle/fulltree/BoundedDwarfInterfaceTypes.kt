@@ -460,6 +460,7 @@ internal class BoundedDwarfInterfaceTypeResolver(
         }
         val value = when (raw) {
             is FullTreeDwarfUnsignedConstantValue -> raw.rawValue.toString()
+            is FullTreeDwarfWideUnsignedConstantValue -> raw.rawValue.toString()
             is FullTreeDwarfSignedConstantValue -> raw.rawValue.toString()
             is FullTreeDwarfNumericValue -> if (attribute.declaredForm in TYPE_NUMERIC_CONSTANT_FORMS) {
                 raw.value.toString()

@@ -1,6 +1,7 @@
 package decompengine.oracle.fulltree
 
 import java.io.InputStream
+import java.math.BigInteger
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.channels.FileChannel
@@ -352,6 +353,17 @@ internal data class FullTreeDwarfUnsignedConstantValue(
     override val indirectDepth: Int,
 ) : FullTreeDwarfUnsignedFormValue, FullTreeDwarfConstantValue
 
+/** DATA16 constants beyond ULong remain source evidence, never machine addresses. */
+internal data class FullTreeDwarfWideUnsignedConstantValue(
+    override val resolvedForm: Long,
+    val rawValue: BigInteger,
+    override val indirectDepth: Int,
+) : FullTreeDwarfConstantValue {
+    init {
+        require(resolvedForm == FULL_TREE_DW_FORM_DATA16 && rawValue.signum() >= 0 && rawValue.bitLength() in 65..128)
+    }
+}
+
 internal data class FullTreeDwarfSignedConstantValue(
     override val resolvedForm: Long,
     val rawValue: Long,
@@ -566,7 +578,12 @@ internal object FullTreeDwarfForms {
             FULL_TREE_DW_FORM_STRP_SUP, FULL_TREE_DW_FORM_GNU_STRP_ALT ->
                 FullTreeDwarfUnsupportedExternalStringValue.also { cursor.skip(offsetSize.toLong()) }
             FULL_TREE_DW_FORM_DATA16 -> if (context == FullTreeDwarfFormContext.CONSTANT || context == FullTreeDwarfFormContext.DATA_VALUE) {
-                FullTreeDwarfUnsignedConstantValue(form, cursor.readData16(), indirectDepth)
+                val raw = cursor.readData16()
+                if (raw.bitLength() <= 64) {
+                    FullTreeDwarfUnsignedConstantValue(form, raw.toLong().toULong(), indirectDepth)
+                } else {
+                    FullTreeDwarfWideUnsignedConstantValue(form, raw, indirectDepth)
+                }
             } else {
                 cursor.skip(16L).let { FullTreeDwarfIgnoredValue }
             }
@@ -1470,8 +1487,16 @@ internal class FullTreeDwarfSectionCursor(
         return readWideUnsigned(width, "address")
     }
 
-    /** Reads DW_FORM_data16 through the CU byte order, rejecting a nonzero high half. */
-    fun readData16(): ULong = readWideUnsigned(16, "DW_FORM_data16")
+    /** Reads exactly 128 unsigned bits through the CU byte order without an address-width cast. */
+    fun readData16(): BigInteger {
+        requireAvailable(16L)
+        val bigEndianBytes = ByteArray(16) { index ->
+            val sourceIndex = if (section.byteOrder == ByteOrder.LITTLE_ENDIAN) 15 - index else index
+            section.byte(position + sourceIndex).toByte()
+        }
+        position += 16L
+        return BigInteger(1, bigEndianBytes)
+    }
 
     private fun readWideUnsigned(width: Int, description: String): ULong {
         requireAvailable(width.toLong())
