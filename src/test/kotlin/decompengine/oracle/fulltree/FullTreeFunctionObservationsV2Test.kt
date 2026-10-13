@@ -7,6 +7,7 @@ import decompengine.oracle.core.OracleSchemas
 import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
+import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import kotlin.test.Test
@@ -25,6 +26,224 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 class FullTreeFunctionObservationsV2Test {
+    @Test
+    fun `raw v2 rederivation rejects template merging splitting inline conflation and pattern promotion`() =
+        inControlTemporaryDirectory { root ->
+            val compilerFixture = FullTreeSourceEntityIdentityProducerTest()
+            val controls = createFullTreeControlFixture(root.resolve("control"))
+            val build = privateDirectory(root.resolve("compiled"))
+            val artifact = compilerFixture.compileFixture(
+                compilerFixture.resolveCompiler("GXX", listOf("g++", "g++-14", "g++-13")),
+                Path.of("src/test/resources/oracle/inline-template-identity-v1").toAbsolutePath().normalize(),
+                build,
+                optimization = 2,
+            )
+            val scope = compilerFixture.scopeForArtifact(controls.authenticatedScope(), fixtureSha256(artifact), Files.size(artifact))
+            val inventoryPath = build.resolve("inventory.json")
+            FullTreeInventoryControl.generateAndPublish(artifact, scope, inventoryPath, maximumWorkers = 1)
+            val scratch = privateDirectory(root.resolve("scratch"))
+            val publication = FullTreeFunctionObservationV2RunPublisher.generateAndPublish(
+                artifact, inventoryPath, scope, scratch, privateDirectory(root.resolve("output")).resolve("run"),
+                maximumWorkers = 1,
+            )
+            val validated = FullTreeFunctionObservationV2RunPublisher.loadAndValidate(
+                publication.binding.root, publication.binding.indexArtifactSha256, artifact, inventoryPath, scope, scratch,
+            )
+            assertEquals(publication.binding.outputs, validated.binding.outputs, "authentic positive must rederive")
+            val rawSha256 = fixtureSha256(artifact)
+            val inventorySha256 = fixtureSha256(inventoryPath)
+            val inventory = parseControlObject(inventoryPath)
+            val shardInputs = FullTreeFunctionObservations.shardInputs(inventory, inventorySha256, scope.document, scope.sha256)
+                .associateBy { it.identifier }
+            val documents = publication.binding.outputs.associate { output ->
+                output.shardId to parseControlObject(publication.binding.root.resolve("outputs/${output.shardId}.json"))
+            }
+            val factsByShard = documents.mapValues { (_, document) ->
+                document.getValue("sourceEntities").jsonArray.map { FullTreeSourceEntityFact.fromCanonicalJson(it.jsonObject) }
+            }
+            val allFacts = factsByShard.values.flatten()
+            val (shardId, facts) = factsByShard.entries.firstOrNull { (_, rows) ->
+                rows.any { it.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE &&
+                    it.semanticAnchorFields?.sourceName == "template_pattern<int>" && it.linkedEmittedRva != null } &&
+                    rows.any { it.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE &&
+                        it.semanticAnchorFields?.sourceName?.startsWith("template_pattern<long") == true }
+            } ?: throw AssertionError("real fixture must retain int and long instances in one shard")
+            val document = documents.getValue(shardId)
+            val intInstance = facts.first { it.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE &&
+                it.semanticAnchorFields?.sourceName == "template_pattern<int>" && it.linkedEmittedRva != null }
+            val longInstance = facts.first { it.kind == FullTreeSourceEntityKind.TEMPLATE_INSTANCE &&
+                it.semanticAnchorFields?.sourceName?.startsWith("template_pattern<long") == true &&
+                it.semanticAnchorCandidateId != null }
+            val intFields = requireNotNull(intInstance.semanticAnchorFields)
+            val longFields = requireNotNull(longInstance.semanticAnchorFields)
+            assertTrue(intFields.isComplete(FullTreeSourceAnchorKind.TEMPLATE_INSTANCE))
+            assertTrue(longFields.isComplete(FullTreeSourceAnchorKind.TEMPLATE_INSTANCE))
+            assertTrue(intFields.templateActualArguments.orEmpty().isNotEmpty())
+            assertTrue(longFields.templateActualArguments.orEmpty().isNotEmpty())
+            assertNotEquals(intFields.templateActualArguments, longFields.templateActualArguments)
+            assertNotEquals(intFields.signature, longFields.signature)
+            assertNotEquals(intInstance.semanticAnchorCandidateId, longInstance.semanticAnchorCandidateId)
+            listOf(intInstance, longInstance).forEach {
+                assertEquals(null, it.semanticAnchorFields?.templatePatternAnchorCandidateId)
+                assertEquals(null, it.resolvedSemanticIdentityId)
+                assertTrue("unknown-template-pattern-reference" in it.reasonCodes)
+            }
+
+            fun documentWithRows(base: JsonObject, rows: List<JsonObject>): JsonObject {
+                val counts = JsonObject(base.controlObject("counts").toMutableMap().apply {
+                    put("sourceEntities", JsonPrimitive(rows.size))
+                    listOf(
+                        "sourceEntitiesByKind" to ("entityKind" to FullTreeSourceEntityKind.entries.map { it.wireValue }),
+                        "sourceEntitiesByObservability" to ("identityObservability" to FullTreeIdentityObservability.entries.map { it.wireValue }),
+                        "sourceEntitiesByDenominatorDisposition" to ("denominatorDisposition" to FullTreeDenominatorDisposition.entries.map { it.wireValue }),
+                    ).forEach { (key, fieldAndValues) ->
+                        val (field, values) = fieldAndValues
+                        put(key, JsonObject(values.associateWith { value -> JsonPrimitive(rows.count { it.controlString(field) == value }) }))
+                    }
+                })
+                return JsonObject(base.toMutableMap().apply {
+                    put("sourceEntities", JsonArray(rows))
+                    put("counts", counts)
+                })
+            }
+
+            fun rejectTransportValidCandidate(name: String, candidateDocument: JsonObject) {
+                OracleSchemas.validate(FullTreeFunctionObservationsV2.SCHEMA_NAME, candidateDocument)
+                val bytes = FullTreeFunctionObservationsV2.canonicalEnvelopeBytes(candidateDocument)
+                assertEquals(candidateDocument, OracleJson.parseCanonical(bytes), name)
+                assertEquals(v1ProjectionForCompose(document), v1ProjectionForCompose(candidateDocument),
+                    "$name must preserve every emitted/non-emitted row and denominator count")
+                val prepared = privateDirectory(root.resolve("$name-prepared"))
+                val outputs = publication.binding.outputs.map { output ->
+                    val outputBytes = if (output.shardId == shardId) bytes else
+                        Files.readAllBytes(publication.binding.root.resolve("outputs/${output.shardId}.json"))
+                    val path = prepared.resolve("${output.shardId}.json")
+                    Files.write(path, outputBytes)
+                    Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("r--------"))
+                    val entities = if (output.shardId == shardId) listOf("emitted", "nonEmitted", "sourceEntities")
+                        .sumOf { candidateDocument.getValue(it).jsonArray.size.toLong() } else output.entities
+                    BoundedShardPreparedOutput(output.shardId, output.inputSha256, path,
+                        OracleArtifacts.sha256(outputBytes), outputBytes.size.toLong(), entities)
+                }
+                val candidate = BoundedShardRunPublisher.publish(
+                    target = privateDirectory(root.resolve("$name-parent")).resolve("run"),
+                    runId = publication.binding.run.controlString("id"),
+                    preparedOutputs = outputs,
+                    bounds = boundedRunBounds(publication.binding.run.controlObject("bounds")),
+                    semanticValidator = BoundedShardOutputSemanticValidator {},
+                )
+                val transport = BoundedShardRunVerifier.verify(candidate.root, candidate.indexArtifactSha256)
+                assertEquals(candidate.outputs, transport.outputs, "$name has freshly authenticated transport receipts")
+                assertNotEquals(publication.binding.indexArtifactSha256, candidate.indexArtifactSha256, name)
+                val rejection = assertFailsWith<FullTreeFunctionObservationV2RunException>(name) {
+                    FullTreeFunctionObservationV2RunPublisher.loadAndValidate(
+                        candidate.root, candidate.indexArtifactSha256, artifact, inventoryPath, scope, scratch,
+                    )
+                }
+                assertEquals("observation-v2 run differs from independent raw-input rederivation", rejection.message, name)
+                assertEquals(rawSha256, fixtureSha256(artifact), name)
+                assertEquals(inventorySha256, fixtureSha256(inventoryPath), name)
+                candidate.outputs.forEach { output ->
+                    assertEquals(output.outputSha256, fixtureSha256(candidate.root.resolve("outputs/${output.shardId}.json")), name)
+                }
+                assertTrue(Files.list(scratch).use { it.findAny().isEmpty }, "$name cleans rederivation scratch")
+            }
+
+            fun rejectChangedFacts(name: String, changed: List<FullTreeSourceEntityFact>) {
+                val ordered = FullTreeSourceEntityFact.deterministicOrder(changed)
+                assertEquals(ordered.size, ordered.map { it.physicalDie }.distinct().size, name)
+                ordered.forEach { assertEquals(it.canonicalJson(), FullTreeSourceEntityFact.fromCanonicalJson(it.canonicalJson()).canonicalJson(), name) }
+                val candidate = documentWithRows(document, ordered.map { it.canonicalJson() })
+                val composition = assertFailsWith<FullTreeFunctionObservationV2Exception>(name) {
+                    FullTreeFunctionObservationsV2.composeEnvelope(v1ProjectionForCompose(document), ordered,
+                        publication.reconciliation, FullTreeFunctionObservationsV2.MAXIMUM_CANONICAL_BYTES)
+                }
+                assertTrue(composition.message.orEmpty().contains("authenticated scan receipt"), "$name: ${composition.message}")
+                val validation = assertFailsWith<FullTreeFunctionObservationV2Exception>(name) {
+                    FullTreeFunctionObservationsV2.validateEnvelope(candidate, scope, inventory, inventorySha256,
+                        shardInputs.getValue(shardId), publication.reconciliation)
+                }
+                assertTrue(validation.message.orEmpty().contains("authenticated scan receipt"), "$name: ${validation.message}")
+                rejectTransportValidCandidate(name, candidate)
+            }
+
+            // Substitute the complete int tuple for the long tuple while retaining both physical
+            // census rows. The recomputed candidate now merges two authentically distinct types.
+            val mergedLong = longInstance.copy(semanticAnchorFields = intFields,
+                semanticAnchorCandidateId = intFields.candidateId(FullTreeSourceAnchorKind.TEMPLATE_INSTANCE))
+            assertEquals(intInstance.semanticAnchorCandidateId, mergedLong.semanticAnchorCandidateId)
+            assertNotEquals(intInstance.sourceEntityId, mergedLong.sourceEntityId)
+            rejectChangedFacts("int-long-merge", facts.map { if (it.sourceEntityId == longInstance.sourceEntityId) mergedLong else it })
+
+            // Forge a second template claim on a real, resolved type DIE, not a second compiler
+            // instance. Preserve the original verified instance and give the clone a distinct ID.
+            val splitPhysical = intInstance.edges.asSequence().filter {
+                it.kind == FullTreeSourceIdentityEdgeKind.TYPE && it.state == FullTreeSourceIdentityEdgeState.RESOLVED
+            }.mapNotNull { it.target }.firstOrNull { target ->
+                target.unitId == intInstance.physicalDie.unitId && allFacts.none { it.physicalDie == target }
+            } ?: throw AssertionError("verified instance must reference a real type DIE outside the census")
+            val split = intInstance.copy(sourceEntityId = splitPhysical.sourceEntityId(intInstance.kind), physicalDie = splitPhysical,
+                edges = intInstance.edges.map { edge ->
+                    FullTreeSourceIdentityEdge(edge.kind, if (edge.source == intInstance.physicalDie) splitPhysical else edge.source,
+                        edge.target, edge.referenceForm, edge.rawReference, edge.state, edge.reasonCode)
+                })
+            assertNotEquals(intInstance.sourceEntityId, split.sourceEntityId)
+            assertEquals(intInstance.semanticAnchorCandidateId, split.semanticAnchorCandidateId)
+            assertEquals(intInstance.linkedEmittedRva, split.linkedEmittedRva)
+            val splitFacts = facts + split
+            assertEquals(facts.size + 1, splitFacts.size)
+            assertTrue(splitFacts.any { it === intInstance })
+            rejectChangedFacts("instance-split", splitFacts)
+
+            val inlineSites = facts.filter { it.kind == FullTreeSourceEntityKind.INLINE_INSTANCE &&
+                it.semanticAnchorFields?.isComplete(FullTreeSourceAnchorKind.INLINE_INSTANCE) == true }
+            val sitePair = inlineSites.asSequence().flatMap { first -> inlineSites.asSequence().map { first to it } }
+                .firstOrNull { (first, second) ->
+                    val a = requireNotNull(first.semanticAnchorFields)
+                    val b = requireNotNull(second.semanticAnchorFields)
+                    first.sourceEntityId != second.sourceEntityId && a.inlineCalleeAnchorCandidateId == b.inlineCalleeAnchorCandidateId &&
+                        a.inlineOwnerAnchorCandidateId == b.inlineOwnerAnchorCandidateId && a.inlineCallFile == b.inlineCallFile &&
+                        a.inlineCallLine == b.inlineCallLine && a.inlineCallColumn != b.inlineCallColumn &&
+                        a.inlinePathAnchorCandidateIds == b.inlinePathAnchorCandidateIds
+                } ?: throw AssertionError("compiler fixture must retain two distinct calls on one source line")
+            val (firstSite, secondSite) = sitePair
+            assertNotEquals(firstSite.semanticAnchorCandidateId, secondSite.semanticAnchorCandidateId)
+            val conflatedFields = copyAnchorFields(requireNotNull(secondSite.semanticAnchorFields),
+                authenticatedFileSha256 = null, inlineCallColumn = firstSite.semanticAnchorFields?.inlineCallColumn)
+            val conflated = secondSite.copy(semanticAnchorFields = conflatedFields,
+                semanticAnchorCandidateId = conflatedFields.candidateId(FullTreeSourceAnchorKind.INLINE_INSTANCE))
+            assertEquals(firstSite.semanticAnchorCandidateId, conflated.semanticAnchorCandidateId)
+            assertEquals(secondSite.edges, conflated.edges, "callee and owner evidence stays intact; only the call column changes")
+            rejectChangedFacts("inline-site-conflation", facts.map { if (it.sourceEntityId == secondSite.sourceEntityId) conflated else it })
+
+            // No generic pattern is claimed to exist in this compiler fixture. This independent
+            // positive contract fixture proves pattern non-scoreability before its promotion.
+            val patternFields = copyAnchorFields(intFields, authenticatedFileSha256 = null,
+                templateFormalParameters = listOf("type-parameter:T"), templateActualArguments = null)
+            val pattern = fact(intInstance.physicalDie, FullTreeSourceEntityKind.TEMPLATE_PATTERN,
+                FullTreeIdentityObservability.OBSERVABLE, FullTreeDenominatorDisposition.NON_SCOREABLE, patternFields)
+            val patternIndex = FullTreeFunctionObservationV2AnchorIndex(100, 1_000_000)
+            patternIndex.accept(FullTreeSourceAnchorKind.TEMPLATE_PATTERN, requireNotNull(pattern.semanticAnchorCandidateId), pattern.sourceEntityId)
+            patternIndex.acceptSourceEntityPopulation(shardId, listOf(pattern))
+            val patternReconciliation = patternIndex.reconciliation()
+            val positivePattern = FullTreeFunctionObservationsV2.composeEnvelope(v1ProjectionForCompose(document), listOf(pattern),
+                patternReconciliation, FullTreeFunctionObservationsV2.MAXIMUM_CANONICAL_BYTES)
+            FullTreeFunctionObservationsV2.validateEnvelope(positivePattern, scope, inventory, inventorySha256,
+                shardInputs.getValue(shardId), patternReconciliation)
+            val realRva = requireNotNull(intInstance.linkedEmittedRva)
+            assertTrue(document.getValue("emitted").jsonArray.any { it.jsonObject.controlString("rva") == realRva })
+            assertFailsWith<IllegalArgumentException> {
+                pattern.copy(denominatorDisposition = FullTreeDenominatorDisposition.EMITTED_RVA_LINK, linkedEmittedRva = realRva)
+            }
+            val promoted = JsonObject(pattern.canonicalJson().toMutableMap().apply {
+                put("denominatorDisposition", JsonPrimitive(FullTreeDenominatorDisposition.EMITTED_RVA_LINK.wireValue))
+                put("linkedEmittedRva", JsonPrimitive(realRva))
+            })
+            assertEquals(setOf("denominatorDisposition", "linkedEmittedRva"),
+                promoted.keys.filter { promoted[it] != pattern.canonicalJson()[it] }.toSet())
+            rejectTransportValidCandidate("pattern-promotion", documentWithRows(positivePattern, listOf(promoted)))
+        }
+
     @Test
     fun `prepared shard rehash checkpoints between bounded chunks and cooperates with cancellation`() =
         inControlTemporaryDirectory { root ->
@@ -2986,6 +3205,9 @@ class FullTreeFunctionObservationsV2Test {
         authenticatedFileSha256: String?,
         inlineCalleeAnchorCandidateId: String? = fields.inlineCalleeAnchorCandidateId,
         sourceName: String? = fields.sourceName,
+        inlineCallColumn: Long? = fields.inlineCallColumn,
+        templateFormalParameters: List<String>? = fields.templateFormalParameters,
+        templateActualArguments: List<String>? = fields.templateActualArguments,
     ) = FullTreeSourceAnchorFields(
         sourcePath = fields.sourcePath,
         declarationFileIndex = fields.declarationFileIndex,
@@ -2995,14 +3217,14 @@ class FullTreeFunctionObservationsV2Test {
         lexicalContext = fields.lexicalContext,
         sourceName = sourceName,
         signature = fields.signature,
-        templateFormalParameters = fields.templateFormalParameters,
+        templateFormalParameters = templateFormalParameters,
         templatePatternAnchorCandidateId = fields.templatePatternAnchorCandidateId,
-        templateActualArguments = fields.templateActualArguments,
+        templateActualArguments = templateActualArguments,
         inlineCalleeAnchorCandidateId = inlineCalleeAnchorCandidateId,
         inlineOwnerAnchorCandidateId = fields.inlineOwnerAnchorCandidateId,
         inlineCallFile = fields.inlineCallFile,
         inlineCallLine = fields.inlineCallLine,
-        inlineCallColumn = fields.inlineCallColumn,
+        inlineCallColumn = inlineCallColumn,
         inlinePathAnchorCandidateIds = fields.inlinePathAnchorCandidateIds,
         authenticatedSourceRevision = fields.authenticatedSourceRevision,
         authenticatedSourceFileSha256 = authenticatedFileSha256,

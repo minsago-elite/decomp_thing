@@ -1219,7 +1219,8 @@ class FullTreeSourceEntityIdentityProducerTest {
         }
     }
 
-    private fun compileFixture(compiler: Path, fixture: Path, output: Path, optimization: Int): Path {
+    // Shared by the V2 adversarial publication controls: use the same real compiler inputs.
+    internal fun compileFixture(compiler: Path, fixture: Path, output: Path, optimization: Int): Path {
         val objects = listOf("caller_one", "caller_two", "instantiate", "unique_pattern").map { name ->
             val target = output.resolve("$name.o")
             runCommand(
@@ -1251,7 +1252,7 @@ class FullTreeSourceEntityIdentityProducerTest {
         return artifact
     }
 
-    private fun resolveCompiler(environmentName: String, candidates: List<String>): Path =
+    internal fun resolveCompiler(environmentName: String, candidates: List<String>): Path =
         resolveCompilerOrNull(System.getenv(environmentName)?.takeIf(String::isNotBlank)?.let(::listOf) ?: candidates)
             ?: throw AssertionError("required fixture compiler $environmentName is unavailable; tried ${candidates.joinToString()}")
 
@@ -1289,7 +1290,7 @@ class FullTreeSourceEntityIdentityProducerTest {
         Regex("DW_AT_name\\s*:[^\\n]*:\\s*${Regex.escape(namePrefix)}(?:>|[ \\t]|$)")
             .containsMatchIn(dwarfShape)
 
-    private fun scopeForArtifact(
+    internal fun scopeForArtifact(
         original: AuthenticatedFullTreeScope,
         artifactSha256: String,
         artifactBytes: Long,
