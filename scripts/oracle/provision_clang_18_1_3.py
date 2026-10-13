@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import contextlib
+import fcntl
 import gzip
 import hashlib
 import io
@@ -95,6 +97,42 @@ ALLOWED_REDIRECT_HOSTS = {
     "objects.githubusercontent.com",
     "release-assets.githubusercontent.com",
 }
+REVIEWED_RELEVANT_FILES = (
+    "clang/include/clang/Basic/LangOptions.def",
+    "clang/include/clang/Basic/LangOptions.h",
+    "clang/include/clang/Basic/CommentOptions.h",
+    "clang/include/clang/Basic/Specifiers.h",
+    "clang/include/clang/Basic/Features.def",
+    "clang/include/clang/Basic/TargetInfo.h",
+    "clang/include/clang/Driver/Options.td",
+    "clang/include/clang/Driver/Options.h",
+    "clang/include/clang/Frontend/CompilerInvocation.h",
+    "clang/include/clang/Frontend/CompilerInstance.h",
+    "clang/include/clang/Tooling/Tooling.h",
+    "clang/include/clang/AST/ASTContext.h",
+    "clang/include/clang/AST/Decl.h",
+    "clang/include/clang/AST/DeclTemplate.h",
+    "clang/include/clang/AST/RecursiveASTVisitor.h",
+    "clang/include/clang/AST/TemplateBase.h",
+    "clang/include/clang/AST/Type.h",
+    "clang/include/clang/Lex/Lexer.h",
+    "clang/include/clang/Lex/PPCallbacks.h",
+    "clang/include/clang/Lex/Preprocessor.h",
+    "clang/include/clang/Lex/MacroInfo.h",
+    "clang/lib/Basic/TargetInfo.cpp",
+    "clang/lib/Driver/Driver.cpp",
+    "clang/lib/Driver/ToolChains/Clang.cpp",
+    "clang/lib/Frontend/CompilerInvocation.cpp",
+    "clang/lib/Frontend/CompilerInstance.cpp",
+    "clang/lib/Tooling/Tooling.cpp",
+    "clang/lib/AST/ASTContext.cpp",
+    "clang/lib/AST/DeclTemplate.cpp",
+    "clang/lib/Lex/Lexer.cpp",
+    "clang/lib/Lex/PPDirectives.cpp",
+    "clang/lib/Lex/PPMacroExpansion.cpp",
+    "clang/lib/Lex/Preprocessor.cpp",
+    "clang/lib/Sema/SemaTemplate.cpp",
+)
 
 
 class ProvisionError(RuntimeError):
@@ -130,9 +168,79 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def recipe_identity(contract_path: Path = CONTRACT_PATH) -> dict[str, str]:
+def read_regular_evidence(path: Path, maximum_bytes: int = MAX_SINGLE_DOWNLOAD) -> bytes:
+    """Read one regular descriptor into immutable bytes, with a strict read cap."""
+    try:
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        with os.fdopen(os.open(path, flags), "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ProvisionError(f"evidence input is not a regular file: {path}")
+            payload = stream.read(maximum_bytes + 1)
+    except OSError as error:
+        raise ProvisionError(f"could not read regular evidence input: {path}: {error}") from error
+    if len(payload) > maximum_bytes:
+        raise ProvisionError(f"evidence input exceeds its byte budget: {path}")
+    return payload
+
+
+def captured_evidence(path: Path, captured: dict[Path, bytes] | None,
+                      maximum_bytes: int = MAX_SINGLE_DOWNLOAD) -> bytes:
+    if captured is None:
+        return read_regular_evidence(path, maximum_bytes)
+    if path not in captured:
+        payload = read_regular_evidence(path, maximum_bytes)
+        if len(payload) + sum(len(value) for value in captured.values()) > MAX_DOWNLOAD_BYTES:
+            raise ProvisionError("captured provenance metadata exceeds its cumulative byte budget")
+        captured[path] = payload
+    if len(captured[path]) > maximum_bytes:
+        raise ProvisionError(f"evidence input exceeds its byte budget: {path}")
+    return captured[path]
+
+
+def verify_regular_evidence_identity(path: Path, expected_bytes: int, expected_sha256: str) -> None:
+    if (type(expected_bytes) is not int or expected_bytes < 0 or expected_bytes > MAX_SINGLE_DOWNLOAD or
+            not isinstance(expected_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None):
+        raise ProvisionError("authenticated evidence byte identity is malformed or exceeds its byte budget")
+    try:
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        with os.fdopen(os.open(path, flags), "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ProvisionError(f"evidence input is not a regular file: {path}")
+            remaining = expected_bytes
+            digest = hashlib.sha256()
+            while remaining:
+                block = stream.read(min(remaining, 1024 * 1024))
+                if not block:
+                    break
+                remaining -= len(block)
+                digest.update(block)
+            if remaining or stream.read(1) or digest.hexdigest() != expected_sha256:
+                raise ProvisionError(f"authenticated evidence bytes changed: {path}")
+    except OSError as error:
+        raise ProvisionError(f"could not verify regular evidence input: {path}: {error}") from error
+
+
+@contextlib.contextmanager
+def sealed_evidence_fd(payload: bytes):
+    """Expose immutable Python bytes to native consumers without a mutable path."""
+    descriptor = os.memfd_create("clang1813-evidence", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+    try:
+        offset = 0
+        while offset < len(payload):
+            offset += os.write(descriptor, payload[offset:offset + 1024 * 1024])
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS,
+                    fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL)
+        yield descriptor, f"/proc/self/fd/{descriptor}"
+    finally:
+        os.close(descriptor)
+
+
+def recipe_identity(contract_path: Path = CONTRACT_PATH,
+                     captured: dict[Path, bytes] | None = None) -> dict[str, str]:
     files = {**RECIPE_FILES, "contractSha256": contract_path}
-    return {name: sha256_file(path) for name, path in files.items()}
+    return {name: (sha256_file(path) if captured is None else
+                   sha256(captured_evidence(path, captured))) for name, path in files.items()}
 
 
 def canonical_json(value: object) -> bytes:
@@ -152,8 +260,25 @@ def strict_json_loads(payload: str | bytes) -> object:
     return json.loads(payload, object_pairs_hook=unique_object)
 
 
-def read_contract(path: Path = CONTRACT_PATH) -> dict:
-    value = strict_json_loads(path.read_text(encoding="utf-8"))
+def require_reviewed_relevant_files(contract: dict) -> None:
+    if not isinstance(contract, dict):
+        raise ProvisionError("provisioning contract must be a JSON object")
+    files = contract.get("relevantFiles")
+    if not isinstance(files, list):
+        raise ProvisionError("relevantFiles must contain the canonical reviewed file policy")
+    for value in files:
+        if (not isinstance(value, str) or PurePosixPath(value).is_absolute() or
+                any(part in ("", ".", "..") for part in value.split("/")) or
+                PurePosixPath(value).as_posix() != value):
+            raise ProvisionError("relevantFiles contains an absolute, dot-component or noncanonical path")
+    if tuple(files) != REVIEWED_RELEVANT_FILES:
+        raise ProvisionError("relevantFiles differs from the canonical reviewed 34-file policy")
+
+
+def read_contract(path: Path = CONTRACT_PATH, *, captured: dict[Path, bytes] | None = None) -> dict:
+    value = strict_json_loads(path.read_text(encoding="utf-8") if captured is None else
+                              captured_evidence(path, captured).decode("utf-8"))
+    require_reviewed_relevant_files(value)
     profile = value["profile"]
     if value.get("schemaVersion") != 1:
         raise ProvisionError("unsupported provisioning contract schema")
@@ -255,7 +380,7 @@ def iter_deb822_lines(lines, allow_empty: bool = False):
         raise ProvisionError("empty Debian control/index document")
 
 
-def iter_compressed_index(path: Path):
+def iter_compressed_index(path: Path, payload: bytes | None = None):
     """Stream a signed .gz/.xz index one Debian paragraph at a time."""
     def bounded_lines(stream):
         total = 0
@@ -277,14 +402,15 @@ def iter_compressed_index(path: Path):
 
     try:
         if path.name.endswith(".gz"):
-            with gzip.open(path, mode="rb") as stream:
+            with (gzip.open(path, mode="rb") if payload is None else
+                  gzip.GzipFile(fileobj=io.BytesIO(payload), mode="rb")) as stream:
                 # A signed Release table may legitimately name an empty pocket
                 # index. The caller authenticates the compressed bytes first;
                 # malformed non-empty paragraphs still fail closed.
                 yield from iter_deb822_lines(bounded_lines(stream), allow_empty=True)
             return
         if path.name.endswith(".xz"):
-            with lzma.open(path, mode="rb") as stream:
+            with lzma.open(path if payload is None else io.BytesIO(payload), mode="rb") as stream:
                 yield from iter_deb822_lines(bounded_lines(stream), allow_empty=True)
             return
     except ProvisionError as error:
@@ -312,13 +438,22 @@ def cleartext_body(inrelease: bytes) -> bytes:
     return ("\n".join(body) + "\n").encode("utf-8")
 
 
-def verify_gpgv(data_path: Path, keyring: Path, allowed_fingerprints: set[str]) -> str:
+def verify_gpgv(data_path: Path, keyring: Path, allowed_fingerprints: set[str], *,
+                 data_payload: bytes | None = None, key_payload: bytes | None = None) -> str:
     if not keyring.is_file():
         raise ProvisionError(f"required trusted keyring is missing: {keyring}")
-    proc = subprocess.run(
-        ["gpgv", "--status-fd", "1", "--keyring", str(keyring), str(data_path)],
-        check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
+    payload = read_regular_evidence(data_path, 8 * 1024 * 1024) if data_payload is None else data_payload
+    key_bytes = read_regular_evidence(keyring, 1024 * 1024) if key_payload is None else key_payload
+    if len(payload) > 8 * 1024 * 1024 or len(key_bytes) > 1024 * 1024:
+        raise ProvisionError("OpenPGP evidence input exceeds its byte budget")
+    with sealed_evidence_fd(key_bytes) as (key_fd, key_path):
+        proc = subprocess.run(
+            ["gpgv", "--status-fd", "1", "--keyring", key_path, "-"],
+            check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, input=payload,
+            pass_fds=(key_fd,),
+        )
+    proc.stdout = proc.stdout.decode("utf-8") if isinstance(proc.stdout, bytes) else proc.stdout
+    proc.stderr = proc.stderr.decode("utf-8") if isinstance(proc.stderr, bytes) else proc.stderr
     if proc.returncode != 0:
         raise ProvisionError(f"OpenPGP verification failed: {proc.stderr.strip()}")
     fingerprints: list[str] = []
@@ -352,11 +487,22 @@ def valid_sig_primary_fingerprint(status_fields: list[str]) -> str:
 
 
 def verify_detached_signature(signature_path: Path, data_path: Path, keyring: Path,
-                              expected_fingerprint: str) -> str:
-    proc = subprocess.run(
-        ["gpgv", "--status-fd", "1", "--keyring", str(keyring), str(signature_path), str(data_path)],
-        check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
+                              expected_fingerprint: str, *, data_payload: bytes | None = None,
+                              signature_payload: bytes | None = None, key_payload: bytes | None = None) -> str:
+    payload = read_regular_evidence(data_path) if data_payload is None else data_payload
+    signature = read_regular_evidence(signature_path, 1024 * 1024) if signature_payload is None else signature_payload
+    key_bytes = read_regular_evidence(keyring, 1024 * 1024) if key_payload is None else key_payload
+    if len(payload) > MAX_SINGLE_DOWNLOAD or len(signature) > 1024 * 1024 or len(key_bytes) > 1024 * 1024:
+        raise ProvisionError("OpenPGP evidence input exceeds its byte budget")
+    with sealed_evidence_fd(payload) as (data_fd, data_name), \
+            sealed_evidence_fd(key_bytes) as (key_fd, key_name):
+        proc = subprocess.run(
+            ["gpgv", "--status-fd", "1", "--keyring", key_name, "-", data_name],
+            check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, input=signature,
+            pass_fds=(data_fd, key_fd),
+        )
+    proc.stdout = proc.stdout.decode("utf-8") if isinstance(proc.stdout, bytes) else proc.stdout
+    proc.stderr = proc.stderr.decode("utf-8") if isinstance(proc.stderr, bytes) else proc.stderr
     if proc.returncode != 0:
         raise ProvisionError(f"detached upstream signature verification failed: {proc.stderr.strip()}")
     fingerprints = []
@@ -373,9 +519,9 @@ def verify_detached_signature(signature_path: Path, data_path: Path, keyring: Pa
     return fingerprints[0]
 
 
-def dearmor_release_key(key_path: Path, temporary_root: Path) -> bytes:
+def dearmor_release_key(key_path: Path, temporary_root: Path, *, key_payload: bytes | None = None) -> bytes:
     """Convert the locked ASCII-armored release key to a bounded gpgv keyring."""
-    key_bytes = key_path.read_bytes()
+    key_bytes = key_path.read_bytes() if key_payload is None else key_payload
     if not key_bytes or len(key_bytes) > 1024 * 1024:
         raise ProvisionError("pinned LLVM release key is empty or exceeds its byte bound")
     temporary_root.mkdir(parents=True, exist_ok=True)
@@ -885,7 +1031,8 @@ def probe_snapshot_metadata(contract: dict, snapshot: str, output: Path, keyring
         inrelease, release_download = downloader.get(inrelease_url, max_bytes=8 * 1024 * 1024)
         inrelease_path = output / "signed-index-metadata" / suite / "InRelease"
         atomic_write(inrelease_path, inrelease)
-        signer = verify_gpgv(inrelease_path, keyring, set(profile["ubuntuArchivePrimaryFingerprints"]))
+        signer = verify_gpgv(inrelease_path, keyring, set(profile["ubuntuArchivePrimaryFingerprints"]),
+                            data_payload=inrelease)
         release = parse_deb822(cleartext_body(inrelease).decode("utf-8"))[0]
         verify_release_profile(release, suite, profile)
         table = release_sha256_table(release)
@@ -909,7 +1056,7 @@ def probe_snapshot_metadata(contract: dict, snapshot: str, output: Path, keyring
                                                   max_bytes=MAX_SNAPSHOT_INDEX_BYTES)
                 index_path_out = output / "signed-index-metadata" / suite / relative_index
                 atomic_write(index_path_out, packed)
-                for row in iter_compressed_index(index_path_out):
+                for row in iter_compressed_index(index_path_out, payload=packed):
                     if kind == "source" and row.get("Package") == profile["sourcePackage"]["name"]:
                         selected = dict(row)
                         selected["_suite"], selected["_component"] = suite, component
@@ -975,7 +1122,8 @@ def acquire_candidate(contract: dict, output: Path, keyring: Path) -> dict:
         inrelease, release_download = downloader.get(inrelease_url, max_bytes=8 * 1024 * 1024)
         inrelease_path = output / "downloads" / suite / "InRelease"
         atomic_write(inrelease_path, inrelease)
-        signer = verify_gpgv(inrelease_path, keyring, set(profile["ubuntuArchivePrimaryFingerprints"]))
+        signer = verify_gpgv(inrelease_path, keyring, set(profile["ubuntuArchivePrimaryFingerprints"]),
+                            data_payload=inrelease)
         release = parse_deb822(cleartext_body(inrelease).decode("utf-8"))[0]
         verify_release_profile(release, suite, profile)
         table = release_sha256_table(release)
@@ -993,7 +1141,7 @@ def acquire_candidate(contract: dict, output: Path, keyring: Path) -> dict:
                 packed, info = downloader.get(url, expected_size, expected_hash, max_bytes=768 * 1024 * 1024)
                 archive_path = output / "downloads" / suite / index_name
                 atomic_write(archive_path, packed)
-                for row in iter_compressed_index(archive_path):
+                for row in iter_compressed_index(archive_path, payload=packed):
                     if kind == "source":
                         package_name = row.get("Package", "")
                         if package_name == source_pin["name"]:
@@ -1060,7 +1208,8 @@ def acquire_candidate(contract: dict, output: Path, keyring: Path) -> dict:
     atomic_write(upstream_archive_path, archive_bytes)
     atomic_write(upstream_signature_path, signature_bytes)
     upstream_signer = verify_detached_signature(
-        upstream_signature_path, upstream_archive_path, upstream_keyring_path, upstream["primaryFingerprint"]
+        upstream_signature_path, upstream_archive_path, upstream_keyring_path, upstream["primaryFingerprint"],
+        data_payload=archive_bytes, signature_payload=signature_bytes, key_payload=upstream_keyring_bytes,
     )
 
     distro_source_root = output / "source" / "package-source"
@@ -1174,11 +1323,12 @@ def ensure_source_artifact_contract(candidate: dict, contract: dict | None = Non
 
 
 def verify_candidate_data(candidate_root: Path, candidate: dict, contract: dict, keyring: Path,
-                          extra_binary_package_names: set[str] | None = None) -> list[dict]:
+                          extra_binary_package_names: set[str] | None = None, *,
+                          captured: dict[Path, bytes] | None = None) -> list[dict]:
     """Recheck signed metadata and all acquired bytes before rootfs provisioning."""
     profile = contract["profile"]
     ensure_source_artifact_contract(candidate, contract)
-    keyring_bytes = keyring.read_bytes()
+    keyring_bytes = captured_evidence(keyring, captured, 1024 * 1024)
     trusted_keyring = candidate["trustedKeyring"]
     if len(keyring_bytes) != trusted_keyring["bytes"] or sha256(keyring_bytes) != trusted_keyring["sha256"]:
         raise ProvisionError("Ubuntu archive keyring bytes changed after acquisition")
@@ -1194,10 +1344,11 @@ def verify_candidate_data(candidate_root: Path, candidate: dict, contract: dict,
         if inrelease.get("path") != f"downloads/{suite}/InRelease" or inrelease.get("url") != expected_inrelease_url or inrelease.get("finalUrl") != expected_inrelease_url:
             raise ProvisionError(f"candidate InRelease path/URL is not the immutable suite URL for {suite}")
         inrelease_path = candidate_root / inrelease["path"]
-        payload = inrelease_path.read_bytes()
+        payload = read_regular_evidence(inrelease_path, 8 * 1024 * 1024)
         if len(payload) != inrelease["bytes"] or sha256(payload) != inrelease["sha256"]:
             raise ProvisionError(f"candidate InRelease bytes changed for {suite}")
-        signer = verify_gpgv(inrelease_path, keyring, set(profile["ubuntuArchivePrimaryFingerprints"]))
+        signer = verify_gpgv(inrelease_path, keyring, set(profile["ubuntuArchivePrimaryFingerprints"]),
+                            data_payload=payload, key_payload=keyring_bytes)
         if signer != repo["signerPrimaryFingerprint"]:
             raise ProvisionError(f"candidate InRelease signer changed for {suite}")
         release = parse_deb822(cleartext_body(payload).decode("utf-8"))[0]
@@ -1217,7 +1368,7 @@ def verify_candidate_data(candidate_root: Path, candidate: dict, contract: dict,
                 expected = table.get(table_path)
                 if expected is None:
                     raise ProvisionError(f"Release metadata does not bind candidate index {table_path}")
-                packed = (candidate_root / index_pathname).read_bytes()
+                packed = read_regular_evidence(candidate_root / index_pathname)
                 if len(packed) != expected[0] or sha256(packed) != expected[1]:
                     raise ProvisionError(f"candidate package index hash/length mismatch for {suite}/{table_path}")
                 if len(packed) != index["bytes"] or sha256(packed) != index["sha256"]:
@@ -1225,7 +1376,7 @@ def verify_candidate_data(candidate_root: Path, candidate: dict, contract: dict,
                 wanted_source = profile["sourcePackage"]["name"]
                 wanted_roots = {row["name"] for row in profile["binaryRoots"]}
                 wanted_roots.update(extra_binary_package_names or set())
-                for row in iter_compressed_index(candidate_root / index_pathname):
+                for row in iter_compressed_index(candidate_root / index_pathname, payload=packed):
                     if index["kind"] == "source" and row.get("Package") != wanted_source:
                         continue
                     if index["kind"] == "binary-amd64" and row.get("Package") not in wanted_roots:
@@ -1251,17 +1402,16 @@ def verify_candidate_data(candidate_root: Path, candidate: dict, contract: dict,
             raise ProvisionError("candidate source payload URL differs from its signed Sources record")
     for row in candidate["source"]["files"]:
         path = candidate_root / row["path"]
-        data = path.read_bytes()
-        if len(data) != row["bytes"] or sha256(data) != row["sha256"]:
-            raise ProvisionError(f"acquired source payload changed: {row['name']}")
+        verify_regular_evidence_identity(path, row["bytes"], row["sha256"])
     upstream = profile["upstream"]
     key = ROOT / upstream["keyFile"]
-    if sha256(key.read_bytes()) != upstream["keySha256"]:
+    key_bytes = captured_evidence(key, captured, 1024 * 1024)
+    if sha256(key_bytes) != upstream["keySha256"]:
         raise ProvisionError("pinned LLVM release key bytes changed")
     upstream_keyring_record = candidate["source"]["upstreamKeyring"]
     upstream_keyring_path = candidate_root / upstream_keyring_record["path"]
-    expected_keyring = dearmor_release_key(key, candidate_root)
-    upstream_keyring_bytes = upstream_keyring_path.read_bytes()
+    expected_keyring = dearmor_release_key(key, candidate_root, key_payload=key_bytes)
+    upstream_keyring_bytes = read_regular_evidence(upstream_keyring_path, 1024 * 1024)
     if (upstream_keyring_bytes != expected_keyring or
             len(upstream_keyring_bytes) != upstream_keyring_record["bytes"] or
             sha256(upstream_keyring_bytes) != upstream_keyring_record["sha256"]):
@@ -1277,12 +1427,17 @@ def verify_candidate_data(candidate_root: Path, candidate: dict, contract: dict,
         final = urllib.parse.urlparse(artifact.get("finalUrl", ""))
         if artifact.get("url") != expected_url or final.scheme != "https" or final.hostname not in ALLOWED_REDIRECT_HOSTS:
             raise ProvisionError("upstream release asset URL/redirect differs from its pinned GitHub source")
-    if sha256(archive_path.read_bytes()) != candidate["source"]["upstreamArchive"]["sha256"]:
+    archive_bytes = read_regular_evidence(archive_path)
+    signature_bytes = read_regular_evidence(signature_path, 1024 * 1024)
+    if (len(archive_bytes) != candidate["source"]["upstreamArchive"]["bytes"] or
+            sha256(archive_bytes) != candidate["source"]["upstreamArchive"]["sha256"]):
         raise ProvisionError("upstream LLVM source archive changed")
-    if sha256(signature_path.read_bytes()) != candidate["source"]["upstreamSignature"]["sha256"]:
+    if (len(signature_bytes) != candidate["source"]["upstreamSignature"]["bytes"] or
+            sha256(signature_bytes) != candidate["source"]["upstreamSignature"]["sha256"]):
         raise ProvisionError("upstream LLVM source signature bytes changed")
     upstream_signer = verify_detached_signature(
         signature_path, archive_path, upstream_keyring_path, upstream["primaryFingerprint"],
+        data_payload=archive_bytes, signature_payload=signature_bytes, key_payload=upstream_keyring_bytes,
     )
     if candidate["source"].get("upstreamSignerPrimaryFingerprint") != upstream_signer:
         raise ProvisionError("upstream LLVM signature signer changed after acquisition")
@@ -1868,27 +2023,67 @@ def inventory_patch_files(source_root: Path) -> list[dict]:
     return rows
 
 
+def read_audited_source_file(root_fd: int, relative: str) -> bytes:
+    """Read only through no-follow component FDs below the retained source root."""
+    if relative not in REVIEWED_RELEVANT_FILES:
+        raise ProvisionError("audited source path is outside the canonical reviewed file policy")
+    current = os.dup(root_fd)
+    try:
+        parts = relative.split("/")
+        for component in parts[:-1]:
+            next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                              dir_fd=current)
+            os.close(current)
+            current = next_fd
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        with os.fdopen(os.open(parts[-1], flags, dir_fd=current), "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise ProvisionError("audited source input is not a regular file")
+            payload = stream.read(MAX_SINGLE_DOWNLOAD + 1)
+            after = os.fstat(stream.fileno())
+            if len(payload) > MAX_SINGLE_DOWNLOAD:
+                raise ProvisionError("audited source input exceeds its byte budget")
+            if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) !=
+                    (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) or
+                    len(payload) != after.st_size):
+                raise ProvisionError("audited source input changed during its descriptor read")
+            return payload
+    finally:
+        os.close(current)
+
+
 def audit_patches(source_root: Path, upstream_root: Path, output: Path, contract: dict) -> dict:
+    require_reviewed_relevant_files(contract)
     patch_rows = inventory_patch_files(source_root)
     relevant = []
     differences = []
-    relevant_set = set(contract["relevantFiles"])
-    for rel in contract["relevantFiles"]:
-        packaged = source_root / rel
-        upstream = upstream_root / rel
-        if not packaged.is_file() or not upstream.is_file():
-            differences.append({"path": rel, "status": "missing", "packagedSha256": None, "upstreamSha256": None})
-            continue
-        packaged_bytes = packaged.read_bytes()
-        upstream_bytes = upstream.read_bytes()
-        row = {"path": rel, "bytes": len(packaged_bytes), "packagedSha256": sha256(packaged_bytes), "upstreamSha256": sha256(upstream_bytes)}
-        row["status"] = "identical" if packaged_bytes == upstream_bytes else "different"
-        row["patchesTouchingPath"] = [patch["path"] for patch in patch_rows if rel in patch["touchedPaths"]]
-        relevant.append(row)
-        if row["status"] != "identical":
-            differences.append(row)
-    if len(relevant_set) != 34:
-        raise ProvisionError("the owned relevant-file audit list changed unexpectedly")
+    root_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        with contextlib.ExitStack() as roots:
+            packaged_fd = os.open(source_root, root_flags)
+            roots.callback(os.close, packaged_fd)
+            upstream_fd = os.open(upstream_root, root_flags)
+            roots.callback(os.close, upstream_fd)
+            total = 0
+            for rel in REVIEWED_RELEVANT_FILES:
+                try:
+                    packaged_bytes = read_audited_source_file(packaged_fd, rel)
+                    upstream_bytes = read_audited_source_file(upstream_fd, rel)
+                except FileNotFoundError:
+                    differences.append({"path": rel, "status": "missing", "packagedSha256": None, "upstreamSha256": None})
+                    continue
+                total += len(packaged_bytes) + len(upstream_bytes)
+                if total > MAX_DOWNLOAD_BYTES:
+                    raise ProvisionError("audited source files exceed their cumulative byte budget")
+                row = {"path": rel, "bytes": len(packaged_bytes), "packagedSha256": sha256(packaged_bytes), "upstreamSha256": sha256(upstream_bytes)}
+                row["status"] = "identical" if packaged_bytes == upstream_bytes else "different"
+                row["patchesTouchingPath"] = [patch["path"] for patch in patch_rows if rel in patch["touchedPaths"]]
+                relevant.append(row)
+                if row["status"] != "identical":
+                    differences.append(row)
+    except OSError as error:
+        raise ProvisionError(f"could not read audited files beneath retained source roots: {error}") from error
     patch_manifest = {"files": patch_rows}
     relevant_manifest = {"files": relevant}
     result = {
@@ -2013,11 +2208,14 @@ def command_probe_report(args: argparse.Namespace) -> int:
 
 
 def run_checked(command: list[str], *, timeout: int = 900, input_text: str | None = None,
-                env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
-    proc = subprocess.run(command, check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                env: dict[str, str] | None = None, stdout_file=None) -> subprocess.CompletedProcess:
+    proc = subprocess.run(command, check=False,
+                          stdout=subprocess.PIPE if stdout_file is None else stdout_file,
+                          stderr=subprocess.STDOUT if stdout_file is None else subprocess.PIPE,
                           text=True, input=input_text, timeout=timeout, env=env)
     if proc.returncode != 0:
-        raise ProvisionError(f"command failed ({proc.returncode}): {command!r}\n{proc.stdout[-6000:]}")
+        diagnostic = proc.stdout if stdout_file is None else proc.stderr
+        raise ProvisionError(f"command failed ({proc.returncode}): {command!r}\n{diagnostic[-6000:]}")
     return proc
 
 
@@ -2155,13 +2353,17 @@ def candidate_build_evidence(candidate: dict, contract: dict) -> dict:
     }
 
 
-def verify_candidate_download_inventory(candidate_root: Path, candidate: dict) -> None:
-    """Require every packaged download to have a unique candidate-bound identity."""
+def candidate_download_rows(candidate: dict) -> list[dict]:
     source = candidate["source"]
-    rows = [*[row["inRelease"] for row in candidate["repositories"]],
+    return [*[row["inRelease"] for row in candidate["repositories"]],
             *candidate["indexes"], *source["files"], source["upstreamKeyring"],
             {**source["upstreamArchive"], "path": source["upstreamArchivePath"]},
             {**source["upstreamSignature"], "path": source["upstreamSignaturePath"]}]
+
+
+def verify_candidate_download_inventory(candidate_root: Path, candidate: dict) -> None:
+    """Require every packaged download to have a unique candidate-bound identity."""
+    rows = candidate_download_rows(candidate)
     expected_paths: set[str] = set()
     for row in rows:
         relative = PurePosixPath(row["path"])
@@ -2174,8 +2376,7 @@ def verify_candidate_download_inventory(candidate_root: Path, candidate: dict) -
         if (any(candidate_root.joinpath(*relative.parts[:index]).is_symlink()
                 for index in range(1, len(relative.parts) + 1)) or not path.is_file()):
             raise ProvisionError("candidate download inventory contains a missing or non-regular file")
-        if path.stat().st_size != row["bytes"] or sha256_file(path) != row["sha256"]:
-            raise ProvisionError(f"candidate download bytes changed: {row['path']}")
+        verify_regular_evidence_identity(path, row["bytes"], row["sha256"])
     actual_paths: set[str] = set()
     for directory, dirnames, filenames in os.walk(candidate_root / "downloads", followlinks=False):
         current = Path(directory)
@@ -2199,7 +2400,7 @@ def copy_verified_source_payload(source: Path, destination: Path, expected_bytes
     digest = hashlib.sha256()
     copied = 0
     try:
-        source_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+        source_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
         with os.fdopen(os.open(source, source_flags), "rb") as incoming:
             if not stat.S_ISREG(os.fstat(incoming.fileno()).st_mode):
                 raise ProvisionError("authenticated source payload is not a regular file")
@@ -2285,9 +2486,10 @@ def audit_fresh_source_payloads(candidate_root: Path, candidate: dict,
 
 
 def load_candidate(candidate_root: Path, contract: dict, keyring: Path,
-                   build_record: dict | None = None) -> tuple[dict, list[dict]]:
+                   build_record: dict | None = None, *,
+                   captured: dict[Path, bytes] | None = None) -> tuple[dict, list[dict]]:
     candidate_path = candidate_root / "acquisition-candidate.json"
-    candidate = read_provenance_report(candidate_path, "acquisition candidate")
+    candidate = read_provenance_report(candidate_path, "acquisition candidate", captured=captured)
     ensure_source_artifact_contract(candidate, contract)
     if build_record is not None:
         for section, expected in candidate_build_evidence(candidate, contract).items():
@@ -2305,9 +2507,10 @@ def load_candidate(candidate_root: Path, contract: dict, keyring: Path,
     parsed = verify_candidate_data(
         candidate_root, candidate, contract, keyring,
         extra_binary_package_names=extra_package_names,
+        **({"captured": captured} if captured is not None else {}),
     )
     audit_path = candidate_root / "patch-audit.json"
-    audit = read_provenance_report(audit_path, "patch audit")
+    audit = read_provenance_report(audit_path, "patch audit", captured=captured)
     if audit.get("status") != "compatible" or candidate.get("patchAudit") != {
         key: audit[key] for key in ("status", "patchCount", "patchInventorySha256", "relevantFileCount", "relevantFileManifestSha256")
     }:
@@ -2380,10 +2583,10 @@ def package_metadata_for_keys(candidate_root: Path, candidate: dict,
         if relative.is_absolute() or ".." in relative.parts:
             raise ProvisionError("candidate package index path is unsafe")
         path = candidate_root.joinpath(*relative.parts)
-        packed = path.read_bytes()
+        packed = read_regular_evidence(path)
         if len(packed) != index["bytes"] or sha256(packed) != index["sha256"]:
             raise ProvisionError("authenticated binary index changed before package closure extraction")
-        for row in iter_compressed_index(path):
+        for row in iter_compressed_index(path, payload=packed):
             if row.get("Package") not in wanted_names or row.get("Architecture") not in ("amd64", "all"):
                 continue
             key = (row.get("Package", ""), row.get("Version", ""), row.get("Architecture", ""))
@@ -2748,6 +2951,8 @@ def normalize_rootfs(rootfs: Path, epoch: int) -> None:
 
 def deterministic_rootfs_tar(rootfs: Path, destination: Path, epoch: int, *,
                               normalize: bool = True, max_bytes: int | None = None) -> dict:
+    if destination.exists() or destination.is_symlink():
+        raise ProvisionError("could not exclusively create rootfs archive destination: path already exists")
     if normalize:
         normalize_rootfs(rootfs, epoch)
     if max_bytes is not None:
@@ -2755,13 +2960,60 @@ def deterministic_rootfs_tar(rootfs: Path, destination: Path, epoch: int, *,
     command = [
         "sudo", "env", "LC_ALL=C", "tar", "--sort=name", "--format=posix", "--numeric-owner",
         f"--mtime=@{epoch}", "--pax-option=delete=atime,delete=ctime",
-        "-cf", str(destination), "-C", str(rootfs), ".",
+        "-cf", "-", "-C", str(rootfs), ".",
     ]
-    run_checked(command, timeout=600)
-    identity = {"bytes": destination.stat().st_size, "sha256": sha256_file(destination)}
-    if max_bytes is not None and identity["bytes"] > max_bytes:
-        raise ProvisionError("canonical rootfs tar exceeds the artifact byte budget")
-    return identity
+    # Create an anonymous inode inside the caller's output directory as the
+    # calling user. Failure closes that inode without unlinking any pathname.
+    # The privileged child sees only stdout; successful publication uses an
+    # exclusive link in the retained parent directory and cannot replace a link.
+    try:
+        parent_fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as error:
+        raise ProvisionError(f"could not exclusively create rootfs archive destination: {error}") from error
+    try:
+        parent = os.fstat(parent_fd)
+        if parent.st_uid != os.geteuid():
+            raise ProvisionError("rootfs archive output directory must be owned by the calling user")
+        try:
+            descriptor = os.open(".", os.O_TMPFILE | os.O_RDWR | os.O_CLOEXEC, 0o600, dir_fd=parent_fd)
+        except OSError as error:
+            raise ProvisionError(f"could not create private rootfs archive inode: {error}") from error
+        with os.fdopen(descriptor, "w+b") as stream:
+            metadata = os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
+                raise ProvisionError("rootfs archive destination is not a regular file")
+            descriptor_path = f"/proc/self/fd/{stream.fileno()}"
+            try:
+                descriptor_identity = os.stat(descriptor_path)
+            except OSError as error:
+                raise ProvisionError("rootfs archive FD publication is unavailable") from error
+            if ((descriptor_identity.st_dev, descriptor_identity.st_ino) !=
+                    (metadata.st_dev, metadata.st_ino)):
+                raise ProvisionError("rootfs archive FD publication identity changed")
+            run_checked(command, timeout=600, stdout_file=stream)
+            stream.flush()
+            size = os.fstat(stream.fileno()).st_size
+            if max_bytes is not None and size > max_bytes:
+                raise ProvisionError("canonical rootfs tar exceeds the artifact byte budget")
+            stream.seek(0)
+            digest = hashlib.sha256()
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+            current_parent = destination.parent.stat(follow_symlinks=False)
+            if (current_parent.st_dev, current_parent.st_ino) != (parent.st_dev, parent.st_ino):
+                raise ProvisionError("rootfs archive destination parent changed during creation")
+            try:
+                os.link(descriptor_path, destination.name,
+                        dst_dir_fd=parent_fd, follow_symlinks=True)
+            except OSError as error:
+                raise ProvisionError(f"could not exclusively publish rootfs archive destination: {error}") from error
+            current = os.stat(destination.name, dir_fd=parent_fd, follow_symlinks=False)
+            if (not stat.S_ISREG(current.st_mode) or
+                    (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino)):
+                raise ProvisionError("rootfs archive destination pathname changed during publication")
+            return {"bytes": size, "sha256": digest.hexdigest()}
+    finally:
+        os.close(parent_fd)
 
 
 def expected_oci_config(profile_id: str, environment: dict[str, str], rootfs_sha256: str) -> dict:
@@ -3069,7 +3321,7 @@ def canonical_commands(contract: dict, keyring_sha256: str) -> dict[str, list[st
         "rootfsTarBudget": budget_command,
         "rootfsTar": ["sudo", "env", "LC_ALL=C", "tar", "--sort=name", "--format=posix",
                       "--numeric-owner", f"--mtime=@{epoch}",
-                      "--pax-option=delete=atime,delete=ctime", "-cf", "<ROOTFS_TAR>", "-C", "<PROFILE_ROOT>", "."],
+                      "--pax-option=delete=atime,delete=ctime", "-cf", "-", "-C", "<PROFILE_ROOT>", "."],
         "ociArchive": ["tar", "--sort=name", "--format=posix", "--numeric-owner", "--owner=0",
                        "--group=0", f"--mtime=@{epoch}", "--pax-option=delete=atime,delete=ctime",
                        "-cf", "<OCI_ARCHIVE>", "-C", "<OCI_LAYOUT>", "blobs/sha256/<CONFIG_SHA256>",
@@ -3168,6 +3420,8 @@ def provision_rootfs(args: argparse.Namespace) -> int:
         raise ProvisionError("rootfs and evidence output trees must be disjoint")
     if canonical_output == canonical_workdir or canonical_output in canonical_workdir.parents:
         raise ProvisionError("evidence output must not equal or contain the work directory")
+    if canonical_rootfs == canonical_workdir or canonical_rootfs in canonical_workdir.parents:
+        raise ProvisionError("rootfs must not equal or contain the work directory")
     if (args.rootfs.exists() or args.rootfs.is_symlink() or
             args.output.exists() or args.output.is_symlink()):
         raise ProvisionError("rootfs and evidence output paths must not exist")
@@ -3339,10 +3593,11 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     return 0
 
 
-def reject_build_record_schema_unknown_fields(record: object) -> None:
+def reject_build_record_schema_unknown_fields(record: object, *,
+                                                captured: dict[Path, bytes] | None = None) -> None:
     """Enforce every additionalProperties:false object boundary in the pinned schema."""
     try:
-        schema = strict_json_loads(RECIPE_FILES["schemaSha256"].read_text(encoding="utf-8"))
+        schema = strict_json_loads(captured_evidence(RECIPE_FILES["schemaSha256"], captured).decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ProvisionError(f"could not read checked-in build-record schema: {error}") from error
 
@@ -3380,7 +3635,8 @@ def reject_build_record_schema_unknown_fields(record: object) -> None:
     validate(record, schema, "$")
 
 
-def validate_build_record(record: dict, contract: dict, contract_path: Path = CONTRACT_PATH) -> None:
+def validate_build_record(record: dict, contract: dict, contract_path: Path = CONTRACT_PATH, *,
+                            captured: dict[Path, bytes] | None = None) -> None:
     if not isinstance(record, dict):
         raise ProvisionError("build record must be a JSON object")
     profile = contract["profile"]
@@ -3536,7 +3792,7 @@ def validate_build_record(record: dict, contract: dict, contract_path: Path = CO
         raise ProvisionError("build record OCI archive checksum or size is invalid")
     if record.get("environment") != contract["environment"]:
         raise ProvisionError("build record environment differs from fixed UTC/source-date profile")
-    if record.get("recipe") != recipe_identity(contract_path):
+    if record.get("recipe") != recipe_identity(contract_path, captured):
         raise ProvisionError("build record recipe hashes do not match the reviewed contract, tooling, and workflow bytes")
     if probe.get("sourceSha256") != record["recipe"].get("probeSha256"):
         raise ProvisionError("build record probe source digest differs from its recipe source bytes")
@@ -3566,7 +3822,7 @@ def validate_build_record(record: dict, contract: dict, contract_path: Path = CO
             raise ProvisionError(f"build record lacks a valid signed index digest: {field}")
     if record["acquisition"].get("signatureFingerprints") != [row["signerPrimaryFingerprint"] for row in repositories]:
         raise ProvisionError("build record repository signer summary is inconsistent")
-    reject_build_record_schema_unknown_fields(record)
+    reject_build_record_schema_unknown_fields(record, captured=captured)
 
 
 def compare_build_runs(first_path: Path, second_path: Path, output_path: Path, contract: dict,
@@ -3714,11 +3970,11 @@ def command_verify_image(args: argparse.Namespace) -> int:
     return 0
 
 
-def read_provenance_report(path: Path, label: str) -> dict:
+def read_provenance_report(path: Path, label: str, *, captured: dict[Path, bytes] | None = None) -> dict:
     if path.is_symlink() or not path.is_file():
         raise ProvisionError(f"{label} provenance report is not a regular file")
     try:
-        report = strict_json_loads(path.read_text(encoding="utf-8"))
+        report = strict_json_loads(captured_evidence(path, captured).decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ProvisionError(f"{label} provenance report is not valid UTF-8 JSON") from error
     if not isinstance(report, dict):
@@ -3936,11 +4192,12 @@ def validate_provenance_loader_report(report: dict, record: dict, record_sha256:
             raise ProvisionError(f"A-loader smoke report lacks the required negative check: {field}")
 
 
-def validate_locked_comparator_manifest(lock_path: Path, negative: dict) -> tuple[dict, Path, str, dict]:
+def validate_locked_comparator_manifest(lock_path: Path, negative: dict, *,
+                                        captured: dict[Path, bytes] | None = None) -> tuple[dict, Path, str, dict]:
     if lock_path.is_symlink() or not lock_path.is_file():
         raise ProvisionError("locked Clang 22.1.6 comparator release lock is not a regular file")
     try:
-        lock = strict_json_loads(lock_path.read_text(encoding="utf-8"))
+        lock = strict_json_loads(captured_evidence(lock_path, captured).decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ProvisionError(f"locked comparator release metadata is invalid: {error}") from error
     if not isinstance(lock, dict):
@@ -3960,7 +4217,7 @@ def validate_locked_comparator_manifest(lock_path: Path, negative: dict) -> tupl
     if manifest_path.is_symlink() or not manifest_path.is_file():
         raise ProvisionError("locked comparator artifact manifest is not a regular file")
     try:
-        manifest_bytes = manifest_path.read_bytes()
+        manifest_bytes = captured_evidence(manifest_path, captured)
     except OSError as error:
         raise ProvisionError(f"could not read locked comparator artifact manifest: {error}") from error
     if sha256(manifest_bytes) != expected_manifest_sha:
@@ -3991,19 +4248,21 @@ def validate_locked_comparator_manifest(lock_path: Path, negative: dict) -> tupl
 
 
 def validate_provenance_negative_report(report: dict, record: dict, contract: dict,
-                                        artifact_lock_path: Path | None = None) -> tuple[Path, str]:
+                                        artifact_lock_path: Path | None = None, *,
+                                        captured: dict[Path, bytes] | None = None) -> tuple[Path, str]:
     negative = contract["negativeControl"]
     lock_path = artifact_lock_path or ROOT / negative["artifactLock"]
-    _, manifest_path, manifest_sha256, expected = validate_locked_comparator_manifest(lock_path, negative)
+    _, manifest_path, manifest_sha256, expected = validate_locked_comparator_manifest(lock_path, negative,
+                                                                                     captured=captured)
     fixture = ROOT / negative["fixture"]
     if (report.get("scope") != "negative-version-gate-only; not a Clang 18.1.3 identity" or
             report.get("artifactOracleId") != negative["oracleId"] or
-            report.get("artifactLockSha256") != sha256_file(lock_path) or
+            report.get("artifactLockSha256") != sha256(captured_evidence(lock_path, captured)) or
             report.get("compilerBytes") != expected["bytes"] or
             report.get("compilerSha256") != expected["sha256"] or
-            report.get("fixtureBytes") != fixture.stat().st_size or
+            report.get("fixtureBytes") != len(captured_evidence(fixture, captured)) or
             report.get("fixtureSha256") != record.get("probe", {}).get("fixtureSha256") or
-            report.get("fixtureSha256") != sha256_file(fixture) or
+            report.get("fixtureSha256") != sha256(captured_evidence(fixture, captured)) or
             report.get("fixtureAcceptedByClang22") is not True or
             report.get("compiler18GateRejected") != "probe compiler version or target mismatch" or
             re.search(r"\bversion\s+22\.1\.6(?:\s|$)", report.get("compilerVersionOutput", "")) is None):
@@ -4012,9 +4271,10 @@ def validate_provenance_negative_report(report: dict, record: dict, contract: di
 
 
 def command_package_provenance(args: argparse.Namespace) -> int:
-    contract = read_contract(args.contract)
-    record = strict_json_loads(args.record.read_text(encoding="utf-8"))
-    validate_build_record(record, contract, args.contract)
+    captured: dict[Path, bytes] = {}
+    contract = read_contract(args.contract, captured=captured)
+    record = read_provenance_report(args.record, "build record", captured=captured)
+    validate_build_record(record, contract, args.contract, captured=captured)
     if record.get("reproducibility") != {
         "cleanBuilds": 2, "matchingRootfsSha256": True, "matchingImageDigest": True,
     }:
@@ -4032,7 +4292,7 @@ def command_package_provenance(args: argparse.Namespace) -> int:
         raise ProvisionError("provenance packaging requires the retained final rootfs directory")
     comparator_lock = ROOT / contract["negativeControl"]["artifactLock"]
     _, comparator_manifest, _, _ = validate_locked_comparator_manifest(
-        comparator_lock, contract["negativeControl"],
+        comparator_lock, contract["negativeControl"], captured=captured,
     )
     expected_artifacts = [
         candidate, patch_audit, args.acquisition / "downloads",
@@ -4051,7 +4311,10 @@ def command_package_provenance(args: argparse.Namespace) -> int:
         args.keyring, ROOT / contract["profile"]["upstream"]["keyFile"],
     ]
     preflight_provenance_output(args.output, [args.acquisition, args.rootfs], expected_artifacts)
-    _, parsed_indexes = load_candidate(args.acquisition, contract, args.keyring, build_record=record)
+    captured_evidence(candidate, captured)
+    captured_evidence(patch_audit, captured)
+    validated_candidate, parsed_indexes = load_candidate(args.acquisition, contract, args.keyring,
+                                                         build_record=record, captured=captured)
     if args.oci_archive.is_symlink() or not args.oci_archive.is_file():
         raise ProvisionError("provenance packaging requires the retained run-two OCI image archive")
     verify_retained_rootfs_and_image(args.rootfs, args.oci_archive, record, contract)
@@ -4060,18 +4323,23 @@ def command_package_provenance(args: argparse.Namespace) -> int:
         record, signed_package_metadata, installed_package_keys(args.rootfs, contract),
     )
     verify_recorded_runtime_closure(args.rootfs, record, contract)
-    record_sha256 = sha256_file(args.record)
-    probe_report = read_provenance_report(args.probe_report, "LibTooling probe")
-    loader_report = read_provenance_report(args.loader_report, "A-loader")
-    negative_report = read_provenance_report(args.negative_report, "Clang 22.1.6 negative")
+    record_sha256 = sha256(captured[args.record])
+    probe_report = read_provenance_report(args.probe_report, "LibTooling probe", captured=captured)
+    loader_report = read_provenance_report(args.loader_report, "A-loader", captured=captured)
+    negative_report = read_provenance_report(args.negative_report, "Clang 22.1.6 negative", captured=captured)
     probe_binary, probe_fixture, probe_source, probe_mode = validate_provenance_probe_report(
         probe_report, record, args.rootfs, contract,
     )
     validate_provenance_loader_report(loader_report, record, record_sha256, args.rootfs)
     comparator_manifest, comparator_manifest_sha256 = validate_provenance_negative_report(
-        negative_report, record, contract,
+        negative_report, record, contract, captured=captured,
     )
     comparator_lock_sha256 = negative_report["artifactLockSha256"]
+    # Metadata already consumed by validators keeps its original immutable
+    # snapshot. Capture the remaining informational files before opening output.
+    for source in expected_artifacts:
+        if source != args.acquisition / "downloads":
+            captured_evidence(source, captured)
     output_path = preflight_provenance_output(args.output, [args.acquisition, args.rootfs], expected_artifacts)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if preflight_provenance_output(args.output, [args.acquisition, args.rootfs], expected_artifacts) != output_path:
@@ -4085,21 +4353,12 @@ def command_package_provenance(args: argparse.Namespace) -> int:
                 if not source.exists():
                     raise ProvisionError(f"provenance evidence file is missing: {source}")
                 if source.is_dir():
-                    root = source
-                    for directory, dirnames, filenames in os.walk(root, followlinks=False):
-                        dirnames.sort()
-                        filenames.sort()
-                        current = Path(directory)
-                        for name in list(dirnames):
-                            child = current / name
-                            if child.is_symlink():
-                                raise ProvisionError("provenance acquisition tree contains a symlink")
-                        for name in filenames:
-                            child = current / name
-                            if child.is_symlink() or not child.is_file():
-                                raise ProvisionError("provenance acquisition tree contains a non-regular file")
-                            relative = child.relative_to(root).as_posix()
-                            _add_provenance_file(archive, child, f"acquisition/downloads/{relative}", epoch)
+                    if source != args.acquisition / "downloads":
+                        raise ProvisionError("provenance contains an unexpected input directory")
+                    for row in sorted(candidate_download_rows(validated_candidate), key=lambda row: row["path"]):
+                        child = args.acquisition / row["path"]
+                        _add_provenance_file(archive, child, "acquisition/" + row["path"], epoch,
+                                             expected_sha256=row["sha256"], expected_bytes=row["bytes"])
                 else:
                     if source.is_symlink() or not source.is_file():
                         raise ProvisionError(f"provenance input is not a regular file: {source}")
@@ -4149,8 +4408,9 @@ def command_package_provenance(args: argparse.Namespace) -> int:
                         archive, source, arcname, epoch,
                         expected_sha256=(
                             comparator_manifest_sha256 if source == comparator_manifest else
-                            comparator_lock_sha256 if source == comparator_lock else None
+                            comparator_lock_sha256 if source == comparator_lock else sha256(captured[source])
                         ),
+                        expected_bytes=len(captured[source]), payload=captured[source],
                     )
             current_probe_binary, current_probe_mode = rootfs_regular_file(
                 args.rootfs, PROBE_BINARY_IN_ROOT, executable=True,
@@ -4235,23 +4495,44 @@ def command_negative_version_smoke(args: argparse.Namespace) -> int:
 
 
 def _add_provenance_file(archive: tarfile.TarFile, source: Path, arcname: str, epoch: int,
-                         expected_sha256: str | None = None, mode: int = 0o444) -> None:
+                         expected_sha256: str | None = None, mode: int = 0o444, *,
+                         expected_bytes: int | None = None, payload: bytes | None = None) -> None:
+    if not isinstance(expected_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
+        raise ProvisionError(f"provenance input lacks its authenticated byte identity: {arcname}")
     info = tarfile.TarInfo(arcname)
-    if expected_sha256 is not None and (source.is_symlink() or not source.is_file()):
-        raise ProvisionError(f"provenance input is not a regular file: {arcname}")
-    payload = source.read_bytes() if expected_sha256 is not None else None
-    if payload is not None and sha256(payload) != expected_sha256:
-        raise ProvisionError(f"provenance input changed before packaging: {arcname}")
-    info.size = len(payload) if payload is not None else source.stat().st_size
     info.mtime = epoch
     info.uid = info.gid = 0
     info.uname = info.gname = ""
     info.mode = mode & 0o7777
     if payload is not None:
+        if sha256(payload) != expected_sha256 or (expected_bytes is not None and len(payload) != expected_bytes):
+            raise ProvisionError(f"provenance input changed before packaging: {arcname}")
+        info.size = len(payload)
         archive.addfile(info, io.BytesIO(payload))
     else:
-        with source.open("rb") as stream:
-            archive.addfile(info, stream)
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        with os.fdopen(os.open(source, flags), "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ProvisionError(f"provenance input is not a regular file: {arcname}")
+            size = metadata.st_size if expected_bytes is None else expected_bytes
+            if type(size) is not int or size < 0 or size > MAX_SINGLE_DOWNLOAD:
+                raise ProvisionError(f"provenance input exceeds its byte budget: {arcname}")
+            info.size = size
+            digest = hashlib.sha256()
+            copied = 0
+
+            class HashingReader:
+                def read(self, requested: int) -> bytes:
+                    nonlocal copied
+                    block = stream.read(min(requested, 1024 * 1024, size - copied))
+                    copied += len(block)
+                    digest.update(block)
+                    return block
+
+            archive.addfile(info, HashingReader())
+            if copied != size or stream.read(1) or digest.hexdigest() != expected_sha256:
+                raise ProvisionError(f"provenance input changed while packaging: {arcname}")
 
 
 def build_parser() -> argparse.ArgumentParser:
