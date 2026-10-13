@@ -180,7 +180,6 @@ jobs:
           python3 scripts/oracle/provision_clang_18_1_3.py negative-version-smoke \
             --compiler "$CLANG_WORK/llvm22-artifacts/artifacts/clang-driver.full" \
             --output "$CLANG_WORK/clang-22.1.6-negative-smoke.json"
-          rm -rf "$CLANG_WORK/llvm22-artifacts"
 
       - name: Provision first clean toolchain rootfs
         run: |
@@ -237,8 +236,10 @@ jobs:
             --oci-archive "$CLANG_WORK/run2/clang-18.1.3-noble-amd64.oci.tar" \
             --probe-report "$CLANG_WORK/run2/probe-report.json" \
             --loader-report "$CLANG_WORK/a-loader-smoke.json" \
+            --negative-compiler "$CLANG_WORK/llvm22-artifacts/artifacts/clang-driver.full" \
             --negative-report "$CLANG_WORK/clang-22.1.6-negative-smoke.json" \
             --output "$CLANG_WORK/clang-18.1.3-provenance.tar"
+          rm -rf "$CLANG_WORK/llvm22-artifacts"
           sudo rm -rf "$CLANG_WORK/rootfs-run2"
           rm "$CLANG_WORK/run2/clang-18.1.3-noble-amd64.oci.tar"
 

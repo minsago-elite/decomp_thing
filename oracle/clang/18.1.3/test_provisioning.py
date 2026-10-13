@@ -856,12 +856,11 @@ class ProvisioningNegativeTests(unittest.TestCase):
             rootfs = Path(temp) / "rootfs"
             rootfs.mkdir()
             budget = self.contract["profile"]["bounds"]["maxArtifactBytes"]
-            expected = ["sudo", "-n", "/usr/bin/python3", "-I", "-B", str(provision.RECIPE_FILES["provisionerSha256"]),
+            expected = ["sudo", "-n", "/usr/bin/python3", "-I", "-B", "-c", provision.ROOTFS_TAR_BUDGET_PROGRAM,
                         "check-rootfs-tar-budget", "--rootfs", str(rootfs), "--max-bytes", str(budget)]
             self.assertEqual(provision.rootfs_tar_budget_command(rootfs, budget), expected)
             recorded = provision.canonical_commands(self.contract, "a" * 64)["rootfsTarBudget"]
-            expected[5] = "<PROVISIONER_SHA256:" + provision.sha256_file(provision.RECIPE_FILES["provisionerSha256"]) + ">"
-            expected[8] = "<PROFILE_ROOT>"
+            expected[9] = "<PROFILE_ROOT>"
             self.assertEqual(recorded, expected)
             for value in (0, -1, True, 1.0):
                 with self.subTest(value=value), self.assertRaises(provision.ProvisionError):
@@ -3792,6 +3791,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                                                oci_archive=base / "run2.oci.tar",
                                                probe_report=base / "probe.json", loader_report=base / "loader.json",
                                                negative_report=base / "negative.json",
+                                               negative_compiler=base / "retained-comparator",
                                                output=base / "provenance.tar")
             args.output = root / "not-created" / "nested" / "provenance.tar"
             with mock.patch.object(provision, "load_candidate") as load:
@@ -3866,6 +3866,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                 report_paths[name].write_bytes(provision.canonical_json(report))
             args = provision.argparse.Namespace(contract=selected, record=record_path, acquisition=root,
                                                rootfs=rootfs, oci_archive=oci_archive, keyring=keyring,
+                                               negative_compiler=base / "retained-comparator",
                                                output=base / "provenance.tar", **report_paths)
 
             def local_tar(command, timeout=None, stdout_file=None):
@@ -3895,7 +3896,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
 
     @contextlib.contextmanager
     def offline_packaging_fixture(self, base):
-        """Inert filesystem fixture; signatures, installed-package query and probe execution are mocked."""
+        """Inert fixture; signatures, package query, probe and comparator execution are mocked."""
         root, candidate, record, keyring = self.candidate_fixture(base)
         selected = base / "contract.json"
         selected.write_bytes(provision.canonical_json(self.contract))
@@ -3930,6 +3931,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
             paths[name].write_bytes(provision.canonical_json(report))
         args = provision.argparse.Namespace(contract=selected, record=record_path,
             acquisition=root, rootfs=rootfs, oci_archive=image, keyring=keyring,
+            negative_compiler=base / "retained-comparator",
             output=base / "provenance.tar", **paths)
         rows = signed_package_rows_for_fixture(record)
         installed = {(row["name"], row["version"], row["architecture"]) for row in record["packages"]}
@@ -3950,6 +3952,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                 mock.patch.object(provision, "installed_package_keys", return_value=installed), \
                 mock.patch.object(provision, "runtime_dependencies", return_value=record["runtime"]["entries"]), \
                 mock.patch.object(provision, "run_probe_sandboxed", return_value=provision.canonical_json(record["probe"])), \
+                mock.patch.object(provision, "execute_locked_negative_comparator", return_value=negative), \
                 mock.patch.object(provision, "run_checked", side_effect=local_tar):
             yield args, candidate
 
@@ -4038,6 +4041,243 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                             expected_sha256=provision.sha256(original), expected_bytes=len(original))
 
 
+    def test_packaging_refuses_synthesized_negative_report_without_retained_compiler(self):
+        execute = provision.execute_locked_negative_comparator
+        with self.temporary_directory() as temp, self.offline_packaging_fixture(Path(temp)) as (args, _):
+            # Every public lock/fixture field passes the metadata validator;
+            # actual replay must still require the retained native executable.
+            with mock.patch.object(provision, "execute_locked_negative_comparator", side_effect=execute):
+                with self.assertRaisesRegex(provision.ProvisionError, "immutable negative comparator"):
+                    provision.command_package_provenance(args)
+            self.assertFalse(args.output.exists())
+
+    def test_packaging_refuses_failed_comparator_execution_and_report_drift(self):
+        for kind in ("failed-execution", "report-drift"):
+            with self.subTest(kind=kind), self.temporary_directory() as temp, \
+                    self.offline_packaging_fixture(Path(temp)) as (args, _):
+                actual_report = json.loads(args.negative_report.read_bytes())
+                actual_report["compilerVersionOutput"] += "actual replay output differs\n"
+                kwargs = ({"side_effect": provision.ProvisionError("real syntax-only execution failed")}
+                          if kind == "failed-execution" else {"return_value": actual_report})
+                with mock.patch.object(provision, "execute_locked_negative_comparator", **kwargs) as execute:
+                    with self.assertRaisesRegex(provision.ProvisionError, "execution failed|actual locked comparator replay"):
+                        provision.command_package_provenance(args)
+                    execute.assert_called_once_with(args.negative_compiler,
+                        ROOT / self.contract["negativeControl"]["fixture"], self.contract,
+                        ROOT / self.contract["negativeControl"]["artifactLock"], captured=mock.ANY)
+                self.assertFalse(args.output.exists())
+
+
+class ConsumerReplayTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.contract = provision.read_contract()
+        cls.temp_root = ROOT / "build/clang1813-consumer-replay-tests"
+        cls.temp_root.mkdir(parents=True, exist_ok=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.temp_root, ignore_errors=True)
+
+    def temporary_directory(self):
+        return tempfile.TemporaryDirectory(dir=self.temp_root)
+
+    def image_fixture(self, base, reverse=False, padding=0):
+        payload = b"offline OCI consumer canary; not a qualified native image"
+        rootfs = base / "rootfs.tar"
+        rootfs.write_bytes(payload)
+        layout = base / "layout"
+        image = provision.create_oci_layout(rootfs, layout, "fixture", self.contract["environment"])
+        path = base / "image.tar"
+        with tarfile.open(path, "w", format=tarfile.USTAR_FORMAT) as archive:
+            for source in sorted((p for p in layout.rglob("*") if p.is_file()), reverse=reverse):
+                data = source.read_bytes()
+                info = tarfile.TarInfo(source.relative_to(layout).as_posix())
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
+        if padding:
+            with path.open("ab") as stream:
+                stream.write(b"\0" * padding)
+        record = {"profile": {"id": "fixture"}, "environment": self.contract["environment"],
+            "rootfs": {"bytes": len(payload), "sha256": provision.sha256(payload)}, "image": image,
+            "imageArtifact": {"bytes": path.stat().st_size, "sha256": provision.sha256_file(path)}}
+        return path, record
+
+    def test_oci_reordered_regular_members_are_accepted(self):
+        with self.temporary_directory() as temp:
+            path, record = self.image_fixture(Path(temp), reverse=True)
+            provision.verify_oci_archive(path, record, 4 * 1024 * 1024)
+
+    def test_oci_path_swap_after_authentication_rejects_semantically_identical_tar(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            path, record = self.image_fixture(base)
+            original = path.read_bytes()
+            header = tarfile.TarInfo.frombuf(original[:512], "utf-8", "strict")
+            header.uid = 42
+            replacement = base / "replacement.tar"
+            replacement.write_bytes(header.tobuf(format=tarfile.USTAR_FORMAT) + original[512:])
+            self.assertNotEqual(provision.sha256_file(replacement), record["imageArtifact"]["sha256"])
+            actual_open = tarfile.open
+            def swap(*args, **kwargs):
+                self.assertIsInstance(kwargs.get("fileobj"), provision.AuthenticatedOCIReader)
+                replacement.replace(path)
+                return actual_open(*args, **kwargs)
+            with mock.patch.object(provision.tarfile, "open", side_effect=swap):
+                with self.assertRaisesRegex(provision.ProvisionError, "retained path changed"):
+                    provision.verify_oci_archive(path, record, 4 * 1024 * 1024)
+
+    def test_oci_transient_inplace_header_mutation_is_refused_before_consumption(self):
+        with self.temporary_directory() as temp:
+            path, record = self.image_fixture(Path(temp))
+            original = path.read_bytes()
+            header = tarfile.TarInfo.frombuf(original[:512], "utf-8", "strict")
+            header.uid = 42
+            changed_header = header.tobuf(format=tarfile.USTAR_FORMAT)
+            actual_read = provision.AuthenticatedOCIReader.read
+            def mutate(reader, size=-1):
+                with path.open("r+b", buffering=0) as writer:
+                    writer.write(changed_header)
+                    try:
+                        return actual_read(reader, size)
+                    finally:
+                        writer.seek(0)
+                        writer.write(original[:512])
+            with mock.patch.object(provision.AuthenticatedOCIReader, "read", new=mutate):
+                with self.assertRaisesRegex(provision.ProvisionError, "authenticated consumer read"):
+                    provision.verify_oci_archive(path, record, 4 * 1024 * 1024)
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_oci_growth_truncation_and_unconsumed_padding_mutations_are_refused(self):
+        for kind in ("growth", "truncation", "padding"):
+            with self.subTest(kind=kind), self.temporary_directory() as temp:
+                path, record = self.image_fixture(Path(temp), padding=2 * 1024 * 1024)
+                actual_open = tarfile.open
+                def mutate(*args, **kwargs):
+                    archive = actual_open(*args, **kwargs)
+                    with path.open("r+b", buffering=0) as writer:
+                        if kind == "growth":
+                            writer.seek(0, os.SEEK_END)
+                            writer.write(b"extra")
+                        elif kind == "truncation":
+                            writer.truncate(record["imageArtifact"]["bytes"] - 512)
+                        else:
+                            writer.seek(-1, os.SEEK_END)
+                            writer.write(b"x")
+                    return archive
+                with mock.patch.object(provision.tarfile, "open", side_effect=mutate):
+                    with self.assertRaisesRegex(provision.ProvisionError, "artifact identity|truncated"):
+                        provision.verify_oci_archive(path, record, 4 * 1024 * 1024)
+
+    def test_oci_symlink_fifo_and_sparse_extended_metadata_are_refused(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            path, record = self.image_fixture(base)
+            for kind in ("symlink", "fifo"):
+                alias = base / kind
+                alias.symlink_to(path) if kind == "symlink" else os.mkfifo(alias)
+                with self.subTest(kind=kind), self.assertRaisesRegex(provision.ProvisionError, "regular|verify OCI"):
+                    provision.verify_oci_archive(alias, record, 4 * 1024 * 1024)
+            for kind in ("pax-budget", "gnu-sparse", "pax-sparse"):
+                info = tarfile.TarInfo("canary")
+                if kind == "pax-budget":
+                    info.type, info.size = tarfile.XHDTYPE, 64 * 1024 + 1
+                    payload = info.tobuf(format=tarfile.USTAR_FORMAT) + b"\0" * (info.size + 1024)
+                elif kind == "gnu-sparse":
+                    info.type, info.size = tarfile.GNUTYPE_SPARSE, 1
+                    payload = info.tobuf(format=tarfile.GNU_FORMAT) + b"\0" * 1024
+                else:
+                    output = io.BytesIO()
+                    info.pax_headers = {"GNU.sparse.map": "0,1", "GNU.sparse.size": str(2 ** 40)}
+                    info.size = 1
+                    with tarfile.open(fileobj=output, mode="w", format=tarfile.PAX_FORMAT) as archive:
+                        archive.addfile(info, io.BytesIO(b"x"))
+                    payload = output.getvalue()
+                malformed = base / (kind + ".tar")
+                malformed.write_bytes(payload)
+                record["imageArtifact"] = {"bytes": len(payload), "sha256": provision.sha256(payload)}
+                with self.subTest(kind=kind), self.assertRaisesRegex(provision.ProvisionError, "metadata|sparse"):
+                    provision.verify_oci_archive(malformed, record, 4 * 1024 * 1024)
+
+    def test_negative_comparator_requires_locked_regular_bytes_before_execution(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            compiler = base / "compiler"
+            compiler.write_bytes(b"unlocked executable")
+            for kind in ("changed", "symlink", "fifo"):
+                selected = compiler
+                if kind != "changed":
+                    selected = base / kind
+                    selected.symlink_to(compiler) if kind == "symlink" else os.mkfifo(selected)
+                with self.subTest(kind=kind), mock.patch.object(provision, "run_checked") as execute:
+                    with self.assertRaises(provision.ProvisionError):
+                        provision.execute_locked_negative_comparator(selected,
+                            ROOT / self.contract["negativeControl"]["fixture"], self.contract,
+                            ROOT / self.contract["negativeControl"]["artifactLock"])
+                    execute.assert_not_called()
+
+    def test_real_elf_comparator_and_fixture_use_sealed_snapshots_despite_path_replacement(self):
+        """Real host ELF execution with a test lock; never claims the actual LLVM artifact ran."""
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            fixture_bytes = (ROOT / self.contract["negativeControl"]["fixture"]).read_bytes()
+            fixture = base / "fixture.cpp"
+            fixture.write_bytes(fixture_bytes)
+            source = base / "consumer.c"
+            source.write_text(r'''
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+static const unsigned char fixture[] = {''' + ",".join(str(b) for b in fixture_bytes) + r'''};
+int main(int argc, char **argv) {
+    int fd = atoi(strrchr(argv[0], '/') + 1);
+    struct stat st;
+    int seals = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+    if (fstat(fd, &st) || st.st_uid != getuid() || (st.st_mode & 0777) != 0555 ||
+        (fcntl(fd, F_GET_SEALS) & seals) != seals) return 11;
+    if (argc == 2 && !strcmp(argv[1], "--version")) { puts("clang version 22.1.6"); return 0; }
+    if (argc != 8 || strcmp(argv[1], "--no-default-config") ||
+        strcmp(argv[2], "--target=x86_64-pc-linux-gnu") || strcmp(argv[3], "-std=c++14") ||
+        strcmp(argv[4], "-fsyntax-only") || strcmp(argv[5], "-x") || strcmp(argv[6], "c++")) return 12;
+    FILE *input = fopen(argv[7], "rb");
+    unsigned char data[sizeof(fixture) + 1];
+    if (!input || fread(data, 1, sizeof(data), input) != sizeof(fixture) ||
+        memcmp(data, fixture, sizeof(fixture))) return 13;
+    fclose(input);
+    fd = atoi(strrchr(argv[7], '/') + 1);
+    return (fcntl(fd, F_GET_SEALS) & seals) == seals ? 0 : 14;
+}
+''', encoding="utf-8")
+            compiler = base / "consumer"
+            subprocess.run(["/usr/bin/cc", str(source), "-o", str(compiler)], check=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
+                           env={**os.environ, "TMPDIR": str(base)})
+            expected = {"bytes": compiler.stat().st_size, "sha256": provision.sha256_file(compiler)}
+            lock = base / "offline-lock.json"
+            lock.write_bytes(b'{"scope":"offline ELF canary only"}\n')
+            actual_run = provision.run_checked
+            calls = []
+            def replace_then_run(command, **kwargs):
+                calls.append(command)
+                compiler.write_bytes(b"replacement must never execute")
+                fixture.write_bytes(b"replacement fixture must never be consumed")
+                return actual_run(command, **kwargs)
+            with mock.patch.object(provision, "validate_locked_comparator_manifest",
+                                   return_value=({}, lock, provision.sha256_file(lock), expected)), \
+                    mock.patch.object(provision, "run_checked", side_effect=replace_then_run):
+                report = provision.execute_locked_negative_comparator(compiler, fixture, self.contract, lock)
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(all(command[0].startswith("/proc/self/fd/") for command in calls))
+            self.assertEqual(report["compilerSha256"], expected["sha256"])
+            self.assertEqual(report["fixtureSha256"], provision.sha256(fixture_bytes))
+            self.assertTrue(report["fixtureAcceptedByClang22"])
+            self.assertEqual(report["compiler18GateRejected"], "probe compiler version or target mismatch")
+
+
 def run_rootfs_privilege_smoke(privilege: str) -> None:
     """Exercise only inert repository-local files; never acquire or qualify a toolchain."""
     if privilege not in ("sudo", "doas"):
@@ -4094,7 +4334,7 @@ if mode == "socket":
             archive = base / "normal.tar"
             with mock.patch.object(provision, "run_checked", side_effect=fixture_execute):
                 provision.deterministic_rootfs_tar(rootfs, archive, 0, normalize=False, max_bytes=budget)
-            assert len(observed) == 2 and observed[0][6] == "check-rootfs-tar-budget"
+            assert len(observed) == 2 and observed[0][7] == "check-rootfs-tar-budget"
             with tarfile.open(archive) as content:
                 assert content.getmember("./private/payload").uid == 0
                 assert content.getmember("./private").mode == 0o700
@@ -4104,6 +4344,15 @@ if mode == "socket":
                 "from pathlib import Path; import sys; p=Path(sys.argv[1]); p.write_bytes(bytes.fromhex(sys.argv[2])); p.chmod(0o600)",
                 str(canary), canary_payload.hex()], timeout=30)
             assert canary.stat().st_uid == 0 and canary.stat().st_mode & 0o777 == 0o600
+            replacement = base / "unchecked-provisioner.py"
+            replacement.write_text("from pathlib import Path; Path(" + repr(str(canary)) + ").write_bytes(b'compromised')\n")
+            with mock.patch.dict(provision.RECIPE_FILES, provisionerSha256=replacement):
+                helper = provision.rootfs_tar_budget_command(rootfs, budget)
+                assert str(replacement) not in helper and helper[6] == provision.ROOTFS_TAR_BUDGET_PROGRAM
+                original_execute([privilege, "-n", *helper[2:]], timeout=30)
+            original_execute([privilege, "-n", "/usr/bin/python3", "-I", "-B", "-c",
+                "from pathlib import Path; import sys; assert Path(sys.argv[1]).read_bytes() == bytes.fromhex(sys.argv[2])",
+                str(canary), canary_payload.hex()], timeout=30)
             planted_archive = base / "planted.tar"
             planted_archive.symlink_to(canary)
             observed.clear()
@@ -4133,12 +4382,12 @@ if mode == "socket":
                         assert diagnostic in str(error)
                     else:
                         raise AssertionError(mode + " preflight unexpectedly succeeded")
-                assert len(observed) == 1 and observed[0][6] == "check-rootfs-tar-budget"
+                assert len(observed) == 1 and observed[0][7] == "check-rootfs-tar-budget"
                 assert not rejected_archive.exists()
         finally:
             original_execute([privilege, "-n", "/usr/bin/rm", "-rf", "--", str(rootfs)], timeout=30)
     assert not base.exists()
-    print("inert root-owned 0700 preflight/tar passed; planted output symlink preserved root-owned canary; oversized/socket refused; cleanup passed")
+    print("inert root-owned 0700 preflight/tar passed; replacement helper and planted output symlink preserved root-owned canary; oversized/socket refused; cleanup passed")
     print("scope=offline-privilege-smoke; nativeQualification=not-run; qualified=false")
 
 

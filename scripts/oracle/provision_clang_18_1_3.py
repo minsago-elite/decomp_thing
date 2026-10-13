@@ -2208,11 +2208,12 @@ def command_probe_report(args: argparse.Namespace) -> int:
 
 
 def run_checked(command: list[str], *, timeout: int = 900, input_text: str | None = None,
-                env: dict[str, str] | None = None, stdout_file=None) -> subprocess.CompletedProcess:
+                env: dict[str, str] | None = None, stdout_file=None,
+                pass_fds: tuple[int, ...] = ()) -> subprocess.CompletedProcess:
     proc = subprocess.run(command, check=False,
                           stdout=subprocess.PIPE if stdout_file is None else stdout_file,
                           stderr=subprocess.STDOUT if stdout_file is None else subprocess.PIPE,
-                          text=True, input=input_text, timeout=timeout, env=env)
+                          text=True, input=input_text, timeout=timeout, env=env, pass_fds=pass_fds)
     if proc.returncode != 0:
         diagnostic = proc.stdout if stdout_file is None else proc.stderr
         raise ProvisionError(f"command failed ({proc.returncode}): {command!r}\n{diagnostic[-6000:]}")
@@ -2239,29 +2240,17 @@ def check_runner_bounds(workdir: Path, profile: dict) -> None:
         raise ProvisionError("standard runner has less than the pinned memory budget")
 
 
-def rootfs_tar_budget_command(rootfs: Path, maximum_bytes: int) -> list[str]:
-    if type(maximum_bytes) is not int or maximum_bytes < 1:
-        raise ProvisionError("rootfs archive budget must be a positive integer")
-    return ["sudo", "-n", "/usr/bin/python3", "-I", "-B", str(RECIPE_FILES["provisionerSha256"]),
-            "check-rootfs-tar-budget", "--rootfs", str(rootfs.absolute()), "--max-bytes", str(maximum_bytes)]
+ROOTFS_TAR_BUDGET_PROGRAM = r'''
+import argparse
+import os
+from pathlib import Path
+import stat
 
-
-def command_check_rootfs_tar_budget(args: argparse.Namespace) -> int:
-    rootfs = args.rootfs
-    if (not rootfs.is_absolute() or ".." in rootfs.parts or rootfs.is_symlink() or not rootfs.is_dir()):
-        raise ProvisionError("rootfs budget inspection requires an absolute non-symlink directory")
-    if type(args.max_bytes) is not int or args.max_bytes < 1:
-        raise ProvisionError("rootfs archive budget must be a positive integer")
-    check_rootfs_tar_budget(rootfs, args.max_bytes)
-    print("read-only rootfs archive budget passed; native qualification remains incomplete")
-    return 0
-
-
-def check_rootfs_tar_budget(rootfs: Path, maximum_bytes: int) -> None:
+def inspect_rootfs_tar_budget(rootfs, maximum_bytes):
     """Conservatively bound canonical tar input size and entry count before writing it."""
     # The canonical GNU tar command writes at least one default 20 x 512-byte record.
     if maximum_bytes < 20 * 512:
-        raise ProvisionError("rootfs archive budget is below the minimum canonical tar record size")
+        raise RuntimeError("rootfs archive budget is below the minimum canonical tar record size")
     entry_count = 1  # tar includes the root directory as '.'
     payload_bytes = 0
     max_entries = maximum_bytes // 8192
@@ -2273,10 +2262,10 @@ def check_rootfs_tar_budget(rootfs: Path, maximum_bytes: int) -> None:
                 for entry in entries:
                     name = entry.name
                     if name in (".", ".."):
-                        raise ProvisionError("rootfs contains an invalid directory entry")
+                        raise RuntimeError("rootfs contains an invalid directory entry")
                     entry_count += 1
                     if entry_count > max_entries:
-                        raise ProvisionError("rootfs entry count exceeds the canonical archive budget")
+                        raise RuntimeError("rootfs entry count exceeds the canonical archive budget")
                     metadata = entry.stat(follow_symlinks=False)
                     mode = metadata.st_mode
                     if stat.S_ISREG(mode):
@@ -2285,11 +2274,56 @@ def check_rootfs_tar_budget(rootfs: Path, maximum_bytes: int) -> None:
                         pending.append(current / name)
                     elif not (stat.S_ISLNK(mode) or stat.S_ISCHR(mode) or
                               stat.S_ISBLK(mode) or stat.S_ISFIFO(mode)):
-                        raise ProvisionError("rootfs contains an unsupported filesystem entry")
+                        raise RuntimeError("rootfs contains an unsupported filesystem entry")
                     if payload_bytes + entry_count * 8192 > maximum_bytes:
-                        raise ProvisionError("rootfs contents exceed the canonical archive byte budget")
+                        raise RuntimeError("rootfs contents exceed the canonical archive byte budget")
     except OSError as error:
-        raise ProvisionError(f"could not inspect retained rootfs for archive bounds: {error}") from error
+        raise RuntimeError(f"could not inspect retained rootfs for archive bounds: {error}") from error
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("command", choices=("check-rootfs-tar-budget",))
+    parser.add_argument("--rootfs", type=Path, required=True)
+    parser.add_argument("--max-bytes", type=int, required=True)
+    args = parser.parse_args()
+    rootfs = args.rootfs
+    if not rootfs.is_absolute() or ".." in rootfs.parts or rootfs.is_symlink() or not rootfs.is_dir():
+        parser.error("rootfs budget inspection requires an absolute non-symlink directory")
+    if args.max_bytes < 1:
+        parser.error("rootfs archive budget must be a positive integer")
+    inspect_rootfs_tar_budget(rootfs, args.max_bytes)
+    print("read-only rootfs archive budget passed; native qualification remains incomplete")
+'''
+# Both consumers use the same already-loaded immutable program. The privileged
+# child receives this literal through argv, never a mutable checkout filename.
+_budget_namespace = {"__name__": "clang1813_read_only_budget"}
+exec(compile(ROOTFS_TAR_BUDGET_PROGRAM, "<clang1813-read-only-budget>", "exec"), _budget_namespace)
+_inspect_rootfs_tar_budget = _budget_namespace["inspect_rootfs_tar_budget"]
+
+
+def rootfs_tar_budget_command(rootfs: Path, maximum_bytes: int) -> list[str]:
+    if type(maximum_bytes) is not int or maximum_bytes < 1:
+        raise ProvisionError("rootfs archive budget must be a positive integer")
+    return ["sudo", "-n", "/usr/bin/python3", "-I", "-B", "-c", ROOTFS_TAR_BUDGET_PROGRAM,
+            "check-rootfs-tar-budget", "--rootfs", str(rootfs.absolute()), "--max-bytes", str(maximum_bytes)]
+
+
+def check_rootfs_tar_budget(rootfs: Path, maximum_bytes: int) -> None:
+    try:
+        _inspect_rootfs_tar_budget(rootfs, maximum_bytes)
+    except RuntimeError as error:
+        raise ProvisionError(str(error)) from error
+
+
+def command_check_rootfs_tar_budget(args: argparse.Namespace) -> int:
+    rootfs = args.rootfs
+    if (not rootfs.is_absolute() or ".." in rootfs.parts or rootfs.is_symlink() or not rootfs.is_dir()):
+        raise ProvisionError("rootfs budget inspection requires an absolute non-symlink directory")
+    if type(args.max_bytes) is not int or args.max_bytes < 1:
+        raise ProvisionError("rootfs archive budget must be a positive integer")
+    check_rootfs_tar_budget(rootfs, args.max_bytes)
+    print("read-only rootfs archive budget passed; native qualification remains incomplete")
+    return 0
 
 
 def rootfs_env_args(contract: dict, extra: dict[str, str] | None = None) -> list[str]:
@@ -3073,13 +3107,126 @@ def create_oci_layout(rootfs_tar: Path, output: Path, profile_id: str, environme
             "layerBytes": len(layer), "layerSha256": layer_digest, "configSha256": config_digest}
 
 
-def verify_oci_archive(path: Path, record: dict, max_bytes: int) -> None:
-    if path.stat().st_size > max_bytes:
-        raise ProvisionError("OCI archive exceeds the configured artifact byte budget")
-    if record.get("imageArtifact", {}) != {"bytes": path.stat().st_size, "sha256": sha256_file(path)}:
-        raise ProvisionError("OCI archive bytes differ from the checksummed build-record artifact identity")
+OCI_READ_CHUNK_BYTES = 1024 * 1024
+
+
+class AuthenticatedOCIReader(io.RawIOBase):
+    """Seekable tar reader that authenticates every consumed chunk before use."""
+    def __init__(self, descriptor: int, length: int, chunk_hashes: list[str]):
+        self.descriptor = descriptor
+        self.length = length
+        self.chunk_hashes = chunk_hashes
+        self.position = 0
+        self.cached_chunk_number = -1
+        self.cached_block = b""
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return True
+
+    def tell(self):
+        return self.position
+
+    def seek(self, offset, whence=os.SEEK_SET):
+        position = (offset if whence == os.SEEK_SET else
+                    self.position + offset if whence == os.SEEK_CUR else
+                    self.length + offset if whence == os.SEEK_END else -1)
+        if position < 0 or position > self.length:
+            raise ProvisionError("OCI archive seek exceeds its authenticated byte bounds")
+        self.position = position
+        return position
+
+    def read(self, size=-1):
+        if size < 0 or size > 2 * OCI_READ_CHUNK_BYTES:
+            raise ProvisionError("OCI archive read exceeds its bounded consumer size")
+        remaining = min(size, self.length - self.position)
+        blocks = []
+        while remaining:
+            chunk_number, within_chunk = divmod(self.position, OCI_READ_CHUNK_BYTES)
+            start = chunk_number * OCI_READ_CHUNK_BYTES
+            if self.cached_chunk_number != chunk_number:
+                block = os.pread(self.descriptor, min(OCI_READ_CHUNK_BYTES, self.length - start), start)
+                if (len(block) != min(OCI_READ_CHUNK_BYTES, self.length - start) or
+                        sha256(block) != self.chunk_hashes[chunk_number]):
+                    raise ProvisionError("OCI archive bytes changed before their authenticated consumer read")
+                # Retain only one authenticated immutable bytes object. Gzip's
+                # small reads reuse this snapshot without repeated 1MiB hashes.
+                self.cached_chunk_number, self.cached_block = chunk_number, block
+            block = self.cached_block
+            count = min(remaining, len(block) - within_chunk)
+            blocks.append(block[within_chunk:within_chunk + count])
+            remaining -= count
+            self.position += count
+        return b"".join(blocks)
+
+
+class BoundedOCITarInfo(tarfile.TarInfo):
+    def _proc_member(self, archive):
+        archive._oci_header_count = getattr(archive, "_oci_header_count", 0) + 1
+        if archive._oci_header_count > 32:
+            raise ProvisionError("OCI archive contains too many headers")
+        if self.type in (tarfile.XHDTYPE, tarfile.XGLTYPE):
+            if self.size < 0 or self.size > 64 * 1024:
+                raise ProvisionError("OCI archive extended metadata exceeds its byte budget")
+        elif self.type not in (tarfile.REGTYPE, tarfile.AREGTYPE):
+            raise ProvisionError("OCI archive contains a non-regular or sparse member")
+        return super()._proc_member(archive)
+
+    def _proc_gnusparse_00(self, *args):
+        raise ProvisionError("OCI archive contains unsupported sparse metadata")
+
+    _proc_gnusparse_01 = _proc_gnusparse_00
+    _proc_gnusparse_10 = _proc_gnusparse_00
+
+
+@contextlib.contextmanager
+def authenticated_oci_reader(path: Path, identity: dict, max_bytes: int):
+    length = identity.get("bytes")
+    expected_sha256 = identity.get("sha256")
+    if (type(length) is not int or length < 1 or length > max_bytes or
+            not isinstance(expected_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None or
+            set(identity) != {"bytes", "sha256"}):
+        raise ProvisionError("OCI archive identity exceeds its artifact byte budget or is malformed")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
-        with tarfile.open(path, mode="r:") as archive:
+        initial = os.fstat(descriptor)
+        if not stat.S_ISREG(initial.st_mode) or initial.st_size != length:
+            raise ProvisionError("OCI archive is not a regular file with its recorded byte count")
+        def scan():
+            digest = hashlib.sha256()
+            chunk_hashes = []
+            for start in range(0, length, OCI_READ_CHUNK_BYTES):
+                block = os.pread(descriptor, min(OCI_READ_CHUNK_BYTES, length - start), start)
+                if len(block) != min(OCI_READ_CHUNK_BYTES, length - start):
+                    raise ProvisionError("OCI archive was truncated during byte authentication")
+                digest.update(block)
+                chunk_hashes.append(sha256(block))
+            if os.pread(descriptor, 1, length) or digest.hexdigest() != expected_sha256:
+                raise ProvisionError("OCI archive bytes differ from the checksummed build-record artifact identity")
+            return chunk_hashes
+        reader = AuthenticatedOCIReader(descriptor, length, scan())
+        yield reader
+        # Recheck padding not consumed by tar and bind the successful CLI result
+        # to the retained pathname. Chunk checks also reject transient changed
+        # bytes during parsing; inode identity alone would not provide that.
+        scan()
+        final = os.fstat(descriptor)
+        current = path.lstat()
+        fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if (any(getattr(initial, field) != getattr(final, field) for field in fields) or
+                not stat.S_ISREG(current.st_mode) or
+                (current.st_dev, current.st_ino) != (initial.st_dev, initial.st_ino)):
+            raise ProvisionError("OCI archive identity or retained path changed during verification")
+    finally:
+        os.close(descriptor)
+
+
+def verify_oci_archive(path: Path, record: dict, max_bytes: int) -> None:
+    try:
+        with authenticated_oci_reader(path, record.get("imageArtifact", {}), max_bytes) as reader, \
+                tarfile.open(fileobj=reader, mode="r:", tarinfo=BoundedOCITarInfo) as archive:
             members: dict[str, tarfile.TarInfo] = {}
             for member in archive:
                 if len(members) >= 16:
@@ -3088,7 +3235,8 @@ def verify_oci_archive(path: Path, record: dict, max_bytes: int) -> None:
                 pure = PurePosixPath(name)
                 if pure.is_absolute() or ".." in pure.parts or not pure.parts:
                     raise ProvisionError("OCI archive contains an unsafe member path")
-                if not member.isfile() or member.issym() or member.islnk() or name in members:
+                if (member.type not in (tarfile.REGTYPE, tarfile.AREGTYPE) or member.sparse is not None or
+                        member.size < 0 or member.size > reader.length or name in members):
                     raise ProvisionError("OCI archive contains a non-regular or duplicate member")
                 members[name] = member
             required = {"oci-layout", "index.json"}
@@ -3292,8 +3440,7 @@ def canonical_commands(contract: dict, keyring_sha256: str) -> dict[str, list[st
     epoch = int(contract["environment"]["SOURCE_DATE_EPOCH"])
     source_list_sha256 = sha256(apt_source_list(contract))
     budget_command = rootfs_tar_budget_command(Path("<PROFILE_ROOT>"), contract["profile"]["bounds"]["maxArtifactBytes"])
-    budget_command[5] = f"<PROVISIONER_SHA256:{sha256_file(RECIPE_FILES['provisionerSha256'])}>"
-    budget_command[8] = "<PROFILE_ROOT>"
+    budget_command[9] = "<PROFILE_ROOT>"
 
     def in_root(command: list[str], apt_environment: bool = False) -> list[str]:
         extra = {"DEBIAN_FRONTEND": "noninteractive"} if apt_environment else None
@@ -4270,6 +4417,94 @@ def validate_provenance_negative_report(report: dict, record: dict, contract: di
     return manifest_path, manifest_sha256
 
 
+@contextlib.contextmanager
+def locked_comparator_fd(compiler: Path, expected: dict):
+    """Hash the exact bounded bytes copied to the sealed executable snapshot."""
+    length = expected.get("bytes")
+    digest = expected.get("sha256")
+    if (type(length) is not int or not 0 < length <= MAX_SINGLE_DOWNLOAD or
+            not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None):
+        raise ProvisionError("negative comparator lock has an invalid bounded byte identity")
+    source = None
+    descriptor = None
+    try:
+        source = os.open(compiler, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        metadata = os.fstat(source)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != length:
+            raise ProvisionError("22.1.6 negative compiler bytes differ from the immutable release-artifact lock")
+        descriptor = os.memfd_create("clang1813-locked-comparator", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+        actual = hashlib.sha256()
+        remaining = length
+        while remaining:
+            block = os.read(source, min(remaining, 1024 * 1024))
+            if not block:
+                break
+            actual.update(block)
+            remaining -= len(block)
+            offset = 0
+            while offset < len(block):
+                offset += os.write(descriptor, block[offset:])
+        if remaining or os.read(source, 1) or actual.hexdigest() != digest:
+            raise ProvisionError("22.1.6 negative compiler bytes differ from the immutable release-artifact lock")
+        if os.pread(descriptor, 4, 0) != b"\x7fELF":
+            raise ProvisionError("locked negative comparator must be the native ELF executable")
+        os.fchmod(descriptor, 0o555)
+        seals = fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
+        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, seals)
+        if (os.fstat(descriptor).st_uid != os.geteuid() or
+                fcntl.fcntl(descriptor, fcntl.F_GET_SEALS) & seals != seals):
+            raise ProvisionError("negative comparator snapshot ownership or immutability could not be verified")
+        yield descriptor, f"/proc/self/fd/{descriptor}"
+    except OSError as error:
+        raise ProvisionError(f"could not capture immutable negative comparator executable: {error}") from error
+    finally:
+        if source is not None:
+            os.close(source)
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def execute_locked_negative_comparator(compiler: Path, fixture: Path, contract: dict,
+                                      artifact_lock: Path, *, captured: dict[Path, bytes] | None = None) -> dict:
+    captured = {} if captured is None else captured
+    negative = contract["negativeControl"]
+    _, _, _, expected = validate_locked_comparator_manifest(artifact_lock, negative, captured=captured)
+    fixture_bytes = captured_evidence(fixture, captured)
+    if fixture_bytes != captured_evidence(ROOT / negative["fixture"], captured):
+        raise ProvisionError("negative comparator fixture differs from the pinned positive fixture bytes")
+    environment = {"LC_ALL": "C", "TZ": "UTC", "PATH": "/usr/bin:/bin"}
+    with locked_comparator_fd(compiler, expected) as (compiler_fd, executable), \
+            sealed_evidence_fd(fixture_bytes) as (fixture_fd, fixture_path):
+        version_output = run_checked([executable, "--version"], timeout=30,
+                                     env=environment, pass_fds=(compiler_fd,)).stdout
+        first_line = version_output.splitlines()[0] if version_output.splitlines() else ""
+        if re.search(r"\bversion\s+22\.1\.6(?:\s|$)", first_line) is None:
+            raise ProvisionError(f"locked negative comparator did not execute as Clang 22.1.6: {first_line!r}")
+        # The anonymous fixture has no .cpp suffix; force the same C++ frontend
+        # rather than letting the driver silently treat it as linker input.
+        run_checked([executable, "--no-default-config", "--target=x86_64-pc-linux-gnu",
+                     "-std=c++14", "-fsyntax-only", "-x", "c++", fixture_path],
+                    timeout=60, env=environment, pass_fds=(compiler_fd, fixture_fd))
+    try:
+        validate_profile_compiler_identity(first_line, "x86_64-pc-linux-gnu")
+    except ProvisionError as error:
+        if "compiler version or target mismatch" not in str(error):
+            raise
+        rejected = str(error)
+    else:
+        raise ProvisionError("negative comparator was accepted as the pinned Clang 18.1.3 profile")
+    return {
+        "schemaVersion": 1,
+        "scope": "negative-version-gate-only; not a Clang 18.1.3 identity",
+        "artifactOracleId": negative["oracleId"],
+        "artifactLockSha256": sha256(captured_evidence(artifact_lock, captured)),
+        "compilerBytes": expected["bytes"], "compilerSha256": expected["sha256"],
+        "compilerVersionOutput": version_output,
+        "fixtureBytes": len(fixture_bytes), "fixtureSha256": sha256(fixture_bytes),
+        "fixtureAcceptedByClang22": True, "compiler18GateRejected": rejected,
+    }
+
+
 def command_package_provenance(args: argparse.Namespace) -> int:
     captured: dict[Path, bytes] = {}
     contract = read_contract(args.contract, captured=captured)
@@ -4280,7 +4515,7 @@ def command_package_provenance(args: argparse.Namespace) -> int:
     }:
         raise ProvisionError("provenance packaging requires a final reproducible build record")
     initial_files = [
-        args.record, args.oci_archive, args.probe_report, args.loader_report, args.negative_report,
+        args.record, args.oci_archive, args.probe_report, args.loader_report, args.negative_report, args.negative_compiler,
         args.contract, args.keyring, *RECIPE_FILES.values(),
     ]
     preflight_provenance_output(args.output, [args.acquisition, args.rootfs], initial_files)
@@ -4334,6 +4569,12 @@ def command_package_provenance(args: argparse.Namespace) -> int:
     comparator_manifest, comparator_manifest_sha256 = validate_provenance_negative_report(
         negative_report, record, contract, captured=captured,
     )
+    actual_negative_report = execute_locked_negative_comparator(
+        args.negative_compiler, ROOT / contract["negativeControl"]["fixture"], contract,
+        comparator_lock, captured=captured,
+    )
+    if actual_negative_report != negative_report:
+        raise ProvisionError("negative smoke report differs from actual locked comparator replay during packaging")
     comparator_lock_sha256 = negative_report["artifactLockSha256"]
     # Metadata already consumed by validators keeps its original immutable
     # snapshot. Capture the remaining informational files before opening output.
@@ -4450,45 +4691,7 @@ def command_package_provenance(args: argparse.Namespace) -> int:
 
 def command_negative_version_smoke(args: argparse.Namespace) -> int:
     contract = read_contract(args.contract)
-    negative = contract["negativeControl"]
-    lock = strict_json_loads(args.artifact_lock.read_text(encoding="utf-8"))
-    expected = lock["artifacts"][negative["artifactRole"]]
-    if lock.get("oracle", {}).get("id") != negative["oracleId"] or lock.get("oracle", {}).get("version") != negative["requiredVersion"]:
-        raise ProvisionError("22.1.6 negative compiler lock does not match the frozen comparator")
-    if args.compiler.stat().st_size != expected["bytes"] or sha256_file(args.compiler) != expected["sha256"]:
-        raise ProvisionError("22.1.6 negative compiler bytes differ from the existing immutable release-artifact lock")
-    version_output = run_checked([str(args.compiler), "--version"], timeout=30).stdout
-    first_line = version_output.splitlines()[0] if version_output.splitlines() else ""
-    if re.search(r"\bversion\s+22\.1\.6(?:\s|$)", first_line) is None:
-        raise ProvisionError(f"locked negative comparator did not execute as Clang 22.1.6: {first_line!r}")
-    fixture = args.fixture
-    if sha256_file(fixture) != sha256_file(ROOT / negative["fixture"]):
-        raise ProvisionError("negative comparator fixture differs from the pinned positive fixture bytes")
-    run_checked([
-        str(args.compiler), "--no-default-config", "--target=x86_64-pc-linux-gnu",
-        "-std=c++14", "-fsyntax-only", str(fixture),
-    ], timeout=60)
-    try:
-        validate_profile_compiler_identity(first_line, "x86_64-pc-linux-gnu")
-    except ProvisionError as error:
-        if "compiler version or target mismatch" not in str(error):
-            raise
-        rejected = str(error)
-    else:
-        raise ProvisionError("negative comparator was accepted as the pinned Clang 18.1.3 profile")
-    result = {
-        "schemaVersion": 1,
-        "scope": "negative-version-gate-only; not a Clang 18.1.3 identity",
-        "artifactOracleId": negative["oracleId"],
-        "artifactLockSha256": sha256_file(args.artifact_lock),
-        "compilerBytes": expected["bytes"],
-        "compilerSha256": expected["sha256"],
-        "compilerVersionOutput": version_output,
-        "fixtureBytes": fixture.stat().st_size,
-        "fixtureSha256": sha256_file(fixture),
-        "fixtureAcceptedByClang22": True,
-        "compiler18GateRejected": rejected,
-    }
+    result = execute_locked_negative_comparator(args.compiler, args.fixture, contract, args.artifact_lock)
     atomic_write(args.output, canonical_json(result))
     print("executed the locked Clang 22.1.6 negative fixture and confirmed 18.1.3 gate rejection")
     return 0
@@ -4623,6 +4826,8 @@ def build_parser() -> argparse.ArgumentParser:
     provenance.add_argument("--probe-report", type=Path, required=True)
     provenance.add_argument("--loader-report", type=Path, required=True)
     provenance.add_argument("--negative-report", type=Path, required=True)
+    provenance.add_argument("--negative-compiler", type=Path, required=True,
+                            help="retained locked Clang 22.1.6 executable replayed during packaging")
     provenance.add_argument("--keyring", type=Path, default=DEFAULT_KEYRING)
     provenance.add_argument("--output", type=Path, required=True)
     provenance.set_defaults(run=command_package_provenance)
