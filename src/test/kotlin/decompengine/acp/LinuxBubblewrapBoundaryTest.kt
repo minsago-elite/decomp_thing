@@ -119,7 +119,7 @@ class LinuxBubblewrapBoundaryTest {
                             assertFailsWith<IOException> { invokePrivate(control, mountSourceGuard, exposed) }
                         }
                         Files.writeString(controlPath.resolve("cleanup-marker"), "private-control-canary")
-                        assertTrue(Files.list(workspace).use { it.findAny().isEmpty })
+                        assertEquals(setOf(replacementParent), Files.list(workspace).use { it.toList().toSet() })
                         assertEquals(setOf(controlPath), Files.list(parent).use { it.toList().toSet() })
                     } finally {
                         invokePrivate(control, type.getDeclaredMethod("deleteAndProve"))
