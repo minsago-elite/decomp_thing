@@ -1497,12 +1497,13 @@ dependencies {
     runtimeOnly("org.slf4j:slf4j-nop:2.0.16")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     testImplementation(kotlin("test"))
-    testImplementation("org.apache.commons:commons-compress:1.28.0")
+    implementation("org.apache.commons:commons-compress:1.28.0")
+    implementation("io.airlift:aircompressor:2.0.3")
 }
 
 tasks.processResources {
     from("oracle") {
-        include("**/*.schema.json", "kotlin-schema-inventory-v1.json")
+        include("**/*.schema.json", "kotlin-schema-inventory-v1.json", "llvm/22.1.6/native-runtime-measurement-v2.Dockerfile")
         into("oracle")
     }
 }
