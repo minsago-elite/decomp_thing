@@ -46,8 +46,13 @@ NSA's Ghidra 12.1.3 release archive (569,445,154 bytes; SHA-256
 `93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54`) and allows 30 minutes and 16 GiB for
 authenticated export plus ownership planning. The bundled direct-API worker caps its Java heap at 2 GiB independently;
 the Kotlin monitor measures the JVM and its complete descendant process tree against the profile ceiling.
-Each full function decompilation has a 60-second timeout and one 180-second retry for a native timeout. The default
-four-argument export remains serial. The explicitly selected bundled runtime v6 uses the checked cc1 throughput
+Each full function decompilation has a 60-second timeout and one 180-second retry for a native timeout. The
+version-15 exporter requests C output without transferring the native syntax-tree/high-variable graph and renders
+each successful result once. Metadata still comes from the analyzed program. This optimization is specific to the
+exporter's C-text consumer; consumers of high variables, p-code, or token addresses require the syntax tree.
+An authored native fixture preserved exact C and all model records against the version-14 behavior. This is bounded
+equivalence evidence, not full cc1 throughput, parallel-worker, cancellation, or interrupted-resume qualification.
+The default four-argument export remains serial. The explicitly selected bundled runtime v6 uses the checked cc1 throughput
 policy: four CPUs, four analysis threads, and four independent native decompilers. The public `ubuntu-24.04` reference
 runner supplies four CPUs and 16 GB of RAM ([GitHub runner specifications](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)).
 The host independently caps admission at four CPUs, checks the attached scope's actual affinity and ancestor quotas

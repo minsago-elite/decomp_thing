@@ -35,6 +35,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import ghidra.app.decompiler.DecompInterface;
+import ghidra.app.decompiler.DecompiledFunction;
 import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.script.GhidraScript;
@@ -591,7 +592,7 @@ final class ExporterSemanticFingerprintV1 {
 // SEMANTIC_FINGERPRINT_TEST_END
 
 public class ExportProgramModel extends GhidraScript {
-    private static final int EXPORTER_VERSION = 14;
+    private static final int EXPORTER_VERSION = 15;
     private static final int DECOMPILE_TIMEOUT_SECONDS = 60;
     private static final int DECOMPILE_RETRY_TIMEOUT_SECONDS = 180;
     private static final int MAXIMUM_DECOMPILE_INSTRUCTIONS = 500_000;
@@ -1191,8 +1192,9 @@ public class ExportProgramModel extends GhidraScript {
             if (taskMonitor.isCancelled() || Thread.currentThread().isInterrupted()) {
                 throw new InterruptedException("program-model native decompilation was cancelled");
             }
-            if (result.decompileCompleted() && result.getDecompiledFunction() != null) {
-                source = result.getDecompiledFunction().getC();
+            DecompiledFunction rendered = result.decompileCompleted() ? result.getDecompiledFunction() : null;
+            if (rendered != null) {
+                source = rendered.getC();
                 if (source != null && (source.length() > MAXIMUM_FULL_FUNCTION_RECORD_BYTES ||
                     source.getBytes(StandardCharsets.UTF_8).length > MAXIMUM_FULL_FUNCTION_RECORD_BYTES)) {
                     throw new PlanningIntegrityException("decompiled source exceeds its byte bound");
@@ -1249,6 +1251,7 @@ public class ExportProgramModel extends GhidraScript {
                 DecompileOptions decompileOptions = new DecompileOptions();
                 decompileOptions.setMaxInstructions(MAXIMUM_DECOMPILE_INSTRUCTIONS);
                 decompiler.setOptions(decompileOptions);
+                decompiler.toggleSyntaxTree(false);
                 if (!decompiler.openProgram(currentProgram)) {
                     throw new IllegalStateException("Ghidra decompiler could not open the current program");
                 }
