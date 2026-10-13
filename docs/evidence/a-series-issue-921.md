@@ -1,47 +1,45 @@
-# A-series issue #921 — Version the complete Kotlin oracle cutover inventory and canonical artifact layer — evidence boundary
+# Kotlin oracle schema and artifact capability — draft evidence
 
-- Milestone: A13: Scale Structural Accuracy Across the Clang/LLVM Full Tree
-- Worktree: `/home/june/a-series-wt/issue-921` (branch `a-series-issue-921`, based on `origin/master`)
-- Status: NOT YET QUALIFIED — this file records the current evidence boundary only; it does not claim production qualification.
+This records the bounded schema/artifact slice for issue #921. The source issue remains open; this draft does not establish the remaining producer, scoring, release, or production gates in #136.
 
-## Outcome (from issue)
-Version the complete Kotlin oracle cutover inventory and canonical artifact layer
+## Baseline and reused checkpoints
 
-## Acceptance criteria (from issue)
-See `gh issue view 921` for the authoritative checklist. This PR does not close #921; it retains the gap for follow-up qualification.
+The inspected source baseline is `origin/master` at `89b26c6cc498c6fa8ac3879e844a9badd140ccb1` (2026-09-30). Reused #136 checkpoints are `1111e199d17888f3fa36b4c8b754d393bc909237` (bounded Kotlin oracle artifact core) and `8062207ef43d18525732c76cb3f874855081b5c6` (Kotlin data-truth semantics). The earlier [cutover evidence note](../oracle-cutover-evidence-136.md), recorded at `bf2501568f39ab52b23492dfc37839bb81895587`, documents the existing strict parser, schema loader, and atomic file layer.
 
-## Method
-- Read issue #921 outcome, acceptance criteria, dependencies and parent checkpoints.
-- Inspected the `origin/master` worktree for existing implementation, tests and retained checkpoints.
-- Recorded only what is currently evidenced; unresolved behavior remains explicitly unclaimed.
+The merged [#1362 boundary-record PR](https://github.com/minsago-elite/decomp_thing/pull/1362) changed only this evidence file. The remaining #921 gap on the pinned current baseline was that schema files existed outside the 69-name `OracleSchemas` catalog with no complete versioned inventory, and the file API had no operation that composed canonical JSON validation with authenticated atomic publication. This implementation closes that scoped gap while retaining the previous layer's format and trust boundaries.
 
-## Current boundary (truthful, no fabrication)
-- No new production behavior is claimed by this file.
-- Qualification evidence (contained runs, deterministic repetitions, independent archive verification, authority boundaries) is still required before #921 can close.
-- Parent checkpoints and dependency contracts referenced by the issue retain their own scope and verification requirements.
+## Versioned schema inventory
 
-## Source excerpt (authoritative issue body, truncated)
-```markdown
-## Outcome
+[`oracle/kotlin-schema-inventory-v1.json`](../../oracle/kotlin-schema-inventory-v1.json) records every repository `oracle/**/*.schema.json` file by logical name, exact path, declared document-format versions, registration disposition, and SHA-256 of the exact schema bytes. Its own bytes are canonical bounded JSON and the inventory is packaged alongside the schemas.
 
-Version the complete Kotlin oracle cutover inventory and canonical artifact layer.
+The historical count of 43 is retained as the starting point, not an inventory cap. At this master snapshot the inventory contains 73 schema files: 69 are registered through `OracleSchemas`; three are retained outside that shared catalog without a current Kotlin `OracleSchemas` consumer; the native-helper policy has its own explicitly non-authoritative validator. The four dispositions are explicit in the inventory and tested by name. New schemas must be inventoried and assigned a reviewed disposition.
 
-Focused child of #136; owns source acceptance criteria 2, 3.
+The canonical inventory bytes have SHA-256 `d8039cf628287fbaa1807dc3cc6d9a5d6d2624e113655e3a7d377cdbdf1e141a`. A static audit passed for canonical JSON encoding, duplicate-free parsing, complete source-file coverage, all 73 exact schema hashes and version declarations, and equality between the 69 shared registrations and `OracleSchemas`.
 
-## Acceptance criteria
+No `.schema.json` payload or existing artifact format is changed in this slice. Existing format-version declarations and exact schema-byte digests are pinned. Intentional future document-format changes must update the format version and include an old-to-new migration test; schema-byte or policy-digest changes must update the exact inventory/configuration digest evidence and document their migration. Existing canonical JSON and schema-configuration vectors remain unchanged.
 
-- [ ] The 43 existing JSON schemas and canonical artifact formats remain stable where possible; every intentional schema/digest change is versioned, migration-tested, and documented.
-- [ ] Shared Kotlin infrastructure rejects duplicate keys and malformed/non-canonical JSON, enforces depth/count/byte limits, hashes canonical bytes, and publishes authenticated artifacts atomically.
+At runtime `OracleSchemas` reads the inventory only from the bundled classpath, rejects duplicate, malformed, noncanonical, over-depth/count/byte inventory JSON, checks the full registered-name set, and checks a loaded registered schema's exact digest before compiling it. `configurationSha256` continues to hash canonical policy bytes followed by exact schema bytes in caller order.
 
-## Dependencies and evidence
+## Shared canonical artifact handoff
 
-Reuse the implementation and retained checkpoints in #136; complete or verify only the remaining gap in this slice. The parent retains the original scope, verification requirements and evidence limitations. Attach focused evidence for this outcome and distinguish draft implementation, merged behavior and production qualification.
+The reusable implementation is `OracleJson`, `OracleSchemas`, and `OracleArtifacts`:
 
-<!-- backlog-sizing-v1 parent=136 slice=1 -->
+- `OracleJson.parse` is strict UTF-8 JSON and rejects duplicate decoded keys, malformed strings/numbers, excess depth/count/bytes, and trailing data. `parseCanonical` additionally requires byte-for-byte equality with the canonical encoding. The compatibility fixture locks key ordering, indentation, numeric spelling, Unicode, and the trailing newline against the existing Python artifact format.
+- Default JSON bounds are 4 MiB input and canonical output, depth 64, 100,000 nodes, 1 MiB per string, 2 MiB total string bytes, and 256 number characters. Hard bounds are 64 MiB, depth 256, 1,000,000 nodes, and 4,096 number characters.
+- Schema and inventory resources are bounded to 1 MiB, depth 96, 200,000 nodes, 256 KiB per string, and 768 KiB total string bytes; the versioned inventory accepts at most 1,024 entries. Schema-validation errors are capped at 64 items, 512 characters per item, and 8 KiB of combined detail.
+- `OracleArtifacts.readCanonical` and `publishCanonical` compose strict canonical validation with the existing bounded authenticated file read and durable same-directory atomic publication. They hash the exact canonical bytes. Default artifact size is 4 MiB, with a 64 MiB hard ceiling. Invalid JSON is rejected before publication, leaving an existing destination unchanged.
+- File and immediate-parent permissions, path identity, symlink rejection, post-read identity/metadata, private temporary files, file and directory synchronization, and atomic replacement remain enforced by the existing artifact layer. Authentication relies on the protected cooperating file/directory owner boundary. SHA-256 commits to the exact artifact bytes; this layer issues no external signature.
 
+This gives #116/#119/#120/#123/#128/#129 a reusable canonical schema/artifact capability and its bounds. Consumers still need to bind their own authenticated inputs/outputs, policy/schema identities, negative cases, determinism evidence, and authority limits. This handoff does not qualify any producer stage, validator/reconciler, scorer, full-tree run, release builder, or Python-free production graph.
+
+## Focused checks and current evidence status
+
+The focused JUnit command is:
+
+```text
+./gradlew --offline test --tests decompengine.oracle.core.OracleJsonTest --tests decompengine.oracle.core.OracleArtifactsTest --tests decompengine.oracle.core.OracleSchemasTest
 ```
 
-## Limitations / next steps
-- Attach focused execution evidence (exact commands, commits, artifacts, budgets) in a follow-up before claiming #921.
-- Keep implementation slices minimal and file-scoped (`docs/evidence/a-series-issue-921.md` only) so parallel A-series PRs do not conflict.
-- Distinguish draft implementation, merged behavior and production qualification per the issue's evidence requirements.
+It was attempted but did not reach Gradle or Kotlin compilation: this environment has no cached Gradle 9.6.1 wrapper distribution. The wrapper's repository-local cache attempt also stopped at DNS resolution for `services.gradle.org` (`UnknownHostException`). No JUnit result is claimed. Required GitHub Actions on the dedicated draft PR and independent review are still pending.
+
+The existing test sources retain the canonical compatibility vector, strict parser negative cases, resource-limit cases, schema configuration digest vectors, schema compilation, and atomic publication/path/permission checks. This slice adds canonical publish/read integration negatives and exhaustive inventory/file/hash/version/disposition checks. Draft code and documentation are not merged behavior or production qualification.

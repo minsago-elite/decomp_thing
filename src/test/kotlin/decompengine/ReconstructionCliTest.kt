@@ -1,12 +1,16 @@
 package decompengine
 
 import decompengine.project.BoundedLlmModuleReconstructor
-import decompengine.project.EvidenceModuleReconstructor
+import decompengine.project.GeneratedCEvidenceCarrier
+import decompengine.project.GeneratedCMakeReconstructionProfile
+import decompengine.project.GeneratedCNinjaReconstructionProfile
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
+import kotlin.test.assertNotEquals
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class ReconstructionCliTest {
@@ -20,15 +24,22 @@ class ReconstructionCliTest {
                 error("evidence-only reconstruction must not read $key")
         }
 
-        val strategy = selectReconstructionStrategy(
-            evidenceOnly = true,
-            maximumContext = 120_000,
-            harnessOverride = null,
-            environment = inaccessibleEnvironment,
-        )
-
-        assertIs<EvidenceModuleReconstructor>(strategy.reconstructor)
-        assertNull(strategy.harnessProvenance)
+        for (base in listOf(GeneratedCMakeReconstructionProfile.descriptor, GeneratedCNinjaReconstructionProfile.descriptor)) {
+            val strategy = selectReconstructionStrategy(
+                evidenceOnly = true,
+                maximumContext = 120_000,
+                harnessOverride = null,
+                environment = inaccessibleEnvironment,
+                profile = base,
+            )
+            assertEquals(base.id, strategy.profile.id)
+            assertNotEquals(base.sha256, strategy.profile.sha256)
+            assertEquals(GeneratedCEvidenceCarrier.profile(base).sha256, strategy.profile.sha256)
+            assertEquals(listOf(GeneratedCEvidenceCarrier.PURPOSE),
+                strategy.profile.adapterConfiguration[GeneratedCEvidenceCarrier.PURPOSE_KEY])
+            assertSame(GeneratedCEvidenceCarrier.reconstructor, strategy.reconstructor)
+            assertNull(strategy.harnessProvenance)
+        }
     }
 
     @Test

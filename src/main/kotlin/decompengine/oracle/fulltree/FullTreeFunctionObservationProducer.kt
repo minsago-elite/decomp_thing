@@ -171,6 +171,7 @@ internal object FullTreeFunctionObservationProducer {
         shardId: String,
         controlLimits: FullTreeControlLimits = FullTreeControlLimits(),
         checkpoint: (String) -> Unit = {},
+        beforeInventoryValidation: (JsonObject) -> Unit = {},
     ): FullTreeFunctionObservationAuthenticatedInputs {
         FullTreeScopeControl.validate(scope, controlLimits)
         checkpoint("after authenticating function-observation scope")
@@ -180,6 +181,7 @@ internal object FullTreeFunctionObservationProducer {
             "full-tree inventory",
             "full-tree-inventory",
         )
+        beforeInventoryValidation(inventory)
         FullTreeInventoryControl.validate(inventory, scope, controlLimits)
         checkpoint("after authenticating function-observation inventory")
         val inventoryArtifactSha256 = OracleArtifacts.sha256(inventoryBytes)
@@ -210,10 +212,11 @@ internal object FullTreeFunctionObservationProducer {
         checkpoint: (String) -> Unit = {},
         recordScannedDies: (Long) -> Unit,
         accept: (FullTreeObservedSubprogram) -> Unit,
+        residentBudgetBytes: Long? = null,
     ): FullTreeFunctionObservationArtifactScan {
         FullTreeScopeControl.validate(scope, controlLimits)
         requireStableDirectory(scratchParent, "function-observation scratch parent")
-        requireScannerResidentBudget(scope.document, producerLimits)
+        requireScannerResidentBudget(scope.document, producerLimits, residentBudgetBytes)
         val authenticatedShard = FullTreeFunctionObservations.shardInputs(
             inputs.inventory,
             inputs.inventoryArtifactSha256,
@@ -282,6 +285,54 @@ internal object FullTreeFunctionObservationProducer {
                 subprograms = scan.subprograms,
             )
         }
+    }
+
+    /** Additive observation-v2 route over the same artifact-accepted function stream as v1. */
+    internal fun scanAuthenticatedShardV2(
+        richArtifact: Path,
+        scope: AuthenticatedFullTreeScope,
+        inputs: FullTreeFunctionObservationAuthenticatedInputs,
+        scratchParent: Path,
+        controlLimits: FullTreeControlLimits,
+        producerLimits: FullTreeFunctionObservationProducerLimits,
+        sink: FullTreeFunctionObservationV2Sink,
+        sourceFacts: List<FullTreeSourceEntityFact>,
+        reconciliation: FullTreeFunctionObservationV2IdentityReconciliation,
+        output: java.io.OutputStream,
+        checkpoint: (String) -> Unit = {},
+        residentBudgetBytes: Long? = null,
+    ): Pair<FullTreeFunctionObservationArtifactScan, FullTreeFunctionObservationV2StreamResult> {
+        val scan = scanAuthenticatedShardWithLimits(
+            richArtifact = richArtifact,
+            scope = scope,
+            inputs = inputs,
+            scratchParent = scratchParent,
+            controlLimits = controlLimits,
+            producerLimits = producerLimits,
+            checkpoint = checkpoint,
+            recordScannedDies = sink::recordScannedDies,
+            accept = sink::accept,
+            residentBudgetBytes = residentBudgetBytes,
+        )
+        // The run census and collision reconciliation retain source facts in deterministic order.
+        // The sinks canonicalize their own final projection, so do not allocate a second list here.
+        sourceFacts.forEach { fact ->
+            checkpoint("before accepting observation-v2 source entity")
+            sink.acceptSourceEntity(fact)
+        }
+        val result = sink.finishToV2(
+            output,
+            FullTreeFunctionObservationBindings(
+                inventoryIndexSha256 = inputs.inventory.controlString("indexSha256"),
+                richArtifactSha256 = scan.richArtifactSha256,
+                scopeSha256 = scope.sha256,
+            ),
+            reconciliation,
+        )
+        if (result.scannedDies != scan.scannedDies) {
+            throw FullTreeControlException("function-observation-v2 sink scanned-DIE count differs from its scanner")
+        }
+        return scan to result
     }
 
     private fun scanSections(
@@ -551,6 +602,7 @@ internal object FullTreeFunctionObservationProducer {
     private fun requireScannerResidentBudget(
         scope: JsonObject,
         producerLimits: FullTreeFunctionObservationProducerLimits,
+        residentBudgetBytes: Long? = null,
     ): Long {
         val cachedUnits = producerLimits.maximumCachedCompilationUnits.toLong()
         val modeledReferenceBytes = Math.addExact(
@@ -566,12 +618,12 @@ internal object FullTreeFunctionObservationProducer {
                 cachedUnits,
             ),
         )
-        if (
-            modeledReferenceBytes > scope.controlObject("bounds").controlObject("perShard")
-                .controlLong("maximumResidentBytes")
-        ) {
+        val authenticatedResidentBytes = scope.controlObject("bounds").controlObject("perShard")
+            .controlLong("maximumResidentBytes")
+        val effectiveResidentBytes = minOf(authenticatedResidentBytes, residentBudgetBytes ?: Long.MAX_VALUE)
+        if (modeledReferenceBytes > effectiveResidentBytes) {
             throw FullTreeControlException(
-                "function-observation DIE/reference cache model exceeds the authenticated resident-byte bound",
+                "function-observation DIE/reference cache model exceeds its remaining resident-byte allowance",
             )
         }
         return modeledReferenceBytes
@@ -595,7 +647,21 @@ internal class FunctionDwarfUnitRepository(
     retainedTags: Set<Long> = setOf(DW_TAG_SUBPROGRAM),
     private val contextForAttribute: (FullTreeDwarfAbbreviationAttribute) -> FullTreeDwarfFormContext =
         ::functionAttributeContext,
+    private val retainAllRecords: Boolean = false,
+    private val maximumRetainedWorkingSetBytes: Long? = null,
+    private val maximumRetainedLineTableWorkingSetBytes: Long? = null,
 ) {
+    // Active operation pins distinguish retained units from cumulative decoding work. An evicted
+    // unit stays available while a reference graph holds it, avoiding duplicate live CU copies.
+    private var operationPins: LinkedHashMap<Long, FunctionDwarfUnit>? = null
+    var loadedUnitBytes: Long = 0L
+        private set
+    var peakRetainedUnitBytes: Long = 0L
+        private set
+    var peakRetainedLineTableBytes: Long = 0L
+        private set
+    var peakRetainedLineTableUnits: Int = 0
+        private set
     private val info = sections.required(".debug_info")
     private val abbreviations = sections.required(".debug_abbrev")
     private val retainedTags = Collections.unmodifiableSet(retainedTags.toSet())
@@ -604,24 +670,71 @@ internal class FunctionDwarfUnitRepository(
             size > producerLimits.maximumCachedCompilationUnits
     }
 
-    fun load(header: FullTreeDwarfCompilationUnitHeader): FunctionDwarfUnit = cache[header.offset] ?: run {
+    private fun retainedUnits(): Map<Long, FunctionDwarfUnit> = LinkedHashMap(cache).apply {
+        operationPins?.let(::putAll)
+    }
+
+    private fun retainedBytes(): Long = retainedUnits().values.fold(0L) { count, unit ->
+        Math.addExact(count, Math.multiplyExact(unit.index.modeledRetainedBytes, 2L))
+    }
+
+    private fun checkRetention() {
+        val bytes = retainedBytes()
+        if (maximumRetainedWorkingSetBytes != null && bytes > maximumRetainedWorkingSetBytes) {
+            throw FullTreeControlException("DWARF repository exceeds retained working-set byte bound")
+        }
+        val retained = retainedUnits().values
+        val lineTableBytes = retained.fold(0L) { total, unit ->
+            Math.addExact(total, unit.lineTableModeledRetainedBytes)
+        }
+        if (maximumRetainedLineTableWorkingSetBytes != null && lineTableBytes > maximumRetainedLineTableWorkingSetBytes) {
+            throw FullTreeControlException(
+                "DWARF repository retained line-table model $lineTableBytes exceeds bound " +
+                    "$maximumRetainedLineTableWorkingSetBytes across ${retained.size} retained units",
+            )
+        }
+        peakRetainedLineTableBytes = maxOf(peakRetainedLineTableBytes, lineTableBytes)
+        peakRetainedLineTableUnits = maxOf(peakRetainedLineTableUnits, retained.count { it.lineTableModeledRetainedBytes > 0L })
+        peakRetainedUnitBytes = maxOf(peakRetainedUnitBytes, bytes)
+    }
+
+    /** The block must return immutable facts, not units or DIE references into its pinned indexes. */
+    fun <T> withRetainedUnits(root: FunctionDwarfUnit, block: () -> T): T {
+        check(operationPins == null) { "DWARF retained-unit scopes may not nest" }
+        operationPins = linkedMapOf(root.header.offset to root)
+        return try {
+            checkRetention()
+            block()
+        } finally { operationPins = null }
+    }
+
+    fun load(header: FullTreeDwarfCompilationUnitHeader): FunctionDwarfUnit {
+        operationPins?.get(header.offset)?.let { return it }
+        cache[header.offset]?.let { unit ->
+            operationPins?.put(header.offset, unit)
+            return unit
+        }
+        // Evict before decoding; active graphs retain their pins independently of the cache.
+        if (cache.size >= producerLimits.maximumCachedCompilationUnits) cache.remove(cache.keys.first())
+        val available = maximumRetainedWorkingSetBytes?.let { maximum ->
+            val remaining = (maximum - retainedBytes()) / 2L
+            if (remaining <= 0L) throw FullTreeControlException("DWARF repository exceeds retained working-set byte bound")
+            remaining
+        }
         val index = FullTreeDwarfDies.readCompilationUnit(
-            info,
-            abbreviations,
-            header,
-            controlLimits,
-            producerLimits.dieLimits,
-            parseBudget,
-            contextForAttribute = contextForAttribute,
-            retainRecord = { tag, depth -> depth == 0 || tag in retainedTags },
+            info, abbreviations, header, controlLimits,
+            available?.let { producerLimits.dieLimits.copy(
+                maximumRetainedBytes = minOf(it, producerLimits.dieLimits.maximumRetainedBytes),
+            ) } ?: producerLimits.dieLimits,
+            parseBudget, contextForAttribute = contextForAttribute,
+            retainRecord = { tag, depth -> retainAllRecords || depth == 0 || tag in retainedTags },
         )
-        FunctionDwarfUnit(
-            header,
-            index,
-            controlLimits,
-            sections,
-            parseBudget,
-        ).also { cache[header.offset] = it }
+        loadedUnitBytes = Math.addExact(loadedUnitBytes, Math.multiplyExact(index.modeledRetainedBytes, 2L))
+        return FunctionDwarfUnit(header, index, controlLimits, sections, parseBudget, ::checkRetention).also { unit ->
+            cache[header.offset] = unit
+            operationPins?.put(header.offset, unit)
+            checkRetention()
+        }
     }
 
     fun referenceChain(
@@ -707,7 +820,16 @@ internal class FunctionDwarfUnit(
     val controlLimits: FullTreeControlLimits,
     val sections: FullTreeDwarfSections,
     private val parseBudget: FullTreeDwarfParseBudget,
+    private val onRetainedLineTable: () -> Unit = {},
 ) {
+    private val childrenByParent: Map<Long?, List<FullTreeDwarfDieRecord>> by lazy {
+        index.recordsInPhysicalOrder.groupBy { it.parentOffset }
+    }
+
+    /** Physical direct children, indexed once while this bounded unit is retained. */
+    fun directChildren(record: FullTreeDwarfDieRecord): List<FullTreeDwarfDieRecord> =
+        childrenByParent[record.offset].orEmpty()
+
     val stringOffsetsBase: Long? = index.root.optionalNonNegativeLong(
         DW_AT_STR_OFFSETS_BASE,
         "DW_AT_str_offsets_base",
@@ -721,6 +843,8 @@ internal class FunctionDwarfUnit(
     private var cachedCompilationDirectory: String? = null
     private var compilationDirectoryResolved = false
     private var cachedLineTable: FullTreeDwarfLineTable? = null
+    var lineTableModeledRetainedBytes: Long = 0L
+        private set
     private var lineTableResolved = false
     private var cachedAddressResolver: FullTreeDwarfAddressResolver? = null
     private var addressResolverResolved = false
@@ -766,7 +890,9 @@ internal class FunctionDwarfUnit(
                     limits,
                 )
             }
+            lineTableModeledRetainedBytes = if (cachedLineTable == null) 0L else modeledLineTableRetainedBytes(limits)
             lineTableResolved = true
+            onRetainedLineTable()
         }
         return cachedLineTable
     }

@@ -19,6 +19,7 @@ internal class GeneratedCRepairSourcePolicy(private val profile: ReconstructionP
     })
 
     init {
+        GeneratedCEvidenceCarrier.requireImplementationPurpose(profile, "generated-C repair admission")
         ReconstructionAdapters.resolve(profile)
         require(sourceRoots.isNotEmpty() || rootFiles.isNotEmpty()) {
             "generated-C repair profile has no declared source inputs"

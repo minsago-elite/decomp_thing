@@ -55,7 +55,16 @@ class StrictJsonException(message: String, cause: Throwable? = null) : IllegalAr
 
 /** Strict, bounded JSON support for authenticated oracle artifacts. */
 object OracleJson {
-    fun parse(bytes: ByteArray, limits: StrictJsonLimits = StrictJsonLimits()): JsonElement {
+    fun parse(bytes: ByteArray, limits: StrictJsonLimits = StrictJsonLimits()): JsonElement =
+        parse(bytes, limits, {})
+
+    /** Parse with bounded progress callbacks for callers enforcing an authenticated deadline. */
+    fun parse(
+        bytes: ByteArray,
+        limits: StrictJsonLimits,
+        checkpoint: (String) -> Unit,
+    ): JsonElement {
+        checkpoint("before strict JSON UTF-8 decoding")
         if (bytes.size > limits.maximumInputBytes) {
             throw StrictJsonException("JSON input exceeds the configured byte limit")
         }
@@ -69,19 +78,39 @@ object OracleJson {
         } catch (failure: Exception) {
             throw StrictJsonException("JSON input is not valid UTF-8", failure)
         }
-        return StrictParser(text, limits).parse()
+        checkpoint("after strict JSON UTF-8 decoding")
+        return StrictParser(text, limits, checkpoint).parse()
     }
 
     fun canonicalBytes(element: JsonElement, limits: StrictJsonLimits = StrictJsonLimits()): ByteArray =
-        CanonicalEncoder(limits).encode(element)
+        CanonicalEncoder(limits, {}).encode(element)
+
+    /** Canonicalize with bounded progress callbacks for callers enforcing an authenticated deadline. */
+    fun canonicalBytes(
+        element: JsonElement,
+        limits: StrictJsonLimits,
+        checkpoint: (String) -> Unit,
+    ): ByteArray = CanonicalEncoder(limits, checkpoint).encode(element)
 
     fun parseAndCanonicalize(bytes: ByteArray, limits: StrictJsonLimits = StrictJsonLimits()): ByteArray =
         canonicalBytes(parse(bytes, limits), limits)
 
     fun parseCanonical(bytes: ByteArray, limits: StrictJsonLimits = StrictJsonLimits()): JsonElement {
+        return parseCanonical(bytes, limits, {})
+    }
+
+    /** Strict canonical parse with bounded progress callbacks for authenticated deadline checks. */
+    fun parseCanonical(
+        bytes: ByteArray,
+        limits: StrictJsonLimits,
+        checkpoint: (String) -> Unit,
+    ): JsonElement {
+        checkpoint("before strict canonical JSON parse")
         val input = bytes.copyOf()
-        val element = parse(input, limits)
-        val canonical = canonicalBytes(element, limits)
+        val element = parse(input, limits, checkpoint)
+        checkpoint("after strict JSON parsing")
+        val canonical = canonicalBytes(element, limits, checkpoint)
+        checkpoint("after strict JSON canonicalization")
         if (!MessageDigest.isEqual(input, canonical)) {
             throw StrictJsonException("JSON artifact is not in canonical byte form")
         }
@@ -92,10 +121,12 @@ object OracleJson {
 private class StrictParser(
     private val source: String,
     private val limits: StrictJsonLimits,
+    private val checkpoint: (String) -> Unit,
 ) {
     private var offset = 0
     private var nodes = 0
     private var totalStringBytes = 0
+    private var nextNodeCheckpoint = 1024
 
     fun parse(): JsonElement {
         skipWhitespace()
@@ -201,6 +232,7 @@ private class StrictParser(
     private fun parseStringAndCharge(): String {
         expect('"')
         val result = StringBuilder()
+        var lastProgressOffset = offset
         while (offset < source.length) {
             val current = source[offset++]
             when {
@@ -219,6 +251,10 @@ private class StrictParser(
                 }
                 Character.isLowSurrogate(current) -> fail("unpaired low surrogate in JSON string")
                 else -> result.append(current)
+            }
+            if (offset - lastProgressOffset >= PROGRESS_CHECKPOINT_CHARACTERS) {
+                checkpoint("while parsing strict JSON string")
+                lastProgressOffset = offset
             }
         }
         fail("unterminated JSON string")
@@ -271,6 +307,10 @@ private class StrictParser(
     private fun chargeNode() {
         nodes++
         if (nodes > limits.maximumNodes) fail("JSON value exceeds the configured node limit")
+        if (nodes >= nextNodeCheckpoint) {
+            checkpoint("while parsing strict JSON values")
+            nextNodeCheckpoint = nodes + NODE_CHECKPOINT_INTERVAL
+        }
     }
 
     private fun chargeString(value: String) {
@@ -293,7 +333,14 @@ private class StrictParser(
     }
 
     private fun skipWhitespace() {
-        while (offset < source.length && source[offset] in JSON_WHITESPACE) offset++
+        var lastProgressOffset = offset
+        while (offset < source.length && source[offset] in JSON_WHITESPACE) {
+            offset++
+            if (offset - lastProgressOffset >= PROGRESS_CHECKPOINT_CHARACTERS) {
+                checkpoint("while parsing strict JSON whitespace")
+                lastProgressOffset = offset
+            }
+        }
     }
 
     private fun expect(expected: Char) {
@@ -310,13 +357,19 @@ private class StrictParser(
 
     private companion object {
         val JSON_WHITESPACE = charArrayOf(' ', '\t', '\n', '\r')
+        const val NODE_CHECKPOINT_INTERVAL = 1024
+        const val PROGRESS_CHECKPOINT_CHARACTERS = 16 * 1024
     }
 }
 
-private class CanonicalEncoder(private val limits: StrictJsonLimits) {
+private class CanonicalEncoder(
+    private val limits: StrictJsonLimits,
+    private val checkpoint: (String) -> Unit,
+) {
     private val output = BoundedByteWriter(limits.maximumCanonicalBytes)
     private var nodes = 0
     private var totalStringBytes = 0
+    private var comparisonsSinceCheckpoint = 0
 
     fun encode(element: JsonElement): ByteArray {
         writeElement(element, indentation = 0, structuralDepth = 1)
@@ -344,7 +397,15 @@ private class CanonicalEncoder(private val limits: StrictJsonLimits) {
             throw StrictJsonException("JSON value exceeds the configured node limit")
         }
         output.writeAscii("{\n")
-        val entries = value.entries.sortedWith { left, right -> compareByCodePoint(left.key, right.key) }
+        val entries = value.entries.sortedWith { left, right ->
+            comparisonsSinceCheckpoint++
+            if (comparisonsSinceCheckpoint >= SORT_COMPARISON_CHECKPOINT_INTERVAL) {
+                checkpoint("while sorting canonical JSON object keys")
+                comparisonsSinceCheckpoint = 0
+            }
+            compareByCodePoint(left.key, right.key)
+        }
+        checkpoint("after sorting canonical JSON object keys")
         entries.forEachIndexed { index, entry ->
             output.writeSpaces((indentation + 1) * INDENT_WIDTH)
             chargeString(entry.key)
@@ -390,6 +451,7 @@ private class CanonicalEncoder(private val limits: StrictJsonLimits) {
     private fun writeString(value: String) {
         output.writeAscii("\"")
         var index = 0
+        var lastProgressIndex = 0
         while (index < value.length) {
             val current = value[index]
             when (current) {
@@ -414,6 +476,10 @@ private class CanonicalEncoder(private val limits: StrictJsonLimits) {
                 }
             }
             index++
+            if (index - lastProgressIndex >= STRING_CHECKPOINT_CHARACTERS) {
+                checkpoint("while writing canonical JSON string")
+                lastProgressIndex = index
+            }
         }
         output.writeAscii("\"")
     }
@@ -421,6 +487,7 @@ private class CanonicalEncoder(private val limits: StrictJsonLimits) {
     private fun chargeNode() {
         nodes++
         if (nodes > limits.maximumNodes) throw StrictJsonException("JSON value exceeds the configured node limit")
+        if (nodes % NODE_CHECKPOINT_INTERVAL == 0) checkpoint("while encoding canonical JSON values")
     }
 
     private fun chargeString(value: String) {
@@ -443,6 +510,9 @@ private class CanonicalEncoder(private val limits: StrictJsonLimits) {
 
     private companion object {
         const val INDENT_WIDTH = 2
+        const val NODE_CHECKPOINT_INTERVAL = 1024
+        const val SORT_COMPARISON_CHECKPOINT_INTERVAL = 4096
+        const val STRING_CHECKPOINT_CHARACTERS = 16 * 1024
     }
 }
 

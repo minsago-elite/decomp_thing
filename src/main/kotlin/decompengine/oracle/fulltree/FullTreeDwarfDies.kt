@@ -82,6 +82,8 @@ internal class FullTreeDwarfDieIndex internal constructor(
     val nullRecordCount: Long,
     recordsInPhysicalOrder: List<FullTreeDwarfDieRecord>,
     recordsByOffset: Map<Long, FullTreeDwarfDieRecord>,
+    /** Conservative reader allocation charge, including decoded abbreviations. */
+    val modeledRetainedBytes: Long = 0L,
 ) {
     val recordsInPhysicalOrder: List<FullTreeDwarfDieRecord> =
         Collections.unmodifiableList(ArrayList(recordsInPhysicalOrder))
@@ -282,6 +284,7 @@ internal object FullTreeDwarfDies {
             nullRecordCount = nullRecords,
             recordsInPhysicalOrder = records,
             recordsByOffset = recordsByOffset,
+            modeledRetainedBytes = retained.bytes,
         )
     }
 
@@ -352,6 +355,7 @@ internal object FullTreeDwarfDies {
 
     private class RetainedByteBudget(private val maximum: Long) {
         private var retained = 0L
+        val bytes: Long get() = retained
 
         fun charge(bytes: Long, label: String) {
             retained = FullTreeDwarfDies.addCount(retained, bytes, "$label byte count")

@@ -76,7 +76,9 @@ internal fun authenticatedScopeWithDocument(
 )
 
 internal inline fun <T> inControlTemporaryDirectory(block: (Path) -> T): T {
-    val directory = kotlin.io.path.createTempDirectory("full-tree-control-")
+    val temporaryRoot = Path.of("build", "tmp").toAbsolutePath().normalize()
+    Files.createDirectories(temporaryRoot)
+    val directory = Files.createTempDirectory(temporaryRoot, "full-tree-control-")
     return try {
         Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"))
         block(directory)

@@ -3,15 +3,22 @@ package decompengine.project
 import decompengine.agent.AgentHarness
 import decompengine.agent.AgentExecutionResult
 import decompengine.agent.AgentStopReason
+import decompengine.oracle.behavior.LlvmBehaviorCandidateAcpLineageIndexV2Publisher
 import java.nio.file.Path
+import java.nio.file.Files
+import java.nio.file.attribute.PosixFilePermission
 import kotlin.io.path.createTempDirectory
+import kotlin.io.path.readBytes
 import kotlin.io.path.readText
+import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -44,7 +51,7 @@ class ModulePromptCompatibilityTest {
     @Test
     fun `candidate assessment applies profile budgets to every agent identity form`() {
         for ((generator, identity) in listOf(
-            "agent:authored" to "custom", "authored" to "agent:authored", "unresolved:agent:authored" to "custom",
+            "agent:authored" to "custom", "authored" to "agent:authored", "unresolved:agent:authored" to "agent:authored",
         )) {
             val profile = withBudget(GeneratedCMakeReconstructionProfile.descriptor, 4096)
             val project = createTempDirectory("candidate-profile-budget-")
@@ -52,7 +59,9 @@ class ModulePromptCompatibilityTest {
                 override fun cacheIdentity(): String = identity
                 override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule =
                     EvidenceModuleReconstructor(true).reconstruct(request).copy(
-                        generator = generator, promptCharacters = 10, promptBudgetCharacters = 4097,
+                        generator = generator,
+                        promptCharacters = if (generator.startsWith("unresolved:agent:")) 5000 else 10,
+                        promptBudgetCharacters = 4097,
                     )
             }
             val manifest = SourceTreeGenerator.generate(model(), project, profile = profile, reconstructor = reconstructor)
@@ -66,6 +75,12 @@ class ModulePromptCompatibilityTest {
             assertTrue(checkpoint.getValue("issues").jsonArray.any {
                 it.jsonObject.getValue("code").jsonPrimitive.content == "prompt-budget-invalid"
             })
+            if (generator.startsWith("unresolved:agent:")) {
+                assertEquals(0, ReconstructionAdapters.resolve(profile).build(project, profile).returnCode)
+                assertFailsWith<Exception> {
+                    ArchivalPackager.create(project, project.parent.resolve("returned-candidate.zip"), profile = profile)
+                }
+            }
         }
     }
 
@@ -114,20 +129,117 @@ class ModulePromptCompatibilityTest {
     }
 
     @Test
-    fun `workflow records profile budget and identity for undispatched modules`() {
+    fun `oversized retained observations preserve accepted projects and prior failure evidence`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "oversized-observation-preservation-")
+        try {
+            for (profile in ReconstructionProfiles.builtIn) {
+                val project = temp.resolve(profile.id)
+                val accepted = SourceTreeGenerator.generate(model(), project, profile = profile,
+                    reconstructor = EvidenceModuleReconstructor(true))
+                assertTrue(accepted.unresolvedImplementationIds.isEmpty())
+                val rejected = ModuleReconstructor { request ->
+                    EvidenceModuleReconstructor(true).reconstruct(request).let { candidate ->
+                        candidate.copy(source = candidate.source.replace("return 7;", "return missing_value;"))
+                    }
+                }
+                assertFailsWith<ModuleReconstructionRevisionRejectedException> {
+                    SourceTreeGenerator.generate(model(), project, profile = profile, reconstructor = rejected,
+                        observedBehavior = "previous failed revision")
+                }
+                val attempt = project.resolve("reports/modules/alpha.attempt.json")
+                assertTrue(attempt.readText().contains("\"status\":\"rejected\""))
+                fun snapshot(): Map<String, String> = Files.walk(project).use { paths ->
+                    paths.filter { Files.isRegularFile(it) }.toList()
+                        .associate { project.relativize(it).toString() to sha256(it.readBytes()) }
+                }
+                val before = snapshot()
+                var dispatches = 0
+                val reconstructor = BoundedLlmModuleReconstructor(AgentHarness { _, _ ->
+                    dispatches++
+                    error("oversized observation must not dispatch")
+                }, maximumContextCharacters = 4_096)
+                val observations = listOf(
+                    "x".repeat(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES + 1),
+                    "é".repeat(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES / 2 + 1),
+                )
+                for ((index, observed) in observations.withIndex()) {
+                    for (target in listOf(project, temp.resolve("${profile.id}-fresh-$index"))) {
+                        val existed = Files.exists(target)
+                        val failure = assertFailsWith<IllegalArgumentException> {
+                            SourceTreeGenerator.generate(model(), target, profile = profile,
+                                reconstructor = reconstructor, observedBehavior = observed)
+                        }
+                        assertTrue(failure.message.orEmpty().contains("retained prompt input bound"))
+                        assertEquals(existed, Files.exists(target))
+                        assertEquals(before, snapshot())
+                    }
+                }
+                assertEquals(0, dispatches)
+            }
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
+    fun `observation retention bound accepts exact UTF8 bytes and does not limit custom inputs`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "observation-retention-boundary-")
+        try {
+            val observation = "é".repeat(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES / 2)
+            assertEquals(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES, observation.toByteArray(Charsets.UTF_8).size)
+            for (profile in ReconstructionProfiles.builtIn) {
+                val project = temp.resolve(profile.id)
+                val manifest = SourceTreeGenerator.generate(model(), project, profile = profile,
+                    reconstructor = BoundedLlmModuleReconstructor(
+                        AgentHarness { _, _ -> error("must not dispatch") }, maximumContextCharacters = 4_096),
+                    observedBehavior = observation)
+                assertEquals(listOf("fn_alpha"), manifest.unresolvedImplementationIds)
+                val checkpointPath = project.resolve(profile.layout.declaration("module-evidence")
+                    .materialize(mapOf("module" to "alpha")))
+                val checkpoint = Json.parseToJsonElement(checkpointPath.readText()).jsonObject
+                assertEquals(JsonPrimitive(observation), checkpoint.getValue("preDispatchObservedBehavior"))
+                assertEquals(listOf("fn_alpha"), ArchivalProjectAuditor.audit(project, profile).unresolvedEntityIds)
+                val accepted = SourceTreeGenerator.generate(model(), project, profile = profile,
+                    reconstructor = EvidenceModuleReconstructor(true), observedBehavior = observation + "é")
+                assertTrue(accepted.unresolvedImplementationIds.isEmpty())
+                assertFalse("preDispatchObservedBehavior" in Json.parseToJsonElement(checkpointPath.readText()).jsonObject)
+            }
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
+    fun `workflow archives undispatched agent modules as unresolved for both profiles`() {
         for (base in ReconstructionProfiles.builtIn) {
-            val profile = withBudget(base, 1)
-            val project = createTempDirectory("profile-module-budget-")
-            val reconstructor = BoundedLlmModuleReconstructor(AgentHarness { _, _ -> error("must not execute") })
-            val manifest = SourceTreeGenerator.generate(model(), project, profile = profile, reconstructor = reconstructor)
+            val profile = base
+            val qualificationRoot = createTempDirectory("profile-module-budget-")
+            val project = Files.createDirectory(qualificationRoot.resolve("project"))
+            val reconstructor = BoundedLlmModuleReconstructor(
+                AgentHarness { _, _ -> error("must not execute") }, maximumContextCharacters = 4_096,
+            )
+            val manifest = SourceTreeGenerator.generate(
+                model(), project, profile = profile, reconstructor = reconstructor,
+                observedBehavior = "x".repeat(4_096),
+            )
             assertEquals(listOf("fn_alpha"), manifest.unresolvedImplementationIds)
             val module = DeterministicModulePlanner(layout = profile.layout).plan(model()).modules.single()
             val checkpoint = Json.parseToJsonElement(project.resolve(
                 profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id)),
             ).readText()).jsonObject
-            assertEquals(JsonPrimitive(1), checkpoint.getValue("promptBudgetCharacters"))
+            assertEquals(JsonPrimitive(4_096), checkpoint.getValue("promptBudgetCharacters"))
             assertEquals(JsonPrimitive(reconstructor.cacheIdentity(profile)), checkpoint.getValue("reconstructorIdentity"))
             assertEquals(JsonPrimitive(false), checkpoint.getValue("accepted"))
+            assertEquals(JsonPrimitive("pre-dispatch-context-budget-fallback"),
+                checkpoint.getValue("workflowOrigin"))
             assertTrue(checkpoint.getValue("issues").jsonArray.any {
                 it.jsonObject.getValue("code").jsonPrimitive.content == "context-budget-exceeded"
             })
@@ -135,9 +247,538 @@ class ModulePromptCompatibilityTest {
                 project.resolve("reports/confidence.json").readText(),
             ).jsonObject.getValue("sourceGenerationBudgetEvidence").jsonObject
             val moduleEvidence = generationEvidence.getValue("modules").jsonArray.single().jsonObject
-            assertTrue(moduleEvidence.getValue("promptCharacters").jsonPrimitive.content.toInt() > 1)
-            assertEquals("1", moduleEvidence.getValue("promptBudgetCharacters").jsonPrimitive.content)
+            assertTrue(moduleEvidence.getValue("promptCharacters").jsonPrimitive.content.toInt() > 4_096)
+            assertEquals("4096", moduleEvidence.getValue("promptBudgetCharacters").jsonPrimitive.content)
             assertEquals("unresolved", moduleEvidence.getValue("outcome").jsonPrimitive.content)
+            assertFalse(Files.exists(project.resolve("reports/repair-revisions")))
+            assertEquals(listOf("fn_alpha"), ArchivalProjectAuditor.audit(project, profile,
+                limits = ArchivalBundleLimits(maximumEntries = manifest.files.size + 1)).unresolvedEntityIds)
+            assertEquals(0, ReconstructionAdapters.resolve(profile).build(project, profile).returnCode)
+            val archive = qualificationRoot.resolve("${project.fileName}.zip")
+            val bundle = ArchivalPackager.create(project, archive, profile = profile)
+            assertEquals(listOf("fn_alpha"), requireNotNull(bundle.audit).unresolvedEntityIds)
+            val extracted = qualificationRoot.resolve("${project.fileName}-extracted")
+            ArchivalBundleVerifier.extractAndVerify(bundle.archivePath, extracted, profile = profile)
+            assertEquals(listOf("fn_alpha"), ArchivalProjectAuditor.audit(extracted, profile).unresolvedEntityIds)
+            if (profile.id == GeneratedCMakeReconstructionProfile.PROFILE_ID) {
+                val indexParent = project.resolve("fallback-lineage-index")
+                Files.createDirectories(indexParent)
+                Files.setPosixFilePermissions(indexParent, setOf(
+                    PosixFilePermission.OWNER_READ,
+                    PosixFilePermission.OWNER_WRITE,
+                    PosixFilePermission.OWNER_EXECUTE,
+                ))
+                val failure = assertFailsWith<IllegalArgumentException> {
+                    LlvmBehaviorCandidateAcpLineageIndexV2Publisher.publish(
+                        bundle.archivePath,
+                        indexParent.resolve("candidate-acp-lineage-index-v2.json"),
+                    )
+                }
+                assertTrue(
+                    failure.message.orEmpty().contains("no accepted first-class ACP contribution"),
+                    "unexpected candidate lineage rejection: ${failure.message}",
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `direct audit authenticates unrepaired fallbacks with relocated evidence`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "relocated-fallback-audit-")
+        try {
+            for (base in ReconstructionProfiles.builtIn) {
+                val profile = ReconstructionProfile(base.schemaVersion, base.id,
+                    ProjectLayoutProfile(base.layout.schemaVersion, base.layout.declarations.map { declaration ->
+                        ProjectFileDeclaration(declaration.id,
+                            declaration.pathTemplate.replace(Regex("^reports/"), "evidence/"),
+                            declaration.roles, declaration.contentKind)
+                    }), base.budgets, base.adapterConfiguration)
+                val project = temp.resolve(profile.id)
+                Files.createDirectories(project)
+                val manifest = SourceTreeGenerator.generate(model(), project, profile = profile,
+                    reconstructor = BoundedLlmModuleReconstructor(
+                        AgentHarness { _, _ -> error("must not execute") }, maximumContextCharacters = 4_096),
+                    observedBehavior = "x".repeat(4_096))
+                assertFalse(Files.exists(project.resolve("reports")))
+                val limits = ArchivalBundleLimits(maximumEntries = manifest.files.size + 1)
+                assertEquals(listOf("fn_alpha"),
+                    ArchivalProjectAuditor.audit(project, profile, limits = limits, publish = false).unresolvedEntityIds)
+                assertFalse(Files.exists(project.resolve("reports")))
+                Files.createDirectory(project.resolve("reports"))
+                assertEquals(listOf("fn_alpha"),
+                    ArchivalProjectAuditor.audit(project, profile, limits = limits).unresolvedEntityIds)
+                assertTrue(Files.exists(project.resolve("reports/archival_audit.json")))
+            }
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
+    fun `direct audit authenticates fallback checkpoint provenance after manifest relabeling`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "relabeled-fallback-audit-")
+        try {
+            for (base in ReconstructionProfiles.builtIn) {
+                val profile = ReconstructionProfile(base.schemaVersion, base.id,
+                    ProjectLayoutProfile(base.layout.schemaVersion, base.layout.declarations.map { declaration ->
+                        ProjectFileDeclaration(declaration.id,
+                            declaration.pathTemplate.replace(Regex("^reports/"), "evidence/"),
+                            declaration.roles, declaration.contentKind)
+                    }), base.budgets, base.adapterConfiguration)
+                val project = temp.resolve(profile.id)
+                Files.createDirectories(project)
+                val manifest = SourceTreeGenerator.generate(model(), project, profile = profile,
+                    reconstructor = BoundedLlmModuleReconstructor(
+                        AgentHarness { _, _ -> error("must not execute") }, maximumContextCharacters = 4_096),
+                    observedBehavior = "x".repeat(4_096))
+                Files.createDirectory(project.resolve("reports"))
+                assertEquals(listOf("fn_alpha"), ArchivalProjectAuditor.audit(project, profile).unresolvedEntityIds)
+                val priorAudit = project.resolve("reports/archival_audit.json").readText()
+                val source = manifest.files.single { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }
+                val moduleId = profile.layout.declaration("module-implementation").moduleIdForPath(source.path)
+                val checkpointPath = profile.layout.declaration("module-evidence").materialize(mapOf("module" to moduleId))
+                val checkpoint = Json.parseToJsonElement(project.resolve(checkpointPath).readText()).jsonObject
+                val confidencePath = profile.layout.declaration("confidence-evidence").materialize()
+                val confidence = Json.parseToJsonElement(project.resolve(confidencePath).readText()).jsonObject
+                val originalManifest = Json.parseToJsonElement(manifest.toJson()).jsonObject
+                for (change in listOf("manifest-only", "identity-only", "generator-only", "future-schema",
+                    "missing-identity", "invalid-identity", "missing-checkpoint")) {
+                    val changedCheckpoint = JsonObject(LinkedHashMap(checkpoint).apply {
+                        if (change != "manifest-only" && change != "generator-only") {
+                            put("generator", JsonPrimitive("unresolved:custom"))
+                        }
+                        if (change == "generator-only") put("reconstructorIdentity", JsonPrimitive("custom"))
+                        if (change == "future-schema") put("schemaVersion", JsonPrimitive(99))
+                        if (change == "missing-identity") remove("reconstructorIdentity")
+                        if (change == "invalid-identity") put("reconstructorIdentity", JsonPrimitive(42))
+                    })
+                    val checkpointBytes = (changedCheckpoint.toString() + "\n").toByteArray()
+                    Files.write(project.resolve(checkpointPath), checkpointBytes)
+                    val changedConfidence = JsonObject(LinkedHashMap(confidence).apply {
+                        put("modules", JsonArray(confidence.getValue("modules").jsonArray.map { item ->
+                            JsonObject(LinkedHashMap(item.jsonObject).apply {
+                                put("revisionEvidence", JsonObject(LinkedHashMap(getValue("revisionEvidence").jsonObject).apply {
+                                    put("checkpointSha256", JsonPrimitive(sha256(checkpointBytes)))
+                                }))
+                            })
+                        }))
+                    }).toString() + "\n"
+                    project.resolve(confidencePath).writeText(changedConfidence)
+                    val changedManifest = JsonObject(LinkedHashMap(originalManifest).apply {
+                        put("files", JsonArray(originalManifest.getValue("files").jsonArray.filterNot {
+                            change == "missing-checkpoint" && it.jsonObject.getValue("path").jsonPrimitive.content == checkpointPath
+                        }.map { item ->
+                            JsonObject(LinkedHashMap(item.jsonObject).apply {
+                                when (getValue("path").jsonPrimitive.content) {
+                                    source.path -> put("generator", JsonPrimitive("unresolved:custom"))
+                                    checkpointPath -> put("sha256", JsonPrimitive(sha256(checkpointBytes)))
+                                    confidencePath -> put("sha256", JsonPrimitive(sha256(changedConfidence.toByteArray())))
+                                }
+                            })
+                        }))
+                    })
+                    project.resolve("source_tree_manifest.json").writeText(changedManifest.toString() + "\n")
+                    val current = SourceTreeManifestReader.read(project, profile)
+                    assertTrue(current.files.all { it.sha256 == sha256(project.resolve(it.path).readBytes()) }, change)
+                    val failure = assertFailsWith<Exception>(change) { ArchivalProjectAuditor.audit(project, profile) }
+                    val expected = when (change) {
+                        "manifest-only", "generator-only" -> "checkpoint provenance differs"
+                        "identity-only" -> "agent-generated module is not accepted"
+                        "future-schema" -> "unsupported module checkpoint schema"
+                        "missing-checkpoint" -> "checkpoint is absent from the source manifest"
+                        else -> "reconstructorIdentity"
+                    }
+                    assertTrue(failure.message.orEmpty().contains(expected), "$change: ${failure.message}")
+                    assertEquals(priorAudit, project.resolve("reports/archival_audit.json").readText(), change)
+                    assertFailsWith<Exception>(change) {
+                        ReconstructionAcpEvidenceArchiveVerifier.verify(project,
+                            current.files.associate { it.path to it.sha256 },
+                            current.files.associate { it.path to Files.size(project.resolve(it.path)) }, current, profile)
+                    }
+                }
+            }
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
+    fun `direct audit detects agent provenance in an unplanned relabeled checkpoint`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val project = Files.createTempDirectory(scratch, "unplanned-provenance-audit-")
+        try {
+            val profile = GeneratedCMakeReconstructionProfile.descriptor
+            val manifest = SourceTreeGenerator.generate(model(), project, profile = profile,
+                reconstructor = EvidenceModuleReconstructor(false))
+            ArchivalProjectAuditor.audit(project, profile)
+            val priorAudit = project.resolve("reports/archival_audit.json").readText()
+            val source = manifest.files.single { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }
+            val sourceId = profile.layout.declaration("module-implementation").moduleIdForPath(source.path)
+            val extraPath = profile.layout.declaration("module-implementation").materialize(mapOf("module" to "zz_unplanned"))
+            val checkpointPath = profile.layout.declaration("module-evidence").materialize(mapOf("module" to sourceId))
+            val extraCheckpointPath = profile.layout.declaration("module-evidence").materialize(mapOf("module" to "zz_unplanned"))
+            Files.copy(project.resolve(source.path), project.resolve(extraPath))
+            val checkpoint = JsonObject(LinkedHashMap(Json.parseToJsonElement(project.resolve(checkpointPath).readText()).jsonObject).apply {
+                put("reconstructorIdentity", JsonPrimitive("agent:unplanned"))
+                put("entityStatuses", JsonArray(emptyList()))
+                put("compilation", kotlinx.serialization.json.JsonNull)
+            }).toString() + "\n"
+            project.resolve(extraCheckpointPath).writeText(checkpoint)
+            val extraSource = GeneratedFileEvidence(extraPath, source.sha256, source.generator,
+                promptSha256 = source.promptSha256, acceptedImplementation = false,
+                roles = source.roles, contentKind = source.contentKind)
+            val checkpointEvidence = manifest.files.single { it.path == checkpointPath }
+            val extraCheckpoint = GeneratedFileEvidence(extraCheckpointPath, sha256(checkpoint.toByteArray()),
+                checkpointEvidence.generator, roles = checkpointEvidence.roles, contentKind = checkpointEvidence.contentKind)
+            project.resolve("source_tree_manifest.json").writeText(SourceTreeManifest(
+                profileId = manifest.profileId, profileSha256 = manifest.profileSha256,
+                inputSha256 = manifest.inputSha256, files = manifest.files + extraSource + extraCheckpoint,
+                unresolvedEntityIds = manifest.unresolvedEntityIds,
+                unresolvedImplementationIds = manifest.unresolvedImplementationIds).toJson())
+            val failure = assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(project, profile) }
+            assertTrue(failure.message.orEmpty().contains("agent-generated module is not accepted"), failure.message)
+            assertEquals(priorAudit, project.resolve("reports/archival_audit.json").readText())
+        } finally {
+            Files.walk(project).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
+    fun `direct audit rejects an unplanned agent fallback retained in the manifest`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val project = Files.createTempDirectory(scratch, "unplanned-fallback-audit-")
+        try {
+            val profile = GeneratedCMakeReconstructionProfile.descriptor
+            val manifest = SourceTreeGenerator.generate(model(), project, profile = profile,
+                reconstructor = EvidenceModuleReconstructor(false))
+            val source = manifest.files.single { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }
+            val extraPath = profile.layout.declaration("module-implementation")
+                .materialize(mapOf("module" to "zz_unplanned"))
+            Files.copy(project.resolve(source.path), project.resolve(extraPath))
+            val extra = GeneratedFileEvidence(extraPath, source.sha256, "unresolved:agent:unplanned",
+                acceptedImplementation = false, roles = source.roles, contentKind = source.contentKind)
+            project.resolve("source_tree_manifest.json").writeText(SourceTreeManifest(
+                profileId = manifest.profileId, profileSha256 = manifest.profileSha256,
+                inputSha256 = manifest.inputSha256, files = manifest.files + extra,
+                unresolvedEntityIds = manifest.unresolvedEntityIds,
+                unresolvedImplementationIds = manifest.unresolvedImplementationIds).toJson())
+            val failure = assertFailsWith<IllegalArgumentException> { ArchivalProjectAuditor.audit(project, profile) }
+            assertTrue(failure.message.orEmpty().contains("checkpoint is absent from the source manifest"))
+            assertFalse(Files.exists(project.resolve("reports/archival_audit.json")))
+        } finally {
+            Files.walk(project).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
+    fun `direct audit preserves unresolved non-agent modules without repair evidence`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val temp = Files.createTempDirectory(scratch, "non-agent-unresolved-audit-")
+        try {
+            for (profile in ReconstructionProfiles.builtIn) {
+                val project = temp.resolve(profile.id)
+                Files.createDirectories(project)
+                val manifest = SourceTreeGenerator.generate(model(), project, profile = profile,
+                    reconstructor = EvidenceModuleReconstructor(false))
+                assertEquals(listOf("fn_alpha"), manifest.unresolvedImplementationIds)
+                assertTrue(manifest.files.filter { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }
+                    .none { it.generator.startsWith("unresolved:agent:") })
+                assertFalse(Files.exists(project.resolve("reports/repair-revisions")))
+                val audit = ArchivalProjectAuditor.audit(project, profile)
+                assertEquals(listOf("fn_alpha"), audit.unresolvedEntityIds)
+                assertTrue(audit.moduleConfidenceEvidenceProblems.isEmpty())
+                assertTrue(Files.exists(project.resolve("reports/archival_audit.json")))
+            }
+        } finally {
+            Files.walk(temp).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
+    fun `archive evidence gate rejects rehashed fallback budgets outside the profile or identity`() {
+        val profile = withBudget(GeneratedCMakeReconstructionProfile.descriptor, 8_192)
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val project = Files.createTempDirectory(scratch, "fallback-budget-binding-")
+        try {
+            val reconstructor = BoundedLlmModuleReconstructor(
+                AgentHarness { _, _ -> error("must not execute") },
+                maximumContextCharacters = 4_096,
+                harnessProvenanceDescriptor = "archive-fallback-budget-fixture",
+            )
+            val manifest = SourceTreeGenerator.generate(
+                model(), project, profile = profile, reconstructor = reconstructor,
+                observedBehavior = "x".repeat(8_192),
+            )
+            val source = manifest.files.single { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }
+            val module = DeterministicModulePlanner(layout = profile.layout).plan(model()).modules.single()
+            val checkpointPath = profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id))
+            val checkpoint = Json.parseToJsonElement(project.resolve(checkpointPath).readText()).jsonObject
+            val manifestJson = Json.parseToJsonElement(manifest.toJson()).jsonObject
+            val promptCharacters = checkpoint.getValue("promptCharacters").jsonPrimitive.content.toLong()
+            val originalIdentity = reconstructor.cacheIdentity(profile)
+            assertEquals(JsonPrimitive("pre-dispatch-context-budget-fallback"), checkpoint.getValue("workflowOrigin"))
+            assertTrue(promptCharacters > 8_193)
+
+            fun verifyCurrentProject(): List<VerifiedCandidateAcpContribution> {
+                val current = SourceTreeManifestReader.read(project, profile)
+                return ReconstructionAcpEvidenceArchiveVerifier.verify(
+                    project,
+                    current.files.associate { it.path to sha256(project.resolve(it.path).readBytes()) },
+                    current.files.associate { it.path to Files.size(project.resolve(it.path)) },
+                    current,
+                    profile,
+                )
+            }
+            assertTrue(verifyCurrentProject().isEmpty())
+
+            val mutations = listOf(
+                Triple("zero-budget", 0, originalIdentity.replace(":context-4096:", ":context-0:")),
+                Triple("below-configured-minimum", 4_095, originalIdentity.replace(":context-4096:", ":context-4095:")),
+                Triple("above-profile", 8_193, originalIdentity.replace(":context-4096:", ":context-8193:")),
+                Triple("budget-above-identity", 4_097, originalIdentity),
+                Triple("identity-above-budget", 4_096, originalIdentity.replace(":context-4096:", ":context-4097:")),
+                Triple("missing-context", 4_096, originalIdentity.replace(":context-4096:", ":")),
+                Triple("decoy-context", 4_096, originalIdentity.replace(":context-4096:", ":context-4096:context-4095:")),
+                Triple("malformed-factory", 4_096, originalIdentity.replace(Regex("factory-[0-9a-f]{64}"), "factory-invalid")),
+                Triple("trailing-identity-text", 4_096, "$originalIdentity:extra"),
+            )
+            for ((name, budget, identity) in mutations) {
+                val changedCheckpoint = JsonObject(LinkedHashMap(checkpoint).apply {
+                    put("promptBudgetCharacters", JsonPrimitive(budget))
+                    put("reconstructorIdentity", JsonPrimitive(identity))
+                    put("generator", JsonPrimitive("unresolved:$identity"))
+                    put("issues", JsonArray(checkpoint.getValue("issues").jsonArray.map { item ->
+                        JsonObject(LinkedHashMap(item.jsonObject).apply {
+                            if (getValue("code").jsonPrimitive.content == "context-budget-exceeded") {
+                                put("message", JsonPrimitive("module context required $promptCharacters characters; limit=$budget"))
+                            }
+                        })
+                    }))
+                })
+                val changedBytes = (changedCheckpoint.toString() + "\n").toByteArray()
+                Files.write(project.resolve(checkpointPath), changedBytes)
+                val changedManifest = JsonObject(LinkedHashMap(manifestJson).apply {
+                    put("files", JsonArray(manifestJson.getValue("files").jsonArray.map { item ->
+                        JsonObject(LinkedHashMap(item.jsonObject).apply {
+                            when (getValue("path").jsonPrimitive.content) {
+                                checkpointPath -> put("sha256", JsonPrimitive(sha256(changedBytes)))
+                                source.path -> put("generator", JsonPrimitive("unresolved:$identity"))
+                            }
+                        })
+                    }))
+                })
+                project.resolve("source_tree_manifest.json").writeText(changedManifest.toString() + "\n")
+
+                val failure = assertFailsWith<IllegalArgumentException>(name) { verifyCurrentProject() }
+                assertTrue(failure.message.orEmpty().contains("pre-dispatch fallback prompt budget differs"),
+                    "$name failed at the wrong gate: ${failure.message}")
+            }
+        } finally {
+            Files.walk(project).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
+    fun `audit validates confidence evidence when every implementation is an undispatched fallback`() {
+        val profile = GeneratedCMakeReconstructionProfile.descriptor
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
+        Files.createDirectories(scratch)
+        val project = Files.createTempDirectory(scratch, "all-fallback-confidence-")
+        try {
+            val generated = SourceTreeGenerator.generate(
+                model(), project, profile = profile,
+                reconstructor = BoundedLlmModuleReconstructor(
+                    AgentHarness { _, _ -> error("must not execute") }, maximumContextCharacters = 4_096,
+                ),
+                observedBehavior = "x".repeat(4_096),
+            )
+            assertEquals(listOf("fn_alpha"), generated.unresolvedImplementationIds)
+            val module = DeterministicModulePlanner(layout = profile.layout).plan(model()).modules.single()
+            val checkpoint = Json.parseToJsonElement(project.resolve(
+                profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id)),
+            ).readText()).jsonObject
+            assertEquals(JsonPrimitive("pre-dispatch-context-budget-fallback"), checkpoint.getValue("workflowOrigin"))
+
+            val confidencePath = project.resolve("reports/confidence.json")
+            val confidence = Json.parseToJsonElement(confidencePath.readText()).jsonObject
+            val changedConfidence = JsonObject(LinkedHashMap(confidence).apply {
+                put("unresolvedImplementationIds", JsonArray(emptyList()))
+            })
+            val changedBytes = (changedConfidence.toString() + "\n").toByteArray()
+            Files.write(confidencePath, changedBytes)
+
+            val manifestPath = project.resolve("source_tree_manifest.json")
+            val manifest = Json.parseToJsonElement(manifestPath.readText()).jsonObject
+            val confidencePathInLayout = profile.layout.declaration("confidence-evidence").materialize()
+            val files = manifest.getValue("files").jsonArray.map { item ->
+                val fields = LinkedHashMap(item.jsonObject)
+                if (fields.getValue("path").jsonPrimitive.content == confidencePathInLayout) {
+                    fields["sha256"] = JsonPrimitive(sha256(changedBytes))
+                }
+                JsonObject(fields)
+            }
+            manifestPath.writeText((JsonObject(LinkedHashMap(manifest).apply {
+                put("files", JsonArray(files))
+            }).toString()) + "\n")
+
+            val failure = assertFailsWith<IllegalArgumentException> {
+                ArchivalProjectAuditor.audit(project, profile, publish = false)
+            }
+            assertTrue(failure.message.orEmpty().contains("confidence unresolvedImplementationIds differs"))
+        } finally {
+            Files.walk(project).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    @Test
+    fun `returned candidate cannot impersonate a pre-dispatch budget fallback`() {
+        val profile = withBudget(GeneratedCMakeReconstructionProfile.descriptor, 1)
+        val project = createTempDirectory("forged-budget-fallback-")
+        val reconstructor = object : ModuleReconstructor {
+            override fun cacheIdentity(): String = "agent:forged-budget"
+            override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule =
+                EvidenceModuleReconstructor(true).reconstruct(request).copy(
+                    generator = "unresolved:agent:forged-budget",
+                    promptCharacters = 5515,
+                    promptBudgetCharacters = 1,
+                    issues = listOf(ModuleReconstructionIssue(
+                        "context-budget-exceeded", "module context required 5515 characters; limit=1",
+                        request.module.functionIds + request.module.globalIds,
+                    )),
+                    retryable = true,
+                    agentExecutionEvidence = null,
+                )
+        }
+        SourceTreeGenerator.generate(model(), project, profile = profile, reconstructor = reconstructor)
+        val module = DeterministicModulePlanner(layout = profile.layout).plan(model()).modules.single()
+        val checkpoint = Json.parseToJsonElement(project.resolve(
+            profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id)),
+        ).readText()).jsonObject
+        assertEquals(JsonPrimitive("reconstructor-return"), checkpoint.getValue("workflowOrigin"))
+        assertUnrepairedAgentAuditRejected(project, profile)
+        assertFailsWith<Exception> {
+            ArchivalPackager.create(project, project.parent.resolve("forged-budget-fallback.zip"), profile = profile)
+        }
+    }
+
+    @Test
+    fun `custom reconstructor exception cannot impersonate the trusted prompt boundary`() {
+        val profile = withBudget(GeneratedCMakeReconstructionProfile.descriptor, 1)
+        val project = createTempDirectory("forged-budget-exception-")
+        val reconstructor = object : ModuleReconstructor {
+            override fun cacheIdentity(): String = "agent:forged-exception"
+            override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule =
+                throw ModuleContextBudgetExceededException(request.module.id, 5515, 1, "a".repeat(64))
+        }
+        SourceTreeGenerator.generate(model(), project, profile = profile, reconstructor = reconstructor)
+        val module = DeterministicModulePlanner(layout = profile.layout).plan(model()).modules.single()
+        val checkpoint = Json.parseToJsonElement(project.resolve(
+            profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id)),
+        ).readText()).jsonObject
+        assertEquals(JsonPrimitive("exception-fallback"), checkpoint.getValue("workflowOrigin"))
+        assertUnrepairedAgentAuditRejected(project, profile)
+        assertFailsWith<Exception> {
+            ArchivalPackager.create(project, project.parent.resolve("forged-budget-exception.zip"), profile = profile)
+        }
+    }
+
+    @Test
+    fun `dispatched harness exception cannot impersonate the prompt boundary`() {
+        val profile = withBudget(GeneratedCMakeReconstructionProfile.descriptor, 120000)
+        val project = createTempDirectory("forged-harness-budget-")
+        val reconstructor = BoundedLlmModuleReconstructor(AgentHarness { _, _ ->
+            throw ModuleContextBudgetExceededException("alpha", 120001, 120000, "a".repeat(64))
+        }, maximumContextCharacters = 120000)
+        SourceTreeGenerator.generate(model(), project, profile = profile, reconstructor = reconstructor)
+        val module = DeterministicModulePlanner(layout = profile.layout).plan(model()).modules.single()
+        val checkpoint = Json.parseToJsonElement(project.resolve(
+            profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id)),
+        ).readText()).jsonObject
+        assertEquals(JsonPrimitive("exception-fallback"), checkpoint.getValue("workflowOrigin"))
+        assertUnrepairedAgentAuditRejected(project, profile)
+        assertFailsWith<Exception> {
+            ArchivalPackager.create(project, project.parent.resolve("forged-harness-budget.zip"), profile = profile)
+        }
+    }
+
+    @Test
+    fun `archive evidence gate accepts authenticated repair of an undispatched fallback`() {
+        val profile = withBudget(GeneratedCMakeReconstructionProfile.descriptor, 1)
+        val project = createTempDirectory("repaired-budget-fallback-")
+        val reconstructor = BoundedLlmModuleReconstructor(AgentHarness { _, _ -> error("must not execute") })
+        val manifest = SourceTreeGenerator.generate(model(), project, profile = profile, reconstructor = reconstructor)
+        val source = manifest.files.single { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }
+        val sourcePath = project.resolve(source.path)
+        val originalBytes = sourcePath.readBytes()
+        val repairedText = sourcePath.readText() + "\n/* accepted repair fixture */\n"
+        sourcePath.writeText(repairedText)
+        val repairedBytes = sourcePath.readBytes()
+        val repairedSource = GeneratedFileEvidence(
+            path = source.path,
+            sha256 = sha256(repairedBytes),
+            generator = "repair-revision",
+            promptSha256 = source.promptSha256,
+            entityIds = source.entityIds,
+            acceptedImplementation = true,
+            roles = source.roles,
+            contentKind = source.contentKind,
+        )
+        val repairedManifest = SourceTreeManifest(
+            profileId = manifest.profileId,
+            profileSha256 = manifest.profileSha256,
+            inputSha256 = manifest.inputSha256,
+            files = manifest.files.map { if (it.path == source.path) repairedSource else it },
+            unresolvedEntityIds = emptyList(),
+            unresolvedImplementationIds = emptyList(),
+        )
+        val lineage = ArchivedRepairReleaseLineage.of(
+            sources = listOf(ArchivedRepairSourceLineage(
+                source.path, source.sha256, originalBytes.size.toLong(), sha256(repairedBytes),
+                repairedBytes.size.toLong(), "accepted-revision",
+            )),
+            graphHeadId = "accepted-revision",
+            graphHeadRevisionSha256 = "a".repeat(64),
+            acceptedAcpContributions = emptyList(),
+        )
+        val payloadSha256 = repairedManifest.files.associate { it.path to sha256(project.resolve(it.path).readBytes()) }
+        val payloadSizes = repairedManifest.files.associate { it.path to Files.size(project.resolve(it.path)) }
+
+        assertTrue(ReconstructionAcpEvidenceArchiveVerifier.verify(
+            project, payloadSha256, payloadSizes, repairedManifest, profile, lineage,
+        ).isEmpty())
+    }
+
+    private fun assertUnrepairedAgentAuditRejected(project: Path, profile: ReconstructionProfile) {
+        assertFalse(Files.exists(project.resolve("reports/repair-revisions")))
+        for (publish in listOf(false, true)) {
+            val failure = assertFailsWith<IllegalArgumentException> {
+                ArchivalProjectAuditor.audit(project, profile, publish = publish)
+            }
+            assertTrue(failure.message.orEmpty().contains("agent-generated module is not accepted"),
+                "unexpected direct audit rejection: ${failure.message}")
+            assertFalse(Files.exists(project.resolve("reports/archival_audit.json")))
         }
     }
 

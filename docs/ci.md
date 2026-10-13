@@ -128,7 +128,7 @@ The repository workflow also runs the pinned Ghidra image against symbol-bearing
 scripts/validate-archival-docker.sh
 ```
 
-That heavier gate compiles both binaries, runs complete evidence-only source-tree reconstruction, requires non-empty global/string recovery, compares repeated stripped models and archives byte-for-byte, verifies every archive payload hash, and rebuilds the freshly extracted project.
+That heavier gate compiles both binaries, runs complete evidence-only source-tree reconstruction, requires non-empty global/string recovery, compares repeated rich and stripped models and archives byte-for-byte, verifies every archive payload hash, and rebuilds the freshly extracted project. The explicit evidence-only policy retains every raw model entity and its planned ownership while compiling diagnostic inventory sources. It preserves unsupported display text as evidence, keeps implementation acceptance false, and does not claim that the diagnostic executable reproduces the input program's ABI or behavior. The ordinary generated-C declaration and implementation gates remain strict.
 
 Project planning is maintained in [GitHub milestones](https://github.com/minsago-elite/decomp_thing/milestones) and [issues](https://github.com/minsago-elite/decomp_thing/issues). `ROADMAP.md` is deprecated and is not generated or checked by CI.
 

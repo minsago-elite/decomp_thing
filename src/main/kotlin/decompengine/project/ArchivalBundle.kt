@@ -115,13 +115,19 @@ object ArchivalPackager {
         require(requiredCorpora.isEmpty() || audit.behaviorMatched == true) {
             "archive project does not satisfy the required behavior corpora"
         }
+        val adapter = ReconstructionAdapters.resolve(profile)
+        val diagnosticOnly = adapter.requiresUnresolvedOutput(profile)
+        val archiveTitle = if (diagnosticOnly) "Evidence-only diagnostic archival source tree" else "Reconstructed archival source tree"
+        val archiveMeaning = if (diagnosticOnly)
+            "This tree compiles a diagnostic inventory. The complete recovered model remains evidence; no recovered ABI, implementation or behavior is supplied. Declaration purpose: ${adapter.diagnosticPurposeDescription(profile)}. Profile SHA-256: ${profile.sha256}. Rebuilds do not execute a recovered entrypoint."
+        else "This project was reconstructed from a binary using evidence-backed analysis and may not be universally equivalent to the original."
         val readme = projectDir.resolve("ARCHIVE_README.md")
         writeProjectEvidenceAtomically(
             readme,
             """
-            # Reconstructed archival source tree
+            # $archiveTitle
 
-            This project was reconstructed from a binary using evidence-backed analysis and may not be universally equivalent to the original.
+            $archiveMeaning
 
             ${archiveBuild.rebuildInstructions}
             Verify payload hashes with `ARCHIVE_MANIFEST.sha256` before use.
@@ -214,6 +220,9 @@ object ArchivalPackager {
                     return@forEach
                 }
                 validateRelativePath(relative)
+                require(!isRepairAtomicTemporary(Path.of(relative))) {
+                    "archive project contains a retained repair atomic temporary: $relative"
+                }
                 require(portablePaths.add(portablePathKey(relative))) {
                     "archive project contains a non-portable colliding path: $relative"
                 }
@@ -357,6 +366,9 @@ object ArchivalBundleVerifier {
                     require(!entry.isDirectory) { "archive contains directory entries" }
                     val normalizedName = entry.name
                     validateRelativePath(normalizedName)
+                    require(!isRepairAtomicTemporary(Path.of(normalizedName))) {
+                        "archive contains a retained repair atomic temporary: $normalizedName"
+                    }
                     require(normalizedName.split('/').size <= maximumPathDepth) { "archive path exceeds its depth bound" }
                     if (normalizedName != HASH_MANIFEST) rejectPrivateOrCachedPath(normalizedName)
                     require(normalizedName !in seen && seenPortable.add(portablePathKey(normalizedName))) {
@@ -493,6 +505,7 @@ private fun validateSourceManifest(
         payloadSizes = payload.mapValues { (_, item) -> item.size },
         manifest = manifest,
         reconstructionProfile = expectedProfile,
+        repairProfileProvider = { ReconstructionAdapters.resolve(expectedProfile).repairIndexProfile(expectedProfile) },
     )
     val reconstructionContributions = ReconstructionAcpEvidenceArchiveVerifier.verify(
         projectDir = projectDir,
@@ -618,6 +631,9 @@ private fun preflightProjectTree(projectDir: Path, limits: ArchivalBundleLimits,
             }
             val relative = archiveRelativePath(projectDir, path)
             validateRelativePath(relative)
+            require(!isRepairAtomicTemporary(path)) {
+                "archive project contains a retained repair atomic temporary: $relative"
+            }
             require(portablePaths.add(portablePathKey(relative))) {
                 "archive project contains a non-portable colliding path: $relative"
             }

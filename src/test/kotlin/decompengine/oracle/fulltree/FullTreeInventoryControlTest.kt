@@ -76,6 +76,27 @@ class FullTreeInventoryControlTest {
         }
 
     @Test
+    fun `inventory reconciliation checks cooperative cancellation inside compilation unit pass`() =
+        inControlTemporaryDirectory { directory ->
+            val fixture = createFullTreeControlFixture(directory.resolve("fixture"))
+            val scope = fixture.authenticatedScope()
+            val inventory = parseControlObject(fixture.inventory)
+            var reachedReconciliation = false
+
+            val failure = assertFailsWith<IllegalStateException> {
+                FullTreeInventoryControl.validate(inventory, scope, checkpoint = { label ->
+                    if (label == "while reconciling inventory compilation units") {
+                        reachedReconciliation = true
+                        throw IllegalStateException("inventory unit reconciliation cancelled")
+                    }
+                })
+            }
+
+            assertTrue(reachedReconciliation)
+            assertEquals("inventory unit reconciliation cancelled", failure.message)
+        }
+
+    @Test
     fun `inventory enforces artifact path mode byte unit and worker bounds without residue`() =
         inControlTemporaryDirectory { directory ->
             val symlinked = createFullTreeControlFixture(directory.resolve("symlink"))
