@@ -34,6 +34,160 @@ import org.junit.jupiter.api.Tag
 @Tag("ci-live")
 class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
     @Test
+    fun `frozen accounting accepts complete stable maps regardless of iteration order`() {
+        val memory = linkedMapOf("max" to 0L, "oom" to 0L, "future_memory_counter" to 7L)
+        val cpu = linkedMapOf("usage_usec" to 2L, "nr_throttled" to 0L, "future_cpu_counter" to 9L)
+        requireFrozenAccounting(
+            memoryBefore = memory,
+            memoryAfter = memory.entries.reversed().associate { it.toPair() },
+            cpuBefore = cpu,
+            cpuAfter = cpu.entries.reversed().associate { it.toPair() },
+            cgroupEvents = mapOf("frozen" to 1L, "populated" to 1L, "future_event" to 3L),
+        )
+    }
+
+    @Test
+    fun `frozen accounting diagnoses known and unknown counter changes without filtering`() {
+        listOf("max", "high", "oom_group_kill", "future_memory_counter").forEach { key ->
+            val failure = frozenAccountingFailure(
+                memoryBefore = mapOf(key to 0L), memoryAfter = mapOf(key to 1L),
+            )
+            assertTrue(failure.message.orEmpty().contains("memory.events.changed=true"))
+            assertTrue(failure.message.orEmpty().contains("$key=0->1"))
+        }
+        listOf("usage_usec", "nr_throttled", "future_cpu_counter").forEach { key ->
+            val failure = frozenAccountingFailure(
+                cpuBefore = mapOf(key to 0L), cpuAfter = mapOf(key to Long.MAX_VALUE),
+            )
+            assertTrue(failure.message.orEmpty().contains("cpu.stat.changed=true"))
+            assertTrue(failure.message.orEmpty().contains("$key=0->${Long.MAX_VALUE}"))
+        }
+    }
+
+    @Test
+    fun `frozen accounting distinguishes added and removed counters from zero`() {
+        listOf("oom_group_kill", "future_counter").forEach { key ->
+            listOf(false, true).forEach { memory ->
+                val original = mapOf("retained" to 0L)
+                val extended = original + (key to 0L)
+                val added = if (memory) frozenAccountingFailure(memoryBefore = original, memoryAfter = extended)
+                    else frozenAccountingFailure(cpuBefore = original, cpuAfter = extended)
+                val removed = if (memory) frozenAccountingFailure(memoryBefore = extended, memoryAfter = original)
+                    else frozenAccountingFailure(cpuBefore = extended, cpuAfter = original)
+                assertTrue(added.message.orEmpty().contains("$key=absent->0"))
+                assertTrue(removed.message.orEmpty().contains("$key=0->absent"))
+            }
+        }
+    }
+
+    @Test
+    fun `frozen accounting diagnoses peak changes without arithmetic overflow`() {
+        val failure = frozenAccountingFailure(peakBefore = 1L, peakAfter = Long.MAX_VALUE)
+        assertTrue(failure.message.orEmpty().contains("memory.peak=1->${Long.MAX_VALUE}"))
+        assertTrue(failure.message.orEmpty().contains("memory.events.changed=false"))
+        assertTrue(failure.message.orEmpty().contains("cpu.stat.changed=false"))
+    }
+
+    @Test
+    fun `frozen accounting rejects missing zero and unexpected barrier values`() {
+        listOf("frozen", "populated").forEach { key ->
+            listOf<Long?>(null, 0L, 2L).forEach { value ->
+                val events = mutableMapOf("frozen" to 1L, "populated" to 1L)
+                if (value == null) events.remove(key) else events[key] = value
+                val failure = frozenAccountingFailure(cgroupEvents = events)
+                assertTrue(failure.message.orEmpty().contains("$key=${value ?: "absent"}"))
+            }
+        }
+    }
+
+    @Test
+    fun `frozen accounting reports simultaneous changes deterministically`() {
+        val memoryBefore = linkedMapOf("oom" to 0L, "max" to 0L)
+        val memoryAfter = linkedMapOf("oom" to 2L, "max" to 1L)
+        val cpuBefore = linkedMapOf("user_usec" to 0L, "usage_usec" to 0L)
+        val cpuAfter = linkedMapOf("user_usec" to 4L, "usage_usec" to 3L)
+        fun failure(reverse: Boolean) = frozenAccountingFailure(
+            memoryBefore = if (reverse) memoryBefore.entries.reversed().associate { it.toPair() } else memoryBefore,
+            memoryAfter = if (reverse) memoryAfter.entries.reversed().associate { it.toPair() } else memoryAfter,
+            cpuBefore = if (reverse) cpuBefore.entries.reversed().associate { it.toPair() } else cpuBefore,
+            cpuAfter = if (reverse) cpuAfter.entries.reversed().associate { it.toPair() } else cpuAfter,
+            peakBefore = 5L, peakAfter = 6L,
+            cgroupEvents = mapOf("frozen" to 0L, "populated" to 0L),
+        ).message.orEmpty()
+        val diagnostic = failure(false)
+        assertEquals(diagnostic, failure(true))
+        listOf(
+            "memory.events.changed=true", "cpu.stat.changed=true", "memory.peak=5->6",
+            "cgroup.events.frozen=0,populated=0", "max=0->1", "oom=0->2",
+            "usage_usec=0->3", "user_usec=0->4", "memory.events changes=2 omitted=0",
+            "cpu.stat changes=2 omitted=0",
+        ).forEach { expected -> assertTrue(diagnostic.contains(expected), expected) }
+    }
+
+    @Test
+    fun `frozen accounting bounds both map diagnostics and retains omission counts`() {
+        val before = (0 until 256).associate { "counter_$it" to 0L }
+        val after = before.mapValues { Long.MAX_VALUE }
+        val diagnostic = frozenAccountingFailure(
+            memoryBefore = before, memoryAfter = after, cpuBefore = before, cpuAfter = after,
+            peakBefore = 1L, peakAfter = Long.MAX_VALUE,
+            cgroupEvents = mapOf("frozen" to 0L),
+        ).message.orEmpty()
+        assertTrue(diagnostic.toByteArray(Charsets.UTF_8).size <= 1024)
+        listOf("memory.events", "cpu.stat").forEach { label ->
+            val match = checkNotNull(Regex("${Regex.escape(label)} changes=256 omitted=([0-9]+) \\[([^]]*)]").find(diagnostic))
+            val included = match.groupValues[2].split(',').count(String::isNotEmpty)
+            assertTrue(included > 0)
+            assertTrue(match.groupValues[1].toInt() > 0)
+            assertEquals(256, included + match.groupValues[1].toInt())
+        }
+        assertTrue(diagnostic.contains("cgroup.events.frozen=0,populated=absent"))
+    }
+
+    @Test
+    fun `frozen accounting rejects a changed counter beyond diagnostic detail limits`() {
+        val oversizedKey = "z".repeat(64 * 1024 - 10)
+        val before = (0 until 256).associate { "counter_$it" to 0L } + (oversizedKey to 0L)
+        val after = before + (oversizedKey to 1L)
+        val diagnostic = frozenAccountingFailure(cpuBefore = before, cpuAfter = after).message.orEmpty()
+        assertTrue(diagnostic.toByteArray(Charsets.UTF_8).size <= 1024)
+        assertTrue(diagnostic.contains("cpu.stat.changed=true"))
+        assertTrue(diagnostic.contains("cpu.stat changes=1 omitted=1 []"))
+        assertTrue(!diagnostic.contains(oversizedKey))
+
+        val unicodeKey = "한".repeat(200)
+        val unicode = frozenAccountingFailure(
+            memoryBefore = mapOf(unicodeKey to 0L), memoryAfter = mapOf(unicodeKey to 1L),
+        ).message.orEmpty()
+        assertTrue(unicode.toByteArray(Charsets.UTF_8).size <= 1024)
+        assertTrue(unicode.contains("memory.events changes=1 omitted=1 []"))
+    }
+
+    private fun frozenAccountingFailure(
+        memoryBefore: Map<String, Long> = mapOf("max" to 0L),
+        memoryAfter: Map<String, Long> = memoryBefore,
+        peakBefore: Long = 42L,
+        peakAfter: Long = peakBefore,
+        cpuBefore: Map<String, Long> = mapOf("usage_usec" to 2L),
+        cpuAfter: Map<String, Long> = cpuBefore,
+        cgroupEvents: Map<String, Long> = mapOf("frozen" to 1L, "populated" to 1L),
+    ): FullTreeFunctionObservationIsolationException = assertFailsWith {
+        requireFrozenAccounting(memoryBefore, memoryAfter, peakBefore, peakAfter, cpuBefore, cpuAfter, cgroupEvents)
+    }
+
+    private fun requireFrozenAccounting(
+        memoryBefore: Map<String, Long> = mapOf("max" to 0L),
+        memoryAfter: Map<String, Long> = memoryBefore,
+        peakBefore: Long = 42L,
+        peakAfter: Long = peakBefore,
+        cpuBefore: Map<String, Long> = mapOf("usage_usec" to 2L),
+        cpuAfter: Map<String, Long> = cpuBefore,
+        cgroupEvents: Map<String, Long> = mapOf("frozen" to 1L, "populated" to 1L),
+    ) = requireStableFrozenObservationCgroupSample(
+        memoryBefore, peakBefore, cpuBefore, memoryAfter, peakAfter, cpuAfter, cgroupEvents,
+    )
+
+    @Test
     fun `prepared fixture cleanup removes bounded nested JVM-like temporary residue`() {
         assumeTrue(System.getProperty("os.name").lowercase().contains("linux"))
         inControlTemporaryDirectory { root ->
