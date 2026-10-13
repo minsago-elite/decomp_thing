@@ -1,9 +1,14 @@
 package decompengine.oracle.behavior
 
+import com.sun.jna.Native
+import com.sun.jna.NativeLong
+import com.sun.jna.Pointer
+import com.sun.jna.ptr.IntByReference
 import decompengine.analysis.AnalysisDeadline
 import decompengine.oracle.core.OracleArtifacts
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Modifier
+import java.lang.reflect.Proxy
 import java.net.StandardProtocolFamily
 import java.net.UnixDomainSocketAddress
 import java.nio.channels.ServerSocketChannel
@@ -111,6 +116,161 @@ class PinnedDockerRuntimeBindingsTest {
                     )
             }
             assertTrue(exposed.isEmpty(), "native endpoint/watch or generic API became public: $exposed")
+        }
+    }
+
+    @Test
+    fun `listener continuity bridge and native declarations remain private and exact`() {
+        val runtime = PinnedDockerRuntimeBindings::class.java
+        val companion = PinnedDockerRuntimeBindings.Companion::class.java
+        val endpoint = runtime.declaredClasses.single { it.simpleName == "PinnedDockerEndpointState" }
+        val privateTypes = setOf("ListenerLibC", "ListenerDescriptor", "ListenerSnapshot", "ListenerCredentials")
+            .map { name -> endpoint.declaredClasses.single { it.simpleName == name } }
+        privateTypes.forEach { type -> assertTrue(Modifier.isPrivate(type.modifiers), type.toString()) }
+
+        val bridge = companion.declaredMethods.single { it.name == "captureForNativeRuntimeV3" }
+        assertTrue(Modifier.isPrivate(bridge.modifiers), bridge.toString())
+        assertEquals(runtime, bridge.returnType)
+        assertContentEquals(arrayOf(Path::class.java, Path::class.java, Path::class.java, AnalysisDeadline::class.java),
+            bridge.parameterTypes)
+        val capture = companion.declaredMethods.single { it.name == "captureWithCheckpoint" }
+        assertTrue(Modifier.isPrivate(capture.modifiers), capture.toString())
+        assertContentEquals(arrayOf(Path::class.java, java.lang.Long.TYPE, String::class.java, java.lang.Long.TYPE,
+            Path::class.java, Path::class.java, kotlin.jvm.functions.Function1::class.java, java.lang.Boolean.TYPE),
+            capture.parameterTypes)
+
+        val libc = privateTypes.single { it.simpleName == "ListenerLibC" }
+        val int = Integer.TYPE
+        val signatures = linkedMapOf(
+            "socket" to (int to arrayOf(int, int, int)),
+            "connect" to (int to arrayOf(int, Pointer::class.java, int)),
+            "getsockopt" to (int to arrayOf(int, int, int, Pointer::class.java, IntByReference::class.java)),
+            "send" to (NativeLong::class.java to arrayOf(int, Pointer::class.java, NativeLong::class.java, int)),
+            "recv" to (NativeLong::class.java to arrayOf(int, Pointer::class.java, NativeLong::class.java, int)),
+            "poll" to (int to arrayOf(Pointer::class.java, NativeLong::class.java, int)),
+            "fcntl" to (int to arrayOf(int, int)),
+            "close" to (int to arrayOf(int)),
+        )
+        assertEquals(signatures.keys, libc.declaredMethods.map { it.name }.toSet())
+        signatures.forEach { (name, signature) ->
+            val method = libc.declaredMethods.single { it.name == name }
+            assertEquals(signature.first, method.returnType, name)
+            assertEquals(signature.second.toList(), method.parameterTypes.toList(), name)
+        }
+
+        val privateTypeNames = privateTypes.map { it.name }.toSet()
+        for (type in listOf(runtime, companion, endpoint)) {
+            val exposed = type.declaredMethods.filter { method ->
+                Modifier.isPublic(method.modifiers) && (
+                    method.returnType.name in privateTypeNames ||
+                        method.parameterTypes.any { it.name in privateTypeNames } ||
+                        method.name.contains("captureForNativeRuntimeV3") ||
+                        (method.isSynthetic && (method.name.startsWith("access\$get") ||
+                            method.name.startsWith("access\$set")) && method.name.contains("Listener"))
+                    )
+            }
+            assertTrue(exposed.isEmpty(), "private listener state or bridge became public: $exposed")
+        }
+    }
+
+    @Test
+    fun `simulated malformed peer pidfd length closes the installed descriptor exactly once`() {
+        withListenerEndpointForTest { endpoint, uid ->
+            val control = ListenerNativeFaultControl(uid, pidfdLength = 3)
+            val failure = assertFailsWith<PinnedDockerRuntimeBindingsException> {
+                readListenerSnapshotForTest(endpoint, control.proxy)
+            }
+            assertTrue(failure.message.orEmpty().contains("malformed owned descriptor"), failure.message)
+            assertEquals(listOf(17, 77), control.socketOptions)
+            assertEquals(listOf(LISTENER_TEST_PIDFD), control.closedDescriptors)
+            assertTrue(control.descriptorCommands.isEmpty())
+            assertEquals(0, control.livenessProbes)
+            assertTrue(failure.suppressed.isEmpty())
+        }
+    }
+
+    @Test
+    fun `simulated unsupported peer pidfd and option acquisition exhaustion fail without a fallback`() {
+        for (errno in listOf(92 /* ENOPROTOOPT */, 24 /* EMFILE */)) {
+            withListenerEndpointForTest { endpoint, uid ->
+                val control = ListenerNativeFaultControl(uid, peerPidfdErrno = errno)
+                val failure = assertFailsWith<PinnedDockerRuntimeBindingsException> {
+                    readListenerSnapshotForTest(endpoint, control.proxy)
+                }
+                assertTrue(failure.message.orEmpty().contains("SO_PEERPIDFD is required"), failure.message)
+                assertTrue(failure.message.orEmpty().contains("errno=$errno"), failure.message)
+                assertEquals(listOf(17, 77), control.socketOptions)
+                assertEquals(1, control.credentialReads)
+                assertTrue(control.closedDescriptors.isEmpty())
+                assertTrue(control.descriptorCommands.isEmpty())
+                assertEquals(0, control.livenessProbes)
+                assertTrue(failure.suppressed.isEmpty())
+            }
+        }
+    }
+
+    @Test
+    fun `simulated peer pidfd missing cloexec is refused using only F_GETFD and closed once`() {
+        withListenerEndpointForTest { endpoint, uid ->
+            val control = ListenerNativeFaultControl(uid, descriptorFlags = 0)
+            val failure = assertFailsWith<PinnedDockerRuntimeBindingsException> {
+                readListenerSnapshotForTest(endpoint, control.proxy)
+            }
+            assertTrue(failure.message.orEmpty().contains("FD_CLOEXEC"), failure.message)
+            assertEquals(listOf(17, 77), control.socketOptions)
+            assertEquals(listOf(LISTENER_TEST_PIDFD to 1 /* F_GETFD */), control.descriptorCommands)
+            assertEquals(listOf(LISTENER_TEST_PIDFD), control.closedDescriptors)
+            assertEquals(0, control.livenessProbes)
+        }
+    }
+
+    @Test
+    fun `simulated credential change after pidfd installation closes only its owned descriptor`() {
+        withListenerEndpointForTest { endpoint, uid ->
+            val control = ListenerNativeFaultControl(uid, changeSecondCredentialPid = true)
+            val failure = assertFailsWith<PinnedDockerRuntimeBindingsException> {
+                readListenerSnapshotForTest(endpoint, control.proxy)
+            }
+            assertTrue(failure.message.orEmpty().contains("credentials changed"), failure.message)
+            assertEquals(listOf(17, 77, 17), control.socketOptions)
+            assertEquals(2, control.credentialReads)
+            assertEquals(listOf(LISTENER_TEST_PIDFD to 1 /* F_GETFD */), control.descriptorCommands)
+            assertEquals(1, control.livenessProbes)
+            assertEquals(listOf(LISTENER_TEST_PIDFD), control.closedDescriptors)
+            assertFalse(control.closedDescriptors.contains(LISTENER_TEST_SOCKET_FD))
+        }
+    }
+
+    @Test
+    fun `simulated pidfd close EINTR retires descriptor ownership without retry`() {
+        val control = ListenerNativeFaultControl(0, closeErrno = 4 /* EINTR */)
+        val descriptorType = listenerEndpointType().declaredClasses.single { it.simpleName == "ListenerDescriptor" }
+        val constructor = descriptorType.declaredConstructors.single()
+        assertTrue(constructor.trySetAccessible())
+        val descriptor = constructor.newInstance(control.proxy, LISTENER_TEST_PIDFD)
+        val close = descriptorType.declaredMethods.single { it.name == "close" }
+        val fd = descriptorType.declaredMethods.single { it.name == "fd" }
+        val failure = assertFailsWith<PinnedDockerRuntimeBindingsException> { invokeListenerForTest(close, descriptor) }
+        assertTrue(failure.message.orEmpty().contains("errno=4"), failure.message)
+        invokeListenerForTest(close, descriptor)
+        invokeListenerForTest(close, descriptor)
+        val retired = assertFailsWith<PinnedDockerRuntimeBindingsException> { invokeListenerForTest(fd, descriptor) }
+        assertTrue(retired.message.orEmpty().contains("closed"), retired.message)
+        assertEquals(listOf(LISTENER_TEST_PIDFD), control.closedDescriptors)
+    }
+
+    @Test
+    fun `simulated cleanup failure preserves malformed snapshot refusal and adds one close failure`() {
+        withListenerEndpointForTest { endpoint, uid ->
+            val control = ListenerNativeFaultControl(uid, pidfdLength = 3, closeErrno = 4 /* EINTR */)
+            val failure = assertFailsWith<PinnedDockerRuntimeBindingsException> {
+                readListenerSnapshotForTest(endpoint, control.proxy)
+            }
+            assertTrue(failure.message.orEmpty().contains("malformed owned descriptor"), failure.message)
+            assertEquals(1, failure.suppressed.size)
+            assertTrue(failure.suppressed.single() is PinnedDockerRuntimeBindingsException)
+            assertTrue(failure.suppressed.single().message.orEmpty().contains("errno=4"))
+            assertEquals(listOf(LISTENER_TEST_PIDFD), control.closedDescriptors)
         }
     }
 
@@ -265,6 +425,120 @@ class PinnedDockerRuntimeBindingsTest {
         }
     }
 }
+
+private fun listenerEndpointType(): Class<*> = PinnedDockerRuntimeBindings::class.java.declaredClasses.single {
+    it.simpleName == "PinnedDockerEndpointState"
+}
+
+private fun withListenerEndpointForTest(action: (Any, Int) -> Unit) {
+    RuntimeBindingFixture().use { fixture ->
+        fixture.capture().use { bindings ->
+            val field = PinnedDockerRuntimeBindings::class.java.getDeclaredField("endpointState")
+            assertTrue(field.trySetAccessible())
+            action(field.get(bindings), Files.getAttribute(fixture.runtimeSocket, "unix:uid") as Int)
+            fixture.assertNoPendingConnection()
+        }
+    }
+}
+
+private fun readListenerSnapshotForTest(endpoint: Any, libc: Any): Any? {
+    val method = listenerEndpointType().declaredMethods.single { it.name == "readListenerSnapshot" }
+    return invokeListenerForTest(method, endpoint, libc, LISTENER_TEST_SOCKET_FD)
+}
+
+private fun invokeListenerForTest(method: java.lang.reflect.Method, receiver: Any, vararg arguments: Any?): Any? {
+    assertTrue(method.trySetAccessible())
+    return try {
+        method.invoke(receiver, *arguments)
+    } catch (failure: InvocationTargetException) {
+        throw failure.targetException
+    }
+}
+
+/** Test-only native option faults; these controls do not execute socket or pidfd kernel calls. */
+private class ListenerNativeFaultControl(
+    private val uid: Int,
+    private val pidfdLength: Int = 4,
+    private val peerPidfdErrno: Int? = null,
+    private val descriptorFlags: Int = 1,
+    private val changeSecondCredentialPid: Boolean = false,
+    private val closeErrno: Int? = null,
+) {
+    val socketOptions = mutableListOf<Int>()
+    val descriptorCommands = mutableListOf<Pair<Int, Int>>()
+    val closedDescriptors = mutableListOf<Int>()
+    var credentialReads = 0
+        private set
+    var livenessProbes = 0
+        private set
+    private val libcType = listenerEndpointType().declaredClasses.single { it.simpleName == "ListenerLibC" }
+    val proxy: Any = Proxy.newProxyInstance(libcType.classLoader, arrayOf(libcType)) { _, method, supplied ->
+        val arguments = supplied ?: emptyArray()
+        when (method.name) {
+            "getsockopt" -> {
+                assertEquals(LISTENER_TEST_SOCKET_FD, arguments[0])
+                assertEquals(1 /* SOL_SOCKET */, arguments[1])
+                val option = arguments[2] as Int
+                val value = arguments[3] as Pointer
+                val length = arguments[4] as IntByReference
+                socketOptions += option
+                when (option) {
+                    17 /* SO_PEERCRED */ -> {
+                        assertEquals(12, length.value)
+                        credentialReads++
+                        value.setInt(0, if (changeSecondCredentialPid && credentialReads > 1) 32_002 else 32_001)
+                        value.setInt(4, uid)
+                        value.setInt(8, 32_003)
+                        0
+                    }
+                    77 /* SO_PEERPIDFD */ -> {
+                        assertEquals(4, length.value)
+                        assertEquals(-1, value.getInt(0))
+                        if (peerPidfdErrno != null) {
+                            Native.setLastError(peerPidfdErrno)
+                            -1
+                        } else {
+                            value.setInt(0, LISTENER_TEST_PIDFD)
+                            length.value = pidfdLength
+                            0
+                        }
+                    }
+                    else -> error("unexpected simulated listener socket option $option")
+                }
+            }
+            "fcntl" -> {
+                val descriptor = arguments[0] as Int
+                val command = arguments[1] as Int
+                assertEquals(LISTENER_TEST_PIDFD, descriptor)
+                assertEquals(1 /* F_GETFD */, command)
+                descriptorCommands += descriptor to command
+                descriptorFlags
+            }
+            "poll" -> {
+                val pollfd = arguments[0] as Pointer
+                assertEquals(1L, (arguments[1] as NativeLong).toLong())
+                assertEquals(0, arguments[2])
+                assertEquals(LISTENER_TEST_PIDFD, pollfd.getInt(0))
+                assertEquals(1 /* POLLIN */, pollfd.getShort(4).toInt())
+                assertEquals(0, pollfd.getShort(6).toInt())
+                livenessProbes++
+                0
+            }
+            "close" -> {
+                closedDescriptors += arguments[0] as Int
+                if (closeErrno != null) {
+                    Native.setLastError(closeErrno)
+                    -1
+                } else 0
+            }
+            "toString" -> "test-only-listener-native-option-control"
+            else -> error("unexpected native call in simulated option fault: ${method.name}")
+        }
+    }
+}
+
+private const val LISTENER_TEST_SOCKET_FD = 4_301
+private const val LISTENER_TEST_PIDFD = 4_302
 
 private fun verifyNativeTerminalForTest(bindings: PinnedDockerRuntimeBindings) {
     val bridge = PinnedDockerRuntimeBindings.Companion::class.java.declaredMethods.single {
