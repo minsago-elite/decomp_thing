@@ -240,8 +240,12 @@ internal object ComposedFunctionObservationElf {
     private const val TEXT_OFFSET = 0x100
     private const val TEXT_BYTES = 0x100
 
-    fun build(): ComposedFunctionObservationArtifact {
-        val dwarf = dwarfSections()
+    fun build(): ComposedFunctionObservationArtifact = buildWithDwarf(dwarfSections())
+
+    fun build(referenceChainEntries: Int): ComposedFunctionObservationArtifact =
+        buildWithDwarf(sourceIdentityReferenceChain(referenceChainEntries))
+
+    private fun buildWithDwarf(dwarf: ComposedDwarfSections): ComposedFunctionObservationArtifact {
         val sectionNames = listOf(".text", ".debug_info", ".debug_abbrev", ".debug_ranges", ".shstrtab")
         val nameTable = ByteArrayOutputStream().apply { write(0) }
         val nameOffsets = sectionNames.associateWith { name ->
@@ -345,6 +349,55 @@ internal object ComposedFunctionObservationElf {
             declarationDieOffset = dwarf.declarationDieOffset,
             emittedDieOffset = dwarf.emittedDieOffset,
             nonEmittedDieOffset = dwarf.nonEmittedDieOffset,
+        )
+    }
+
+    /** Synthetic raw-DWARF control: the root counts as the first origin/specification entry. */
+    private fun sourceIdentityReferenceChain(entries: Int): ComposedDwarfSections {
+        require(entries in 2..33)
+        val abbreviations = ByteArrayOutputStream().apply {
+            abbreviation(1, 0x11, true, listOf(
+                0x03L to FULL_TREE_DW_FORM_STRING,
+                0x1bL to FULL_TREE_DW_FORM_STRING,
+                0x25L to FULL_TREE_DW_FORM_STRING,
+                0x13L to FULL_TREE_DW_FORM_DATA2,
+            ))
+            abbreviation(2, 0x2e, attributes = listOf(
+                0x47L to FULL_TREE_DW_FORM_REF4,
+                0x3cL to FULL_TREE_DW_FORM_FLAG_PRESENT,
+            ))
+            abbreviation(3, 0x2e, attributes = listOf(
+                0x03L to FULL_TREE_DW_FORM_STRING,
+                0x3bL to FULL_TREE_DW_FORM_DATA1,
+                0x3cL to FULL_TREE_DW_FORM_FLAG_PRESENT,
+            ))
+            write(0)
+        }.toByteArray()
+        val dies = ByteArrayOutputStream().apply {
+            write(uleb(1))
+            write(utf8z("source-reference-bound.c"))
+            write(utf8z("/fixture/source-tree/clang/lib/Reference"))
+            write(utf8z("Synthetic Kotlin source identity reference-bound control"))
+            write(unsigned(0x000cL, 2))
+        }
+        val rootOffset = 11 + dies.size()
+        repeat(entries - 1) { index ->
+            dies.write(uleb(2))
+            dies.write(unsigned((rootOffset + (index + 1) * 5).toLong(), 4))
+        }
+        val terminalOffset = 11 + dies.size()
+        dies.write(uleb(3))
+        dies.write(utf8z("reference_bound_terminal"))
+        dies.write(37)
+        dies.write(0)
+        val body = unsigned(4L, 2) + unsigned(0L, 4) + byteArrayOf(8) + dies.toByteArray()
+        return ComposedDwarfSections(
+            info = unsigned(body.size.toLong(), 4) + body,
+            abbreviations = abbreviations,
+            ranges = range(0L, 0L),
+            declarationDieOffset = terminalOffset,
+            emittedDieOffset = rootOffset,
+            nonEmittedDieOffset = rootOffset,
         )
     }
 

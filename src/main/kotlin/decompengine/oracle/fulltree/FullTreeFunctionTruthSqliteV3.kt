@@ -419,6 +419,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
         scratchParent: Path,
         outputRoot: Path,
         limits: FullTreeFunctionTruthV3Limits = FullTreeFunctionTruthV3Limits(),
+        traversal: FullTreeSourceIdentityTraversal = FullTreeSourceIdentityTraversal.CANONICAL,
     ): FullTreeFunctionTruthV3Generation = runV3 {
         val deadline = V3RunDeadline.start(scope, limits)
         FullTreeOracleOperationCheckpoint.withCheckpoint(deadline::checkpoint, deadline) {
@@ -448,6 +449,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
             val initialRun = authenticateObservationV2(
                 observationV2Root, expectedObservationV2IndexArtifactSha256, richArtifact, inventoryPath,
                 scope, workspace.root, limits, deadline,
+                traversal = traversal,
             )
             observationIdentity.verifyIdentity(deadline::checkpoint)
             val observationSnapshot = snapshotObservationV2(
@@ -487,6 +489,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
                         limits,
                         deadline,
                         aggregateScratchRoot = workspace.root,
+                        traversal = traversal,
                     ),
                 )
                 boundaryGuards(
@@ -533,6 +536,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
         scope: AuthenticatedFullTreeScope,
         scratchParent: Path,
         limits: FullTreeFunctionTruthV3Limits = FullTreeFunctionTruthV3Limits(),
+        traversal: FullTreeSourceIdentityTraversal = FullTreeSourceIdentityTraversal.CANONICAL,
     ): FullTreeFunctionTruthV3Validation = runV3 {
         val deadline = V3RunDeadline.start(scope, limits)
         FullTreeOracleOperationCheckpoint.withCheckpoint(deadline::checkpoint, deadline) {
@@ -562,6 +566,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
             val initialRun = authenticateObservationV2(
                 observationV2Root, expectedObservationV2IndexArtifactSha256, richArtifact, inventoryPath,
                 scope, workspace.root, limits, deadline,
+                traversal = traversal,
             )
             observationIdentity.verifyIdentity(deadline::checkpoint)
             val observationSnapshot = snapshotObservationV2(
@@ -598,6 +603,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
                     limits,
                     deadline,
                     aggregateScratchRoot = workspace.root,
+                    traversal = traversal,
                 ),
             )
             boundaryGuards(
@@ -772,6 +778,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
         limits: FullTreeFunctionTruthV3Limits,
         deadline: V3RunDeadline,
         aggregateScratchRoot: Path = scratchParent,
+        traversal: FullTreeSourceIdentityTraversal = FullTreeSourceIdentityTraversal.CANONICAL,
     ): FullTreeFunctionObservationV2RunPublication = try {
         deadline.checkpoint("before independently rederiving observation-v2")
         val availableScratchBytes = remainingV3Scratch(limits, aggregateScratchRoot)
@@ -812,6 +819,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
             scope = scope,
             scratchParent = scratchParent,
             limits = nestedLimits,
+            traversal = traversal,
         )
             .also {
                 requireV3WorkspaceBound(aggregateScratchRoot, limits)

@@ -17,6 +17,7 @@ import java.util.Comparator
 import java.util.concurrent.CancellationException
 import java.util.concurrent.TimeUnit
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -819,6 +820,7 @@ class FullTreeFunctionTruthSqliteV3Test {
         inControlTemporaryDirectory { root ->
             val fixture = createCompilerFixture(root, perShardResidentBytes = 1792L * 1024L * 1024L)
             val limits = tightScratchLimits().copy(maximumRetainedWorkingSetBytes = 2L * 1024L * 1024L * 1024L)
+            val firstTraversal = SourceTraversalTrace(FullTreeSourceIdentityTraversalOrder.FORWARD)
             val first = FullTreeFunctionTruthSqliteV3.generateAndPublish(
                 richArtifact = fixture.rich,
                 strippedArtifact = fixture.stripped,
@@ -830,6 +832,7 @@ class FullTreeFunctionTruthSqliteV3Test {
                 scratchParent = fixture.scratch,
                 outputRoot = root.resolve("truth-v3-first"),
                 limits = limits,
+                traversal = firstTraversal.traversal,
             )
             val second = FullTreeFunctionTruthSqliteV3.generateAndPublish(
                 richArtifact = fixture.rich,
@@ -874,6 +877,7 @@ class FullTreeFunctionTruthSqliteV3Test {
             assertEquals(first.counts, second.counts)
             assertEquals(v3TreeBytes(first.root), v3TreeBytes(second.root))
             writeFixtureVector(fixture, first)
+            assertCompilerTraversalParity(fixture, root, limits, first, firstTraversal)
             assertFalse(first.authoritativeReleaseEvidence)
             assertFalse(first.productionQualification)
             assertFalse(first.downstreamScoringAuthorized)
@@ -1045,6 +1049,206 @@ class FullTreeFunctionTruthSqliteV3Test {
             assertV3ObservationSnapshotRejectsTreeSwap(fixture, root)
             assertDirectoryEmpty(fixture.scratch)
         }
+
+    /** Shares the compiled ELF and pinned observation receipt across all execution orders. */
+    private fun assertCompilerTraversalParity(
+        fixture: V3Fixture,
+        root: Path,
+        limits: FullTreeFunctionTruthV3Limits,
+        baselineTruth: FullTreeFunctionTruthV3Generation,
+        baselineTruthTrace: SourceTraversalTrace,
+    ) {
+        val inventory = parseControlObject(fixture.inventoryPath)
+        val inventorySha256 = fixtureSha256(fixture.inventoryPath)
+        val shard = FullTreeFunctionObservations.shardInputs(
+            inventory, inventorySha256, fixture.scope.document, fixture.scope.sha256,
+        ).single()
+        val baselineObservationBytes = Files.readAllBytes(
+            fixture.observationV2Root.resolve("outputs/${shard.identifier}.json"),
+        )
+        val baselineTruthBytes = v3TreeBytes(baselineTruth.root)
+        val inputHashes = listOf(fixture.rich, fixture.stripped, fixture.inventoryPath, fixture.elfIndex)
+            .associateWith(::fixtureSha256)
+        var baselineSourceTrace: SourceTraversalTrace? = null
+        var baselineSourceScan: FullTreeSourceEntityIdentityScan? = null
+        var baselineReconciliation: FullTreeFunctionObservationV2IdentityReconciliation? = null
+        val reports = ArrayList<JsonObject>()
+        FullTreeSourceIdentityTraversalOrder.entries.forEach { order ->
+            val sourceTrace = SourceTraversalTrace(order)
+            val source = FullTreeSourceEntityIdentityProducer.scanShard(
+                richArtifact = fixture.rich,
+                inventoryPath = fixture.inventoryPath,
+                scope = fixture.scope,
+                shardId = shard.identifier,
+                scratchParent = fixture.scratch,
+                controlLimits = limits.observationV2.shard.control,
+                producerLimits = limits.observationV2.shard.producer,
+                traversal = sourceTrace.traversal,
+            )
+            if (baselineSourceTrace == null) {
+                baselineSourceTrace = sourceTrace
+                baselineSourceScan = source
+            }
+            sourceTrace.assertPermutationOf(requireNotNull(baselineSourceTrace))
+            assertEquals(baselineSourceScan!!.facts, source.facts, "$order source facts, IDs, links and edges")
+            assertEquals(baselineSourceScan!!.canonicalSha256, source.canonicalSha256, "$order canonical source bytes")
+            assertEquals(baselineSourceScan!!.canonicalBytes, source.canonicalBytes)
+            assertEquals(baselineSourceScan!!.scannedDies, source.scannedDies)
+
+            val publicationTrace = SourceTraversalTrace(order)
+            val publication = FullTreeFunctionObservationV2RunPublisher.generateAndPublish(
+                richArtifact = fixture.rich,
+                inventoryPath = fixture.inventoryPath,
+                scope = fixture.scope,
+                scratchParent = fixture.scratch,
+                outputRoot = root.resolve("observations-v2-${order.name.lowercase()}"),
+                maximumWorkers = 2,
+                limits = limits.observationV2,
+                traversal = publicationTrace.traversal,
+            )
+            assertEquals(1, publication.maximumWorkers, "the real compiler fixture has one authenticated shard")
+            publicationTrace.assertPasses(sourceTrace, 1)
+            if (baselineReconciliation == null) baselineReconciliation = publication.reconciliation
+            assertEquals(baselineReconciliation, publication.reconciliation, "$order full-run collision population")
+            assertEquals(fixture.observationV2IndexSha256, publication.binding.indexArtifactSha256)
+            assertEquals(v3TreeBytes(fixture.observationV2Root), v3TreeBytes(publication.binding.root))
+
+            // The memory path consumes a fresh authenticated function scan and independently
+            // extracted source facts, with the same production reconciliation used by SQLite.
+            val memory = FullTreeFunctionObservationAccumulatorV2(shard)
+            val functionScan = FullTreeFunctionObservationProducer.scanAuthenticatedShardWithLimits(
+                richArtifact = fixture.rich,
+                scope = fixture.scope,
+                inputs = FullTreeFunctionObservationAuthenticatedInputs(inventory, inventorySha256, shard),
+                scratchParent = fixture.scratch,
+                controlLimits = limits.observationV2.shard.control,
+                producerLimits = limits.observationV2.shard.producer,
+                recordScannedDies = memory::recordScannedDies,
+                accept = memory::accept,
+            )
+            reconcileObservationV2Facts(source.facts, publication.reconciliation).forEach(memory::acceptSourceEntity)
+            val memoryDocument = memory.finish(
+                inventoryIndexSha256 = inventory.controlString("indexSha256"),
+                richArtifactSha256 = functionScan.richArtifactSha256,
+                scopeSha256 = fixture.scope.sha256,
+                reconciliation = publication.reconciliation,
+            )
+            FullTreeFunctionObservationsV2.validateEnvelope(
+                memoryDocument, fixture.scope, inventory, inventorySha256, shard, publication.reconciliation,
+            )
+            val memoryBytes = FullTreeFunctionObservationsV2.canonicalEnvelopeBytes(memoryDocument)
+            assertContentEquals(baselineObservationBytes, memoryBytes, "$order memory/SQLite canonical shard parity")
+            val emittedRvas = memoryDocument.controlArray("emitted").controlObjects("emitted functions")
+                .map { it.controlString("rva") }
+            assertEquals(emittedRvas.size, emittedRvas.toSet().size, "$order emitted RVA uniqueness")
+
+            val validationTrace = SourceTraversalTrace(order)
+            val validatedObservation = FullTreeFunctionObservationV2RunPublisher.loadAndValidate(
+                candidateRoot = fixture.observationV2Root,
+                expectedIndexArtifactSha256 = fixture.observationV2IndexSha256,
+                richArtifact = fixture.rich,
+                inventoryPath = fixture.inventoryPath,
+                scope = fixture.scope,
+                scratchParent = fixture.scratch,
+                limits = limits.observationV2,
+                traversal = validationTrace.traversal,
+            )
+            validationTrace.assertPasses(sourceTrace, 1)
+            assertEquals(publication.outputs, validatedObservation.outputs)
+            assertEquals(publication.reconciliation, validatedObservation.reconciliation)
+
+            val truthTrace = if (order == FullTreeSourceIdentityTraversalOrder.FORWARD) baselineTruthTrace
+                else SourceTraversalTrace(order)
+            val truth = if (order == FullTreeSourceIdentityTraversalOrder.FORWARD) baselineTruth else
+                FullTreeFunctionTruthSqliteV3.generateAndPublish(
+                    richArtifact = fixture.rich,
+                    strippedArtifact = fixture.stripped,
+                    inventoryPath = fixture.inventoryPath,
+                    elfFunctionIndex = fixture.elfIndex,
+                    observationV2Root = fixture.observationV2Root,
+                    expectedObservationV2IndexArtifactSha256 = fixture.observationV2IndexSha256,
+                    scope = fixture.scope,
+                    scratchParent = fixture.scratch,
+                    outputRoot = root.resolve("truth-v3-${order.name.lowercase()}"),
+                    limits = limits,
+                    traversal = truthTrace.traversal,
+                )
+            truthTrace.assertPasses(sourceTrace, 2) // Initial authentication and the final publication recheck.
+            assertEquals(baselineTruthBytes, v3TreeBytes(truth.root), "$order complete truth-v3 tree")
+            assertEquals(baselineTruth.counts, truth.counts)
+            val truthValidationTrace = SourceTraversalTrace(order)
+            val validatedTruth = FullTreeFunctionTruthSqliteV3.loadAndValidate(
+                candidateRoot = baselineTruth.root,
+                richArtifact = fixture.rich,
+                strippedArtifact = fixture.stripped,
+                inventoryPath = fixture.inventoryPath,
+                elfFunctionIndex = fixture.elfIndex,
+                observationV2Root = fixture.observationV2Root,
+                expectedObservationV2IndexArtifactSha256 = fixture.observationV2IndexSha256,
+                scope = fixture.scope,
+                scratchParent = fixture.scratch,
+                limits = limits,
+                traversal = truthValidationTrace.traversal,
+            )
+            truthValidationTrace.assertPasses(sourceTrace, 2) // Both validation authentications use this order.
+            assertTrue(validatedTruth.rawInputsRederived && validatedTruth.candidateBytesMatchedAtValidationBoundary)
+            assertEquals(baselineTruth.indexArtifactSha256, validatedTruth.indexArtifactSha256)
+            assertEquals(inputHashes, inputHashes.keys.associateWith(::fixtureSha256))
+            assertDirectoryEmpty(fixture.scratch)
+            reports += JsonObject(mapOf(
+                "order" to JsonPrimitive(order.name),
+                "visits" to sourceTrace.canonicalVisits(),
+                "sourceCanonicalSha256" to JsonPrimitive(source.canonicalSha256),
+                "sourceEntityCount" to JsonPrimitive(source.facts.size),
+                "observationShardSha256" to JsonPrimitive(OracleArtifacts.sha256(memoryBytes)),
+                "observationIndexArtifactSha256" to JsonPrimitive(publication.binding.indexArtifactSha256),
+                "collisionPopulation" to publication.reconciliation.canonicalJson(),
+                "truthIndexArtifactSha256" to JsonPrimitive(truth.indexArtifactSha256),
+                "effectiveWorkers" to JsonPrimitive(publication.maximumWorkers),
+                "v2GenerationPasses" to JsonPrimitive(1),
+                "v2ValidationPasses" to JsonPrimitive(1),
+                "v3GenerationPasses" to JsonPrimitive(2),
+                "v3ValidationPasses" to JsonPrimitive(2),
+            ))
+        }
+        val report = JsonObject(mapOf(
+            "fixtureOnly" to JsonPrimitive(true),
+            "richArtifactSha256" to JsonPrimitive(fixtureSha256(fixture.rich)),
+            "inventoryArtifactSha256" to JsonPrimitive(inventorySha256),
+            "scopeSha256" to JsonPrimitive(fixture.scope.sha256),
+            "orders" to JsonArray(reports),
+        ))
+        val reportPath = Path.of(System.getProperty("user.dir"))
+            .resolve("build/test-results/test/full-tree-source-traversal-v2-v3.json")
+        Files.createDirectories(reportPath.parent)
+        Files.write(reportPath, OracleJson.canonicalBytes(report))
+    }
+
+    private class SourceTraversalTrace(private val order: FullTreeSourceIdentityTraversalOrder) {
+        private val visits = ArrayList<Triple<String, Long, Long?>>()
+        val traversal = FullTreeSourceIdentityTraversal(order) { phase, cu, die ->
+            check(visits.size < 100_000) { "compiler fixture traversal trace exceeds its fixed bound" }
+            visits += Triple(phase, cu, die)
+        }
+
+        fun assertPasses(singlePass: SourceTraversalTrace, count: Int) {
+            assertEquals(List(count) { singlePass.visits }.flatten(), visits, "$order actual raw-input passes")
+        }
+
+        fun assertPermutationOf(forward: SourceTraversalTrace) {
+            assertEquals(forward.visits.toSet(), visits.toSet(), "$order identical authenticated visit membership")
+            assertEquals(visits.size, visits.toSet().size, "$order visits each CU/DIE/map entry exactly once")
+            assertSourceIdentityTraversalPermutation(forward.visits, visits, order, "V2/V3 $order")
+        }
+
+        fun canonicalVisits(): JsonArray = JsonArray(visits.map { (phase, cu, die) ->
+            JsonObject(mapOf(
+                "phase" to JsonPrimitive(phase),
+                "compilationUnitOffset" to JsonPrimitive(cu),
+                "dieOffset" to (die?.let(::JsonPrimitive) ?: JsonNull),
+            ))
+        })
+    }
 
     private fun assertSelfConsistentMutationsRejected(
         expected: FullTreeFunctionTruthV3Generation,
