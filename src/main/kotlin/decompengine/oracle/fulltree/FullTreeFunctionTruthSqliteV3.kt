@@ -2,6 +2,7 @@ package decompengine.oracle.fulltree
 
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.LinuxSyscallException
+import decompengine.acp.LinuxDescriptorReserve
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.OracleSchemas
@@ -488,23 +489,31 @@ internal object FullTreeFunctionTruthSqliteV3 {
                         aggregateScratchRoot = workspace.root,
                     ),
                 )
-                deadline.checkpoint("before committing truth-v3 publication")
-                publication.commit(projection, deadline::checkpoint) {
-                    rawInputs.verifyUnchanged("at truth-v3 publication boundary")
-                    observationSnapshot.verifyOriginalUnchanged(deadline::checkpoint)
-                    legacySnapshot.verifyOriginalUnchanged(deadline::checkpoint)
+                boundaryGuards(
+                    scope, limits, projection, observationSnapshot, legacySnapshot,
+                    listOf(richArtifact, strippedArtifact, inventoryPath, elfFunctionIndex), rawInputs, deadline,
+                ).use { guards ->
+                    observationSnapshot.retainOriginalUntilBoundary(guards, deadline::checkpoint)
+                    legacySnapshot.retainOriginalUntilBoundary(guards, deadline::checkpoint)
+                    deadline.checkpoint("before committing truth-v3 publication")
+                    publication.commit(projection, deadline::checkpoint, {
+                        rawInputs.verifyUnchanged("at truth-v3 publication boundary")
+                        observationSnapshot.verifyIdentity(deadline::checkpoint)
+                        legacySnapshot.verifyIdentity(deadline::checkpoint)
+                        guards.verifyUnchanged(deadline::checkpoint)
+                    }, guards)
+                    FullTreeFunctionTruthV3Generation(
+                        root = target,
+                        index = projection.index,
+                        indexArtifactSha256 = projection.indexArtifactSha256,
+                        indexSha256 = projection.indexSha256,
+                        observationV2IndexArtifactSha256 = v2Run.binding.indexArtifactSha256,
+                        elfIndexArtifactSha256 = legacyTruth.elfIndexArtifactSha256,
+                        outputBytes = projection.outputBytes,
+                        databaseHighWaterBytes = legacyTruth.databaseHighWaterBytes,
+                        counts = projection.counts,
+                    )
                 }
-                FullTreeFunctionTruthV3Generation(
-                    root = target,
-                    index = projection.index,
-                    indexArtifactSha256 = projection.indexArtifactSha256,
-                    indexSha256 = projection.indexSha256,
-                    observationV2IndexArtifactSha256 = v2Run.binding.indexArtifactSha256,
-                    elfIndexArtifactSha256 = legacyTruth.elfIndexArtifactSha256,
-                    outputBytes = projection.outputBytes,
-                    databaseHighWaterBytes = legacyTruth.databaseHighWaterBytes,
-                    counts = projection.counts,
-                )
             } finally {
                 publication.close()
             }
@@ -591,24 +600,56 @@ internal object FullTreeFunctionTruthSqliteV3 {
                     aggregateScratchRoot = workspace.root,
                 ),
             )
-            verifyV3Candidate(candidateSnapshot, projection, candidateParent, candidateParentIdentity)
-            candidateSnapshot.verifyOriginalUnchanged(deadline::checkpoint)
-            rawInputs.verifyUnchanged("at truth-v3 candidate comparison boundary")
-            observationSnapshot.verifyOriginalUnchanged(deadline::checkpoint)
-            legacySnapshot.verifyOriginalUnchanged(deadline::checkpoint)
-            FullTreeFunctionTruthV3Validation(
-                indexArtifactSha256 = projection.indexArtifactSha256,
-                indexSha256 = projection.indexSha256,
-                observationV2IndexArtifactSha256 = v2Run.binding.indexArtifactSha256,
-                elfIndexArtifactSha256 = legacyTruth.elfIndexArtifactSha256,
-                outputBytes = projection.outputBytes,
-                databaseHighWaterBytes = legacyTruth.databaseHighWaterBytes,
-                counts = projection.counts,
-            )
+            boundaryGuards(
+                scope, limits, projection, observationSnapshot, legacySnapshot,
+                listOf(richArtifact, strippedArtifact, inventoryPath, elfFunctionIndex), rawInputs, deadline,
+            ).use { guards ->
+                candidateSnapshot.retainOriginalUntilBoundary(guards, deadline::checkpoint)
+                observationSnapshot.retainOriginalUntilBoundary(guards, deadline::checkpoint)
+                legacySnapshot.retainOriginalUntilBoundary(guards, deadline::checkpoint)
+                V3StableTreeSnapshot.captureIdentity(
+                    derivedRoot, setOf("shards"), projection.index.v3Array("shards").size.toLong() + 2L,
+                    projection.outputBytes, deadline::checkpoint, setOf("index.json", "exclusions.json"),
+                ).retainAtBoundary(derivedRoot, expectedV3Members(projection.index, projection.indexBytes), guards, deadline::checkpoint)
+                verifyV3Candidate(candidateSnapshot, projection, candidateParent, candidateParentIdentity)
+                rawInputs.verifyUnchanged("at truth-v3 candidate comparison boundary")
+                candidateSnapshot.verifyIdentity(deadline::checkpoint)
+                observationSnapshot.verifyIdentity(deadline::checkpoint)
+                legacySnapshot.verifyIdentity(deadline::checkpoint)
+                guards.verifyUnchanged(deadline::checkpoint)
+                FullTreeFunctionTruthV3Validation(
+                    indexArtifactSha256 = projection.indexArtifactSha256,
+                    indexSha256 = projection.indexSha256,
+                    observationV2IndexArtifactSha256 = v2Run.binding.indexArtifactSha256,
+                    elfIndexArtifactSha256 = legacyTruth.elfIndexArtifactSha256,
+                    outputBytes = projection.outputBytes,
+                    databaseHighWaterBytes = legacyTruth.databaseHighWaterBytes,
+                    counts = projection.counts,
+                )
+            }
         }
         }
         }
     }
+
+    private fun boundaryGuards(
+        scope: AuthenticatedFullTreeScope,
+        limits: FullTreeFunctionTruthV3Limits,
+        projection: V3Projection,
+        observation: V3StableTreeSnapshot,
+        legacy: V3StableTreeSnapshot,
+        rawPaths: List<Path>,
+        rawInputs: V3RawInputGuards,
+        deadline: V3RunDeadline,
+    ): V3BoundaryGuards = V3BoundaryGuards(
+        minOf(limits.maximumRetainedWorkingSetBytes,
+            scope.document.controlObject("bounds").controlObject("wholeRun").controlLong("maximumResidentBytes")),
+        Math.addExact(projection.indexBytes.size.toLong(), Math.addExact(observation.controlBytes(), legacy.controlBytes())),
+        rawPaths,
+        deadline::checkpoint,
+        deadline,
+        rawInputs,
+    )
 
     private fun deriveLegacyAndCensus(
         richArtifact: Path,
@@ -1496,9 +1537,36 @@ internal object FullTreeFunctionTruthSqliteV3 {
         outputBytes: Long,
         checkpoint: (String) -> Unit = {},
     ) {
-        snapshot.verifyIdentity(checkpoint)
-        verifyV3IndexTree(snapshot.root, index, indexBytes, outputBytes)
+        V3BoundaryGuards().use { guards ->
+            retainV3Staging(snapshot, index, indexBytes, outputBytes, guards, checkpoint)
+            guards.verifyUnchanged(checkpoint)
+        }
     }
+
+    private fun retainV3Staging(
+        snapshot: V3StableTreeSnapshot,
+        index: JsonObject,
+        indexBytes: ByteArray,
+        outputBytes: Long,
+        guards: V3BoundaryGuards,
+        checkpoint: (String) -> Unit,
+    ): IntRange {
+        val retained = snapshot.retainAtBoundary(snapshot.root, expectedV3Members(index, indexBytes), guards, checkpoint)
+        verifyV3IndexTree(snapshot.root, index, indexBytes, outputBytes)
+        guards.verifyUnchanged(checkpoint)
+        return retained
+    }
+
+    private fun expectedV3Members(index: JsonObject, indexBytes: ByteArray): Map<String, V3ExpectedTreeMember> =
+        TreeMap<String, V3ExpectedTreeMember>().apply {
+            put("index.json", V3ExpectedTreeMember(indexBytes.size.toLong(), OracleArtifacts.sha256(indexBytes)))
+            val exclusions = index.v3Object("exclusions")
+            put(exclusions.v3String("path"), V3ExpectedTreeMember(exclusions.v3Long("bytes"), exclusions.v3String("sha256")))
+            index.v3Array("shards").forEach { raw ->
+                val record = raw as JsonObject
+                put(record.v3String("path"), V3ExpectedTreeMember(record.v3Long("bytes"), record.v3String("sha256")))
+            }
+        }
 
     private fun verifyV3IndexTree(root: Path, index: JsonObject, indexBytes: ByteArray, expectedOutputBytes: Long) {
         OracleSchemas.validate(INDEX_SCHEMA_NAME, index)
@@ -2065,7 +2133,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
         }
     }
 
-    private data class V3Projection(
+    internal data class V3Projection(
         val root: Path,
         val index: JsonObject,
         val indexBytes: ByteArray,
@@ -2096,6 +2164,9 @@ internal object FullTreeFunctionTruthSqliteV3 {
         val totalBytes: Long,
         private val privateSnapshotIdentity: V3PrivateSnapshotIdentity? = null,
     ) {
+        internal fun controlBytes(): Long = files.entries.filter { '/' !in it.key }
+            .fold(0L) { total, entry -> Math.addExact(total, entry.value.bytes) }
+
         fun verifyIdentity(checkpoint: (String) -> Unit = {}) {
             val current = enumerate(
                 sourceRoot, allowedDirectories, allowedRootFiles, maximumFiles, maximumBytes, checkpoint,
@@ -2109,22 +2180,61 @@ internal object FullTreeFunctionTruthSqliteV3 {
         }
 
         fun verifyOriginalUnchanged(checkpoint: (String) -> Unit = {}) {
+            V3BoundaryGuards().use { guards ->
+                retainOriginalUntilBoundary(guards, checkpoint)
+                guards.verifyUnchanged(checkpoint)
+            }
+        }
+
+        /** Retains both original and private members until the enclosing operation releases them. */
+        fun retainOriginalUntilBoundary(guards: V3BoundaryGuards, checkpoint: (String) -> Unit = {}) {
+            val pinned = privateSnapshotIdentity
+                ?: v3Fail("truth-v3 private snapshot has not been created")
             verifyPrivateSnapshotUnchanged(checkpoint)
             verifyIdentity(checkpoint)
-            files.forEach { (relative, expected) ->
-                FullTreeFunctionTruthSqliteV3.withV3TreeMemberPhase(relative) {
-                checkpoint("while rechecking pinned truth-v3 input member $relative")
-                val path = sourceRoot.resolve(relative)
-                StableControlFile.open(path, maximumBytes, "truth-v3 pinned member $relative").use { guard ->
-                    if (guard.size != expected.bytes || guard.authenticatedSha256 != expected.sha256) {
-                        FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 pinned input member changed bytes at $relative")
-                    }
-                    guard.verifyUnchanged("truth-v3 pinned input member $relative")
-                }
-                }
+            guards.retainTree(root, pinned.files, null, "private truth-v3 snapshot", checkpoint) { budget ->
+                verifyTerminalIdentity(root, true, budget)
+            }
+            guards.retainTree(sourceRoot, files, null, "pinned truth-v3 input", checkpoint) { budget ->
+                verifyTerminalIdentity(sourceRoot, false, budget)
             }
             verifyIdentity(checkpoint)
             verifyPrivateSnapshotUnchanged(checkpoint)
+        }
+
+        fun retainAtBoundary(
+            atRoot: Path,
+            expected: Map<String, V3ExpectedTreeMember>,
+            guards: V3BoundaryGuards,
+            checkpoint: (String) -> Unit,
+        ): IntRange {
+            verifyIdentityAt(atRoot, checkpoint)
+            return guards.retainTree(atRoot, files, expected, "truth-v3 publication", checkpoint) { budget ->
+                verifyTerminalIdentity(atRoot, false, budget)
+            }.also {
+                verifyIdentityAt(atRoot, checkpoint)
+            }
+        }
+
+        private fun verifyIdentityAt(atRoot: Path, checkpoint: (String) -> Unit) {
+            val current = enumerate(atRoot, allowedDirectories, allowedRootFiles, maximumFiles, maximumBytes, checkpoint)
+            if (current.rootIdentity != rootIdentity || current.directoryIdentities != directoryIdentities ||
+                current.files.mapValues { (_, file) -> file.fileIdentity to file.bytes } !=
+                files.mapValues { (_, file) -> file.fileIdentity to file.bytes }
+            ) v3Fail("truth-v3 relocated tree identities or membership changed")
+        }
+
+        private fun verifyTerminalIdentity(atRoot: Path, privateTree: Boolean, budget: (String) -> Unit) {
+            val pinned = if (privateTree) checkNotNull(privateSnapshotIdentity) else null
+            val current = enumerate(
+                atRoot, allowedDirectories, allowedRootFiles, maximumFiles, maximumBytes, budget,
+            )
+            val expectedFiles = pinned?.files ?: files
+            if (current.rootIdentity != (pinned?.rootIdentity ?: rootIdentity) ||
+                current.directoryIdentities != (pinned?.directoryIdentities ?: directoryIdentities) ||
+                current.files.mapValues { (_, file) -> file.fileIdentity to file.bytes } !=
+                expectedFiles.mapValues { (_, file) -> file.fileIdentity to file.bytes }
+            ) v3Fail("truth-v3 terminal tree identities or membership changed")
         }
 
         fun verifyPrivateSnapshotUnchanged(checkpoint: (String) -> Unit = {}) {
@@ -2338,7 +2448,149 @@ internal object FullTreeFunctionTruthSqliteV3 {
         }
     }
 
-    private data class V3TreeFileIdentity(val path: Path, val fileIdentity: Any, val bytes: Long, val sha256: String)
+    /** One operation-wide admission ledger, including both sides of the rename handoff. */
+    internal class V3BoundaryGuards(
+        private val maximumRetainedBytes: Long = 1024L * 1024L * 1024L,
+        retainedControlBytes: Long = 0L,
+        alreadyGuardedPaths: List<Path> = emptyList(),
+        // Production supplies the deadline directly, never an externally supplied mutation/checkpoint hook.
+        private val terminalBudget: (String) -> Unit = { stage ->
+            if (Thread.currentThread().isInterrupted) v3Fail("truth-v3 operation was interrupted $stage")
+        },
+        private val terminalShardPhases: FullTreeOracleShardPhaseObserver? = null,
+        private val alreadyGuardedInputs: V3RawInputGuards? = null,
+    ) : AutoCloseable {
+        private data class Held(val relative: String, val guard: StableControlFile, var parentRenamed: Boolean = false)
+        private data class HeldTree(
+            val indices: IntRange,
+            val verifyIdentity: ((String) -> Unit) -> Unit,
+            var parentRenamed: Boolean = false,
+        )
+        private val held = ArrayList<Held>()
+        private val trees = ArrayList<HeldTree>()
+        private var modeledBytes = Math.addExact(V3_FIXED_RETAINED_BYTES, Math.multiplyExact(retainedControlBytes, 4L))
+
+        init {
+            require(maximumRetainedBytes > 0L && retainedControlBytes >= 0L)
+            alreadyGuardedPaths.forEach { path ->
+                modeledBytes = Math.addExact(modeledBytes, modeledGuardBytes(path))
+            }
+            require(modeledBytes <= maximumRetainedBytes) { "truth-v3 boundary guards exceed retained-working-set bound" }
+        }
+
+        internal fun retainTree(
+            root: Path,
+            members: Map<String, V3TreeFileIdentity>,
+            expected: Map<String, V3ExpectedTreeMember>?,
+            label: String,
+            checkpoint: (String) -> Unit,
+            verifyTerminalIdentity: ((String) -> Unit) -> Unit,
+        ): IntRange {
+            if (expected != null && expected.keys != members.keys) v3Fail("truth-v3 guarded member set differs")
+            val remaining = maximumRetainedBytes - modeledBytes
+            if (members.size.toLong() > remaining / MINIMUM_GUARD_BYTES) {
+                v3Fail("truth-v3 simultaneous guard count exceeds retained-working-set bound")
+            }
+            var added = 0L
+            var maximumDepth = 0
+            members.forEach { (relative, _) ->
+                checkpoint("while admitting truth-v3 boundary guards")
+                val path = root.resolve(relative).toAbsolutePath().normalize()
+                added = Math.addExact(added, modeledGuardBytes(path))
+                maximumDepth = maxOf(maximumDepth, path.parent.nameCount)
+            }
+            if (added > remaining) v3Fail("truth-v3 boundary guard metadata exceeds retained-working-set bound")
+            modeledBytes = Math.addExact(modeledBytes, added)
+            val first = held.size
+            val reserves = ArrayList<LinuxDescriptorReserve>()
+            try {
+                // Reserve actual kernel capacity before opening any member. Chunking keeps admission cancellable.
+                var unreserved = members.size
+                while (unreserved > 0) {
+                    checkpoint("while reserving truth-v3 boundary descriptors")
+                    val count = minOf(unreserved, 256)
+                    reserves += LinuxFilesystemSyscalls.reserveDescriptors(count)
+                    unreserved -= count
+                }
+                // Opening retains one FD and transiently uses the entire ancestor chain, selected/read FDs,
+                // metadata/fdinfo descriptors, the shared watcher and publication/checkpoint descriptors.
+                LinuxFilesystemSyscalls.reserveDescriptors(Math.addExact(maximumDepth, 32)).close()
+                members.entries.forEachIndexed { position, (relative, source) ->
+                    withV3TreeMemberPhase(relative) {
+                        checkpoint("while rechecking $label member $relative")
+                        reserves[position / 256].release(1)
+                        val path = root.resolve(relative)
+                        val wanted = expected?.getValue(relative) ?: V3ExpectedTreeMember(source.bytes, source.sha256)
+                        val guard = StableControlFile.openWithCheckpoint(path, source.bytes, "$label member $relative", checkpoint)
+                        held += Held(relative, guard)
+                        val identity = Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS).fileKey()
+                        if (identity != source.fileIdentity || guard.size != wanted.bytes || guard.authenticatedSha256 != wanted.sha256) {
+                            v3Fail("truth-v3 guarded member changed identity or bytes at $relative")
+                        }
+                    }
+                }
+            } finally {
+                reserves.asReversed().forEach { it.close() }
+            }
+            return (first until held.size).also { trees += HeldTree(it, verifyTerminalIdentity) }
+        }
+
+        fun parentRenamed(indices: IntRange) {
+            indices.forEach { held[it].parentRenamed = true }
+            trees.single { it.indices == indices }.parentRenamed = true
+        }
+
+        fun verifyUnchanged(checkpoint: (String) -> Unit = {}) {
+            held.forEach { entry ->
+                withV3TreeMemberPhase(entry.relative) {
+                    checkpoint("while verifying held truth-v3 boundary member ${entry.relative}")
+                    if (entry.parentRenamed) entry.guard.requireRetainedLeaseAndIdentity("truth-v3 staging handoff ${entry.relative}")
+                    else entry.guard.verifyUnchanged("truth-v3 boundary member ${entry.relative}")
+                }
+            }
+            // No caller hooks run after this point. Enumerate exact membership after all callback-bearing
+            // hashes, then check ordinary path/watch history as well as retained lease continuity. The
+            // intentionally renamed staging tree is instead bound by its separately retained target tree.
+            FullTreeOracleOperationCheckpoint.withCheckpoint(terminalBudget, terminalShardPhases) {
+                trees.filterNot { it.parentRenamed }.forEach { it.verifyIdentity(terminalBudget) }
+                held.forEach { entry ->
+                    withV3TreeMemberPhase(entry.relative) {
+                        terminalBudget("while checking final truth-v3 boundary member ${entry.relative}")
+                        if (entry.parentRenamed) entry.guard.requireRetainedLeaseAndIdentity("truth-v3 final staging member ${entry.relative}")
+                        else entry.guard.requireSingleLink("truth-v3 final boundary member ${entry.relative}")
+                    }
+                }
+                alreadyGuardedInputs?.requirePathAndIdentity(terminalBudget)
+                terminalBudget("at truth-v3 guarded operation boundary")
+            }
+        }
+
+        override fun close() {
+            var failure: Throwable? = null
+            held.asReversed().forEach { entry ->
+                try { entry.guard.close() } catch (caught: Throwable) {
+                    if (failure == null) failure = caught else failure.addSuppressed(caught)
+                }
+            }
+            held.clear()
+            trees.clear()
+            failure?.let { throw it }
+        }
+
+        companion object {
+            private const val MINIMUM_GUARD_BYTES = 2048L
+            internal fun modeledGuardBytes(path: Path): Long {
+                val normalized = path.toAbsolutePath().normalize()
+                // Guard/reservation/list/tree metadata, duplicated path text, and per-ancestor watch/identity state.
+                return Math.addExact(MINIMUM_GUARD_BYTES, Math.addExact(
+                    Math.multiplyExact(normalized.toString().length.toLong(), 4L),
+                    Math.multiplyExact(normalized.parent.nameCount.toLong() + 1L, 512L),
+                ))
+            }
+        }
+    }
+
+    internal data class V3TreeFileIdentity(val path: Path, val fileIdentity: Any, val bytes: Long, val sha256: String)
 
     private data class V3TreeMetadata(
         val rootIdentity: Any,
@@ -2358,6 +2610,13 @@ internal object FullTreeFunctionTruthSqliteV3 {
     ) : AutoCloseable {
         fun verifyUnchanged(label: String) {
             inputs.forEach { (name, guard) -> guard.verifyUnchanged("truth-v3 $name $label") }
+        }
+
+        fun requirePathAndIdentity(checkpoint: (String) -> Unit) {
+            inputs.forEach { (name, guard) ->
+                checkpoint("while checking final truth-v3 raw input $name")
+                guard.requirePathAndIdentity("truth-v3 $name at guarded operation boundary")
+            }
         }
 
         override fun close() {
@@ -2420,7 +2679,7 @@ internal object FullTreeFunctionTruthSqliteV3 {
         }
     }
 
-    private class V3Publication private constructor(
+    internal class V3Publication private constructor(
         private val target: Path,
         val staging: Path,
         private val parent: Path,
@@ -2431,10 +2690,17 @@ internal object FullTreeFunctionTruthSqliteV3 {
         private var committed = false
         private var published = false
 
-        fun commit(
+        fun commit(projection: V3Projection, checkpoint: (String) -> Unit, verifyInputs: () -> Unit) {
+            V3BoundaryGuards(retainedControlBytes = projection.indexBytes.size.toLong()).use { guards ->
+                commit(projection, checkpoint, verifyInputs, guards)
+            }
+        }
+
+        internal fun commit(
             projection: V3Projection,
             checkpoint: (String) -> Unit,
             verifyInputs: () -> Unit,
+            boundaryGuards: V3BoundaryGuards,
         ) {
             checkpoint("before committing truth-v3 publication")
             verifyInputs()
@@ -2459,8 +2725,8 @@ internal object FullTreeFunctionTruthSqliteV3 {
                         FullTreeFunctionTruthSqliteV3.v3Fail("truth-v3 output root already exists")
                     }
                     LinuxFilesystemSyscalls.synchronize(descriptor)
-                    FullTreeFunctionTruthSqliteV3.reauthenticateV3Staging(
-                        stagedSnapshot, projection.index, projection.indexBytes, projection.outputBytes, checkpoint,
+                    val stagedGuards = FullTreeFunctionTruthSqliteV3.retainV3Staging(
+                        stagedSnapshot, projection.index, projection.indexBytes, projection.outputBytes, boundaryGuards, checkpoint,
                     )
                     try {
                         LinuxFilesystemSyscalls.renameNoReplace(parentFd, staging.fileName.toString(), target.fileName.toString())
@@ -2471,12 +2737,20 @@ internal object FullTreeFunctionTruthSqliteV3 {
                         throw failure
                     }
                     published = true
+                    boundaryGuards.parentRenamed(stagedGuards)
+                    stagedSnapshot.retainAtBoundary(
+                        target, expectedV3Members(projection.index, projection.indexBytes), boundaryGuards, checkpoint,
+                    )
+                    boundaryGuards.verifyUnchanged(checkpoint)
                 }
                 LinuxFilesystemSyscalls.synchronize(descriptor)
             }
             requireDirectoryIdentity(target, stagingIdentity, "truth-v3 published root")
             checkpoint("after truth-v3 publication rename")
             verifyInputs()
+            boundaryGuards.verifyUnchanged(checkpoint)
+            requireDirectoryIdentity(target, stagingIdentity, "truth-v3 published root")
+            requireDirectoryIdentity(parent, parentIdentity, "truth-v3 publication parent")
             committed = true
         }
 
