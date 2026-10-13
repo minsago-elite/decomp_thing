@@ -333,12 +333,16 @@ jobs:
         env:
           RUN_REAL_GHIDRA: "true"
           RUN_REAL_GHIDRA_CALL_SITES: "true"
+          RUN_REAL_GHIDRA_NATIVE_CALLS: "true"
         run: |
           unset GHIDRA_HOME
           ./gradlew --no-daemon test \
             --tests decompengine.analysis.BundledGhidraTest \
             --tests decompengine.project.GhidraProgramModelExporterTest \
             --tests decompengine.project.RecoveredCallSitesTest \
+            --tests decompengine.project.NativeCallCollectorRealTest \
+            --tests decompengine.project.NativeCallObservationsV1Test \
+            --tests decompengine.oracle.gcc.GccBundledNativeCallCaptureTest \
             --tests decompengine.mvp.GhidraDecompilerTest \
             --tests decompengine.project.ReconstructionPipelineTest \
             --tests decompengine.web.SourceTreeJobReconstructorTest

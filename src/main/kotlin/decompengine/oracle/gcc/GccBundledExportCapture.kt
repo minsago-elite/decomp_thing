@@ -250,7 +250,7 @@ private fun requireInvocation(state: ByteArray, artifacts: List<GccCompilerEngin
     }
 }
 
-internal class GccBoundExportFiles(private val maximumBytes: Long) {
+internal class GccBoundExportFiles(private val maximumBytes: Long, private val checkpoint: () -> Unit = {}) {
     var bytes: Long = 0
         private set
     private val files = mutableListOf<BoundExportFile>()
@@ -342,6 +342,7 @@ internal class GccBoundExportFiles(private val maximumBytes: Long) {
     }
 
     fun read(directory: LinuxDescriptor, name: String, maximumFileBytes: Int): ByteArray {
+        checkpoint()
         val file = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, name)) { "GCC export file is missing: $name" }
         return file.use { selected ->
             requireCaptureFile(selected.identity, directory.identity)
@@ -354,19 +355,23 @@ internal class GccBoundExportFiles(private val maximumBytes: Long) {
             LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(selected).use { readable ->
                 FileChannel.open(LinuxFilesystemSyscalls.stableDescriptorPath(readable.fd), StandardOpenOption.READ).use { channel ->
                     val buffer = ByteBuffer.wrap(captured)
-                    while (buffer.hasRemaining()) require(channel.read(buffer) > 0) { "GCC export file was truncated: $name" }
+                    while (buffer.hasRemaining()) {
+                        checkpoint()
+                        require(channel.read(buffer) > 0) { "GCC export file was truncated: $name" }
+                    }
                     require(channel.read(ByteBuffer.allocate(1)) == -1) { "GCC export file grew: $name" }
                 }
             }
             val retained = BoundExportFile(directory, name, selected.identity, metadata)
             retained.verify()
+            checkpoint()
             files += retained
             captured
         }
     }
 
     fun verify() {
-        files.forEach { it.verify() }
+        files.forEach { checkpoint(); it.verify() }
         publishedModelDirectory?.let { directory ->
             require(captureEntryExists(directory, "program_model.json") == (publishedModel != null)) {
                 "GCC published model membership changed during capture"

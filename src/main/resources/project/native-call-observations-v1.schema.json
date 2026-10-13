@@ -1,0 +1,1225 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:decompengine:native-call-observations-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "addressSpaces",
+    "bindings",
+    "policy",
+    "records",
+    "schemaVersion",
+    "summary"
+  ],
+  "properties": {
+    "addressSpaces": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/AddressSpace"
+      },
+      "maxItems": 256,
+      "minItems": 1
+    },
+    "bindings": {
+      "$ref": "#/$defs/NativeCallBindingsV1"
+    },
+    "policy": {
+      "const": "ghidra-native-call-observations-v1"
+    },
+    "records": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/FunctionRecord"
+          },
+          {
+            "$ref": "#/$defs/SiteRecord"
+          },
+          {
+            "$ref": "#/$defs/FunctionSummaryRecord"
+          }
+        ]
+      },
+      "maxItems": 10262144
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "summary": {
+      "$ref": "#/$defs/ScanSummary"
+    }
+  },
+  "$defs": {
+    "Address": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "no-address"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "spaceIndex",
+            "offsetBits"
+          ],
+          "properties": {
+            "kind": {
+              "const": "address"
+            },
+            "spaceIndex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            },
+            "offsetBits": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{16}$"
+            }
+          }
+        }
+      ]
+    },
+    "AddressSpace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index",
+        "name",
+        "type",
+        "sizeBits",
+        "addressableUnitSize",
+        "overlay",
+        "signedOffsets"
+      ],
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "type": {
+          "type": "integer"
+        },
+        "sizeBits": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "addressableUnitSize": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "overlay": {
+          "type": "boolean"
+        },
+        "signedOffsets": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ReferenceType": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": -2
+            },
+            "name": {
+              "const": "INVALID"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": -1
+            },
+            "name": {
+              "const": "FLOW"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 0
+            },
+            "name": {
+              "const": "FALL_THROUGH"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 1
+            },
+            "name": {
+              "const": "UNCONDITIONAL_JUMP"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 2
+            },
+            "name": {
+              "const": "CONDITIONAL_JUMP"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 3
+            },
+            "name": {
+              "const": "UNCONDITIONAL_CALL"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 4
+            },
+            "name": {
+              "const": "CONDITIONAL_CALL"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 5
+            },
+            "name": {
+              "const": "TERMINATOR"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 6
+            },
+            "name": {
+              "const": "COMPUTED_JUMP"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 7
+            },
+            "name": {
+              "const": "CONDITIONAL_TERMINATOR"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 8
+            },
+            "name": {
+              "const": "COMPUTED_CALL"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 9
+            },
+            "name": {
+              "const": "INDIRECTION"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 10
+            },
+            "name": {
+              "const": "CALL_TERMINATOR"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 11
+            },
+            "name": {
+              "const": "JUMP_TERMINATOR"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 12
+            },
+            "name": {
+              "const": "CONDITIONAL_COMPUTED_JUMP"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 13
+            },
+            "name": {
+              "const": "CONDITIONAL_COMPUTED_CALL"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 14
+            },
+            "name": {
+              "const": "CONDITIONAL_CALL_TERMINATOR"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 15
+            },
+            "name": {
+              "const": "COMPUTED_CALL_TERMINATOR"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 16
+            },
+            "name": {
+              "const": "CALL_OVERRIDE_UNCONDITIONAL"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 17
+            },
+            "name": {
+              "const": "JUMP_OVERRIDE_UNCONDITIONAL"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 18
+            },
+            "name": {
+              "const": "CALLOTHER_OVERRIDE_CALL"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 19
+            },
+            "name": {
+              "const": "CALLOTHER_OVERRIDE_JUMP"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 100
+            },
+            "name": {
+              "const": "DATA"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 101
+            },
+            "name": {
+              "const": "READ"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 102
+            },
+            "name": {
+              "const": "WRITE"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 103
+            },
+            "name": {
+              "const": "READ_WRITE"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 104
+            },
+            "name": {
+              "const": "READ_IND"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 105
+            },
+            "name": {
+              "const": "WRITE_IND"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 106
+            },
+            "name": {
+              "const": "READ_WRITE_IND"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 107
+            },
+            "name": {
+              "const": "PARAM"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 113
+            },
+            "name": {
+              "const": "EXTERNAL"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 114
+            },
+            "name": {
+              "const": "DATA_IND"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "name"
+          ],
+          "properties": {
+            "code": {
+              "const": 127
+            },
+            "name": {
+              "const": "THUNK"
+            }
+          }
+        }
+      ]
+    },
+    "ExternalObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "externalSpaceAddress",
+        "externalProgramAddress",
+        "libraryName",
+        "label",
+        "originalImportedName",
+        "source"
+      ],
+      "properties": {
+        "externalSpaceAddress": {
+          "$ref": "#/$defs/Address"
+        },
+        "externalProgramAddress": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Address"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "libraryName": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "originalImportedName": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "enum": [
+            "DEFAULT",
+            "ANALYSIS",
+            "AI",
+            "IMPORTED",
+            "USER_DEFINED"
+          ]
+        }
+      }
+    },
+    "MemoryBlockObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "start",
+        "end",
+        "initialized",
+        "executable"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "start": {
+          "$ref": "#/$defs/Address"
+        },
+        "end": {
+          "$ref": "#/$defs/Address"
+        },
+        "initialized": {
+          "type": "boolean"
+        },
+        "executable": {
+          "type": "boolean"
+        }
+      }
+    },
+    "TargetObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "address",
+        "functionEntry",
+        "external",
+        "memoryBlock"
+      ],
+      "properties": {
+        "address": {
+          "$ref": "#/$defs/Address"
+        },
+        "functionEntry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Address"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "external": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExternalObservation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memoryBlock": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryBlockObservation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "ReferenceObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "target",
+        "operandIndex",
+        "primary",
+        "source",
+        "referenceType"
+      ],
+      "properties": {
+        "from": {
+          "$ref": "#/$defs/Address"
+        },
+        "target": {
+          "$ref": "#/$defs/TargetObservation"
+        },
+        "operandIndex": {
+          "type": "integer"
+        },
+        "primary": {
+          "type": "boolean"
+        },
+        "source": {
+          "enum": [
+            "DEFAULT",
+            "ANALYSIS",
+            "AI",
+            "IMPORTED",
+            "USER_DEFINED"
+          ]
+        },
+        "referenceType": {
+          "$ref": "#/$defs/ReferenceType"
+        }
+      }
+    },
+    "ReferenceNeighborhood": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "viaReferenceIndex",
+        "source",
+        "references"
+      ],
+      "properties": {
+        "viaReferenceIndex": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source": {
+          "$ref": "#/$defs/Address"
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReferenceObservation"
+          },
+          "maxItems": 64
+        }
+      }
+    },
+    "NativeCallBindingsV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "collectorSha256",
+        "compilerSpecId",
+        "ghidraArchiveSha256",
+        "imageBase",
+        "inputSha256",
+        "languageId",
+        "programModelBytes",
+        "programModelExporterSha256",
+        "programModelSha256"
+      ],
+      "properties": {
+        "collectorSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "compilerSpecId": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "ghidraArchiveSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "imageBase": {
+          "$ref": "#/$defs/Address"
+        },
+        "inputSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "languageId": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "programModelBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 536870912
+        },
+        "programModelExporterSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "programModelSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "FunctionRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recordKind",
+        "entry",
+        "bodyAddressCount",
+        "bodyRangeCount",
+        "isThunk",
+        "immediateThunkTarget"
+      ],
+      "properties": {
+        "recordKind": {
+          "const": "function"
+        },
+        "entry": {
+          "$ref": "#/$defs/Address"
+        },
+        "bodyAddressCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bodyRangeCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "isThunk": {
+          "type": "boolean"
+        },
+        "immediateThunkTarget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TargetObservation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "SiteRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recordKind",
+        "address",
+        "owner",
+        "observationKind",
+        "listedLength",
+        "delaySlotDepth",
+        "lengthOverridden",
+        "byteStatus",
+        "instructionBytes",
+        "prototypeFlow",
+        "effectiveFlow",
+        "flowOverride",
+        "prototypeFallThrough",
+        "effectiveFallThrough",
+        "prototypeTargets",
+        "references",
+        "referenceNeighborhoods"
+      ],
+      "properties": {
+        "recordKind": {
+          "const": "site"
+        },
+        "address": {
+          "$ref": "#/$defs/Address"
+        },
+        "owner": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Address"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observationKind": {
+          "enum": [
+            "prototype-call",
+            "analysis-call-candidate",
+            "direct-tail-candidate"
+          ]
+        },
+        "listedLength": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "delaySlotDepth": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "lengthOverridden": {
+          "type": "boolean"
+        },
+        "byteStatus": {
+          "enum": [
+            "available",
+            "unsupported-boundary"
+          ]
+        },
+        "instructionBytes": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 8192,
+              "pattern": "^(?:[0-9a-f]{2})+$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prototypeFlow": {
+          "$ref": "#/$defs/ReferenceType"
+        },
+        "effectiveFlow": {
+          "$ref": "#/$defs/ReferenceType"
+        },
+        "flowOverride": {
+          "enum": [
+            "NONE",
+            "BRANCH",
+            "CALL",
+            "CALL_RETURN",
+            "RETURN"
+          ]
+        },
+        "prototypeFallThrough": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Address"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effectiveFallThrough": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Address"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prototypeTargets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TargetObservation"
+          },
+          "maxItems": 64
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReferenceObservation"
+          },
+          "maxItems": 64
+        },
+        "referenceNeighborhoods": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReferenceNeighborhood"
+          },
+          "maxItems": 64
+        }
+      }
+    },
+    "FunctionSummaryRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recordKind",
+        "entry",
+        "instructionsVisited",
+        "prototypeCalls",
+        "analysisCallCandidates",
+        "directTailCandidates",
+        "ordinaryJumpInstructions",
+        "unresolvedComputedJumps"
+      ],
+      "properties": {
+        "recordKind": {
+          "const": "function-summary"
+        },
+        "entry": {
+          "$ref": "#/$defs/Address"
+        },
+        "instructionsVisited": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "prototypeCalls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "analysisCallCandidates": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "directTailCandidates": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ordinaryJumpInstructions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unresolvedComputedJumps": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "ScanSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "coverage",
+        "functions",
+        "thunks",
+        "instructionsVisited",
+        "ownedInstructions",
+        "unownedInstructions",
+        "sites",
+        "prototypeCalls",
+        "analysisCallCandidates",
+        "directTailCandidates",
+        "ordinaryJumpInstructions",
+        "unresolvedComputedJumps",
+        "directReferences",
+        "neighborhoodReferences",
+        "unownedPrototypeCalls",
+        "unownedAnalysisCallCandidates",
+        "unownedDirectTailCandidates"
+      ],
+      "properties": {
+        "coverage": {
+          "const": "all-currently-listed-instructions-and-recovered-functions"
+        },
+        "functions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "thunks": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "instructionsVisited": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ownedInstructions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unownedInstructions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sites": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "prototypeCalls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "analysisCallCandidates": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "directTailCandidates": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ordinaryJumpInstructions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unresolvedComputedJumps": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "directReferences": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "neighborhoodReferences": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unownedPrototypeCalls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unownedAnalysisCallCandidates": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unownedDirectTailCandidates": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

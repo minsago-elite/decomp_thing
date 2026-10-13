@@ -87,7 +87,33 @@ internal object FullTreeCanonicalStreaming {
         limits: FullTreeCanonicalStreamingLimits,
         consume: (field: String, index: Long, value: JsonObject, canonicalBytes: ByteArray) -> Unit,
     ): FullTreeStreamedCanonicalObject {
+        val source = validateSource(path, label, limits.maximumInputBytes)
+        return Files.newInputStream(source.path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { input ->
+            readObject(input, label, expectedSourceSha256, source.attributes.size(), fieldOrder, arrayFields,
+                omittedDigestField, limits, { _, _ -> }, consume)
+        }.also { ensureSourceIdentity(source, label) }
+    }
+
+    /**
+     * Streams an already owned descriptor. The caller retains responsibility for descriptor
+     * provenance and identity checks; this method authenticates only its bounded canonical bytes.
+     * Like the path overload, it closes the supplied stream and leaves callbacks speculative until
+     * every byte, binding and final envelope check has passed.
+     */
+    internal fun readObject(
+        input: InputStream,
+        label: String,
+        expectedSourceSha256: String,
+        expectedSourceBytes: Long,
+        fieldOrder: List<String>,
+        arrayFields: Set<String>,
+        omittedDigestField: String?,
+        limits: FullTreeCanonicalStreamingLimits,
+        consumeEnvelope: (field: String, value: JsonElement) -> Unit = { _, _ -> },
+        consume: (field: String, index: Long, value: JsonObject, canonicalBytes: ByteArray) -> Unit,
+    ): FullTreeStreamedCanonicalObject {
         requireDigest(expectedSourceSha256, "$label source")
+        require(expectedSourceBytes in 1L..limits.maximumInputBytes) { "$label exceeds its byte limit" }
         require(fieldOrder.isNotEmpty() && fieldOrder.distinct().size == fieldOrder.size)
         require(fieldOrder.all(CANONICAL_FIELD_NAME::matches)) {
             "streaming field names must be plain canonical schema keys"
@@ -95,14 +121,13 @@ internal object FullTreeCanonicalStreaming {
         require(arrayFields.all { it in fieldOrder })
         require(omittedDigestField == null || omittedDigestField in fieldOrder)
 
-        val source = validateSource(path, label, limits.maximumInputBytes)
         val rawDigest = MessageDigest.getInstance("SHA-256")
         val completeDigest = CanonicalObjectDigest(limits.maximumInputBytes)
         val omittedDigest = omittedDigestField?.let { CanonicalObjectDigest(limits.maximumInputBytes) }
         val envelope = linkedMapOf<String, JsonElement>()
         val documentBudget = DocumentBudget(limits, label)
         val bounded = MaximumInputStream(
-            Files.newInputStream(source.path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS),
+            input,
             limits.maximumInputBytes,
             label,
         )
@@ -166,6 +191,7 @@ internal object FullTreeCanonicalStreaming {
                             completeDigest.value(canonical)
                             if (actualField != omittedDigestField) omittedDigest?.value(canonical)
                             envelope[actualField] = value
+                            consumeEnvelope(actualField, value)
                         }
                     }
                     requireToken(parser.nextToken(), JsonToken.END_OBJECT, "$label has extra top-level fields")
@@ -181,8 +207,7 @@ internal object FullTreeCanonicalStreaming {
         } catch (failure: Exception) {
             throw FullTreeDataTruthException("cannot stream $label: ${failure.message}", failure)
         }
-        ensureSourceIdentity(source, label)
-        if (bounded.byteCount != source.attributes.size()) {
+        if (bounded.byteCount != expectedSourceBytes) {
             throw FullTreeDataTruthException("$label changed size during streaming")
         }
         val raw = rawDigest.digest()

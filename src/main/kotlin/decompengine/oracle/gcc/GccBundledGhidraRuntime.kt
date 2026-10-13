@@ -12,6 +12,25 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.longOrNull
 
+/** Candidate metadata only; the retained deployment independently authenticates both identities. */
+internal data class GccBundledNativeCallCollectorIdentityV1(
+    val sourceBytes: Long, val sourceSha256: String, val classBytes: Long, val classSha256: String,
+) {
+    init {
+        require(sourceBytes in 1..4L * 1024 * 1024 && classBytes in 1..128L * 1024 * 1024) {
+            "native call collector identity exceeds its byte bound"
+        }
+        require(listOf(sourceSha256, classSha256).all { it.matches(Regex("[a-f0-9]{64}")) }) {
+            "native call collector digest is invalid"
+        }
+    }
+
+    fun toJson(): JsonObject = JsonObject(mapOf(
+        "sourceBytes" to JsonPrimitive(sourceBytes), "sourceSha256" to JsonPrimitive(sourceSha256),
+        "classBytes" to JsonPrimitive(classBytes), "classSha256" to JsonPrimitive(classSha256),
+    ))
+}
+
 internal data class GccBundledGhidraClassPathEntry(val path: Path, val bytes: Long, val sha256: String) {
     init {
         requireRuntimePath(path)
@@ -24,13 +43,17 @@ internal class GccBundledGhidraRuntime(
     val root: Path,
     classPath: List<GccBundledGhidraClassPathEntry>,
     val invocationVersion: Int = 3,
+    val nativeCallCollector: GccBundledNativeCallCollectorIdentityV1? = null,
 ) {
-    val recoveryMode: String = if (invocationVersion == 5) "full" else "planning"
+    val recoveryMode: String = if (invocationVersion == 5 || invocationVersion == 8) "full" else "planning"
     val classPath: List<GccBundledGhidraClassPathEntry>
     val release: Path
 
     init {
-        require(invocationVersion in 1..5) { "bundled Ghidra invocation version is unsupported" }
+        require(invocationVersion in 1..5 || invocationVersion == 8) { "bundled Ghidra invocation version is unsupported" }
+        require((invocationVersion == 8) == (nativeCallCollector != null)) {
+            "native call collector identity requires its distinct runtime invocation"
+        }
         requireRuntimePath(root)
         val copied = ArrayList<GccBundledGhidraClassPathEntry>()
         for (entry in classPath) {
@@ -111,23 +134,33 @@ internal class GccBundledGhidraRuntime(
         val byRole = artifacts.associateBy { it.role }
         val exporter = byRole.getValue(GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE)
         val archive = byRole.getValue(GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE)
-        require(invocationVersion != 5 || runKind != GccCompilerEngineContainmentRunKind.INTERRUPTED) {
+        require(invocationVersion !in setOf(5, 8) || runKind != GccCompilerEngineContainmentRunKind.INTERRUPTED) {
             "full-recovery export does not support planning checkpoint interruption"
+        }
+        require(invocationVersion != 8 || runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL) {
+            "native call observations require a fresh uninterrupted operation"
         }
         val controlName = if (resumed) resumeControlDirectoryName(state, lease) else freshControlDirectoryName(lease.path)
         val controlRoot = controlName?.let(lease.path::resolve) ?: lease.path
         val project = if (resumed) controlRoot.resolve("state") else state.path
         val exporterArguments = listOf(
-            exporter.sha256, archive.sha256, if (invocationVersion == 5) "full" else "planning",
+            exporter.sha256, archive.sha256, recoveryMode,
             lease.path.resolve("reports/program_model.json").toString(),
         ) + if (runKind == GccCompilerEngineContainmentRunKind.INTERRUPTED && invocationVersion >= 3) {
             listOf("hold-first-planning-checkpoint-v1")
         } else emptyList()
+        val postScripts = listOf(GhidraPostScript("ExportProgramModel.java", exporterArguments)) +
+            if (invocationVersion == 8) listOf(GhidraPostScript("ExportNativeCallsV1.class", listOf(
+                byRole.getValue(GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY).sha256,
+                exporter.sha256, archive.sha256, checkNotNull(nativeCallCollector).sourceSha256,
+                lease.path.resolve("reports/program_model.json").toString(),
+                lease.path.resolve("reports/native-calls-v1").toString(),
+            ))) else emptyList()
         val invocation = GhidraInvocation(
             project, "archival_reconstruction",
             byRole.getValue(GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY).path,
             exporter.path.parent,
-            listOf(GhidraPostScript("ExportProgramModel.java", exporterArguments)),
+            postScripts,
         )
         val prefix = GhidraWorkerCommand.prefix(
             byRole.getValue(GccCompilerEngineContainmentArtifactRole.JAVA_EXECUTABLE).path,
@@ -153,7 +186,7 @@ internal class GccBundledGhidraRuntime(
             "bytes" to JsonPrimitive(entry.bytes),
             "sha256" to JsonPrimitive(entry.sha256),
         )) }),
-    ))
+    ) + (nativeCallCollector?.let { mapOf("nativeCallCollector" to it.toJson()) } ?: emptyMap()))
 
     companion object {
         private const val PROVIDER_PREFIX = "bundled-ghidra-java-api-runtime-v"
@@ -164,15 +197,31 @@ internal class GccBundledGhidraRuntime(
         )
 
         fun parse(document: JsonObject): GccBundledGhidraRuntime {
-            require(document.keys == setOf("provider", "root", "classPath")) { "bundled Ghidra runtime fields are invalid" }
             val version = when (document.strictString("provider")) {
                 "${PROVIDER_PREFIX}1" -> 1
                 "${PROVIDER_PREFIX}2" -> 2
                 "${PROVIDER_PREFIX}3" -> 3
                 "${PROVIDER_PREFIX}4" -> 4
                 "${PROVIDER_PREFIX}5" -> 5
+                "${PROVIDER_PREFIX}8" -> 8
                 else -> throw IllegalArgumentException("bundled Ghidra runtime provider is invalid")
             }
+            require(document.keys == setOf("provider", "root", "classPath") +
+                if (version == 8) setOf("nativeCallCollector") else emptySet()) { "bundled Ghidra runtime fields are invalid" }
+            val collector = if (version == 8) {
+                val value = document["nativeCallCollector"] as? JsonObject
+                    ?: throw IllegalArgumentException("native call collector identity must be an object")
+                require(value.keys == setOf("sourceBytes", "sourceSha256", "classBytes", "classSha256")) {
+                    "native call collector identity fields are invalid"
+                }
+                fun number(name: String): Long {
+                    val item = value[name] as? JsonPrimitive
+                    require(item != null && !item.isString) { "native call collector size must be an integer" }
+                    return requireNotNull(item.longOrNull)
+                }
+                GccBundledNativeCallCollectorIdentityV1(number("sourceBytes"), value.strictString("sourceSha256"),
+                    number("classBytes"), value.strictString("classSha256"))
+            } else null
             val entries = document["classPath"] as? JsonArray
                 ?: throw IllegalArgumentException("bundled Ghidra classpath must be an array")
             require(entries.size in 2..512) { "bundled Ghidra classpath count is invalid" }
@@ -184,7 +233,7 @@ internal class GccBundledGhidraRuntime(
                 GccBundledGhidraClassPathEntry(
                     Path.of(entry.strictString("path")), requireNotNull(size.longOrNull), entry.strictString("sha256"),
                 )
-            }, version)
+            }, version, collector)
         }
     }
 }

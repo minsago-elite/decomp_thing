@@ -144,6 +144,9 @@ val stageFrontend = tasks.register<Sync>("stageFrontend") {
 sourceSets.main { resources.srcDir(stageFrontend) }
 tasks.processResources {
     duplicatesStrategy = DuplicatesStrategy.FAIL
+    from(layout.projectDirectory.file("ghidra-bridge/src/main/java/ExportNativeCallsV1.java")) {
+        into("ghidra_scripts")
+    }
     // Copy does not provide Sync's deletion semantics. Remove only our generated
     // namespace so renamed chunks cannot survive in later JARs.
     doFirst {
@@ -647,6 +650,7 @@ val generateGccBundledGhidraReference = tasks.register("generateGccBundledGhidra
     dependsOn(":ghidra-bridge:stageBundle", tasks.named("jar"))
     inputs.dir(gccBundledGhidraDirectory)
     inputs.file(tasks.named<Jar>("jar").flatMap { it.archiveFile })
+    inputs.file(layout.projectDirectory.file("ghidra-bridge/src/main/java/ExportNativeCallsV1.java"))
     outputs.file(gccBundledGhidraReference)
 
     doLast {
@@ -748,6 +752,25 @@ val generateGccBundledGhidraReference = tasks.register("generateGccBundledGhidra
                 }
             }
         }
+        val nativeCollectorResourcePath = "ghidra_scripts/ExportNativeCallsV1.java"
+        val nativeCollectorClassPath = "scripts/ExportNativeCallsV1.class"
+        val nativeCollectorEntry = byPath[nativeCollectorClassPath]
+        require(nativeCollectorEntry != null && nativeCollectorEntry["kind"] == "file" &&
+            (nativeCollectorEntry["bytes"] as Long) > 0L
+        ) { "Bundled Ghidra reference omits the compiled native call collector" }
+        val nativeCollectorBytes = JarFile(applicationJar, false).use { jar ->
+            val resources = jar.entries().asSequence().filter { it.name == nativeCollectorResourcePath }.take(2).toList()
+            require(resources.size == 1 && !resources.single().isDirectory &&
+                resources.single().size in 1L..(4L * 1024 * 1024)
+            ) { "Application JAR has a missing, duplicate or excessive native call collector resource" }
+            jar.getInputStream(resources.single()).use { input ->
+                input.readNBytes(4 * 1024 * 1024 + 1).also { content ->
+                    require(content.size.toLong() == resources.single().size && content.size <= 4 * 1024 * 1024) {
+                        "Application JAR native call collector resource changed length"
+                    }
+                }
+            }
+        }
         fun digest(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes)
             .joinToString("") { byte -> "%02x".format(byte) }
         fun canonicalBytes(value: Map<String, Any>): ByteArray {
@@ -808,6 +831,12 @@ val generateGccBundledGhidraReference = tasks.register("generateGccBundledGhidra
             ),
             "ghidraRelease" to "PUBLIC",
             "ghidraVersion" to "12.1.3",
+            "nativeCallCollector" to mapOf(
+                "bytes" to nativeCollectorBytes.size.toLong(),
+                "classPath" to nativeCollectorClassPath,
+                "resourcePath" to "/$nativeCollectorResourcePath",
+                "sha256" to digest(nativeCollectorBytes),
+            ),
             "provider" to "gcc-bundled-ghidra-deployment-reference-v1",
             "rootMode" to 0x1ed,
             "schemaVersion" to 1,
@@ -1345,7 +1374,8 @@ private fun configureOracleTestRuntime(testTask: Test) {
     testTask.dependsOn(stageOracleNativeLibraries)
     testTask.dependsOn(":ghidra-bridge:stageBundle")
     val testInstalledGhidra = providers.environmentVariable("RUN_REAL_GHIDRA").orNull == "true" ||
-        providers.environmentVariable("RUN_REAL_GHIDRA_CALL_SITES").orNull == "true"
+        providers.environmentVariable("RUN_REAL_GHIDRA_CALL_SITES").orNull == "true" ||
+        providers.environmentVariable("RUN_REAL_GHIDRA_NATIVE_CALLS").orNull == "true"
     if (testInstalledGhidra) testTask.dependsOn("installDist")
     testTask.dependsOn(generateAcpGateHelperChecksum)
     testTask.dependsOn(generateLlvmBehaviorHelperChecksum)
