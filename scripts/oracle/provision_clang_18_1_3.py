@@ -139,8 +139,21 @@ def canonical_json(value: object) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
 
 
+def strict_json_loads(payload: str | bytes) -> object:
+    """Reject duplicate members, including nested and escaped-equivalent JSON keys."""
+    def unique_object(pairs: list[tuple[str, object]]) -> dict:
+        result = {}
+        for name, value in pairs:
+            if name in result:
+                raise ProvisionError(f"JSON evidence contains a duplicate object member: {name[:120]!r}")
+            result[name] = value
+        return result
+
+    return json.loads(payload, object_pairs_hook=unique_object)
+
+
 def read_contract(path: Path = CONTRACT_PATH) -> dict:
-    value = json.loads(path.read_text(encoding="utf-8"))
+    value = strict_json_loads(path.read_text(encoding="utf-8"))
     profile = value["profile"]
     if value.get("schemaVersion") != 1:
         raise ProvisionError("unsupported provisioning contract schema")
@@ -181,7 +194,7 @@ def read_contract(path: Path = CONTRACT_PATH) -> dict:
         "fixture": "oracle/clang/18.1.3/fixtures/libtooling-positive.cpp",
     }:
         raise ProvisionError("negative Clang 22.1.6 comparator contract drift")
-    lock = json.loads((ROOT / negative["artifactLock"]).read_text(encoding="utf-8"))
+    lock = strict_json_loads((ROOT / negative["artifactLock"]).read_text(encoding="utf-8"))
     artifact = lock.get("artifacts", {}).get(negative["artifactRole"], {})
     if lock.get("oracle", {}).get("id") != negative["oracleId"] or lock.get("oracle", {}).get("version") != negative["requiredVersion"]:
         raise ProvisionError("negative comparator does not reference the exact 22.1.6 oracle lock")
@@ -1989,8 +2002,8 @@ def command_audit_patches(args: argparse.Namespace) -> int:
 
 def command_probe_report(args: argparse.Namespace) -> int:
     contract = read_contract(args.contract)
-    report = json.loads(args.report.read_text(encoding="utf-8"))
-    inventory = json.loads(args.inventory.read_text(encoding="utf-8"))
+    report = strict_json_loads(args.report.read_text(encoding="utf-8"))
+    inventory = strict_json_loads(args.inventory.read_text(encoding="utf-8"))
     checked = validate_probe_report(report, inventory, contract)
     checked["sourceSha256"] = sha256(args.source.read_bytes())
     checked["binarySha256"] = sha256(args.binary.read_bytes())
@@ -2842,9 +2855,9 @@ def verify_oci_archive(path: Path, record: dict, max_bytes: int) -> None:
                     raise ProvisionError(f"OCI archive member size changed: {name}")
                 return data
 
-            if json.loads(read_small("oci-layout")) != {"imageLayoutVersion": "1.0.0"}:
+            if strict_json_loads(read_small("oci-layout")) != {"imageLayoutVersion": "1.0.0"}:
                 raise ProvisionError("OCI layout version is unsupported")
-            index = json.loads(read_small("index.json"))
+            index = strict_json_loads(read_small("index.json"))
             descriptors = index.get("manifests", [])
             if (index.get("schemaVersion") != 2 or index.get("mediaType") != OCI_INDEX_MEDIA_TYPE or
                     len(descriptors) != 1 or not isinstance(descriptors[0], dict) or
@@ -2858,7 +2871,7 @@ def verify_oci_archive(path: Path, record: dict, max_bytes: int) -> None:
             manifest_bytes = read_small(manifest_name)
             if sha256(manifest_bytes) != digest.removeprefix("sha256:") or len(manifest_bytes) != manifest_desc.get("size"):
                 raise ProvisionError("OCI manifest content does not match its index digest/size")
-            manifest = json.loads(manifest_bytes)
+            manifest = strict_json_loads(manifest_bytes)
             config_desc = manifest.get("config", {})
             layers = manifest.get("layers", [])
             if (len(layers) != 1 or manifest.get("schemaVersion") != 2 or
@@ -2873,7 +2886,7 @@ def verify_oci_archive(path: Path, record: dict, max_bytes: int) -> None:
                 raise ProvisionError("OCI image config descriptor size differs from the config blob length")
             if not config_digest.startswith("sha256:") or sha256(config_bytes) != config_digest.removeprefix("sha256:"):
                 raise ProvisionError("OCI image config content does not match its digest")
-            config = json.loads(config_bytes)
+            config = strict_json_loads(config_bytes)
             rootfs_identity = record["rootfs"]
             expected_diff_id = "sha256:" + rootfs_identity["sha256"]
             if config.get("rootfs", {}).get("diff_ids") != [expected_diff_id]:
@@ -3250,7 +3263,7 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     runtime_report = run_probe_sandboxed(
         profile_root, [probe_path, PROBE_FIXTURE_IN_ROOT], contract, timeout=120,
     )
-    runtime_json = json.loads(runtime_report)
+    runtime_json = strict_json_loads(runtime_report)
     inventory = audit_langoptions(
         rootfs_path(profile_root, "/usr/lib/llvm-18/include/clang/Basic/LangOptions.def"),
         rootfs_path(profile_root, "/usr/lib/llvm-18/include/clang/Basic/LangOptions.h"), contract,
@@ -3326,7 +3339,7 @@ def provision_rootfs(args: argparse.Namespace) -> int:
 def reject_build_record_schema_unknown_fields(record: object) -> None:
     """Enforce every additionalProperties:false object boundary in the pinned schema."""
     try:
-        schema = json.loads(RECIPE_FILES["schemaSha256"].read_text(encoding="utf-8"))
+        schema = strict_json_loads(RECIPE_FILES["schemaSha256"].read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ProvisionError(f"could not read checked-in build-record schema: {error}") from error
 
@@ -3555,8 +3568,22 @@ def validate_build_record(record: dict, contract: dict, contract_path: Path = CO
 
 def compare_build_runs(first_path: Path, second_path: Path, output_path: Path, contract: dict,
                        contract_path: Path = CONTRACT_PATH) -> dict:
-    first = json.loads(first_path.read_text(encoding="utf-8"))
-    second = json.loads(second_path.read_text(encoding="utf-8"))
+    try:
+        if first_path.resolve(strict=True) == second_path.resolve(strict=True):
+            raise ProvisionError("two clean runs require distinct record paths and files")
+        flags = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC
+        with os.fdopen(os.open(first_path, flags), "rb") as first_file, \
+                os.fdopen(os.open(second_path, flags), "rb") as second_file:
+            first_identity = os.fstat(first_file.fileno())
+            second_identity = os.fstat(second_file.fileno())
+            if (not stat.S_ISREG(first_identity.st_mode) or not stat.S_ISREG(second_identity.st_mode) or
+                    (first_identity.st_dev, first_identity.st_ino) ==
+                    (second_identity.st_dev, second_identity.st_ino)):
+                raise ProvisionError("two clean runs require distinct regular record files")
+            first = strict_json_loads(first_file.read().decode("utf-8"))
+            second = strict_json_loads(second_file.read().decode("utf-8"))
+    except OSError as error:
+        raise ProvisionError(f"could not inspect independent build records: {error}") from error
     validate_build_record(first, contract, contract_path)
     validate_build_record(second, contract, contract_path)
     if canonical_json(first) != canonical_json(second):
@@ -3580,7 +3607,7 @@ def command_compare_runs(args: argparse.Namespace) -> int:
 
 def command_verify_record(args: argparse.Namespace) -> int:
     contract = read_contract(args.contract)
-    record = json.loads(args.record.read_text(encoding="utf-8"))
+    record = strict_json_loads(args.record.read_text(encoding="utf-8"))
     validate_build_record(record, contract, args.contract)
     if record.get("reproducibility") != {
         "cleanBuilds": 2, "matchingRootfsSha256": True, "matchingImageDigest": True,
@@ -3597,7 +3624,7 @@ def command_verify_record(args: argparse.Namespace) -> int:
 
 def command_write_loader_input(args: argparse.Namespace) -> int:
     contract = read_contract(args.contract)
-    record = json.loads(args.record.read_text(encoding="utf-8"))
+    record = strict_json_loads(args.record.read_text(encoding="utf-8"))
     validate_build_record(record, contract, args.contract)
     if record.get("reproducibility") != {
         "cleanBuilds": 2, "matchingRootfsSha256": True, "matchingImageDigest": True,
@@ -3668,7 +3695,7 @@ def command_write_loader_input(args: argparse.Namespace) -> int:
 
 def command_verify_image(args: argparse.Namespace) -> int:
     contract = read_contract(args.contract)
-    record = json.loads(args.record.read_text(encoding="utf-8"))
+    record = strict_json_loads(args.record.read_text(encoding="utf-8"))
     validate_build_record(record, contract, args.contract)
     if record.get("reproducibility") != {
         "cleanBuilds": 2, "matchingRootfsSha256": True, "matchingImageDigest": True,
@@ -3683,7 +3710,7 @@ def read_provenance_report(path: Path, label: str) -> dict:
     if path.is_symlink() or not path.is_file():
         raise ProvisionError(f"{label} provenance report is not a regular file")
     try:
-        report = json.loads(path.read_text(encoding="utf-8"))
+        report = strict_json_loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ProvisionError(f"{label} provenance report is not valid UTF-8 JSON") from error
     if not isinstance(report, dict):
@@ -3742,7 +3769,7 @@ def validate_provenance_probe_report(
         rootfs, [PROBE_BINARY_IN_ROOT, PROBE_FIXTURE_IN_ROOT], contract, timeout=120,
     )
     try:
-        replay_report = json.loads(replay_output)
+        replay_report = strict_json_loads(replay_output)
     except (TypeError, json.JSONDecodeError) as error:
         raise ProvisionError("retained probe replay did not emit valid JSON") from error
     if not isinstance(replay_report, dict):
@@ -3905,7 +3932,7 @@ def validate_locked_comparator_manifest(lock_path: Path, negative: dict) -> tupl
     if lock_path.is_symlink() or not lock_path.is_file():
         raise ProvisionError("locked Clang 22.1.6 comparator release lock is not a regular file")
     try:
-        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        lock = strict_json_loads(lock_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ProvisionError(f"locked comparator release metadata is invalid: {error}") from error
     if not isinstance(lock, dict):
@@ -3931,7 +3958,7 @@ def validate_locked_comparator_manifest(lock_path: Path, negative: dict) -> tupl
     if sha256(manifest_bytes) != expected_manifest_sha:
         raise ProvisionError("comparator artifact manifest digest differs from the release-artifacts lock")
     try:
-        manifest_data = json.loads(manifest_bytes)
+        manifest_data = strict_json_loads(manifest_bytes)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ProvisionError(f"locked comparator artifact manifest is invalid: {error}") from error
     if not isinstance(manifest_data, dict):
@@ -3978,7 +4005,7 @@ def validate_provenance_negative_report(report: dict, record: dict, contract: di
 
 def command_package_provenance(args: argparse.Namespace) -> int:
     contract = read_contract(args.contract)
-    record = json.loads(args.record.read_text(encoding="utf-8"))
+    record = strict_json_loads(args.record.read_text(encoding="utf-8"))
     validate_build_record(record, contract, args.contract)
     if record.get("reproducibility") != {
         "cleanBuilds": 2, "matchingRootfsSha256": True, "matchingImageDigest": True,
@@ -4156,7 +4183,7 @@ def command_package_provenance(args: argparse.Namespace) -> int:
 def command_negative_version_smoke(args: argparse.Namespace) -> int:
     contract = read_contract(args.contract)
     negative = contract["negativeControl"]
-    lock = json.loads(args.artifact_lock.read_text(encoding="utf-8"))
+    lock = strict_json_loads(args.artifact_lock.read_text(encoding="utf-8"))
     expected = lock["artifacts"][negative["artifactRole"]]
     if lock.get("oracle", {}).get("id") != negative["oracleId"] or lock.get("oracle", {}).get("version") != negative["requiredVersion"]:
         raise ProvisionError("22.1.6 negative compiler lock does not match the frozen comparator")

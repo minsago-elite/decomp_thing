@@ -299,6 +299,160 @@ class ProvisioningNegativeTests(unittest.TestCase):
             self.assertEqual(record["resources"],
                              provision.resource_manifest(rootfs, record["resourceDirectory"]))
 
+    def test_compare_runs_rejects_canonical_and_physical_aliases_before_validation(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            first = base / "first.json"
+            payload = provision.canonical_json(self.valid_build_record())
+            first.write_bytes(payload)
+            link = base / "symlink.json"
+            link.symlink_to(first)
+            hardlink = base / "hardlink.json"
+            os.link(first, hardlink)
+            intermediate = base / "intermediate"
+            intermediate.mkdir()
+            aliases = (first, link, hardlink, intermediate / "../first.json",
+                       Path(os.path.relpath(first, Path.cwd())))
+            for index, second in enumerate(aliases):
+                output = base / ("result-" + str(index) + ".json")
+                with self.subTest(second=second), mock.patch.object(provision, "validate_build_record",
+                        side_effect=provision.ProvisionError("fixture reached validation")) as validate:
+                    with self.assertRaisesRegex(provision.ProvisionError, "distinct.*record"):
+                        provision.compare_build_runs(first, second, output, self.contract)
+                    validate.assert_not_called()
+                self.assertFalse(output.exists())
+                self.assertEqual(first.read_bytes(), payload)
+
+    def test_compare_runs_accepts_distinct_regular_files_with_equal_fixture_records(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            first, second, output = base / "first.json", base / "second.json", base / "result.json"
+            payload = provision.canonical_json(self.valid_build_record())
+            first.write_bytes(payload)
+            second.write_bytes(payload)
+            self.assertFalse(first.samefile(second))
+            record = provision.compare_build_runs(first, second, output, self.contract)
+            self.assertEqual(record["reproducibility"], {
+                "cleanBuilds": 2, "matchingRootfsSha256": True, "matchingImageDigest": True,
+            })
+            self.assertEqual(output.read_bytes(), provision.canonical_json(record))
+
+    def test_compare_runs_checks_opened_file_identity_after_path_replacement(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            first, second, output = base / "first.json", base / "second.json", base / "result.json"
+            payload = provision.canonical_json(self.valid_build_record())
+            first.write_bytes(payload)
+            second.write_bytes(payload)
+            original_open = os.open
+
+            def replace_second(path, flags, *args, **kwargs):
+                if Path(path) == second:
+                    second.unlink()
+                    os.link(first, second)
+                return original_open(path, flags, *args, **kwargs)
+
+            with mock.patch.object(provision.os, "open", side_effect=replace_second), \
+                    mock.patch.object(provision, "validate_build_record") as validate:
+                with self.assertRaisesRegex(provision.ProvisionError, "distinct regular record files"):
+                    provision.compare_build_runs(first, second, output, self.contract)
+                validate.assert_not_called()
+            self.assertTrue(first.samefile(second))
+            self.assertFalse(output.exists())
+
+    def test_json_parser_rejects_nested_equal_and_escaped_duplicate_members(self):
+        valid = {"left": {"digest": "a"}, "right": {"digest": "b"}, "array": [{"n": 1}, {"n": 2}]}
+        self.assertEqual(provision.strict_json_loads(provision.canonical_json(valid)), valid)
+        payloads = (
+            '{"image":{},"image":{}}',
+            '{"array":[{"digest":"a","digest":"b"}]}',
+            r'{"image":{},"im\u0061ge":{}}',
+            r'{"nested":{"é":1,"\u00e9":2}}',
+        )
+        for payload in payloads:
+            for data in (payload, payload.encode("utf-8")):
+                with self.subTest(payload=payload, binary=isinstance(data, bytes)), \
+                        self.assertRaisesRegex(provision.ProvisionError, "duplicate object member"):
+                    provision.strict_json_loads(data)
+
+    def test_record_commands_reject_duplicate_members_before_validation_or_output(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            record = self.valid_build_record()
+            canonical = provision.canonical_json(record)
+            variants = (b'{"image":{},' + canonical[1:],
+                        canonical.replace(b'"recipe":{', b'"recipe":{"contractSha256":"untrusted",', 1))
+            path, output = base / "record.json", base / "output.json"
+            args = provision.argparse.Namespace(contract=provision.CONTRACT_PATH, record=path,
+                                               output=output, rootfs_tar=None)
+            for payload in variants:
+                self.assertEqual(json.loads(payload), record)  # legacy last-wins interpretation remains valid
+                path.write_bytes(payload)
+                for command in (provision.command_verify_record, provision.command_write_loader_input,
+                                provision.command_verify_image, provision.command_package_provenance):
+                    with self.subTest(command=command.__name__, payload=payload[:80]), \
+                            mock.patch.object(provision, "validate_build_record",
+                                side_effect=provision.ProvisionError("fixture reached validation")) as validate:
+                        with self.assertRaisesRegex(provision.ProvisionError, "duplicate object member"):
+                            command(args)
+                        validate.assert_not_called()
+                    self.assertFalse(output.exists())
+
+    def test_provenance_report_rejects_top_level_and_nested_duplicate_members(self):
+        with self.temporary_directory() as temp:
+            path = Path(temp) / "report.json"
+            for payload in (b'{"scope":"first","scope":"last"}',
+                            b'{"scope":"fixture","payload":[{"sha256":"a","sha256":"a"}]}'):
+                path.write_bytes(payload)
+                with self.subTest(payload=payload), self.assertRaisesRegex(
+                        provision.ProvisionError, "duplicate object member"):
+                    provision.read_provenance_report(path, "fixture")
+            path.write_bytes(b'{"scope":"fixture","payload":[{"sha256":"a"}]}')
+            self.assertEqual(provision.read_provenance_report(path, "fixture"),
+                             {"scope": "fixture", "payload": [{"sha256": "a"}]})
+
+    def test_compare_runs_rejects_duplicate_members_in_either_distinct_input(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            first, second, output = base / "first.json", base / "second.json", base / "result.json"
+            canonical = provision.canonical_json(self.valid_build_record())
+            duplicated = b'{"image":{},' + canonical[1:]
+            for selected in (first, second):
+                first.write_bytes(duplicated if selected == first else canonical)
+                second.write_bytes(duplicated if selected == second else canonical)
+                with self.subTest(input=selected), mock.patch.object(provision, "validate_build_record",
+                        side_effect=provision.ProvisionError("fixture reached validation")) as validate:
+                    with self.assertRaisesRegex(provision.ProvisionError, "duplicate object member"):
+                        provision.compare_build_runs(first, second, output, self.contract)
+                    validate.assert_not_called()
+                self.assertFalse(output.exists())
+
+    def test_retained_probe_rejects_duplicate_output_before_inventory_validation(self):
+        with self.temporary_directory() as temp:
+            record = self.valid_build_record()
+            rootfs = Path(temp) / "rootfs"
+            self.prepare_probe_rootfs(record, rootfs)
+            replay = {key: value for key, value in record["probe"].items()
+                      if key not in ("sourceSha256", "binarySha256", "fixtureSha256")}
+            output = b'{"compilerVersion":"22.1.6",' + provision.canonical_json(replay)[1:]
+            self.assertEqual(json.loads(output), replay)
+            with mock.patch.object(provision, "run_probe_sandboxed", return_value=output.decode("utf-8")), \
+                    mock.patch.object(provision, "audit_langoptions",
+                        side_effect=provision.ProvisionError("fixture reached inventory")) as audit:
+                with self.assertRaisesRegex(provision.ProvisionError, "duplicate object member"):
+                    provision.validate_provenance_probe_report(dict(record["probe"]), record, rootfs, self.contract)
+                audit.assert_not_called()
+
+    def test_selected_contract_rejects_duplicate_profile_before_using_pins(self):
+        with self.temporary_directory() as temp:
+            path = Path(temp) / "contract.json"
+            canonical = provision.canonical_json(self.contract)
+            payload = b'{"profile":{},' + canonical[1:]
+            self.assertEqual(json.loads(payload), self.contract)
+            path.write_bytes(payload)
+            with self.assertRaisesRegex(provision.ProvisionError, "duplicate object member"):
+                provision.read_contract(path)
+
     def test_workflow_actions_are_pinned_to_immutable_commit_shas(self):
         workflow = (ROOT / ".github/workflows/generic-template-toolchain.yml").read_text(encoding="utf-8")
         actions = re.findall(r"^\s*uses:\s*([^\s#]+)", workflow, flags=re.MULTILINE)
@@ -2432,6 +2586,73 @@ public:
                         with self.assertRaisesRegex(provision.ProvisionError, "config semantics"):
                             provision.verify_oci_archive(archive_path, record, 1024 * 1024)
                     else:
+                        provision.verify_oci_archive(archive_path, record, 1024 * 1024)
+
+    def test_oci_image_verifier_rejects_rehashed_duplicate_json_members(self):
+        def duplicate(payload, name, marker=b"{"):
+            injected = marker + json.dumps(name).encode("utf-8") + b":null,"
+            self.assertIn(marker, payload)
+            changed = payload.replace(marker, injected, 1)
+            self.assertEqual(json.loads(changed), json.loads(payload))
+            self.assertNotEqual(changed, payload)
+            return changed
+
+        cases = ("layout", "index", "index-descriptor", "manifest", "manifest-config", "config", "config-env")
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            payload = b"synthetic rootfs layer; not a qualified image"
+            rootfs_tar = base / "rootfs.tar"
+            rootfs_tar.write_bytes(payload)
+            for case in cases:
+                with self.subTest(case=case):
+                    layout = base / case
+                    image = provision.create_oci_layout(rootfs_tar, layout, "fixture", self.contract["environment"])
+                    manifest_path = layout / "blobs/sha256" / image["manifestSha256"]
+                    manifest = json.loads(manifest_path.read_bytes())
+                    config_path = layout / "blobs/sha256" / manifest["config"]["digest"].removeprefix("sha256:")
+                    if case in ("config", "config-env"):
+                        config_bytes = config_path.read_bytes()
+                        config_bytes = (duplicate(config_bytes, "architecture") if case == "config"
+                                        else duplicate(config_bytes, "Env", b'"config":{'))
+                        config_digest = provision.sha256(config_bytes)
+                        config_path.unlink()
+                        (config_path.parent / config_digest).write_bytes(config_bytes)
+                        manifest["config"].update(digest="sha256:" + config_digest, size=len(config_bytes))
+                    manifest_bytes = provision.canonical_json(manifest)
+                    if case == "manifest":
+                        manifest_bytes = duplicate(manifest_bytes, "schemaVersion")
+                    elif case == "manifest-config":
+                        manifest_bytes = duplicate(manifest_bytes, "digest", b'"config":{')
+                    manifest_digest = provision.sha256(manifest_bytes)
+                    if manifest_digest != image["manifestSha256"]:
+                        manifest_path.unlink()
+                    (manifest_path.parent / manifest_digest).write_bytes(manifest_bytes)
+                    index_path = layout / "index.json"
+                    index = json.loads(index_path.read_bytes())
+                    index["manifests"][0].update(digest="sha256:" + manifest_digest, size=len(manifest_bytes))
+                    index_bytes = provision.canonical_json(index)
+                    if case == "index":
+                        index_bytes = duplicate(index_bytes, "schemaVersion")
+                    elif case == "index-descriptor":
+                        index_bytes = duplicate(index_bytes, "mediaType", b'"manifests":[{')
+                    index_path.write_bytes(index_bytes)
+                    image.update(manifestSha256=manifest_digest, imageDigest="sha256:" + manifest_digest)
+                    if case == "layout":
+                        layout_path = layout / "oci-layout"
+                        layout_path.write_bytes(duplicate(layout_path.read_bytes(), "imageLayoutVersion"))
+                    archive_path = base / (case + ".tar")
+                    with tarfile.open(archive_path, "w") as archive:
+                        for path in sorted(layout.rglob("*")):
+                            if path.is_file():
+                                archive.add(path, arcname=path.relative_to(layout).as_posix())
+                    record = {
+                        "profile": {"id": "fixture"}, "environment": self.contract["environment"],
+                        "rootfs": {"bytes": len(payload), "sha256": provision.sha256(payload)},
+                        "image": image,
+                        "imageArtifact": {"bytes": archive_path.stat().st_size,
+                                          "sha256": provision.sha256_file(archive_path)},
+                    }
+                    with self.assertRaisesRegex(provision.ProvisionError, "duplicate object member"):
                         provision.verify_oci_archive(archive_path, record, 1024 * 1024)
 
     def test_oci_image_verifier_rejects_unrecorded_blob(self):
