@@ -1023,6 +1023,8 @@ class FullTreeFunctionTruthSqliteV3Test {
             assertEquals(first.indexArtifactSha256, validated.indexArtifactSha256)
             assertEquals(first.outputBytes, validated.outputBytes)
 
+            assertPublicInlineSiteConflationRejected(first, fixture, root, limits)
+
             val forged = copyTree(first.root, root.resolve("truth-v3-forged"))
             mutateAndRehashSourceIdentity(forged)
             val forgedBytes = v3TreeBytes(forged)
@@ -1348,6 +1350,94 @@ class FullTreeFunctionTruthSqliteV3Test {
                 )
             }
         }
+    }
+
+    private fun assertPublicInlineSiteConflationRejected(
+        baseline: FullTreeFunctionTruthV3Generation,
+        fixture: V3Fixture,
+        root: Path,
+        limits: FullTreeFunctionTruthV3Limits,
+    ) {
+        // The caller has already accepted this exact compiler-derived tree through public
+        // loadAndValidate. Select two genuine sites, not fabricated rows or a generic pattern.
+        val sites = allSourceRows(baseline.root).map { FullTreeSourceEntityFact.fromCanonicalJson(it) }.filter {
+            it.kind == FullTreeSourceEntityKind.INLINE_INSTANCE &&
+                it.semanticAnchorFields?.isComplete(FullTreeSourceAnchorKind.INLINE_INSTANCE) == true
+        }
+        val (first, second) = sites.asSequence().flatMap { a -> sites.asSequence().map { a to it } }
+            .firstOrNull { (a, b) ->
+                val left = requireNotNull(a.semanticAnchorFields)
+                val right = requireNotNull(b.semanticAnchorFields)
+                a.sourceEntityId != b.sourceEntityId && left.inlineCallColumn != right.inlineCallColumn &&
+                    left.inlineCallColumn.toString().length == right.inlineCallColumn.toString().length &&
+                    left.canonicalJson().filterKeys { it != "inlineCallColumn" } ==
+                    right.canonicalJson().filterKeys { it != "inlineCallColumn" }
+            } ?: error("compiler fixture must contain same-owner/callee inline sites differing only in same-width call columns")
+        val firstFields = requireNotNull(first.semanticAnchorFields)
+        val secondFields = requireNotNull(second.semanticAnchorFields)
+        assertNotNull(firstFields.inlineCallColumn)
+        assertNotNull(secondFields.inlineCallColumn)
+        assertTrue(first.semanticAnchorCandidateId != second.semanticAnchorCandidateId)
+        assertEquals(firstFields.inlineOwnerAnchorCandidateId, secondFields.inlineOwnerAnchorCandidateId)
+        assertEquals(firstFields.inlineCalleeAnchorCandidateId, secondFields.inlineCalleeAnchorCandidateId)
+        val conflated = second.copy(
+            semanticAnchorFields = firstFields,
+            semanticAnchorCandidateId = firstFields.candidateId(FullTreeSourceAnchorKind.INLINE_INSTANCE),
+        )
+        assertEquals(first.semanticAnchorCandidateId, conflated.semanticAnchorCandidateId)
+        assertEquals(second.sourceEntityId, conflated.sourceEntityId)
+        assertEquals(second.edges, conflated.edges)
+        assertEquals(conflated.canonicalJson(), FullTreeSourceEntityFact.fromCanonicalJson(conflated.canonicalJson()).canonicalJson())
+        assertEquals(setOf("semanticAnchorFields", "semanticAnchorCandidateId"),
+            second.canonicalJson().keys.filter { second.canonicalJson()[it] != conflated.canonicalJson()[it] }.toSet())
+
+        val inputHashes = listOf(fixture.rich, fixture.stripped, fixture.inventoryPath, fixture.elfIndex).associateWith(::fixtureSha256)
+        val observationBytes = v3TreeBytes(fixture.observationV2Root)
+        val baselineBytes = v3TreeBytes(baseline.root)
+        val candidate = copyTree(baseline.root, root.resolve("truth-v3-conflated-inline-sites"))
+        mutateAndRehashSourceRow(candidate, second.sourceEntityId) { conflated.canonicalJson() }
+        val candidateBytes = v3TreeBytes(candidate)
+        assertEquals(baselineBytes.mapValues { it.value.size }, candidateBytes.mapValues { it.value.size },
+            "fixed-width tuple/hash changes must not reach the candidate byte-bound rejection")
+        assertEquals(baseline.outputBytes, candidateBytes.values.sumOf { it.size.toLong() })
+        val changedIndex = parseControlObject(candidate.resolve("index.json"))
+        assertEquals(baseline.index.controlObject("counts"), changedIndex.controlObject("counts"))
+        assertEquals(changedIndex.controlString("indexSha256"), OracleArtifacts.sha256(
+            OracleJson.canonicalBytes(JsonObject(changedIndex.filterKeys { it != "indexSha256" })),
+        ))
+        changedIndex.controlArray("shards").controlObjects("shards").forEach { record ->
+            val path = candidate.resolve(record.controlString("path"))
+            assertEquals(record.controlLong("bytes"), Files.size(path))
+            assertEquals(record.controlString("sha256"), fixtureSha256(path))
+        }
+        assertTrue(baseline.indexArtifactSha256 != fixtureSha256(candidate.resolve("index.json")))
+        assertEquals(allSourceRows(baseline.root).size, allSourceRows(candidate).size)
+        assertEquals(2, allSourceRows(candidate).count { row ->
+            row.controlString("sourceEntityId") in setOf(first.sourceEntityId, second.sourceEntityId) &&
+                row["semanticAnchorCandidateId"] == JsonPrimitive(first.semanticAnchorCandidateId)
+        }, "both physical sites remain, now falsely claiming the same candidate")
+
+        // The candidate is schema/row/hash-consistent; its claims still disagree with raw DWARF.
+        val rejection = assertFailsWith<FullTreeFunctionTruthV3Exception> {
+            FullTreeFunctionTruthSqliteV3.loadAndValidate(
+                candidateRoot = candidate,
+                richArtifact = fixture.rich,
+                strippedArtifact = fixture.stripped,
+                inventoryPath = fixture.inventoryPath,
+                elfFunctionIndex = fixture.elfIndex,
+                observationV2Root = fixture.observationV2Root,
+                expectedObservationV2IndexArtifactSha256 = fixture.observationV2IndexSha256,
+                scope = fixture.scope,
+                scratchParent = fixture.scratch,
+                limits = limits,
+            )
+        }
+        assertEquals("truth-v3 candidate bytes differ from raw rederivation at index.json", rejection.message)
+        assertEquals(candidateBytes, v3TreeBytes(candidate), "public refusal preserves the candidate")
+        assertEquals(baselineBytes, v3TreeBytes(baseline.root))
+        assertEquals(inputHashes, inputHashes.keys.associateWith(::fixtureSha256))
+        assertEquals(observationBytes, v3TreeBytes(fixture.observationV2Root))
+        assertDirectoryEmpty(fixture.scratch)
     }
 
     private fun assertPublicEntityBoundEnforcement(
