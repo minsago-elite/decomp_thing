@@ -79,7 +79,7 @@ cross the observed metadata/entry-set checkpoints; they do not replace that cont
 
 ## Build and installation integrity
 
-`buildLlvmBehaviorHelper` compiles the C source as a bounded static Linux ELF for x86-64 or aarch64.
+`buildLlvmBehaviorHelper` compiles the C source as a bounded static Linux ELF on the pinned Linux x86-64 oracle native profile; the Kotlin producer and installed provenance opener refuse other hosts before native loading, while the ELF artifact verifier retains its x86-64 and aarch64 inspection support.
 `verifyLlvmBehaviorHelper` rejects an interpreter, `DT_NEEDED`, writable-executable loads, an
 executable stack, a wrong architecture, a missing v2 marker, or a non-fail-closed direct invocation.
 `generateLlvmBehaviorHelperChecksum` publishes the exact SHA-256 line used by the raw-path Kotlin
