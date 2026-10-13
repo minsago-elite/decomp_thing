@@ -330,6 +330,91 @@ class LinuxBubblewrapBoundaryTest {
                     assertTrue(process.waitFor(5, TimeUnit.SECONDS))
                 }
             }
+            val policy = ProcessBuilder(
+                java.toString(), "-XX:-UsePerfData", "-Djava.io.tmpdir=$temporary", "-Djna.tmpdir=$temporary",
+                "-cp", System.getProperty("java.class.path"),
+                LinuxBubblewrapBoundaryTest::class.java.name, "statx-policy-probe", base.toString(),
+            ).redirectErrorStream(true).redirectOutput(base.resolve("statx-policy-probe.log").toFile()).start()
+            try {
+                assertTrue(policy.waitFor(15, TimeUnit.SECONDS), "statx policy probe timed out")
+                val output = Files.readString(base.resolve("statx-policy-probe.log"))
+                assertEquals(0, policy.exitValue(), output)
+                assertTrue(output.contains("statx-policy-probe: nativeEperm=1 fallbackIdentityCases=4 invalidFdRefused=true"), output)
+                output.lineSequence().filter { it.startsWith("statx-policy-probe:") }.forEach(::println)
+            } finally {
+                if (policy.isAlive) {
+                    policy.destroyForcibly()
+                    assertTrue(policy.waitFor(5, TimeUnit.SECONDS))
+                }
+            }
+        }
+    }
+
+    private fun runStatxPolicyProbe(base: Path) {
+        val (auditArchitecture, statxNumber) = when (System.getProperty("os.arch")) {
+            "amd64", "x86_64" -> 0xc000003e.toInt() to 332
+            "aarch64" -> 0xc00000b7.toInt() to 291
+            else -> error("statx seccomp probe requires a supported 64-bit Linux architecture")
+        }
+        val directory = Files.createDirectory(base.resolve("statx-policy"))
+        val file = Files.writeString(directory.resolve("regular"), "descriptor-policy-canary")
+        val unlinked = Files.writeString(directory.resolve("unlinked"), "unlinked-policy-canary")
+        val link = Files.createSymbolicLink(directory.resolve("link"), file.fileName)
+        val descriptors = listOf(directory, file, unlinked, link).map {
+            requireNotNull(LinuxFilesystemSyscalls.openAbsolutePathOrNull(it))
+        }
+        try {
+            Files.delete(unlinked)
+            val legacyMethod = LinuxFilesystemSyscalls::class.java.getDeclaredMethod(
+                "descriptorProcIdentity", Int::class.javaPrimitiveType,
+            )
+            val before = descriptors.map { invokePrivate(LinuxFilesystemSyscalls, legacyMethod, it.fd) }
+            val libc = com.sun.jna.NativeLibrary.getInstance(com.sun.jna.Platform.C_LIBRARY_NAME)
+            // An irreversible filter belongs only to this separate JVM's current thread. Authenticate
+            // the architecture, return EPERM only for statx, and allow every other syscall.
+            com.sun.jna.Memory(7 * 8L).use { filters ->
+                fun instruction(index: Int, code: Int, yes: Int = 0, no: Int = 0, value: Int) {
+                    val offset = index * 8L
+                    filters.setShort(offset, code.toShort())
+                    filters.setByte(offset + 2, yes.toByte())
+                    filters.setByte(offset + 3, no.toByte())
+                    filters.setInt(offset + 4, value)
+                }
+                instruction(0, 0x20, value = 4) // LD seccomp_data.arch
+                instruction(1, 0x15, yes = 1, value = auditArchitecture)
+                instruction(2, 0x06, value = 0x80000000.toInt()) // KILL_PROCESS on a foreign ABI
+                instruction(3, 0x20, value = 0) // LD seccomp_data.nr
+                instruction(4, 0x15, no = 1, value = statxNumber)
+                instruction(5, 0x06, value = 0x00050001) // ERRNO | EPERM
+                instruction(6, 0x06, value = 0x7fff0000) // ALLOW
+                com.sun.jna.Memory(16).use { program ->
+                    program.clear()
+                    program.setShort(0, 7)
+                    program.setPointer(8, filters)
+                    val prctl = libc.getFunction("prctl")
+                    assertEquals(0, prctl.invokeInt(arrayOf(38, com.sun.jna.NativeLong(1),
+                        com.sun.jna.NativeLong(0), com.sun.jna.NativeLong(0), com.sun.jna.NativeLong(0))),
+                        "PR_SET_NO_NEW_PRIVS failed: errno=${com.sun.jna.Native.getLastError()}")
+                    assertEquals(0, prctl.invokeInt(arrayOf(22, com.sun.jna.NativeLong(2), program,
+                        com.sun.jna.NativeLong(0), com.sun.jna.NativeLong(0))),
+                        "PR_SET_SECCOMP failed: errno=${com.sun.jna.Native.getLastError()}")
+                }
+            }
+            com.sun.jna.Memory(256).use { statistics ->
+                val result = libc.getFunction("statx").invokeInt(arrayOf(descriptors[0].fd, "", 0x1100, 0x17ff, statistics))
+                val errno = com.sun.jna.Native.getLastError()
+                assertEquals(-1, result, "the real seccomp policy must deny statx")
+                assertEquals(1, errno)
+            }
+            descriptors.forEachIndexed { index, descriptor ->
+                assertEquals(before[index], invokePrivate(LinuxFilesystemSyscalls, legacyMethod, descriptor.fd))
+                assertEquals(before[index], LinuxFilesystemSyscalls.identity(descriptor.fd))
+            }
+            assertFailsWith<IOException> { LinuxFilesystemSyscalls.identity(-1) }
+            assertEquals("descriptor-policy-canary", Files.readString(file))
+            println("statx-policy-probe: nativeEperm=1 fallbackIdentityCases=4 invalidFdRefused=true")
+        } finally {
+            descriptors.asReversed().forEach { it.close() }
         }
     }
 
@@ -342,6 +427,7 @@ class LinuxBubblewrapBoundaryTest {
         command("mount", "--make-rprivate", "/")
         val parent = Files.createDirectory(base.resolve("controls"))
         val workspace = Files.createDirectory(base.resolve("workspace"))
+        fun openDescriptorCount() = Files.list(Path.of("/proc/self/fd")).use { it.count() }
         val identityType = LinuxFilesystemSyscalls::class.java
         val legacyIdentity = identityType.getDeclaredMethod("descriptorProcIdentity", Int::class.javaPrimitiveType)
         val statxIdentity = identityType.getDeclaredMethod("descriptorStatxIdentity", Int::class.javaPrimitiveType)
@@ -408,13 +494,13 @@ class LinuxBubblewrapBoundaryTest {
                 -1L
             })
         })
-        for (errno in listOf(38, 95)) assertEquals(null, failedStatxQuery(errno))
+        for (errno in listOf(1, 38, 95)) assertEquals(null, failedStatxQuery(errno))
         for (errno in listOf(5, 9, 13)) {
             val genuine = assertFailsWith<LinuxSyscallException> { failedStatxQuery(errno) }
             assertEquals(errno, genuine.errno)
         }
         println("private-control-bind-probe: identityParityCases=$identityParityCases nativeStatxCases=$nativeStatxCases missingMaskFallback=true invalidFdRefused=true")
-        println("private-control-bind-probe: syntheticErrnoFallbackCases=2 syntheticRealErrorsPropagated=3 actualRetryHelperExercised=true")
+        println("private-control-bind-probe: syntheticErrnoFallbackCases=3 syntheticRealErrorsPropagated=3 actualRetryHelperExercised=true")
         val type = Class.forName("decompengine.acp.PinnedControlDirectory")
         val parentType = Class.forName("decompengine.acp.PinnedSandboxControlTemporaryParent")
         val companion = type.getDeclaredField("Companion").apply { isAccessible = true }.get(null)
@@ -462,6 +548,70 @@ class LinuxBubblewrapBoundaryTest {
             val ancestorAlias = alias(parent, "alias-ancestor")
             val childAlias = alias(privateChild, "alias-child")
             val fileAlias = alias(canary, "alias-file")
+            val beforeNestedAdmission = openDescriptorCount()
+            for (temporaryParent in listOf(firstPath, privateChild, rootAlias, childAlias)) {
+                val beforeEntries = Files.list(firstPath).use { it.map { entry -> entry.fileName.toString() }.toList().toSet() }
+                withTemporaryParent(temporaryParent.toString()) {
+                    val pinned = requireNotNull(invokeBoundaryPrivate("sandboxControlTemporaryParent", emptyArray()))
+                    try {
+                        val rejected = assertFailsWith<IOException> {
+                            invokePrivate(companion, create, AcpRuntimeClosureLimits(64, 4096, 8), pinned)
+                        }
+                        assertTrue(rejected.message.orEmpty().contains("private control directory"), rejected.toString())
+                    } finally { invokePrivate(pinned, AutoCloseable::class.java.getMethod("close")) }
+                }
+                assertEquals(beforeEntries, Files.list(firstPath).use { it.map { entry -> entry.fileName.toString() }.toList().toSet() })
+                assertEquals("controller-secret-canary", Files.readString(canary))
+            }
+            val mountedPrivateParent = Files.createDirectory(firstPath.resolve("mounted-control-parent"))
+            command("mount", "-t", "tmpfs", "-o", "size=1048576,nr_inodes=32", "tmpfs", mountedPrivateParent.toString())
+            try {
+                withTemporaryParent(mountedPrivateParent.toString()) {
+                    val pinned = requireNotNull(invokeBoundaryPrivate("sandboxControlTemporaryParent", emptyArray()))
+                    try {
+                        val rejected = assertFailsWith<IOException> {
+                            invokePrivate(companion, create, AcpRuntimeClosureLimits(64, 4096, 8), pinned)
+                        }
+                        assertTrue(rejected.message.orEmpty().contains("private control directory"), rejected.toString())
+                    } finally { invokePrivate(pinned, AutoCloseable::class.java.getMethod("close")) }
+                }
+                assertTrue(Files.list(mountedPrivateParent).use { it.findAny().isEmpty })
+            } finally {
+                command("umount", mountedPrivateParent.toString())
+                Files.delete(mountedPrivateParent)
+            }
+            assertEquals(beforeNestedAdmission, openDescriptorCount(), "rejected nested controls must release parent descriptors")
+            val cleanupOuter = newControl()
+            val cleanupInner = newControl()
+            val cleanupOuterPath = controlPath(cleanupOuter)
+            val cleanupInnerPath = controlPath(cleanupInner)
+            val movedInner = cleanupOuterPath.resolve("relocated-active-control")
+            Files.writeString(cleanupInnerPath.resolve("canary.txt"), "still-active-inner-control")
+            Files.move(cleanupInnerPath, movedInner)
+            try {
+                // Exercise the bounded walker directly as well as outer admission: it must refuse an
+                // actual selected active-control inode before quarantine, chmod or destructive descent.
+                LinuxFilesystemSyscalls.openRoot(cleanupOuterPath).use { outer ->
+                    val selectedFailure = assertFailsWith<IOException> {
+                        deletePrivateTreeContents(outer, AcpRuntimeClosureLimits(64, 4096, 8))
+                    }
+                    assertTrue(selectedFailure.message.orEmpty().contains("another active private control"), selectedFailure.toString())
+                }
+                assertFailsWith<AcpCleanupProofFailure> { invokePrivate(cleanupOuter, type.getDeclaredMethod("deleteAndProve")) }
+                assertEquals("still-active-inner-control", Files.readString(movedInner.resolve("canary.txt")))
+                assertEquals(setOf("relocated-active-control"), Files.list(cleanupOuterPath).use {
+                    it.map { entry -> entry.fileName.toString() }.toList().toSet()
+                })
+            } finally { Files.move(movedInner, cleanupInnerPath) }
+            // A proved remediation does not erase the earlier unverified cleanup disposition.
+            assertFailsWith<AcpCleanupProofFailure> { invokePrivate(cleanupOuter, type.getDeclaredMethod("deleteAndProve")) }
+            assertFalse(Files.exists(cleanupOuterPath))
+            controls.remove(cleanupOuter)
+            invokePrivate(cleanupInner, type.getDeclaredMethod("deleteAndProve"))
+            controls.remove(cleanupInner)
+            assertFalse(Files.exists(cleanupInnerPath))
+            assertEquals(beforeNestedAdmission, openDescriptorCount())
+            println("private-control-bind-probe: nestedControlParentsRefused=5 relocatedLiveInnerPreserved=true exactRemediationProved=true")
             for (source in listOf(rootAlias, ancestorAlias, childAlias, fileAlias)) {
                 denied { invokePrivate(first, guard, source, {}) }
                 denied { calculateAcpRuntimeManifestSha256(source, AcpRuntimeClosureLimits(64, 4096, 8)) }
@@ -478,6 +628,31 @@ class LinuxBubblewrapBoundaryTest {
                 runBlocking { broker.writeTextFile("disjoint", ancestorAlias.resolve("ordinary.txt").toString(), "ordinary-updated") }
             }
             assertEquals("ordinary-updated", Files.readString(ordinary))
+            val beforeAuthorityCancellation = openDescriptorCount()
+            for (rootCheckpoint in listOf(true, false)) {
+                var observed = false
+                val cancelled = request(ancestorAlias, "ordinary.txt").let { original -> AgentExecutionRequest(
+                    objective = original.objective,
+                    workspaceRoots = original.workspaceRoots,
+                    accessPolicy = original.accessPolicy,
+                    cancellation = AgentCancellation {
+                        val frames = Thread.currentThread().stackTrace.filter {
+                            it.className == "decompengine.acp.AcpFilesystemBroker\$Companion"
+                        }
+                        val atRoot = frames.any { it.methodName.startsWith("openRoot") }
+                        val selected = if (rootCheckpoint) atRoot else !atRoot && frames.any { it.methodName.startsWith("open") }
+                        if (selected) observed = true
+                        selected
+                    },
+                ) }
+                val cancellation = assertFailsWith<RequestedAcpCancellation> {
+                    AcpFilesystemBroker.open(cancelled, AcpFilesystemLimits(), AcpFilesystemAuditRecorder()).close()
+                }
+                assertTrue(observed)
+                assertEquals("filesystem authority opening", cancellation.phase)
+                assertEquals(beforeAuthorityCancellation, openDescriptorCount(), "cancelled admission must close every root descriptor")
+            }
+            println("private-control-bind-probe: cancelledRootAndRuleAdmissionPreserved=true admissionDescriptorsReleased=true")
             val late = Files.createDirectory(workspace.resolve("late"))
             Files.writeString(late.resolve("canary.txt"), "ordinary-before-bind")
             val audit = AcpFilesystemAuditRecorder()
@@ -598,7 +773,6 @@ class LinuxBubblewrapBoundaryTest {
                 TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - closureStarted))
             repeat(4096 - 128) { index -> Files.writeString(closure.resolve("scale-$index"), "ordinary-$index") }
             val scaleLimits = AcpRuntimeClosureLimits(8192, 131072, 8)
-            fun openDescriptorCount() = Files.list(Path.of("/proc/self/fd")).use { it.count() }
             val retainedDescriptorCount = openDescriptorCount()
             val scaleStarted = System.nanoTime()
             val scaleDigest = calculateAcpRuntimeManifestSha256(closure, scaleLimits)
@@ -2092,8 +2266,12 @@ class LinuxBubblewrapBoundaryTest {
     private companion object {
         @JvmStatic
         fun main(args: Array<String>) {
-            require(args.size == 2 && args[0] == "private-control-bind-probe")
-            LinuxBubblewrapBoundaryTest().runPrivateControlBindProbe(Path.of(args[1]))
+            require(args.size == 2)
+            when (args[0]) {
+                "private-control-bind-probe" -> LinuxBubblewrapBoundaryTest().runPrivateControlBindProbe(Path.of(args[1]))
+                "statx-policy-probe" -> LinuxBubblewrapBoundaryTest().runStatxPolicyProbe(Path.of(args[1]))
+                else -> error("unknown native boundary probe")
+            }
         }
 
         val BWRAP: Path = Path.of("/usr/bin/bwrap")

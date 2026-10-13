@@ -733,7 +733,7 @@ internal object LinuxFilesystemSyscalls {
         null
     } catch (failure: LinuxSyscallException) {
         // The interrupted-syscall helper throws for every other negative result.
-        if (failure.errno == ENOSYS || failure.errno == EOPNOTSUPP) null else throw failure
+        if (failure.errno == EPERM || failure.errno == ENOSYS || failure.errno == EOPNOTSUPP) null else throw failure
     }
 
     private fun decodeDescriptorStatxIdentity(statistics: Memory): LinuxFileIdentity? {
@@ -1043,6 +1043,7 @@ internal object LinuxFilesystemSyscalls {
     private const val RENAME_NOREPLACE = 1
     private const val RENAME_EXCHANGE = 2
     private const val EINTR = 4
+    private const val EPERM = 1
     private const val ENOSYS = 38
     private const val EOPNOTSUPP = 95
     private const val EWOULDBLOCK = 11

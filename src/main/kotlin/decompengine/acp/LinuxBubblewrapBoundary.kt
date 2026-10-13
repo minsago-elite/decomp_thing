@@ -1775,10 +1775,18 @@ private fun requireHostStagingMountClosure(source: Path, mounts: List<HostPhysic
 }
 
 private fun requireControlCreationUnexposed(parent: LinuxDescriptor, name: String) {
-    if (ACTIVE_HOST_STAGING_ROOTS.isEmpty()) return
+    if (ACTIVE_HOST_STAGING_ROOTS.isEmpty() && ACTIVE_PRIVATE_CONTROLS.isEmpty()) return
     val mounts = hostPhysicalMounts(NO_SANDBOX_CHECKPOINT)
     val candidate = hostPhysicalLocation(parent, mounts, NO_SANDBOX_CHECKPOINT).let {
         it.copy(path = it.path.resolve(name), namespacePath = it.namespacePath.resolve(name))
+    }
+    ACTIVE_PRIVATE_CONTROLS.forEach { control ->
+        control.physicalLocations(mounts, NO_SANDBOX_CHECKPOINT).forEach { active ->
+            if (candidate.key == active.key || candidate.namespacePath.startsWith(active.namespacePath) ||
+                (candidate.filesystemDevice == active.filesystemDevice && candidate.path.startsWith(active.path))) {
+                throw IOException("sandbox private control creation overlaps an active private control directory")
+            }
+        }
     }
     ACTIVE_HOST_STAGING_ROOTS.forEach { grant ->
         grant.locations(mounts, NO_SANDBOX_CHECKPOINT).forEach { active ->
@@ -2189,6 +2197,14 @@ private class PinnedControlDirectory private constructor(
         val priorFailure = cleanupFailure
         try {
             requireCurrent()
+            val mounts = hostPhysicalMounts(NO_SANDBOX_CHECKPOINT)
+            requirePrivateControlLocationUnexposed(
+                hostPhysicalLocation(descriptor, mounts, NO_SANDBOX_CHECKPOINT), true, mounts,
+                NO_SANDBOX_CHECKPOINT, privateSnapshotOwner = expectedKey,
+            )
+            if (mounts != hostPhysicalMounts(NO_SANDBOX_CHECKPOINT)) {
+                throw IOException("host mounts changed during private-control cleanup admission")
+            }
             // A failed launch can leave attacker-created residue beside the pinned resources. Drain
             // only this already-authenticated directory through its retained descriptor and the same
             // aggregate entry/byte/depth limits used for private runtime cleanup. A pathname
@@ -2758,6 +2774,7 @@ private fun deletePrivateTreeContents(
             if (child.identity.mountId != directoryMountId) {
                 throw IOException("private cleanup tree crosses a mount boundary")
             }
+            requirePrivateCleanupEntryNotActiveControl(child.identity.key)
             val quarantine = ".decomp-acp-entry-delete-${UUID.randomUUID()}"
             LinuxFilesystemSyscalls.renameNoReplace(directory.fd, name, quarantine)
             LinuxFilesystemSyscalls.openPathAtOrNull(directory.fd, quarantine).use { selected ->
@@ -2771,6 +2788,7 @@ private fun deletePrivateTreeContents(
                     if (childDirectory.identity.key != child.identity.key ||
                         childDirectory.identity.mountId != child.identity.mountId
                     ) throw IOException("private cleanup directory changed after quarantine")
+                    requirePrivateCleanupEntryNotActiveControl(childDirectory.identity.key)
                     deletePrivateTreeContents(childDirectory, budget, depth + 1)
                     LinuxFilesystemSyscalls.removeDirectory(directory.fd, quarantine)
                     if (LinuxFilesystemSyscalls.identity(childDirectory.fd).linkCount != 0) {
@@ -2789,6 +2807,12 @@ private fun deletePrivateTreeContents(
             requireNameAbsent(directory.fd, quarantine)
             requireNameAbsent(directory.fd, name)
         }
+    }
+}
+
+private fun requirePrivateCleanupEntryNotActiveControl(key: LinuxFileKey): Unit = synchronized(ACTIVE_PRIVATE_CONTROLS) {
+    if (ACTIVE_PRIVATE_CONTROLS.any { it.key == key }) {
+        throw IOException("private cleanup may not remove another active private control")
     }
 }
 
