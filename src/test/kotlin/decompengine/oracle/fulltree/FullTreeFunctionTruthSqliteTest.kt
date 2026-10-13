@@ -22,13 +22,18 @@ class FullTreeFunctionTruthSqliteTest {
     @Test
     fun `truth keeps alternate names on one emitted RVA record and rejects a rehashed alias split`() {
         inControlTemporaryDirectory { root ->
-            val fixture = createFunctionTruthFixture(root.resolve("alias-split-inputs"))
+            val shardId = "alias-split"
+            val fixture = createFunctionTruthFixture(
+                root.resolve("alias-split-inputs"), observationWorkers = 1, singleShardId = shardId,
+            )
             val generated = generateTruth(fixture, root.resolve("alias-truth"), maximumWorkers = 2)
 
-            val shardPath = generated.root.resolve("shards/generated-tools-clang.json")
+            val shardPath = generated.root.resolve("shards/$shardId.json")
             val shard = parseControlObject(shardPath)
-            val matches = shard.controlArray("functions").controlObjects("functions")
-                .filter { it.controlString("rva") == "0x1139" }
+            val functions = shard.controlArray("functions").controlObjects("functions")
+            assertEquals(setOf("0x1129", "0x1139"), functions.map { it.controlString("rva") }.toSet())
+            assertEquals(2, functions.size)
+            val matches = functions.filter { it.controlString("rva") == "0x1139" }
             assertEquals(1, matches.size, "aliases must not create additional score records")
             val function = matches.single()
             assertEquals("scored", function.controlString("population"))
@@ -45,15 +50,22 @@ class FullTreeFunctionTruthSqliteTest {
             assertEquals(1, sourceNameEvidence.size)
             assertEquals("dwarf-subprogram", sourceNameEvidence.single().controlString("kind"))
             assertTrue(sourceNameEvidence.single().controlString("locator").contains("DW_AT_name"))
-            assertEquals(1L, shard.controlObject("counts").controlLong("functions"))
+            assertEquals(2L, shard.controlObject("counts").controlLong("functions"))
             assertEquals(2L, generated.counts.scoredRvas)
 
             val split = copyTruthCandidate(generated.root, root.resolve("split-alias-truth"))
-            forgeAliasSplitTruthCandidate(split, "generated-tools-clang")
+            forgeAliasSplitTruthCandidate(split, shardId)
             val splitBytes = truthTreeBytes(split)
-            assertFailsWith<FullTreeFunctionTruthException> {
+            val rejection = assertFailsWith<FullTreeFunctionTruthException> {
                 validateTruth(fixture, split, maximumWorkers = 2)
             }
+            assertTrue(
+                generateSequence<Throwable>(rejection) { it.cause }.any {
+                    it is FullTreeFunctionTruthException &&
+                        it.message == "function-truth shard functions are not strictly RVA ordered"
+                },
+                rejection.stackTraceToString(),
+            )
             assertEquals(splitBytes, truthTreeBytes(split), "validation must retain rejected candidate bytes")
             assertDirectoryEmpty(fixture.scratch)
             assertNoTruthResidue(root)
@@ -346,6 +358,7 @@ internal fun createFunctionTruthFixture(
     observationWorkers: Int = 2,
     runIdOverride: String? = null,
     strippedBytesOverride: ByteArray? = null,
+    singleShardId: String? = null,
 ): FunctionTruthFixture {
     Files.createDirectories(root)
     Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("rwx------"))
@@ -381,6 +394,17 @@ internal fun createFunctionTruthFixture(
     val manifestSha256 = OracleArtifacts.sha256(OracleJson.canonicalBytes(manifest))
     val scopeDocument = JsonObject(
         original.document.toMutableMap().apply {
+            if (singleShardId != null) {
+                val sharding = original.document.controlObject("sharding")
+                this["sharding"] = JsonObject(sharding.toMutableMap().apply {
+                    this["rules"] = JsonArray(sharding.controlArray("rules").controlObjects("shard rules").map { rule ->
+                        JsonObject(rule.toMutableMap().apply {
+                            this["componentDepth"] = JsonPrimitive(0)
+                            this["shardPrefix"] = JsonPrimitive(singleShardId)
+                        })
+                    })
+                })
+            }
             this["oracle"] = JsonObject(
                 original.document.controlObject("oracle").toMutableMap().apply {
                     this["artifactManifestSha256"] = JsonPrimitive(manifestSha256)
@@ -400,7 +424,10 @@ internal fun createFunctionTruthFixture(
         artifactManifestSha256 = manifestSha256,
     )
     val originalInventory = parseControlObject(control.inventory)
-    val inventory = JsonObject(
+    val inventoryPath = root.resolve("inventory.json")
+    val inventory = if (singleShardId != null) {
+        FullTreeInventoryControl.generateAndPublish(rich, scope, inventoryPath, maximumWorkers = 1).inventory
+    } else JsonObject(
         originalInventory.toMutableMap().apply {
             this["oracle"] = JsonObject(
                 originalInventory.controlObject("oracle").toMutableMap().apply {
@@ -411,8 +438,7 @@ internal fun createFunctionTruthFixture(
             )
         },
     )
-    val inventoryPath = root.resolve("inventory.json")
-    writeControlObject(inventoryPath, inventory)
+    if (singleShardId == null) writeControlObject(inventoryPath, inventory)
     FullTreeScopeControl.validate(scope)
     FullTreeInventoryControl.loadAndValidate(inventoryPath, scope)
 
@@ -753,27 +779,21 @@ private fun forgeAliasSplitTruthCandidate(root: Path, shardId: String) {
     val selected = functions.single { it.controlString("rva") == "0x1139" }
     val aliases = selected.controlArray("aliases")
     check(aliases.size == 2) { "the frozen alias fixture must contain two alternate names" }
-    val splitFunctions = functions.flatMap { function ->
-        if (function !== selected) {
-            listOf(function)
-        } else {
-            aliases.map { alias ->
-                JsonObject(function.toMutableMap().apply { this["aliases"] = JsonArray(listOf(alias)) })
-            }
-        }
+    check(functions.size == 2 && functions.map { it.controlString("rva") }.distinct().size == 2)
+    // Replace the other raw RVA with the split alias so the forged population stays within the
+    // fresh projection's row and byte bounds. This intentionally omits that raw function; only
+    // the exact duplicate-RVA rejection below establishes which boundary rejected the candidate.
+    val splitFunctions = aliases.map { alias ->
+        JsonObject(selected.toMutableMap().apply { this["aliases"] = JsonArray(listOf(alias)) })
     }
-    val shardBytes = OracleJson.canonicalBytes(
-        JsonObject(
-            shard.toMutableMap().apply {
-                this["counts"] = JsonObject(
-                    shard.controlObject("counts").toMutableMap().apply {
-                        this["functions"] = JsonPrimitive(functions.size + 1)
-                    },
-                )
-                this["functions"] = JsonArray(splitFunctions)
-            },
-        ),
+    assertEquals(listOf("0x1139", "0x1139"), splitFunctions.map { it.controlString("rva") })
+    assertFalse(splitFunctions.any { it.controlString("rva") == "0x1129" })
+    val forgedShard = JsonObject(
+        shard.toMutableMap().apply { this["functions"] = JsonArray(splitFunctions) },
     )
+    OracleSchemas.validate("full-tree-function-truth", forgedShard)
+    val shardBytes = OracleJson.canonicalBytes(forgedShard)
+    assertTrue(shardBytes.size.toLong() <= Files.size(shardPath), "forged shard must fit the fresh projection byte bound")
     Files.write(shardPath, shardBytes)
 
     val indexPath = root.resolve("index.json")
@@ -786,20 +806,14 @@ private fun forgeAliasSplitTruthCandidate(root: Path, shardId: String) {
             JsonObject(
                 record.toMutableMap().apply {
                     this["bytes"] = JsonPrimitive(shardBytes.size)
-                    this["functions"] = JsonPrimitive(record.controlLong("functions") + 1L)
                     this["sha256"] = JsonPrimitive(OracleArtifacts.sha256(shardBytes))
                 },
             )
         }
     }
-    val counts = index.controlObject("counts")
     val withoutSelf = JsonObject(
         index.toMutableMap().apply {
             remove("indexSha256")
-            this["counts"] = JsonObject(counts.toMutableMap().apply {
-                this["dwarfRvas"] = JsonPrimitive(counts.controlLong("dwarfRvas") + 1L)
-                this["scoredRvas"] = JsonPrimitive(counts.controlLong("scoredRvas") + 1L)
-            })
             this["shards"] = JsonArray(shardRecords)
         },
     )
