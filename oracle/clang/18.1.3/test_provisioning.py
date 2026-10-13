@@ -254,7 +254,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
         self.assertTrue(all(re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", action) for action in actions), actions)
         self.assertIn("Production snapshot metadata diagnostic", workflow)
         self.assertIn("--snapshot 20240702T000000Z", workflow)
-        self.assertIn("if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'snapshot-metadata-diagnostic') }}", workflow)
+        self.assertIn("if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'snapshot-metadata-diagnostic' }}", workflow)
         qualify_job = re.search(r"(?ms)^  qualify:\n(.*?)(?=^  [A-Za-z0-9_-]+:|\Z)", workflow)
         self.assertIsNotNone(qualify_job)
         qualify_text = qualify_job.group(1)

@@ -41,7 +41,7 @@ concurrency:
 jobs:
   snapshot-metadata:
     name: Production snapshot metadata diagnostic
-    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'snapshot-metadata-diagnostic') }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'snapshot-metadata-diagnostic' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
