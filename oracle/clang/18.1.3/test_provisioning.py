@@ -34,6 +34,22 @@ def signed_package_rows_for_fixture(record):
     return list(rows.values())
 
 
+class DownloadResponseFixture(io.BytesIO):
+    def __init__(self, payload, announced=None):
+        super().__init__(payload)
+        self.headers = {"Content-Encoding": "identity"}
+        if announced is not None:
+            self.headers["Content-Length"] = str(announced)
+        self.read_sizes = []
+
+    def read(self, size=-1):
+        self.read_sizes.append(size)
+        return super().read(size)
+
+    def geturl(self):
+        return "https://snapshot.ubuntu.com/object"
+
+
 class ProvisioningNegativeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -246,6 +262,42 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 "rejectedWrongImage", "rejectedWrongCxxDriverBytes", "rejectedChangedResourceIdentity",
                 "rejectedChangedRuntimeLibraryIdentity", "rejectedMissingResourceDirectory")},
         }
+
+    def prepare_loader_input_fixture(self, base, label):
+        record = self.valid_build_record()
+        rootfs = base / ("rootfs-" + label)
+        self.prepare_runtime_rootfs(record, rootfs)
+        compiler = next(tool for tool in record["tools"] if tool["role"] == "cxx-driver")
+        compiler["path"] = compiler["resolvedPath"]
+        compiler_path = rootfs / compiler["resolvedPath"].lstrip("/")
+        compiler_path.parent.mkdir(parents=True)
+        compiler_path.write_bytes(b"synthetic inert compiler bytes; never executed\n")
+        compiler_path.chmod(int(compiler["mode"], 8))
+        compiler["bytes"] = compiler_path.stat().st_size
+        compiler["sha256"] = provision.sha256_file(compiler_path)
+        resource = rootfs / record["resourceDirectory"].lstrip("/") / "include/fixture.h"
+        resource.parent.mkdir(parents=True)
+        resource.write_bytes(b"synthetic resource header; no compiler execution\n")
+        record["resources"] = provision.resource_manifest(rootfs, record["resourceDirectory"])
+        record_path = base / ("record-" + label + ".json")
+        record_path.write_bytes(provision.canonical_json(record))
+        output = base / ("report-" + label + ".json")
+        args = provision.argparse.Namespace(contract=provision.CONTRACT_PATH, record=record_path,
+                                           rootfs=rootfs, output=output)
+        self.assertEqual(provision.command_write_loader_input(args), 0)
+        return record, rootfs, record_path, output, output.with_suffix(".properties")
+
+    def test_loader_input_preserves_literal_utf8_rootfs_and_report_paths(self):
+        with self.temporary_directory() as temp:
+            record, rootfs, _, output, properties = self.prepare_loader_input_fixture(Path(temp), "한글-é")
+            encoded = properties.read_bytes()
+            self.assertIn(("rootfs=" + str(rootfs.resolve()) + "\n").encode("utf-8"), encoded)
+            self.assertIn(("smokeOutput=" + str(output) + "\n").encode("utf-8"), encoded)
+            self.assertIn("한글-é".encode("utf-8"), encoded)
+            self.assertNotIn(b"\\u", encoded)
+            self.assertFalse(output.exists())
+            self.assertEqual(record["resources"],
+                             provision.resource_manifest(rootfs, record["resourceDirectory"]))
 
     def test_workflow_actions_are_pinned_to_immutable_commit_shas(self):
         workflow = (ROOT / ".github/workflows/generic-template-toolchain.yml").read_text(encoding="utf-8")
@@ -1700,6 +1752,142 @@ class ProvisioningNegativeTests(unittest.TestCase):
             with mock.patch.object(downloader, "_open_request", return_value=Response(b"data")):
                 with self.assertRaises(provision.ProvisionError):
                     downloader.get("https://snapshot.ubuntu.com/object", expected_sha256="0" * 64)
+
+    def test_public_downloader_limits_each_read_to_remaining_cumulative_allowance(self):
+        with self.temporary_directory() as temp:
+            downloader = provision.BoundedDownloader(Path(temp), total_limit=10)
+            first = DownloadResponseFixture(b"first!", announced=6)
+            overflow = DownloadResponseFixture(b"12345678")
+            with mock.patch.object(downloader, "_open_request", side_effect=[first, overflow]):
+                self.assertEqual(downloader.get("https://snapshot.ubuntu.com/object", max_bytes=8)[0], b"first!")
+                with self.assertRaisesRegex(provision.ProvisionError, "cumulative acquisition"):
+                    downloader.get("https://snapshot.ubuntu.com/object", max_bytes=8)
+            self.assertEqual(first.read_sizes, [9])
+            self.assertEqual(overflow.read_sizes, [5])  # remaining four bytes plus one overflow sentinel
+            self.assertEqual(downloader.total, 11)
+            with mock.patch.object(downloader, "_open_request") as network:
+                with self.assertRaisesRegex(provision.ProvisionError, "cumulative acquisition"):
+                    downloader.get("https://snapshot.ubuntu.com/object", max_bytes=8)
+                network.assert_not_called()
+
+    def test_public_downloader_rejects_announced_or_expected_overflow_before_body_read(self):
+        with self.temporary_directory() as temp:
+            downloader = provision.BoundedDownloader(Path(temp), total_limit=10)
+            downloader.total = 8
+            response = DownloadResponseFixture(b"payload", announced=3)
+            with mock.patch.object(downloader, "_open_request", return_value=response) as network:
+                with self.assertRaisesRegex(provision.ProvisionError, "cumulative acquisition"):
+                    downloader.get("https://snapshot.ubuntu.com/object", max_bytes=8)
+                network.assert_called_once()
+            self.assertEqual(response.read_sizes, [])
+            self.assertEqual(downloader.total, 8)
+            with mock.patch.object(downloader, "_open_request") as network:
+                with self.assertRaisesRegex(provision.ProvisionError, "cumulative acquisition"):
+                    downloader.get("https://snapshot.ubuntu.com/object", expected_size=3, max_bytes=8)
+                network.assert_not_called()
+
+    def test_public_downloader_accepts_exact_total_boundary_and_preserves_object_ceiling(self):
+        with self.temporary_directory() as temp:
+            downloader = provision.BoundedDownloader(Path(temp), total_limit=10)
+            first, last = DownloadResponseFixture(b"first!"), DownloadResponseFixture(b"last", announced=4)
+            with mock.patch.object(downloader, "_open_request", side_effect=[first, last]):
+                downloader.get("https://snapshot.ubuntu.com/object", max_bytes=8)
+                data, identity = downloader.get("https://snapshot.ubuntu.com/object", expected_size=4,
+                                               expected_sha256=provision.sha256(b"last"), max_bytes=8)
+            self.assertEqual(data, b"last")
+            self.assertEqual(identity["bytes"], 4)
+            self.assertEqual(last.read_sizes, [5])
+            self.assertEqual(downloader.total, 10)
+            with mock.patch.object(downloader, "_open_request") as network:
+                with self.assertRaisesRegex(provision.ProvisionError, "cumulative acquisition"):
+                    downloader.get("https://snapshot.ubuntu.com/object", max_bytes=8)
+                network.assert_not_called()
+            downloader = provision.BoundedDownloader(Path(temp) / "object", total_limit=10)
+            response = DownloadResponseFixture(b"123456")
+            with mock.patch.object(downloader, "_open_request", return_value=response):
+                with self.assertRaisesRegex(provision.ProvisionError, "per-object"):
+                    downloader.get("https://snapshot.ubuntu.com/object", max_bytes=2)
+            self.assertEqual(response.read_sizes, [3])
+            self.assertEqual(downloader.total, 3)
+
+    def test_public_downloader_rejected_digest_bytes_consume_cumulative_budget(self):
+        with self.temporary_directory() as temp:
+            downloader = provision.BoundedDownloader(Path(temp), total_limit=4)
+            with mock.patch.object(downloader, "_open_request", return_value=DownloadResponseFixture(b"data")):
+                with self.assertRaisesRegex(provision.ProvisionError, "SHA-256 mismatch"):
+                    downloader.get("https://snapshot.ubuntu.com/object", expected_sha256="0" * 64)
+            self.assertEqual(downloader.total, 4)
+            with mock.patch.object(downloader, "_open_request") as network:
+                with self.assertRaisesRegex(provision.ProvisionError, "cumulative acquisition"):
+                    downloader.get("https://snapshot.ubuntu.com/object")
+                network.assert_not_called()
+
+    def test_public_downloader_rejects_nonpositive_or_noninteger_limits_before_io(self):
+        with self.temporary_directory() as temp:
+            for limit in (0, -1, True, 1.5):
+                root = Path(temp) / ("invalid-" + str(limit))
+                with self.subTest(total_limit=limit), self.assertRaisesRegex(provision.ProvisionError, "positive integer"):
+                    provision.BoundedDownloader(root, total_limit=limit)
+                self.assertFalse(root.exists())
+            downloader = provision.BoundedDownloader(Path(temp) / "valid", total_limit=4)
+            with mock.patch.object(downloader, "_open_request") as network:
+                for limit in (0, -1, True, 1.5):
+                    with self.subTest(max_bytes=limit), self.assertRaisesRegex(provision.ProvisionError, "positive integer"):
+                        downloader.get("https://snapshot.ubuntu.com/object", max_bytes=limit)
+                network.assert_not_called()
+
+    def test_provisioning_rejects_canonical_output_overlap_before_all_mutations(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            canary = base / "unrelated"
+            canary.write_bytes(b"must remain unchanged")
+            real = base / "real"
+            real.mkdir()
+            alias = base / "alias"
+            alias.symlink_to(real, target_is_directory=True)
+            tree = base / "absent/tree"
+            relative = Path(os.path.relpath(tree, Path.cwd()))
+            pairs = ((tree, tree), (tree, tree / "nested"), (tree / "nested", tree),
+                     (relative, tree), (real / "run/rootfs", alias / "run"),
+                     (alias / "run", real / "run/rootfs"),
+                     (base / "missing/../absent/tree", tree))
+            for index, (rootfs, output) in enumerate(pairs):
+                args = provision.argparse.Namespace(contract=provision.CONTRACT_PATH,
+                    workdir=base / ("work-" + str(index)), rootfs=rootfs, output=output,
+                    acquisition=base / "acquisition", keyring=base / "keyring")
+                with self.subTest(rootfs=rootfs, output=output), \
+                        mock.patch.object(provision, "read_contract") as contract, \
+                        mock.patch.object(provision, "load_candidate") as candidate, \
+                        mock.patch.object(provision, "remove_optional_source_caches") as cleanup, \
+                        mock.patch.object(provision, "run_checked") as bootstrap, \
+                        mock.patch.object(provision.BoundedDownloader, "get") as network:
+                    with self.assertRaisesRegex(provision.ProvisionError, "must be disjoint"):
+                        provision.provision_rootfs(args)
+                    for action in (contract, candidate, cleanup, bootstrap, network):
+                        action.assert_not_called()
+                self.assertFalse(args.workdir.exists())
+                self.assertFalse(rootfs.exists())
+                self.assertFalse(output.exists())
+                self.assertEqual(canary.read_bytes(), b"must remain unchanged")
+
+    def test_provisioning_accepts_disjoint_siblings_and_rejects_dangling_output_link(self):
+        with self.temporary_directory() as temp:
+            base = Path(temp)
+            args = provision.argparse.Namespace(contract=provision.CONTRACT_PATH, workdir=base / "work",
+                rootfs=base / "rootfs", output=base / "output", acquisition=base / "acquisition",
+                keyring=base / "keyring")
+            with mock.patch.object(provision, "load_candidate", side_effect=provision.ProvisionError("fixture stop")) as candidate:
+                with self.assertRaisesRegex(provision.ProvisionError, "fixture stop"):
+                    provision.provision_rootfs(args)
+                candidate.assert_called_once()
+            self.assertTrue(args.workdir.is_dir())
+            self.assertFalse(args.rootfs.exists())
+            self.assertFalse(args.output.exists())
+            args.output.symlink_to(base / "missing")
+            with mock.patch.object(provision, "load_candidate") as candidate:
+                with self.assertRaisesRegex(provision.ProvisionError, "paths must not exist"):
+                    provision.provision_rootfs(args)
+                candidate.assert_not_called()
 
     def test_acquisition_status_is_read_only_and_cannot_be_enabled_by_environment(self):
         stdout = io.StringIO()

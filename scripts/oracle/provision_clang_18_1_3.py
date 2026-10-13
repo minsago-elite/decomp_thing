@@ -418,6 +418,8 @@ def index_path(table: dict[str, tuple[int, str]], component: str, kind: str, arc
 
 class BoundedDownloader:
     def __init__(self, root: Path, total_limit: int = MAX_DOWNLOAD_BYTES):
+        if type(total_limit) is not int or total_limit < 1:
+            raise ProvisionError("cumulative acquisition byte ceiling must be a positive integer")
         self.root = root
         self.total_limit = total_limit
         self.total = 0
@@ -429,6 +431,16 @@ class BoundedDownloader:
 
     def get(self, url: str, expected_size: int | None = None, expected_sha256: str | None = None,
             max_bytes: int = MAX_SINGLE_DOWNLOAD, allow_github_redirect: bool = False) -> tuple[bytes, dict]:
+        if type(max_bytes) is not int or max_bytes < 1:
+            raise ProvisionError("per-object acquisition byte ceiling must be a positive integer")
+        remaining = self.total_limit - self.total
+        if remaining < 1:
+            raise ProvisionError("cumulative acquisition exceeds configured byte ceiling")
+        byte_limit = min(max_bytes, remaining)
+        ceiling = ("cumulative acquisition exceeds configured byte ceiling" if remaining < max_bytes
+                   else "remote object exceeds configured per-object byte ceiling")
+        if expected_size is not None and expected_size > byte_limit:
+            raise ProvisionError(ceiling)
         request = urllib.request.Request(url, headers={"Accept-Encoding": "identity", "User-Agent": "decomp-thing-clang-oracle/1"})
         source = urllib.parse.urlparse(url)
         try:
@@ -442,16 +454,14 @@ class BoundedDownloader:
                 if response.headers.get("Content-Encoding", "identity").lower() not in ("", "identity"):
                     raise ProvisionError("server applied content encoding to bytes whose digest is being checked")
                 announced = response.headers.get("Content-Length")
-                if announced is not None and int(announced) > max_bytes:
-                    raise ProvisionError("remote object exceeds configured per-object byte ceiling")
-                data = response.read(max_bytes + 1)
+                if announced is not None and int(announced) > byte_limit:
+                    raise ProvisionError(ceiling)
+                data = response.read(byte_limit + 1)
         except (OSError, ValueError) as error:
             raise ProvisionError(f"public HTTPS acquisition failed for {url}: {type(error).__name__}: {error}") from error
-        if len(data) > max_bytes:
-            raise ProvisionError("remote object exceeded configured per-object byte ceiling")
         self.total += len(data)
-        if self.total > self.total_limit:
-            raise ProvisionError("cumulative acquisition exceeds configured byte ceiling")
+        if len(data) > byte_limit:
+            raise ProvisionError(ceiling)
         if expected_size is not None and len(data) != expected_size:
             raise ProvisionError(f"length mismatch for {url}: expected {expected_size}, got {len(data)}")
         digest = sha256(data)
@@ -3134,11 +3144,20 @@ def remove_optional_source_caches(acquisition: Path) -> None:
 
 
 def provision_rootfs(args: argparse.Namespace) -> int:
+    try:
+        canonical_rootfs = args.rootfs.resolve()
+        canonical_output = args.output.resolve()
+    except (OSError, RuntimeError) as error:
+        raise ProvisionError("could not resolve rootfs and evidence output paths") from error
+    if (canonical_rootfs == canonical_output or canonical_rootfs in canonical_output.parents or
+            canonical_output in canonical_rootfs.parents):
+        raise ProvisionError("rootfs and evidence output trees must be disjoint")
+    if (args.rootfs.exists() or args.rootfs.is_symlink() or
+            args.output.exists() or args.output.is_symlink()):
+        raise ProvisionError("rootfs and evidence output paths must not exist")
     contract = read_contract(args.contract)
     profile = contract["profile"]
     args.workdir.mkdir(parents=True, exist_ok=True)
-    if args.rootfs.exists() or args.output.exists():
-        raise ProvisionError("rootfs and evidence output paths must not exist")
     candidate, indexes = load_candidate(args.acquisition, contract, args.keyring)
     remove_optional_source_caches(args.acquisition)
     check_runner_bounds(args.workdir, profile)
