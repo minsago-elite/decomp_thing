@@ -1332,6 +1332,30 @@ internal class LinuxBubblewrapBoundary private constructor(
         ): LinuxBubblewrapBoundary {
             cancellationCheck()
             val controlTemporaryParent = sandboxControlTemporaryParent()
+            return try {
+                prepareWithPinnedTemporaryParent(
+                    configuration,
+                    observer,
+                    launchHook,
+                    cleanupHook,
+                    scopeObserver,
+                    cancellationCheck,
+                    controlTemporaryParent,
+                )
+            } finally {
+                controlTemporaryParent.close()
+            }
+        }
+
+        private fun prepareWithPinnedTemporaryParent(
+            configuration: AcpLinuxSandboxConfiguration,
+            observer: AcpSandboxCommandObserver?,
+            launchHook: AcpSandboxLaunchHook?,
+            cleanupHook: AcpSandboxCleanupHook?,
+            scopeObserver: AcpSandboxScopeObserver?,
+            cancellationCheck: () -> Unit,
+            controlTemporaryParent: PinnedSandboxControlTemporaryParent,
+        ): LinuxBubblewrapBoundary {
             requireLinuxCgroupV2()
             LinuxFilesystemSyscalls.requirePidfdSupported()
             cancellationCheck()
@@ -1519,8 +1543,10 @@ internal class LinuxBubblewrapBoundary private constructor(
             }
         }
 
-        private fun createControlDirectory(limits: AcpRuntimeClosureLimits, parentPath: Path): PinnedControlDirectory =
-            PinnedControlDirectory.create(limits, parentPath)
+        private fun createControlDirectory(
+            limits: AcpRuntimeClosureLimits,
+            parent: PinnedSandboxControlTemporaryParent,
+        ): PinnedControlDirectory = PinnedControlDirectory.create(limits, parent)
     }
 }
 
@@ -1685,7 +1711,7 @@ private class PinnedControlDirectory private constructor(
         if (deleted) throw IOException("sandbox control directory is already deleted")
         requireDirectoryDescriptorIdentity(descriptor, expectedKey, expectedMountId, CONTROL_DIRECTORY_MODE)
         requireDirectoryDescriptorIdentity(parent, parent.identity.key, parent.identity.mountId, null)
-        LinuxFilesystemSyscalls.openRoot(parentPath).use { currentParent ->
+        openCanonicalDirectoryNoFollow(parentPath).use { currentParent ->
             if (currentParent.identity.key != parent.identity.key ||
                 currentParent.identity.mountId != parent.identity.mountId
             ) throw IOException("sandbox control-directory parent pathname changed")
@@ -1798,8 +1824,12 @@ private class PinnedControlDirectory private constructor(
     }
 
     companion object {
-        fun create(cleanupLimits: AcpRuntimeClosureLimits, parentPath: Path): PinnedControlDirectory {
-            val parent = LinuxFilesystemSyscalls.openRoot(parentPath)
+        fun create(
+            cleanupLimits: AcpRuntimeClosureLimits,
+            pinnedParent: PinnedSandboxControlTemporaryParent,
+        ): PinnedControlDirectory {
+            val parentPath = pinnedParent.path
+            val parent = pinnedParent.transfer()
             var descriptor: LinuxDescriptor? = null
             var createdName: String? = null
             try {
@@ -1815,7 +1845,7 @@ private class PinnedControlDirectory private constructor(
                     openedIdentity.mode.permissions != CONTROL_DIRECTORY_MODE ||
                     openedIdentity.mountId != parent.identity.mountId
                 ) throw IOException("sandbox control directory is not a private mode-0700 child of its temporary parent")
-                LinuxFilesystemSyscalls.openRoot(directory).use { byPath ->
+                openCanonicalDirectoryNoFollow(directory).use { byPath ->
                     if (byPath.identity.key != opened.identity.key ||
                         byPath.identity.mountId != opened.identity.mountId
                     ) throw IOException("sandbox control-directory pathname changed during creation")
@@ -4617,49 +4647,50 @@ internal fun isValidSystemdManagerVersionOutput(output: String): Boolean {
 /** Proves that the fixed launcher opens only the supplied environment descriptor path as fd 4. */
 private fun probeEnvironmentFdOpener(
     path: Path,
-    parentPath: Path,
+    parent: PinnedSandboxControlTemporaryParent,
     cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
 ) {
     cancellationCheck()
-    LinuxFilesystemSyscalls.openRoot(parentPath).use { parent ->
-        LinuxFilesystemSyscalls.createTemporaryAt(parent.fd).use { probeFile ->
-            LinuxFilesystemSyscalls.chmod(probeFile, SANDBOX_ENVIRONMENT_FILE_MODE)
-            LinuxFilesystemSyscalls.write(
-                probeFile,
-                ENVIRONMENT_FD_OPENER_PROBE_OUTPUT.toByteArray(),
-                cancellationCheck,
-            )
-            val command = listOf(
-                path.toString(),
-                "--noprofile",
-                "--norc",
-                "-c",
-                ENVIRONMENT_FD_OPENER_SCRIPT,
-                ENVIRONMENT_FD_OPENER_ARG0,
-                LinuxFilesystemSyscalls.stableDescriptorPath(probeFile.fd).toString(),
-                path.toString(),
-                "--noprofile",
-                "--norc",
-                "-c",
-                ENVIRONMENT_FD_OPENER_PROBE_SCRIPT,
-            )
-            val process = ProcessBuilder(command).redirectErrorStream(true).also { builder ->
-                builder.environment().clear()
-            }.let { builder ->
-                cancellationCheck()
-                builder.start()
-            }
-            awaitTrustedProcess(process, PROBE_TIMEOUT, cancellationCheck, "environment-fd launcher")
-            val output = process.inputStream.readNBytes(MAXIMUM_PROBE_BYTES + 1).toString(Charsets.UTF_8)
-            if (process.exitValue() != 0 || output != ENVIRONMENT_FD_OPENER_PROBE_OUTPUT) {
-                throw IOException("environment-fd launcher did not preserve exact fd-4 semantics")
-            }
+    parent.requireCurrentPath()
+    LinuxFilesystemSyscalls.createTemporaryAt(parent.descriptor().fd).use { probeFile ->
+        parent.requireCurrentPath()
+        LinuxFilesystemSyscalls.chmod(probeFile, SANDBOX_ENVIRONMENT_FILE_MODE)
+        LinuxFilesystemSyscalls.write(
+            probeFile,
+            ENVIRONMENT_FD_OPENER_PROBE_OUTPUT.toByteArray(),
+            cancellationCheck,
+        )
+        val command = listOf(
+            path.toString(),
+            "--noprofile",
+            "--norc",
+            "-c",
+            ENVIRONMENT_FD_OPENER_SCRIPT,
+            ENVIRONMENT_FD_OPENER_ARG0,
+            LinuxFilesystemSyscalls.stableDescriptorPath(probeFile.fd).toString(),
+            path.toString(),
+            "--noprofile",
+            "--norc",
+            "-c",
+            ENVIRONMENT_FD_OPENER_PROBE_SCRIPT,
+        )
+        val process = ProcessBuilder(command).redirectErrorStream(true).also { builder ->
+            builder.environment().clear()
+        }.let { builder ->
+            cancellationCheck()
+            builder.start()
         }
+        awaitTrustedProcess(process, PROBE_TIMEOUT, cancellationCheck, "environment-fd launcher")
+        val output = process.inputStream.readNBytes(MAXIMUM_PROBE_BYTES + 1).toString(Charsets.UTF_8)
+        if (process.exitValue() != 0 || output != ENVIRONMENT_FD_OPENER_PROBE_OUTPUT) {
+            throw IOException("environment-fd launcher did not preserve exact fd-4 semantics")
+        }
+        parent.requireCurrentPath()
     }
 }
 
 /** Both host-side control resources use one existing canonical JVM temporary parent. */
-private fun sandboxControlTemporaryParent(): Path {
+private fun sandboxControlTemporaryParent(): PinnedSandboxControlTemporaryParent {
     val configured = System.getProperty("java.io.tmpdir")
         ?: throw IOException("sandbox temporary parent is not configured")
     val parent = try {
@@ -4670,7 +4701,75 @@ private fun sandboxControlTemporaryParent(): Path {
     if (!parent.isAbsolute || parent != parent.normalize() ||
         !Files.isDirectory(parent, LinkOption.NOFOLLOW_LINKS) || parent.toRealPath() != parent
     ) throw IOException("sandbox temporary parent must be an existing absolute canonical directory")
-    return parent
+    val pinned = openCanonicalDirectoryNoFollow(parent)
+    try {
+        requireDirectoryDescriptorIdentity(pinned, pinned.identity.key, pinned.identity.mountId, null)
+        openCanonicalDirectoryNoFollow(parent).use { current ->
+            if (current.identity.key != pinned.identity.key || current.identity.mountId != pinned.identity.mountId) {
+                throw IOException("sandbox temporary parent pathname changed while it was pinned")
+            }
+        }
+        return PinnedSandboxControlTemporaryParent(parent, pinned)
+    } catch (failure: Throwable) {
+        pinned.close()
+        throw failure
+    }
+}
+
+/** Walks every path component through O_NOFOLLOW directory descriptors, never pathname ancestors. */
+private fun openCanonicalDirectoryNoFollow(path: Path): LinuxDescriptor {
+    val root = path.root
+    if (!path.isAbsolute || path != path.normalize() || root == null) {
+        throw IOException("private directory path must be absolute and normalized")
+    }
+    var current: LinuxDescriptor? = LinuxFilesystemSyscalls.openRoot(root)
+    try {
+        for (component in path) {
+            val parent = requireNotNull(current)
+            val next = LinuxFilesystemSyscalls.openDirectoryAt(
+                parent.fd,
+                component.toString(),
+            )
+            parent.close()
+            current = next
+        }
+        return requireNotNull(current).also { current = null }
+    } finally {
+        current?.close()
+    }
+}
+
+/** Owns the canonical temporary parent descriptor until control-directory creation takes it over. */
+private class PinnedSandboxControlTemporaryParent(
+    val path: Path,
+    descriptor: LinuxDescriptor,
+) : AutoCloseable {
+    private var ownedDescriptor: LinuxDescriptor? = descriptor
+
+    fun descriptor(): LinuxDescriptor = ownedDescriptor
+        ?: throw IOException("sandbox temporary parent descriptor was transferred")
+
+    fun requireCurrentPath() {
+        val pinned = descriptor()
+        requireDirectoryDescriptorIdentity(pinned, pinned.identity.key, pinned.identity.mountId, null)
+        openCanonicalDirectoryNoFollow(path).use { current ->
+            if (current.identity.key != pinned.identity.key || current.identity.mountId != pinned.identity.mountId) {
+                throw IOException("sandbox temporary parent pathname changed")
+            }
+        }
+    }
+
+    fun transfer(): LinuxDescriptor {
+        requireCurrentPath()
+        val pinned = descriptor()
+        ownedDescriptor = null
+        return pinned
+    }
+
+    override fun close() {
+        ownedDescriptor?.close()
+        ownedDescriptor = null
+    }
 }
 
 private data class CommandResult(val exitCode: Int, val output: String)

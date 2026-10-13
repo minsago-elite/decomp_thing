@@ -7,19 +7,23 @@ import decompengine.agent.AgentOperation
 import decompengine.agent.AgentPathRule
 import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkspaceRoot
+import org.junit.jupiter.api.AfterAll
 import java.io.IOException
 import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.file.Files
+import java.nio.file.FileAlreadyExistsException
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.PosixFilePermission
 import java.nio.file.attribute.UserDefinedFileAttributeView
 import java.security.MessageDigest
 import java.time.Duration
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
@@ -35,54 +39,111 @@ import kotlin.test.assertTrue
 class LinuxBubblewrapBoundaryTest {
     @Test
     fun `configured temporary parent pins private controls and exact fd probe beside a disjoint workspace`() {
+        PROBE_RESULT.getOrNull()?.let { fixture ->
+            assertTrue(fixture.startsWith(repositoryRoot()))
+        }
         withRepositoryTemporaryDirectory("acp-private-control-parent-") { base ->
-            val parent = Files.createDirectory(base.resolve("control-parent"))
+            val parentAncestor = Files.createDirectory(base.resolve("control-root"))
+            val parent = Files.createDirectory(parentAncestor.resolve("control-parent"))
             Files.setPosixFilePermissions(parent, OWNER_ONLY)
             val workspace = Files.createDirectory(base.resolve("workspace"))
+            val replacementParent = Files.createDirectory(workspace.resolve("control-parent"))
             withTemporaryParent(parent.toString()) {
-                val validated = invokeBoundaryPrivate("sandboxControlTemporaryParent", emptyArray()) as Path
-                assertEquals(parent, validated)
-                val type = Class.forName("decompengine.acp.PinnedControlDirectory")
-                val companion = type.getDeclaredField("Companion").apply { isAccessible = true }.get(null)
-                val control = invokePrivate(
-                    companion,
-                    companion.javaClass.getDeclaredMethod("create", AcpRuntimeClosureLimits::class.java, Path::class.java),
-                    AcpRuntimeClosureLimits(32, 1024, 4), validated,
-                )!!
-                val controlPath = invokePrivate(control, type.getDeclaredMethod("getPath")) as Path
+                val pinnedTemporaryParent = requireNotNull(
+                    invokeBoundaryPrivate("sandboxControlTemporaryParent", emptyArray()),
+                )
                 try {
-                    assertEquals(parent, controlPath.parent)
-                    assertEquals(OWNER_ONLY, Files.getPosixFilePermissions(controlPath))
-                    LinuxFilesystemSyscalls.openRoot(parent).use { pinnedParent ->
-                        LinuxFilesystemSyscalls.openRoot(controlPath).use { pinnedChild ->
-                            assertEquals(pinnedParent.identity.mountId, pinnedChild.identity.mountId)
-                            assertEquals(
-                                (Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toInt(),
-                                pinnedChild.identity.uid,
-                            )
+                    val temporaryParentType = Class.forName("decompengine.acp.PinnedSandboxControlTemporaryParent")
+                    val validated = invokePrivate(
+                        pinnedTemporaryParent,
+                        temporaryParentType.getDeclaredMethod("getPath"),
+                    ) as Path
+                    assertEquals(parent, validated)
+                    val probeMethod = Class.forName("decompengine.acp.LinuxBubblewrapBoundaryKt")
+                        .getDeclaredMethod(
+                            "probeEnvironmentFdOpener",
+                            Path::class.java,
+                            temporaryParentType,
+                            Function0::class.java,
+                        )
+                    val type = Class.forName("decompengine.acp.PinnedControlDirectory")
+                    val companion = type.getDeclaredField("Companion").apply { isAccessible = true }.get(null)
+                    val createMethod = companion.javaClass.getDeclaredMethod(
+                        "create",
+                        AcpRuntimeClosureLimits::class.java,
+                        temporaryParentType,
+                    )
+                    val runtimeClosureLimits = AcpRuntimeClosureLimits(32, 1024, 4)
+                    val movedAncestor = base.resolve("control-root-pinned")
+                    try {
+                        Files.move(parentAncestor, movedAncestor)
+                        Files.createSymbolicLink(parentAncestor, workspace)
+                        assertFailsWith<IOException> {
+                            invokePrivate(null, probeMethod, BASH, pinnedTemporaryParent, {})
+                        }
+                        assertFailsWith<IOException> {
+                            invokePrivate(companion, createMethod, runtimeClosureLimits, pinnedTemporaryParent)
+                        }
+                        assertTrue(Files.list(replacementParent).use { it.findAny().isEmpty })
+                        assertTrue(Files.list(movedAncestor.resolve("control-parent")).use { it.findAny().isEmpty })
+                    } finally {
+                        Files.deleteIfExists(parentAncestor)
+                        if (Files.exists(movedAncestor, LinkOption.NOFOLLOW_LINKS)) {
+                            Files.move(movedAncestor, parentAncestor)
                         }
                     }
-                    invokePrivate(control, type.getDeclaredMethod("requireCurrent"))
-                    val mountSourceGuard = type.getDeclaredMethod("requireMountSourceUnexposed", Path::class.java)
-                    listOf(base, parent, controlPath, controlPath.resolve("child")).forEach { exposed ->
-                        assertFailsWith<IOException> { invokePrivate(control, mountSourceGuard, exposed) }
+                    invokePrivate(null, probeMethod, BASH, pinnedTemporaryParent, {})
+                    assertTrue(Files.list(parent).use { it.findAny().isEmpty })
+                    val control = invokePrivate(
+                        companion,
+                        createMethod,
+                        runtimeClosureLimits,
+                        pinnedTemporaryParent,
+                    )!!
+                    val controlPath = invokePrivate(control, type.getDeclaredMethod("getPath")) as Path
+                    try {
+                        assertEquals(parent, controlPath.parent)
+                        assertEquals(OWNER_ONLY, Files.getPosixFilePermissions(controlPath))
+                        LinuxFilesystemSyscalls.openRoot(parent).use { pinnedParent ->
+                            LinuxFilesystemSyscalls.openRoot(controlPath).use { pinnedChild ->
+                                assertEquals(pinnedParent.identity.mountId, pinnedChild.identity.mountId)
+                                assertEquals(
+                                    (Files.getAttribute(Path.of("/proc/self"), "unix:uid") as Number).toInt(),
+                                    pinnedChild.identity.uid,
+                                )
+                            }
+                        }
+                        invokePrivate(control, type.getDeclaredMethod("requireCurrent"))
+                        val mountSourceGuard = type.getDeclaredMethod("requireMountSourceUnexposed", Path::class.java)
+                        listOf(base, parent, controlPath, controlPath.resolve("child")).forEach { exposed ->
+                            assertFailsWith<IOException> { invokePrivate(control, mountSourceGuard, exposed) }
+                        }
+                        Files.writeString(controlPath.resolve("cleanup-marker"), "private-control-canary")
+                        assertTrue(Files.list(workspace).use { it.findAny().isEmpty })
+                        assertEquals(setOf(controlPath), Files.list(parent).use { it.toList().toSet() })
+                    } finally {
+                        invokePrivate(control, type.getDeclaredMethod("deleteAndProve"))
                     }
-                    Files.writeString(controlPath.resolve("cleanup-marker"), "private-control-canary")
-                    assertTrue(Files.list(workspace).use { it.findAny().isEmpty })
-                    invokeBoundaryPrivate(
-                        "probeEnvironmentFdOpener",
-                        arrayOf(Path::class.java, Path::class.java, Function0::class.java),
-                        BASH, validated, {},
-                    )
-                    assertEquals(setOf(controlPath), Files.list(parent).use { it.toList().toSet() })
+                    assertTrue(Files.list(parent).use { it.findAny().isEmpty })
                 } finally {
-                    invokePrivate(control, type.getDeclaredMethod("deleteAndProve"))
+                    invokePrivate(pinnedTemporaryParent, AutoCloseable::class.java.getMethod("close"))
                 }
-                assertTrue(Files.list(parent).use { it.findAny().isEmpty })
             }
             // Default Linux compatibility can be checked without creating any additional host-/tmp files.
             withTemporaryParent("/tmp") {
-                assertEquals(Path.of("/tmp"), invokeBoundaryPrivate("sandboxControlTemporaryParent", emptyArray()))
+                val pinned = requireNotNull(invokeBoundaryPrivate("sandboxControlTemporaryParent", emptyArray()))
+                try {
+                    assertEquals(
+                        Path.of("/tmp"),
+                        invokePrivate(
+                            pinned,
+                            Class.forName("decompengine.acp.PinnedSandboxControlTemporaryParent")
+                                .getDeclaredMethod("getPath"),
+                        ),
+                    )
+                } finally {
+                    invokePrivate(pinned, AutoCloseable::class.java.getMethod("close"))
+                }
             }
         }
     }
@@ -93,6 +154,7 @@ class LinuxBubblewrapBoundaryTest {
         assertFailsWith<IOException> {
             withRepositoryTemporaryDirectory("acp-setup-failure-") { partial ->
                 failedSetupBase = partial
+                assertTrue(partial.startsWith(repositoryRoot()))
                 Files.createDirectory(partial.resolve("partial-setup"))
                 throw IOException("injected setup failure")
             }
@@ -1485,31 +1547,19 @@ class LinuxBubblewrapBoundaryTest {
         assertEquals("not-found", output)
     }
 
-    private fun clearStaging(root: Path) {
-        if (!Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)) return
-        Files.walk(root).use { entries ->
-            entries.sorted(Comparator.reverseOrder()).filter { it != root }.forEach(Files::deleteIfExists)
-        }
-    }
-
     private fun <T> withRepositoryTemporaryDirectory(prefix: String, action: (Path) -> T): T {
-        var repository = Path.of("").toAbsolutePath().normalize()
-        while (!Files.exists(repository.resolve(".git"), LinkOption.NOFOLLOW_LINKS) ||
-            !Files.isRegularFile(repository.resolve("gradlew"), LinkOption.NOFOLLOW_LINKS)
-        ) {
-            repository = repository.parent ?: throw IllegalStateException("test is not running inside the repository")
-        }
-        val canonicalRepository = repository.toRealPath()
-        val temporaryParent = Files.createDirectories(repository.resolve("build/tmp/acp-boundary-tests")).toRealPath()
-        require(temporaryParent.startsWith(canonicalRepository)) { "ACP test temporary parent escaped the repository" }
-        val base = Files.createTempDirectory(temporaryParent, prefix).toAbsolutePath().normalize()
+        val base = createRepositoryTemporaryDirectory(prefix)
+        var actionFailure: Throwable? = null
         try {
             return action(base)
+        } catch (failure: Throwable) {
+            actionFailure = failure
+            throw failure
         } finally {
             try {
-                clearStaging(base)
-            } finally {
-                Files.deleteIfExists(base)
+                deleteRepositoryTemporaryDirectory(base)
+            } catch (cleanup: Throwable) {
+                actionFailure?.addSuppressed(cleanup) ?: throw cleanup
             }
         }
     }
@@ -1568,16 +1618,122 @@ class LinuxBubblewrapBoundaryTest {
             maximumCpuSeconds = 8,
         )
 
-        private fun compileStatic(source: Path, prefix: String): Path {
-            val output = createTempDirectory(prefix).resolve("program").toAbsolutePath().normalize()
-            val process = ProcessBuilder(
-                CC.toString(), "-std=c11", "-O2", "-static", source.toString(), "-o", output.toString(),
-            ).redirectErrorStream(true).start()
-            val diagnostics = process.inputStream.readNBytes(32 * 1024).toString(Charsets.UTF_8)
-            if (!process.waitFor(20, TimeUnit.SECONDS) || process.exitValue() != 0) {
-                throw IOException("static fixture compile failed: $diagnostics")
+        private val staticFixtureDirectories = ConcurrentLinkedQueue<Path>()
+
+        @AfterAll
+        @JvmStatic
+        fun removeStaticFixtures() {
+            val failures = mutableListOf<Throwable>()
+            while (true) {
+                val directory = staticFixtureDirectories.poll() ?: break
+                runCatching { deleteRepositoryTemporaryDirectory(directory) }
+                    .exceptionOrNull()?.let(failures::add)
             }
-            return output
+            if (failures.isNotEmpty()) {
+                val failure = IOException("static ACP test fixture cleanup was not proven", failures.first())
+                failures.drop(1).forEach(failure::addSuppressed)
+                throw failure
+            }
+        }
+
+        private fun repositoryRoot(): Path {
+            var repository = Path.of("").toAbsolutePath().normalize()
+            while (!Files.exists(repository.resolve(".git"), LinkOption.NOFOLLOW_LINKS) ||
+                !Files.isRegularFile(repository.resolve("gradlew"), LinkOption.NOFOLLOW_LINKS)
+            ) {
+                repository = repository.parent ?: throw IllegalStateException("test is not running inside the repository")
+            }
+            return repository.toRealPath()
+        }
+
+        private fun repositoryTemporaryParent(): Path {
+            val repository = repositoryRoot()
+            var current = repository
+            val created = mutableListOf<Path>()
+            try {
+                for (component in listOf("build", "tmp", "acp-boundary-tests")) {
+                    val child = current.resolve(component).normalize()
+                    if (!child.startsWith(repository) || child.parent != current || current.toRealPath() != current) {
+                        throw IOException("ACP test temporary parent would escape the repository")
+                    }
+                    if (!Files.exists(child, LinkOption.NOFOLLOW_LINKS)) {
+                        try {
+                            Files.createDirectory(child)
+                            created += child
+                        } catch (_: FileAlreadyExistsException) {
+                            // Another test worker created the same repository-local parent.
+                        }
+                    }
+                    val attributes = Files.readAttributes(
+                        child,
+                        BasicFileAttributes::class.java,
+                        LinkOption.NOFOLLOW_LINKS,
+                    )
+                    if (!attributes.isDirectory || attributes.isSymbolicLink || child.toRealPath() != child) {
+                        throw IOException("ACP test temporary parent contains a noncanonical directory")
+                    }
+                    current = child
+                }
+                return current
+            } catch (failure: Throwable) {
+                created.asReversed().forEach { path ->
+                    runCatching { Files.deleteIfExists(path) }.exceptionOrNull()?.let(failure::addSuppressed)
+                }
+                throw failure
+            }
+        }
+
+        private fun createRepositoryTemporaryDirectory(prefix: String): Path {
+            val parent = repositoryTemporaryParent()
+            val repository = repositoryRoot()
+            var base: Path? = null
+            try {
+                base = Files.createTempDirectory(parent, prefix).toAbsolutePath().normalize()
+                if (!base.startsWith(repository) || base.parent != parent || base.toRealPath() != base) {
+                    throw IOException("ACP test temporary directory escaped the repository")
+                }
+                return base
+            } catch (failure: Throwable) {
+                base?.let { path ->
+                    runCatching { deleteRepositoryTemporaryDirectory(path) }
+                        .exceptionOrNull()?.let(failure::addSuppressed)
+                }
+                throw failure
+            }
+        }
+
+        private fun deleteRepositoryTemporaryDirectory(directory: Path) {
+            val repository = repositoryRoot()
+            if (!directory.isAbsolute || directory != directory.normalize() || !directory.startsWith(repository)) {
+                throw IOException("refusing to clean an ACP test directory outside the repository")
+            }
+            if (Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) {
+                Files.walk(directory).use { entries ->
+                    entries.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+                }
+            } else {
+                Files.deleteIfExists(directory)
+            }
+        }
+
+        private fun compileStatic(source: Path, prefix: String): Path {
+            val directory = createRepositoryTemporaryDirectory(prefix)
+            try {
+                val output = directory.resolve("program")
+                val process = ProcessBuilder(
+                    CC.toString(), "-std=c11", "-O2", "-static", source.toString(), "-o", output.toString(),
+                ).redirectErrorStream(true).start()
+                val diagnostics = process.inputStream.readNBytes(32 * 1024).toString(Charsets.UTF_8)
+                if (!process.waitFor(20, TimeUnit.SECONDS) || process.exitValue() != 0) {
+                    throw IOException("static fixture compile failed: $diagnostics")
+                }
+                staticFixtureDirectories.add(directory)
+                return output
+            } catch (failure: Throwable) {
+                runCatching { deleteRepositoryTemporaryDirectory(directory) }
+                    .exceptionOrNull()?.let(failure::addSuppressed)
+                throw failure
+            }
         }
     }
 }
