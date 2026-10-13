@@ -2,6 +2,7 @@ package decompengine.acp
 
 import decompengine.agent.AgentAccessPolicy
 import decompengine.agent.AgentCancellation
+import decompengine.agent.AgentExecutionException
 import decompengine.agent.AgentExecutionRequest
 import decompengine.agent.AgentOperation
 import decompengine.agent.AgentPathRule
@@ -29,6 +30,8 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.writeText
+import kotlinx.coroutines.runBlocking
+import com.agentclientprotocol.protocol.AcpExpectedError
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -114,9 +117,9 @@ class LinuxBubblewrapBoundaryTest {
                             }
                         }
                         invokePrivate(control, type.getDeclaredMethod("requireCurrent"))
-                        val mountSourceGuard = type.getDeclaredMethod("requireMountSourceUnexposed", Path::class.java)
+                        val mountSourceGuard = type.getDeclaredMethod("requireMountSourceUnexposed", Path::class.java, Function0::class.java)
                         listOf(base, parent, controlPath, controlPath.resolve("child")).forEach { exposed ->
-                            assertFailsWith<IOException> { invokePrivate(control, mountSourceGuard, exposed) }
+                            assertFailsWith<IOException> { invokePrivate(control, mountSourceGuard, exposed, {}) }
                         }
                         Files.writeString(controlPath.resolve("cleanup-marker"), "private-control-canary")
                         assertEquals(setOf(replacementParent), Files.list(workspace).use { it.toList().toSet() })
@@ -239,26 +242,19 @@ class LinuxBubblewrapBoundaryTest {
                         accessPolicy = AgentAccessPolicy(listOf(callbackRule)),
                     )
                     assertTrue(callbackRequest.accessPolicy.allows(callbackPath, AgentOperation.READ_FILE))
-                    val filesystemBroker = AcpFilesystemBroker.open(
-                        callbackRequest,
-                        AcpFilesystemLimits(),
-                        AcpFilesystemAuditRecorder(),
-                    )
-                    try {
-                        assertTrue(requireNotNull(filesystemBroker.capability).readTextFile)
-                        val failure = assertFailsWith<IOException> {
-                            boundary.openTerminalBroker(
-                                callbackRequest,
-                                AgentCancellation.NONE,
-                                configuredPolicy = null,
-                                agentEnvironment = emptyMap(),
-                                audit = AcpTerminalAuditRecorder(),
-                            )
-                        }
-                        assertTrue(failure.message.orEmpty().contains("filesystem callback authority"))
-                    } finally {
-                        filesystemBroker.close()
+                    assertFailsWith<IOException> {
+                        AcpFilesystemBroker.open(callbackRequest, AcpFilesystemLimits(), AcpFilesystemAuditRecorder())
                     }
+                    val failure = assertFailsWith<IOException> {
+                        boundary.openTerminalBroker(
+                            callbackRequest,
+                            AgentCancellation.NONE,
+                            configuredPolicy = null,
+                            agentEnvironment = emptyMap(),
+                            audit = AcpTerminalAuditRecorder(),
+                        )
+                    }
+                    assertTrue(failure.message.orEmpty().contains("filesystem callback authority"))
 
                     val hostFile = workspace.resolve("host-only.txt").also {
                         Files.writeString(it, "must stay hidden")
@@ -309,6 +305,235 @@ class LinuxBubblewrapBoundaryTest {
                 }
             }
         }
+    }
+
+    @Test
+    fun `private controls reject native bind aliases and late callback exposure without denying disjoint grants`() {
+        withRepositoryTemporaryDirectory("acp-private-bind-") { base ->
+            val temporary = Files.createDirectory(base.resolve("tmp"))
+            val java = Path.of(System.getProperty("java.home"), "bin", "java")
+            val process = ProcessBuilder(
+                "unshare", "--user", "--map-root-user", "--mount", "--fork", "--",
+                java.toString(), "-XX:-UsePerfData", "-Djava.io.tmpdir=$temporary", "-Djna.tmpdir=$temporary",
+                "-cp", System.getProperty("java.class.path"),
+                LinuxBubblewrapBoundaryTest::class.java.name, "private-control-bind-probe", base.toString(),
+            ).redirectErrorStream(true).redirectOutput(base.resolve("native-probe.log").toFile()).start()
+            try {
+                assertTrue(process.waitFor(45, TimeUnit.SECONDS), "private-control bind probe timed out")
+                val output = Files.readString(base.resolve("native-probe.log"))
+                assertEquals(0, process.exitValue(), output)
+                assertTrue(output.contains("private-control-bind-probe: all native controls passed"), output)
+                output.lineSequence().filter { it.startsWith("private-control-bind-probe:") }.forEach(::println)
+            } finally {
+                if (process.isAlive) {
+                    process.destroyForcibly()
+                    assertTrue(process.waitFor(5, TimeUnit.SECONDS))
+                }
+            }
+        }
+    }
+
+    private fun runPrivateControlBindProbe(base: Path) {
+        fun command(vararg argv: String) {
+            val process = ProcessBuilder(*argv).redirectErrorStream(true).start()
+            assertTrue(process.waitFor(5, TimeUnit.SECONDS))
+            assertEquals(0, process.exitValue(), process.inputStream.readNBytes(4096).toString(Charsets.UTF_8))
+        }
+        command("mount", "--make-rprivate", "/")
+        val parent = Files.createDirectory(base.resolve("controls"))
+        val workspace = Files.createDirectory(base.resolve("workspace"))
+        val type = Class.forName("decompengine.acp.PinnedControlDirectory")
+        val parentType = Class.forName("decompengine.acp.PinnedSandboxControlTemporaryParent")
+        val companion = type.getDeclaredField("Companion").apply { isAccessible = true }.get(null)
+        val create = companion.javaClass.getDeclaredMethod("create", AcpRuntimeClosureLimits::class.java, parentType)
+        val guard = type.getDeclaredMethod("requireMountSourceUnexposed", Path::class.java, Function0::class.java)
+        val controls = mutableListOf<Any>()
+        val mounts = mutableListOf<Path>()
+        fun newControl(): Any = withTemporaryParent(parent.toString()) {
+            val pinnedParent = requireNotNull(invokeBoundaryPrivate("sandboxControlTemporaryParent", emptyArray()))
+            try {
+                requireNotNull(invokePrivate(companion, create, AcpRuntimeClosureLimits(64, 4096, 8), pinnedParent))
+                    .also(controls::add)
+            } finally {
+                invokePrivate(pinnedParent, AutoCloseable::class.java.getMethod("close"))
+            }
+        }
+        fun controlPath(control: Any): Path = invokePrivate(control, type.getDeclaredMethod("getPath")) as Path
+        fun alias(source: Path, name: String): Path {
+            val destination = base.resolve(name)
+            if (Files.isDirectory(source)) Files.createDirectory(destination) else Files.writeString(destination, "placeholder")
+            command("mount", "--bind", source.toString(), destination.toString())
+            mounts.add(destination)
+            return destination
+        }
+        fun request(root: Path, relative: String) = AgentExecutionRequest(
+            objective = "native private-control canary",
+            workspaceRoots = listOf(AgentWorkspaceRoot("workspace", root)),
+            accessPolicy = AgentAccessPolicy(listOf(AgentPathRule(AgentWorkspacePath("workspace", relative),
+                setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE)))),
+        )
+        fun denied(action: () -> Unit) {
+            try { action(); error("private-control authority unexpectedly succeeded") }
+            catch (_: AgentExecutionException) { }
+            catch (_: IOException) { }
+            catch (_: AcpExpectedError) { }
+        }
+        try {
+            val first = newControl()
+            val firstPath = controlPath(first)
+            val privateChild = Files.createDirectory(firstPath.resolve("private-child"))
+            val canary = Files.writeString(privateChild.resolve("canary.txt"), "controller-secret-canary")
+            val rootAlias = alias(firstPath, "alias-root")
+            val ancestorAlias = alias(parent, "alias-ancestor")
+            val childAlias = alias(privateChild, "alias-child")
+            val fileAlias = alias(canary, "alias-file")
+            for (source in listOf(rootAlias, ancestorAlias, childAlias, fileAlias)) {
+                denied { invokePrivate(first, guard, source, {}) }
+                denied { calculateAcpRuntimeManifestSha256(source, AcpRuntimeClosureLimits(64, 4096, 8)) }
+            }
+            for ((root, relative) in listOf(rootAlias to "private-child/canary.txt",
+                    ancestorAlias to "${firstPath.fileName}/private-child/canary.txt", childAlias to "canary.txt")) {
+                denied { AcpFilesystemBroker.open(request(root, relative), AcpFilesystemLimits(), AcpFilesystemAuditRecorder()).close() }
+            }
+            denied { AcpFilesystemBroker.open(request(base, "alias-file"), AcpFilesystemLimits(), AcpFilesystemAuditRecorder()).close() }
+            denied { requireAcpPrivateControlsUnexposed(ancestorAlias.resolve("${firstPath.fileName}/missing/new.txt"), false) }
+            val ordinary = Files.writeString(parent.resolve("ordinary.txt"), "ordinary")
+            AcpFilesystemBroker.open(request(ancestorAlias, "ordinary.txt"), AcpFilesystemLimits(), AcpFilesystemAuditRecorder()).use { broker ->
+                assertEquals("ordinary", runBlocking { broker.readTextFile("disjoint", ancestorAlias.resolve("ordinary.txt").toString(), null, null) }.content)
+                runBlocking { broker.writeTextFile("disjoint", ancestorAlias.resolve("ordinary.txt").toString(), "ordinary-updated") }
+            }
+            assertEquals("ordinary-updated", Files.readString(ordinary))
+            val late = Files.createDirectory(workspace.resolve("late"))
+            Files.writeString(late.resolve("canary.txt"), "ordinary-before-bind")
+            val audit = AcpFilesystemAuditRecorder()
+            AcpFilesystemBroker.open(request(workspace, "late/canary.txt"), AcpFilesystemLimits(), audit).use { broker ->
+                val second = newControl()
+                val secondPath = controlPath(second)
+                val secondCanary = Files.writeString(secondPath.resolve("canary.txt"), "second-controller-secret")
+                command("mount", "--bind", secondPath.toString(), late.toString())
+                mounts.add(late)
+                denied { runBlocking { broker.readTextFile("late", late.resolve("canary.txt").toString(), null, null) } }
+                denied { runBlocking { broker.writeTextFile("late", late.resolve("canary.txt").toString(), "must-not-land") } }
+                assertEquals("second-controller-secret", Files.readString(secondCanary))
+                assertEquals(setOf("canary.txt"), Files.list(secondPath).use { it.map { it.fileName.toString() }.toList().toSet() })
+                assertEquals(2, audit.snapshot().size)
+                assertTrue(audit.snapshot().none { it.outcome == AcpFilesystemAuditOutcome.ALLOWED })
+            }
+            // An already-open broker must also protect controls created later on its own mount.
+            val future = Files.createDirectory(workspace.resolve("future-controls"))
+            val futureRequest = AgentExecutionRequest(
+                objective = "deny a later control without a mount transition",
+                workspaceRoots = listOf(AgentWorkspaceRoot("workspace", workspace)),
+                accessPolicy = AgentAccessPolicy(listOf(AgentPathRule(AgentWorkspacePath("workspace", "future-controls"),
+                    setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE), recursive = true))),
+            )
+            val futureAudit = AcpFilesystemAuditRecorder()
+            AcpFilesystemBroker.open(futureRequest, AcpFilesystemLimits(), futureAudit).use { broker ->
+                val newControl = java.util.concurrent.CompletableFuture.supplyAsync {
+                    withTemporaryParent(future.toString()) {
+                        val pinned = requireNotNull(invokeBoundaryPrivate("sandboxControlTemporaryParent", emptyArray()))
+                        try { requireNotNull(invokePrivate(companion, create, AcpRuntimeClosureLimits(64, 4096, 8), pinned)) }
+                        finally { invokePrivate(pinned, AutoCloseable::class.java.getMethod("close")) }
+                    }
+                }.get(5, TimeUnit.SECONDS).also(controls::add)
+                val newPath = controlPath(newControl)
+                val secret = Files.writeString(newPath.resolve("future-canary.txt"), "future-controller-secret")
+                denied { runBlocking { broker.readTextFile("future", secret.toString(), null, null) } }
+                denied { runBlocking { broker.writeTextFile("future", secret.toString(), "must-not-land") } }
+                assertEquals("future-controller-secret", Files.readString(secret))
+                assertEquals(2, futureAudit.snapshot().size)
+                assertTrue(futureAudit.snapshot().none { it.outcome == AcpFilesystemAuditOutcome.ALLOWED })
+            }
+            // A retained live staging bind must reject a later control before creating any entry.
+            val staging = AcpWorkflowStagingRoot.createReadOnly("activeStaging", base)
+            val retained = invokeBoundaryPrivate("retainHostStagingRoots", arrayOf(List::class.java, Function0::class.java),
+                listOf(AcpSandboxRootGrant(staging, AcpSandboxRootMode.READ_ONLY)), {}) as List<*>
+            try {
+                withTemporaryParent(staging.path.toString()) {
+                    val pinned = requireNotNull(invokeBoundaryPrivate("sandboxControlTemporaryParent", emptyArray()))
+                    try { denied { invokePrivate(companion, create, AcpRuntimeClosureLimits(64, 4096, 8), pinned) } }
+                    finally { invokePrivate(pinned, AutoCloseable::class.java.getMethod("close")) }
+                }
+                assertTrue(Files.list(staging.path).use { it.findAny().isEmpty })
+                val stagingAlias = alias(staging.path, "active-staging-alias")
+                withTemporaryParent(stagingAlias.toString()) {
+                    val pinned = requireNotNull(invokeBoundaryPrivate("sandboxControlTemporaryParent", emptyArray()))
+                    try { denied { invokePrivate(companion, create, AcpRuntimeClosureLimits(64, 4096, 8), pinned) } }
+                    finally { invokePrivate(pinned, AutoCloseable::class.java.getMethod("close")) }
+                }
+                assertTrue(Files.list(staging.path).use { it.findAny().isEmpty })
+                val nested = Files.createDirectory(staging.path.resolve("nested-mount"))
+                command("mount", "-t", "tmpfs", "-o", "size=1048576,nr_inodes=32", "tmpfs", nested.toString())
+                try {
+                    val nestedFailure = assertFailsWith<IOException> {
+                        invokeBoundaryPrivate("retainHostStagingRoots", arrayOf(List::class.java, Function0::class.java),
+                            listOf(AcpSandboxRootGrant(staging, AcpSandboxRootMode.READ_ONLY)), {})
+                    }
+                    assertTrue(nestedFailure.message.orEmpty().contains("nested mount"))
+                    withTemporaryParent(nested.toString()) {
+                        val pinned = requireNotNull(invokeBoundaryPrivate("sandboxControlTemporaryParent", emptyArray()))
+                        try { denied { invokePrivate(companion, create, AcpRuntimeClosureLimits(64, 4096, 8), pinned) } }
+                        finally { invokePrivate(pinned, AutoCloseable::class.java.getMethod("close")) }
+                    }
+                    assertTrue(Files.list(nested).use { it.findAny().isEmpty })
+                } finally {
+                    command("umount", nested.toString())
+                    Files.delete(nested)
+                }
+            } finally {
+                invokeBoundaryPrivate("cleanupLaunchResources", arrayOf(List::class.java,
+                    Class.forName("decompengine.acp.SandboxEnvironmentFile"), List::class.java), emptyList<Any>(), null, retained)
+            }
+            withTemporaryParent(staging.path.toString()) {
+                val pinned = requireNotNull(invokeBoundaryPrivate("sandboxControlTemporaryParent", emptyArray()))
+                try { invokePrivate(companion, create, AcpRuntimeClosureLimits(64, 4096, 8), pinned).also { control ->
+                    assertTrue(control != null)
+                    invokePrivate(control, type.getDeclaredMethod("deleteAndProve"))
+                } } finally { invokePrivate(pinned, AutoCloseable::class.java.getMethod("close")) }
+            }
+            assertTrue(Files.list(staging.path).use { it.findAny().isEmpty })
+            // A replaced control name stays quarantined at both admitted and retained-fd locations.
+            val original = firstPath
+            val held = parent.resolve("retained-private-control")
+            Files.move(original, held)
+            Files.createDirectory(original)
+            try {
+                denied { invokePrivate(first, type.getDeclaredMethod("deleteAndProve")) }
+                denied { requireAcpPrivateControlsUnexposed(held.resolve("private-child/canary.txt"), false) }
+                denied { requireAcpPrivateControlsUnexposed(original, true) }
+                AcpFilesystemBroker.open(request(ancestorAlias, "ordinary.txt"), AcpFilesystemLimits(), AcpFilesystemAuditRecorder()).use { broker ->
+                    assertEquals("ordinary-updated", runBlocking { broker.readTextFile("quarantined-disjoint",
+                        ancestorAlias.resolve("ordinary.txt").toString(), null, null) }.content)
+                }
+            } finally {
+                Files.delete(original)
+                Files.move(held, original)
+            }
+            assertEquals("controller-secret-canary", Files.readString(canary))
+            val interrupted = assertFailsWith<IOException> {
+                invokePrivate(first, guard, workspace, { throw IOException("bounded-checkpoint") })
+            }
+            assertEquals("bounded-checkpoint", interrupted.message)
+            val closure = Files.createDirectory(workspace.resolve("ordinary-runtime-closure"))
+            repeat(128) { index -> Files.writeString(closure.resolve("file-$index"), "ordinary-$index") }
+            val closureStarted = System.nanoTime()
+            val digest = calculateAcpRuntimeManifestSha256(closure, AcpRuntimeClosureLimits(256, 8192, 8))
+            assertTrue(digest.matches(Regex("[0-9a-f]{64}")))
+            println("private-control-bind-probe: ordinary128fileClosureMilliseconds=" +
+                TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - closureStarted))
+            println("private-control-bind-probe: all native controls passed")
+        } finally {
+            mounts.asReversed().forEach { command("umount", it.toString()) }
+            controls.asReversed().forEach { control ->
+                val path = controlPath(control)
+                try { invokePrivate(control, type.getDeclaredMethod("deleteAndProve")) }
+                catch (failure: AcpCleanupProofFailure) {
+                    assertFalse(Files.exists(path), "failed cleanup must retain controls until a later proved removal")
+                }
+            }
+        }
+        // A deleted control cannot retain a stale-inode restriction on later ordinary directories.
+        requireAcpPrivateControlsUnexposed(workspace, true)
     }
 
     @Test
@@ -1513,11 +1738,11 @@ class LinuxBubblewrapBoundaryTest {
         entries.filter { it.fileName.toString().startsWith(".decomp-acp-control-") }.toList().toSet()
     }
 
-    private fun withTemporaryParent(value: String?, action: () -> Unit) {
+    private fun <T> withTemporaryParent(value: String?, action: () -> T): T {
         val previous = System.getProperty("java.io.tmpdir")
         try {
             if (value == null) System.clearProperty("java.io.tmpdir") else System.setProperty("java.io.tmpdir", value)
-            action()
+            return action()
         } finally {
             if (previous == null) System.clearProperty("java.io.tmpdir") else System.setProperty("java.io.tmpdir", previous)
         }
@@ -1576,6 +1801,12 @@ class LinuxBubblewrapBoundaryTest {
         .joinToString("") { "%02x".format(it) }
 
     private companion object {
+        @JvmStatic
+        fun main(args: Array<String>) {
+            require(args.size == 2 && args[0] == "private-control-bind-probe")
+            LinuxBubblewrapBoundaryTest().runPrivateControlBindProbe(Path.of(args[1]))
+        }
+
         val BWRAP: Path = Path.of("/usr/bin/bwrap")
         val PRLIMIT: Path = Path.of("/usr/bin/prlimit")
         val SYSTEMD_RUN: Path = Path.of("/usr/bin/systemd-run")

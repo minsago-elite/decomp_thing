@@ -218,6 +218,7 @@ internal class AcpFilesystemBroker private constructor(
                             )
                         }
                         requireReadableIdentity(opened.identity)
+                        requireAcpPrivateControlDescriptorUnexposed(opened, ::checkpointCancellation)
                         parent.verifyBindings()
                         parent.requireCurrentIdentity(resolved.fileName, authorized.identity)
                         val bytes = try {
@@ -229,6 +230,7 @@ internal class AcpFilesystemBroker private constructor(
                             )
                         }
                         requireReadableIdentity(LinuxFilesystemSyscalls.identity(opened.fd))
+                        requireAcpPrivateControlDescriptorUnexposed(opened, ::checkpointCancellation)
                         parent.verifyBindings()
                         parent.requireCurrentIdentity(resolved.fileName, authorized.identity)
                         selectLines(decodeUtf8(bytes), line, limit)
@@ -298,6 +300,7 @@ internal class AcpFilesystemBroker private constructor(
                                 if (original == null) {
                                     raceHook?.run(AcpFilesystemRaceStage.BEFORE_CREATE_RENAME, resolved.absolutePath)
                                     checkpointCancellation()
+                                    parent.verifyBindings()
                                     installCreate(
                                         parent,
                                         temporary,
@@ -308,6 +311,7 @@ internal class AcpFilesystemBroker private constructor(
                                 } else {
                                     raceHook?.run(AcpFilesystemRaceStage.BEFORE_REPLACE_EXCHANGE, resolved.absolutePath)
                                     checkpointCancellation()
+                                    parent.verifyBindings()
                                     installReplacement(
                                         parent,
                                         temporary,
@@ -481,6 +485,7 @@ internal class AcpFilesystemBroker private constructor(
                     }
                     raceHook?.run(AcpFilesystemRaceStage.AFTER_METADATA_VALIDATION, requestedPath)
                     raceHook?.run(AcpFilesystemRaceStage.BEFORE_OLD_UNLINK, requestedPath)
+                    parent.verifyBindings()
                     parent.deleteOwned(
                         temporary.name,
                         original.identity.key,
@@ -613,6 +618,7 @@ internal class AcpFilesystemBroker private constructor(
         val bindings = mutableListOf(DirectoryBinding(resolved.root.declaredPath, resolved.root.descriptor.identity.key))
         var current = resolved.root.descriptor
         try {
+            requireAcpPrivateControlDescriptorUnexposed(current, ::checkpointCancellation)
             val parent = resolved.relative.parent
             if (parent != null) {
                 for (componentPath in parent) {
@@ -634,6 +640,12 @@ internal class AcpFilesystemBroker private constructor(
                             AcpFilesystemAuditReason.MOUNT_TRANSITION,
                             "filesystem mount transitions beneath a workspace root are not allowed",
                         )
+                    }
+                    try {
+                        requireAcpPrivateControlDescriptorUnexposed(child, ::checkpointCancellation)
+                    } catch (failure: Throwable) {
+                        child.close()
+                        throw failure
                     }
                     opened += child
                     current = child
@@ -753,10 +765,17 @@ internal class AcpFilesystemBroker private constructor(
                     "filesystem mount transitions beneath a workspace root are not allowed",
                 )
             }
+            try {
+                requireAcpPrivateControlDescriptorUnexposed(opened, ::checkpointCancellation)
+            } catch (failure: Throwable) {
+                opened.close()
+                throw failure
+            }
             return opened
         }
 
         fun verifyBindings() {
+            requireAcpPrivateControlDescriptorUnexposed(descriptor, ::checkpointCancellation)
             bindings.forEach { binding ->
                 checkpointCancellation()
                 try {
@@ -829,6 +848,7 @@ internal class AcpFilesystemBroker private constructor(
                 ) {
                     throw IOException("secure temporary file does not have the required identity and mode")
                 }
+                verifyBindings()
                 LinuxFilesystemSyscalls.linkTemporaryAt(descriptor, fd, name)
                 materialized = true
                 raceHook?.run(AcpFilesystemRaceStage.AFTER_TEMPORARY_LINK, requestedPath)
@@ -933,7 +953,19 @@ internal class AcpFilesystemBroker private constructor(
             }
             val opened = mutableListOf<SecureRoot>()
             try {
-                request.workspaceRoots.forEach { root -> opened += openRoot(root) }
+                request.workspaceRoots.forEach { root -> opened += openRoot(root, request.cancellation) }
+                request.accessPolicy.pathRules.forEach { rule ->
+                    if (rule.operations.any { it in request.accessPolicy.allowedOperations &&
+                            it in setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE) }) {
+                        val root = request.workspaceRoots.single { it.id == rule.path.rootId }
+                        requireAcpPrivateControlsUnexposed(root.path.resolve(rule.path.relativePath), rule.recursive,
+                            cancellationCheck = {
+                                if (request.cancellation.isCancellationRequested()) {
+                                    throw IOException("ACP filesystem authority opening cancelled")
+                                }
+                            })
+                    }
+                }
                 return AcpFilesystemBroker(request, limits, audit,
                     opened.sortedByDescending { it.declaredPath.nameCount }, readEnabled, writeEnabled, raceHook)
             } catch (failure: Throwable) {
@@ -942,7 +974,7 @@ internal class AcpFilesystemBroker private constructor(
             }
         }
 
-        private fun openRoot(root: AgentWorkspaceRoot): SecureRoot {
+        private fun openRoot(root: AgentWorkspaceRoot, cancellation: decompengine.agent.AgentCancellation): SecureRoot {
             try {
                 LinuxFilesystemSyscalls.requireSupported(root.path)
                 val realPath = root.path.toRealPath()
@@ -969,6 +1001,14 @@ internal class AcpFilesystemBroker private constructor(
                             root,
                             "workspace root changed while authority was opened",
                         )
+                    }
+                    try {
+                        requireAcpPrivateControlDescriptorUnexposed(descriptor, cancellationCheck = {
+                            if (cancellation.isCancellationRequested()) throw IOException("ACP filesystem authority opening cancelled")
+                        })
+                    } catch (failure: Throwable) {
+                        descriptor.close()
+                        throw failure
                     }
                     return SecureRoot(root, root.path, descriptor)
                 }
