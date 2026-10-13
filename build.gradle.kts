@@ -15,6 +15,7 @@ import java.util.jar.Attributes
 import java.util.jar.JarEntry
 import java.util.jar.JarFile
 import java.util.jar.Manifest
+import org.gradle.api.tasks.testing.Test
 
 plugins {
     kotlin("jvm") version "2.4.0"
@@ -1316,95 +1317,140 @@ distributions {
     }
 }
 
+// Resident checks use process-wide RSS/high-water data. Keep these callback-boundary tests out
+// of the shared core-suite worker when CI requests isolated execution.
+private val v3BoundaryIsolatedTestMethods = listOf(
+    "decompengine.oracle.fulltree.FullTreeFunctionTruthSqliteV3Test.truth v3 final staging recheck rejects rewriting an earlier shard",
+    "decompengine.oracle.fulltree.FullTreeFunctionTruthSqliteV3Test.truth v3 publication retains member guards through rename and revokes raced output",
+)
+private val isolateV3BoundaryTests = providers.gradleProperty("isolateV3BoundaryTests")
+    .map { it == "true" }
+    .orElse(false)
+
+private fun configureOracleTestRuntime(testTask: Test) {
+    if (providers.environmentVariable("DECOMP_REQUIRE_GCC_ENGINE_CLI").orNull == "true") {
+        // The test JVM retains large captured records; this is not aggregate RSS qualification.
+        testTask.maxHeapSize = "8g"
+        testTask.outputs.upToDateWhen { false }
+        testTask.outputs.cacheIf("live GCC CLI qualification must execute") { false }
+    }
+    if (providers.environmentVariable("DECOMP_REQUIRE_GCC_DWARF_INTERFACES").orNull == "true") {
+        // Repeated bounded captures retain both bundles; modeled record limits are not JVM RSS.
+        testTask.maxHeapSize = "8g"
+        testTask.outputs.upToDateWhen { false }
+        testTask.outputs.cacheIf("retained GCC DWARF qualification must execute") { false }
+    }
+    // Keep the split test tasks on the same staged native/runtime inputs as the regular suite.
+    testTask.dependsOn("installDist")
+    testTask.dependsOn(stageOracleNativeLibraries)
+    testTask.dependsOn(":ghidra-bridge:stageBundle")
+    val testInstalledGhidra = providers.environmentVariable("RUN_REAL_GHIDRA").orNull == "true" ||
+        providers.environmentVariable("RUN_REAL_GHIDRA_CALL_SITES").orNull == "true"
+    if (testInstalledGhidra) testTask.dependsOn("installDist")
+    testTask.dependsOn(generateAcpGateHelperChecksum)
+    testTask.dependsOn(generateLlvmBehaviorHelperChecksum)
+    testTask.dependsOn(generateKotlinBootClasspathReference)
+    testTask.dependsOn(generateGccBundledGhidraReference)
+    testTask.dependsOn(generateLlvmHostedWorkerClasspathReference)
+    testTask.inputs.file(acpGateHelperBinary)
+    testTask.inputs.file(acpGateHelperChecksum)
+    testTask.inputs.file(llvmBehaviorHelperBinary)
+    testTask.inputs.file(llvmBehaviorHelperChecksum)
+    testTask.inputs.file(kotlinBootClasspathReference)
+    testTask.inputs.file(gccBundledGhidraReference)
+    testTask.inputs.file(llvmHostedWorkerClasspathReference)
+    testTask.inputs.dir(kotlinBootRuntimeDirectory)
+    testTask.doFirst {
+        testTask.systemProperty("decompengine.oracle.nativeLibraryDirectory", oracleNativeLibraryDirectory.get().asFile.absolutePath)
+        val ghidraBundle = if (testInstalledGhidra) layout.buildDirectory.dir("install/llm_bin_patch/libexec/ghidra")
+            else project(":ghidra-bridge").layout.buildDirectory.dir("bundle")
+        testTask.systemProperty("decompengine.ghidra.bundle", ghidraBundle.get().asFile.absolutePath)
+        val ghidraReference = if (testInstalledGhidra) {
+            layout.buildDirectory.file("install/llm_bin_patch/lib/gcc-bundled-ghidra-reference-v1.json")
+        } else gccBundledGhidraReference
+        testTask.systemProperty("decompengine.oracle.gcc.bundledGhidraReference", ghidraReference.get().asFile.absolutePath)
+        testTask.systemProperty("decompengine.oracle.gcc.bundledGhidraRoot", ghidraBundle.get().asFile.absolutePath)
+        testTask.systemProperty("decompengine.ghidra.provenanceArchive", File(gradle.gradleUserHomeDir,
+            "caches/decomp-ghidra/ghidra_12.1.3_PUBLIC_20260817.zip").absolutePath)
+        testTask.systemProperty(
+            "decompengine.acp.gateHelperExecutable",
+            acpGateHelperBinary.get().asFile.absolutePath,
+        )
+        testTask.systemProperty(
+            "decompengine.acp.gateHelperChecksum",
+            acpGateHelperChecksum.get().asFile.absolutePath,
+        )
+        testTask.systemProperty(
+            "decompengine.oracle.behavior.nativeHelperExecutable",
+            llvmBehaviorHelperBinary.get().asFile.absolutePath,
+        )
+        testTask.systemProperty(
+            "decompengine.oracle.behavior.nativeHelperChecksum",
+            llvmBehaviorHelperChecksum.get().asFile.absolutePath,
+        )
+        testTask.systemProperty(
+            "decompengine.oracle.gcc.bootKeeperClasspathReference",
+            kotlinBootClasspathReference.get().asFile.absolutePath,
+        )
+        testTask.systemProperty(
+            "decompengine.oracle.gcc.bootKeeperClasspathRoot",
+            kotlinBootRuntimeDirectory.get().asFile.absolutePath,
+        )
+        testTask.systemProperty(
+            "decompengine.oracle.behavior.hostedWorkerClasspathReference",
+            llvmHostedWorkerClasspathReference.get().asFile.absolutePath,
+        )
+        testTask.systemProperty(
+            "decompengine.oracle.behavior.hostedWorkerClasspathRoot",
+            kotlinBootRuntimeDirectory.get().asFile.absolutePath,
+        )
+    }
+    testTask.environment(
+        "DECOMP_ACP_PARENT_SECRET_CANARY",
+        "decomp-acp-parent-secret-canary-must-not-cross-the-sandbox",
+    )
+}
+
 tasks.test {
-    when (val shard = providers.gradleProperty("ciTestShard").orNull) {
+    val shard = providers.gradleProperty("ciTestShard").orNull
+    when (shard) {
         null -> useJUnitPlatform()
         "core" -> useJUnitPlatform { excludeTags("ci-live") }
         "live" -> useJUnitPlatform { includeTags("ci-live") }
         else -> error("unsupported ciTestShard: $shard")
     }
-    if (providers.environmentVariable("DECOMP_REQUIRE_GCC_ENGINE_CLI").orNull == "true") {
-        // The test JVM retains large captured records; this is not aggregate RSS qualification.
-        maxHeapSize = "8g"
-        outputs.upToDateWhen { false }
-        outputs.cacheIf("live GCC CLI qualification must execute") { false }
+    if (isolateV3BoundaryTests.get() && shard != "live") {
+        filter { v3BoundaryIsolatedTestMethods.forEach { excludeTestsMatching(it) } }
     }
-    if (providers.environmentVariable("DECOMP_REQUIRE_GCC_DWARF_INTERFACES").orNull == "true") {
-        // Repeated bounded captures retain both bundles; modeled record limits are not JVM RSS.
-        maxHeapSize = "8g"
-        outputs.upToDateWhen { false }
-        outputs.cacheIf("retained GCC DWARF qualification must execute") { false }
-    }
-    // The installed CLI smoke test exercises the packaged launcher.
-    dependsOn("installDist")
-    dependsOn(stageOracleNativeLibraries)
-    dependsOn(":ghidra-bridge:stageBundle")
-    val testInstalledGhidra = providers.environmentVariable("RUN_REAL_GHIDRA").orNull == "true" ||
-        providers.environmentVariable("RUN_REAL_GHIDRA_CALL_SITES").orNull == "true"
-    if (testInstalledGhidra) dependsOn("installDist")
-    dependsOn(generateAcpGateHelperChecksum)
-    dependsOn(generateLlvmBehaviorHelperChecksum)
-    dependsOn(generateKotlinBootClasspathReference)
-    dependsOn(generateGccBundledGhidraReference)
-    dependsOn(generateLlvmHostedWorkerClasspathReference)
-    inputs.file(acpGateHelperBinary)
-    inputs.file(acpGateHelperChecksum)
-    inputs.file(llvmBehaviorHelperBinary)
-    inputs.file(llvmBehaviorHelperChecksum)
-    inputs.file(kotlinBootClasspathReference)
-    inputs.file(gccBundledGhidraReference)
-    inputs.file(llvmHostedWorkerClasspathReference)
-    inputs.dir(kotlinBootRuntimeDirectory)
-    doFirst {
-        systemProperty("decompengine.oracle.nativeLibraryDirectory", oracleNativeLibraryDirectory.get().asFile.absolutePath)
-        val ghidraBundle = if (testInstalledGhidra) layout.buildDirectory.dir("install/llm_bin_patch/libexec/ghidra")
-            else project(":ghidra-bridge").layout.buildDirectory.dir("bundle")
-        systemProperty("decompengine.ghidra.bundle", ghidraBundle.get().asFile.absolutePath)
-        val ghidraReference = if (testInstalledGhidra) {
-            layout.buildDirectory.file("install/llm_bin_patch/lib/gcc-bundled-ghidra-reference-v1.json")
-        } else gccBundledGhidraReference
-        systemProperty("decompengine.oracle.gcc.bundledGhidraReference", ghidraReference.get().asFile.absolutePath)
-        systemProperty("decompengine.oracle.gcc.bundledGhidraRoot", ghidraBundle.get().asFile.absolutePath)
-        systemProperty("decompengine.ghidra.provenanceArchive", File(gradle.gradleUserHomeDir,
-            "caches/decomp-ghidra/ghidra_12.1.3_PUBLIC_20260817.zip").absolutePath)
-        systemProperty(
-            "decompengine.acp.gateHelperExecutable",
-            acpGateHelperBinary.get().asFile.absolutePath,
-        )
-        systemProperty(
-            "decompengine.acp.gateHelperChecksum",
-            acpGateHelperChecksum.get().asFile.absolutePath,
-        )
-        systemProperty(
-            "decompengine.oracle.behavior.nativeHelperExecutable",
-            llvmBehaviorHelperBinary.get().asFile.absolutePath,
-        )
-        systemProperty(
-            "decompengine.oracle.behavior.nativeHelperChecksum",
-            llvmBehaviorHelperChecksum.get().asFile.absolutePath,
-        )
-        systemProperty(
-            "decompengine.oracle.gcc.bootKeeperClasspathReference",
-            kotlinBootClasspathReference.get().asFile.absolutePath,
-        )
-        systemProperty(
-            "decompengine.oracle.gcc.bootKeeperClasspathRoot",
-            kotlinBootRuntimeDirectory.get().asFile.absolutePath,
-        )
-        systemProperty(
-            "decompengine.oracle.behavior.hostedWorkerClasspathReference",
-            llvmHostedWorkerClasspathReference.get().asFile.absolutePath,
-        )
-        systemProperty(
-            "decompengine.oracle.behavior.hostedWorkerClasspathRoot",
-            kotlinBootRuntimeDirectory.get().asFile.absolutePath,
-        )
-    }
-    environment(
-        "DECOMP_ACP_PARENT_SECRET_CANARY",
-        "decomp-acp-parent-secret-canary-must-not-cross-the-sandbox",
-    )
+    configureOracleTestRuntime(this)
 }
+
+private fun registerV3BoundaryIsolatedTest(taskName: String, testMethod: String) =
+    tasks.register<Test>(taskName) {
+        group = "verification"
+        description = "Runs one V3 publication-boundary test in a fresh test JVM"
+        testClassesDirs = sourceSets["test"].output.classesDirs
+        classpath = sourceSets["test"].runtimeClasspath
+        useJUnitPlatform { excludeTags("ci-live") }
+        filter { includeTestsMatching(testMethod) }
+        forkEvery = 1
+        maxParallelForks = 1
+        outputs.upToDateWhen { false }
+        outputs.cacheIf("V3 boundary tests must measure a fresh test JVM") { false }
+        onlyIf {
+            isolateV3BoundaryTests.get() && providers.gradleProperty("ciTestShard").orNull != "live"
+        }
+        configureOracleTestRuntime(this)
+    }
+
+private val v3BoundaryFinalStagingIsolated = registerV3BoundaryIsolatedTest(
+    "v3BoundaryFinalStagingIsolated", v3BoundaryIsolatedTestMethods[0],
+)
+private val v3BoundaryPublicationIsolated = registerV3BoundaryIsolatedTest(
+    "v3BoundaryPublicationIsolated", v3BoundaryIsolatedTestMethods[1],
+)
+v3BoundaryFinalStagingIsolated.configure { shouldRunAfter(tasks.named("test")) }
+v3BoundaryPublicationIsolated.configure { shouldRunAfter(v3BoundaryFinalStagingIsolated) }
 
 dependencies {
     implementation("com.agentclientprotocol:acp:0.30.1")

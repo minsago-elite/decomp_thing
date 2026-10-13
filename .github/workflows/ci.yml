@@ -280,6 +280,10 @@ jobs:
             build/test-results/full-suite
             build/reports/tests/test
             build/test-results/test
+            build/reports/tests/v3BoundaryFinalStagingIsolated
+            build/test-results/v3BoundaryFinalStagingIsolated
+            build/reports/tests/v3BoundaryPublicationIsolated
+            build/test-results/v3BoundaryPublicationIsolated
       - name: Release finite ACP quota fixture
         if: always()
         run: bash scripts/ci-release-acp-quota.sh
