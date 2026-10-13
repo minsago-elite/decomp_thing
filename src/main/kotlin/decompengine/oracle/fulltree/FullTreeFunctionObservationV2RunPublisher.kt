@@ -257,6 +257,7 @@ internal object FullTreeFunctionObservationV2RunPublisher {
         outputRoot: Path,
         maximumWorkers: Int = 1,
         limits: FullTreeFunctionObservationV2RunLimits = FullTreeFunctionObservationV2RunLimits(),
+        traversal: FullTreeSourceIdentityTraversal = FullTreeSourceIdentityTraversal.CANONICAL,
     ): FullTreeFunctionObservationV2RunPublication = translateV2RunFailure {
         require(maximumWorkers in 1..minOf(32, limits.shard.control.maximumWorkers, limits.run.maximumWorkers))
         FullTreeScopeControl.validate(scope, limits.shard.control)
@@ -426,6 +427,7 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                             sourceFactAdmissionBytes = nextSerializedBytes
                             modeledRetainedBytes = nextRetained
                         },
+                        traversal = traversal,
                     )
                     if (scan.inventoryArtifactSha256 != inventorySha256 || scan.richArtifactSha256 != richSha256) {
                         v2RunFail("source-identity scan inputs differ from the authenticated run")
@@ -788,6 +790,7 @@ internal object FullTreeFunctionObservationV2RunPublisher {
         scope: AuthenticatedFullTreeScope,
         scratchParent: Path,
         limits: FullTreeFunctionObservationV2RunLimits = FullTreeFunctionObservationV2RunLimits(),
+        traversal: FullTreeSourceIdentityTraversal = FullTreeSourceIdentityTraversal.CANONICAL,
     ): FullTreeFunctionObservationV2RunPublication = translateV2RunFailure {
         val (stableScratchParent, scratchIdentity) = requireStableDirectory(
             scratchParent,
@@ -839,6 +842,7 @@ internal object FullTreeFunctionObservationV2RunPublisher {
                 regeneratedRoot,
                 workers,
                 limits,
+                traversal,
             )
             if (
                 candidate.runSha256 != regenerated.binding.runSha256 ||

@@ -10,6 +10,29 @@ import java.util.LinkedHashSet
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.JsonObject
 
+/** Execution order only: authenticated membership, reference semantics and wire identities stay fixed. */
+internal enum class FullTreeSourceIdentityTraversalOrder(
+    val reverseCompilationUnits: Boolean,
+    val reverseDies: Boolean,
+    val reverseLookupInsertion: Boolean,
+) {
+    FORWARD(false, false, false),
+    REVERSE_CUS(true, false, false),
+    REVERSE_DIES(false, true, false),
+    PERMUTE_MAPS(false, false, true),
+    REVERSE_ALL(true, true, true),
+}
+
+internal data class FullTreeSourceIdentityTraversal(
+    val order: FullTreeSourceIdentityTraversalOrder = FullTreeSourceIdentityTraversalOrder.FORWARD,
+    /** Observes actual processing; global claim phases carry the candidate hash and use offset zero. */
+    val onVisit: ((phase: String, compilationUnitOffset: Long, dieOffset: Long?) -> Unit)? = null,
+) {
+    companion object {
+        val CANONICAL = FullTreeSourceIdentityTraversal()
+    }
+}
+
 /** Result of one complete, authenticated source-entity pass. No partial fact list escapes a failed pass. */
 internal data class FullTreeSourceEntityIdentityScan(
     val richArtifactSha256: String,
@@ -66,6 +89,7 @@ internal object FullTreeSourceEntityIdentityProducer {
         residentBudgetBytes: Long? = null,
         /** Admits shard-local collision copies before the source rows are copied and retained. */
         factAdjustmentAdmission: ((collisionCopyBytes: Long, collisionExpansionBytes: Long) -> Unit)? = null,
+        traversal: FullTreeSourceIdentityTraversal = FullTreeSourceIdentityTraversal.CANONICAL,
     ): FullTreeSourceEntityIdentityScan {
         FullTreeScopeControl.validate(scope, controlLimits)
         requireStableDirectory(scratchParent, "source-identity scratch parent")
@@ -208,12 +232,14 @@ internal object FullTreeSourceEntityIdentityProducer {
             throw FullTreeControlException("source-identity inventory unit count changed after admission")
         }
         val inventoryUnitDocuments = inventoryUnitArray.controlObjects("inventory units")
-        val unitByOffset = inventoryUnitDocuments.associateBy {
+        val lookupUnits = if (traversal.order.reverseLookupInsertion) inventoryUnitDocuments.asReversed() else inventoryUnitDocuments
+        val unitByOffset = lookupUnits.associateBy {
             parseDwarfOffset(it.controlString("dwarfOffset"), "inventory DWARF offset")
         }
         if (unitByOffset.size != inventoryUnitDocuments.size) {
             throw FullTreeControlException("authenticated inventory repeats a DWARF compilation-unit offset")
         }
+        traversal.onVisit?.let { observe -> unitByOffset.keys.forEach { observe("unit-lookup", it, null) } }
         val identityDwarfLimits = controlLimits.copy(
             maximumCompilationUnits = inventoryUnitDocuments.size,
             maximumDwarfMetadataBytes = admitted.boundedUnitMetadataBytes,
@@ -252,7 +278,7 @@ internal object FullTreeSourceEntityIdentityProducer {
                 checkpoint,
                 factAdmission,
             )
-            val anchorClaims = SourceIdentityAnchorClaims(budget, anchorClaim)
+            val anchorClaims = SourceIdentityAnchorClaims(budget, anchorClaim, traversal)
             val facts = ArrayList<FullTreeSourceEntityFact>()
             val layout = FullTreeElfLayout.scanLayout(artifact, "rich artifact", producerLimits.elfLayoutLimits, checkpoint)
             val executable = FullTreeElfExecutableMembership.fromSorted(layout.executableRanges)
@@ -269,7 +295,9 @@ internal object FullTreeSourceEntityIdentityProducer {
                     inventoryUnitDocuments.size,
                     headerParseBudget,
                 )
-                val headersByOffset = headers.associateBy { it.offset }
+                val lookupHeaders = if (traversal.order.reverseLookupInsertion) headers.asReversed() else headers
+                val headersByOffset = lookupHeaders.associateBy { it.offset }
+                traversal.onVisit?.let { observe -> headersByOffset.keys.forEach { observe("header-lookup", it, null) } }
                 val retainedTags = sourceIdentityRetainedTags()
                 val maximumRetainedBytes = minOf(
                     producerLimits.dieLimits.maximumRetainedBytes,
@@ -295,7 +323,8 @@ internal object FullTreeSourceEntityIdentityProducer {
                 )
                 val sourceRevision = scope.sourceLock.controlObject("revision").controlString("commit")
 
-                inputs.shard.units.forEach { unitDocument ->
+                val unitVisitation = if (traversal.order.reverseCompilationUnits) inputs.shard.units.asReversed() else inputs.shard.units
+                unitVisitation.forEach { unitDocument ->
                     val unitOffset = parseDwarfOffset(
                         unitDocument.controlString("dwarfOffset"),
                         "source-identity inventory DWARF offset",
@@ -305,6 +334,7 @@ internal object FullTreeSourceEntityIdentityProducer {
                     val inventoryUnit = unitByOffset[unitOffset]
                         ?: throw FullTreeControlException("source-identity unit is absent from the inventory")
                     val owner = repository.load(header)
+                    traversal.onVisit?.invoke("cu", unitOffset, null)
                     scannedDies = Math.addExact(scannedDies, owner.index.physicalRecordCount)
                     requireSourceIdentityScannedDiesWithinBound(scannedDies, maximumScannedDies)
 
@@ -327,8 +357,11 @@ internal object FullTreeSourceEntityIdentityProducer {
                             anchorClaims = anchorClaims,
                             checkpoint = checkpoint,
                         )
-                        owner.index.recordsInPhysicalOrder.forEach { record ->
+                        val records = owner.index.recordsInPhysicalOrder
+                        val dieVisitation = if (traversal.order.reverseDies) records.asReversed() else records
+                        dieVisitation.forEach { record ->
                             if (record.tag in SOURCE_ENTITY_TAGS) {
+                                traversal.onVisit?.invoke("die", unitOffset, record.offset)
                                 val fact = ids.fact(record)
                                 if (fact != null) {
                                     budget.retain(fact)
@@ -773,6 +806,7 @@ internal fun sourceIdentityLineTableBudget(
 private class SourceIdentityAnchorClaims(
     private val budget: SourceIdentityRetentionBudget,
     private val externalClaim: ((kind: FullTreeSourceAnchorKind, candidateId: String, physicalClaimId: String) -> Unit)?,
+    private val traversal: FullTreeSourceIdentityTraversal,
 ) {
     private val claims = HashMap<String, MutableSet<String>>()
 
@@ -790,10 +824,13 @@ private class SourceIdentityAnchorClaims(
     fun collisionReport(checkpoint: ((String) -> Unit)? = null): SourceIdentityAnchorCollisionReport {
         val collisions = HashMap<String, List<String>>()
         var copiedCollisionIds = 0L
-        claims.entries.forEachIndexed { index, (candidateId, sourceEntityIds) ->
-            if (index.toLong() % SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL == 0L) {
+        var visitedClaims = 0L
+        fun reconcile(entry: Map.Entry<String, MutableSet<String>>) {
+            val (candidateId, sourceEntityIds) = entry
+            if (visitedClaims++ % SOURCE_IDENTITY_DEADLINE_CHECKPOINT_INTERVAL == 0L) {
                 checkpoint?.invoke("while reconciling source-anchor collisions")
             }
+            traversal.onVisit?.invoke("claim:$candidateId", 0L, null)
             if (sourceEntityIds.size > 1) {
                 budget.charge(sourceEntityIds.size.toLong() * 16L + 64L, "source-anchor collision report")
                 val retainedIds = ArrayList<String>(sourceEntityIds.size)
@@ -806,6 +843,12 @@ private class SourceIdentityAnchorClaims(
                 collisions[candidateId] = retainedIds
             }
         }
+        // Rotate the actual HashMap iterator with one retained entry, without copying its population.
+        // The map-only mode holds extraction/insertion order fixed, so the permutation is observable.
+        val iterator = claims.entries.iterator()
+        val deferred = if (traversal.order.reverseLookupInsertion && iterator.hasNext()) iterator.next() else null
+        while (iterator.hasNext()) reconcile(iterator.next())
+        deferred?.let(::reconcile)
         checkpoint?.invoke("after reconciling source-anchor collisions")
         return SourceIdentityAnchorCollisionReport(byCandidateId = collisions)
     }
