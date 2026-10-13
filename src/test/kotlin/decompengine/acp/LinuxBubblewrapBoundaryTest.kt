@@ -349,6 +349,7 @@ class LinuxBubblewrapBoundaryTest {
         val guard = type.getDeclaredMethod("requireMountSourceUnexposed", Path::class.java, Function0::class.java)
         val controls = mutableListOf<Any>()
         val mounts = mutableListOf<Path>()
+        var verifiedScaleDigest: String? = null
         fun newControl(): Any = withTemporaryParent(parent.toString()) {
             val pinnedParent = requireNotNull(invokeBoundaryPrivate("sandboxControlTemporaryParent", emptyArray()))
             try {
@@ -521,6 +522,101 @@ class LinuxBubblewrapBoundaryTest {
             assertTrue(digest.matches(Regex("[0-9a-f]{64}")))
             println("private-control-bind-probe: ordinary128fileClosureMilliseconds=" +
                 TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - closureStarted))
+            repeat(4096 - 128) { index -> Files.writeString(closure.resolve("scale-$index"), "ordinary-$index") }
+            val scaleLimits = AcpRuntimeClosureLimits(8192, 131072, 8)
+            fun openDescriptorCount() = Files.list(Path.of("/proc/self/fd")).use { it.count() }
+            val retainedDescriptorCount = openDescriptorCount()
+            val scaleStarted = System.nanoTime()
+            val scaleDigest = calculateAcpRuntimeManifestSha256(closure, scaleLimits)
+            verifiedScaleDigest = scaleDigest
+            assertTrue(scaleDigest.matches(Regex("[0-9a-f]{64}")))
+            assertEquals(4096L, Files.list(closure).use { it.count() })
+            assertEquals(retainedDescriptorCount, openDescriptorCount(), "successful scope must release retained descriptors")
+            println("private-control-bind-probe: ordinary4096fileClosureMilliseconds=" +
+                TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - scaleStarted))
+            println("private-control-bind-probe: scaleEntries=4097 activeControls=${controls.size} actualBindMounts=${mounts.size}")
+
+            // A second invocation can register and remove a real control while the manifest is
+            // running. The lease owns independent descriptors and refuses even restored membership.
+            var checks = 0
+            var registryChanged = false
+            val registryFailure = assertFailsWith<IOException> {
+                calculateAcpRuntimeManifestSha256(closure, scaleLimits) {
+                    if (++checks == 400) {
+                        java.util.concurrent.CompletableFuture.runAsync {
+                            val concurrent = newControl()
+                            invokePrivate(concurrent, type.getDeclaredMethod("deleteAndProve"))
+                            controls.remove(concurrent)
+                        }.get(5, TimeUnit.SECONDS)
+                        registryChanged = true
+                    }
+                }
+            }
+            assertTrue(registryChanged)
+            assertTrue(registryFailure.message.orEmpty().contains("private controls changed"), registryFailure.toString())
+            assertEquals(retainedDescriptorCount, openDescriptorCount(), "registry drift must release retained descriptors")
+
+            // Keep the original mountinfo handle: moving an existing bind and restoring it before
+            // the final table comparison must still leave a detectable kernel event.
+            val mountSource = Files.createDirectory(workspace.resolve("mount-event-source"))
+            val mountInitial = alias(mountSource, "mount-event-initial")
+            val mountMoved = Files.createDirectory(base.resolve("mount-event-moved"))
+            checks = 0
+            var mountChanged = false
+            val mountFailure = assertFailsWith<IOException> {
+                calculateAcpRuntimeManifestSha256(closure, scaleLimits) {
+                    if (++checks == 400) {
+                        command("mount", "--move", mountInitial.toString(), mountMoved.toString())
+                        command("mount", "--move", mountMoved.toString(), mountInitial.toString())
+                        mountChanged = true
+                    }
+                }
+            }
+            assertTrue(mountChanged)
+            assertTrue(mountFailure.message.orEmpty().contains("host mounts changed"), mountFailure.toString())
+            assertEquals(retainedDescriptorCount, openDescriptorCount(), "mount drift must release retained descriptors")
+
+            val replacedFile = Files.writeString(workspace.resolve("manifest-file-replacement"), "ordinary-old-content")
+            var replaced = false
+            val replacementFailure = assertFailsWith<IOException> {
+                calculateAcpRuntimeManifestSha256(replacedFile, AcpRuntimeClosureLimits(16, 4096, 8)) {
+                    if (!replaced && Thread.currentThread().stackTrace.any { it.methodName == "sha256" }) {
+                        Files.delete(replacedFile)
+                        Files.writeString(replacedFile, "replacement-content")
+                        replaced = true
+                    }
+                }
+            }
+            assertTrue(replaced)
+            assertTrue(replacementFailure.message.orEmpty().contains("authenticated source pathname"), replacementFailure.toString())
+            assertEquals("replacement-content", Files.readString(replacedFile))
+            assertEquals(retainedDescriptorCount, openDescriptorCount(), "unknown descriptor names must release the scope")
+
+            // A bind root can change physical root coordinates without changing its mount id.
+            // Cross-mount scopes retain the full guard and reject before hashing private bytes.
+            val renameSource = Files.createDirectory(workspace.resolve("rename-source"))
+            Files.writeString(renameSource.resolve("ordinary.txt"), "ordinary-before-rename")
+            val renameAlias = alias(renameSource, "rename-alias")
+            val hiddenSource = firstPath.resolve("renamed-runtime")
+            checks = 0
+            var renamed = false
+            try {
+                denied {
+                    calculateAcpRuntimeManifestSha256(renameAlias, AcpRuntimeClosureLimits(64, 4096, 8)) {
+                        if (!renamed && Thread.currentThread().stackTrace.any { it.methodName == "readIdentity" }) {
+                            Files.move(renameSource, hiddenSource)
+                            Files.writeString(hiddenSource.resolve("ordinary.txt"), "controller-secret-after-rename")
+                            renamed = true
+                        }
+                    }
+                }
+                assertTrue(renamed)
+                assertEquals("controller-secret-after-rename", Files.readString(hiddenSource.resolve("ordinary.txt")))
+            } finally {
+                if (renamed) Files.move(hiddenSource, renameSource)
+            }
+            assertEquals(scaleDigest, calculateAcpRuntimeManifestSha256(closure, scaleLimits))
+            println("private-control-bind-probe: scoped manifest scale, concurrent registry, mount restore, bind rename passed")
             println("private-control-bind-probe: all native controls passed")
         } finally {
             mounts.asReversed().forEach { command("umount", it.toString()) }
@@ -534,6 +630,23 @@ class LinuxBubblewrapBoundaryTest {
         }
         // A deleted control cannot retain a stale-inode restriction on later ordinary directories.
         requireAcpPrivateControlsUnexposed(workspace, true)
+        val closure = workspace.resolve("ordinary-runtime-closure")
+        val scaleLimits = AcpRuntimeClosureLimits(8192, 131072, 8)
+        assertEquals(verifiedScaleDigest, calculateAcpRuntimeManifestSha256(closure, scaleLimits))
+        var emptyChecks = 0
+        var admittedFromEmpty = false
+        val emptyFailure = assertFailsWith<IOException> {
+            calculateAcpRuntimeManifestSha256(closure, scaleLimits) {
+                if (++emptyChecks == 400) {
+                    val concurrent = newControl()
+                    try { invokePrivate(concurrent, type.getDeclaredMethod("deleteAndProve")) }
+                    finally { controls.remove(concurrent) }
+                    admittedFromEmpty = true
+                }
+            }
+        }
+        assertTrue(admittedFromEmpty)
+        assertTrue(emptyFailure.message.orEmpty().contains("private controls changed"), emptyFailure.toString())
     }
 
     @Test

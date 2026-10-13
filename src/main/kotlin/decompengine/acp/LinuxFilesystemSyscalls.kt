@@ -116,6 +116,25 @@ internal object LinuxFilesystemSyscalls {
         false
     }
 
+    /** Checks the original mountinfo handle's event epoch without rereading its metadata. */
+    fun mountMetadataChanged(handle: LinuxDescriptor): Boolean = handle.whileOpen { descriptor ->
+        val polled = Memory(POLLFD_BYTES.toLong())
+        polled.setInt(0, descriptor)
+        polled.setShort(Int.SIZE_BYTES.toLong(), (POLLPRI or POLLERR).toShort())
+        polled.setShort((Int.SIZE_BYTES + Short.SIZE_BYTES).toLong(), 0)
+        while (true) {
+            val result = libc.poll(polled, NativeLong(1), 0)
+            if (result >= 0) {
+                val events = polled.getShort((Int.SIZE_BYTES + Short.SIZE_BYTES).toLong()).toInt() and 0xffff
+                if (events and (POLLNVAL or POLLHUP) != 0) throw IOException("mountinfo event descriptor is invalid")
+                return@whileOpen result > 0 && events and (POLLPRI or POLLERR) != 0
+            }
+            if (Native.getLastError() != EINTR) throw syscallFailure("inspect host mount metadata events")
+        }
+        @Suppress("UNREACHABLE_CODE")
+        false
+    }
+
     /** Signals the pinned process, never a later process reusing its numeric PID. */
     private fun signalProcess(handle: LinuxProcessDescriptor, signal: Int): Boolean =
         handle.signalWhileOpen { descriptor ->
@@ -984,6 +1003,7 @@ internal object LinuxFilesystemSyscalls {
     private const val SIGTERM = 15
     private const val SIGKILL = 9
     private const val POLLIN = 0x001
+    private const val POLLPRI = 0x002
     private const val POLLERR = 0x008
     private const val POLLHUP = 0x010
     private const val POLLNVAL = 0x020
