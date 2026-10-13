@@ -1,5 +1,7 @@
 package decompengine.oracle.fulltree
 
+import decompengine.acp.LinuxFilesystemSyscalls
+import decompengine.acp.LinuxSyscallException
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.OracleSchemas
@@ -9,14 +11,19 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.nio.file.attribute.PosixFilePermission
 import java.nio.file.attribute.PosixFilePermissions
 import java.util.Comparator
+import java.util.concurrent.CancellationException
 import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
+import kotlin.test.assertNotNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -25,6 +32,531 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
 class FullTreeFunctionTruthSqliteV3Test {
+    @Test
+    fun `truth v3 final original recheck rejects rewriting an earlier member`() =
+        inControlTemporaryDirectory { root ->
+            // Snapshot authentication is byte-oriented; compiler provenance is exercised separately.
+            val original = privateDirectory(root.resolve("original"))
+            val shards = privateDirectory(original.resolve("shards"))
+            Files.writeString(original.resolve("exclusions.json"), "{\"fixture\":\"exclusions\"}")
+            Files.writeString(original.resolve("index.json"), "{\"fixture\":\"index\"}")
+            Files.writeString(shards.resolve("fixture.json"), "{\"fixture\":\"shard\"}")
+            val originalBytes = v3TreeBytes(original)
+            val totalBytes = originalBytes.values.sumOf { it.size.toLong() }
+            val identity = FullTreeFunctionTruthSqliteV3.V3StableTreeSnapshot.captureIdentity(
+                original, setOf("shards"), 3L, totalBytes, {}, setOf("index.json", "exclusions.json"),
+            )
+            val snapshot = identity.createSnapshot(
+                original, root.resolve("pinned"), setOf("shards"), null, {}, totalBytes,
+            )
+            snapshot.verifyOriginalUnchanged()
+            val target = original.resolve("exclusions.json")
+            val before = Files.readAllBytes(target)
+            val changed = before.copyOf().also { it[0] = '['.code.toByte() }
+            var checkedExclusions = false
+            var callbackFired = false
+            var rewriteSucceeded: Boolean? = null
+            val failure = runCatching {
+                snapshot.verifyOriginalUnchanged { stage ->
+                    if (stage == "while rechecking pinned truth-v3 input member exclusions.json") {
+                        checkedExclusions = true
+                    }
+                    if (!callbackFired && stage == "while rechecking pinned truth-v3 input member index.json") {
+                        assertTrue(checkedExclusions, "the hostile write must follow the original exclusions check")
+                        callbackFired = true
+                        rewriteSucceeded = tryNonblockingSameLengthRewrite(target, changed)
+                    }
+                }
+            }.exceptionOrNull()
+            assertTrue(callbackFired, "the final original-member checkpoint must execute")
+            val wrote = assertNotNull(rewriteSucceeded, "the hostile write must complete or be refused without blocking")
+            assertEquals(before.size.toLong(), Files.size(target), "the hostile write preserves file size")
+            assertEquals((if (wrote) changed else before).toList(), Files.readAllBytes(target).toList(),
+                "a successful hostile write must change the original member bytes")
+            assertEquals(originalBytes, v3TreeBytes(snapshot.root), "the private snapshot stays unchanged")
+            val rejection = assertIs<IllegalArgumentException>(failure,
+                "the final original recheck must reject an earlier-member rewrite or lease-break attempt; " +
+                    "rewriteSucceeded=$rewriteSucceeded")
+            assertTrue(listOf("lease", "chang", "mutat").any { rejection.causeMessageChain().contains(it, ignoreCase = true) },
+                "rejection must identify the hostile mutation: ${rejection.causeMessageChain()}")
+        }
+
+    @Test
+    fun `truth v3 final staging recheck rejects rewriting an earlier shard`() =
+        inControlTemporaryDirectory { root ->
+            val fixture = createBoundaryTruthFixture(root)
+            val generated = fixture.generated
+            val generatedBytes = v3TreeBytes(generated.root)
+            val staging = copyTree(generated.root, root.resolve("staging"))
+            val index = parseControlObject(staging.resolve("index.json"))
+            val indexBytes = Files.readAllBytes(staging.resolve("index.json"))
+            val firstShard = staging.resolve((index.controlArray("shards").first() as JsonObject).controlString("path"))
+            val before = Files.readAllBytes(firstShard)
+            val changed = before.copyOf().also { it[0] = '['.code.toByte() }
+            val snapshot = FullTreeFunctionTruthSqliteV3.freezeAndVerifyV3Staging(
+                staging, index, indexBytes, generated.outputBytes,
+            )
+            FullTreeFunctionTruthSqliteV3.reauthenticateV3Staging(snapshot, index, indexBytes, generated.outputBytes)
+            var hashedFirstShard = false
+            var callbackFired = false
+            var rewriteSucceeded: Boolean? = null
+            val failure = runCatching {
+                FullTreeOracleOperationCheckpoint.withCheckpoint({ stage ->
+                    if (stage == "while hashing truth-v3 member ${firstShard.fileName}") {
+                        hashedFirstShard = true
+                    }
+                    if (!callbackFired && stage == "while hashing truth-v3 member exclusions.json") {
+                        assertTrue(hashedFirstShard, "the hostile write must follow the first shard hash")
+                        callbackFired = true
+                        rewriteSucceeded = tryNonblockingSameLengthRewrite(firstShard, changed)
+                    }
+                }) {
+                    FullTreeFunctionTruthSqliteV3.reauthenticateV3Staging(
+                        snapshot, index, indexBytes, generated.outputBytes,
+                    )
+                }
+            }.exceptionOrNull()
+            assertTrue(callbackFired, "the final staging-member checkpoint must execute")
+            val wrote = assertNotNull(rewriteSucceeded, "the hostile write must complete or be refused without blocking")
+            assertEquals(before.size.toLong(), Files.size(firstShard), "the hostile write preserves file size")
+            assertEquals((if (wrote) changed else before).toList(), Files.readAllBytes(firstShard).toList(),
+                "a successful hostile write must change the already-hashed shard bytes")
+            assertEquals(generatedBytes, v3TreeBytes(generated.root), "the authenticated fixture stays unchanged")
+            assertDirectoryEmpty(fixture.scratch)
+            val rejection = assertIs<IllegalArgumentException>(failure,
+                "the final staging recheck must reject an earlier-shard rewrite or lease-break attempt; " +
+                    "rewriteSucceeded=$rewriteSucceeded")
+            assertTrue(listOf("lease", "chang", "mutat").any { rejection.causeMessageChain().contains(it, ignoreCase = true) },
+                "rejection must identify the hostile mutation: ${rejection.causeMessageChain()}")
+        }
+
+    @Test
+    fun `truth v3 publication retains member guards through rename and revokes raced output`() =
+        inControlTemporaryDirectory { root ->
+            val fixture = createBoundaryTruthFixture(root)
+            val generated = fixture.generated
+            val generatedBytes = v3TreeBytes(generated.root)
+            val firstShardPath = (generated.index.controlArray("shards").first() as JsonObject).controlString("path")
+            assertTrue(generated.index.controlArray("shards").size in 1..255,
+                "the small fixture emits exactly one indexed-shard checkpoint per hash pass")
+
+            val successParent = privateDirectory(root.resolve("successful-commit"))
+            val successTarget = successParent.resolve("published")
+            var successStaging: Path? = null
+            var inputChecks = 0
+            FullTreeFunctionTruthSqliteV3.V3Publication.create(successTarget, generated.outputBytes).use { publication ->
+                successStaging = publication.staging
+                publication.commit(boundaryProjection(generated, publication.staging), {}, verifyInputs = { inputChecks++ })
+            }
+            assertEquals(2, inputChecks, "successful commit verifies inputs before and after rename")
+            assertFalse(Files.exists(assertNotNull(successStaging), LinkOption.NOFOLLOW_LINKS))
+            assertEquals(generatedBytes, v3TreeBytes(successTarget), "successful publication preserves all authenticated bytes")
+            assertEquals(listOf("published"), Files.list(successParent).use { paths -> paths.map { it.fileName.toString() }.toList() })
+
+            val rewriteParent = privateDirectory(root.resolve("rejected-staging-rewrite"))
+            val rewriteTarget = rewriteParent.resolve("rejected")
+            var hashPass = 0
+            var firstShardHashed = false
+            var rewriteCallbackFired = false
+            var rewriteSucceeded: Boolean? = null
+            val rewriteFailure = runCatching {
+                FullTreeFunctionTruthSqliteV3.V3Publication.create(rewriteTarget, generated.outputBytes).use { publication ->
+                    val projection = boundaryProjection(generated, publication.staging)
+                    val firstShard = publication.staging.resolve(firstShardPath)
+                    val before = Files.readAllBytes(firstShard)
+                    val changed = before.copyOf().also { it[0] = '['.code.toByte() }
+                    val checkpoint: (String) -> Unit = { stage ->
+                        if (stage == "while hashing truth-v3 indexed shards") {
+                            hashPass++
+                            firstShardHashed = false
+                        }
+                        if (hashPass == 2 && stage == "while hashing truth-v3 member ${firstShard.fileName}") {
+                            firstShardHashed = true
+                        }
+                        if (hashPass == 2 && !rewriteCallbackFired && stage == "while hashing truth-v3 member exclusions.json") {
+                            assertTrue(firstShardHashed, "the final rehash must already have visited the attacked shard")
+                            rewriteCallbackFired = true
+                            val wrote = tryNonblockingSameLengthRewrite(firstShard, changed)
+                            rewriteSucceeded = wrote
+                            assertEquals(before.size.toLong(), Files.size(firstShard), "the hostile write preserves file size")
+                            assertEquals((if (wrote) changed else before).toList(), Files.readAllBytes(firstShard).toList())
+                        }
+                    }
+                    FullTreeOracleOperationCheckpoint.withCheckpoint(checkpoint) {
+                        publication.commit(projection, checkpoint, verifyInputs = {})
+                    }
+                }
+            }.exceptionOrNull()
+            assertTrue(rewriteCallbackFired, "the actual final publication rehash must reach the hostile writer")
+            assertNotNull(rewriteSucceeded, "the nonblocking writer must finish or be refused")
+            val rewriteRejection = assertIs<IllegalArgumentException>(rewriteFailure,
+                "publication must reject the earlier-shard write attempt; rewriteSucceeded=$rewriteSucceeded")
+            assertTrue(listOf("lease", "chang", "mutat").any { rewriteRejection.causeMessageChain().contains(it, ignoreCase = true) },
+                "rejection must identify the hostile mutation: ${rewriteRejection.causeMessageChain()}")
+            assertFalse(Files.exists(rewriteTarget, LinkOption.NOFOLLOW_LINKS), "a rejected rehash must not publish a target")
+            assertDirectoryEmpty(rewriteParent)
+
+            val replacementParent = privateDirectory(root.resolve("rejected-destination-replacement"))
+            val replacementTarget = replacementParent.resolve("rejected")
+            val replacementMember = replacementParent.resolve("replacement-exclusions.json")
+            Files.copy(generated.root.resolve("exclusions.json"), replacementMember, StandardCopyOption.COPY_ATTRIBUTES)
+            var replacementCallbackFired = false
+            val replacementFailure = runCatching {
+                FullTreeFunctionTruthSqliteV3.V3Publication.create(replacementTarget, generated.outputBytes).use { publication ->
+                    publication.commit(boundaryProjection(generated, publication.staging), { stage ->
+                        if (stage == "after truth-v3 publication rename") {
+                            assertFalse(replacementCallbackFired, "the publication rename checkpoint is reached once")
+                            val targetMember = replacementTarget.resolve("exclusions.json")
+                            val beforeIdentity = Files.getAttribute(targetMember, "unix:ino", LinkOption.NOFOLLOW_LINKS)
+                            val beforeBytes = Files.readAllBytes(targetMember)
+                            val originalMode = Files.getPosixFilePermissions(replacementTarget, LinkOption.NOFOLLOW_LINKS)
+                            try {
+                                Files.setPosixFilePermissions(replacementTarget, originalMode + PosixFilePermission.OWNER_WRITE)
+                                Files.move(replacementMember, targetMember, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                            } finally {
+                                Files.setPosixFilePermissions(replacementTarget, originalMode)
+                            }
+                            assertTrue(beforeIdentity != Files.getAttribute(targetMember, "unix:ino", LinkOption.NOFOLLOW_LINKS),
+                                "the hostile replacement must change the destination inode")
+                            assertEquals(beforeBytes.toList(), Files.readAllBytes(targetMember).toList(),
+                                "destination replacement preserves bytes to isolate pathname binding")
+                            replacementCallbackFired = true
+                        }
+                    }, verifyInputs = {})
+                }
+            }.exceptionOrNull()
+            assertTrue(replacementCallbackFired, "the destination replacement must occur after the actual rename")
+            val replacementRejection = assertIs<IllegalArgumentException>(replacementFailure,
+                "publication must reject a byte-identical destination member replacement")
+            assertTrue(listOf("identit", "chang", "mutat").any { replacementRejection.causeMessageChain().contains(it, ignoreCase = true) },
+                "rejection must identify the destination replacement: ${replacementRejection.causeMessageChain()}")
+            assertFalse(Files.exists(replacementTarget, LinkOption.NOFOLLOW_LINKS), "the identified raced target must be revoked")
+            assertDirectoryEmpty(replacementParent)
+            assertEquals(generatedBytes, v3TreeBytes(generated.root), "all publication controls leave their source fixture unchanged")
+            assertDirectoryEmpty(fixture.scratch)
+        }
+
+    @Test
+    fun `truth v3 boundary guards admit exact overlapping trees and release cancelled leases`() =
+        inControlTemporaryDirectory { root ->
+            val first = privateDirectory(root.resolve("first"))
+            privateDirectory(first.resolve("shards"))
+            Files.writeString(first.resolve("exclusions.json"), "{\"fixture\":\"exclusions\"}")
+            Files.writeString(first.resolve("index.json"), "{\"fixture\":\"index\"}")
+            Files.writeString(first.resolve("shards/fixture.json"), "{\"fixture\":\"shard\"}")
+            val second = copyTree(first, root.resolve("second"))
+            val expected = v3TreeBytes(first).mapValues { (_, bytes) ->
+                FullTreeFunctionTruthSqliteV3.V3ExpectedTreeMember(bytes.size.toLong(), OracleArtifacts.sha256(bytes.toByteArray()))
+            }
+            val totalBytes = expected.values.sumOf { it.bytes }
+            fun identity(tree: Path) = FullTreeFunctionTruthSqliteV3.V3StableTreeSnapshot.captureIdentity(
+                tree, setOf("shards"), expected.size.toLong(), totalBytes, {}, setOf("index.json", "exclusions.json"),
+            )
+            val firstSnapshot = identity(first)
+            val secondSnapshot = identity(second)
+            val fixedAllowance = 96L * 1024L * 1024L
+            val firstGuardBytes = expected.keys.sumOf {
+                FullTreeFunctionTruthSqliteV3.V3BoundaryGuards.modeledGuardBytes(first.resolve(it))
+            }
+            val secondGuardBytes = expected.keys.sumOf {
+                FullTreeFunctionTruthSqliteV3.V3BoundaryGuards.modeledGuardBytes(second.resolve(it))
+            }
+            val exactAllowance = fixedAllowance + firstGuardBytes + secondGuardBytes
+            FullTreeFunctionTruthSqliteV3.V3BoundaryGuards(maximumRetainedBytes = exactAllowance).use { guards ->
+                assertEquals(0..2, firstSnapshot.retainAtBoundary(first, expected, guards, {}))
+                assertEquals(3..5, secondSnapshot.retainAtBoundary(second, expected, guards, {}))
+                guards.verifyUnchanged()
+            }
+
+            val firstMember = first.resolve("exclusions.json")
+            val firstBytes = Files.readAllBytes(firstMember)
+            var openedSecondMember = false
+            FullTreeFunctionTruthSqliteV3.V3BoundaryGuards(maximumRetainedBytes = exactAllowance - 1L).use { guards ->
+                firstSnapshot.retainAtBoundary(first, expected, guards, {})
+                val rejection = assertFailsWith<FullTreeFunctionTruthV3Exception>(
+                    "one byte below the aggregate allowance must reject the second simultaneously held tree",
+                ) {
+                    secondSnapshot.retainAtBoundary(second, expected, guards) { stage ->
+                        if (stage.startsWith("while rechecking truth-v3 publication member ")) openedSecondMember = true
+                    }
+                }
+                assertTrue(rejection.message.orEmpty().contains("guard metadata exceeds retained-working-set bound"),
+                    "the second tree must fail aggregate metadata admission: ${rejection.message}")
+                assertFalse(openedSecondMember, "the second tree is rejected before opening any member")
+                assertFalse(tryNonblockingSameLengthRewrite(firstMember, firstBytes),
+                    "the first tree remains leased while the overlapping tree is rejected")
+            }
+            assertTrue(tryNonblockingSameLengthRewrite(firstMember, firstBytes),
+                "closing the rejected transaction releases the first tree's retained lease")
+
+            val cancellation = CancellationException("cancel after retaining exclusions.json")
+            var exclusionsCheckpoint = false
+            var cancellationCheckpoint = false
+            val observedCancellation = assertFailsWith<CancellationException> {
+                FullTreeFunctionTruthSqliteV3.V3BoundaryGuards(
+                    maximumRetainedBytes = fixedAllowance + firstGuardBytes,
+                ).use { guards ->
+                    firstSnapshot.retainAtBoundary(first, expected, guards) { stage ->
+                        if (stage == "while rechecking truth-v3 publication member exclusions.json") exclusionsCheckpoint = true
+                        if (stage == "while rechecking truth-v3 publication member index.json") {
+                            assertTrue(exclusionsCheckpoint, "cancellation occurs after the earlier member was opened")
+                            cancellationCheckpoint = true
+                            throw cancellation
+                        }
+                    }
+                }
+            }
+            assertSame(cancellation, observedCancellation, "the checkpoint's exact cancellation propagates")
+            assertTrue(cancellationCheckpoint)
+            val changed = firstBytes.copyOf().also { it[0] = '['.code.toByte() }
+            assertTrue(tryNonblockingSameLengthRewrite(firstMember, changed),
+                "cancellation closes the earlier member guard instead of retaining its read lease")
+            assertEquals(changed.toList(), Files.readAllBytes(firstMember).toList())
+            assertTrue(tryNonblockingSameLengthRewrite(firstMember, firstBytes))
+            assertEquals(v3TreeBytes(first), v3TreeBytes(second), "cleanup preserves both snapshot populations")
+        }
+
+    @Test
+    fun `truth v3 terminal verification rejects replacing an earlier private tree`() =
+        inControlTemporaryDirectory { root ->
+            val (_, snapshot) = createBoundaryByteSnapshot(root)
+            snapshot.verifyOriginalUnchanged()
+            val before = v3TreeBytes(snapshot.root)
+            val oldRootInode = Files.getAttribute(snapshot.root, "unix:ino", LinkOption.NOFOLLOW_LINKS)
+            val oldMemberInodes = before.keys.associateWith {
+                Files.getAttribute(snapshot.root.resolve(it), "unix:ino", LinkOption.NOFOLLOW_LINKS)
+            }
+            val replacement = copyTree(snapshot.root, root.resolve("replacement"))
+            val displaced = root.resolve("displaced-private-tree")
+            var indexCallbacks = 0
+            var earlierTreeVisited = false
+            var callbackFired = false
+            val failure = runCatching {
+                snapshot.verifyOriginalUnchanged { stage ->
+                    if (stage == "while verifying held truth-v3 boundary member shards/fixture.json" && indexCallbacks == 1) {
+                        earlierTreeVisited = true
+                    }
+                    if (stage == "while verifying held truth-v3 boundary member index.json") {
+                        indexCallbacks++
+                        if (indexCallbacks == 2) {
+                            assertTrue(earlierTreeVisited, "the private tree was fully checked before the later original-member callback")
+                            Files.move(snapshot.root, displaced, StandardCopyOption.ATOMIC_MOVE)
+                            Files.move(replacement, snapshot.root, StandardCopyOption.ATOMIC_MOVE)
+                            callbackFired = true
+                        }
+                    }
+                }
+            }.exceptionOrNull()
+            assertTrue(callbackFired, "the late held-member callback must replace the earlier private tree")
+            assertEquals(oldRootInode, Files.getAttribute(displaced, "unix:ino", LinkOption.NOFOLLOW_LINKS))
+            assertTrue(oldRootInode != Files.getAttribute(snapshot.root, "unix:ino", LinkOption.NOFOLLOW_LINKS),
+                "the replacement must change the private tree's pathname binding")
+            assertEquals(oldMemberInodes, before.keys.associateWith {
+                Files.getAttribute(displaced.resolve(it), "unix:ino", LinkOption.NOFOLLOW_LINKS)
+            }, "all previously guarded file inodes remain untouched in the displaced tree")
+            assertEquals(before, v3TreeBytes(displaced))
+            assertEquals(before, v3TreeBytes(snapshot.root), "the replacement is byte-identical")
+            val rejection = assertIs<IllegalArgumentException>(failure,
+                "terminal verification must reject replacing an earlier tree after its full member check")
+            assertTrue(listOf("identit", "chang", "mutat").any { rejection.causeMessageChain().contains(it, ignoreCase = true) },
+                "rejection must identify the late tree replacement: ${rejection.causeMessageChain()}")
+        }
+
+    @Test
+    fun `truth v3 terminal verification rejects a late unexpected candidate member`() =
+        inControlTemporaryDirectory { root ->
+            val (candidate, snapshot) = createBoundaryByteSnapshot(root)
+            assertTrue(PosixFilePermission.OWNER_WRITE in Files.getPosixFilePermissions(candidate),
+                "the candidate root is owner-writable from its initial identity capture")
+            snapshot.verifyOriginalUnchanged()
+            val before = v3TreeBytes(candidate)
+            var shardCallbacks = 0
+            var callbackFired = false
+            val unexpected = candidate.resolve("unexpected.json")
+            val failure = runCatching {
+                snapshot.verifyOriginalUnchanged { stage ->
+                    if (stage == "while verifying held truth-v3 boundary member shards/fixture.json") {
+                        shardCallbacks++
+                        if (shardCallbacks == 2) {
+                            Files.writeString(unexpected, "{\"fixture\":\"unexpected\"}")
+                            callbackFired = true
+                        }
+                    }
+                }
+            }.exceptionOrNull()
+            assertTrue(callbackFired, "the unexpected member must be added during the last original-member callback")
+            assertEquals("{\"fixture\":\"unexpected\"}", Files.readString(unexpected))
+            val after = v3TreeBytes(candidate)
+            assertEquals(before.keys + "unexpected.json", after.keys, "the mutation changes exact tree membership")
+            assertEquals(before, after.filterKeys { it != "unexpected.json" }, "all authenticated members retain their bytes")
+            assertEquals(before, v3TreeBytes(snapshot.root), "the private snapshot stays unchanged")
+            val rejection = assertIs<IllegalArgumentException>(failure,
+                "terminal verification must reject a late member added after the previous exact-membership enumeration")
+            assertTrue(listOf("membership", "unexpected", "chang", "mutat").any { rejection.causeMessageChain().contains(it, ignoreCase = true) },
+                "rejection must identify the late membership mutation: ${rejection.causeMessageChain()}")
+        }
+
+    @Test
+    fun `truth v3 terminal verification rejects replacing a previously checked raw input ancestor`() =
+        inControlTemporaryDirectory { root ->
+            val (_, snapshot) = createBoundaryByteSnapshot(root)
+            val rawRoot = privateDirectory(root.resolve("raw-inputs"))
+            val rawPaths = listOf("rich.elf", "stripped.elf", "inventory.json", "elf-index.json").map { name ->
+                rawRoot.resolve(name).also { Files.writeString(it, "raw fixture $name") }
+            }
+            // Raw inputs already permit hard links; terminal checking must preserve that contract.
+            Files.createLink(rawRoot.resolve("rich-alias.elf"), rawPaths.first())
+            assertEquals(2, (Files.getAttribute(rawPaths.first(), "unix:nlink", LinkOption.NOFOLLOW_LINKS) as Number).toInt())
+            val before = v3TreeBytes(rawRoot)
+            val oldRootInode = Files.getAttribute(rawRoot, "unix:ino", LinkOption.NOFOLLOW_LINKS)
+            val oldMemberInodes = before.keys.associateWith {
+                Files.getAttribute(rawRoot.resolve(it), "unix:ino", LinkOption.NOFOLLOW_LINKS)
+            }
+            val replacement = copyTree(rawRoot, root.resolve("replacement-raw-inputs"))
+            val displaced = root.resolve("displaced-raw-inputs")
+            val snapshotBefore = v3TreeBytes(snapshot.root)
+            var callbackFired = false
+            var indexCallbacks = 0
+            val failure = FullTreeFunctionTruthSqliteV3.V3RawInputGuards.open(
+                rawPaths[0], rawPaths[1], rawPaths[2], rawPaths[3], FullTreeFunctionTruthV3Limits(),
+            ).use { rawInputs ->
+                rawInputs.verifyUnchanged("positive raw-input boundary control")
+                FullTreeFunctionTruthSqliteV3.V3BoundaryGuards(
+                    alreadyGuardedPaths = rawPaths,
+                    alreadyGuardedInputs = rawInputs,
+                ).use { guards ->
+                    snapshot.retainOriginalUntilBoundary(guards)
+                    guards.verifyUnchanged()
+                }
+                runCatching {
+                    rawInputs.verifyUnchanged("before callback-bearing tree verification")
+                    FullTreeFunctionTruthSqliteV3.V3BoundaryGuards(
+                        alreadyGuardedPaths = rawPaths,
+                        alreadyGuardedInputs = rawInputs,
+                    ).use { guards ->
+                        snapshot.retainOriginalUntilBoundary(guards)
+                        guards.verifyUnchanged { stage ->
+                            if (stage == "while verifying held truth-v3 boundary member index.json") {
+                                indexCallbacks++
+                                if (indexCallbacks == 2) {
+                                    Files.move(rawRoot, displaced, StandardCopyOption.ATOMIC_MOVE)
+                                    Files.move(replacement, rawRoot, StandardCopyOption.ATOMIC_MOVE)
+                                    callbackFired = true
+                                }
+                            }
+                        }
+                    }
+                }.exceptionOrNull()
+            }
+            assertTrue(callbackFired, "the raw-only ancestor must be replaced during a later held tree-member callback")
+            assertEquals(oldRootInode, Files.getAttribute(displaced, "unix:ino", LinkOption.NOFOLLOW_LINKS))
+            assertTrue(oldRootInode != Files.getAttribute(rawRoot, "unix:ino", LinkOption.NOFOLLOW_LINKS),
+                "the replacement changes the raw ancestor's pathname binding")
+            assertEquals(oldMemberInodes, before.keys.associateWith {
+                Files.getAttribute(displaced.resolve(it), "unix:ino", LinkOption.NOFOLLOW_LINKS)
+            }, "the already checked raw inodes remain untouched")
+            assertEquals(before, v3TreeBytes(displaced))
+            assertEquals(before, v3TreeBytes(rawRoot), "the replacement raw input tree is byte-identical")
+            assertEquals(snapshotBefore, v3TreeBytes(snapshot.root), "the guarded truth snapshot stays unchanged")
+            val rejection = assertIs<IllegalArgumentException>(failure,
+                "terminal verification must recheck raw pathname bindings after callback-bearing tree checks")
+            assertTrue(listOf("identit", "chang", "mutat", "path").any { rejection.causeMessageChain().contains(it, ignoreCase = true) },
+                "rejection must identify the late raw ancestor replacement: ${rejection.causeMessageChain()}")
+        }
+
+    private fun createBoundaryByteSnapshot(root: Path): Pair<Path, FullTreeFunctionTruthSqliteV3.V3StableTreeSnapshot> {
+        val candidate = privateDirectory(root.resolve("candidate"))
+        privateDirectory(candidate.resolve("shards"))
+        Files.writeString(candidate.resolve("exclusions.json"), "{\"fixture\":\"exclusions\"}")
+        Files.writeString(candidate.resolve("index.json"), "{\"fixture\":\"index\"}")
+        Files.writeString(candidate.resolve("shards/fixture.json"), "{\"fixture\":\"shard\"}")
+        val totalBytes = v3TreeBytes(candidate).values.sumOf { it.size.toLong() }
+        val identity = FullTreeFunctionTruthSqliteV3.V3StableTreeSnapshot.captureIdentity(
+            candidate, setOf("shards"), 3L, totalBytes, {}, setOf("index.json", "exclusions.json"),
+        )
+        return candidate to identity.createSnapshot(
+            candidate, root.resolve("pinned"), setOf("shards"), null, {}, totalBytes,
+        )
+    }
+
+    private data class BoundaryTruthFixture(val generated: FullTreeFunctionTruthV3Generation, val scratch: Path)
+
+    private fun createBoundaryTruthFixture(root: Path): BoundaryTruthFixture {
+        // Production publishers share the small authenticated control fixture; no compiler or golden substitution.
+        val fixture = createFunctionTruthFixture(root.resolve("inputs"))
+        val limits = tightScratchLimits()
+        val observationRoot = root.resolve("observations-v2")
+        val observation = FullTreeFunctionObservationV2RunPublisher.generateAndPublish(
+            richArtifact = fixture.rich,
+            inventoryPath = fixture.inventoryPath,
+            scope = fixture.scope,
+            scratchParent = fixture.scratch,
+            outputRoot = observationRoot,
+            maximumWorkers = 2,
+            limits = limits.observationV2,
+        )
+        val generated = FullTreeFunctionTruthSqliteV3.generateAndPublish(
+            richArtifact = fixture.rich,
+            strippedArtifact = fixture.stripped,
+            inventoryPath = fixture.inventoryPath,
+            elfFunctionIndex = fixture.elfIndex,
+            observationV2Root = observationRoot,
+            expectedObservationV2IndexArtifactSha256 = observation.binding.indexArtifactSha256,
+            scope = fixture.scope,
+            scratchParent = fixture.scratch,
+            outputRoot = root.resolve("truth-v3"),
+            limits = limits,
+        )
+        assertDirectoryEmpty(fixture.scratch)
+        return BoundaryTruthFixture(generated, fixture.scratch)
+    }
+
+    private fun boundaryProjection(
+        generated: FullTreeFunctionTruthV3Generation,
+        staging: Path,
+    ): FullTreeFunctionTruthSqliteV3.V3Projection {
+        privateDirectory(staging.resolve("shards"))
+        Files.walk(generated.root).use { paths ->
+            paths.filter { Files.isRegularFile(it, LinkOption.NOFOLLOW_LINKS) }.forEach { input ->
+                Files.copy(input, staging.resolve(generated.root.relativize(input)), StandardCopyOption.COPY_ATTRIBUTES)
+            }
+        }
+        return FullTreeFunctionTruthSqliteV3.V3Projection(
+            root = staging,
+            index = generated.index,
+            indexBytes = Files.readAllBytes(generated.root.resolve("index.json")),
+            indexArtifactSha256 = generated.indexArtifactSha256,
+            indexSha256 = generated.indexSha256,
+            outputBytes = generated.outputBytes,
+            counts = generated.counts,
+            elfIndexArtifactSha256 = generated.elfIndexArtifactSha256,
+        )
+    }
+
+    private fun tryNonblockingSameLengthRewrite(path: Path, bytes: ByteArray): Boolean {
+        assertEquals(Files.size(path), bytes.size.toLong(), "the mutation must preserve member length")
+        val originalMode = Files.getPosixFilePermissions(path, LinkOption.NOFOLLOW_LINKS)
+        try {
+            Files.setPosixFilePermissions(path, originalMode + PosixFilePermission.OWNER_WRITE)
+            return LinuxFilesystemSyscalls.openRoot(path.parent).use { parent ->
+                requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, path.fileName.toString())).use { selected ->
+                    try {
+                        // reopenWritable uses O_NONBLOCK: held read leases must refuse instead of hanging.
+                        LinuxFilesystemSyscalls.reopenWritable(selected).use { writable ->
+                            LinuxFilesystemSyscalls.write(writable, bytes) {}
+                        }
+                        true
+                    } catch (failure: LinuxSyscallException) {
+                        if (failure.errno != 11) throw failure // EWOULDBLOCK only.
+                        false
+                    }
+                }
+            }
+        } finally {
+            Files.setPosixFilePermissions(path, originalMode)
+        }
+    }
+
     @Test
     fun `truth v3 combined resource bounds admit exact limits and reject one over`() {
         assertEquals(10L, fullTreeFunctionTruthV3CombinedEntityCount(4L, 6L, 10L))
