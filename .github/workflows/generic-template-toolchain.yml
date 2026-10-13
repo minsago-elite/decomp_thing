@@ -213,7 +213,6 @@ jobs:
             --oci-archive "$CLANG_WORK/run2/clang-18.1.3-noble-amd64.oci.tar"
           cmp "$CLANG_WORK/run1/clang-18.1.3-noble-amd64.oci.tar" \
             "$CLANG_WORK/run2/clang-18.1.3-noble-amd64.oci.tar"
-          rm "$CLANG_WORK/run2/clang-18.1.3-noble-amd64.oci.tar"
 
       - name: Exercise the real A profile, PATH, driver, and resource loaders
         run: |
@@ -232,11 +231,13 @@ jobs:
             --acquisition "$CLANG_WORK/acquisition" \
             --record "$CLANG_WORK/build-record.json" \
             --rootfs "$CLANG_WORK/rootfs-run2" \
+            --oci-archive "$CLANG_WORK/run2/clang-18.1.3-noble-amd64.oci.tar" \
             --probe-report "$CLANG_WORK/run2/probe-report.json" \
             --loader-report "$CLANG_WORK/a-loader-smoke.json" \
             --negative-report "$CLANG_WORK/clang-22.1.6-negative-smoke.json" \
             --output "$CLANG_WORK/clang-18.1.3-provenance.tar"
           sudo rm -rf "$CLANG_WORK/rootfs-run2"
+          rm "$CLANG_WORK/run2/clang-18.1.3-noble-amd64.oci.tar"
 
       - name: Upload the immutable toolchain image
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
