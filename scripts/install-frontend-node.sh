@@ -45,7 +45,8 @@ frontend_stage=$(mktemp -d "$frontend_parent/.decomp-frontend-node.XXXXXX")
 trap 'rm -rf -- "$frontend_stage"' EXIT
 
 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
-  --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 180 \
+  --tlsv1.2 --retry 3 --retry-all-errors --retry-max-time 300 \
+  --connect-timeout 15 --max-time 180 \
   "https://nodejs.org/download/release/v${frontend_node_version}/${frontend_archive}" \
   --output "$frontend_stage/$frontend_archive"
 (

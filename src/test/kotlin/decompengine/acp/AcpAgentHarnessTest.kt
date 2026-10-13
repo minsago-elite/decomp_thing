@@ -64,6 +64,8 @@ import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import org.junit.jupiter.api.Timeout
 
 @Timeout(value = 60, unit = TimeUnit.SECONDS)
@@ -118,20 +120,23 @@ class AcpAgentHarnessTest {
                     profile = profile,
                 ).reconstruct(binary, output)
             } catch (failure: Exception) {
-                val checkpoint = output.resolve("source-tree").resolve(
-                    profile.layout.declaration("module-evidence").materialize(mapOf("module" to "decomp")),
-                )
-                val checkpointDiagnostics = runCatching {
-                    if (!Files.isRegularFile(checkpoint)) "<missing>" else {
-                        val maximumBytes = 16 * 1024
-                        val bytes = Files.newInputStream(checkpoint).use { it.readNBytes(maximumBytes + 1) }
-                        bytes.take(maximumBytes).toByteArray().toString(Charsets.UTF_8) +
-                            if (bytes.size > maximumBytes) "\n<truncated>" else ""
-                    }
-                }.getOrElse { "<unreadable: ${it.javaClass.simpleName}>" }
+                val sourceRoot = output.resolve("source-tree")
+                val retainedDiagnostics = listOf(
+                    "checkpoint" to "module-evidence",
+                    "execution" to "module-agent-execution-evidence",
+                ).joinToString("; ") { (label, role) ->
+                    val path = sourceRoot.resolve(
+                        profile.layout.declaration(role).materialize(mapOf("module" to "decomp")),
+                    )
+                    val diagnostic = retainedArchivalDiagnostic(
+                        path,
+                        fields = if (label == "execution") setOf("outcome", "lifecycle") else null,
+                    )
+                    "$label=$diagnostic"
+                }
                 throw AssertionError(
                     "public ${base.id} ACP reconstruction failed; diagnostics=${harness.latestDiagnostics()}; " +
-                        "sandbox=${harness.latestSandboxEvidence()}; checkpoint=$checkpointDiagnostics",
+                        "sandbox=${harness.latestSandboxEvidence()}; $retainedDiagnostics",
                     failure,
                 )
             }
@@ -139,6 +144,12 @@ class AcpAgentHarnessTest {
             assertEquals(0, result.build.returnCode)
             assertTrue(requireNotNull(result.bundle.audit).unresolvedEntityIds.isEmpty())
             assertTrue(requireNotNull(harness.latestAcpExecutionEvidence()).sandboxEvidence.networkIsolated)
+            val diagnostics = assertNotNull(harness.latestDiagnostics())
+            assertEquals(0, diagnostics.exitCode)
+            assertFalse(diagnostics.rootTerminationRequested)
+            assertFalse(diagnostics.forcedTermination)
+            assertTrue(diagnostics.sandboxCleanupVerified)
+            assertTrue(diagnostics.remainingProcessIds.isEmpty())
             val extracted = temp.resolve("${base.id}-extracted")
             ArchivalBundleVerifier.extractAndVerify(result.bundle.archivePath, extracted, profile = profile)
             val rebuilt = ReconstructionAdapters.resolve(profile).build(extracted, profile)
@@ -147,6 +158,24 @@ class AcpAgentHarnessTest {
                 ArchivalProjectAuditor.audit(extracted, profile).toJson())
         }
     }
+
+    private fun retainedArchivalDiagnostic(path: Path, fields: Set<String>? = null): String = runCatching {
+        if (!Files.isRegularFile(path)) "<missing>" else {
+            val maximumRendered = 16 * 1024
+            val maximumBytes = if (fields == null) maximumRendered else 64 * 1024
+            val bytes = Files.newInputStream(path).use { it.readNBytes(maximumBytes + 1) }
+            if (fields == null) {
+                bytes.take(maximumBytes).toByteArray().toString(Charsets.UTF_8) +
+                    if (bytes.size > maximumBytes) "\n<truncated>" else ""
+            } else if (bytes.size > maximumBytes) {
+                "<exceeds $maximumBytes bytes>"
+            } else {
+                val document = Json.parseToJsonElement(bytes.toString(Charsets.UTF_8)) as JsonObject
+                val rendered = JsonObject(document.filterKeys { it in fields }).toString()
+                rendered.take(maximumRendered) + if (rendered.length > maximumRendered) "<truncated>" else ""
+            }
+        }
+    }.getOrElse { "<unreadable: ${it.javaClass.simpleName}>" }
 
     @Test
     fun `public harness fails closed before launch when the outer sandbox is absent`() {
