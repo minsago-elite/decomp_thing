@@ -3075,6 +3075,64 @@ def downloaded_package_key(deb: Path) -> tuple[str, str, str]:
     return tuple(records[0][name] for name in names)
 
 
+def remove_optional_source_caches(acquisition: Path) -> None:
+    """Remove only optional cached trees through an authenticated no-follow parent descriptor."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    acquisition_fd = os.open(acquisition, flags)
+    try:
+        acquisition_identity = os.fstat(acquisition_fd)
+
+        def require_acquisition_binding() -> None:
+            try:
+                current_fd = os.open(acquisition, flags)
+            except OSError as error:
+                raise ProvisionError("acquisition source cache root pathname changed") from error
+            try:
+                current = os.fstat(current_fd)
+                if (current.st_dev, current.st_ino) != (acquisition_identity.st_dev, acquisition_identity.st_ino):
+                    raise ProvisionError("acquisition source cache root identity changed")
+            finally:
+                os.close(current_fd)
+
+        require_acquisition_binding()
+        try:
+            expected_parent = os.stat("source", dir_fd=acquisition_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            require_acquisition_binding()
+            return
+        if not stat.S_ISDIR(expected_parent.st_mode):
+            raise ProvisionError("acquisition source cache parent must be a real directory")
+        source_fd = os.open("source", flags, dir_fd=acquisition_fd)
+        try:
+            source_identity = os.fstat(source_fd)
+            if (source_identity.st_dev, source_identity.st_ino) != (expected_parent.st_dev, expected_parent.st_ino):
+                raise ProvisionError("acquisition source cache parent identity changed")
+
+            def require_source_binding() -> None:
+                require_acquisition_binding()
+                current = os.stat("source", dir_fd=acquisition_fd, follow_symlinks=False)
+                if (not stat.S_ISDIR(current.st_mode) or
+                        (current.st_dev, current.st_ino) != (source_identity.st_dev, source_identity.st_ino)):
+                    raise ProvisionError("acquisition source cache parent pathname changed")
+
+            for name in ("package-source", "upstream"):
+                require_source_binding()
+                try:
+                    metadata = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    require_source_binding()
+                    continue
+                if not stat.S_ISDIR(metadata.st_mode):
+                    raise ProvisionError("acquisition source cache must be a real directory")
+                require_source_binding()
+                shutil.rmtree(name, dir_fd=source_fd)
+                require_source_binding()
+        finally:
+            os.close(source_fd)
+    finally:
+        os.close(acquisition_fd)
+
+
 def provision_rootfs(args: argparse.Namespace) -> int:
     contract = read_contract(args.contract)
     profile = contract["profile"]
@@ -3082,8 +3140,7 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     if args.rootfs.exists() or args.output.exists():
         raise ProvisionError("rootfs and evidence output paths must not exist")
     candidate, indexes = load_candidate(args.acquisition, contract, args.keyring)
-    shutil.rmtree(args.acquisition / "source/package-source")
-    shutil.rmtree(args.acquisition / "source/upstream")
+    remove_optional_source_caches(args.acquisition)
     check_runner_bounds(args.workdir, profile)
     profile_root = args.rootfs
     profile_root.parent.mkdir(parents=True, exist_ok=True)
@@ -3648,6 +3705,7 @@ def validate_provenance_probe_report(
         raise ProvisionError("probe provenance report differs from the reproducible build-record probe")
     probe_path, probe_mode = rootfs_regular_file(rootfs, PROBE_BINARY_IN_ROOT, executable=True)
     fixture_path, _ = rootfs_regular_file(rootfs, PROBE_FIXTURE_IN_ROOT)
+    source_path, _ = rootfs_regular_file(rootfs, PROBE_SOURCE_IN_ROOT)
     expected_recipe_source = record.get("recipe", {}).get("probeSha256")
     source_digest = verify_staged_probe_source(rootfs, expected_recipe_source)
     if source_digest != record["probe"]["sourceSha256"]:

@@ -418,8 +418,8 @@ class ProvisioningNegativeTests(unittest.TestCase):
             )
             candidate = {"trustedKeyring": {"sha256": provision.sha256_file(keyring)}}
             packages = {("ca-certificates", "synthetic", "all")}
+            args.acquisition.mkdir()
             with mock.patch.object(provision, "load_candidate", return_value=(candidate, [])), \
-                    mock.patch.object(provision.shutil, "rmtree"), \
                     mock.patch.object(provision, "check_runner_bounds"), \
                     mock.patch.object(provision, "run_checked", side_effect=run_checked), \
                     mock.patch.object(provision, "installed_package_keys", return_value=packages), \
@@ -697,8 +697,8 @@ class ProvisioningNegativeTests(unittest.TestCase):
             args = provision.argparse.Namespace(
                 contract=provision.CONTRACT_PATH, workdir=base, rootfs=base / "rootfs",
                 output=base / "output", acquisition=base / "acquisition", keyring=base / "keyring")
+            args.acquisition.mkdir()
             with mock.patch.object(provision, "load_candidate", return_value=({}, [])), \
-                    mock.patch.object(provision.shutil, "rmtree"), \
                     mock.patch.object(provision, "check_runner_bounds"), \
                     mock.patch.object(provision, "run_checked") as bootstrap, \
                     mock.patch.object(provision, "installed_package_keys", return_value=set()), \
@@ -1034,6 +1034,26 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 provision.normalize_rootfs(rootfs, 1714003200)
             commands = [call.args[0] for call in run.call_args_list]
             self.assertTrue(any(str(rootfs / "var/cache/ldconfig/aux-cache") in command for command in commands))
+
+    def test_successful_retained_probe_replay_returns_authenticated_source_and_file_identities(self):
+        with self.temporary_directory() as temporary:
+            rootfs = Path(temporary) / "rootfs"
+            record = self.valid_build_record()
+            binary, fixture, mode = self.prepare_probe_rootfs(record, rootfs)
+            source = provision.rootfs_path(rootfs, provision.PROBE_SOURCE_IN_ROOT)
+            replay = {key: value for key, value in record["probe"].items()
+                      if key not in ("sourceSha256", "binarySha256", "fixtureSha256")}
+            with mock.patch.object(provision, "run_probe_sandboxed", return_value=json.dumps(replay)) as run, \
+                    mock.patch.object(provision, "audit_langoptions", return_value=self.probe_inventory(record)):
+                result = provision.validate_provenance_probe_report(record["probe"], record, rootfs, self.contract)
+            self.assertEqual(result, (binary, fixture, source, mode))
+            run.assert_called_once_with(
+                rootfs, [provision.PROBE_BINARY_IN_ROOT, provision.PROBE_FIXTURE_IN_ROOT],
+                self.contract, timeout=120,
+            )
+            for path, field in ((result[0], "binarySha256"), (result[1], "fixtureSha256"),
+                                (result[2], "sourceSha256")):
+                self.assertEqual(provision.sha256_file(path), record["probe"][field])
 
     def test_provenance_reports_must_bind_to_build_record_and_locked_comparator(self):
         record = self.valid_build_record()
@@ -2698,6 +2718,124 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                                            extra_binary_package_names=expected_names)
             self.assertEqual(list(root.glob("patch-audit-replay-*")), [])
 
+    def test_sequential_provisioning_replays_authenticated_sources_after_optional_caches_are_removed(self):
+        with self.temporary_directory() as temporary:
+            base = Path(temporary)
+            root, candidate, _, keyring = self.candidate_fixture(base)
+            download_hashes = {path.relative_to(root): provision.sha256_file(path)
+                               for path in (root / "downloads").rglob("*") if path.is_file()}
+
+            def extract_dsc(command, **kwargs):
+                self.assertEqual(command[:2], ["dpkg-source", "-x"])
+                destination = Path(command[-1])
+                (destination / "debian/patches").mkdir(parents=True)
+                (destination / "debian/patches/series").write_bytes(b"")
+                for relative in self.contract["relevantFiles"]:
+                    target = destination / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(b"matching synthetic source\n")
+                return subprocess.CompletedProcess(command, 0, "")
+
+            def extract_upstream(archive, destination):
+                self.assertEqual(archive.read_bytes(), b"synthetic bytes for downloads/upstream/source.tar.xz")
+                source = destination / "llvm-project-18.1.3.src"
+                for relative in self.contract["relevantFiles"]:
+                    target = source / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(b"matching synthetic source\n")
+                return source
+
+            class ReachedRunnerBounds(RuntimeError):
+                pass
+
+            with mock.patch.object(provision, "verify_candidate_data", return_value=[]) as signed, \
+                    mock.patch.object(provision.subprocess, "run", side_effect=extract_dsc) as extracted, \
+                    mock.patch.object(provision, "safe_extract_xz_tar", side_effect=extract_upstream) as upstream, \
+                    mock.patch.object(provision, "check_runner_bounds", side_effect=ReachedRunnerBounds) as bounds, \
+                    mock.patch.object(provision, "run_checked") as native:
+                for label in ("run1", "run2"):
+                    args = provision.argparse.Namespace(
+                        contract=provision.CONTRACT_PATH, acquisition=root, keyring=keyring,
+                        workdir=base / "work", rootfs=base / f"rootfs-{label}", output=base / label,
+                    )
+                    with self.subTest(label=label), self.assertRaises(ReachedRunnerBounds):
+                        provision.provision_rootfs(args)
+                    self.assertFalse((root / "source/package-source").exists())
+                    self.assertFalse((root / "source/upstream").exists())
+                    self.assertEqual(list(root.glob("patch-audit-replay-*")), [])
+                    self.assertEqual(json.loads((root / "acquisition-candidate.json").read_bytes()), candidate)
+                    self.assertEqual({path.relative_to(root): provision.sha256_file(path)
+                                      for path in (root / "downloads").rglob("*") if path.is_file()}, download_hashes)
+                self.assertEqual(signed.call_count, 2)
+                self.assertEqual(extracted.call_count, 2)
+                self.assertEqual(upstream.call_count, 2)
+                self.assertEqual(bounds.call_count, 2)
+                native.assert_not_called()
+
+    def test_optional_source_cache_cleanup_rejects_links_files_and_real_removal_failures(self):
+        for relative in ("source", "source/package-source", "source/upstream"):
+            for kind in ("file", "directory-link", "missing-link"):
+                with self.subTest(relative=relative, kind=kind), self.temporary_directory() as temporary:
+                    base = Path(temporary)
+                    acquisition = base / "acquisition"
+                    acquisition.mkdir()
+                    ordinary = base / "ordinary"
+                    ordinary.mkdir()
+                    canary = ordinary / "canary.txt"
+                    canary.write_bytes(b"preserve unrelated bytes")
+                    malformed = acquisition / relative
+                    malformed.parent.mkdir(parents=True, exist_ok=True)
+                    if kind == "file":
+                        malformed.write_bytes(b"not an extraction directory")
+                    else:
+                        malformed.symlink_to(ordinary if kind == "directory-link" else base / "absent")
+                    with self.assertRaisesRegex(provision.ProvisionError, "source cache.*real directory"):
+                        provision.remove_optional_source_caches(acquisition)
+                    self.assertTrue(malformed.is_symlink() or malformed.is_file())
+                    self.assertEqual(canary.read_bytes(), b"preserve unrelated bytes")
+        with self.temporary_directory() as temporary:
+            acquisition = Path(temporary) / "acquisition"
+            cached = acquisition / "source/package-source"
+            cached.mkdir(parents=True)
+            with mock.patch.object(provision.shutil, "rmtree", side_effect=PermissionError("real removal refused")):
+                with self.assertRaisesRegex(PermissionError, "real removal refused"):
+                    provision.remove_optional_source_caches(acquisition)
+            self.assertTrue(cached.is_dir())
+
+    def test_optional_source_cache_cleanup_rejects_parent_swap_before_deleting_any_tree(self):
+        with self.temporary_directory() as temporary:
+            base = Path(temporary)
+            acquisition = base / "acquisition"
+            source = acquisition / "source"
+            ordinary = base / "ordinary"
+            for parent in (source, ordinary):
+                for name in ("package-source", "upstream"):
+                    tree = parent / name
+                    tree.mkdir(parents=True)
+                    (tree / "canary.txt").write_bytes(b"preserve this tree")
+            held = acquisition / "source-held"
+            real_stat = provision.os.stat
+            swapped = False
+
+            def swap_after_child_stat(path, *args, **kwargs):
+                nonlocal swapped
+                result = real_stat(path, *args, **kwargs)
+                if path == "package-source" and kwargs.get("dir_fd") is not None and not swapped:
+                    source.rename(held)
+                    source.symlink_to(ordinary)
+                    swapped = True
+                return result
+
+            with mock.patch.object(provision.os, "stat", side_effect=swap_after_child_stat), \
+                    mock.patch.object(provision.shutil, "rmtree") as removed:
+                with self.assertRaisesRegex(provision.ProvisionError, "cache parent pathname changed"):
+                    provision.remove_optional_source_caches(acquisition)
+                removed.assert_not_called()
+            self.assertTrue(swapped)
+            for parent in (held, ordinary):
+                for name in ("package-source", "upstream"):
+                    self.assertEqual((parent / name / "canary.txt").read_bytes(), b"preserve this tree")
+
     def test_candidate_replay_rejects_rehashed_attacker_owned_source_trees(self):
         with self.temporary_directory() as temp:
             root, candidate, record, keyring = self.candidate_fixture(Path(temp))
@@ -2794,24 +2932,24 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
                         provision.load_candidate(root, self.contract, keyring, record)
                     signed.assert_not_called()
 
-    def test_candidate_replay_rejects_changed_patch_audit_and_source_tree(self):
-        for mutation in ("audit", "audit-details", "source"):
+    def test_candidate_replay_rejects_changed_recorded_patch_audit(self):
+        for mutation in ("audit", "audit-details"):
             with self.subTest(mutation=mutation), self.temporary_directory() as temp:
                 root, candidate, record, keyring = self.candidate_fixture(Path(temp))
-                if mutation in ("audit", "audit-details"):
-                    path = root / "patch-audit.json"
-                    audit = json.loads(path.read_bytes())
-                    if mutation == "audit":
-                        audit["patchInventorySha256"] = "f" * 64
-                    else:
-                        audit["patchInventory"] = []
-                    path.write_bytes(provision.canonical_json(audit))
+                path = root / "patch-audit.json"
+                trusted_replay = json.loads(path.read_bytes())
+                audit = json.loads(path.read_bytes())
+                if mutation == "audit":
+                    audit["patchInventorySha256"] = "f" * 64
                 else:
-                    relative = self.contract["relevantFiles"][0]
-                    (root / "source/package-source" / relative).write_bytes(b"changed source")
-                with mock.patch.object(provision, "verify_candidate_data", return_value=[]):
-                    with self.assertRaises(provision.ProvisionError):
+                    audit["patchInventory"] = []
+                path.write_bytes(provision.canonical_json(audit))
+                with mock.patch.object(provision, "verify_candidate_data", return_value=[]), \
+                        mock.patch.object(provision, "audit_fresh_source_payloads", return_value=trusted_replay) as replay:
+                    expected = "changed after acquisition" if mutation == "audit" else "patch audit inventory changed"
+                    with self.assertRaisesRegex(provision.ProvisionError, expected):
                         provision.load_candidate(root, self.contract, keyring, record)
+                    self.assertEqual(replay.call_count, int(mutation == "audit-details"))
                 self.assertEqual(list(root.glob("patch-audit-replay-*")), [])
 
     def test_packaging_authenticates_candidate_before_creating_archive(self):
