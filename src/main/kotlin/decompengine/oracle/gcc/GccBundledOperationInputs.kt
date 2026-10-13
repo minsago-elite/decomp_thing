@@ -2,10 +2,25 @@ package decompengine.oracle.gcc
 
 import decompengine.oracle.fulltree.FullTreeFunctionObservationClassPathEntry
 import decompengine.oracle.fulltree.StableControlFile
+import decompengine.oracle.fulltree.FullTreeElfLayout
+import decompengine.oracle.fulltree.FullTreeElfExecutableRange
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.util.Collections
+
+internal data class GccBundledNativeCallAddressSpaceIdentityV1(
+    val name: String, val type: Int, val sizeBits: Int, val addressableUnitSize: Int,
+    val overlay: Boolean, val signedOffsets: Boolean,
+)
+
+/** Retained input-byte and fixed-profile metadata, never oracle or scoring authority. */
+internal data class GccBundledNativeCallTargetEvidenceV1(
+    val profileSha256: String, val profileTarget: String, val inputSha256: String, val inputBytes: Long,
+    val imageBase: ULong, val languageId: String, val compilerSpecId: String,
+    val defaultAddressSpace: GccBundledNativeCallAddressSpaceIdentityV1,
+    val executableRanges: List<FullTreeElfExecutableRange>,
+)
 
 internal class GccBundledOperationInputs private constructor(
     private val deploymentReference: GccKotlinBootClasspathReference,
@@ -14,6 +29,7 @@ internal class GccBundledOperationInputs private constructor(
     classPathEntries: List<FullTreeFunctionObservationClassPathEntry>,
     private val plannerProfile: GccRetainedCompilerEngineProfile?,
     private val cliInvocation: GccBundledCliInvocation?,
+    private val nativeCallObservations: Boolean,
 ) : AutoCloseable {
     val deploymentClosureSha256: String = gccBundledLiveDeploymentClosureSha256(
         deploymentReference.closureSha256,
@@ -23,6 +39,38 @@ internal class GccBundledOperationInputs private constructor(
     val classPathEntries: List<FullTreeFunctionObservationClassPathEntry> =
         Collections.unmodifiableList(ArrayList(classPathEntries))
     private var closed = false
+
+    @Synchronized
+    fun nativeCallTargetEvidence(checkpoint: () -> Unit): GccBundledNativeCallTargetEvidenceV1 {
+        check(nativeCallObservations) { "native target evidence requires the distinct retained native-call operation" }
+        checkpoint()
+        verify("before native-call target derivation")
+        val profile = checkNotNull(plannerProfile) { "native call observations require a retained production profile" }
+        val pinned = profile.requireNativeCallProfile()
+        checkpoint()
+        val binary = guards.single { (name, _) -> name == "bundled operation artifact engine-binary" }.second
+        require(binary.size == pinned.strippedBinary.bytes && binary.authenticatedSha256 == pinned.strippedBinary.sha256) {
+            "native call target input differs from the independently pinned cc1"
+        }
+        val layout = FullTreeElfLayout.scanLayout(binary, "native-call pinned cc1", checkpoint = { checkpoint() })
+        require(layout.elfClass == 2 && layout.byteOrder == 1 && layout.machine == pinned.targetAbi.machine &&
+            layout.osAbi == pinned.targetAbi.osAbi && layout.elfType == pinned.targetAbi.elfType &&
+            layout.imageBase == pinned.imageBase &&
+            layout.executableRanges.map { it.start to it.endExclusive } ==
+                pinned.executableRanges.map { it.startRva to it.endExclusiveRva }) {
+            "native call target ELF layout differs from the independently pinned profile"
+        }
+        // The pinned cc1 is ET_EXEC with image base 0x400000. No ET_DYN loader rebasing is inferred.
+        require(layout.elfType == "ET_EXEC" && layout.imageBase == 0x400000UL)
+        val result = GccBundledNativeCallTargetEvidenceV1(profile.suite.profileSha256, profile.suite.target,
+            binary.authenticatedSha256, binary.size, layout.imageBase,
+            pinned.targetAbi.ghidraLanguage, pinned.targetAbi.ghidraCompilerSpec,
+            GccBundledNativeCallAddressSpaceIdentityV1("ram", 1, 64, 1, false, false),
+            java.util.List.copyOf(layout.executableRanges))
+        checkpoint()
+        verify("after native-call target derivation")
+        return result
+    }
 
     @Synchronized
     fun plannerRequest(intent: GccBundledOperationIntent, exported: GccBundledExecutedOperation,
@@ -132,10 +180,11 @@ internal class GccBundledOperationInputs private constructor(
                     }
                     FullTreeFunctionObservationClassPathEntry(entry.path, entry.sha256)
                 }
-                val bundle = GccBundledGhidraRetainedRuntime.open(runtime, artifacts, excluded)
+                val bundle = GccBundledGhidraRetainedRuntime.open(runtime, artifacts, excluded, intent.budgets)
                 retained = bundle
                 val inputs = GccBundledOperationInputs(
                     reference, bundle, Collections.unmodifiableList(opened.toList()), classPath, plannerProfile, intent.cliInvocation,
+                    intent.bundledRuntime.invocationVersion == 8,
                 )
                 inputs.verify("after prepared operation input authentication")
                 return inputs

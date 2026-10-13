@@ -4,10 +4,14 @@ import decompengine.project.sha256
 import decompengine.project.RecoveredCallSitesTest
 import decompengine.oracle.gcc.GccCompilerEngineProfiles
 import decompengine.oracle.gcc.authenticateGhidraInstallation
+import decompengine.oracle.gcc.GccBundledGhidraDeploymentReference
 import decompengine.oracle.fulltree.inControlTemporaryDirectory
+import java.io.File
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
+import java.util.jar.JarFile
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.readText
@@ -20,6 +24,86 @@ import kotlin.test.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class BundledGhidraTest {
+    @Test
+    fun `installed native collector source and complete compiled closure match the production reference`() {
+        assumeTrue(System.getenv("RUN_REAL_GHIDRA") == "true" || System.getenv("RUN_REAL_GHIDRA_NATIVE_CALLS") == "true",
+            "installed native collector packaging check is opt-in")
+        val repository = Path.of(System.getProperty("user.dir")).toRealPath()
+        val evidenceParent = repository.resolve("build/native-call-packaging-tests")
+        Files.createDirectories(evidenceParent)
+        val work = Files.createTempDirectory(evidenceParent, "installed-native-")
+        try {
+            val processHome = Files.createDirectory(work.resolve("home"))
+            val temporary = Files.createDirectory(work.resolve("tmp"))
+            val cache = Files.createDirectory(work.resolve("cache"))
+            val sourceName = "ghidra-bridge/src/main/java/ExportNativeCallsV1.java"
+            val source = repository.resolve(sourceName).toRealPath()
+            assertFalse(Files.exists(repository.resolve("src/main/resources/ghidra_scripts/ExportNativeCallsV1.java"), LinkOption.NOFOLLOW_LINKS),
+                "native collector resource must be generated from its compiled Java source")
+            val inventoryLog = work.resolve("tracked-source.log")
+            val inventory = ProcessBuilder("git", "ls-files", "--", "*ExportNativeCallsV1.java")
+                .directory(repository.toFile()).apply {
+                    environment()["HOME"] = processHome.toString()
+                    environment()["TMPDIR"] = temporary.toString()
+                    environment()["XDG_CACHE_HOME"] = cache.toString()
+                    environment()["GIT_CONFIG_NOSYSTEM"] = "1"
+                    redirectErrorStream(true)
+                    redirectOutput(inventoryLog.toFile())
+                }.start()
+            try {
+                assertTrue(inventory.waitFor(10, TimeUnit.SECONDS), "tracked collector source inventory timed out")
+                assertEquals(0, inventory.exitValue(), inventoryLog.readText())
+                assertEquals(listOf(sourceName), inventoryLog.readText().lineSequence().filter(String::isNotBlank).toList(),
+                    "the collector must have one tracked source and no tracked resource copy")
+            } finally {
+                if (inventory.isAlive) inventory.destroyForcibly()
+                assertTrue(inventory.waitFor(5, TimeUnit.SECONDS), "tracked source inventory could not be reaped")
+            }
+            val installed = repository.resolve("build/install/llm_bin_patch").toRealPath()
+            val libraries = Files.list(installed.resolve("lib")).use { paths -> paths.filter {
+                Files.isRegularFile(it, LinkOption.NOFOLLOW_LINKS) && it.fileName.toString().endsWith(".jar")
+            }.sorted().limit(513).toList() }
+            assertTrue(libraries.size in 1..512)
+            val application = libraries.single { path -> JarFile(path.toFile(), false).use {
+                it.getJarEntry("decompengine/oracle/gcc/GccBundledGhidraDeploymentReference.class") != null
+            } }
+            val tests = Path.of(BundledGhidraInstalledNativeCollectorProbe::class.java.protectionDomain.codeSource.location.toURI()).toRealPath()
+            assertTrue(Files.isDirectory(tests), "installed probe must come from the test class directory")
+            val compiledClasses = repository.resolve("ghidra-bridge/build/classes/java/main").toRealPath()
+            val log = work.resolve("installed-native-reference.log")
+            val command = listOf(Path.of(System.getProperty("java.home"), "bin/java").toString(),
+                "-Duser.home=$processHome", "-Djava.io.tmpdir=$temporary", "-Djna.tmpdir=$temporary", "-XX:-UsePerfData",
+                "-Ddecompengine.oracle.nativeLibraryDirectory=${installed.resolve("libexec/oracle-native")}",
+                "-cp", (listOf(tests) + libraries).joinToString(File.pathSeparator),
+                BundledGhidraInstalledNativeCollectorProbe::class.java.name,
+                application.toString(), installed.resolve("libexec/ghidra").toString(), source.toString(), compiledClasses.toString())
+            val process = ProcessBuilder(command).directory(work.toFile()).apply {
+                for (name in listOf("JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS", "CLASSPATH", "GHIDRA_HOME")) environment().remove(name)
+                environment()["HOME"] = processHome.toString()
+                environment()["TMPDIR"] = temporary.toString()
+                environment()["XDG_CONFIG_HOME"] = processHome.toString()
+                environment()["XDG_DATA_HOME"] = processHome.toString()
+                environment()["XDG_CACHE_HOME"] = cache.toString()
+                redirectErrorStream(true)
+                redirectOutput(log.toFile())
+            }.start()
+            try {
+                assertTrue(process.waitFor(30, TimeUnit.SECONDS), "installed native reference check timed out")
+                assertTrue(Files.size(log) <= 64 * 1024, "installed native reference diagnostics exceeded the bound")
+                val diagnostic = log.readText()
+                assertEquals(0, process.exitValue(), diagnostic)
+                assertTrue(diagnostic.lineSequence().any { it.startsWith("installed-native-collector-reference-verified:") }, diagnostic)
+            } finally {
+                if (process.isAlive) process.destroyForcibly()
+                assertTrue(process.waitFor(5, TimeUnit.SECONDS), "installed native reference check could not be reaped")
+                process.outputStream.close()
+                process.inputStream.close()
+                process.errorStream.close()
+            }
+        } finally {
+            Files.walk(work).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::delete) }
+        }
+    }
     @Test
     fun `shared worker command rejects empty duplicate and ambiguous classpaths`() {
         val java = Path.of("/runtime/bin/java")
@@ -209,6 +293,88 @@ class BundledGhidraTest {
             block(root)
         } finally {
             Files.walk(root).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::delete) }
+        }
+    }
+}
+
+/** Runs with test classes and installed JARs only; development reference overrides are absent. */
+object BundledGhidraInstalledNativeCollectorProbe {
+    @JvmStatic
+    fun main(arguments: Array<String>) {
+        check(arguments.size == 4)
+        val expectedApplication = Path.of(arguments[0]).toRealPath()
+        val expectedBundle = Path.of(arguments[1]).toRealPath()
+        val trackedSource = Path.of(arguments[2]).toRealPath()
+        val compiledClasses = Path.of(arguments[3]).toRealPath()
+        val application = Path.of(GccBundledGhidraDeploymentReference::class.java.protectionDomain.codeSource.location.toURI()).toRealPath()
+        check(application == expectedApplication && Files.isRegularFile(application, LinkOption.NOFOLLOW_LINKS)) {
+            "native collector probe did not load the exact installed application JAR"
+        }
+        check(System.getProperty("decompengine.oracle.gcc.bundledGhidraReference") == null &&
+            System.getProperty("decompengine.oracle.gcc.bundledGhidraRoot") == null) {
+            "installed native reference check cannot use development fallbacks"
+        }
+        GccBundledGhidraDeploymentReference.open().use { deployment ->
+            check(deployment.bundleRoot == expectedBundle)
+            val reference = deployment.reference
+            val collector = checkNotNull(reference.nativeCallCollector) { "installed reference has no native collector identity" }
+            fun collectorClass(name: String): Boolean = name.substringAfterLast('/').let {
+                it.startsWith("ExportNativeCallsV1") && it.endsWith(".class")
+            }
+            val declaredClasses = reference.entries.values.filter { it.path.startsWith("scripts/") && collectorClass(it.path) }
+                .associateBy { it.path }
+            check("scripts/ExportNativeCallsV1.class" in declaredClasses && declaredClasses.size > 1) {
+                "installed reference omits the collector's primary or nested compiled classes"
+            }
+            val actualClasses = Files.list(expectedBundle.resolve("scripts")).use { paths ->
+                paths.filter { collectorClass(it.fileName.toString()) }.limit(513).toList()
+            }
+            check(actualClasses.size in 2..512)
+            check(actualClasses.map { "scripts/${it.fileName}" }.toSet() == declaredClasses.keys) {
+                "installed collector classes differ from the complete declared closure"
+            }
+            val compiled = Files.list(compiledClasses).use { paths -> paths.filter { collectorClass(it.fileName.toString()) }.limit(513).toList() }
+            check(compiled.size in 2..512 && compiled.map { "scripts/${it.fileName}" }.toSet() == declaredClasses.keys) {
+                "installed native collector closure omits or adds classes from the actual Java compilation"
+            }
+            for (path in actualClasses) {
+                check(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) && path.toRealPath() == path)
+                val entry = declaredClasses.getValue("scripts/${path.fileName}")
+                val expectedBytes = checkNotNull(entry.bytes)
+                check(entry.kind == "file" && expectedBytes == Files.size(path) && expectedBytes in 1..128L * 1024 * 1024)
+                val bytes = Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS).use { it.readNBytes(expectedBytes.toInt() + 1) }
+                check(bytes.size.toLong() == entry.bytes && sha256(bytes) == entry.sha256) {
+                    "installed native collector class does not match its independent identity: ${entry.path}"
+                }
+                val compiledPath = compiledClasses.resolve(path.fileName)
+                check(Files.isRegularFile(compiledPath, LinkOption.NOFOLLOW_LINKS) && compiledPath.toRealPath() == compiledPath &&
+                    Files.size(compiledPath) == expectedBytes)
+                val compiledBytes = Files.newInputStream(compiledPath, LinkOption.NOFOLLOW_LINKS).use { it.readNBytes(expectedBytes.toInt() + 1) }
+                check(compiledBytes.contentEquals(bytes)) { "installed collector bytes differ from their actual Java compilation" }
+            }
+            val primary = declaredClasses.getValue("scripts/ExportNativeCallsV1.class")
+            check(primary.bytes == collector.classBytes && primary.sha256 == collector.classSha256)
+            JarFile(expectedBundle.resolve("decomp-ghidra-bridge.jar").toFile(), false).use { bridge ->
+                val entries = bridge.entries().asSequence().take(200_001).toList()
+                check(entries.size <= 200_000 && entries.none { collectorClass(it.name) }) {
+                    "bridge JAR contains duplicate native collector implementations"
+                }
+            }
+            check(Files.isRegularFile(trackedSource, LinkOption.NOFOLLOW_LINKS) && Files.size(trackedSource) in 1..4L * 1024 * 1024)
+            val sourceBytes = Files.newInputStream(trackedSource, LinkOption.NOFOLLOW_LINKS).use { it.readNBytes(4 * 1024 * 1024 + 1) }
+            check(sourceBytes.size.toLong() == collector.sourceBytes && sha256(sourceBytes) == collector.sourceSha256)
+            JarFile(application.toFile(), false).use { jar ->
+                val entries = jar.entries().asSequence().take(200_001).toList()
+                check(entries.size <= 200_000 && entries.none { collectorClass(it.name) })
+                val resource = entries.single { it.name == "ghidra_scripts/ExportNativeCallsV1.java" }
+                check(!resource.isDirectory && resource.size == collector.sourceBytes)
+                val packaged = jar.getInputStream(resource).use { it.readNBytes(4 * 1024 * 1024 + 1) }
+                check(packaged.contentEquals(sourceBytes) && sha256(packaged) == collector.sourceSha256) {
+                    "installed native collector resource was not generated from the single tracked Java source"
+                }
+            }
+            deployment.verify("after installed native collector source and complete class closure checks")
+            println("installed-native-collector-reference-verified:${reference.closureSha256}:classes=${actualClasses.size}")
         }
     }
 }
