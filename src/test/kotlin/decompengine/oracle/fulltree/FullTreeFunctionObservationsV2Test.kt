@@ -2023,6 +2023,7 @@ class FullTreeFunctionObservationsV2Test {
                 scratchParent = scratch,
                 outputRoot = secondRoot,
                 maximumWorkers = 2,
+                traversal = FullTreeSourceIdentityTraversal(FullTreeSourceIdentityTraversalOrder.REVERSE_ALL),
             )
             assertEquals(1, first.maximumWorkers)
             assertEquals(2, second.maximumWorkers)
@@ -2061,6 +2062,7 @@ class FullTreeFunctionObservationsV2Test {
                 inventoryPath = fixture.inventory,
                 scope = scope,
                 scratchParent = scratch,
+                traversal = FullTreeSourceIdentityTraversal(FullTreeSourceIdentityTraversalOrder.REVERSE_ALL),
             )
             assertEquals(first.binding.runSha256, rederived.binding.runSha256)
             assertEquals(first.outputs, rederived.outputs)

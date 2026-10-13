@@ -57,7 +57,9 @@ exact-head Kotlin core runtime artifact for PR head `c8e1ddf497690f902112fac08c4
 and failed only because this golden had not yet been checked in. The vector bytes were independently
 parsed and canonicalized; its index artifact digest, logical index digest, count totals, compiler
 input-vector digest, ELF digest, and V3 schema hashes all match their embedded values and checked-in
-inputs. The exact-head Kotlin rerun after pinning this golden is required for final verification.
+inputs. A later verified Actions artifact (`11333298611`) records all three truth-v3 tests and
+all five frozen truth-v2 tests passing, with the generated V3 vector matching the checked-in
+SHA-256 above. This closes the historical golden rerun requirement only.
 
 | Runtime evidence | Value |
 | --- | --- |
@@ -80,12 +82,40 @@ unresolved rows are zero. There are 16 emitted-RVA links and 29 non-scoreable ce
 vector also retains the complete per-kind, observability, disposition, collision, exclusion and
 shard digests/counts. Generic-template pattern proof remains absent and null.
 
+## Traversal verification
+
+The compiler-backed V3 test reuses this one linked ELF and its authenticated observation
+receipt across five variants: forward/forward, reverse/forward and forward/reverse CU/DIE
+visitation; independent `PERMUTE_MAPS`; and reverse/reverse visitation with map permutation.
+`PERMUTE_MAPS` holds CU/DIE order fixed while reversing lookup-map insertion and rotating
+actual collision-claim `HashMap` iteration. Bounded traces observe CU/DIE coordinates,
+lookup-map iteration and full candidate IDs; assertions prove unchanged membership,
+exactly-once processing and the changed claim order. The tests then compare canonical
+source facts, independently scanned memory/SQLite V2 shard bytes, full collision
+reconciliation and complete V3 trees. Generation and validation both trace their initial
+and final raw-input rederivations.
+
+The supplemental report is `build/test-results/test/full-tree-source-traversal-v2-v3.json`.
+It records actual visitation coordinates and authenticated input/output digests; it does not
+change the existing compiler input/output vectors or schema/configuration identities. This
+compiler fixture has one shard, so requested workers 2 is explicitly checked to resolve to 1.
+The separate two-shard V2 test retains non-vacuous workers 1/2 coverage and uses reverse
+traversal for the second publication and validation. Worker-bound run provenance remains
+bound to each actual worker limit; only shard bytes must match across worker limits.
+
+These new traversal assertions require an executed Actions result before they provide closure
+evidence. They do not establish production qualification or generic-template identity proof.
+
 Verification command:
 
 ```sh
 ./gradlew test --tests decompengine.oracle.fulltree.FullTreeFunctionTruthSqliteV3Test
 ```
 
-The local Gradle wrapper distribution could not be downloaded because `services.gradle.org` did
-not resolve, so the runtime suite is verified through exact-head GitHub Actions instead. This
-fixture-only evidence grants no production qualification, release authority or scoring permission.
+Local `compileKotlin` and compilation of all affected test sources passed. Supplemental direct
+execution of the actual repository test methods passed the raw 32/33-entry reference-walk
+boundary, the original composed ELF control, the two-shard worker 1/2 control, and all five
+source traversal variants for GCC 16.2.1 and Clang 23.1.3 at `-O0`/`-O2`. These runs do not
+replace Gradle/JUnit qualification; the pinned GCC 13.3 V3 matrix still requires exact-head
+GitHub Actions. This fixture-only evidence grants no production qualification, release authority
+or scoring permission.
