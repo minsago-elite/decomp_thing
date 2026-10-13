@@ -615,7 +615,12 @@ class AcpAgentHarnessTest {
         val secondFixture = fixture(idleMillis = 30_000, wallMillis = 60_000)
         val firstRequest = firstFixture.request.withContextMarker("first-turn-marker")
         val secondRequest = secondFixture.request.withContextMarker("second-turn-marker")
-        val harness = harness("success", timeouts = timeouts(startup = 15_000, request = 45_000, shutdown = 3_000))
+        // The fixture holds stdin open after its response so concurrent receipt checks do not race
+        // an immediate successful process exit against final-response delivery.
+        val harness = harness(
+            "overlapping-success",
+            timeouts = timeouts(startup = 15_000, request = 45_000, shutdown = 3_000),
+        )
         val callbacksEntered = CountDownLatch(2)
         val executor = Executors.newFixedThreadPool(2)
 

@@ -1,0 +1,145 @@
+{
+  "compiler": {
+    "observedVersion": "g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+    "readelfVersion": "GNU readelf (GNU Binutils for Ubuntu) 2.42"
+  },
+  "compilerInputVectorMatches": true,
+  "fixtureInputVectorSha256": "e432ff19b9fc0dbeb6cb42609b25cb40665cfef9a8929be2c1c56a094c151a8e",
+  "input": {
+    "inventoryArtifactSha256": "e33526659292850c9a1f8f0377139658e6dd38bf1e0867667e0607bdc8c5ba87",
+    "linkedElfBytes": 27280,
+    "linkedElfSha256": "641ef1219d91f8593c0439de52265801912450e4afa216b52711f7b99cb1ce6b",
+    "observationV2IndexArtifactSha256": "810ce485dd4ed7e1c37112b3f2ad1d501c9cfd6ad165780bbeef65e4385bba43",
+    "richElfSha256": "641ef1219d91f8593c0439de52265801912450e4afa216b52711f7b99cb1ce6b",
+    "scopeSha256": "5ca8a4bb70ce9455434fa7d75be07e6af73c6bc4b67326675b7ad167ba6e4e86",
+    "strippedElfSha256": "641ef1219d91f8593c0439de52265801912450e4afa216b52711f7b99cb1ce6b"
+  },
+  "output": {
+    "counts": {
+      "coalescedEmittedRvas": 0,
+      "definitionNoRangeUnique": 0,
+      "dwarfOnlyRvas": 0,
+      "dwarfRvas": 21,
+      "elfOnlyRvas": 6,
+      "elfRvas": 27,
+      "inlineOnlyUnique": 9,
+      "nonEmittedObservations": 16,
+      "nonEmittedUnique": 13,
+      "scoredRvas": 21,
+      "selectedElsewhereUnique": 4,
+      "sourceEntities": 45,
+      "sourceEntitiesByDenominatorDisposition": {
+        "ambiguous": 0,
+        "emitted-rva-link": 16,
+        "non-scoreable": 29,
+        "unknown": 0
+      },
+      "sourceEntitiesByKind": {
+        "declaration-only": 3,
+        "inline-instance": 10,
+        "no-range-definition": 10,
+        "template-instance": 22,
+        "template-pattern": 0,
+        "unresolved": 0
+      },
+      "sourceEntitiesByObservability": {
+        "ambiguous": 22,
+        "observable": 8,
+        "unknown": 12,
+        "unobservable": 3
+      }
+    },
+    "databaseHighWaterBytes": 385024,
+    "index": {
+      "complete": true,
+      "counts": {
+        "coalescedEmittedRvas": 0,
+        "definitionNoRangeUnique": 0,
+        "dwarfOnlyRvas": 0,
+        "dwarfRvas": 21,
+        "elfOnlyRvas": 6,
+        "elfRvas": 27,
+        "inlineOnlyUnique": 9,
+        "nonEmittedObservations": 16,
+        "nonEmittedUnique": 13,
+        "scoredRvas": 21,
+        "selectedElsewhereUnique": 4,
+        "sourceEntities": 45,
+        "sourceEntitiesByDenominatorDisposition": {
+          "ambiguous": 0,
+          "emitted-rva-link": 16,
+          "non-scoreable": 29,
+          "unknown": 0
+        },
+        "sourceEntitiesByKind": {
+          "declaration-only": 3,
+          "inline-instance": 10,
+          "no-range-definition": 10,
+          "template-instance": 22,
+          "template-pattern": 0,
+          "unresolved": 0
+        },
+        "sourceEntitiesByObservability": {
+          "ambiguous": 22,
+          "observable": 8,
+          "unknown": 12,
+          "unobservable": 3
+        }
+      },
+      "exclusions": {
+        "bytes": 3925,
+        "functions": 6,
+        "id": "elf-only-exclusions",
+        "nonEmitted": 0,
+        "path": "exclusions.json",
+        "sha256": "ab31441e3fbaac4bf08c64c843affb57e42052ffac3bb5f04c82c923aab3af9a"
+      },
+      "identityReconciliation": {
+        "algorithm": "full-run-anchor-claims-v1",
+        "candidateCount": 42,
+        "claimCount": 50,
+        "collisionCandidateCount": 8,
+        "populationSha256": "6ffbf092d4c42849bea78b69678a2960b7f687e6eba4105ddcafe6dec28ff646"
+      },
+      "indexSha256": "5b8b35ddf6d3c253563a543a9982a203515f8248b4a04f57047a06fdcf671be8",
+      "oracle": {
+        "configurationSha256": "a59e80ed0cd440f07be4741892d75ba5a3514532a73ecb67bbc617b4d24a34c2",
+        "elfIndexSha256": "b358a3cfbce38d14b8090560625a5808def4500eb1674c5b89b127b1a3381635",
+        "inventoryIndexSha256": "cdcbc4900c04d387e2c0c7bd5884f20d45b324aa2f2adbca15fa8c87820a4fc4",
+        "observationIndexSha256": "810ce485dd4ed7e1c37112b3f2ad1d501c9cfd6ad165780bbeef65e4385bba43",
+        "scopeSha256": "5ca8a4bb70ce9455434fa7d75be07e6af73c6bc4b67326675b7ad167ba6e4e86"
+      },
+      "schemaVersion": 2,
+      "shards": [
+        {
+          "bytes": 274281,
+          "functions": 21,
+          "id": "clang-lib-inlinetemplate",
+          "nonEmitted": 13,
+          "path": "shards/clang-lib-inlinetemplate.json",
+          "sha256": "3dbd86e787ba8b1952a9873263a37d3aac04639e5be2fb035fd7e91fa0c3c312",
+          "sourceEntities": 45
+        }
+      ]
+    },
+    "indexArtifactSha256": "90b5c5dccfca1c0403465e34719cea58de919d7290975c3a3f8ee9a33be319d9",
+    "indexSha256": "5b8b35ddf6d3c253563a543a9982a203515f8248b4a04f57047a06fdcf671be8",
+    "outputBytes": 280448
+  },
+  "producer": {
+    "configurationSha256": "a59e80ed0cd440f07be4741892d75ba5a3514532a73ecb67bbc617b4d24a34c2",
+    "id": "full-tree-function-truth",
+    "schemas": [
+      {
+        "name": "full-tree-function-truth-v3",
+        "schemaSha256": "81bc31d80ee00b32e39ae8d8154a8890ecf5d724322ac0d1eb4c303a0a547c43"
+      },
+      {
+        "name": "full-tree-function-truth-index-v3",
+        "schemaSha256": "250ecb435bdb1c98cedff2d39b8ccface0dd0d1de86b787cc1019c6d3da7c59f"
+      }
+    ],
+    "version": 3
+  },
+  "vectorKind": "full-tree-function-truth-v3-output-v1"
+}

@@ -1,7 +1,7 @@
 {
   "historicalStartingCount": 43,
   "kind": "kotlin-oracle-schema-inventory",
-  "schemaCount": 73,
+  "schemaCount": 77,
   "schemaInventoryVersion": 1,
   "schemas": [
     {
@@ -252,6 +252,15 @@
     },
     {
       "formatVersions": [
+        2
+      ],
+      "name": "full-tree-function-observations-v2",
+      "path": "oracle/full-tree-function-observations-v2.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "c068ed200c8493acbe830ba4e4d8390e8a30499b3d866c43646ff802ff645d89"
+    },
+    {
+      "formatVersions": [
         1
       ],
       "name": "full-tree-function-truth",
@@ -270,6 +279,24 @@
     },
     {
       "formatVersions": [
+        2
+      ],
+      "name": "full-tree-function-truth-index-v3",
+      "path": "oracle/full-tree-function-truth-index-v3.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "250ecb435bdb1c98cedff2d39b8ccface0dd0d1de86b787cc1019c6d3da7c59f"
+    },
+    {
+      "formatVersions": [
+        2
+      ],
+      "name": "full-tree-function-truth-v3",
+      "path": "oracle/full-tree-function-truth-v3.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "81bc31d80ee00b32e39ae8d8154a8890ecf5d724322ac0d1eb4c303a0a547c43"
+    },
+    {
+      "formatVersions": [
         1
       ],
       "name": "full-tree-generated-file-inventory",
@@ -285,6 +312,15 @@
       "path": "oracle/full-tree-generated-file-provenance.schema.json",
       "registration": "shared-kotlin",
       "schemaSha256": "1ff70380fcaccb6f9d8525ceb50cdd8bef972346de06058c21771b38e7643d44"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "full-tree-generic-template-frontend-v1",
+      "path": "oracle/full-tree-generic-template-frontend-v1.schema.json",
+      "registration": "shared-kotlin",
+      "schemaSha256": "1204674af671d68fbd0083804436f504199f518cc88fc688aa5f41bfbe256b8f"
     },
     {
       "formatVersions": [
@@ -670,5 +706,5 @@
       "scopeNote": "Retained format; no current Kotlin OracleSchemas consumer is registered for it."
     }
   ],
-  "sharedCatalogCount": 69
+  "sharedCatalogCount": 73
 }

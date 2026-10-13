@@ -206,7 +206,28 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         val memoryExceeded = AtomicBoolean(false)
         val diagnosticsExceeded = AtomicBoolean(false)
         val tasks = ArrayList<CompletableFuture<*>>()
+        var stdout: CompletableFuture<ByteArray>? = null
+        var stderr: CompletableFuture<ByteArray>? = null
+        var diagnosticsPublished = false
         var primaryFailure: Throwable? = null
+        fun publishDiagnostics(stdoutBytes: ByteArray, stderrBytes: ByteArray, beforeWrite: () -> Unit = {}) {
+            beforeWrite()
+            reports.resolve("ghidra_stdout.log").writeBytes(stdoutBytes)
+            beforeWrite()
+            reports.resolve("ghidra_stderr.log").writeBytes(stderrBytes)
+            beforeWrite()
+            reports.resolve("ghidra_resource_usage.json").writeText(
+                "{\"maximumResidentBytesLimit\":${limits.maximumResidentBytes}," +
+                    "\"maximumResidentBytesObserved\":${peakResidentBytes.get()}," +
+                    "\"wallClockMillisLimit\":${limits.wallClockTimeout.toMillis()}," +
+                    "\"parentWallClockMillisLimit\":${deadline.parentMaximumMillis}," +
+                    "\"remainingWallClockNanosAtLaunch\":$remainingNanosAtLaunch," +
+                    "\"maximumDiagnosticBytesPerStream\":${limits.maximumDiagnosticBytesPerStream}," +
+                    "\"stdoutBytesRetained\":${stdoutBytes.size},\"stderrBytesRetained\":${stderrBytes.size}," +
+                    "\"diagnosticLimitExceeded\":${diagnosticsExceeded.get()}}\n",
+            )
+            diagnosticsPublished = true
+        }
         try {
             deadline.checkpoint("after worker launch")
             process.outputStream.close()
@@ -230,8 +251,8 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                     bytes.copyOf(limits.maximumDiagnosticBytesPerStream)
                 } else bytes
             }.also(tasks::add)
-            val stdout = capture(process.inputStream)
-            val stderr = capture(process.errorStream)
+            val stdoutTask = capture(process.inputStream).also { stdout = it }
+            val stderrTask = capture(process.errorStream).also { stderr = it }
             val completed = try {
                 process.waitFor(deadline.remainingNanosOrZero(), TimeUnit.NANOSECONDS)
             } catch (interrupted: InterruptedException) {
@@ -251,21 +272,10 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                     }
                 }
             }
-            val stdoutBytes = await(stdout)
-            val stderrBytes = await(stderr)
+            val stdoutBytes = await(stdoutTask)
+            val stderrBytes = await(stderrTask)
             await(memoryMonitor)
-            reports.resolve("ghidra_stdout.log").writeBytes(stdoutBytes)
-            reports.resolve("ghidra_stderr.log").writeBytes(stderrBytes)
-            reports.resolve("ghidra_resource_usage.json").writeText(
-                "{\"maximumResidentBytesLimit\":${limits.maximumResidentBytes}," +
-                    "\"maximumResidentBytesObserved\":${peakResidentBytes.get()}," +
-                    "\"wallClockMillisLimit\":${limits.wallClockTimeout.toMillis()}," +
-                    "\"parentWallClockMillisLimit\":${deadline.parentMaximumMillis}," +
-                    "\"remainingWallClockNanosAtLaunch\":$remainingNanosAtLaunch," +
-                    "\"maximumDiagnosticBytesPerStream\":${limits.maximumDiagnosticBytesPerStream}," +
-                    "\"stdoutBytesRetained\":${stdoutBytes.size},\"stderrBytesRetained\":${stderrBytes.size}," +
-                    "\"diagnosticLimitExceeded\":${diagnosticsExceeded.get()}}\n",
-            )
+            publishDiagnostics(stdoutBytes, stderrBytes)
             if (memoryExceeded.get()) throw GhidraAnalysisException(
                 "Ghidra program recovery exceeded ${limits.maximumResidentBytes} resident bytes; " +
                     "rerun with the same output directory to resume durable function checkpoints",
@@ -303,6 +313,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             throw reported
         } finally {
             var cleanupFailure: Throwable? = null
+            var cleanupInterrupted = Thread.interrupted()
             fun cleanup(action: () -> Unit) {
                 try { action() } catch (failure: Throwable) {
                     val previous = primaryFailure ?: cleanupFailure
@@ -310,6 +321,43 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                 }
             }
             cleanup { processTree.terminate() }
+            if (primaryFailure != null && !diagnosticsPublished) {
+                val stdoutTask = stdout
+                val stderrTask = stderr
+                if (stdoutTask != null && stderrTask != null) cleanup {
+                    // The watchdog may interrupt the normal drain after the worker has timed out.
+                    // Retain its bounded output before cancelling capture, without replacing the
+                    // original failure or starting a fresh process-tree cleanup allowance.
+                    fun remainingCleanup(): Long = (processTree.remainingCleanupNanosOrNull() ?: 0L).also {
+                        if (it == 0L) throw java.util.concurrent.TimeoutException("export diagnostic cleanup allowance expired")
+                    }
+                    var interruptionRecorded = false
+                    fun interrupted(failure: Throwable) {
+                        cleanupInterrupted = true
+                        if (!interruptionRecorded) {
+                            primaryFailure?.addSuppressed(failure)
+                            interruptionRecorded = true
+                        }
+                    }
+                    fun <T> duringCleanup(action: (Long) -> T): T {
+                        while (true) {
+                            val remaining = remainingCleanup()
+                            try {
+                                return action(remaining)
+                            } catch (failure: InterruptedException) {
+                                interrupted(failure)
+                            } catch (failure: java.nio.channels.ClosedByInterruptException) {
+                                Thread.interrupted()
+                                interrupted(failure)
+                            }
+                        }
+                    }
+                    val stdoutBytes = duringCleanup { stdoutTask.get(it, TimeUnit.NANOSECONDS) }
+                    val stderrBytes = duringCleanup { stderrTask.get(it, TimeUnit.NANOSECONDS) }
+                    // Each attempt opens fresh streams; an interrupt-closed channel is never reused.
+                    duringCleanup { publishDiagnostics(stdoutBytes, stderrBytes) { remainingCleanup() } }
+                }
+            }
             tasks.forEach { task -> cleanup { task.cancel(true) } }
             cleanup { process.inputStream.close() }
             cleanup { process.errorStream.close() }
@@ -329,6 +377,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                     )
                 }
             }
+            if (cleanupInterrupted) Thread.currentThread().interrupt()
             cleanupFailure?.let { throw it }
         }
     }
