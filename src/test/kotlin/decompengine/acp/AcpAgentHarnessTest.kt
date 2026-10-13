@@ -1320,13 +1320,21 @@ class AcpAgentHarnessTest {
         )
         val executor = Executors.newSingleThreadExecutor()
         val events = mutableListOf<AgentExecutionEvent>()
+        val readyAcknowledged = CountDownLatch(1)
         try {
             val execution = executor.submit<decompengine.agent.AgentExecutionResult> {
-                harness.execute(request, events::add)
+                harness.execute(request) { event ->
+                    events += event
+                    if (event is AgentMessageEvent && event.textDelta == "cooperative-cancellation-ready") {
+                        readyAcknowledged.countDown()
+                    }
+                }
             }
-            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
-            while (!ready.exists() && !execution.isDone && System.nanoTime() < deadline) Thread.sleep(10)
+            // Publication precedes callback completion; cancel only after the peer confirms that
+            // the official write response arrived, so cancellation cannot roll readiness back.
+            assertTrue(readyAcknowledged.await(3, TimeUnit.SECONDS), "fixture never acknowledged the ready write")
             assertTrue(ready.exists(), "fixture never reached session/prompt")
+            assertEquals("ready\n", ready.readText())
             cancellation.cancel()
 
             val result = try {
