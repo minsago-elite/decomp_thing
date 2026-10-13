@@ -961,7 +961,7 @@ internal class AcpFilesystemBroker private constructor(
                         requireAcpPrivateControlsUnexposed(root.path.resolve(rule.path.relativePath), rule.recursive,
                             cancellationCheck = {
                                 if (request.cancellation.isCancellationRequested()) {
-                                    throw IOException("ACP filesystem authority opening cancelled")
+                                    throw RequestedAcpCancellation("filesystem authority opening")
                                 }
                             })
                     }
@@ -1004,7 +1004,7 @@ internal class AcpFilesystemBroker private constructor(
                     }
                     try {
                         requireAcpPrivateControlDescriptorUnexposed(descriptor, cancellationCheck = {
-                            if (cancellation.isCancellationRequested()) throw IOException("ACP filesystem authority opening cancelled")
+                            if (cancellation.isCancellationRequested()) throw RequestedAcpCancellation("filesystem authority opening")
                         })
                     } catch (failure: Throwable) {
                         descriptor.close()
@@ -1012,6 +1012,8 @@ internal class AcpFilesystemBroker private constructor(
                     }
                     return SecureRoot(root, root.path, descriptor)
                 }
+            } catch (cancelled: RequestedAcpCancellation) {
+                throw cancelled
             } catch (failure: AgentExecutionException) {
                 throw failure
             } catch (failure: Throwable) {

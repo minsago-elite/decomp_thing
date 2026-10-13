@@ -3155,7 +3155,7 @@ private class AcpProcessExitedFailure(val exitCode: Int) : AcpTerminalFailure("A
 internal class AcpProtocolFailure(message: String) : IllegalStateException(message)
 private class AcpPhaseTimeout(phase: String) : RuntimeException("ACP $phase exceeded its configured timeout")
 private class AcpIdleTimeout(timeout: Duration) : RuntimeException("ACP session/prompt was idle for ${timeout.toMillis()} ms")
-private class RequestedAcpCancellation(val phase: String) : RuntimeException("ACP execution cancelled during $phase")
+internal class RequestedAcpCancellation(val phase: String) : RuntimeException("ACP execution cancelled during $phase")
 
 @OptIn(UnstableApi::class)
 private fun AgentCapabilities.supports(capability: AcpRequiredAgentCapability): Boolean = when (capability) {

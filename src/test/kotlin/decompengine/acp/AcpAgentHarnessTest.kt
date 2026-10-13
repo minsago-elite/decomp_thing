@@ -1662,6 +1662,38 @@ class AcpAgentHarnessTest {
         assertNull(launchCancelledHarness.latestDiagnostics())
         assertNull(launchCancelledHarness.latestSandboxEvidence())
 
+        for (rootCheckpoint in listOf(true, false)) {
+            val authorityCancellationObserved = java.util.concurrent.atomic.AtomicBoolean(false)
+            val authorityCancellation = AgentCancellation {
+                val frames = Thread.currentThread().stackTrace.filter {
+                    it.className == "decompengine.acp.AcpFilesystemBroker\$Companion"
+                }
+                val atRoot = frames.any { it.methodName.startsWith("openRoot") }
+                val selected = if (rootCheckpoint) atRoot else !atRoot && frames.any { it.methodName.startsWith("open") }
+                if (selected) authorityCancellationObserved.set(true)
+                selected
+            }
+            val authorityHarness = harness("success")
+            val authorityFixture = fixture()
+            val authorityReceipt = authorityHarness.executeReceipt(
+                authorityFixture.request.withCancellation(authorityCancellation),
+            )
+            val authorityResult = assertIs<AgentExecutionOutcome.Returned>(authorityReceipt.outcome).result
+            val authorityEvidence = assertIs<AcpInvocationEvidenceSnapshot>(authorityReceipt.providerEvidence)
+            assertTrue(authorityCancellationObserved.get(), "actual filesystem authority checkpoint was not reached")
+            assertEquals(AgentStopReason.CANCELLED, authorityResult.stopReason)
+            assertEquals(AcpExecutionLifecyclePhase.FINAL_WORKSPACE_SNAPSHOT, authorityEvidence.phaseReached)
+            assertEquals(AcpExecutionCleanupDisposition.VERIFIED, authorityEvidence.cleanupDisposition)
+            assertNull(authorityEvidence.negotiatedAgent)
+            assertNull(authorityEvidence.completeExecutionEvidence)
+            assertNull(authorityEvidence.wirePromptSha256)
+            assertNull(authorityResult.session)
+            val authorityDiagnostics = assertNotNull(authorityEvidence.diagnostics)
+            assertTrue(authorityDiagnostics.remainingProcessIds.isEmpty())
+            assertTrue(authorityDiagnostics.sandboxCleanupVerified)
+            assertProcessStopped(authorityDiagnostics.pid)
+        }
+
         val evidenceCancellationObserved = java.util.concurrent.atomic.AtomicBoolean(false)
         val evidenceCancellation = AgentCancellation {
             val duringEvidenceConstruction = Thread.currentThread().stackTrace.any { frame ->
