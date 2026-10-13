@@ -161,6 +161,14 @@ private class NativeSessionCommand(
     private val command: LinuxBoundedSessionCommand,
     private val testHook: NonAuthoritativeSessionTestHook,
 ) {
+    init {
+        if (System.getProperty("os.arch", "") !in setOf("amd64", "x86_64", "aarch64") ||
+            Native.LONG_SIZE != Long.SIZE_BYTES || Native.POINTER_SIZE != Long.SIZE_BYTES
+        ) {
+            throw LinuxBoundedSessionException("bounded session pidfd execution requires Linux x86-64 or aarch64 LP64")
+        }
+    }
+
     private val libc: SessionLibC = Native.load(Platform.C_LIBRARY_NAME, SessionLibC::class.java)
     private val attributes = Memory(OPAQUE_NATIVE_STORAGE_BYTES)
     private val fileActions = Memory(OPAQUE_NATIVE_STORAGE_BYTES)
@@ -625,6 +633,15 @@ private class NativeSessionCommand(
      * retries internally, so calling them here would reopen an unbounded retry path. Adding a
      * caller-supplied clock/native callback or a public process-signaling overload would widen the
      * authority surface solely for this control-plane command.
+     *
+     * Use libc syscall(2), not the pidfd wrappers first exported by glibc 2.36. Both admitted LP64
+     * ABIs assign pidfd_open=434 and pidfd_send_signal=424. The primary Linux v6.6 ABI definitions
+     * are pinned at commit ffc253263a1375a65fa6c9f62a893e9767fbebfa:
+     * https://github.com/torvalds/linux/blob/ffc253263a1375a65fa6c9f62a893e9767fbebfa/arch/x86/entry/syscalls/syscall_64.tbl#L348
+     * https://github.com/torvalds/linux/blob/ffc253263a1375a65fa6c9f62a893e9767fbebfa/include/uapi/asm-generic/unistd.h#L757
+     * https://github.com/torvalds/linux/blob/ffc253263a1375a65fa6c9f62a893e9767fbebfa/arch/arm64/include/uapi/asm/unistd.h#L25
+     * aarch64 includes the generic table. NativeLong preserves C long arguments/results; no
+     * numeric-PID signaling substitution is made when the kernel rejects either syscall.
      */
     private fun requirePidfdSupported(deadline: Long) {
         try {
@@ -644,7 +661,7 @@ private class NativeSessionCommand(
         require(processId in 1..Int.MAX_VALUE.toLong()) { "process id is invalid" }
         while (true) {
             requireDeadline(deadline, DeadlinePhase.COMMAND)
-            val descriptor = libc.pidfd_open(processId.toInt(), 0)
+            val descriptor = libc.syscall(NativeLong(434), NativeLong(processId), NativeLong(0)).toInt()
             if (descriptor >= 0) {
                 val handle = LinuxProcessDescriptor(descriptor, processId)
                 try {
@@ -672,10 +689,11 @@ private class NativeSessionCommand(
     ): Boolean = handle.signalWhileOpen { descriptor ->
         while (true) {
             requireDeadline(deadline, phase)
-            val result = libc.pidfd_send_signal(descriptor, signal, null, 0)
-            val error = if (result != 0) Native.getLastError() else 0
+            val result = libc.syscall(NativeLong(424), NativeLong(descriptor.toLong()),
+                NativeLong(signal.toLong()), null, NativeLong(0)).toLong()
+            val error = if (result != 0L) Native.getLastError() else 0
             requireDeadline(deadline, phase)
-            if (result == 0) return@signalWhileOpen true
+            if (result == 0L) return@signalWhileOpen true
             when (error) {
                 EINTR -> requireDeadline(deadline, phase)
                 ESRCH -> return@signalWhileOpen false
@@ -870,8 +888,9 @@ private interface SessionLibC : Library {
     fun poll(descriptors: Pointer, count: NativeLong, timeoutMilliseconds: Int): Int
     fun kill(pid: Int, signal: Int): Int
     fun waitpid(pid: Int, status: Pointer, options: Int): Int
-    fun pidfd_open(pid: Int, flags: Int): Int
-    fun pidfd_send_signal(pidfd: Int, signal: Int, info: Pointer?, flags: Int): Int
+    fun syscall(number: NativeLong, argument1: NativeLong, argument2: NativeLong): NativeLong
+    fun syscall(number: NativeLong, argument1: NativeLong, argument2: NativeLong,
+        argument3: Pointer?, argument4: NativeLong): NativeLong
     fun sigfillset(set: Pointer): Int
     fun sigemptyset(set: Pointer): Int
     fun sigdelset(set: Pointer, signal: Int): Int
