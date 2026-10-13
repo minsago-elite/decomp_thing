@@ -192,9 +192,9 @@ internal class GccCompilerEngineContainmentRequest(
             runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL)) {
             "GCC driver containment requires bundled full-recovery export with fresh control state"
         }
-        require(bundledRuntime?.invocationVersion != 6 || (engineId == "cc1" &&
+        require(bundledRuntime?.invocationVersion !in setOf(6, 7) || (engineId == "cc1" &&
             runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL)) {
-            "parallel full-recovery containment requires fresh cc1 control state"
+            "parallel full-recovery and diagnostic containment require fresh cc1 control state"
         }
         when (runKind) {
             GccCompilerEngineContainmentRunKind.INTERRUPTED,
@@ -704,9 +704,11 @@ private fun renderDefinition(request: GccCompilerEngineContainmentRequest): Defi
     val unitName = "decomp-gcc-${request.engineId}-${requestSha256.take(32)}.scope"
     val unsigned = JsonObject(
         linkedMapOf(
-            "schemaVersion" to JsonPrimitive(if (request.bundledRuntime?.invocationVersion == 6) 3
+            "schemaVersion" to JsonPrimitive(if (request.bundledRuntime?.runtimeDiagnostics == true) 4
+                else if (request.bundledRuntime?.invocationVersion == 6) 3
                 else if (request.bundledRuntime == null) 1 else 2),
-            "provider" to JsonPrimitive(if (request.bundledRuntime?.invocationVersion == 6) PARALLEL_DEFINITION_PROVIDER
+            "provider" to JsonPrimitive(if (request.bundledRuntime?.runtimeDiagnostics == true) DIAGNOSTIC_DEFINITION_PROVIDER
+                else if (request.bundledRuntime?.invocationVersion == 6) PARALLEL_DEFINITION_PROVIDER
                 else if (request.bundledRuntime == null) DEFINITION_PROVIDER else BUNDLED_DEFINITION_PROVIDER),
             "authority" to JsonPrimitive(ASSESSMENT_AUTHORITY),
             "releaseEligible" to JsonPrimitive(false),
@@ -742,11 +744,12 @@ private fun parseDefinition(bytes: ByteArray): DefinitionFacts {
     val root = parseCanonicalObject(bytes, "containment definition")
     root.requireKeys(DEFINITION_FIELDS, "containment definition")
     val version = root.intField("schemaVersion", "containment definition")
-    require(version in 1..3) { "containment definition schema version is unsupported" }
+    require(version in 1..4) { "containment definition schema version is unsupported" }
     root.requireString("provider", when (version) {
         1 -> DEFINITION_PROVIDER
         2 -> BUNDLED_DEFINITION_PROVIDER
-        else -> PARALLEL_DEFINITION_PROVIDER
+        3 -> PARALLEL_DEFINITION_PROVIDER
+        else -> DIAGNOSTIC_DEFINITION_PROVIDER
     }, "containment definition")
     root.requireString("authority", ASSESSMENT_AUTHORITY, "containment definition")
     root.requireBoolean("releaseEligible", false, "containment definition")
@@ -1384,6 +1387,7 @@ private fun containmentFail(message: String): Nothing =
 private const val DEFINITION_PROVIDER = "gcc-compiler-engine-containment-definition-v1"
 private const val BUNDLED_DEFINITION_PROVIDER = "gcc-compiler-engine-containment-definition-v2"
 private const val PARALLEL_DEFINITION_PROVIDER = "gcc-compiler-engine-containment-definition-v3"
+private const val DIAGNOSTIC_DEFINITION_PROVIDER = "gcc-compiler-engine-containment-definition-v4"
 private const val PARALLEL_ATTACHED_RECEIPT_PROVIDER = "gcc-compiler-engine-unit-attached-at-boot-receipt-v3"
 private const val ATTACHED_RECEIPT_PROVIDER = "gcc-compiler-engine-unit-attached-at-boot-receipt-v2"
 private const val ABSENCE_RECEIPT_PROVIDER = "gcc-compiler-engine-terminal-absence-receipt-v2"

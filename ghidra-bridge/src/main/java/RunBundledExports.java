@@ -6,6 +6,7 @@ import java.util.Set;
 public final class RunBundledExports extends GhidraScript {
     @Override
     protected void run() throws Exception {
+        BundledGhidraWorker.diagnosticsGuard();
         String[] arguments = getScriptArgs();
         if (arguments.length == 0) throw new IllegalArgumentException("No bundled exporters requested");
         Set<String> exporters = Set.of("ExportProgramModel.java", "ExportRecoveredCallSites.java", "ExportDecompiledC.java");
@@ -18,9 +19,15 @@ public final class RunBundledExports extends GhidraScript {
             if (count < 0 || count > 16 || count > arguments.length - index) {
                 throw new IllegalArgumentException("Invalid bundled exporter arguments");
             }
-            runScript(name, Arrays.copyOfRange(arguments, index, index + count));
+            BundledGhidraWorker.diagnosticsExporter(name);
+            try {
+                runScript(name, Arrays.copyOfRange(arguments, index, index + count));
+            } finally {
+                BundledGhidraWorker.diagnosticsGuard();
+            }
             index += count;
         }
         BundledGhidraWorker.exportsCompleted();
+        BundledGhidraWorker.diagnosticsFinalization();
     }
 }

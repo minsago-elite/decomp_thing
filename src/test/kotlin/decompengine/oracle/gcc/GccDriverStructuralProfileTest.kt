@@ -33,9 +33,9 @@ class GccDriverStructuralProfileTest {
         assertEquals("gcc-cc1-16.2.0", profile.profileId)
         assertEquals("16.2.0", profile.version)
         assertEquals("78d4ac73dd391005b895a6148cd9831e28e1208b", profile.sourceRevision)
-        assertEquals("9b90c3c016f332438057a1a403023442a931fdfaf16328f3a2e0fdcab878b52f",
+        assertEquals("8e142e3f2713edbd4b7e842ad0d50f5d806cae181ab3152aebef94fe11de40a7",
             profile.compilerEngineProfileSha256)
-        assertEquals("8949fa1c60a77d46610d40b69c917193cbc8b817943f6af7a2b535837176c049",
+        assertEquals("85ca86a7da528eac4972f0af1ba4f98de3002e3e9a91abc3e08d5178aaf38c23",
             profile.fullExportProfileSha256)
         assertEquals("dbef520c025d268f5126229ace8ad5b08a15722573d45b5e1ab934611905abb4", profile.artifactManifestSha256)
         assertEquals("ba9b2f314bfb3d92a172e67f8ce993a2e98b9bc14aabf00ff6d58e4631037621", profile.fullBinary.sha256)
@@ -200,6 +200,18 @@ class GccDriverStructuralProfileTest {
         }
         assertFailsWith<IllegalArgumentException> { profile.bindFullExport(fullOperation(profile, snapshot, forceLegacy = true)) }
         assertFailsWith<IllegalArgumentException> { profile.bindFullExport(fullOperation(profile, snapshot, forceLegacyExecution = true)) }
+    }
+
+    @Test
+    fun `diagnostic intent and runtime cannot become structural full export authority`() {
+        val profile = profile()
+        val snapshot = fullSnapshot(profile, modelBytes(profile, executableAddress(profile)))
+        for ((diagnosticIntent, diagnosticRuntime) in listOf(true to false, false to true, true to true)) {
+            assertFailsWith<IllegalArgumentException> {
+                profile.bindFullExport(fullOperation(profile, snapshot,
+                    diagnosticIntent = diagnosticIntent, diagnosticRuntime = diagnosticRuntime))
+            }
+        }
     }
 
     @Test
@@ -507,6 +519,8 @@ class GccDriverStructuralProfileTest {
         runtimeWorkers: Int = 4,
         forceLegacy: Boolean = false,
         forceLegacyExecution: Boolean = false,
+        diagnosticIntent: Boolean = false,
+        diagnosticRuntime: Boolean = false,
     ): GccBundledFullExportOperation {
         val operationId = "a".repeat(64)
         val plannerProfile = GccRetainedCompilerEngineProfile.open(profile.root.resolve("compiler-engines.json"), plannerEngineId).use {
@@ -514,13 +528,15 @@ class GccDriverStructuralProfileTest {
         }
         val parallel = profile.engineId == "cc1" && !forceLegacy
         val intent = JsonObject(mapOf(
-            "provider" to JsonPrimitive(if (parallel) "gcc-bundled-operation-intent-v3" else "gcc-bundled-operation-intent-v2"),
-            "schemaVersion" to JsonPrimitive(if (parallel) 3 else 2),
+            "provider" to JsonPrimitive(if (diagnosticIntent) "gcc-bundled-operation-intent-v4"
+                else if (parallel) "gcc-bundled-operation-intent-v3" else "gcc-bundled-operation-intent-v2"),
+            "schemaVersion" to JsonPrimitive(if (diagnosticIntent) 4 else if (parallel) 3 else 2),
             "operationId" to JsonPrimitive(operationId),
             "engineId" to JsonPrimitive(intentEngineId),
             "runKind" to JsonPrimitive("fresh-control"),
             "plannerProfile" to plannerProfile,
-            "bundledRuntime" to JsonObject(mapOf("provider" to JsonPrimitive(if (parallel) "bundled-ghidra-java-api-runtime-v6"
+            "bundledRuntime" to JsonObject(mapOf("provider" to JsonPrimitive(if (diagnosticRuntime) "bundled-ghidra-java-api-runtime-v7"
+                else if (parallel) "bundled-ghidra-java-api-runtime-v6"
                 else "bundled-ghidra-java-api-runtime-v5")) + if (parallel) mapOf(
                 "processorCount" to JsonPrimitive(runtimeWorkers), "analysisThreadCount" to JsonPrimitive(runtimeWorkers),
                 "decompilerWorkerCount" to JsonPrimitive(runtimeWorkers)) else emptyMap()),

@@ -26,14 +26,19 @@ internal class GccBundledGhidraRuntime(
     val invocationVersion: Int = 3,
 ) {
     val recoveryMode: String = if (invocationVersion >= 5) "full" else "planning"
-    val processorCount: Int = if (invocationVersion == 6) 4 else 1
-    val analysisThreadCount: Int = if (invocationVersion == 6) 4 else 1
-    val decompilerWorkerCount: Int = if (invocationVersion == 6) 4 else 1
+    val runtimeDiagnostics: Boolean = invocationVersion == 7
+    val workerOperation: String = if (runtimeDiagnostics) "analyze-diagnostics-v1" else "analyze"
+    val diagnosticPolicy: String? = if (runtimeDiagnostics) "jvm-mxbean-stdout-v1" else null
+    val maximumJavaHeapBytes: Long = 2L * 1024 * 1024 * 1024
+    private val parallelRecovery: Boolean = invocationVersion in setOf(6, 7)
+    val processorCount: Int = if (parallelRecovery) 4 else 1
+    val analysisThreadCount: Int = if (parallelRecovery) 4 else 1
+    val decompilerWorkerCount: Int = if (parallelRecovery) 4 else 1
     val classPath: List<GccBundledGhidraClassPathEntry>
     val release: Path
 
     init {
-        require(invocationVersion in 1..6) { "bundled Ghidra invocation version is unsupported" }
+        require(invocationVersion in 1..7) { "bundled Ghidra invocation version is unsupported" }
         requireRuntimePath(root)
         val copied = ArrayList<GccBundledGhidraClassPathEntry>()
         for (entry in classPath) {
@@ -104,6 +109,9 @@ internal class GccBundledGhidraRuntime(
         lease: GccCompilerEngineOutputLeaseIdentity,
         runKind: GccCompilerEngineContainmentRunKind = GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
     ): List<String> {
+        require(!runtimeDiagnostics || runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL) {
+            "bundled Ghidra runtime diagnostics require fresh uninterrupted execution"
+        }
         val resumed = invocationVersion == 4
         require(state.mode == if (resumed) GccCompilerEngineAnalysisStateMode.RESUME_MANIFEST
             else GccCompilerEngineAnalysisStateMode.FRESH_EMPTY) {
@@ -125,7 +133,7 @@ internal class GccBundledGhidraRuntime(
             lease.path.resolve("reports/program_model.json").toString(),
         ) + if (runKind == GccCompilerEngineContainmentRunKind.INTERRUPTED && invocationVersion >= 3) {
             listOf("hold-first-planning-checkpoint-v1")
-        } else if (invocationVersion == 6) {
+        } else if (parallelRecovery) {
             listOf("full-recovery-workers-v1:$decompilerWorkerCount")
         } else emptyList()
         val invocation = GhidraInvocation(
@@ -143,11 +151,12 @@ internal class GccBundledGhidraRuntime(
             listOf(
                 prefix.first(), "-Duser.home=${temporaryDirectory}", "-Djava.io.tmpdir=${temporaryDirectory}",
                 "-XX:ActiveProcessorCount=$processorCount", "-XX:+DisableAttachMechanism",
-            ) + (if (invocationVersion == 6) listOf("-Dcpu.core.override=$analysisThreadCount") else emptyList()) + prefix.drop(1)
+            ) + (if (parallelRecovery) listOf("-Dcpu.core.override=$analysisThreadCount") else emptyList()) + prefix.drop(1)
         } else {
             prefix
         }
-        return isolatedPrefix + invocation.arguments()
+        val arguments = invocation.arguments()
+        return isolatedPrefix + if (runtimeDiagnostics) listOf(workerOperation) + arguments.drop(1) else arguments
     }
 
     fun toJson(): JsonObject = JsonObject(mapOf(
@@ -158,10 +167,14 @@ internal class GccBundledGhidraRuntime(
             "bytes" to JsonPrimitive(entry.bytes),
             "sha256" to JsonPrimitive(entry.sha256),
         )) }),
-    ) + (if (invocationVersion == 6) mapOf(
+    ) + (if (parallelRecovery) mapOf(
         "processorCount" to JsonPrimitive(processorCount),
         "analysisThreadCount" to JsonPrimitive(analysisThreadCount),
         "decompilerWorkerCount" to JsonPrimitive(decompilerWorkerCount),
+    ) else emptyMap()) + (if (runtimeDiagnostics) mapOf(
+        "workerOperation" to JsonPrimitive(workerOperation),
+        "diagnosticPolicy" to JsonPrimitive(diagnosticPolicy),
+        "maximumJavaHeapBytes" to JsonPrimitive(maximumJavaHeapBytes),
     ) else emptyMap()))
 
     companion object {
@@ -180,16 +193,25 @@ internal class GccBundledGhidraRuntime(
                 "${PROVIDER_PREFIX}4" -> 4
                 "${PROVIDER_PREFIX}5" -> 5
                 "${PROVIDER_PREFIX}6" -> 6
+                "${PROVIDER_PREFIX}7" -> 7
                 else -> throw IllegalArgumentException("bundled Ghidra runtime provider is invalid")
             }
             val throughputFields = setOf("processorCount", "analysisThreadCount", "decompilerWorkerCount")
+            val diagnosticFields = setOf("workerOperation", "diagnosticPolicy", "maximumJavaHeapBytes")
             require(document.keys == setOf("provider", "root", "classPath") +
-                (if (version == 6) throughputFields else emptySet())) { "bundled Ghidra runtime fields are invalid" }
-            if (version == 6) throughputFields.forEach { name ->
+                (if (version in setOf(6, 7)) throughputFields else emptySet()) +
+                (if (version == 7) diagnosticFields else emptySet())) { "bundled Ghidra runtime fields are invalid" }
+            if (version in setOf(6, 7)) throughputFields.forEach { name ->
                 val value = document[name] as? JsonPrimitive
                 require(value != null && !value.isString && value.content == "4") {
                     "bundled Ghidra runtime throughput count is unsupported"
                 }
+            }
+            if (version == 7) {
+                require(document.strictString("workerOperation") == "analyze-diagnostics-v1" &&
+                    document.strictString("diagnosticPolicy") == "jvm-mxbean-stdout-v1" &&
+                    document["maximumJavaHeapBytes"] == JsonPrimitive(2L * 1024 * 1024 * 1024)
+                ) { "bundled Ghidra diagnostic policy is unsupported" }
             }
             val entries = document["classPath"] as? JsonArray
                 ?: throw IllegalArgumentException("bundled Ghidra classpath must be an array")

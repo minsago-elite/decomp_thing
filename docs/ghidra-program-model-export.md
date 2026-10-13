@@ -132,3 +132,33 @@ caps, prelaunch cancellation and live worker cancellation. Selected existing exp
 tests cover model reading, timeout diagnostics, parser size bounds and profile-derived
 limits. These local checks do not rerun historical GCC exports or qualify cc1/lto1
 fresh-versus-resumed semantic equivalence.
+
+### Contained cc1 runtime diagnostics
+
+The manual **GCC oracle model** Actions operation `cc1-runtime-diagnostics` reuses the contained cc1 setup and selects
+`gcc-engine-runtime-diagnostic`. Its closed runtime 7 operation, `analyze-diagnostics-v1`, enables the fixed
+`jvm-mxbean-stdout-v1` observer. Ordinary runtimes 1–6 keep their commands and behavior. Diagnostic intent 4 and
+containment definition 4 cannot enter full-export qualification, planning, resume, or structural assessment.
+
+The observer records initialization, import-and-analysis, guarded exporter, finalization, and terminal phases, plus
+JVM process CPU, heap and memory-pool usage, and collector count/time counters every 15 seconds. JVM CPU excludes
+native decompilers. Collector elapsed time is not GC CPU time and overlapping collector counters must not be added.
+Unsupported metrics are explicit nulls. The import-and-analysis phase includes import; existing analyzer timing
+output provides finer detail. The worker heap stays 2 GiB, concurrency stays four CPUs/analysis threads/decompilers,
+and containment stays 16 GiB with the existing aggregate CPU ceiling and cleanup reserve. The 9,000-second contained
+and 9,900-second launcher diagnostic ceilings do not change the 1,800-second complete-operation acceptance check.
+
+One daemon owns sampling, encoding, and writes through a dedicated stdout descriptor. Phase callbacks do not wait
+for it. The queue admits at most 14 ordinary events, reserving two of its 16 logical slots for loss and terminal
+records. At most 640 records and 5 MiB are permitted, including reserved records; each encoded frame is capped at
+4,096 bytes including framing and newlines. Shutdown waits at most 250 ms and preserves the original outcome.
+Queue loss, cap exhaustion, unavailable output, interruption, or forced termination can leave incomplete telemetry.
+A terminal record describes prior record accounting; it cannot certify completion of its own write or final drain.
+
+Capture retains at most 16 MiB from each of stdout and stderr, and an allowlist of operation/profile/deployment
+metadata before scratch cleanup. It checks the intended authorization chain against actual retained inputs and the
+installed runtime. Those checks do not authenticate individual stdout markers, which another writer can imitate.
+Malformed, interleaved, truncated, or gapped frames remain visible as incomplete diagnostics. Capture hashes identify
+the retained bytes; they are not execution receipts. The diagnostic summary remains incomplete, unscored, and
+release-ineligible, never writes `qualification.json`, and preserves a failing command's original failure. A single
+reviewed Actions capture supplies observations for the next performance change; it does not qualify cc1 throughput.

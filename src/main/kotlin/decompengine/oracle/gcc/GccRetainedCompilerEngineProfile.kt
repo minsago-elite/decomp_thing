@@ -1,6 +1,7 @@
 package decompengine.oracle.gcc
 
 import decompengine.oracle.core.OracleArtifactSnapshot
+import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.fulltree.StableControlFile
 import java.nio.file.Path
@@ -87,8 +88,11 @@ internal class GccRetainedCompilerEngineProfile private constructor(
     }
 
     @Synchronized
-    fun exportWallClockMillis(targetId: String, fullRecovery: Boolean): Long {
+    fun exportWallClockMillis(targetId: String, fullRecovery: Boolean, runtimeDiagnostics: Boolean = false): Long {
         target(targetId)
+        if (runtimeDiagnostics) {
+            return Math.multiplyExact(requireDiagnosticPolicy(targetId, fullRecovery).wallClockSeconds, 1_000L)
+        }
         require(targetId != "driver" || fullRecovery) { "GCC driver requires full-recovery export" }
         require(!fullRecovery || targetId != "lto1") { "full-recovery export is unsupported for lto1" }
         return if (fullRecovery && targetId == "cc1") suite.budgets.fullRecoveryCc1ExportWallClockMillis
@@ -105,8 +109,9 @@ internal class GccRetainedCompilerEngineProfile private constructor(
     }
 
     @Synchronized
-    fun invocationVersion(engineId: String, fullRecovery: Boolean): Int {
-        exportWallClockMillis(engineId, fullRecovery)
+    fun invocationVersion(engineId: String, fullRecovery: Boolean, runtimeDiagnostics: Boolean = false): Int {
+        exportWallClockMillis(engineId, fullRecovery, runtimeDiagnostics)
+        if (runtimeDiagnostics) return requireDiagnosticPolicy(engineId, fullRecovery).runtimeInvocationVersion
         return if (!fullRecovery) 3
         else if (engineId == "cc1") suite.fullRecoveryCc1Throughput?.runtimeInvocationVersion ?: 5
         else 5
@@ -121,7 +126,10 @@ internal class GccRetainedCompilerEngineProfile private constructor(
         bundledRuntime: GccBundledGhidraRuntime? = null,
     ): ByteArray {
         requireCurrent()
-        val engine = target(engineId)
+        target(engineId)
+        require(bundledRuntime?.invocationVersion != 7 && bundledRuntime?.runtimeDiagnostics != true) {
+            "diagnostic runtime cannot enter ordinary GCC export admission"
+        }
         val throughput = suite.fullRecoveryCc1Throughput?.takeIf { engineId == "cc1" && fullRecoveryExport }
         if (throughput != null) {
             require(bundledRuntime != null && bundledRuntime.invocationVersion == throughput.runtimeInvocationVersion &&
@@ -139,6 +147,61 @@ internal class GccRetainedCompilerEngineProfile private constructor(
                 "GCC operation runtime differs from its retained recovery mode"
             }
         }
+        requireInvocationArtifacts(engineId, artifacts)
+        require(budgets.wallClockMillis <= exportWallClockMillis(engineId, fullRecoveryExport) &&
+            budgets.maximumResidentBytes <= suite.budgets.exportMaximumResidentBytes
+        ) { "GCC operation exceeds its retained profile resource ceilings" }
+        requireCurrent()
+        return encoded.copyOf()
+    }
+
+    @Synchronized
+    fun bindDiagnosticInvocation(
+        engineId: String,
+        artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
+        budgets: GccCompilerEngineContainmentBudgets,
+        fullRecoveryExport: Boolean,
+        bundledRuntime: GccBundledGhidraRuntime? = null,
+    ): ByteArray {
+        val diagnostic = requireDiagnosticPolicy(engineId, fullRecoveryExport)
+        require(bundledRuntime != null && bundledRuntime.invocationVersion == diagnostic.runtimeInvocationVersion &&
+            bundledRuntime.runtimeDiagnostics && bundledRuntime.recoveryMode == "full" &&
+            bundledRuntime.workerOperation == diagnostic.workerOperation &&
+            bundledRuntime.diagnosticPolicy == diagnostic.diagnosticPolicy &&
+            bundledRuntime.processorCount == diagnostic.processorCount &&
+            bundledRuntime.analysisThreadCount == diagnostic.analysisThreadCount &&
+            bundledRuntime.decompilerWorkerCount == diagnostic.decompilerWorkerCount &&
+            bundledRuntime.maximumJavaHeapBytes == diagnostic.maximumJavaHeapBytes
+        ) { "GCC diagnostic runtime differs from its retained diagnostic policy" }
+        requireInvocationArtifacts(engineId, artifacts)
+        require(budgets.wallClockMillis <= exportWallClockMillis(engineId, fullRecoveryExport, runtimeDiagnostics = true) &&
+            budgets.maximumResidentBytes <= minOf(diagnostic.maximumResidentBytes, suite.budgets.exportMaximumResidentBytes)
+        ) { "GCC diagnostic operation exceeds its retained profile resource ceilings" }
+        requireCurrent()
+        return OracleJson.canonicalBytes(JsonObject(mapOf(
+            "provider" to JsonPrimitive("gcc-retained-diagnostic-profile-v1"),
+            "schemaVersion" to JsonPrimitive(1),
+            "ordinaryProfileSha256" to JsonPrimitive(OracleArtifacts.sha256(encoded)),
+            "ordinaryProfile" to OracleJson.parseCanonical(encoded),
+            "diagnosticPolicy" to diagnostic.toPolicyJson(),
+            "engineId" to JsonPrimitive(engineId),
+            "recoveryMode" to JsonPrimitive("full"),
+            "complete" to JsonPrimitive(false),
+            "releaseEligible" to JsonPrimitive(false),
+        )))
+    }
+
+    private fun requireDiagnosticPolicy(engineId: String, fullRecovery: Boolean): GccCompilerEngineDiagnosticPolicy {
+        target(engineId)
+        require(engineId == "cc1" && fullRecovery) { "GCC runtime diagnostics require explicit cc1 full recovery" }
+        return requireNotNull(suite.cc1RuntimeDiagnostics) { "GCC runtime diagnostics require a retained diagnostic policy" }
+    }
+
+    private fun requireInvocationArtifacts(
+        engineId: String,
+        artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
+    ) {
+        val engine = target(engineId)
         val byRole = artifacts.associateBy { it.role }
         require(byRole.size == artifacts.size) { "planner profile invocation repeats artifact roles" }
         val controls = mapOf(
@@ -163,11 +226,6 @@ internal class GccRetainedCompilerEngineProfile private constructor(
         require(archive.bytes == suite.analysis.ghidraArchive.bytes && archive.sha256 == suite.analysis.ghidraArchive.sha256 &&
             byRole.getValue(GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE).sha256 == suite.analysis.exporterSha256
         ) { "GCC operation analysis tools differ from its retained planner profile" }
-        require(budgets.wallClockMillis <= exportWallClockMillis(engineId, fullRecoveryExport) &&
-            budgets.maximumResidentBytes <= suite.budgets.exportMaximumResidentBytes
-        ) { "GCC operation exceeds its retained profile resource ceilings" }
-        requireCurrent()
-        return encoded.copyOf()
     }
 
     @Synchronized

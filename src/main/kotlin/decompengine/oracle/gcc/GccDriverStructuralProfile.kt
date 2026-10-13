@@ -212,7 +212,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
         private const val SOURCE_PROFILE_ID = "gcc-driver-16.2.0"
         private const val PROFILE_VERSION = "16.2.0"
         private const val SOURCE_REVISION = "78d4ac73dd391005b895a6148cd9831e28e1208b"
-        private const val COMPILER_ENGINE_PROFILE_SHA256 = "9b90c3c016f332438057a1a403023442a931fdfaf16328f3a2e0fdcab878b52f"
+        private const val COMPILER_ENGINE_PROFILE_SHA256 = "8e142e3f2713edbd4b7e842ad0d50f5d806cae181ab3152aebef94fe11de40a7"
         private const val CC1_MANIFEST_SHA256 = "dbef520c025d268f5126229ace8ad5b08a15722573d45b5e1ab934611905abb4"
         private const val DRIVER_MANIFEST_SHA256 = "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9"
         private const val CC1_BUILD_RECORD_SHA256 = "f6b2711d4f82562195acebe7250d7dc62eb9425af4f736736e0ea69b65103e8e"
@@ -220,7 +220,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
         private const val BUILD_RECORD_SHA256 = "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
         private const val TOOLCHAIN_REPRODUCTION_SHA256 = "5c2c159d7287305159a220a1260f6ff6bffe9ec78bb1cbe2fb24f85b68a7d4de"
         private const val TARGET_ABI_SHA256 = "d251d5e6a0edc17655c355fb8fd757d557f064a6e67095ad53c8ca1e7569a343"
-        private const val FULL_EXPORT_PROFILE_SHA256 = "8949fa1c60a77d46610d40b69c917193cbc8b817943f6af7a2b535837176c049"
+        private const val FULL_EXPORT_PROFILE_SHA256 = "85ca86a7da528eac4972f0af1ba4f98de3002e3e9a91abc3e08d5178aaf38c23"
         private const val MAXIMUM_CONTROL_BYTES = 4 * 1024 * 1024
         private const val MAXIMUM_MANIFEST_BYTES = 64 * 1024 * 1024
         private val JSON_LIMITS = StrictJsonLimits(

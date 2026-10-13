@@ -3,22 +3,29 @@ name: GCC live full export
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
+  workflow_call:
+    inputs:
+      capture-mode:
+        description: Closed manual diagnostic capture mode
+        required: true
+        type: string
 
 concurrency:
   # Unrelated label events must not cancel a qualification before its job guard runs.
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{ github.event.action == 'labeled' && !contains(fromJSON('["qualify:cc1-full-export","qualify:driver-full-export"]'), github.event.label.name) && '-ignored-label' || '' }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ inputs.capture-mode || 'qualification' }}${{ github.event.action == 'labeled' && !contains(fromJSON('["qualify:cc1-full-export","qualify:driver-full-export"]'), github.event.label.name) && '-ignored-label' || '' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   cc1-live-full-export:
-    if: github.event_name == 'pull_request' && (github.event.action != 'labeled' || contains(fromJSON('["qualify:cc1-full-export","qualify:driver-full-export"]'), github.event.label.name)) && (contains(github.event.pull_request.labels.*.name, 'qualify:cc1-full-export') || contains(github.event.pull_request.labels.*.name, 'qualify:driver-full-export'))
-    name: ${{ matrix.target }} live full export
+    if: (github.event_name == 'workflow_dispatch' && inputs.capture-mode == 'cc1-runtime-diagnostics') || (github.event_name == 'pull_request' && inputs.capture-mode == '' && (github.event.action != 'labeled' || contains(fromJSON('["qualify:cc1-full-export","qualify:driver-full-export"]'), github.event.label.name)) && (contains(github.event.pull_request.labels.*.name, 'qualify:cc1-full-export') || contains(github.event.pull_request.labels.*.name, 'qualify:driver-full-export')))
+    name: ${{ matrix.target }} ${{ inputs.capture-mode == 'cc1-runtime-diagnostics' && 'runtime diagnostics' || 'live full export' }}
     strategy:
       fail-fast: false
       matrix:
-        target: ${{ fromJSON(contains(github.event.pull_request.labels.*.name, 'qualify:cc1-full-export') && contains(github.event.pull_request.labels.*.name, 'qualify:driver-full-export') && '["cc1","driver"]' || contains(github.event.pull_request.labels.*.name, 'qualify:driver-full-export') && '["driver"]' || '["cc1"]') }}
+        target: ${{ fromJSON(inputs.capture-mode == 'cc1-runtime-diagnostics' && '["cc1"]' || contains(github.event.pull_request.labels.*.name, 'qualify:cc1-full-export') && contains(github.event.pull_request.labels.*.name, 'qualify:driver-full-export') && '["cc1","driver"]' || contains(github.event.pull_request.labels.*.name, 'qualify:driver-full-export') && '["driver"]' || '["cc1"]') }}
     env:
       DECOMP_GCC_CLI_FULL_EXPORT_ENGINE: ${{ matrix.target }}
+      DECOMP_GCC_CLI_CAPTURE_MODE: ${{ inputs.capture-mode || 'qualification' }}
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ matrix.target == 'driver' && 90 || 360 }}
     permissions:
@@ -27,8 +34,8 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Select qualification evidence directory
-        run: echo "DECOMP_GCC_CLI_EVIDENCE_ROOT=$RUNNER_TEMP/${DECOMP_GCC_CLI_FULL_EXPORT_ENGINE}-full-export-evidence" >> "$GITHUB_ENV"
+      - name: Select capture evidence directory
+        run: echo "DECOMP_GCC_CLI_EVIDENCE_ROOT=$GITHUB_WORKSPACE/build/gcc-${DECOMP_GCC_CLI_FULL_EXPORT_ENGINE}-${DECOMP_GCC_CLI_CAPTURE_MODE}-evidence" >> "$GITHUB_ENV"
       - uses: actions/checkout@v7
         with:
           submodules: recursive
@@ -163,11 +170,11 @@ jobs:
         run: |
           df -h "$DECOMP_GCC_CLI_CC1_FRESH_SCRATCH" "$RUNNER_TEMP"
           df -i "$DECOMP_GCC_CLI_CC1_FRESH_SCRATCH" "$RUNNER_TEMP"
-      - name: Run the real contained full-export qualification
+      - name: Run the selected contained capture
         env:
           DECOMP_GCC_CLI_PROFILE: ${{ github.workspace }}/oracle/gcc/16.2.0/compiler-engines.json
           DECOMP_GCC_CLI_EXPORT_BINARY: ${{ matrix.target == 'driver' && format('{0}/oracle/gcc/16.2.0/artifacts/gcc-driver.stripped', github.workspace) || format('{0}/gcc-cc1-engine/artifacts/gcc-cc1.stripped', runner.temp) }}
-        run: scripts/ci-qualify-gcc-cc1-full-export.sh
+        run: scripts/ci-qualify-gcc-cc1-full-export.sh "$DECOMP_GCC_CLI_CAPTURE_MODE"
       - name: Record capacity after the live export
         if: always()
         run: |
@@ -177,11 +184,11 @@ jobs:
           else
             echo 'cc1 scratch was not provisioned'
           fi
-      - name: Retain production model and receipt evidence
+      - name: Retain capture logs and available evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: gcc-${{ matrix.target }}-live-full-export-${{ github.run_id }}-${{ github.run_attempt }}
+          name: gcc-${{ matrix.target }}-${{ inputs.capture-mode == 'cc1-runtime-diagnostics' && 'runtime-diagnostics' || 'live-full-export' }}-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 30
           if-no-files-found: warn
           path: |

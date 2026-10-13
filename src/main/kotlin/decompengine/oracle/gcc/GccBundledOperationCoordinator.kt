@@ -201,7 +201,7 @@ internal class GccBundledPreparedOperation internal constructor(
     /** Executes the versioned full-recovery exporter and snapshots its output after worker absence. */
     @Synchronized
     fun executeFullExport(): GccBundledFullExportOperation {
-        check(intent.bundledRuntime.recoveryMode == "full") { "full export execution requires the full-recovery runtime" }
+        intent.requireFullExportExecution()
         return executeRun(GccCompilerEngineContainmentRunKind.FRESH_CONTROL, null) { borrowed, execution ->
             val receipt = journal.recordExecution(execution.canonicalBytes)
             val captured = borrowed.withPinnedDescriptor { descriptor ->
@@ -216,6 +216,18 @@ internal class GccBundledPreparedOperation internal constructor(
                 GCC_BUNDLED_PREPARED_OPERATION_PERMIT,
             )
         }.also { completedFullExport = it }
+    }
+
+    /** Diagnostic execution produces only contained execution evidence, never a full-export capability. */
+    @Synchronized
+    fun executeRuntimeDiagnostic(): Path {
+        check(intent.bundledRuntime.runtimeDiagnostics) { "runtime diagnostics require the explicit diagnostic runtime" }
+        return executeRun(GccCompilerEngineContainmentRunKind.FRESH_CONTROL, null) { _, execution ->
+            journal.recordExecution(execution.canonicalBytes)
+            inputs.verify("after GCC diagnostic execution")
+            lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+            journal.path.resolve("execution.json")
+        }
     }
 
     @Synchronized
@@ -629,7 +641,7 @@ internal class GccBundledPreparedOperation internal constructor(
     ): T {
         requireCurrent()
         require(intent.runKind == kind) { "GCC bundled execution kind differs from the prepared intent" }
-        require(intent.bundledRuntime.invocationVersion in 2..3 || intent.bundledRuntime.invocationVersion in 5..6) {
+        require(intent.bundledRuntime.invocationVersion in 2..3 || intent.bundledRuntime.invocationVersion in 5..7) {
             "GCC contained execution requires an explicitly bound fresh JVM runtime"
         }
         executionAttempted = true

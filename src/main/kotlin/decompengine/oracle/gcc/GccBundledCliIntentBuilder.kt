@@ -13,7 +13,10 @@ internal object GccBundledCliIntentBuilder {
     fun build(operationId: String, engineId: String, runKind: GccCompilerEngineContainmentRunKind,
         binary: Path, profilePath: Path, archive: Path, controls: Path, journalRoot: Path, scratch: Path,
         diskPolicy: FullTreeDiskScratchPolicy, cliInvocation: GccBundledCliInvocation? = null,
-        fullRecoveryExport: Boolean = false): GccBundledOperationIntent {
+        fullRecoveryExport: Boolean = false, runtimeDiagnostics: Boolean = false): GccBundledOperationIntent {
+        require(!runtimeDiagnostics || (fullRecoveryExport && engineId == "cc1")) {
+            "runtime diagnostics require a fresh cc1 full-recovery operation"
+        }
         require(operationId.matches(Regex("[a-f0-9]{64}")))
         require(engineId in setOf("cc1", "lto1", "driver") && runKind in setOf(
             GccCompilerEngineContainmentRunKind.FRESH_CONTROL, GccCompilerEngineContainmentRunKind.INTERRUPTED))
@@ -26,7 +29,8 @@ internal object GccBundledCliIntentBuilder {
         require(engineId != "driver" || fullRecoveryExport) {
             "driver admission requires a fresh full-recovery export"
         }
-        require(cliInvocation == null || cliInvocation.options.fullRecoveryExport == fullRecoveryExport) {
+        require(cliInvocation == null || (cliInvocation.options.fullRecoveryExport == fullRecoveryExport &&
+            cliInvocation.options.runtimeDiagnostics == runtimeDiagnostics)) {
             "CLI invocation command differs from requested recovery mode"
         }
         val roots = listOf(controls, journalRoot, scratch)
@@ -80,7 +84,7 @@ internal object GccBundledCliIntentBuilder {
                             val runtime = GccBundledGhidraRuntime(bundle, reference.classPath.map { relative ->
                                 val entry = reference.entries.getValue(relative)
                                 GccBundledGhidraClassPathEntry(bundle.resolve(relative), checkNotNull(entry.bytes), checkNotNull(entry.sha256))
-                            }, invocationVersion = profile.invocationVersion(engineId, fullRecoveryExport))
+                            }, invocationVersion = profile.invocationVersion(engineId, fullRecoveryExport, runtimeDiagnostics))
                             val manifest = boot.invocationManifestBytes()
                             val exporter = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java"))
                                 .use { it.readNBytes(MAXIMUM_CONTROL_BYTES + 1) }
@@ -110,7 +114,7 @@ internal object GccBundledCliIntentBuilder {
                             artifacts += staged(GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE, "ExportProgramModel.java", exporter)
                             val intent = GccBundledOperationIntent(operationId, engineId, runKind, artifacts, runtime,
                                 GccCompilerEngineContainmentBudgets(
-                                    profile.exportWallClockMillis(engineId, fullRecoveryExport),
+                                    profile.exportWallClockMillis(engineId, fullRecoveryExport, runtimeDiagnostics),
                                     suite.budgets.exportMaximumResidentBytes, 128),
                                 diskPolicy, profile, cliInvocation)
                             requireDirectory()

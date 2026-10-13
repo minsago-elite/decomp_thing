@@ -13,12 +13,29 @@ import java.util.List;
 
 public final class BundledGhidraWorker {
     private static boolean exportsCompleted;
+    private static JvmMxBeanDiagnostics diagnostics;
 
     public static void exportsCompleted() {
         exportsCompleted = true;
     }
 
+    public static void diagnosticsGuard() {
+        if (diagnostics != null) diagnostics.phase(JvmMxBeanDiagnostics.Phase.GUARD, null);
+    }
+
+    public static void diagnosticsExporter(String exporter) {
+        if (diagnostics != null) diagnostics.phase(JvmMxBeanDiagnostics.Phase.EXPORTER, exporter);
+    }
+
+    public static void diagnosticsFinalization() {
+        if (diagnostics != null) diagnostics.phase(JvmMxBeanDiagnostics.Phase.FINALIZATION, null);
+    }
+
     public static void main(String[] arguments) {
+        if (arguments.length >= 2 && arguments[1].equals("analyze-diagnostics-v1")) {
+            runWithDiagnostics(arguments);
+            return;
+        }
         try {
             run(arguments);
             System.exit(0);
@@ -26,6 +43,23 @@ public final class BundledGhidraWorker {
             failure.printStackTrace(System.err);
             System.exit(1);
         }
+    }
+
+    private static void runWithDiagnostics(String[] arguments) {
+        diagnostics = JvmMxBeanDiagnostics.startDefault();
+        boolean success = false;
+        int exitCode;
+        try {
+            run(arguments);
+            success = true;
+            exitCode = 0;
+        } catch (Exception failure) {
+            failure.printStackTrace(System.err);
+            exitCode = 1;
+        } finally {
+            if (diagnostics != null) diagnostics.finish(success);
+        }
+        System.exit(exitCode);
     }
 
     private static void run(String[] arguments) throws Exception {
@@ -41,7 +75,7 @@ public final class BundledGhidraWorker {
             System.out.println("Bundled Ghidra direct API ready: " + Application.getApplicationVersion());
             return;
         }
-        if (arguments.length < 8 || !arguments[1].equals("analyze")) {
+        if (arguments.length < 8 || !(arguments[1].equals("analyze") || arguments[1].equals("analyze-diagnostics-v1"))) {
             throw new IllegalArgumentException("Expected analyze, project, name, input, scripts and post-script arguments");
         }
         Path project = Path.of(arguments[2]);
@@ -85,12 +119,427 @@ public final class BundledGhidraWorker {
         }
         analyzer.getOptions().setPostScriptsWithArgs(List.of(new Pair<>(
             "RunBundledExports.class", guardedArguments.toArray(String[]::new))));
+        if (diagnostics != null) diagnostics.phase(JvmMxBeanDiagnostics.Phase.IMPORT_AND_ANALYSIS, null);
         try {
             analyzer.processLocal(projectLocation.toString(), projectName, "/", List.of(binary.toFile()));
         } finally {
+            diagnosticsFinalization();
             if (projectAlias != null) Files.deleteIfExists(projectAlias);
         }
         if (analyzer.checkAnalysisTimedOut()) throw new IllegalStateException("Ghidra analysis timed out");
         if (!exportsCompleted) throw new IllegalStateException("Bundled Ghidra import or export failed; existing output is not a successful result");
+    }
+}
+
+// This JDK-only helper is compiled directly by the focused sampler regression tests.
+final class JvmMxBeanDiagnostics {
+    static final String POLICY = "jvm-mxbean-stdout-v1";
+    static final String PREFIX = "DECOMP_GHIDRA_DIAGNOSTICS_V1 ";
+    // The Linux diagnostic runtime uses a tighter PIPE_BUF-sized frame than the 8 KiB contract.
+    static final int MAX_FRAME_BYTES = 4096;
+    static final int MAX_RECORDS = 640;
+    static final int MAX_PENDING_RECORDS = 16;
+    static final long MAX_BYTES = 5L * 1024 * 1024;
+    static final long SAMPLE_NANOS = java.util.concurrent.TimeUnit.SECONDS.toNanos(15);
+    static final long DRAIN_NANOS = java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(250);
+    private static final int RESERVED_RECORDS = 2;
+    private static final int MAX_NAMES = 32;
+    private static final int MAX_NAME_CHARS = 128;
+
+    enum Phase {
+        INIT("init"), IMPORT_AND_ANALYSIS("import-and-analysis"), GUARD("guard"),
+        EXPORTER("exporter"), FINALIZATION("finalization"), TERMINAL("terminal");
+        final String wire;
+        Phase(String wire) { this.wire = wire; }
+    }
+
+    enum Loss {
+        QUEUE_SATURATION("queue_saturation"), RECORD_LIMIT("record_limit"), BYTE_LIMIT("byte_limit"),
+        FRAME_LIMIT("frame_limit"), OUTPUT_FAILURE("output_failure"), DRAIN_TIMEOUT("drain_timeout"),
+        INTERNAL_FAILURE("internal_failure");
+        final String wire;
+        Loss(String wire) { this.wire = wire; }
+    }
+
+    interface Metrics {
+        java.util.Map<String, Object> initial();
+        java.util.Map<String, Object> sample();
+    }
+
+    interface Sink { void write(byte[] frame) throws java.io.IOException; }
+
+    private record Event(Phase phase, String exporter) {}
+    private record Poll(Event event, boolean sealedAndEmpty) {}
+
+    private final Metrics metrics;
+    private final Sink sink;
+    private final java.util.function.LongSupplier clock;
+    private final long sampleNanos;
+    private final long started;
+    private final java.util.concurrent.locks.ReentrantLock queueLock = new java.util.concurrent.locks.ReentrantLock();
+    private final java.util.ArrayDeque<Event> queue = new java.util.ArrayDeque<>(MAX_PENDING_RECORDS);
+    private final java.util.concurrent.atomic.AtomicInteger activeProducers = new java.util.concurrent.atomic.AtomicInteger();
+    private final java.util.concurrent.atomic.AtomicInteger losses = new java.util.concurrent.atomic.AtomicInteger();
+    private final java.util.concurrent.atomic.AtomicLong dropped = new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicBoolean finishClaimed = new java.util.concurrent.atomic.AtomicBoolean();
+    private final java.util.concurrent.atomic.AtomicBoolean closing = new java.util.concurrent.atomic.AtomicBoolean();
+    private final java.util.concurrent.CountDownLatch drained = new java.util.concurrent.CountDownLatch(1);
+    private final Thread emitter;
+    private volatile Phase currentPhase = Phase.INIT;
+    private volatile boolean ordinaryStopped;
+    private volatile boolean outcomeSuccess;
+    private volatile long drainStarted;
+    // The remaining fields are exclusively owned by the emitter.
+    private long sequence;
+    private long elapsed;
+    private long bytes;
+    private int ordinaryRecords;
+    private boolean truncationEmitted;
+
+    static JvmMxBeanDiagnostics startDefault() {
+        try {
+            // Never close/flush stdout and never acquire System.out's PrintStream monitor.
+            java.io.FileOutputStream output = new java.io.FileOutputStream(java.io.FileDescriptor.out);
+            JvmMxBeanDiagnostics result = new JvmMxBeanDiagnostics(
+                new JdkMetrics(), output::write, System::nanoTime, SAMPLE_NANOS);
+            result.start();
+            return result;
+        } catch (Throwable unavailable) {
+            // Diagnostics cannot change the worker's original outcome. Missing records are incomplete.
+            return null;
+        }
+    }
+
+    JvmMxBeanDiagnostics(Metrics metrics, Sink sink, java.util.function.LongSupplier clock, long sampleNanos) {
+        if (sampleNanos <= 0) throw new IllegalArgumentException("Invalid diagnostic sample interval");
+        this.metrics = metrics;
+        this.sink = sink;
+        this.clock = clock;
+        this.sampleNanos = sampleNanos;
+        this.started = clock.getAsLong();
+        this.emitter = new Thread(this::emitLoop, "bundled-ghidra-jvm-diagnostics");
+        this.emitter.setDaemon(true);
+    }
+
+    void start() { emitter.start(); }
+
+    // Phase producers perform no MXBean reads, encoding, stdout calls, waits or blocking lock acquisition.
+    void phase(Phase phase, String exporter) {
+        activeProducers.incrementAndGet();
+        try {
+            if (closing.get()) return;
+            if (phase == null || phase == Phase.TERMINAL || (phase == Phase.EXPORTER) != (exporter != null) ||
+                (exporter != null && !exporter.equals("ExportProgramModel.java") &&
+                    !exporter.equals("ExportRecoveredCallSites.java") && !exporter.equals("ExportDecompiledC.java"))) {
+                lose(Loss.INTERNAL_FAILURE);
+                return;
+            }
+            currentPhase = phase;
+            if (ordinaryStopped) { drop(); return; }
+            if (!queueLock.tryLock()) { lose(Loss.QUEUE_SATURATION); return; }
+            try {
+                if (closing.get()) return;
+                // Two logical mailbox slots remain reserved for truncation and terminal.
+                if (queue.size() >= MAX_PENDING_RECORDS - RESERVED_RECORDS) {
+                    lose(Loss.QUEUE_SATURATION);
+                    return;
+                }
+                queue.addLast(new Event(phase, exporter));
+            } finally {
+                queueLock.unlock();
+            }
+            java.util.concurrent.locks.LockSupport.unpark(emitter);
+        } catch (Throwable unavailable) {
+            lose(Loss.INTERNAL_FAILURE);
+        } finally {
+            activeProducers.decrementAndGet();
+            if (closing.get()) java.util.concurrent.locks.LockSupport.unpark(emitter);
+        }
+    }
+
+    void finish(boolean success) {
+        // Publishing the closing flag seals admission: the emitter checks empty under the same
+        // queue lock used by producers before constructing the final reserved records.
+        if (!finishClaimed.compareAndSet(false, true)) return;
+        outcomeSuccess = success;
+        drainStarted = System.nanoTime();
+        closing.set(true);
+        java.util.concurrent.locks.LockSupport.unpark(emitter);
+        try {
+            long remaining = DRAIN_NANOS - (System.nanoTime() - drainStarted);
+            if (remaining <= 0 || !drained.await(remaining, java.util.concurrent.TimeUnit.NANOSECONDS)) {
+                mark(Loss.DRAIN_TIMEOUT);
+            }
+        } catch (InterruptedException interrupted) {
+            mark(Loss.DRAIN_TIMEOUT);
+            Thread.currentThread().interrupt();
+        } catch (Throwable unavailable) {
+            mark(Loss.INTERNAL_FAILURE);
+        }
+    }
+
+    private void mark(Loss loss) { losses.getAndUpdate(value -> value | (1 << loss.ordinal())); }
+    private void drop() { dropped.getAndUpdate(value -> value == Long.MAX_VALUE ? value : value + 1); }
+    private void lose(Loss loss) { mark(loss); drop(); }
+
+    private Poll poll() {
+        queueLock.lock();
+        try {
+            Event event = queue.pollFirst();
+            return new Poll(event, event == null && closing.get() && activeProducers.get() == 0);
+        } finally { queueLock.unlock(); }
+    }
+
+    private void emitLoop() {
+        try {
+            emitMetrics("initial", Phase.INIT, true);
+            long sampledAt = System.nanoTime();
+            while (true) {
+                emitTruncation();
+                Poll polled = poll();
+                Event event = polled.event();
+                if (event != null) {
+                    java.util.Map<String, Object> fields = object();
+                    fields.put("exporter", event.exporter());
+                    emitOrdinary("phase", event.phase(), fields);
+                    continue;
+                }
+                if (polled.sealedAndEmpty()) {
+                    // poll() observed the empty queue under its lock after admission was sealed.
+                    if (System.nanoTime() - drainStarted >= DRAIN_NANOS) mark(Loss.DRAIN_TIMEOUT);
+                    emitTruncation();
+                    java.util.Map<String, Object> terminal = lossFields();
+                    terminal.put("priorRecordsComplete", losses.get() == 0 && dropped.get() == 0);
+                    // A stdout record cannot attest that its own write or final drain completed.
+                    terminal.put("shutdownDrainConfirmed", false);
+                    terminal.put("outcome", outcomeSuccess ? "success" : "failure");
+                    emitReserved("terminal", Phase.TERMINAL, terminal);
+                    return;
+                }
+                long sinceSample = System.nanoTime() - sampledAt;
+                if (!ordinaryStopped && sinceSample >= sampleNanos) {
+                    emitMetrics("sample", currentPhase, false);
+                    sampledAt = System.nanoTime();
+                } else {
+                    long delay = ordinaryStopped ? SAMPLE_NANOS : Math.max(1, sampleNanos - sinceSample);
+                    java.util.concurrent.locks.LockSupport.parkNanos(Math.min(delay, SAMPLE_NANOS));
+                }
+            }
+        } catch (java.io.IOException outputFailure) {
+            mark(Loss.OUTPUT_FAILURE);
+        } catch (Throwable unavailable) {
+            mark(Loss.INTERNAL_FAILURE);
+        } finally {
+            // Never join, flush or close the shared output descriptor.
+            drained.countDown();
+        }
+    }
+
+    private void emitMetrics(String kind, Phase phase, boolean initial) throws java.io.IOException {
+        try { emitOrdinary(kind, phase, initial ? metrics.initial() : metrics.sample()); }
+        catch (FrameLimit exceeded) { lose(Loss.FRAME_LIMIT); }
+    }
+
+    private void emitOrdinary(String kind, Phase phase, java.util.Map<String, Object> fields) throws java.io.IOException {
+        if (ordinaryStopped) { drop(); return; }
+        if (ordinaryRecords >= MAX_RECORDS - RESERVED_RECORDS) {
+            ordinaryStopped = true;
+            lose(Loss.RECORD_LIMIT);
+            return;
+        }
+        byte[] frame;
+        try { frame = frame(kind, phase, fields); }
+        catch (FrameLimit exceeded) { lose(Loss.FRAME_LIMIT); return; }
+        if (bytes + frame.length > MAX_BYTES - (long) RESERVED_RECORDS * MAX_FRAME_BYTES) {
+            ordinaryStopped = true;
+            lose(Loss.BYTE_LIMIT);
+            return;
+        }
+        write(frame);
+        ordinaryRecords++;
+    }
+
+    private java.util.Map<String, Object> lossFields() {
+        java.util.Map<String, Object> fields = object();
+        java.util.List<String> names = new java.util.ArrayList<>();
+        int observed = losses.get();
+        for (Loss loss : Loss.values()) if ((observed & (1 << loss.ordinal())) != 0) names.add(loss.wire);
+        fields.put("lossReasons", names);
+        fields.put("droppedRecords", dropped.get());
+        return fields;
+    }
+
+    private void emitTruncation() throws java.io.IOException {
+        if (losses.get() != 0 && !truncationEmitted) {
+            emitReserved("truncation", currentPhase, lossFields());
+            truncationEmitted = true;
+        }
+    }
+
+    private void emitReserved(String kind, Phase phase, java.util.Map<String, Object> fields) throws java.io.IOException {
+        byte[] frame = frame(kind, phase, fields);
+        if (sequence >= MAX_RECORDS || bytes + frame.length > MAX_BYTES) throw new AssertionError("Diagnostic reserve exhausted");
+        write(frame);
+    }
+
+    private void write(byte[] frame) throws java.io.IOException {
+        sink.write(frame);
+        bytes += frame.length;
+        sequence++;
+    }
+
+    private byte[] frame(String kind, Phase phase, java.util.Map<String, Object> fields) {
+        long observed = clock.getAsLong() - started;
+        if (observed >= 0) elapsed = Math.max(elapsed, observed);
+        java.util.Map<String, Object> record = object();
+        record.put("policy", POLICY);
+        record.put("sequence", sequence);
+        record.put("elapsedNanos", elapsed);
+        record.put("kind", kind);
+        record.put("phase", phase.wire);
+        record.putAll(fields);
+        StringBuilder json = new StringBuilder();
+        encode(json, record, 0);
+        // The leading newline separates the atomic frame from unfinished ordinary stdout lines.
+        byte[] frame = ("\n" + PREFIX + json + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        if (frame.length > MAX_FRAME_BYTES) throw new FrameLimit();
+        return frame;
+    }
+
+    private static void encode(StringBuilder output, Object value, int depth) {
+        if (depth > 8 || output.length() > MAX_FRAME_BYTES) throw new FrameLimit();
+        if (value == null) output.append("null");
+        else if (value instanceof String text) {
+            if (text.length() > MAX_NAME_CHARS || text.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 256) throw new FrameLimit();
+            output.append('"');
+            for (int index = 0; index < text.length(); index++) {
+                char character = text.charAt(index);
+                switch (character) {
+                    case '"' -> output.append("\\\"");
+                    case '\\' -> output.append("\\\\");
+                    case '\n' -> output.append("\\n");
+                    case '\r' -> output.append("\\r");
+                    case '\t' -> output.append("\\t");
+                    default -> {
+                        if (character < 32 || Character.isSurrogate(character)) {
+                            output.append("\\u");
+                            for (int shift = 12; shift >= 0; shift -= 4) output.append("0123456789abcdef".charAt((character >> shift) & 15));
+                        } else output.append(character);
+                    }
+                }
+                if (output.length() > MAX_FRAME_BYTES) throw new FrameLimit();
+            }
+            output.append('"');
+        } else if (value instanceof Boolean || value instanceof Long || value instanceof Integer) output.append(value);
+        else if (value instanceof java.util.Map<?, ?> map) {
+            output.append('{');
+            boolean comma = false;
+            for (java.util.Map.Entry<?, ?> entry : map.entrySet()) {
+                if (comma) output.append(',');
+                encode(output, entry.getKey(), depth + 1);
+                output.append(':');
+                encode(output, entry.getValue(), depth + 1);
+                comma = true;
+            }
+            output.append('}');
+        } else if (value instanceof java.util.List<?> list) {
+            if (list.size() > MAX_NAMES) throw new FrameLimit();
+            output.append('[');
+            boolean comma = false;
+            for (Object item : list) {
+                if (comma) output.append(',');
+                encode(output, item, depth + 1);
+                comma = true;
+            }
+            output.append(']');
+        } else throw new IllegalArgumentException("Unsupported diagnostic value");
+        if (output.length() > MAX_FRAME_BYTES) throw new FrameLimit();
+    }
+
+    private static final class FrameLimit extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+    }
+
+    static java.util.Map<String, Object> object() { return new java.util.LinkedHashMap<>(); }
+
+    static final class JdkMetrics implements Metrics {
+        private static Object number(long value) { return value < 0 ? null : value; }
+        private static String text(java.util.function.Supplier<String> getter) {
+            try { return getter.get(); } catch (RuntimeException unavailable) { return null; }
+        }
+        private static Object number(java.util.function.LongSupplier getter) {
+            try { return number(getter.getAsLong()); } catch (RuntimeException unavailable) { return null; }
+        }
+        private static Object usage(java.util.function.Supplier<java.lang.management.MemoryUsage> getter) {
+            try {
+                java.lang.management.MemoryUsage usage = getter.get();
+                if (usage == null) return null;
+                java.util.Map<String, Object> result = object();
+                result.put("initBytes", number(usage.getInit()));
+                result.put("usedBytes", number(usage.getUsed()));
+                result.put("committedBytes", number(usage.getCommitted()));
+                result.put("maxBytes", number(usage.getMax()));
+                return result;
+            } catch (RuntimeException unavailable) { return null; }
+        }
+        public java.util.Map<String, Object> initial() {
+            java.util.Map<String, Object> result = object();
+            result.put("jvmName", text(() -> java.lang.management.ManagementFactory.getRuntimeMXBean().getVmName()));
+            result.put("jvmVendor", text(() -> java.lang.management.ManagementFactory.getRuntimeMXBean().getVmVendor()));
+            result.put("jvmVersion", text(() -> java.lang.management.ManagementFactory.getRuntimeMXBean().getVmVersion()));
+            result.put("javaVersion", text(() -> System.getProperty("java.version")));
+            result.put("processors", number(() -> Runtime.getRuntime().availableProcessors()));
+            result.put("heap", usage(() -> java.lang.management.ManagementFactory.getMemoryMXBean().getHeapMemoryUsage()));
+            try {
+                java.util.List<String> names = new java.util.ArrayList<>();
+                for (java.lang.management.GarbageCollectorMXBean collector : java.lang.management.ManagementFactory.getGarbageCollectorMXBeans()) {
+                    if (names.size() >= MAX_NAMES) throw new FrameLimit();
+                    names.add(collector.getName());
+                }
+                names.sort(String::compareTo);
+                result.put("collectors", names);
+            } catch (FrameLimit bound) { throw bound; }
+            catch (RuntimeException unavailable) { result.put("collectors", null); }
+            return result;
+        }
+        public java.util.Map<String, Object> sample() {
+            java.util.Map<String, Object> result = object();
+            result.put("jvmCpuNanos", number(() -> {
+                java.lang.management.OperatingSystemMXBean os = java.lang.management.ManagementFactory.getOperatingSystemMXBean();
+                return os instanceof com.sun.management.OperatingSystemMXBean extended ? extended.getProcessCpuTime() : -1;
+            }));
+            result.put("heap", usage(() -> java.lang.management.ManagementFactory.getMemoryMXBean().getHeapMemoryUsage()));
+            try {
+                java.util.List<java.util.Map<String, Object>> pools = new java.util.ArrayList<>();
+                for (java.lang.management.MemoryPoolMXBean pool : java.lang.management.ManagementFactory.getMemoryPoolMXBeans()) {
+                    if (pools.size() >= MAX_NAMES) throw new FrameLimit();
+                    java.util.Map<String, Object> record = object();
+                    record.put("name", java.util.Objects.requireNonNull(pool.getName()));
+                    record.put("type", pool.getType().name());
+                    record.put("valid", pool.isValid());
+                    record.put("usage", usage(pool::getUsage));
+                    record.put("postGc", usage(pool::getCollectionUsage));
+                    pools.add(record);
+                }
+                pools.sort(java.util.Comparator.comparing(item -> (String) item.get("name")));
+                result.put("pools", pools);
+            } catch (FrameLimit bound) { throw bound; }
+            catch (RuntimeException unavailable) { result.put("pools", null); }
+            try {
+                java.util.List<java.util.Map<String, Object>> collectors = new java.util.ArrayList<>();
+                for (java.lang.management.GarbageCollectorMXBean collector : java.lang.management.ManagementFactory.getGarbageCollectorMXBeans()) {
+                    if (collectors.size() >= MAX_NAMES) throw new FrameLimit();
+                    java.util.Map<String, Object> record = object();
+                    record.put("name", java.util.Objects.requireNonNull(collector.getName()));
+                    record.put("count", number(collector::getCollectionCount));
+                    record.put("timeMillis", number(collector::getCollectionTime));
+                    collectors.add(record);
+                }
+                collectors.sort(java.util.Comparator.comparing(item -> (String) item.get("name")));
+                result.put("collectors", collectors);
+            } catch (FrameLimit bound) { throw bound; }
+            catch (RuntimeException unavailable) { result.put("collectors", null); }
+            return result;
+        }
     }
 }

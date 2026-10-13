@@ -38,6 +38,27 @@ class GccBundledCliCommandTest {
     }
 
     @Test
+    fun `runtime diagnostics require a distinct fresh cc1 invocation`() = fixture { root ->
+        val args = arguments(root)
+        val diagnostic = GccBundledCliOptions.parse(args, fullRecoveryExport = true, runtimeDiagnostics = true)
+        assertTrue(diagnostic.runtimeDiagnostics)
+        assertEquals("gcc-engine-runtime-diagnostic", diagnostic.commandName)
+        assertFails { GccBundledCliOptions.parse(args, runtimeDiagnostics = true) }
+        for (engine in listOf("driver", "lto1")) {
+            assertFails { GccBundledCliOptions.parse(listOf(engine) + args.drop(1), true, true) }
+        }
+        assertFails { GccBundledCliOptions.parse(args + listOf("--resume-after-checkpoint", "512"), true, true) }
+        val children = listOf(diagnostic.output, privateDirectory(diagnostic.output.resolve("inputs")),
+            privateDirectory(diagnostic.output.resolve("journal")))
+        val identities = children.associateWith { path -> LinuxFilesystemSyscalls.openRoot(path).use { it.identity } }
+        val invocation = GccBundledCliInvocation(diagnostic, args, identities)
+        val document = OracleJson.parseCanonical(invocation.canonicalBytes).jsonObject
+        assertEquals("gcc-engine-runtime-diagnostic", document.getValue("argv").jsonArray.first().jsonPrimitive.content)
+        assertFalse(invocation.canonicalBytes.contentEquals(
+            GccBundledCliInvocation(GccBundledCliOptions.parse(args, true), args, identities).canonicalBytes))
+    }
+
+    @Test
     fun `driver selection is bound to full fresh invocation and rejects compiler substitution`() = fixture { root ->
         val args = listOf("driver") + arguments(root).drop(1)
         val options = GccBundledCliOptions.parse(args, fullRecoveryExport = true)

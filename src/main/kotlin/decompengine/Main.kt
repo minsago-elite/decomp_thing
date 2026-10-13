@@ -42,6 +42,7 @@ fun main(args: Array<String>) {
         "reconstruct" -> runReconstruct(args.drop(1))
         "gcc-engine-plan" -> runGccEnginePlan(args.drop(1))
         "gcc-engine-full-export" -> runGccEngineFullExport(args.drop(1))
+        "gcc-engine-runtime-diagnostic" -> runGccEngineCommand(args.drop(1), fullRecoveryExport = true, runtimeDiagnostics = true)
         "web" -> runWeb(args.drop(1))
         null, "help", "--help", "-h" -> printHelp()
         else -> {
@@ -60,21 +61,24 @@ private fun runGccEngineFullExport(args: List<String>) {
     runGccEngineCommand(args, fullRecoveryExport = true)
 }
 
-private fun runGccEngineCommand(args: List<String>, fullRecoveryExport: Boolean) {
+private fun runGccEngineCommand(args: List<String>, fullRecoveryExport: Boolean, runtimeDiagnostics: Boolean = false) {
     val options = try {
-        decompengine.oracle.gcc.GccBundledCliOptions.parse(args, fullRecoveryExport)
+        decompengine.oracle.gcc.GccBundledCliOptions.parse(args, fullRecoveryExport, runtimeDiagnostics)
     } catch (failure: IllegalArgumentException) {
         System.err.println(failure.message)
-        val command = if (fullRecoveryExport) "gcc-engine-full-export" else "gcc-engine-plan"
+        val command = if (runtimeDiagnostics) "gcc-engine-runtime-diagnostic" else if (fullRecoveryExport) "gcc-engine-full-export" else "gcc-engine-plan"
         val resumeOption = if (fullRecoveryExport) "" else " [--resume-after-checkpoint <multiple-of-512>]"
-        System.err.println("usage: llm_bin_patch $command <cc1|lto1> <stripped-binary> " +
+        val engines = if (runtimeDiagnostics) "cc1" else if (fullRecoveryExport) "<cc1|driver>" else "<cc1|lto1>"
+        System.err.println("usage: llm_bin_patch $command $engines <stripped-binary> " +
             "--profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>$resumeOption")
         kotlin.system.exitProcess(2)
     }
     val result = decompengine.oracle.gcc.GccBundledCliCommand.run(options, args)
     println("engine: ${options.engineId}")
     println("operation result: $result")
-    if (fullRecoveryExport) {
+    if (runtimeDiagnostics) {
+        println("Diagnostic execution journal retained; no qualification, scoring, or release authority is emitted.")
+    } else if (fullRecoveryExport) {
         println("Full model provenance is recorded in the result; structural scoring remains unavailable and scratch is retained.")
     } else {
         println("Model and plan paths and their digests are recorded in the result; scratch is retained.")
@@ -548,6 +552,7 @@ private fun printHelp() {
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
           llm_bin_patch reconstruct <binary> --output <directory> [--profile generated-c-make-v1|generated-c-ninja-v1] [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]
           llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
+          llm_bin_patch gcc-engine-runtime-diagnostic cc1 <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch gcc-engine-full-export <cc1|driver> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173]
 
@@ -559,6 +564,7 @@ private fun printHelp() {
           Doctor's --profile selects generated-c-make-v1 (default) or generated-c-ninja-v1.
           Reconstruction's --evidence-only mode is agent-free and cannot be combined with --harness.
           gcc-engine-plan requires contained execution and retains scratch plus linked evidence; results remain incomplete and release-ineligible.
+          gcc-engine-runtime-diagnostic retains a diagnostic execution journal without qualification, scoring, or release authority.
           gcc-engine-full-export runs a fresh contained full-recovery export and emits an authenticated structural profile binding; it does not score or certify structural truth.
           --resume-after-checkpoint <multiple-of-512> interrupts and resumes within this process; it is not cold recovery.
           Scratch defaults: 8 GiB available / 64 GiB maximum filesystem, 32768 available / 1000000 maximum inodes.
