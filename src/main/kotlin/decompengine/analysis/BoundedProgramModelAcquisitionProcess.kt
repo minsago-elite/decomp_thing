@@ -11,6 +11,7 @@ import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
+import java.nio.file.FileSystems
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
@@ -46,9 +47,14 @@ internal class BoundedProgramModelAcquisitionProcess(
         require(residentLimit >= MINIMUM_WORKER_RESIDENT_BYTES) {
             "program-model acquisition resident budget cannot fit its bounded JVM"
         }
+        require(path.fileSystem === FileSystems.getDefault() && workDirectory.fileSystem === FileSystems.getDefault()) {
+            "program-model acquisition requires the default filesystem; provider paths cannot be transferred as host path strings"
+        }
         deadline.checkpoint("before bounded program-model acquisition")
-        val normalizedPath = path.toAbsolutePath().normalize()
-        val work = workDirectory.toAbsolutePath().normalize()
+        // Preserve the caller's filesystem traversal. Lexically normalizing a symlink followed
+        // by '..' would make the helper read a different ordinary host file.
+        val absolutePath = path.toAbsolutePath()
+        val work = workDirectory.toAbsolutePath()
         val owner = ownership.reserve(cleanupMillis, controlExecutor)
         var primaryFailure: Throwable? = null
         try {
@@ -62,7 +68,7 @@ internal class BoundedProgramModelAcquisitionProcess(
             owner.launchAttempted.set(true)
             val process = launch.startWithAdmission(deadline::checkpoint, {
                 val command = try {
-                    val command = commandFactory(normalizedPath, work, maximumBytes, residentLimit)
+                    val command = commandFactory(absolutePath, work, maximumBytes, residentLimit)
                     require(command.isNotEmpty() && command.all { it.isNotEmpty() && '\u0000' !in it }) {
                         "program-model acquisition command is empty or ambiguous"
                     }
@@ -402,7 +408,7 @@ internal object BoundedProgramModelAcquisitionWorker {
             val path = Path.of(arguments[0])
             val maximumBytes = arguments[1].toLong()
             val residentLimit = arguments[2].toLong()
-            require(path.isAbsolute && path.normalize() == path)
+            require(path.isAbsolute)
             require(maximumBytes in 1..BoundedProgramModelAcquisitionProcess.MAXIMUM_MODEL_BYTES)
             require(residentLimit in BoundedProgramModelAcquisitionProcess.MINIMUM_WORKER_RESIDENT_BYTES..
                 BoundedProgramModelAcquisitionProcess.MAXIMUM_WORKER_RESIDENT_BYTES)

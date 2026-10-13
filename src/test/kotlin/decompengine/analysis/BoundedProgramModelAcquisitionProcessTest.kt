@@ -11,6 +11,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
+import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -37,6 +38,103 @@ import kotlin.test.assertTrue
 
 /** Tests use a benign child for blocked native I/O, never a production-worker test mode. */
 class BoundedProgramModelAcquisitionProcessTest {
+    @Test
+    fun `ZipFS model and work paths refuse admission without reading different canonical host bytes`() = fixture { f ->
+        val zipBytes = pathControlModel("zipmodel", 'b').toJson().toByteArray()
+        val hostBytes = pathControlModel("hostfake", 'c').toJson().toByteArray()
+        assertFalse(zipBytes.contentEquals(hostBytes))
+        assertEquals(zipBytes.size, hostBytes.size, "a provider conversion must not be hidden by a different byte allowance")
+        assertEquals(pathControlModel("zipmodel", 'b'), ProgramModelJson.readCanonical(zipBytes))
+        assertEquals(pathControlModel("hostfake", 'c'), ProgramModelJson.readCanonical(hostBytes))
+        val hostParent = Files.createDirectory(f.root.resolve("provider-shadow"))
+        val hostModel = hostParent.resolve("model.json")
+        Files.write(hostModel, hostBytes, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
+        val admissions = AtomicInteger()
+        val starts = AtomicInteger()
+        val rejection = Executor { admissions.incrementAndGet(); throw RejectedExecutionException("provider path reached admission") }
+        val reader = f.reader(capture = rejection, control = rejection, launch = BoundedAnalysisProcessLaunch(rejection),
+            starter = { command, work -> starts.incrementAndGet(); f.start(command, work) })
+        FileSystems.newFileSystem(f.root.resolve("provider-path.zip"), mapOf("create" to "true")).use { zip ->
+            // The provider's absolute text names an existing, benign host decoy inside this fixture.
+            val zipParent = zip.getPath(hostParent.toString()).toAbsolutePath().normalize()
+            val zipModel = zipParent.resolve("model.json")
+            assertEquals(hostModel, Path.of(zipModel.toString()))
+            assertTrue(hostModel.startsWith(f.root))
+            Files.createDirectories(zipParent)
+            Files.write(zipModel, zipBytes, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
+            val expired = deadline(1)
+            Thread.sleep(5) // Confirms provider refusal precedes the first deadline checkpoint.
+            assertEquals(0L, expired.remainingNanosOrZero())
+            for ((path, work) in listOf(zipModel to f.root, hostModel to zipParent)) {
+                val failure = assertFailsWith<IllegalArgumentException> {
+                    reader.read(path, work, zipBytes.size.toLong(), RESIDENT_BYTES, expired)
+                }
+                assertTrue(failure.message.orEmpty().contains("default filesystem"), "provider refusal must explain the unsupported path boundary")
+                assertEquals(0, admissions.get())
+                assertEquals(0, starts.get(), "provider text must not launch a worker that could read the different host decoy")
+                assertEquals(0, f.ownership.retainedInvocations())
+                assertContentEquals(zipBytes, Files.readAllBytes(zipModel))
+                assertContentEquals(hostBytes, Files.readAllBytes(hostModel))
+                f.assertPriorEvidence()
+            }
+            Files.list(zipParent).use { paths ->
+                assertEquals(listOf("model.json"), paths.map { it.fileName.toString() }.toList())
+            }
+        }
+        assertContentEquals(hostBytes, Files.readAllBytes(hostModel))
+        Files.list(hostParent).use { paths ->
+            assertEquals(listOf("model.json"), paths.map { it.fileName.toString() }.toList(), "provider refusal must not create host artifacts")
+        }
+        f.assertReleased()
+        f.assertPriorEvidence()
+    }
+
+    @Test
+    fun `actual bounded helper preserves symlink dotdot model and work traversal with exact canonical parity`() = fixture { f ->
+        val outer = Files.createDirectory(f.root.resolve("outer"))
+        val target = Files.createDirectory(f.root.resolve("target"))
+        val child = Files.createDirectory(target.resolve("child"))
+        val link = Files.createSymbolicLink(outer.resolve("link"), child)
+        val suppliedWork = link.resolve("..")
+        val suppliedModel = suppliedWork.resolve("model.json")
+        val actualModel = pathControlModel("physical", 'b')
+        val actualBytes = actualModel.toJson().toByteArray()
+        val decoyModel = pathControlModel("lexical_", 'c')
+        val decoyBytes = decoyModel.toJson().toByteArray()
+        assertFalse(actualBytes.contentEquals(decoyBytes))
+        assertEquals(actualBytes.size, decoyBytes.size)
+        Files.write(target.resolve("model.json"), actualBytes, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
+        Files.write(outer.resolve("model.json"), decoyBytes, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
+        assertEquals(outer, suppliedWork.normalize())
+        assertTrue(Files.isSameFile(suppliedWork, target))
+        assertTrue(Files.isSameFile(suppliedModel, target.resolve("model.json")))
+        assertEquals(decoyModel, ProgramModelJson.readCanonical(Files.readAllBytes(outer.resolve("model.json"))))
+        val starts = AtomicInteger()
+        val observedPath = AtomicReference<String?>()
+        val observedWork = AtomicReference<Path?>()
+        val reader = f.reader(starter = { command, work ->
+            starts.incrementAndGet()
+            assertEquals(BoundedProgramModelAcquisitionWorker::class.java.name, command[command.size - 4])
+            observedPath.set(command[command.size - 3])
+            observedWork.set(work)
+            assertTrue(command.contains("-Djava.io.tmpdir=$suppliedWork"))
+            assertTrue(command.contains("-Djna.tmpdir=$suppliedWork"))
+            assertTrue(command.contains("-Duser.home=$suppliedWork"))
+            f.start(command, work)
+        })
+        val acquired = reader.read(suppliedModel, suppliedWork, actualBytes.size.toLong(), RESIDENT_BYTES, deadline(5_000))
+        assertEquals(1, starts.get())
+        assertEquals(suppliedModel.toString(), observedPath.get(), "the fixed helper must receive the supplied traversal unchanged")
+        assertEquals(suppliedWork, observedWork.get(), "native launch must preserve the supplied work-directory traversal")
+        assertContentEquals(actualBytes, acquired)
+        assertEquals(actualModel, ProgramModelJson.readCanonical(acquired))
+        assertContentEquals(actualBytes, Files.readAllBytes(target.resolve("model.json")))
+        assertContentEquals(decoyBytes, Files.readAllBytes(outer.resolve("model.json")))
+        f.assertChildAbsent()
+        f.assertReleased()
+        f.assertPriorEvidence()
+    }
+
     @Test
     fun `actual bounded helper preserves canonical bytes at the exact model and 64MiB resident bounds`() = fixture { f ->
         val model = RecoveredProgramModel(inputSha256 = "a".repeat(64), functions = (0 until 256).map { index ->
@@ -684,6 +782,10 @@ private const val RESIDENT_BYTES = 64L * 1024 * 1024
 private val WORKER_BYTES = "benign model byte fixture\n".toByteArray()
 private val PRIOR_MODEL = "previous canonical model evidence\n".toByteArray()
 private val PRIOR_REPORT = "previous report evidence\n".toByteArray()
+private fun pathControlModel(symbol: String, inputHash: Char) = RecoveredProgramModel(
+    inputSha256 = inputHash.toString().repeat(64), functions = listOf(RecoveredFunction(
+        "fn_$symbol", symbol, 0x401000UL, "int $symbol(void)", "int $symbol(void) { return 7; }\n")),
+)
 private fun deadline(milliseconds: Long): AnalysisDeadline = AnalysisDeadline.start(
     TimeUnit.MILLISECONDS.toNanos(milliseconds), "model acquisition fixture",
 )
