@@ -30,13 +30,14 @@ class GccRetainedDriverTargetTest {
     @Test
     fun `legacy and explicit compiler engines retain exactly the existing planner policy`() = withControls { root ->
         val path = root.resolve("compiler-engines.json")
+        removeThroughputPolicy(path)
         GccRetainedCompilerEngineProfile.open(path).use { legacy ->
             val suite = legacy.suite
             val reconstruction = suite.reconstructionProfile()
             val expected = OracleJson.canonicalBytes(JsonObject(mapOf(
                 "provider" to JsonPrimitive("gcc-retained-planner-profile-v1"),
                 "schemaVersion" to JsonPrimitive(1),
-                "profileSha256" to JsonPrimitive(PROFILE_SHA256),
+                "profileSha256" to JsonPrimitive(sha256(path)),
                 "plannerId" to JsonPrimitive(suite.analysis.plannerId),
                 "plannerVersion" to JsonPrimitive(suite.analysis.plannerVersion),
                 "reconstructionProfileSha256" to JsonPrimitive(reconstruction.sha256),
@@ -48,6 +49,13 @@ class GccRetainedDriverTargetTest {
                 }),
             )))
             assertContentEquals(expected, legacy.policyBytes())
+            assertEquals(null, suite.fullRecoveryCc1Throughput)
+            assertEquals(5, legacy.invocationVersion("cc1", true))
+            assertEquals(3, legacy.invocationVersion("cc1", false))
+            assertEquals(3, legacy.invocationVersion("lto1", false))
+            assertContentEquals(expected, legacy.bindInvocation("cc1", invocationArtifacts(legacy, "cc1"),
+                budgets(), true, runtime(root, 5)))
+            assertFails { legacy.bindInvocation("cc1", invocationArtifacts(legacy, "cc1"), budgets(), true, runtime(root, 6)) }
             assertEquals(listOf("cc1", "lto1"), suite.engines.map { it.id })
             assertFails { suite.engine("driver") }
             assertFails { legacy.target("driver") }
@@ -90,8 +98,10 @@ class GccRetainedDriverTargetTest {
             assertFails { retained.suite.engine("driver") }
 
             val policy = OracleJson.parseCanonical(retained.policyBytes()).jsonObject
-            assertEquals("gcc-retained-export-target-profile-v1", policy.getValue("provider").jsonPrimitive.content)
-            assertEquals(1, policy.getValue("schemaVersion").jsonPrimitive.int)
+            assertEquals("gcc-retained-export-target-profile-v2", policy.getValue("provider").jsonPrimitive.content)
+            assertEquals(2, policy.getValue("schemaVersion").jsonPrimitive.int)
+            assertEquals(retained.suite.fullRecoveryCc1Throughput!!.toPolicyJson(), policy.getValue("fullRecoveryCc1Throughput"))
+            assertEquals(5, retained.invocationVersion("driver", true))
             assertEquals(PROFILE_SHA256, policy.getValue("profileSha256").jsonPrimitive.content)
             val expectedTarget = JsonObject(mapOf(
                 "id" to JsonPrimitive("driver"),
@@ -158,12 +168,61 @@ class GccRetainedDriverTargetTest {
             assertEquals(1_800_000L, retained.exportWallClockMillis("lto1", false))
             assertFails { retained.exportWallClockMillis("lto1", true) }
             assertContentEquals(retained.policyBytes(), retained.bindInvocation("cc1",
-                invocationArtifacts(retained, "cc1"), budgets(9_000_000L), true))
+                invocationArtifacts(retained, "cc1"), budgets(9_000_000L), true, runtime(root, 6)))
             assertContentEquals(retained.policyBytes(), retained.bindInvocation("lto1",
                 invocationArtifacts(retained, "lto1"), budgets(), false))
-            assertFails { retained.bindInvocation("cc1", invocationArtifacts(retained, "cc1"), budgets(9_000_001L), true) }
+            assertFails { retained.bindInvocation("cc1", invocationArtifacts(retained, "cc1"), budgets(9_000_001L), true, runtime(root, 6)) }
             assertFails { retained.bindInvocation("lto1", invocationArtifacts(retained, "lto1"), budgets(), true) }
         }
+    }
+
+    @Test
+    fun `checked throughput admission requires the bound cc1 full runtime and rejects mode substitution`() = withControls { root ->
+        val path = root.resolve("compiler-engines.json")
+        GccRetainedCompilerEngineProfile.open(path).use { retained ->
+            val policy = OracleJson.parseCanonical(retained.policyBytes()).jsonObject
+            assertEquals("gcc-retained-planner-profile-v2", policy.getValue("provider").jsonPrimitive.content)
+            assertEquals(2, policy.getValue("schemaVersion").jsonPrimitive.int)
+            assertEquals(retained.suite.fullRecoveryCc1Throughput!!.toPolicyJson(), policy.getValue("fullRecoveryCc1Throughput"))
+            assertEquals(6, retained.invocationVersion("cc1", true))
+            assertEquals(3, retained.invocationVersion("cc1", false))
+            assertEquals(3, retained.invocationVersion("lto1", false))
+            assertFails { retained.invocationVersion("lto1", true) }
+            val cc1Artifacts = invocationArtifacts(retained, "cc1")
+            assertContentEquals(retained.policyBytes(), retained.bindInvocation("cc1", cc1Artifacts, budgets(), true, runtime(root, 6)))
+            assertFails { retained.bindInvocation("cc1", cc1Artifacts, budgets(), true) }
+            assertFails { retained.bindInvocation("cc1", cc1Artifacts, budgets(), true, runtime(root, 5)) }
+            assertFails { retained.bindInvocation("cc1", cc1Artifacts, budgets(), true, runtime(root, 3)) }
+            assertFails { retained.bindInvocation("cc1", cc1Artifacts, budgets(), false, runtime(root, 6)) }
+            assertFails { retained.bindInvocation("cc1", cc1Artifacts, budgets(), false, runtime(root, 5)) }
+            assertContentEquals(retained.policyBytes(), retained.bindInvocation("cc1", cc1Artifacts, budgets(), false, runtime(root, 3)))
+            assertFails { retained.bindInvocation("lto1", invocationArtifacts(retained, "lto1"), budgets(), false, runtime(root, 6)) }
+        }
+        GccRetainedCompilerEngineProfile.open(path, "driver").use { retained ->
+            assertFails { retained.bindInvocation("driver", invocationArtifacts(retained, "driver"), budgets(), true, runtime(root, 6)) }
+            assertContentEquals(retained.policyBytes(), retained.bindInvocation("driver", invocationArtifacts(retained, "driver"),
+                budgets(), true, runtime(root, 5)))
+        }
+    }
+
+    @Test
+    fun `throughput policy rejects altered counts versions missing fields and extra authority`() = withControls { root ->
+        val path = root.resolve("compiler-engines.json")
+        val profile = document(path)
+        val analysis = profile.getValue("analysis").jsonObject
+        val throughput = analysis.getValue("fullRecoveryCc1Throughput").jsonObject
+        val invalid = throughput.keys.flatMap { name -> listOf(
+            JsonObject(throughput - name),
+            JsonObject(throughput + (name to JsonPrimitive(throughput.getValue(name).jsonPrimitive.int + 1))),
+            JsonObject(throughput + (name to JsonPrimitive(throughput.getValue(name).jsonPrimitive.content))),
+        ) } + JsonObject(throughput + ("engineId" to JsonPrimitive("lto1")))
+        for (policy in invalid) {
+            Files.write(path, OracleJson.canonicalBytes(JsonObject(profile + ("analysis" to
+                JsonObject(analysis + ("fullRecoveryCc1Throughput" to policy))))))
+            assertFails { GccRetainedCompilerEngineProfile.open(path).use { } }
+        }
+        Files.write(path, OracleJson.canonicalBytes(profile))
+        GccRetainedCompilerEngineProfile.open(path).use { assertEquals(6, it.invocationVersion("cc1", true)) }
     }
 
     @Test
@@ -396,6 +455,21 @@ class GccRetainedDriverTargetTest {
     private fun budgets(wallClockMillis: Long = 1_800_000L) =
         GccCompilerEngineContainmentBudgets(wallClockMillis, 16L * 1024 * 1024 * 1024, 32)
 
+    private fun runtime(root: Path, version: Int): GccBundledGhidraRuntime {
+        val bundle = root.resolve("unmaterialized-runtime")
+        return GccBundledGhidraRuntime(bundle, listOf(
+            GccBundledGhidraClassPathEntry(bundle.resolve("decomp-ghidra-bridge.jar"), 1, "a".repeat(64)),
+            GccBundledGhidraClassPathEntry(bundle.resolve("ghidra_12.1.3_PUBLIC/Ghidra/Framework/lib/runtime.jar"), 1, "b".repeat(64)),
+        ), version)
+    }
+
+    private fun removeThroughputPolicy(path: Path) {
+        val profile = document(path)
+        val analysis = profile.getValue("analysis").jsonObject
+        Files.write(path, OracleJson.canonicalBytes(JsonObject(profile + ("analysis" to
+            JsonObject(analysis - "fullRecoveryCc1Throughput")))))
+    }
+
     private fun document(path: Path): JsonObject = OracleJson.parse(Files.readAllBytes(path)).jsonObject
 
     private fun sha256(path: Path): String = OracleArtifacts.sha256(Files.readAllBytes(path))
@@ -431,7 +505,7 @@ class GccRetainedDriverTargetTest {
         const val O_WRONLY = 0x1
         const val O_NONBLOCK = 0x800
         const val EWOULDBLOCK = 11
-        const val PROFILE_SHA256 = "0786c50653ffd1a3042cc28c6682ade6b49de74c8172dec38cadb6689d809710"
+        const val PROFILE_SHA256 = "5334af1ba3561a03651df07883a3e22cb96bdba6ee7738891581b6dbda127a4d"
         const val BUILD_SHA256 = "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
         const val MANIFEST_SHA256 = "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9"
         const val FULL_SHA256 = "8009c7cfc4f66017aa932d86a6d4ec7f374e6ab7a01b3ef5ab3d2fcc78c2378b"

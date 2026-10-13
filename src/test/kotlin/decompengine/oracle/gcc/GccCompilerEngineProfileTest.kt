@@ -91,8 +91,8 @@ class GccCompilerEngineProfileTest {
         assertEquals("12.1.3", suite.analysis.ghidraVersion)
         assertEquals(569_445_154L, suite.analysis.ghidraArchive.bytes)
         assertEquals("93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54", suite.analysis.ghidraArchive.sha256)
-        assertEquals("4055ce21c5805faeb20e17600091eb182ed7921af42b2d231497c1c3661fa6ce", suite.analysis.exporterSha256)
-        assertEquals(13, suite.analysis.exporterVersion)
+        assertEquals("1a59aee6e5c3d8fb6fcf1ead7423c750942147273670dfee3296fe40cca8a524", suite.analysis.exporterSha256)
+        assertEquals(14, suite.analysis.exporterVersion)
         assertEquals("planning", suite.analysis.exporterMode)
         assertEquals(listOf("cc1", "lto1"), suite.engines.map(GccCompilerEngine::id))
 
@@ -117,8 +117,8 @@ class GccCompilerEngineProfileTest {
         val root = copyControlPlane(checkedProfile().parent)
         val profile = root.resolve("compiler-engines.json")
         val current = profile.readBytes().decodeToString()
-        assertTrue("\"version\": 13" in current)
-        profile.writeBytes(current.replaceFirst("\"version\": 13", "\"version\": 12").toByteArray())
+        assertTrue("\"version\": 14" in current)
+        profile.writeBytes(current.replaceFirst("\"version\": 14", "\"version\": 13").toByteArray())
 
         assertFailsWith<GccCompilerEngineProfileException> {
             GccCompilerEngineProfiles.load(profile)

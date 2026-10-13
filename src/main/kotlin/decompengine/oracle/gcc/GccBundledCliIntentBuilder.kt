@@ -80,7 +80,7 @@ internal object GccBundledCliIntentBuilder {
                             val runtime = GccBundledGhidraRuntime(bundle, reference.classPath.map { relative ->
                                 val entry = reference.entries.getValue(relative)
                                 GccBundledGhidraClassPathEntry(bundle.resolve(relative), checkNotNull(entry.bytes), checkNotNull(entry.sha256))
-                            }, invocationVersion = if (fullRecoveryExport) 5 else 3)
+                            }, invocationVersion = profile.invocationVersion(engineId, fullRecoveryExport))
                             val manifest = boot.invocationManifestBytes()
                             val exporter = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java"))
                                 .use { it.readNBytes(MAXIMUM_CONTROL_BYTES + 1) }

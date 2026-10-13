@@ -26,6 +26,25 @@ import kotlinx.serialization.json.long
 
 class GccBundledFullExportCaptureTest {
     @Test
+    fun `full capture authenticates the admitted worker count before consuming sidecars`() = fixture { root, run, reports ->
+        writeState(root, decompilationWorkers = 4)
+        assertFailsWith<IllegalArgumentException> {
+            GccBundledFullExportCapture.capture(run, reports, artifacts())
+        }
+        val parallel = GccBundledFullExportCapture.capture(run, reports, artifacts(), expectedDecompilerWorkers = 4)
+        assertEquals(1L, parallel.functionCount)
+        writeState(root, decompilationWorkers = 1)
+        assertFailsWith<IllegalArgumentException> {
+            GccBundledFullExportCapture.capture(run, reports, artifacts(), expectedDecompilerWorkers = 4)
+        }
+        for (count in listOf(0, 2, 3, 5)) {
+            assertFailsWith<IllegalArgumentException> {
+                GccBundledFullExportCapture.capture(run, reports, artifacts(), expectedDecompilerWorkers = count)
+            }
+        }
+    }
+
+    @Test
     fun `full export snapshot binds invocation progress model and all descriptor captured sidecars`() = fixture { root, run, reports ->
         val snapshot = GccBundledFullExportCapture.capture(run, reports, artifacts())
         assertEquals(1L, snapshot.functionCount)
@@ -1078,11 +1097,12 @@ class GccBundledFullExportCaptureTest {
         root: Path,
         recoveryMode: String = "full",
         inputSha256: String = inputSha(),
-        exporterVersion: Int = 13,
+        exporterVersion: Int = 14,
+        decompilationWorkers: Int = 1,
         language: String = "x86:LE:64:default",
         compilerSpec: String = "gcc",
     ) {
-        val state = """{"schemaVersion":2,"exporterVersion":$exporterVersion,"exporterSha256":"${exporterSha()}","analysisToolSha256":"${analysisToolSha()}","recoveryMode":"$recoveryMode","inputSha256":"$inputSha256","language":"$language","compilerSpec":"$compilerSpec","semanticStateBinding":null}
+        val state = """{"schemaVersion":2,"exporterVersion":$exporterVersion,"exporterSha256":"${exporterSha()}","analysisToolSha256":"${analysisToolSha()}","recoveryMode":"$recoveryMode","decompilationWorkers":$decompilationWorkers,"inputSha256":"$inputSha256","language":"$language","compilerSpec":"$compilerSpec","semanticStateBinding":null}
 """
         Files.writeString(root.resolve("reports/program_model.json.export/state.json"), state)
     }

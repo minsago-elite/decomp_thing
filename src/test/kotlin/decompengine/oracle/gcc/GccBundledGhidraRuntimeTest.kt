@@ -68,7 +68,7 @@ class GccBundledGhidraRuntimeTest {
             GccCompilerEngineContainmentContract.assessDefinition(request(historical)).bindingSha256,
             GccCompilerEngineContainmentContract.assessDefinition(request(current)).bindingSha256,
         )
-        assertFailsWith<IllegalArgumentException> { GccBundledGhidraRuntime(ROOT, classPath(), invocationVersion = 6) }
+        assertFailsWith<IllegalArgumentException> { GccBundledGhidraRuntime(ROOT, classPath(), invocationVersion = 7) }
     }
 
     @Test
@@ -87,6 +87,65 @@ class GccBundledGhidraRuntimeTest {
         assertEquals(command, parsed.command(artifacts(parsed), state(), lease()))
         assertFailsWith<IllegalArgumentException> {
             full.command(artifacts, state(), lease(), GccCompilerEngineContainmentRunKind.INTERRUPTED)
+        }
+    }
+
+    @Test
+    fun `version six pins four CPU analysis and decompiler workers in command runtime and definition`() {
+        val full = GccBundledGhidraRuntime(ROOT, classPath(), invocationVersion = 6)
+        val selected = artifacts(full)
+        val command = full.command(selected, state(), lease())
+        assertEquals(4, full.processorCount)
+        assertEquals(4, full.analysisThreadCount)
+        assertEquals(4, full.decompilerWorkerCount)
+        assertEquals("full", full.recoveryMode)
+        assertTrue(command.contains("-XX:ActiveProcessorCount=4"))
+        assertTrue(command.contains("-Dcpu.core.override=4"))
+        assertEquals("5", command[command.indexOf("ExportProgramModel.java") + 1])
+        assertEquals("full-recovery-workers-v1:4", command.last())
+        val parsed = GccBundledGhidraRuntime.parse(full.toJson())
+        assertEquals(command, parsed.command(artifacts(parsed), state(), lease()))
+        val assessment = GccCompilerEngineContainmentContract.assessDefinition(request(
+            full, selected, command, GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
+        ))
+        val document = OracleJson.parseCanonical(assessment.canonicalBytes).jsonObject
+        assertEquals(JsonPrimitive(3), document["schemaVersion"])
+        assertEquals(JsonPrimitive("gcc-compiler-engine-containment-definition-v3"), document["provider"])
+        assertEquals(JsonPrimitive(4), document.getValue("containment").jsonObject["processorCount"])
+        assertFalse(assessment.startAuthorized)
+        assertEquals(4, GccCompilerEngineContainmentContract.parseDefinitionForLiveController(
+            assessment.canonicalBytes).bundledRuntime?.processorCount)
+        val contradictory = JsonObject(document + ("containment" to JsonObject(
+            document.getValue("containment").jsonObject + ("processorCount" to JsonPrimitive(1)))))
+        assertFailsWith<IllegalArgumentException> {
+            GccCompilerEngineContainmentContract.parseDefinitionForLiveController(rehashDefinition(contradictory))
+        }
+        for (replacement in listOf("full-recovery-workers-v1:1", "full-recovery-workers-v1:8")) {
+            assertFailsWith<IllegalArgumentException> {
+                request(full, selected, command.dropLast(1) + replacement, GccCompilerEngineContainmentRunKind.FRESH_CONTROL)
+            }
+        }
+        assertFailsWith<IllegalArgumentException> {
+            full.command(selected, state(), lease(), GccCompilerEngineContainmentRunKind.INTERRUPTED)
+        }
+    }
+
+    @Test
+    fun `runtime throughput fields cannot be omitted altered or attached to legacy providers`() {
+        val full = GccBundledGhidraRuntime(ROOT, classPath(), invocationVersion = 6).toJson()
+        for (field in listOf("processorCount", "analysisThreadCount", "decompilerWorkerCount")) {
+            assertFailsWith<IllegalArgumentException> { GccBundledGhidraRuntime.parse(JsonObject(full - field)) }
+            for (value in listOf(JsonPrimitive(1), JsonPrimitive(5), JsonPrimitive("4"), JsonPrimitive(4.0))) {
+                assertFailsWith<IllegalArgumentException> { GccBundledGhidraRuntime.parse(JsonObject(full + (field to value))) }
+            }
+        }
+        for (version in 1..5) {
+            assertFailsWith<IllegalArgumentException> {
+                GccBundledGhidraRuntime.parse(JsonObject(full + ("provider" to JsonPrimitive("bundled-ghidra-java-api-runtime-v$version"))))
+            }
+            val legacy = GccBundledGhidraRuntime(ROOT, classPath(), invocationVersion = version)
+            assertEquals(setOf("provider", "root", "classPath"), legacy.toJson().keys)
+            assertEquals(1, legacy.processorCount)
         }
     }
 
@@ -477,6 +536,34 @@ class GccBundledGhidraRuntimeTest {
                 }
             }
             assertTrue(failure.message.orEmpty().contains("independent deployment reference"), failure.message)
+            assertContentEquals(bytes, Files.readAllBytes(definitionPath))
+            assertEquals(listOf("definition.json"), Files.list(directory).use { paths -> paths.map { it.fileName.toString() }.toList() })
+        } finally {
+            Files.deleteIfExists(definitionPath)
+            Files.delete(directory)
+        }
+    }
+
+    @Test
+    fun `BOOT only controller rejects four CPU definitions before opening runtime inputs`() {
+        val parent = Files.createDirectories(Path.of("build", "gcc-bundled-runtime-tests"))
+        val directory = Files.createTempDirectory(parent, "parallel-boot-").toAbsolutePath().normalize()
+        Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"))
+        val definitionPath = directory.resolve("definition.json")
+        val full = GccBundledGhidraRuntime(ROOT, classPath(), invocationVersion = 6)
+        val selected = artifacts(full)
+        val bytes = GccCompilerEngineContainmentContract.assessDefinition(request(
+            full, selected, full.command(selected, state(), lease()), GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
+        )).canonicalBytes
+        try {
+            Files.write(definitionPath, bytes)
+            Files.setPosixFilePermissions(definitionPath, PosixFilePermissions.fromString("r--------"))
+            val failure = assertFailsWith<GccCompilerEngineLiveContainmentException> {
+                GccCompilerEngineLiveContainmentController.attachAtBoot(definitionPath).use {
+                    error("parallel runtime reached the one-CPU BOOT controller")
+                }
+            }
+            assertTrue(failure.message.orEmpty().contains("BOOT-only controller admits one CPU"), failure.message)
             assertContentEquals(bytes, Files.readAllBytes(definitionPath))
             assertEquals(listOf("definition.json"), Files.list(directory).use { paths -> paths.map { it.fileName.toString() }.toList() })
         } finally {

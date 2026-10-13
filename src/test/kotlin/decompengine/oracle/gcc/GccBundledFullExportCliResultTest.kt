@@ -83,6 +83,12 @@ class GccBundledFullExportCliResultTest {
         assertEquals(treeSha, result.getValue("outputTreeSha256").jsonPrimitive.content)
 
         val driverBinding = fullBindingBytes(treeSha, profileId = "gcc-driver-16.2.0", engineId = "driver")
+        assertFailsWith<IllegalArgumentException> {
+            createResult(binding = fullBindingBytes(treeSha, profileId = "gcc-driver-16.2.0", engineId = "driver", lineageVersion = 2))
+        }
+        assertFailsWith<IllegalArgumentException> { createResult(binding = fullBindingBytes(treeSha, lineageVersion = 3)) }
+        // Earlier single-CPU cc1 result provenance remains readable.
+        createResult(binding = fullBindingBytes(treeSha, lineageVersion = 1))
         val driverResult = OracleJson.parseCanonical(createResult(binding = driverBinding)).jsonObject
         // Selection stays in the bound provenance: the result retains its closed v2 pointer schema
         // and all three negative-authority fields for either selected target.
@@ -200,6 +206,7 @@ class GccBundledFullExportCliResultTest {
         profileId: String = "gcc-cc1-16.2.0",
         engineId: String = "cc1",
         profileVersion: String = "16.2.0",
+        lineageVersion: Int = if (engineId == "cc1") 2 else 1,
     ): ByteArray {
         val target = JsonObject(mapOf(
             "id" to JsonPrimitive("sysv-amd64-elf-v1"),
@@ -218,8 +225,8 @@ class GccBundledFullExportCliResultTest {
             "executableRangesSha256" to JsonPrimitive("1".repeat(64)),
         ))
         val lineage = JsonObject(mapOf(
-            "provider" to JsonPrimitive("gcc-bundled-full-export-receipt-lineage-v1"),
-            "schemaVersion" to JsonPrimitive(1),
+            "provider" to JsonPrimitive("gcc-bundled-full-export-receipt-lineage-v$lineageVersion"),
+            "schemaVersion" to JsonPrimitive(lineageVersion),
             "operationId" to JsonPrimitive("a".repeat(64)),
             "intentSha256" to JsonPrimitive("b".repeat(64)),
             "engineId" to JsonPrimitive(engineId),

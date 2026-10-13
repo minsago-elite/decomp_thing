@@ -559,7 +559,7 @@ class GccBundledOperationCoordinatorTest {
             val fullBudget = GccCompilerEngineContainmentBudgets(
                 suite.budgets.fullRecoveryCc1ExportWallClockMillis, budgets().maximumResidentBytes, 32)
             assertFails { build(limits = fullBudget) }
-            val fullRuntime = GccBundledGhidraRuntime(runtime().root, runtime().classPath, invocationVersion = 5)
+            val fullRuntime = GccBundledGhidraRuntime(runtime().root, runtime().classPath, invocationVersion = 6)
             val fullIntent = GccBundledOperationIntent(OPERATION_ID, "cc1", GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
                 selected, fullRuntime, fullBudget, policy(), profile)
             assertEquals(fullBudget, fullIntent.budgets)

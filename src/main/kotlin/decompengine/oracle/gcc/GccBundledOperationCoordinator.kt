@@ -205,7 +205,8 @@ internal class GccBundledPreparedOperation internal constructor(
         return executeRun(GccCompilerEngineContainmentRunKind.FRESH_CONTROL, null) { borrowed, execution ->
             val receipt = journal.recordExecution(execution.canonicalBytes)
             val captured = borrowed.withPinnedDescriptor { descriptor ->
-                GccBundledFullExportCapture.capture(descriptor, directories.getValue("reports"), intent.artifacts)
+                GccBundledFullExportCapture.capture(descriptor, directories.getValue("reports"), intent.artifacts,
+                    expectedDecompilerWorkers = intent.bundledRuntime.decompilerWorkerCount)
             }
             inputs.verify("after GCC full export snapshot")
             lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
@@ -628,7 +629,7 @@ internal class GccBundledPreparedOperation internal constructor(
     ): T {
         requireCurrent()
         require(intent.runKind == kind) { "GCC bundled execution kind differs from the prepared intent" }
-        require(intent.bundledRuntime.invocationVersion in 2..3 || intent.bundledRuntime.invocationVersion == 5) {
+        require(intent.bundledRuntime.invocationVersion in 2..3 || intent.bundledRuntime.invocationVersion in 5..6) {
             "GCC contained execution requires an explicitly bound fresh JVM runtime"
         }
         executionAttempted = true
@@ -675,6 +676,7 @@ internal class GccBundledPreparedOperation internal constructor(
                         checkNotNull(operationDeadline).remainingWholeSecondsMillis(intent.budgets.wallClockMillis),
                         intent.budgets.maximumResidentBytes, intent.budgets.pidsMax,
                         minOf(intent.diskPolicy.maximumFilesystemBytes, 1024L * 1024 * 1024),
+                        processorCount = intent.bundledRuntime.processorCount,
                     ),
                     deploymentClosureSha256 = inputs.deploymentClosureSha256,
                     interruption = interruption,

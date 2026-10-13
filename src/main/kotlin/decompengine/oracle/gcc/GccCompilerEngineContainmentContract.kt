@@ -192,6 +192,10 @@ internal class GccCompilerEngineContainmentRequest(
             runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL)) {
             "GCC driver containment requires bundled full-recovery export with fresh control state"
         }
+        require(bundledRuntime?.invocationVersion != 6 || (engineId == "cc1" &&
+            runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL)) {
+            "parallel full-recovery containment requires fresh cc1 control state"
+        }
         when (runKind) {
             GccCompilerEngineContainmentRunKind.INTERRUPTED,
             GccCompilerEngineContainmentRunKind.FRESH_CONTROL ->
@@ -389,6 +393,7 @@ internal object GccCompilerEngineContainmentContract {
             facts.resources.wallClockMillis != definition.budgets.wallClockMillis ||
             facts.resources.maximumResidentBytes != definition.budgets.maximumResidentBytes ||
             facts.resources.pidsMax != definition.budgets.pidsMax ||
+            definition.parallelRuntime ||
             facts.cgroupDevice <= 0L || facts.cgroupInode <= 0L || facts.cgroupMountId <= 0L ||
             !facts.bootId.matches(BOOT_ID) || !facts.invocationId.matches(SYSTEMD_ID128) ||
             facts.invocationId == ZERO_ID128 || facts.processes.size != REQUIRED_BOOT_PROCESS_COUNT
@@ -562,7 +567,10 @@ private data class DefinitionFacts(
     val outputUid: Int,
     val budgets: GccCompilerEngineContainmentBudgets,
     val artifactSha256: Map<GccCompilerEngineContainmentArtifactRole, String>,
-)
+) {
+    val processorCount: Int get() = request.bundledRuntime?.processorCount ?: 1
+    val parallelRuntime: Boolean get() = processorCount > 1
+}
 
 private data class AttachedProcessFacts(
     val role: String,
@@ -696,15 +704,17 @@ private fun renderDefinition(request: GccCompilerEngineContainmentRequest): Defi
     val unitName = "decomp-gcc-${request.engineId}-${requestSha256.take(32)}.scope"
     val unsigned = JsonObject(
         linkedMapOf(
-            "schemaVersion" to JsonPrimitive(if (request.bundledRuntime == null) 1 else 2),
-            "provider" to JsonPrimitive(if (request.bundledRuntime == null) DEFINITION_PROVIDER else BUNDLED_DEFINITION_PROVIDER),
+            "schemaVersion" to JsonPrimitive(if (request.bundledRuntime?.invocationVersion == 6) 3
+                else if (request.bundledRuntime == null) 1 else 2),
+            "provider" to JsonPrimitive(if (request.bundledRuntime?.invocationVersion == 6) PARALLEL_DEFINITION_PROVIDER
+                else if (request.bundledRuntime == null) DEFINITION_PROVIDER else BUNDLED_DEFINITION_PROVIDER),
             "authority" to JsonPrimitive(ASSESSMENT_AUTHORITY),
             "releaseEligible" to JsonPrimitive(false),
             "startAuthorized" to JsonPrimitive(false),
             "request" to requestObject,
             "requestSha256" to JsonPrimitive(requestSha256),
             "unitName" to JsonPrimitive(unitName),
-            "containment" to containmentJson(request.budgets),
+            "containment" to containmentJson(request.budgets, request.bundledRuntime?.processorCount ?: 1),
         ),
     )
     val bindingSha256 = sha256(unsigned)
@@ -732,8 +742,12 @@ private fun parseDefinition(bytes: ByteArray): DefinitionFacts {
     val root = parseCanonicalObject(bytes, "containment definition")
     root.requireKeys(DEFINITION_FIELDS, "containment definition")
     val version = root.intField("schemaVersion", "containment definition")
-    require(version == 1 || version == 2) { "containment definition schema version is unsupported" }
-    root.requireString("provider", if (version == 1) DEFINITION_PROVIDER else BUNDLED_DEFINITION_PROVIDER, "containment definition")
+    require(version in 1..3) { "containment definition schema version is unsupported" }
+    root.requireString("provider", when (version) {
+        1 -> DEFINITION_PROVIDER
+        2 -> BUNDLED_DEFINITION_PROVIDER
+        else -> PARALLEL_DEFINITION_PROVIDER
+    }, "containment definition")
     root.requireString("authority", ASSESSMENT_AUTHORITY, "containment definition")
     root.requireBoolean("releaseEligible", false, "containment definition")
     root.requireBoolean("startAuthorized", false, "containment definition")
@@ -832,8 +846,8 @@ private fun attachedReceiptUnsigned(
     processes: JsonArray,
 ): JsonObject = JsonObject(
     linkedMapOf(
-        "schemaVersion" to JsonPrimitive(2),
-        "provider" to JsonPrimitive(ATTACHED_RECEIPT_PROVIDER),
+        "schemaVersion" to JsonPrimitive(if (definition.parallelRuntime) 3 else 2),
+        "provider" to JsonPrimitive(if (definition.parallelRuntime) PARALLEL_ATTACHED_RECEIPT_PROVIDER else ATTACHED_RECEIPT_PROVIDER),
         "phase" to JsonPrimitive("UNIT_ATTACHED_AT_BOOT"),
         "bindingSha256" to JsonPrimitive(definition.bindingSha256),
         "requestSha256" to JsonPrimitive(definition.requestSha256),
@@ -863,7 +877,7 @@ private fun attachedReceiptUnsigned(
                 "killMode" to JsonPrimitive("control-group"),
                 "sendSigkill" to JsonPrimitive(true),
                 "delegate" to JsonPrimitive(false),
-            ),
+            ) + processorCountJson(definition.processorCount),
         ),
         "cgroup" to JsonObject(
             mapOf(
@@ -880,7 +894,7 @@ private fun attachedReceiptUnsigned(
                 "pidsMax" to JsonPrimitive(definition.budgets.pidsMax),
                 "killMode" to JsonPrimitive("control-group"),
                 "sendSigkill" to JsonPrimitive(true),
-            ),
+            ) + processorCountJson(definition.processorCount),
         ),
         "bootProtocol" to JsonObject(
             mapOf(
@@ -899,8 +913,8 @@ private fun attachedReceiptUnsigned(
 private fun parseAttachedReceipt(definition: DefinitionFacts, bytes: ByteArray): AttachedReceiptFacts {
     val root = parseCanonicalObject(bytes, "UNIT_ATTACHED-at-BOOT receipt")
     root.requireKeys(ATTACHED_RECEIPT_FIELDS, "UNIT_ATTACHED-at-BOOT receipt")
-    root.requireInt("schemaVersion", 2, "UNIT_ATTACHED-at-BOOT receipt")
-    root.requireString("provider", ATTACHED_RECEIPT_PROVIDER, "UNIT_ATTACHED-at-BOOT receipt")
+    root.requireInt("schemaVersion", if (definition.parallelRuntime) 3 else 2, "UNIT_ATTACHED-at-BOOT receipt")
+    root.requireString("provider", if (definition.parallelRuntime) PARALLEL_ATTACHED_RECEIPT_PROVIDER else ATTACHED_RECEIPT_PROVIDER, "UNIT_ATTACHED-at-BOOT receipt")
     root.requireString("phase", "UNIT_ATTACHED_AT_BOOT", "UNIT_ATTACHED-at-BOOT receipt")
     root.requireString("bindingSha256", definition.bindingSha256, "UNIT_ATTACHED-at-BOOT receipt")
     root.requireString("requestSha256", definition.requestSha256, "UNIT_ATTACHED-at-BOOT receipt")
@@ -919,7 +933,8 @@ private fun parseAttachedReceipt(definition: DefinitionFacts, bytes: ByteArray):
         containmentFail("UNIT_ATTACHED-at-BOOT receipt has an invalid boot or invocation identity")
     }
     val systemd = root.objectField("systemd", "UNIT_ATTACHED-at-BOOT receipt")
-    systemd.requireKeys(SYSTEMD_FIELDS, "systemd receipt")
+    systemd.requireKeys(SYSTEMD_FIELDS + processorCountJson(definition.processorCount).keys, "systemd receipt")
+    if (definition.parallelRuntime) systemd.requireInt("processorCount", definition.processorCount, "systemd receipt")
     systemd.requireString("id", definition.unitName, "systemd receipt")
     systemd.requireBoolean("transient", true, "systemd receipt")
     systemd.requireString("loadState", "loaded", "systemd receipt")
@@ -940,7 +955,8 @@ private fun parseAttachedReceipt(definition: DefinitionFacts, bytes: ByteArray):
         containmentFail("systemd control group is not the exact derived user-manager unit leaf")
     }
     val cgroup = root.objectField("cgroup", "UNIT_ATTACHED-at-BOOT receipt")
-    cgroup.requireKeys(CGROUP_FIELDS, "cgroup receipt")
+    cgroup.requireKeys(CGROUP_FIELDS + processorCountJson(definition.processorCount).keys, "cgroup receipt")
+    if (definition.parallelRuntime) cgroup.requireInt("processorCount", definition.processorCount, "cgroup receipt")
     cgroup.requireInt("version", 2, "cgroup receipt")
     cgroup.requireString("path", "/sys/fs/cgroup$controlGroup", "cgroup receipt")
     listOf("device", "inode", "mountId").forEach { field ->
@@ -1152,7 +1168,7 @@ private fun budgetsJson(budgets: GccCompilerEngineContainmentBudgets): JsonObjec
     ),
 )
 
-private fun containmentJson(budgets: GccCompilerEngineContainmentBudgets): JsonObject = JsonObject(
+private fun containmentJson(budgets: GccCompilerEngineContainmentBudgets, processorCount: Int): JsonObject = JsonObject(
     mapOf(
         "phaseOrder" to JsonArray(
             listOf("PREPARED", "UNIT_ATTACHED_AT_BOOT", "TERMINAL_ABSENT").map(::JsonPrimitive),
@@ -1177,8 +1193,11 @@ private fun containmentJson(budgets: GccCompilerEngineContainmentBudgets): JsonO
         "requireCgroupAbsent" to JsonPrimitive(true),
         "requireAllReceiptPidfdsDead" to JsonPrimitive(true),
         "requiredIndependentAbsenceSweeps" to JsonPrimitive(REQUIRED_ABSENCE_SWEEPS),
-    ),
+    ) + processorCountJson(processorCount),
 )
+
+private fun processorCountJson(processorCount: Int): Map<String, JsonPrimitive> =
+    if (processorCount == 1) emptyMap() else mapOf("processorCount" to JsonPrimitive(processorCount))
 
 private fun withSelfHash(unsigned: JsonObject, field: String): ByteArray {
     val digest = sha256(unsigned)
@@ -1364,6 +1383,8 @@ private fun containmentFail(message: String): Nothing =
 
 private const val DEFINITION_PROVIDER = "gcc-compiler-engine-containment-definition-v1"
 private const val BUNDLED_DEFINITION_PROVIDER = "gcc-compiler-engine-containment-definition-v2"
+private const val PARALLEL_DEFINITION_PROVIDER = "gcc-compiler-engine-containment-definition-v3"
+private const val PARALLEL_ATTACHED_RECEIPT_PROVIDER = "gcc-compiler-engine-unit-attached-at-boot-receipt-v3"
 private const val ATTACHED_RECEIPT_PROVIDER = "gcc-compiler-engine-unit-attached-at-boot-receipt-v2"
 private const val ABSENCE_RECEIPT_PROVIDER = "gcc-compiler-engine-terminal-absence-receipt-v2"
 private const val ASSESSMENT_AUTHORITY = "non-authoritative-caller-supplied-containment-bytes-v1"

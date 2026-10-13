@@ -27,6 +27,13 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.UUID;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
@@ -44,6 +51,177 @@ import ghidra.program.model.listing.InstructionIterator;
 import ghidra.program.model.listing.Parameter;
 import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.Symbol;
+import ghidra.util.task.TaskMonitor;
+import ghidra.util.task.TaskMonitorAdapter;
+
+// PARALLEL_EXPORT_TEST_BEGIN
+/** Only this coordinator prepares metadata and publishes evidence; workers return immutable results. */
+final class ExporterParallelCoordinatorV1<M, R> implements AutoCloseable {
+    static final int MAXIMUM_WORKERS = 4;
+    static final long CLEANUP_MILLIS = 2_000;
+
+    interface Worker<M, R> {
+        R execute(M metadata, boolean retry) throws Exception;
+        // Both lifecycle operations must be nonblocking; native termination is awaited below.
+        void cancel();
+        void dispose();
+    }
+
+    interface Source<M, R> {
+        void checkCancelled() throws Exception;
+        boolean accepted(int index) throws Exception;
+        M prepare(int index, boolean retry) throws Exception;
+        boolean metadataComplete(M metadata);
+        boolean retryRequired(R result);
+        boolean retrySucceeded(R result);
+        void commit(int index, R result) throws Exception;
+    }
+
+    private static final class Attempt<M, R> {
+        final int index;
+        final M metadata;
+        final R original;
+
+        Attempt(int index, M metadata, R original) {
+            this.index = index;
+            this.metadata = metadata;
+            this.original = original;
+        }
+    }
+
+    private static final class Completed<M, R> {
+        final Attempt<M, R> attempt;
+        final R result;
+
+        Completed(Attempt<M, R> attempt, R result) {
+            this.attempt = attempt;
+            this.result = result;
+        }
+    }
+
+    private final List<Worker<M, R>> workers;
+    private final ArrayBlockingQueue<Worker<M, R>> available;
+    private final ExecutorService executor;
+    private final ExecutorCompletionService<Completed<M, R>> completions;
+    private int outstanding;
+    private boolean started;
+    private boolean closed;
+
+    ExporterParallelCoordinatorV1(List<Worker<M, R>> workers) {
+        if (workers.isEmpty() || workers.size() > MAXIMUM_WORKERS || workers.contains(null)) {
+            throw new IllegalArgumentException("full recovery worker count must be between one and four");
+        }
+        this.workers = new ArrayList<>(workers);
+        available = new ArrayBlockingQueue<>(workers.size());
+        available.addAll(workers);
+        executor = Executors.newFixedThreadPool(workers.size(), task -> {
+            Thread thread = new Thread(task, "program-model-decompiler");
+            // The outer isolated worker owns the final process-tree termination boundary.
+            thread.setDaemon(true);
+            return thread;
+        });
+        completions = new ExecutorCompletionService<>(executor, new ArrayBlockingQueue<>(workers.size()));
+    }
+
+    void run(int count, Source<M, R> source) throws Exception {
+        if (started || closed || count < 0) throw new IllegalStateException("full recovery coordinator is not fresh");
+        started = true;
+        int next = 0;
+        Set<Integer> metadataBarriers = new TreeSet<>();
+        while (next < count || outstanding != 0) {
+            source.checkCancelled();
+            while (next < count && outstanding < workers.size() && metadataBarriers.isEmpty()) {
+                source.checkCancelled();
+                int index = next++;
+                if (source.accepted(index)) continue;
+                M metadata = source.prepare(index, false);
+                if (!source.metadataComplete(metadata)) metadataBarriers.add(index);
+                submit(new Attempt<>(index, metadata, null));
+            }
+            if (outstanding == 0) continue;
+            Future<Completed<M, R>> ready = completions.poll(50, TimeUnit.MILLISECONDS);
+            if (ready == null) continue;
+            Completed<M, R> completed;
+            try {
+                completed = ready.get();
+            } catch (ExecutionException failed) {
+                Throwable cause = failed.getCause();
+                if (cause instanceof Exception) throw (Exception) cause;
+                if (cause instanceof Error) throw (Error) cause;
+                throw new IllegalStateException("full recovery worker failed", cause);
+            }
+            outstanding--;
+            source.checkCancelled();
+            Attempt<M, R> attempt = completed.attempt;
+            if (attempt.original == null && source.retryRequired(completed.result)) {
+                // Repeat metadata recovery just as the serial exporter did before its native retry.
+                // An initially incomplete metadata pass blocks later first-owner claims until here.
+                M metadata = source.prepare(attempt.index, true);
+                if (!source.metadataComplete(metadata)) metadataBarriers.add(attempt.index);
+                submit(new Attempt<>(attempt.index, metadata, completed.result));
+            } else {
+                R selected = attempt.original != null && !source.retrySucceeded(completed.result)
+                    ? attempt.original : completed.result;
+                source.commit(attempt.index, selected);
+                metadataBarriers.remove(attempt.index);
+            }
+        }
+    }
+
+    private void submit(Attempt<M, R> attempt) {
+        if (outstanding >= workers.size()) throw new IllegalStateException("full recovery live-job bound exceeded");
+        completions.submit(() -> {
+            Worker<M, R> worker = available.remove();
+            try {
+                R result = worker.execute(attempt.metadata, attempt.original != null);
+                if (result == null) throw new IllegalStateException("full recovery worker returned no result");
+                return new Completed<>(attempt, result);
+            } finally {
+                available.add(worker);
+            }
+        });
+        outstanding++;
+    }
+
+    @Override
+    public void close() {
+        if (closed) return;
+        closed = true;
+        boolean interrupted = Thread.interrupted();
+        Throwable failure = null;
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CLEANUP_MILLIS);
+        for (Worker<M, R> worker : workers) {
+            try { worker.cancel(); }
+            catch (Throwable problem) { failure = addFailure(failure, problem); }
+        }
+        executor.shutdownNow();
+        try {
+            boolean stopped = false;
+            while (!stopped && System.nanoTime() < deadline) {
+                try {
+                    stopped = executor.awaitTermination(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+                } catch (InterruptedException problem) {
+                    interrupted = true;
+                }
+            }
+            if (!stopped) failure = addFailure(failure, new IllegalStateException("full recovery workers exceeded cleanup deadline"));
+        } finally {
+            for (Worker<M, R> worker : workers) {
+                try { worker.dispose(); }
+                catch (Throwable problem) { failure = addFailure(failure, problem); }
+            }
+            if (interrupted) Thread.currentThread().interrupt();
+        }
+        if (failure != null) throw new IllegalStateException("full recovery worker cleanup failed", failure);
+    }
+
+    private static Throwable addFailure(Throwable previous, Throwable next) {
+        if (previous == null) return next;
+        if (previous != next) previous.addSuppressed(next);
+        return previous;
+    }
+}
+// PARALLEL_EXPORT_TEST_END
 
 // SEMANTIC_FINGERPRINT_TEST_BEGIN
 final class ExporterSemanticFingerprintV1 {
@@ -413,7 +591,7 @@ final class ExporterSemanticFingerprintV1 {
 // SEMANTIC_FINGERPRINT_TEST_END
 
 public class ExportProgramModel extends GhidraScript {
-    private static final int EXPORTER_VERSION = 13;
+    private static final int EXPORTER_VERSION = 14;
     private static final int DECOMPILE_TIMEOUT_SECONDS = 60;
     private static final int DECOMPILE_RETRY_TIMEOUT_SECONDS = 180;
     private static final int MAXIMUM_DECOMPILE_INSTRUCTIONS = 500_000;
@@ -839,7 +1017,8 @@ public class ExportProgramModel extends GhidraScript {
 
     private void rethrowInfrastructureFailure(Exception failure) throws Exception {
         if (
-            monitor.isCancelled() || failure instanceof IOException ||
+            monitor.isCancelled() || Thread.currentThread().isInterrupted() || failure instanceof InterruptedException ||
+            failure instanceof IOException ||
             failure instanceof PlanningIntegrityException
         ) throw failure;
     }
@@ -885,14 +1064,34 @@ public class ExportProgramModel extends GhidraScript {
         return new GlobalEvidence(globalId(base), name, base, type, initializer);
     }
 
-    private FunctionExport exportFunction(
+    private static final class FunctionMetadata {
+        final Function function;
+        final String prefix, evidence, failure;
+        final boolean evidenceComplete;
+
+        FunctionMetadata(Function function, String prefix, String evidence, String failure, boolean evidenceComplete) {
+            this.function = function;
+            this.prefix = prefix;
+            this.evidence = evidence;
+            this.failure = failure;
+            this.evidenceComplete = evidenceComplete;
+        }
+    }
+
+    private static final class NativeOutcome {
+        final String source, failure;
+
+        NativeOutcome(String source, String failure) {
+            this.source = source;
+            this.failure = failure;
+        }
+    }
+
+    private FunctionMetadata collectFunctionMetadata(
         Function function,
-        DecompInterface decompiler,
         Path globalsDirectory,
         Path typesDirectory,
-        PlanningBatchEvidence planningEvidence,
-        boolean includeDecompiledC,
-        int decompileTimeoutSeconds
+        PlanningBatchEvidence planningEvidence
     ) throws Exception {
         Set<String> callIds = new TreeSet<>();
         Set<String> referencedGlobals = new TreeSet<>();
@@ -913,6 +1112,9 @@ public class ExportProgramModel extends GhidraScript {
         try {
             InstructionIterator instructions = currentProgram.getListing().getInstructions(function.getBody(), true);
             while (instructions.hasNext()) {
+                if (monitor.isCancelled() || Thread.currentThread().isInterrupted()) {
+                    throw new InterruptedException("program-model metadata recovery was cancelled");
+                }
                 Instruction instruction = instructions.next();
                 for (Reference reference : instruction.getReferencesFrom()) {
                     Address target = reference.getToAddress();
@@ -954,43 +1156,138 @@ public class ExportProgramModel extends GhidraScript {
             failure = appendFailure(failure, exceptionMessage("type recovery", problem));
         }
 
+        StringBuilder prefix = new StringBuilder();
+        prefix.append("    {\n");
+        prefix.append("      \"id\": ").append(json(functionId(function))).append(",\n");
+        prefix.append("      \"name\": ").append(json(function.getName())).append(",\n");
+        prefix.append("      \"address\": ").append(json(String.format("0x%x", function.getEntryPoint().getOffset()))).append(",\n");
+        prefix.append("      \"prototype\": ").append(json(function.getPrototypeString(false, false))).append(",\n");
+        StringBuilder evidence = new StringBuilder();
+        evidence.append("      \"recoveryAssessment\": \"unassessed\",\n");
+        evidence.append("      \"calls\": ["); appendStrings(evidence, callIds); evidence.append("],\n");
+        evidence.append("      \"referencedGlobals\": ["); appendStrings(evidence, referencedGlobals); evidence.append("],\n");
+        evidence.append("      \"strings\": ["); appendStrings(evidence, strings); evidence.append("],\n");
+        if ((long) prefix.length() + evidence.length() > MAXIMUM_FULL_FUNCTION_RECORD_BYTES ||
+            (long) prefix.toString().getBytes(StandardCharsets.UTF_8).length +
+                evidence.toString().getBytes(StandardCharsets.UTF_8).length > MAXIMUM_FULL_FUNCTION_RECORD_BYTES) {
+            throw new PlanningIntegrityException("function metadata exceeds its byte bound: " + functionId(function));
+        }
+        return new FunctionMetadata(function, prefix.toString(), evidence.toString(), failure, evidenceComplete);
+    }
+
+    private static NativeOutcome decompileFunction(
+        Function function,
+        DecompInterface decompiler,
+        int timeoutSeconds,
+        TaskMonitor taskMonitor
+    ) throws Exception {
         String source = null;
-        if (includeDecompiledC) {
-            try {
-                DecompileResults result = decompiler.decompileFunction(function, decompileTimeoutSeconds, monitor);
-                if (result.decompileCompleted() && result.getDecompiledFunction() != null) {
-                    source = result.getDecompiledFunction().getC();
-                } else {
-                    String detail = result.getErrorMessage();
-                    failure = appendFailure(
-                        failure,
-                        "decompilation failed or timed out" +
-                            (detail == null || detail.trim().isEmpty() ? "" : ": " + detail)
-                    );
+        String failure = null;
+        try {
+            if (taskMonitor.isCancelled() || Thread.currentThread().isInterrupted()) {
+                throw new InterruptedException("program-model native decompilation was cancelled");
+            }
+            DecompileResults result = decompiler.decompileFunction(function, timeoutSeconds, taskMonitor);
+            if (taskMonitor.isCancelled() || Thread.currentThread().isInterrupted()) {
+                throw new InterruptedException("program-model native decompilation was cancelled");
+            }
+            if (result.decompileCompleted() && result.getDecompiledFunction() != null) {
+                source = result.getDecompiledFunction().getC();
+                if (source != null && (source.length() > MAXIMUM_FULL_FUNCTION_RECORD_BYTES ||
+                    source.getBytes(StandardCharsets.UTF_8).length > MAXIMUM_FULL_FUNCTION_RECORD_BYTES)) {
+                    throw new PlanningIntegrityException("decompiled source exceeds its byte bound");
                 }
-            } catch (Exception problem) {
-                rethrowInfrastructureFailure(problem);
-                failure = appendFailure(failure, exceptionMessage("decompilation", problem));
+            } else {
+                String detail = result.getErrorMessage();
+                failure = appendFailure(null, "decompilation failed or timed out" +
+                    (detail == null || detail.trim().isEmpty() ? "" : ": " + detail));
+            }
+        } catch (Exception problem) {
+            if (taskMonitor.isCancelled() || Thread.currentThread().isInterrupted() ||
+                problem instanceof InterruptedException || problem instanceof IOException ||
+                problem instanceof PlanningIntegrityException) throw problem;
+            failure = appendFailure(null, exceptionMessage("decompilation", problem));
+        }
+        return new NativeOutcome(source, failure);
+    }
+
+    private static FunctionExport renderFunction(FunctionMetadata metadata, NativeOutcome nativeOutcome, boolean full) {
+        String source = nativeOutcome == null ? null : nativeOutcome.source;
+        String failure = nativeOutcome == null ? metadata.failure : appendFailure(metadata.failure, nativeOutcome.failure);
+        String status = full
+            ? (source == null ? "failed" : (metadata.evidenceComplete ? "recovered" : "partial"))
+            : (metadata.evidenceComplete ? "partial" : "failed");
+        String record = metadata.prefix + "      \"extractionStatus\": " + json(status) + ",\n" +
+            metadata.evidence + "      \"decompiledC\": " + json(source) + "\n    }";
+        if (record.getBytes(StandardCharsets.UTF_8).length > MAXIMUM_FULL_FUNCTION_RECORD_BYTES) {
+            throw new PlanningIntegrityException("function record exceeds its byte bound");
+        }
+        return new FunctionExport(record, status, failure);
+    }
+
+    private FunctionExport exportFunction(
+        Function function,
+        DecompInterface decompiler,
+        Path globalsDirectory,
+        Path typesDirectory,
+        PlanningBatchEvidence planningEvidence,
+        boolean includeDecompiledC,
+        int decompileTimeoutSeconds
+    ) throws Exception {
+        FunctionMetadata metadata = collectFunctionMetadata(function, globalsDirectory, typesDirectory, planningEvidence);
+        NativeOutcome nativeOutcome = includeDecompiledC
+            ? decompileFunction(function, decompiler, decompileTimeoutSeconds, monitor) : null;
+        return renderFunction(metadata, nativeOutcome, includeDecompiledC);
+    }
+
+    private final class NativeWorker implements ExporterParallelCoordinatorV1.Worker<FunctionMetadata, FunctionExport> {
+        private final DecompInterface decompiler = new DecompInterface();
+        private final TaskMonitorAdapter taskMonitor = new TaskMonitorAdapter(true);
+
+        NativeWorker() {
+            try {
+                DecompileOptions decompileOptions = new DecompileOptions();
+                decompileOptions.setMaxInstructions(MAXIMUM_DECOMPILE_INSTRUCTIONS);
+                decompiler.setOptions(decompileOptions);
+                if (!decompiler.openProgram(currentProgram)) {
+                    throw new IllegalStateException("Ghidra decompiler could not open the current program");
+                }
+            } catch (RuntimeException | Error failure) {
+                decompiler.stopProcess();
+                decompiler.dispose();
+                throw failure;
             }
         }
 
-        String status = includeDecompiledC
-            ? (source == null ? "failed" : (evidenceComplete ? "recovered" : "partial"))
-            : (evidenceComplete ? "partial" : "failed");
-        StringBuilder output = new StringBuilder();
-        output.append("    {\n");
-        output.append("      \"id\": ").append(json(functionId(function))).append(",\n");
-        output.append("      \"name\": ").append(json(function.getName())).append(",\n");
-        output.append("      \"address\": ").append(json(String.format("0x%x", function.getEntryPoint().getOffset()))).append(",\n");
-        output.append("      \"prototype\": ").append(json(function.getPrototypeString(false, false))).append(",\n");
-        output.append("      \"extractionStatus\": ").append(json(status)).append(",\n");
-        output.append("      \"recoveryAssessment\": \"unassessed\",\n");
-        output.append("      \"calls\": ["); appendStrings(output, callIds); output.append("],\n");
-        output.append("      \"referencedGlobals\": ["); appendStrings(output, referencedGlobals); output.append("],\n");
-        output.append("      \"strings\": ["); appendStrings(output, strings); output.append("],\n");
-        output.append("      \"decompiledC\": ").append(json(source)).append("\n");
-        output.append("    }");
-        return new FunctionExport(output.toString(), status, failure);
+        @Override
+        public FunctionExport execute(FunctionMetadata metadata, boolean retry) throws Exception {
+            NativeOutcome outcome = decompileFunction(metadata.function, decompiler,
+                retry ? DECOMPILE_RETRY_TIMEOUT_SECONDS : DECOMPILE_TIMEOUT_SECONDS, taskMonitor);
+            return renderFunction(metadata, outcome, true);
+        }
+
+        @Override
+        public void cancel() {
+            taskMonitor.cancel();
+            decompiler.stopProcess();
+        }
+
+        @Override
+        public void dispose() { decompiler.dispose(); }
+    }
+
+    private ExporterParallelCoordinatorV1<FunctionMetadata, FunctionExport> createFullRecoveryCoordinator(int count) {
+        List<ExporterParallelCoordinatorV1.Worker<FunctionMetadata, FunctionExport>> workers = new ArrayList<>();
+        try {
+            for (int index = 0; index < count; index++) workers.add(new NativeWorker());
+            return new ExporterParallelCoordinatorV1<>(workers);
+        } catch (RuntimeException | Error failure) {
+            for (ExporterParallelCoordinatorV1.Worker<FunctionMetadata, FunctionExport> worker : workers) {
+                try { worker.cancel(); } catch (Throwable problem) { failure.addSuppressed(problem); }
+                try { worker.dispose(); } catch (Throwable problem) { failure.addSuppressed(problem); }
+            }
+            throw failure;
+        }
     }
 
     private PlanningSemanticState computePlanningSemanticState(List<Function> functions) throws Exception {
@@ -1822,12 +2119,8 @@ public class ExportProgramModel extends GhidraScript {
         String[] arguments = getScriptArgs();
         if (arguments.length != 4 && arguments.length != 5) {
             throw new IllegalArgumentException(
-                "expected exporter SHA-256, analysis-tool SHA-256, recovery mode, output path, and optional checkpoint hold"
+                "expected exporter SHA-256, analysis-tool SHA-256, recovery mode, output path, and optional execution policy"
             );
-        }
-        boolean holdFirstPlanningCheckpoint = arguments.length == 5;
-        if (holdFirstPlanningCheckpoint && !"hold-first-planning-checkpoint-v1".equals(arguments[4])) {
-            throw new IllegalArgumentException("unsupported planning checkpoint hold");
         }
         if (!arguments[0].matches("[0-9a-f]{64}")) throw new IllegalArgumentException("invalid exporter SHA-256");
         if (!arguments[1].matches("[0-9a-f]{64}")) throw new IllegalArgumentException("invalid analysis-tool SHA-256");
@@ -1838,6 +2131,17 @@ public class ExportProgramModel extends GhidraScript {
             throw new IllegalArgumentException("unsupported recovery mode");
         }
         boolean includeDecompiledC = recoveryMode.equals("full");
+        boolean holdFirstPlanningCheckpoint = false;
+        int decompilationWorkers = 1;
+        if (arguments.length == 5) {
+            if (!includeDecompiledC && "hold-first-planning-checkpoint-v1".equals(arguments[4])) {
+                holdFirstPlanningCheckpoint = true;
+            } else if (includeDecompiledC && arguments[4].matches("full-recovery-workers-v1:[1-4]")) {
+                decompilationWorkers = arguments[4].charAt(arguments[4].length() - 1) - '0';
+            } else {
+                throw new IllegalArgumentException("unsupported export execution policy");
+            }
+        }
         Path outputPath = Paths.get(arguments[3]).toAbsolutePath().normalize();
         Path stateDirectory = outputPath.resolveSibling(outputPath.getFileName() + ".export");
         Path functionsDirectory = stateDirectory.resolve("functions");
@@ -1892,6 +2196,7 @@ public class ExportProgramModel extends GhidraScript {
             ",\"exporterSha256\":" + json(exporterSha256) +
             ",\"analysisToolSha256\":" + json(analysisToolSha256) +
             ",\"recoveryMode\":" + json(recoveryMode) +
+            (includeDecompiledC ? ",\"decompilationWorkers\":" + decompilationWorkers : "") +
             ",\"inputSha256\":" + json(inputSha256) +
             ",\"language\":" + json(currentProgram.getLanguageID().toString()) +
             ",\"compilerSpec\":" + json(currentProgram.getCompilerSpec().getCompilerSpecID().toString()) +
@@ -1960,62 +2265,65 @@ public class ExportProgramModel extends GhidraScript {
             reused = completed;
             writeProgress(progressPath, "decompiling", completed, total, recovered, partial, failed, reused, null);
 
-            DecompInterface decompiler = new DecompInterface();
-            DecompileOptions decompileOptions = new DecompileOptions();
-            decompileOptions.setMaxInstructions(MAXIMUM_DECOMPILE_INSTRUCTIONS);
-            decompiler.setOptions(decompileOptions);
-            if (!decompiler.openProgram(currentProgram)) {
-                decompiler.dispose();
-                throw new IllegalStateException("Ghidra decompiler could not open the current program");
-            }
-            try {
-                for (int index = 0; index < functions.size(); index++) {
-                    Function function = functions.get(index);
-                    String id = functionIds.get(index);
-                    Path record = functionsDirectory.resolve(id + ".json");
-                    if (isAcceptedRecord(record)) continue;
-                    if (monitor.isCancelled()) throw new InterruptedException("program-model export was cancelled");
-                    long functionStartedNanos = System.nanoTime();
-                    writeProgress(progressPath, "decompiling", completed, total, recovered, partial, failed, reused, id);
-                    FunctionExport exported = exportFunction(
-                        function,
-                        decompiler,
-                        globalsDirectory,
-                        typesDirectory,
-                        null,
-                        true,
-                        DECOMPILE_TIMEOUT_SECONDS
-                    );
-                    if (isRetryableDecompileTimeout(exported)) {
-                        if (monitor.isCancelled()) throw new InterruptedException("program-model export was cancelled");
-                        println("program-model retrying timed-out function " + id + " with " + DECOMPILE_RETRY_TIMEOUT_SECONDS + " seconds");
-                        FunctionExport retry = exportFunction(
-                            function,
-                            decompiler,
-                            globalsDirectory,
-                            typesDirectory,
-                            null,
-                            true,
-                            DECOMPILE_RETRY_TIMEOUT_SECONDS
-                        );
-                        if (!retry.status.equals("failed")) exported = retry;
+            final int[] counts = { completed, recovered, partial, failed };
+            final int reusedRecords = reused;
+            final Map<Integer, Long> startedFunctions = new TreeMap<>();
+            try (ExporterParallelCoordinatorV1<FunctionMetadata, FunctionExport> coordinator =
+                createFullRecoveryCoordinator(decompilationWorkers)) {
+                coordinator.run(functions.size(), new ExporterParallelCoordinatorV1.Source<FunctionMetadata, FunctionExport>() {
+                    @Override
+                    public void checkCancelled() throws Exception {
+                        if (monitor.isCancelled() || Thread.currentThread().isInterrupted()) {
+                            throw new InterruptedException("program-model export was cancelled");
+                        }
                     }
-                    writeFunctionFailure(failuresDirectory, id, exported);
-                    if (exported.record.getBytes(StandardCharsets.UTF_8).length > MAXIMUM_FULL_FUNCTION_RECORD_BYTES) {
-                        throw new IllegalStateException("full function record exceeds its byte bound: " + id);
+
+                    @Override
+                    public boolean accepted(int index) throws Exception {
+                        Path record = functionsDirectory.resolve(functionIds.get(index) + ".json");
+                        return isAcceptedRecord(record);
                     }
-                    writeAtomic(record, exported.record);
-                    completed++;
-                    if (exported.status.equals("recovered")) recovered++;
-                    else if (exported.status.equals("partial")) partial++;
-                    else failed++;
-                    writeProgress(progressPath, "decompiling", completed, total, recovered, partial, failed, reused, null);
-                    println("program-model export " + completed + "/" + total + " " + id +
-                        " status=" + exported.status + " elapsedNanos=" + (System.nanoTime() - functionStartedNanos));
-                }
-            } finally {
-                decompiler.dispose();
+
+                    @Override
+                    public FunctionMetadata prepare(int index, boolean retry) throws Exception {
+                        String id = functionIds.get(index);
+                        if (retry) {
+                            println("program-model retrying timed-out function " + id + " with " + DECOMPILE_RETRY_TIMEOUT_SECONDS + " seconds");
+                        } else {
+                            startedFunctions.put(index, System.nanoTime());
+                        }
+                        writeProgress(progressPath, "decompiling", counts[0], total, counts[1], counts[2], counts[3], reusedRecords, id);
+                        return collectFunctionMetadata(functions.get(index), globalsDirectory, typesDirectory, null);
+                    }
+
+                    @Override
+                    public boolean metadataComplete(FunctionMetadata metadata) { return metadata.evidenceComplete; }
+
+                    @Override
+                    public boolean retryRequired(FunctionExport exported) { return isRetryableDecompileTimeout(exported); }
+
+                    @Override
+                    public boolean retrySucceeded(FunctionExport exported) { return !exported.status.equals("failed"); }
+
+                    @Override
+                    public void commit(int index, FunctionExport exported) throws Exception {
+                        String id = functionIds.get(index);
+                        writeFunctionFailure(failuresDirectory, id, exported);
+                        writeAtomic(functionsDirectory.resolve(id + ".json"), exported.record);
+                        counts[0]++;
+                        if (exported.status.equals("recovered")) counts[1]++;
+                        else if (exported.status.equals("partial")) counts[2]++;
+                        else counts[3]++;
+                        writeProgress(progressPath, "decompiling", counts[0], total, counts[1], counts[2], counts[3], reusedRecords, null);
+                        println("program-model export " + counts[0] + "/" + total + " " + id +
+                            " status=" + exported.status + " elapsedNanos=" + (System.nanoTime() - startedFunctions.remove(index)));
+                    }
+                });
             }
+            completed = counts[0];
+            recovered = counts[1];
+            partial = counts[2];
+            failed = counts[3];
             for (String id : functionIds) {
                 Path record = functionsDirectory.resolve(id + ".json");
                 if (!isAcceptedRecord(record)) throw new IllegalStateException("missing durable function record: " + id);

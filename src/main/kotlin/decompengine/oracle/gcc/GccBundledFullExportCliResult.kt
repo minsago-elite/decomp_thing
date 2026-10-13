@@ -135,10 +135,13 @@ internal object GccBundledFullExportCliResultV2 {
 
         val lineage = binding.getValue("receiptLineage") as? JsonObject
             ?: throw IllegalArgumentException("structural binding receipt lineage must be an object")
+        val lineageVersion = lineage.requiredLong("schemaVersion", "structural binding receipt lineage")
+        require(lineageVersion == 1L || (lineageVersion == 2L && engineId == "cc1")) {
+            "full-export receipt lineage version is unsupported for its engine"
+        }
         require(lineage.keys == RECEIPT_LINEAGE_KEYS &&
             lineage.requiredString("provider", "structural binding receipt lineage") ==
-            "gcc-bundled-full-export-receipt-lineage-v1" &&
-            lineage.requiredLong("schemaVersion", "structural binding receipt lineage") == 1L &&
+            "gcc-bundled-full-export-receipt-lineage-v$lineageVersion" &&
             lineage.requiredString("engineId", "structural binding receipt lineage") == engineId &&
             lineage.requiredString("operationId", "structural binding receipt lineage") == operationId &&
             lineage.requiredDigest("intentSha256", "structural binding receipt lineage") == requestSha256 &&

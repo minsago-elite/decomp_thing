@@ -25,12 +25,15 @@ internal class GccBundledGhidraRuntime(
     classPath: List<GccBundledGhidraClassPathEntry>,
     val invocationVersion: Int = 3,
 ) {
-    val recoveryMode: String = if (invocationVersion == 5) "full" else "planning"
+    val recoveryMode: String = if (invocationVersion >= 5) "full" else "planning"
+    val processorCount: Int = if (invocationVersion == 6) 4 else 1
+    val analysisThreadCount: Int = if (invocationVersion == 6) 4 else 1
+    val decompilerWorkerCount: Int = if (invocationVersion == 6) 4 else 1
     val classPath: List<GccBundledGhidraClassPathEntry>
     val release: Path
 
     init {
-        require(invocationVersion in 1..5) { "bundled Ghidra invocation version is unsupported" }
+        require(invocationVersion in 1..6) { "bundled Ghidra invocation version is unsupported" }
         requireRuntimePath(root)
         val copied = ArrayList<GccBundledGhidraClassPathEntry>()
         for (entry in classPath) {
@@ -111,17 +114,19 @@ internal class GccBundledGhidraRuntime(
         val byRole = artifacts.associateBy { it.role }
         val exporter = byRole.getValue(GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE)
         val archive = byRole.getValue(GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE)
-        require(invocationVersion != 5 || runKind != GccCompilerEngineContainmentRunKind.INTERRUPTED) {
+        require(invocationVersion < 5 || runKind != GccCompilerEngineContainmentRunKind.INTERRUPTED) {
             "full-recovery export does not support planning checkpoint interruption"
         }
         val controlName = if (resumed) resumeControlDirectoryName(state, lease) else freshControlDirectoryName(lease.path)
         val controlRoot = controlName?.let(lease.path::resolve) ?: lease.path
         val project = if (resumed) controlRoot.resolve("state") else state.path
         val exporterArguments = listOf(
-            exporter.sha256, archive.sha256, if (invocationVersion == 5) "full" else "planning",
+            exporter.sha256, archive.sha256, if (invocationVersion >= 5) "full" else "planning",
             lease.path.resolve("reports/program_model.json").toString(),
         ) + if (runKind == GccCompilerEngineContainmentRunKind.INTERRUPTED && invocationVersion >= 3) {
             listOf("hold-first-planning-checkpoint-v1")
+        } else if (invocationVersion == 6) {
+            listOf("full-recovery-workers-v1:$decompilerWorkerCount")
         } else emptyList()
         val invocation = GhidraInvocation(
             project, "archival_reconstruction",
@@ -137,8 +142,8 @@ internal class GccBundledGhidraRuntime(
         val isolatedPrefix = if (invocationVersion >= 2) {
             listOf(
                 prefix.first(), "-Duser.home=${temporaryDirectory}", "-Djava.io.tmpdir=${temporaryDirectory}",
-                "-XX:ActiveProcessorCount=1", "-XX:+DisableAttachMechanism",
-            ) + prefix.drop(1)
+                "-XX:ActiveProcessorCount=$processorCount", "-XX:+DisableAttachMechanism",
+            ) + (if (invocationVersion == 6) listOf("-Dcpu.core.override=$analysisThreadCount") else emptyList()) + prefix.drop(1)
         } else {
             prefix
         }
@@ -153,7 +158,11 @@ internal class GccBundledGhidraRuntime(
             "bytes" to JsonPrimitive(entry.bytes),
             "sha256" to JsonPrimitive(entry.sha256),
         )) }),
-    ))
+    ) + (if (invocationVersion == 6) mapOf(
+        "processorCount" to JsonPrimitive(processorCount),
+        "analysisThreadCount" to JsonPrimitive(analysisThreadCount),
+        "decompilerWorkerCount" to JsonPrimitive(decompilerWorkerCount),
+    ) else emptyMap()))
 
     companion object {
         private const val PROVIDER_PREFIX = "bundled-ghidra-java-api-runtime-v"
@@ -164,14 +173,23 @@ internal class GccBundledGhidraRuntime(
         )
 
         fun parse(document: JsonObject): GccBundledGhidraRuntime {
-            require(document.keys == setOf("provider", "root", "classPath")) { "bundled Ghidra runtime fields are invalid" }
             val version = when (document.strictString("provider")) {
                 "${PROVIDER_PREFIX}1" -> 1
                 "${PROVIDER_PREFIX}2" -> 2
                 "${PROVIDER_PREFIX}3" -> 3
                 "${PROVIDER_PREFIX}4" -> 4
                 "${PROVIDER_PREFIX}5" -> 5
+                "${PROVIDER_PREFIX}6" -> 6
                 else -> throw IllegalArgumentException("bundled Ghidra runtime provider is invalid")
+            }
+            val throughputFields = setOf("processorCount", "analysisThreadCount", "decompilerWorkerCount")
+            require(document.keys == setOf("provider", "root", "classPath") +
+                (if (version == 6) throughputFields else emptySet())) { "bundled Ghidra runtime fields are invalid" }
+            if (version == 6) throughputFields.forEach { name ->
+                val value = document[name] as? JsonPrimitive
+                require(value != null && !value.isString && value.content == "4") {
+                    "bundled Ghidra runtime throughput count is unsupported"
+                }
             }
             val entries = document["classPath"] as? JsonArray
                 ?: throw IllegalArgumentException("bundled Ghidra classpath must be an array")

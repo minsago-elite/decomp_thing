@@ -60,6 +60,29 @@ data class GccCompilerEngineArtifactBinding(
     val sha256: String,
 )
 
+/** Closed, checked policy for bounded cc1 full-recovery throughput; no caller-selected counts. */
+data class GccCompilerEngineThroughputPolicy(
+    val schemaVersion: Int,
+    val runtimeInvocationVersion: Int,
+    val processorCount: Int,
+    val analysisThreadCount: Int,
+    val decompilerWorkerCount: Int,
+) {
+    init {
+        require(schemaVersion == 1 && runtimeInvocationVersion == 6 && processorCount == 4 &&
+            analysisThreadCount == 4 && decompilerWorkerCount == 4
+        ) { "compiler-engine throughput policy is unsupported" }
+    }
+
+    internal fun toPolicyJson(): JsonObject = JsonObject(mapOf(
+        "schemaVersion" to JsonPrimitive(schemaVersion),
+        "runtimeInvocationVersion" to JsonPrimitive(runtimeInvocationVersion),
+        "processorCount" to JsonPrimitive(processorCount),
+        "analysisThreadCount" to JsonPrimitive(analysisThreadCount),
+        "decompilerWorkerCount" to JsonPrimitive(decompilerWorkerCount),
+    ))
+}
+
 data class AuthenticatedGccCompilerEngineArtifact(
     val path: Path,
     val bytes: Long,
@@ -140,6 +163,7 @@ data class GccCompilerEngineSuite(
     val analysis: GccCompilerEngineAnalysisToolchain,
     val budgets: GccCompilerEngineBudgets,
     val engines: List<GccCompilerEngine>,
+    val fullRecoveryCc1Throughput: GccCompilerEngineThroughputPolicy? = null,
 ) {
     init {
         require(engines.map(GccCompilerEngine::id) == listOf("cc1", "lto1"))
@@ -227,6 +251,16 @@ internal class GccCompilerEngineProfileLoader(
             plannerId = planner.stringField("id"),
             plannerVersion = planner.intField("version"),
         )
+        val throughput = analysisDocument["fullRecoveryCc1Throughput"]?.let {
+            val policy = analysisDocument.objectField("fullRecoveryCc1Throughput")
+            GccCompilerEngineThroughputPolicy(
+                schemaVersion = policy.intField("schemaVersion"),
+                runtimeInvocationVersion = policy.intField("runtimeInvocationVersion"),
+                processorCount = policy.intField("processorCount"),
+                analysisThreadCount = policy.intField("analysisThreadCount"),
+                decompilerWorkerCount = policy.intField("decompilerWorkerCount"),
+            )
+        }
         authenticateAnalysisToolchain(analysis)
 
         val sourceLock = readBoundDependency(
@@ -279,6 +313,7 @@ internal class GccCompilerEngineProfileLoader(
             analysis = analysis,
             budgets = budgets,
             engines = Collections.unmodifiableList(engines),
+            fullRecoveryCc1Throughput = throughput,
         )
     }
 
@@ -316,7 +351,7 @@ internal class GccCompilerEngineProfileLoader(
 
     private fun authenticateAnalysisToolchain(analysis: GccCompilerEngineAnalysisToolchain) {
         if (
-            analysis.exporterId != "decompengine-ghidra-program-model" || analysis.exporterVersion != 13 ||
+            analysis.exporterId != "decompengine-ghidra-program-model" || analysis.exporterVersion != 14 ||
             analysis.exporterMode != "planning" ||
             analysis.plannerId != "deterministic-module-planner" || analysis.plannerVersion != 1
         ) {
@@ -625,7 +660,7 @@ internal class GccCompilerEngineProfileLoader(
     private data class RawArtifact(val path: Path, val bytes: ByteArray, val sha256: String)
 
     private companion object {
-        private const val DRIVER_COMPILER_PROFILE_SHA256 = "0786c50653ffd1a3042cc28c6682ade6b49de74c8172dec38cadb6689d809710"
+        private const val DRIVER_COMPILER_PROFILE_SHA256 = "5334af1ba3561a03651df07883a3e22cb96bdba6ee7738891581b6dbda127a4d"
         private const val DRIVER_SOURCE_LOCK_SHA256 = "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc"
         private const val DRIVER_BUILD_RECORD_SHA256 = "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
         private const val DRIVER_TOOLCHAIN_SHA256 = "5c2c159d7287305159a220a1260f6ff6bffe9ec78bb1cbe2fb24f85b68a7d4de"

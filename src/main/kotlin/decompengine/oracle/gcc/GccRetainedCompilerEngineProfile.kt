@@ -105,14 +105,40 @@ internal class GccRetainedCompilerEngineProfile private constructor(
     }
 
     @Synchronized
+    fun invocationVersion(engineId: String, fullRecovery: Boolean): Int {
+        exportWallClockMillis(engineId, fullRecovery)
+        return if (!fullRecovery) 3
+        else if (engineId == "cc1") suite.fullRecoveryCc1Throughput?.runtimeInvocationVersion ?: 5
+        else 5
+    }
+
+    @Synchronized
     fun bindInvocation(
         engineId: String,
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
         budgets: GccCompilerEngineContainmentBudgets,
         fullRecoveryExport: Boolean,
+        bundledRuntime: GccBundledGhidraRuntime? = null,
     ): ByteArray {
         requireCurrent()
         val engine = target(engineId)
+        val throughput = suite.fullRecoveryCc1Throughput?.takeIf { engineId == "cc1" && fullRecoveryExport }
+        if (throughput != null) {
+            require(bundledRuntime != null && bundledRuntime.invocationVersion == throughput.runtimeInvocationVersion &&
+                bundledRuntime.processorCount == throughput.processorCount &&
+                bundledRuntime.analysisThreadCount == throughput.analysisThreadCount &&
+                bundledRuntime.decompilerWorkerCount == throughput.decompilerWorkerCount
+            ) { "GCC cc1 full recovery differs from its retained throughput policy" }
+        } else {
+            require(bundledRuntime?.invocationVersion != 6) {
+                "parallel full recovery requires the retained cc1 throughput policy"
+            }
+        }
+        bundledRuntime?.let { runtime ->
+            require((runtime.recoveryMode == "full") == fullRecoveryExport) {
+                "GCC operation runtime differs from its retained recovery mode"
+            }
+        }
         val byRole = artifacts.associateBy { it.role }
         require(byRole.size == artifacts.size) { "planner profile invocation repeats artifact roles" }
         val controls = mapOf(
@@ -199,9 +225,11 @@ internal class GccRetainedCompilerEngineProfile private constructor(
                 val suite = loader.load(path)
                 val driver = if (targetId == "driver") loader.loadDriverTarget(suite) else null
                 val reconstruction = suite.reconstructionProfile()
+                val policyVersion = if (suite.fullRecoveryCc1Throughput == null) 1 else 2
                 val policy = OracleJson.canonicalBytes(JsonObject(mapOf(
-                    "provider" to JsonPrimitive(if (driver == null) "gcc-retained-planner-profile-v1" else "gcc-retained-export-target-profile-v1"),
-                    "schemaVersion" to JsonPrimitive(1),
+                    "provider" to JsonPrimitive(if (driver == null) "gcc-retained-planner-profile-v$policyVersion"
+                        else "gcc-retained-export-target-profile-v$policyVersion"),
+                    "schemaVersion" to JsonPrimitive(policyVersion),
                     "profileSha256" to JsonPrimitive(suite.profileSha256),
                     "plannerId" to JsonPrimitive(suite.analysis.plannerId),
                     "plannerVersion" to JsonPrimitive(suite.analysis.plannerVersion),
@@ -214,7 +242,9 @@ internal class GccRetainedCompilerEngineProfile private constructor(
                             "sha256" to JsonPrimitive(guard.authenticatedSha256),
                         ))
                     }),
-                ) + (driver?.let { mapOf("target" to it.toPolicyJson()) } ?: emptyMap())))
+                ) + (driver?.let { mapOf("target" to it.toPolicyJson()) } ?: emptyMap()) +
+                    (suite.fullRecoveryCc1Throughput?.let { mapOf("fullRecoveryCc1Throughput" to it.toPolicyJson()) }
+                        ?: emptyMap())))
                 return GccRetainedCompilerEngineProfile(suite, driver, guards.toMap(), policy).also { it.requireCurrent() }
             } catch (failure: Throwable) {
                 guards.values.toList().asReversed().forEach { guard ->

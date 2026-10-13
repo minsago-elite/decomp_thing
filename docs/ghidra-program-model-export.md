@@ -46,13 +46,32 @@ NSA's Ghidra 12.1.3 release archive (569,445,154 bytes; SHA-256
 `93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54`) and allows 30 minutes and 16 GiB for
 authenticated export plus ownership planning. The bundled direct-API worker caps its Java heap at 2 GiB independently;
 the Kotlin monitor measures the JVM and its complete descendant process tree against the profile ceiling.
-Each full function decompilation has a 60-second timeout, and full export is deliberately single-function staged so its
-live C body memory is bounded by the largest individual function rather than the complete program. Planning batches
+Each full function decompilation has a 60-second timeout and one 180-second retry for a native timeout. The default
+four-argument export remains serial. The explicitly selected bundled runtime v6 uses the checked cc1 throughput
+policy: four CPUs, four analysis threads, and four independent native decompilers. The public `ubuntu-24.04` reference
+runner supplies four CPUs and 16 GB of RAM ([GitHub runner specifications](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)).
+The host independently caps admission at four CPUs, checks the attached scope's actual affinity and ancestor quotas
+before START, and retains those observations with its attachment receipt. The kernel cgroup and systemd quota must
+match the selected count. Aggregate CPU time retains its existing ceiling; a live process-tree CPU monitor stops
+before that ceiling to reserve monitoring and forced-cleanup time, and final frozen accounting must also pass.
+
+Metadata collection and first-owner global/type sidecars remain in address order. At most four jobs, including
+completed results awaiting publication, are retained. Native workers return bounded immutable outcomes; the single
+coordinator publishes independent function records as they complete, then assembles the sorted model. A metadata
+failure stops dispatch beyond that address until its retry decision finishes, preserving first-owner evidence even
+when metadata recovery is retried. Cancellation stops every native worker before publication can finish. The full
+checkpoint state binds the selected worker count. Planning batches
 contain no decompiled C: fragments are bounded to 64 MiB, evidence records to 1 MiB, and fan-in to 256 batches
 (131,072 functions). Assembly precomputes the exact model size and enforces the same 512 MiB limit through a counting
 output stream before atomic publication. Semantic preflight canonical bytes are capped at 1 GiB, with unique retained
 global/type/failure evidence capped at 512 MiB. The preflight repeats planning-visible analysis traversal but performs
 no decompilation and writes no export state before the complete binding is available.
+
+The cc1 full-recovery diagnostic ceiling remains 9,000 seconds. It does not satisfy the 30-minute reference budget:
+the live throughput qualification separately checks the complete operation against 1,800 seconds after retaining
+the model and resource receipts. A successful full capture remains unscored and release-ineligible. Full capture
+currently requires a fresh run with no reused records; planning resume evidence does not qualify full-recovery
+interrupted/resumed equivalence.
 
 The JVM consumer reads the completed model through a stable regular-file snapshot capped at 512 MiB, then requires the
 exact canonical UTF-8 fields, entity order, set order, whitespace, and bytes before planning. A merely parseable JSON

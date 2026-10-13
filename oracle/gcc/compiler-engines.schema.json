@@ -12,13 +12,25 @@
       "additionalProperties": false,
       "required": ["exporter", "ghidra", "planner"],
       "properties": {
+        "fullRecoveryCc1Throughput": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schemaVersion", "runtimeInvocationVersion", "processorCount", "analysisThreadCount", "decompilerWorkerCount"],
+          "properties": {
+            "schemaVersion": {"const": 1},
+            "runtimeInvocationVersion": {"const": 6},
+            "processorCount": {"const": 4},
+            "analysisThreadCount": {"const": 4},
+            "decompilerWorkerCount": {"const": 4}
+          }
+        },
         "exporter": {
           "type": "object",
           "additionalProperties": false,
           "required": ["id", "version", "sha256", "recoveryMode"],
           "properties": {
             "id": {"const": "decompengine-ghidra-program-model"},
-            "version": {"const": 13},
+            "version": {"const": 14},
             "recoveryMode": {"const": "planning"},
             "sha256": {"$ref": "#/$defs/sha256"}
           }

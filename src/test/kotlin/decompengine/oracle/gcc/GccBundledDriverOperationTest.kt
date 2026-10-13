@@ -72,7 +72,7 @@ class GccBundledDriverOperationTest {
                 for (engine in listOf("cc1", "lto1")) {
                     intent(engines, engine = engine, version = 3, artifacts = profileArtifacts(engines, engine))
                 }
-                intent(engines, engine = "cc1", artifacts = profileArtifacts(engines, "cc1"))
+                intent(engines, engine = "cc1", version = 6, artifacts = profileArtifacts(engines, "cc1"))
                 assertFailsWith<IllegalArgumentException> {
                     intent(engines, engine = "lto1", artifacts = profileArtifacts(engines, "lto1"))
                 }

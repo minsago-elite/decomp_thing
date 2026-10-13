@@ -22,6 +22,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonObject
@@ -101,6 +102,18 @@ class GccProductionFullExportQualificationTest {
             assertEquals(OracleArtifacts.sha256(executionBytes), result.requiredText("executionReceiptSha256"))
             val assessmentBytes = readStable(journal.resolve("export-assessment.json"), MAXIMUM_RECEIPT_BYTES)
             assertEquals(OracleArtifacts.sha256(assessmentBytes), result.requiredText("exportAssessmentReceiptSha256"))
+            val attachmentBytes = readStable(journal.resolve("attachment.json"), MAXIMUM_RECEIPT_BYTES)
+            val attachmentRecord = OracleJson.parseCanonical(attachmentBytes).jsonObject
+            val attachment = attachmentRecord.getValue("attachment").jsonObject
+            val execution = OracleJson.parseCanonical(executionBytes).jsonObject.getValue("execution").jsonObject
+            assertEquals(operationId, attachmentRecord.requiredText("operationId"))
+            assertEquals(result.requiredText("requestSha256"), attachmentRecord.requiredText("intentSha256"))
+            assertEquals(OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(attachmentRecord - "recordSha256"))),
+                attachmentRecord.requiredText("recordSha256"))
+            assertEquals(OracleArtifacts.sha256(OracleJson.canonicalBytes(attachment)), attachmentRecord.requiredText("attachmentSha256"))
+            assertEquals(OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(attachment - "attachmentSha256"))),
+                attachment.requiredText("attachmentSha256"))
+            assertEquals(OracleArtifacts.sha256(OracleJson.canonicalBytes(attachment)), execution.requiredText("attachmentSha256"))
 
             val modelPath = Path.of(result.requiredText("programModel"))
             assertTrue(modelPath.startsWith(scratch) && modelPath.toRealPath() == modelPath)
@@ -178,6 +191,7 @@ class GccProductionFullExportQualificationTest {
             publish(captured.resolve("structural-full-export-binding.json"), bindingBytes)
             publish(captured.resolve(GccBundledFullExportCliResultV2.TREE_MANIFEST_NAME), manifestBytes)
             publish(captured.resolve("intent.json"), intentBytes)
+            publish(captured.resolve("attachment.json"), attachmentBytes)
             publish(captured.resolve("execution.json"), executionBytes)
             publish(captured.resolve("export-assessment.json"), assessmentBytes)
             publish(captured.resolve("launcher-summary.json"), OracleJson.canonicalBytes(launcherSummary))
@@ -206,6 +220,36 @@ class GccProductionFullExportQualificationTest {
                     "boundaryBindingSha256" to JsonPrimitive(OracleArtifacts.sha256(boundaryBytes)),
                 )
             } else emptyMap()
+            val throughputFields = if (engine == "cc1") {
+                val intent = OracleJson.parseCanonical(intentBytes).jsonObject
+                val runtime = intent.getValue("bundledRuntime").jsonObject
+                assertEquals("bundled-ghidra-java-api-runtime-v6", runtime.requiredText("provider"))
+                for (field in listOf("processorCount", "analysisThreadCount", "decompilerWorkerCount")) {
+                    assertEquals(4L, runtime.getValue(field).jsonPrimitive.long)
+                }
+                assertEquals("kotlin-lease-contained-command-attachment-v2", attachment.requiredText("provider"))
+                val resources = attachment.getValue("resources").jsonObject
+                assertEquals(4L, resources.getValue("processorCount").jsonPrimitive.long)
+                val capacity = attachment.getValue("hostCpuCapacity").jsonObject
+                assertTrue(capacity.getValue("affinityProcessors").jsonPrimitive.long >= 4)
+                assertTrue(capacity.getValue("quotaProcessors") == JsonNull || capacity.getValue("quotaProcessors").jsonPrimitive.long >= 4)
+                assertEquals(attachment.requiredText("controlGroup"), capacity.requiredText("controlGroup"))
+                val accounting = execution.getValue("cgroup").jsonObject
+                val cpuNanos = accounting.getValue("cpuNanos").jsonPrimitive.long
+                val residentBytes = accounting.getValue("peakResidentBytes").jsonPrimitive.long
+                assertTrue(cpuNanos <= Math.multiplyExact(resources.getValue("cpuSeconds").jsonPrimitive.long, 1_000_000_000L))
+                assertTrue(residentBytes <= 16L * 1024 * 1024 * 1024)
+                val assessment = OracleJson.parseCanonical(assessmentBytes).jsonObject.getValue("assessment").jsonObject
+                val wallNanos = assessment.getValue("operationWallTime").jsonObject.getValue("elapsedNanos").jsonPrimitive.long
+                mapOf(
+                    "processorCount" to JsonPrimitive(4),
+                    "operationWallNanos" to JsonPrimitive(wallNanos),
+                    "cpuNanos" to JsonPrimitive(cpuNanos),
+                    "peakResidentBytes" to JsonPrimitive(residentBytes),
+                    "referenceWallBudgetSeconds" to JsonPrimitive(1_800),
+                    "referenceBudgetPassed" to JsonPrimitive(wallNanos <= 1_800_000_000_000L),
+                )
+            } else emptyMap()
             val summary = JsonObject(mapOf(
                 "provider" to JsonPrimitive(if (engine == "driver") "gcc-driver-live-full-export-capture-v1" else "gcc-live-full-export-capture-v1"),
                 "engine" to JsonPrimitive(engine),
@@ -225,8 +269,10 @@ class GccProductionFullExportQualificationTest {
                 "limitation" to JsonPrimitive(if (engine == "driver")
                     "live contained driver export and selected function-boundary replay only; structural identity admission and production scoring remain open"
                     else "live contained export only; independent identity replay and production scoring remain open"),
-            ) + boundaryFields)
+            ) + boundaryFields + throughputFields)
             publish(evidenceRoot.resolve("qualification.json"), OracleJson.canonicalBytes(summary))
+            if (engine == "cc1") assertTrue(summary.getValue("referenceBudgetPassed").jsonPrimitive.boolean,
+                "cc1 export exceeded the 30-minute reference budget; completed diagnostic evidence was retained")
             println("Retained unscored live $engine full-export evidence at $captured (${modelBytes} model bytes, $functionCount functions)")
         }
     }
