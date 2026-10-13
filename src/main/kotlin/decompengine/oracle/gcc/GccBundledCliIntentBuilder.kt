@@ -13,7 +13,8 @@ internal object GccBundledCliIntentBuilder {
     fun build(operationId: String, engineId: String, runKind: GccCompilerEngineContainmentRunKind,
         binary: Path, profilePath: Path, archive: Path, controls: Path, journalRoot: Path, scratch: Path,
         diskPolicy: FullTreeDiskScratchPolicy, cliInvocation: GccBundledCliInvocation? = null,
-        fullRecoveryExport: Boolean = false): GccBundledOperationIntent {
+        fullRecoveryExport: Boolean = false, nativeCallObservations: Boolean = false): GccBundledOperationIntent {
+        require(!fullRecoveryExport || !nativeCallObservations) { "distinct export commands cannot be combined" }
         require(operationId.matches(Regex("[a-f0-9]{64}")))
         require(engineId in setOf("cc1", "lto1") && runKind in setOf(
             GccCompilerEngineContainmentRunKind.FRESH_CONTROL, GccCompilerEngineContainmentRunKind.INTERRUPTED))
@@ -23,8 +24,17 @@ internal object GccBundledCliIntentBuilder {
         require(!fullRecoveryExport || engineId == "cc1") {
             "full-recovery structural export is currently supported only for cc1"
         }
+        require(!nativeCallObservations || (engineId == "cc1" && runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL)) {
+            "native call observations require a fresh uninterrupted cc1 operation"
+        }
+        require(!nativeCallObservations || cliInvocation != null) {
+            "native call observations require a bound production CLI invocation"
+        }
         require(cliInvocation == null || cliInvocation.options.fullRecoveryExport == fullRecoveryExport) {
             "CLI invocation command differs from requested recovery mode"
+        }
+        require(cliInvocation == null || cliInvocation.options.nativeCallObservations == nativeCallObservations) {
+            "CLI invocation command differs from requested native call mode"
         }
         val roots = listOf(controls, journalRoot, scratch)
         (roots + listOf(binary, profilePath, archive)).forEach { path ->
@@ -45,6 +55,7 @@ internal object GccBundledCliIntentBuilder {
             require(LinuxFilesystemSyscalls.directoryEntryNames(directory, 1).isEmpty()) { "CLI control directory must be empty" }
             GccRetainedCompilerEngineProfile.open(profilePath).use { profile ->
                 profile.requireDisjoint(roots)
+                if (nativeCallObservations) profile.requireNativeCallProfile()
                 val suite = profile.suite
                 val engine = suite.engine(engineId)
                 cliInvocation?.options?.resumeAfterCheckpoint?.let { threshold ->
@@ -77,7 +88,13 @@ internal object GccBundledCliIntentBuilder {
                             val runtime = GccBundledGhidraRuntime(bundle, reference.classPath.map { relative ->
                                 val entry = reference.entries.getValue(relative)
                                 GccBundledGhidraClassPathEntry(bundle.resolve(relative), checkNotNull(entry.bytes), checkNotNull(entry.sha256))
-                            }, invocationVersion = if (fullRecoveryExport) 5 else 3)
+                            }, invocationVersion = when {
+                                nativeCallObservations -> 8
+                                fullRecoveryExport -> 5
+                                else -> 3
+                            }, nativeCallCollector = if (nativeCallObservations) requireNotNull(reference.nativeCallCollector) {
+                                "bundled deployment does not contain the independently pinned native call collector"
+                            } else null)
                             val manifest = boot.invocationManifestBytes()
                             val exporter = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java"))
                                 .use { it.readNBytes(MAXIMUM_CONTROL_BYTES + 1) }
