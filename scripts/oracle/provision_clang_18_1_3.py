@@ -2998,6 +2998,18 @@ def stage_probe_inputs(rootfs: Path) -> tuple[Path, Path]:
     return source_target, fixture_target
 
 
+def verify_staged_probe_source(rootfs: Path, expected_recipe_sha256: str) -> str:
+    """Bind the retained source bytes to the recipe before compiling the probe."""
+    if (not isinstance(expected_recipe_sha256, str) or
+            not re.fullmatch(r"[0-9a-f]{64}", expected_recipe_sha256)):
+        raise ProvisionError("recipe has an invalid probe-source digest")
+    source_path, _ = rootfs_regular_file(rootfs, PROBE_SOURCE_IN_ROOT)
+    actual_sha256 = sha256_file(source_path)
+    if actual_sha256 != expected_recipe_sha256:
+        raise ProvisionError("staged probe source differs from the expected recipe source bytes")
+    return actual_sha256
+
+
 def canonical_commands(contract: dict, keyring_sha256: str) -> dict[str, list[str]]:
     """Reviewed argv with workspace paths and verified artifact paths normalized."""
     apt = apt_command_prefix()
@@ -3142,9 +3154,10 @@ def provision_rootfs(args: argparse.Namespace) -> int:
         raise ProvisionError(f"resolved Clang resource directory is not a versioned LLVM 18 directory: {resource_dir}")
     resource_files = resource_manifest(profile_root, resource_dir)
 
-    probe_source = RECIPE_FILES["probeSha256"]
     fixture = RECIPE_FILES["fixtureSha256"]
+    expected_probe_source_sha256 = recipe_identity(args.contract)["probeSha256"]
     probe_in_root, fixture_in_root = stage_probe_inputs(profile_root)
+    staged_probe_source_sha256 = verify_staged_probe_source(profile_root, expected_probe_source_sha256)
     libdir = rootfs_run(profile_root, ["/usr/bin/llvm-config-18", "--libdir"], contract).strip()
     if libdir != "/usr/lib/llvm-18/lib":
         raise ProvisionError("llvm-config library directory differs from the versioned probe recipe")
@@ -3153,7 +3166,11 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     rootfs_run(profile_root, ["/usr/bin/llvm-config-18", "--cxxflags"], contract)
     probe_path = PROBE_BINARY_IN_ROOT
     compile_command = probe_compile_command()
+    source_sha256_before_compile = staged_probe_source_sha256
     rootfs_run(profile_root, compile_command, contract, timeout=600)
+    staged_probe_source_sha256 = verify_staged_probe_source(profile_root, expected_probe_source_sha256)
+    if staged_probe_source_sha256 != source_sha256_before_compile:
+        raise ProvisionError("staged probe source changed during compilation")
     runtime_report = run_probe_sandboxed(
         profile_root, [probe_path, PROBE_FIXTURE_IN_ROOT], contract, timeout=120,
     )
@@ -3163,7 +3180,7 @@ def provision_rootfs(args: argparse.Namespace) -> int:
         rootfs_path(profile_root, "/usr/lib/llvm-18/include/clang/Basic/LangOptions.h"), contract,
     )
     probe_checked = validate_probe_report(runtime_json, inventory, contract)
-    probe_checked["sourceSha256"] = sha256(probe_source.read_bytes())
+    probe_checked["sourceSha256"] = staged_probe_source_sha256
     probe_checked["binarySha256"] = sha256(rootfs_path(profile_root, probe_path).read_bytes())
     probe_checked["apiChecks"] = runtime_json["apiChecks"]
     probe_checked["fixtureSha256"] = sha256(fixture.read_bytes())
@@ -3429,6 +3446,8 @@ def validate_build_record(record: dict, contract: dict, contract_path: Path = CO
         raise ProvisionError("build record environment differs from fixed UTC/source-date profile")
     if record.get("recipe") != recipe_identity(contract_path):
         raise ProvisionError("build record recipe hashes do not match the reviewed contract, tooling, and workflow bytes")
+    if probe.get("sourceSha256") != record["recipe"].get("probeSha256"):
+        raise ProvisionError("build record probe source digest differs from its recipe source bytes")
     repositories = record.get("acquisition", {}).get("repositories", [])
     if {row.get("suite") for row in repositories} != set(profile["suites"]):
         raise ProvisionError("build record does not bind every pinned signed repository suite")
@@ -3623,13 +3642,14 @@ def preflight_provenance_output(output: Path, input_roots: list[Path], input_fil
     return canonical_output
 
 
-def validate_provenance_probe_report(report: dict, record: dict, rootfs: Path, contract: dict) -> tuple[Path, Path, int]:
+def validate_provenance_probe_report(
+        report: dict, record: dict, rootfs: Path, contract: dict) -> tuple[Path, Path, Path, int]:
     if canonical_json(report) != canonical_json(record.get("probe")):
         raise ProvisionError("probe provenance report differs from the reproducible build-record probe")
     probe_path, probe_mode = rootfs_regular_file(rootfs, PROBE_BINARY_IN_ROOT, executable=True)
     fixture_path, _ = rootfs_regular_file(rootfs, PROBE_FIXTURE_IN_ROOT)
-    source_path, _ = rootfs_regular_file(rootfs, PROBE_SOURCE_IN_ROOT)
-    source_digest = sha256_file(source_path)
+    expected_recipe_source = record.get("recipe", {}).get("probeSha256")
+    source_digest = verify_staged_probe_source(rootfs, expected_recipe_source)
     if source_digest != record["probe"]["sourceSha256"]:
         raise ProvisionError("retained probe source bytes differ from the build-record sourceSha256")
     probe_digest = sha256_file(probe_path)
@@ -3656,7 +3676,7 @@ def validate_provenance_probe_report(report: dict, record: dict, rootfs: Path, c
         contract,
     )
     checked = validate_probe_report(replay_report, inventory, contract)
-    checked["sourceSha256"] = sha256_file(RECIPE_FILES["probeSha256"])
+    checked["sourceSha256"] = source_digest
     checked["binarySha256"] = probe_digest
     checked["fixtureSha256"] = fixture_digest
     if canonical_json(checked) != canonical_json(record["probe"]):

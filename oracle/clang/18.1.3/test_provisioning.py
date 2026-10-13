@@ -100,7 +100,8 @@ class ProvisioningNegativeTests(unittest.TestCase):
             "macroObservations": {"expansionCount": 1, "macroInfoChecks": 1,
                                    "nonBuiltinClassifications": 1},
             "definitionSha256": digest, "headerSha256": digest,
-            "sourceSha256": digest, "binarySha256": digest, "fixtureSha256": digest,
+            "sourceSha256": provision.recipe_identity()["probeSha256"],
+            "binarySha256": digest, "fixtureSha256": digest,
         }
         return {
             "schemaVersion": 1,
@@ -211,7 +212,8 @@ class ProvisioningNegativeTests(unittest.TestCase):
             shutil.copyfile(ROOT / "oracle/clang/18.1.3/fixtures" / f"llvmorg-18.1.3-{name}",
                             header_dir / name)
         record["probe"]["binarySha256"] = provision.sha256(binary)
-        record["probe"]["sourceSha256"] = provision.sha256_file(provision.RECIPE_FILES["probeSha256"])
+        expected_source_sha256 = provision.recipe_identity()["probeSha256"]
+        record["probe"]["sourceSha256"] = provision.verify_staged_probe_source(rootfs, expected_source_sha256)
         record["probe"]["fixtureSha256"] = provision.sha256(fixture_bytes)
         self.assertEqual(provision.sha256_file(source_path), record["probe"]["sourceSha256"])
         return probe_path, fixture_path, mode
@@ -1039,6 +1041,7 @@ class ProvisioningNegativeTests(unittest.TestCase):
         shutil.rmtree(rootfs, ignore_errors=True)
         self.prepare_runtime_rootfs(record, rootfs)
         probe_binary, probe_fixture, _ = self.prepare_probe_rootfs(record, rootfs)
+        probe_source = provision.rootfs_path(rootfs, provision.PROBE_SOURCE_IN_ROOT)
         replay = {key: value for key, value in record["probe"].items()
                   if key not in ("sourceSha256", "binarySha256", "fixtureSha256")}
         with mock.patch.object(provision, "run_probe_sandboxed", side_effect=provision.ProvisionError(
@@ -1066,6 +1069,23 @@ class ProvisioningNegativeTests(unittest.TestCase):
                 provision.validate_provenance_probe_report(dict(record["probe"]), record, rootfs, self.contract)
             replay_run.assert_not_called()
         probe_binary.write_bytes(original_binary)
+        original_source = probe_source.read_bytes()
+        probe_source.chmod(0o644)
+        probe_source.write_bytes(original_source + b"tamper")
+        with mock.patch.object(provision, "run_probe_sandboxed") as replay_run:
+            with self.assertRaisesRegex(provision.ProvisionError, "expected recipe source bytes"):
+                provision.validate_provenance_probe_report(dict(record["probe"]), record, rootfs, self.contract)
+            replay_run.assert_not_called()
+        probe_source.write_bytes(original_source)
+        probe_source.chmod(0o444)
+        changed_record = json.loads(json.dumps(record))
+        changed_record["probe"]["sourceSha256"] = "0" * 64
+        with mock.patch.object(provision, "run_probe_sandboxed") as replay_run:
+            with self.assertRaisesRegex(provision.ProvisionError, "differ from the build-record sourceSha256"):
+                provision.validate_provenance_probe_report(
+                    changed_record["probe"], changed_record, rootfs, self.contract,
+                )
+            replay_run.assert_not_called()
         probe_binary.chmod(0o644)
         with mock.patch.object(provision, "run_probe_sandboxed") as replay_run:
             with self.assertRaisesRegex(provision.ProvisionError, "execute permission"):
@@ -1821,6 +1841,12 @@ class ProvisioningNegativeTests(unittest.TestCase):
         record = self.valid_build_record()
         record["tools"][0]["mode"] = "0444"
         with self.assertRaisesRegex(provision.ProvisionError, "tool executable byte identity"):
+            provision.validate_build_record(record, self.contract)
+
+    def test_build_record_probe_source_digest_must_match_recipe(self):
+        record = self.valid_build_record()
+        record["probe"]["sourceSha256"] = "0" * 64
+        with self.assertRaisesRegex(provision.ProvisionError, "probe source digest differs from its recipe"):
             provision.validate_build_record(record, self.contract)
 
     def test_build_record_rejects_downloaded_package_digest_drift(self):
