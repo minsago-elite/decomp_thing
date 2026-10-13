@@ -5,13 +5,13 @@ import decompengine.agent.AgentWorkflowPhase
 import decompengine.analysis.AnalysisDeadline
 import decompengine.analysis.BundledGhidra
 import decompengine.analysis.BoundedAnalysisProcessLaunch
+import decompengine.analysis.BoundedProgramModelAcquisitionProcess
 import decompengine.analysis.GhidraAnalysisException
 import decompengine.analysis.GhidraInvocation
 import decompengine.analysis.GhidraPostScript
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
-import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
@@ -175,7 +175,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             deadline.checkpoint("after constructing export command")
             val exitCode = executeExport(command, workDir, reports, deadline)
             deadline.checkpoint("before export result validation")
-            require(exitCode == 0 && Files.isRegularFile(output, LinkOption.NOFOLLOW_LINKS)) {
+            require(exitCode == 0) {
                 "Ghidra program recovery failed with exit code $exitCode; see ${reports.resolve("ghidra_stderr.log")}"
             }
             val modelBytes = readStableProgramModel(output, deadline)
@@ -407,34 +407,8 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
     }
 
     private fun readStableProgramModel(path: Path, deadline: AnalysisDeadline): ByteArray {
-        deadline.checkpoint("before reading exported model")
-        val before = Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
-        require(before.isRegularFile && before.size() in 1..limits.maximumProgramModelBytes) {
-            "Ghidra program model exceeds its authenticated parser bound"
-        }
-        require(before.size() <= Int.MAX_VALUE) { "Ghidra program model cannot be represented by the bounded parser" }
-        deadline.checkpoint("before allocating admitted model bytes")
-        val bytes = ByteArray(before.size().toInt())
-        deadline.checkpoint("after allocating admitted model bytes")
-        Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS).use { input ->
-            var offset = 0
-            while (offset < bytes.size) {
-                deadline.checkpoint("before reading model chunk")
-                val count = input.read(bytes, offset, minOf(64 * 1024, bytes.size - offset))
-                deadline.checkpoint("after reading model chunk")
-                require(count > 0) { "Ghidra program model changed while being read" }
-                offset += count
-            }
-            require(input.read() == -1) { "Ghidra program model changed while being read" }
-        }
-        deadline.checkpoint("after reading exported model")
-        val after = Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
-        require(
-            after.isRegularFile && before.fileKey() == after.fileKey() && before.size() == after.size() &&
-                before.lastModifiedTime() == after.lastModifiedTime() && bytes.size.toLong() == before.size()
-        ) { "Ghidra program model changed while being read" }
-        deadline.checkpoint("after validating exported model file")
-        return bytes
+        return MODEL_ACQUISITION.read(path, path.toAbsolutePath().normalize().parent,
+            limits.maximumProgramModelBytes, limits.maximumResidentBytes, deadline)
     }
 
     private fun residentBytes(process: Process): Long {
@@ -454,6 +428,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
 
     companion object {
         private val EXPORT_PROCESS_LAUNCH = BoundedAnalysisProcessLaunch()
+        private val MODEL_ACQUISITION = BoundedProgramModelAcquisitionProcess()
 
         internal const val UNAUTHENTICATED_ANALYSIS_TOOL_SHA256 =
             "0000000000000000000000000000000000000000000000000000000000000000"
