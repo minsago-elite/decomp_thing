@@ -110,6 +110,7 @@ public final class Clang1813AProfileLoaderSmoke {
         + "\"buildRecordSha256\":\"" + required(input, "buildRecordSha256") + "\","
         + "\"imageDigest\":\"" + imageDigest + "\","
         + "\"infrastructureProfileProjectionSha256\":\"" + profile.sha256() + "\","
+        + "\"infrastructureProfileProjection\":" + profile.preimage() + ","
         + "\"pathTransformSha256\":\"" + path.getPathTransformSha256() + "\","
         + "\"resourceDirectory\":\"" + resources.getResolvedResourceDirectory() + "\","
         + "\"resourceFileCount\":" + resources.getFiles().size() + ","

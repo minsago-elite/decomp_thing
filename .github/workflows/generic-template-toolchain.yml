@@ -16,6 +16,8 @@ on:
       - '.github/workflows/generic-template-toolchain.yml'
       - 'oracle/clang/18.1.3/**'
       - 'oracle/llvm/22.1.6/release-artifacts.json'
+      - 'oracle/llvm/22.1.6/oracle-manifest.json'
+      - 'oracle/llvm/22.1.6/keys/douglas-yung-llvm-release.asc'
       - 'scripts/oracle/provision_clang_18_1_3.py'
       - 'src/main/kotlin/decompengine/oracle/fulltree/FullTreeGenericTemplateFrontendProfileV1.kt'
   push:
@@ -24,6 +26,8 @@ on:
       - '.github/workflows/generic-template-toolchain.yml'
       - 'oracle/clang/18.1.3/**'
       - 'oracle/llvm/22.1.6/release-artifacts.json'
+      - 'oracle/llvm/22.1.6/oracle-manifest.json'
+      - 'oracle/llvm/22.1.6/keys/douglas-yung-llvm-release.asc'
       - 'scripts/oracle/provision_clang_18_1_3.py'
       - 'src/main/kotlin/decompengine/oracle/fulltree/FullTreeGenericTemplateFrontendProfileV1.kt'
 

@@ -2790,6 +2790,96 @@ def frontend_cxx_driver_identity_sha256(record: dict, record_sha256: str) -> str
     return sha256(b"decomp-thing/generic-template/cxx-driver-identity/v1\0" + payload)
 
 
+def frontend_path_transform_sha256(record: dict) -> str:
+    """Recompute A's authenticated PATH transform from the build-record environment."""
+    raw_path = record.get("environment", {}).get("PATH")
+    if not isinstance(raw_path, str):
+        raise ProvisionError("build record does not contain a string PATH for the A-loader projection")
+    try:
+        path_bytes = raw_path.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as error:
+        raise ProvisionError("build-record PATH is not valid UTF-8") from error
+    entries = raw_path.split(":")
+    if not path_bytes or len(path_bytes) > 4096 or not 1 <= len(entries) <= 64:
+        raise ProvisionError("build-record PATH is outside the A-loader transform bounds")
+    for entry in entries:
+        try:
+            encoded = entry.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as error:
+            raise ProvisionError("build-record PATH contains a non-UTF-8 entry") from error
+        components = [] if entry == "/" else entry[1:].split("/") if entry.startswith("/") else [""]
+        if (not encoded or len(encoded) > 1024 or not entry.startswith("/") or entry.startswith("//") or
+                "//" in entry or "\0" in entry or (entry != "/" and entry.endswith("/")) or
+                any(part in ("", ".", "..") or len(part.encode("utf-8")) > 255 for part in components)):
+            raise ProvisionError("build-record PATH contains a non-canonical entry")
+
+    def domain_hash(domain: str, value: object) -> str:
+        return sha256(domain.encode("ascii") + b"\0" + frontend_canonical_json(value))
+
+    inert_digest = domain_hash(
+        "decomp-thing/generic-template/path-directory/v1",
+        {"entries": [], "mode": "0555"},
+    )
+    transform = {
+        "containerImageDigest": record["image"]["imageDigest"],
+        "environmentPathPolicy": "captured-posix-path-to-inert-virtual-directories-v1",
+        "inertDirectorySha256": inert_digest,
+        "rawPathSha256": sha256(path_bytes),
+        "virtualPathEntries": [f"/__decomp/toolchain/path/{index:04d}" for index in range(len(entries))],
+    }
+    return domain_hash("decomp-thing/generic-template/path-transform/v1", transform)
+
+
+def frontend_profile_projection_preimage(record: dict, record_sha256: str,
+                                          runtime_rows: object) -> dict:
+    """Build A's exact profile preimage, binding its runtime rows to the recorded closure."""
+    if not isinstance(runtime_rows, list) or not runtime_rows:
+        raise ProvisionError("A-loader profile projection has no runtime-library rows")
+    tool = next((row for row in record.get("tools", []) if row.get("role") == "cxx-driver"), None)
+    if not isinstance(tool, dict):
+        raise ProvisionError("build record has no C++ driver for the A-loader projection")
+    recorded_runtime = {
+        ("toolchain" + row["path"], row["sha256"])
+        for row in record.get("runtime", {}).get("entries", [])
+        if isinstance(row, dict) and isinstance(row.get("path"), str) and isinstance(row.get("sha256"), str)
+    }
+    normalized_runtime = []
+    seen_paths = set()
+    for row in runtime_rows:
+        if not isinstance(row, dict) or set(row) != {"path", "sha256"}:
+            raise ProvisionError("A-loader profile projection runtime row is malformed")
+        path, digest = row.get("path"), row.get("sha256")
+        if (not isinstance(path, str) or not isinstance(digest, str) or
+                not re.fullmatch(r"toolchain/[^\x00]+", path) or
+                not re.fullmatch(r"[0-9a-f]{64}", digest) or digest == tool["sha256"] or
+                (path, digest) not in recorded_runtime or path in seen_paths):
+            raise ProvisionError("A-loader profile projection runtime row differs from the build-record closure")
+        seen_paths.add(path)
+        normalized_runtime.append({"path": path, "sha256": digest})
+    if normalized_runtime != sorted(normalized_runtime, key=lambda row: row["path"].encode("utf-8")):
+        raise ProvisionError("A-loader profile projection runtime rows are not in canonical path order")
+    return {
+        "adapterApiVersion": "clang-libtooling-18.1.3-v1",
+        "adapterSha256": sha256_file(ROOT / "oracle/clang/18.1.3/Clang1813AProfileLoaderSmoke.java"),
+        "adapterSourceRevision": "0" * 40,
+        "compilerSha256": tool["sha256"],
+        "cxxDriverIdentitySha256": frontend_cxx_driver_identity_sha256(record, record_sha256),
+        "pathTransformSha256": frontend_path_transform_sha256(record),
+        "resourceHeaderManifestSha256": frontend_resource_manifest_sha256(
+            record["resourceDirectory"], record["resources"]),
+        "resolvedResourceDirectory": "toolchain" + record["resourceDirectory"],
+        "runtimeLibraryDigests": normalized_runtime,
+        "targetTriple": record["probe"]["target"],
+        "toolchainProfileSha256": sha256(canonical_json(record["profile"])),
+    }
+
+
+def frontend_profile_projection_sha256(preimage: dict) -> str:
+    return sha256(
+        b"decomp-thing/generic-template/frontend-profile/v1\0" + frontend_canonical_json(preimage)
+    )
+
+
 def validate_provenance_loader_report(report: dict, record: dict, record_sha256: str) -> None:
     resources = record["resources"]
     expected_resource_sha = frontend_resource_manifest_sha256(record["resourceDirectory"], resources)
@@ -2803,9 +2893,19 @@ def validate_provenance_loader_report(report: dict, record: dict, record_sha256:
         raise ProvisionError("A-loader smoke report does not bind the build record, image, and resource manifest")
     if report.get("cxxDriverIdentitySha256") != frontend_cxx_driver_identity_sha256(record, record_sha256):
         raise ProvisionError("A-loader smoke report C++ driver identity differs from the build record")
-    for field in ("infrastructureProfileProjectionSha256", "pathTransformSha256"):
-        if not re.fullmatch(r"[0-9a-f]{64}", str(report.get(field, ""))):
-            raise ProvisionError(f"A-loader smoke report has an invalid {field}")
+    expected_path_transform = frontend_path_transform_sha256(record)
+    if report.get("pathTransformSha256") != expected_path_transform:
+        raise ProvisionError("A-loader smoke report PATH transform differs from the build-record environment and image")
+    projection = report.get("infrastructureProfileProjection")
+    if not isinstance(projection, dict):
+        raise ProvisionError("A-loader smoke report lacks its frontend profile projection preimage")
+    expected_projection = frontend_profile_projection_preimage(
+        record, record_sha256, projection.get("runtimeLibraryDigests"),
+    )
+    if projection != expected_projection:
+        raise ProvisionError("A-loader smoke report frontend profile projection differs from the build record")
+    if report.get("infrastructureProfileProjectionSha256") != frontend_profile_projection_sha256(expected_projection):
+        raise ProvisionError("A-loader smoke report frontend profile projection digest is invalid")
     for field in ("rejectedWrongImage", "rejectedWrongCxxDriverBytes", "rejectedChangedResourceIdentity",
                   "rejectedChangedRuntimeLibraryIdentity", "rejectedMissingResourceDirectory"):
         if report.get(field) is not True:

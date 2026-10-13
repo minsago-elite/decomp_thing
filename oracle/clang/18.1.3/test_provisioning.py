@@ -55,8 +55,10 @@ class ProvisioningNegativeTests(unittest.TestCase):
             "mode": "0555",
             "versionOutput": "clang version 18.1.3\n",
         }
-        file_manifest = provision.manifest([{"path": "/usr/lib/llvm-18/lib/libclang-cpp.so",
-                                             "bytes": 1, "sha256": digest}])
+        file_manifest = provision.manifest([
+            {"path": "/usr/lib/llvm-18/lib/libclang-cpp.so", "bytes": 1, "sha256": digest},
+            {"path": "/usr/lib/llvm-18/lib/libLLVM-18.so", "bytes": 2, "sha256": "b" * 64},
+        ])
         resources = provision.manifest([{"path": "/usr/lib/llvm-18/lib/clang/18.1.3/include/stddef.h",
                                          "bytes": 1, "sha256": digest}])
         repositories = [{
@@ -125,6 +127,31 @@ class ProvisioningNegativeTests(unittest.TestCase):
             "libclang-cpp18-dev", "libclang-cpp18",
         })
 
+    def valid_loader_report(self, record, record_sha):
+        compiler_sha = next(tool["sha256"] for tool in record["tools"] if tool["role"] == "cxx-driver")
+        runtime_rows = [
+            {"path": "toolchain" + row["path"], "sha256": row["sha256"]}
+            for row in record["runtime"]["entries"] if row["sha256"] != compiler_sha
+        ]
+        projection = provision.frontend_profile_projection_preimage(record, record_sha, runtime_rows)
+        return {
+            "scope": "infrastructure-loader-smoke-only",
+            "buildRecordSha256": record_sha,
+            "imageDigest": record["image"]["imageDigest"],
+            "resourceDirectory": "toolchain" + record["resourceDirectory"],
+            "resourceFileCount": record["resources"]["entryCount"],
+            "resourceTreeBytes": sum(row["bytes"] for row in record["resources"]["entries"]),
+            "resourceManifestSha256": provision.frontend_resource_manifest_sha256(
+                record["resourceDirectory"], record["resources"]),
+            "infrastructureProfileProjectionSha256": provision.frontend_profile_projection_sha256(projection),
+            "infrastructureProfileProjection": projection,
+            "pathTransformSha256": provision.frontend_path_transform_sha256(record),
+            "cxxDriverIdentitySha256": provision.frontend_cxx_driver_identity_sha256(record, record_sha),
+            **{field: True for field in (
+                "rejectedWrongImage", "rejectedWrongCxxDriverBytes", "rejectedChangedResourceIdentity",
+                "rejectedChangedRuntimeLibraryIdentity", "rejectedMissingResourceDirectory")},
+        }
+
     def test_workflow_actions_are_pinned_to_immutable_commit_shas(self):
         workflow = (ROOT / ".github/workflows/generic-template-toolchain.yml").read_text(encoding="utf-8")
         actions = re.findall(r"^\s*uses:\s*([^\s#]+)", workflow, flags=re.MULTILINE)
@@ -142,7 +169,11 @@ class ProvisioningNegativeTests(unittest.TestCase):
                       "(github.event_name != 'workflow_dispatch' || inputs.mode == 'full-qualification') }}",
                       qualify_text)
         trigger_text = workflow[:workflow.index("permissions:")]
-        self.assertEqual(trigger_text.count("'oracle/llvm/22.1.6/release-artifacts.json'"), 2)
+        for dependency in (
+                "oracle/llvm/22.1.6/release-artifacts.json",
+                "oracle/llvm/22.1.6/oracle-manifest.json",
+                "oracle/llvm/22.1.6/keys/douglas-yung-llvm-release.asc"):
+            self.assertEqual(trigger_text.count(f"'{dependency}'"), 2)
         self.assertLess(qualify_text.index("Authenticate Ubuntu Snapshot source and patch compatibility first"),
                         qualify_text.index('bash scripts/install-frontend-node.sh'))
         self.assertEqual(qualify_text.count('-PfrontendNodeHome="$CLANG_WORK/frontend-node"'),
@@ -609,28 +640,16 @@ class ProvisioningNegativeTests(unittest.TestCase):
         provision.validate_provenance_probe_report(dict(record["probe"]), record)
 
         record_sha = "b" * 64
-        resource_digest = provision.frontend_resource_manifest_sha256(
-            record["resourceDirectory"], record["resources"])
-        loader_report = {
-            "scope": "infrastructure-loader-smoke-only",
-            "buildRecordSha256": record_sha,
-            "imageDigest": record["image"]["imageDigest"],
-            "resourceDirectory": "toolchain" + record["resourceDirectory"],
-            "resourceFileCount": record["resources"]["entryCount"],
-            "resourceTreeBytes": sum(row["bytes"] for row in record["resources"]["entries"]),
-            "resourceManifestSha256": resource_digest,
-            "infrastructureProfileProjectionSha256": "c" * 64,
-            "pathTransformSha256": "d" * 64,
-            "cxxDriverIdentitySha256": provision.frontend_cxx_driver_identity_sha256(record, record_sha),
-            "rejectedWrongImage": True,
-            "rejectedWrongCxxDriverBytes": True,
-            "rejectedChangedResourceIdentity": True,
-            "rejectedChangedRuntimeLibraryIdentity": True,
-            "rejectedMissingResourceDirectory": True,
-        }
+        loader_report = self.valid_loader_report(record, record_sha)
         provision.validate_provenance_loader_report(loader_report, record, record_sha)
         for field in ("cxxDriverIdentitySha256", "imageDigest", "resourceManifestSha256"):
             changed = dict(loader_report, **{field: "0" * 64})
+            with self.subTest(field=field), self.assertRaises(provision.ProvisionError):
+                provision.validate_provenance_loader_report(changed, record, record_sha)
+        for field in ("infrastructureProfileProjectionSha256", "pathTransformSha256"):
+            digest = loader_report[field]
+            wrong_digest = ("1" if digest[0] == "0" else "0") + digest[1:]
+            changed = dict(loader_report, **{field: wrong_digest})
             with self.subTest(field=field), self.assertRaises(provision.ProvisionError):
                 provision.validate_provenance_loader_report(changed, record, record_sha)
         for field, changed_value in (("sha256", "0" * 64), ("bytes", 2), ("mode", "0755"),
@@ -1818,20 +1837,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
             record_path.write_bytes(provision.canonical_json(record))
             record_sha = provision.sha256_file(record_path)
             resources = record["resources"]
-            loader = {
-                "scope": "infrastructure-loader-smoke-only", "buildRecordSha256": record_sha,
-                "imageDigest": record["image"]["imageDigest"],
-                "resourceDirectory": "toolchain" + record["resourceDirectory"],
-                "resourceFileCount": resources["entryCount"],
-                "resourceTreeBytes": sum(row["bytes"] for row in resources["entries"]),
-                "resourceManifestSha256": provision.frontend_resource_manifest_sha256(
-                    record["resourceDirectory"], resources),
-                "cxxDriverIdentitySha256": provision.frontend_cxx_driver_identity_sha256(record, record_sha),
-                "infrastructureProfileProjectionSha256": "c" * 64, "pathTransformSha256": "d" * 64,
-                **{field: True for field in (
-                    "rejectedWrongImage", "rejectedWrongCxxDriverBytes", "rejectedChangedResourceIdentity",
-                    "rejectedChangedRuntimeLibraryIdentity", "rejectedMissingResourceDirectory")},
-            }
+            loader = ProvisioningNegativeTests.valid_loader_report(self, record, record_sha)
             negative_contract = self.contract["negativeControl"]
             lock_path = ROOT / negative_contract["artifactLock"]
             artifact = json.loads(lock_path.read_bytes())["artifacts"][negative_contract["artifactRole"]]
