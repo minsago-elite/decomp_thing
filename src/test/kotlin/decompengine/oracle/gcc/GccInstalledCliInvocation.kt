@@ -13,6 +13,10 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.longOrNull
 
+private val INSTALLED_GCC_CLI_COMMANDS = setOf(
+    "gcc-engine-plan", "gcc-engine-full-export", "gcc-engine-runtime-diagnostic",
+)
+
 /** Test orchestration only; the CLI's production controller remains the authority. */
 internal fun invokeInstalledGccCli(arguments: List<String>, evidence: Path, timeoutSeconds: Long,
     installation: Path = Path.of(System.getProperty("user.dir"), "build/install/llm_bin_patch"),
@@ -24,7 +28,7 @@ internal fun invokeInstalledGccCli(arguments: List<String>, evidence: Path, time
     require(Files.isExecutable(launcher))
     val launcherBytes = Files.newInputStream(launcher).use { it.readNBytes(256 * 1024 + 1) }
     require(launcherBytes.size <= 256 * 1024)
-    require(command in setOf("gcc-engine-plan", "gcc-engine-full-export"))
+    require(command in INSTALLED_GCC_CLI_COMMANDS)
     val selectedCommand = listOf(launcher.toString(), command) + arguments
     val javaHome = Path.of(System.getProperty("java.home")).toRealPath().toString()
     val request = OracleJson.canonicalBytes(JsonObject(mapOf(
@@ -110,7 +114,7 @@ internal fun verifyInstalledCliEvidence(
         require(request["launcherSha256"] == JsonPrimitive(launcher.authenticatedSha256))
         launcher.verifyUnchanged("after retained launcher verification")
     }
-    require(command in setOf("gcc-engine-plan", "gcc-engine-full-export"))
+    require(command in INSTALLED_GCC_CLI_COMMANDS)
     require(request["argv"] == JsonArray((listOf(installation.resolve("bin/llm_bin_patch").toRealPath().toString(),
         command) + arguments).map(::JsonPrimitive))) { "launcher arguments differ from qualification selection" }
     require(result.keys == setOf("provider", "invocationSha256", "exitCode", "productionVerified",
