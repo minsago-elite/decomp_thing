@@ -1605,13 +1605,20 @@ class AcpAgentHarnessTest {
             timeouts = timeouts(startup = 1_000, request = 3_000, shutdown = 600),
         )
         val executor = Executors.newSingleThreadExecutor()
+        val readyAcknowledged = CountDownLatch(1)
         try {
             val execution = executor.submit<decompengine.agent.AgentExecutionResult> {
-                harness.execute(fixture.request.withCancellation(cancellation))
+                harness.execute(fixture.request.withCancellation(cancellation)) { event ->
+                    if (event is AgentMessageEvent && event.textDelta == "uncooperative-cancellation-ready") {
+                        readyAcknowledged.countDown()
+                    }
+                }
             }
-            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
-            while (!ready.exists() && !execution.isDone && System.nanoTime() < deadline) Thread.sleep(10)
+            // The peer acknowledges the ready write and installs its TERM handler before this
+            // event, so cancellation exercises the intended uncooperative lifecycle.
+            assertTrue(readyAcknowledged.await(3, TimeUnit.SECONDS), "fixture never acknowledged uncooperative readiness")
             assertTrue(ready.exists(), "fixture never reached session/prompt")
+            assertEquals("ready\n", ready.readText())
             cancellation.cancel()
 
             val result = try {
