@@ -50,7 +50,7 @@ class WebProgressCutoverTest {
             publish(0, 0)
             path = "/cutover/api/v1/jobs/${job.id}/runs/${run.runId}"
             val api = WebApiController(access, EmbeddedWebAssets.load(basePath = "/cutover/"), service,
-                WebJobMutationBoundary(access, service), resources)
+                WebJobMutationBoundary(access, service), resources, clock = controls.clock)
             server.executor = httpWorkers
             server.createContext("/") { exchange -> check(api.route(exchange)) }
             server.start()
@@ -140,6 +140,39 @@ class WebProgressCutoverTest {
             }
             assertTrue(events.all { it.getValue("occurredAt").jsonPrimitive.content == "2026-09-08T00:00:02Z" })
             run to events
+        }
+        assertEquals(scenario(), scenario())
+    }
+
+    @Test fun `real HTTP retention gaps use publication time and repeat across controlled fixtures`() {
+        fun scenario(): List<JsonObject> = Fixture().use { f ->
+            val readerWorker = Executors.newSingleThreadExecutor()
+            try {
+                listOf("2026-09-08T00:00:02.123456789Z", "2026-09-08T00:00:04.246913578Z").mapIndexed { index, expectedTime ->
+                    val cursor = data(f.get("/snapshot")).getValue("throughCursor").jsonPrimitive.content
+                    val connection = f.stream(cursor)
+                    assertEquals(200, connection.statusCode())
+                    connection.body().bufferedReader().use { reader ->
+                        val pending = readerWorker.submit<Map<String, String>> { frame(reader) }
+                        // Advance after admission: the gap must sample publication time, not stream creation time.
+                        f.controls.clock.advance(Duration.ofSeconds(2).plusNanos(123_456_789))
+                        f.publish(index + 1, index + 1)
+                        val gap = pending.get(5, TimeUnit.SECONDS)
+                        assertEquals("retention.gap", gap["event"]); assertFalse("id" in gap)
+                        val control = Json.parseToJsonElement(gap.getValue("data")).jsonObject
+                        assertEquals(expectedTime, control.getValue("occurredAt").jsonPrimitive.content)
+                        assertEquals(JsonNull, control["cursor"]); assertEquals(JsonNull, control["sequence"])
+                        val payload = control.getValue("payload").jsonObject
+                        assertEquals(cursor, payload.getValue("requestedCursor").jsonPrimitive.content)
+                        val fresh = data(f.get("/snapshot"))
+                        assertEquals(fresh["oldestCursor"], payload["oldestCursor"])
+                        assertEquals(fresh["throughCursor"], payload["latestCursor"])
+                        assertNull(readerWorker.submit<String?> { reader.readLine() }.get(5, TimeUnit.SECONDS))
+                        // Session-authenticated cursor tokens vary; retain every other field, including the timestamp.
+                        JsonObject(control + ("payload" to JsonObject(payload - setOf("requestedCursor", "oldestCursor", "latestCursor"))))
+                    }
+                }
+            } finally { readerWorker.shutdownNow(); assertTrue(readerWorker.awaitTermination(5, TimeUnit.SECONDS)) }
         }
         assertEquals(scenario(), scenario())
     }
@@ -273,6 +306,7 @@ class WebProgressCutoverTest {
                     assertEquals("retention.gap", gap["event"]); assertFalse("id" in gap)
                     val control = Json.parseToJsonElement(gap.getValue("data")).jsonObject
                     assertEquals(JsonNull, control["cursor"]); assertEquals(JsonNull, control["sequence"])
+                    assertEquals("2026-09-09T00:00:00Z", control.getValue("occurredAt").jsonPrimitive.content)
                     assertNull(readerWorker.submit<String?> { reader.readLine() }.get(5, TimeUnit.SECONDS))
                 }
                 val expired = f.get("/events?transport=poll&after=$cursor")

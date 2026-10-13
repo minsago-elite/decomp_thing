@@ -9,6 +9,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.security.MessageDigest
+import java.time.Clock
 import java.util.UUID
 
 /** Versioned presentation only. Job paths and workflow adapters never enter a JSON response. */
@@ -18,6 +19,7 @@ internal class WebApiController(
     private val jobs: WebJobService,
     private val jobMutations: WebJobMutationBoundary,
     streamResources: WebStreamResources,
+    clock: Clock = Clock.systemUTC(),
 ) {
     private val prefix = "${assets.basePath}api/v1/"
     private val applicationBuildId = applicationBuildId()
@@ -33,7 +35,7 @@ internal class WebApiController(
     private val progressPages = WebProgressPages()
     private val eventStream = WebEventStream(access, streamResources, progressPages, read = { jobId, runId ->
         readWebProgress(jobs, jobId, runId).second
-    })
+    }, clock = clock)
     private val jobPages = WebJobPages(jobs::collectionRecords)
 
     fun route(exchange: HttpExchange): Boolean {
