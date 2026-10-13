@@ -26,15 +26,32 @@ internal class BoundedAnalysisProcessLaunch(
         checkpoint: (String) -> Unit,
         processStarter: () -> Process,
         stopLateProcess: (Process) -> Unit,
+    ): Process = startWithAdmission(checkpoint, processStarter, stopLateProcess) {}
+
+    /** Reports only proven refusal before a supplier is accepted; late launches remain owned. */
+    fun startWithAdmission(
+        checkpoint: (String) -> Unit,
+        processStarter: () -> Process,
+        stopLateProcess: (Process) -> Unit,
+        onNotAdmitted: (Throwable) -> Unit,
     ): Process {
-        lateCleanupFailure.get()?.let {
-            throw GhidraAnalysisException("analysis launch is unavailable after an unconfirmed late-worker cleanup", it)
+        fun refused(failure: Throwable): Nothing {
+            try { onNotAdmitted(failure) }
+            catch (callbackFailure: Throwable) {
+                if (callbackFailure !== failure) failure.addSuppressed(callbackFailure)
+            }
+            throw failure
         }
-        checkpoint("before admitting export process launch")
+        try {
+            lateCleanupFailure.get()?.let {
+                throw GhidraAnalysisException("analysis launch is unavailable after an unconfirmed late-worker cleanup", it)
+            }
+            checkpoint("before admitting export process launch")
+        } catch (failure: Throwable) { refused(failure) }
         val launched = try {
             CompletableFuture.supplyAsync(processStarter, executor)
         } catch (failure: RejectedExecutionException) {
-            throw GhidraAnalysisException("analysis process launch capacity is exhausted", failure)
+            refused(GhidraAnalysisException("analysis process launch capacity is exhausted", failure))
         }
         try {
             while (true) {
