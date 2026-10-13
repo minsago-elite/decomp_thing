@@ -26,6 +26,59 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class GccBundledGhidraRuntimeTest {
     @Test
+    fun `native runtime admits only its paired fresh cc1 worker and distinct v5 definition`() {
+        val base = runtime()
+        val identity = GccBundledNativeCallCollectorIdentityV1(64, SHA_A, 128, SHA_B)
+        val native = GccBundledGhidraRuntime(base.root, base.classPath, 8, identity)
+        assertEquals(1, native.processorCount)
+        assertEquals(1, native.analysisThreadCount)
+        assertEquals(1, native.decompilerWorkerCount)
+        assertFalse(native.runtimeDiagnostics)
+        assertEquals("analyze", native.workerOperation)
+        val inputs = artifacts(native)
+        val command = native.command(inputs, state(), lease(), GccCompilerEngineContainmentRunKind.FRESH_CONTROL)
+        assertFalse(command.any { it.startsWith("-Dcpu.core.override=") || it.startsWith("full-recovery-workers-v1:") })
+        val args = command.drop(command.indexOf("decompengine.ghidra.BundledGhidraWorker") + 1)
+        assertEquals(20, args.size)
+        assertEquals(listOf("ExportProgramModel.java", "4", inputs.single {
+            it.role == GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE }.sha256,
+            BundledGhidra.ARCHIVE_SHA256, "full", "/scratch/run/reports/program_model.json"), args.subList(6, 12))
+        assertEquals(listOf("ExportNativeCallsV1.class", "6", inputs.single {
+            it.role == GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY }.sha256,
+            args[8], args[9], identity.sourceSha256, args[11], "/scratch/run/reports/native-calls-v1"), args.subList(12, 20))
+        val selected = request(native, inputs, command, GccCompilerEngineContainmentRunKind.FRESH_CONTROL)
+        val document = OracleJson.parseCanonical(GccCompilerEngineContainmentContract.assessDefinition(selected).canonicalBytes).jsonObject
+        assertEquals("5", document.getValue("schemaVersion").jsonPrimitive.content)
+        assertEquals("gcc-compiler-engine-containment-definition-v5", document.getValue("provider").jsonPrimitive.content)
+        val parsed = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(OracleJson.canonicalBytes(document))
+        assertEquals(native.toJson(), assertNotNull(parsed.bundledRuntime).toJson())
+        assertEquals("false", document.getValue("startAuthorized").jsonPrimitive.content)
+        assertEquals("false", document.getValue("releaseEligible").jsonPrimitive.content)
+        for (kind in listOf(GccCompilerEngineContainmentRunKind.INTERRUPTED, GccCompilerEngineContainmentRunKind.RESUMED)) {
+            assertFailsWith<IllegalArgumentException> { native.command(inputs, state(), lease(), kind) }
+        }
+        assertFailsWith<IllegalArgumentException> { GccBundledGhidraRuntime(base.root, base.classPath, 8) }
+        for (version in 1..7) assertFailsWith<IllegalArgumentException> { GccBundledGhidraRuntime(base.root, base.classPath, version, identity) }
+        assertFailsWith<IllegalArgumentException> { request(native, inputs, command + "Other.java", GccCompilerEngineContainmentRunKind.FRESH_CONTROL) }
+        assertFailsWith<IllegalArgumentException> { GccCompilerEngineContainmentRequest("lto1", selected.runKind, inputs,
+            selected.analysisState, command, selected.environment, selected.outputLease, selected.budgets, native) }
+        assertFailsWith<IllegalArgumentException> { GccBundledOperationIntent(SHA_A, "cc1",
+            GccCompilerEngineContainmentRunKind.FRESH_CONTROL, inputs, native, selected.budgets,
+            decompengine.oracle.fulltree.FullTreeDiskScratchPolicy(1024, 2048, 128, 256)) }
+        for (version in listOf(1, 2, 3, 4)) {
+            val provider = "gcc-compiler-engine-containment-definition-v$version"
+            val downgraded = JsonObject(document + mapOf("schemaVersion" to JsonPrimitive(version), "provider" to JsonPrimitive(provider)))
+            assertFailsWith<IllegalArgumentException> { GccCompilerEngineContainmentContract.parseDefinitionForLiveController(rehashDefinition(downgraded)) }
+        }
+        val runtimeDocument = native.toJson()
+        val bad = listOf(JsonObject(runtimeDocument - "nativeCallCollector"),
+            JsonObject(runtimeDocument + ("provider" to JsonPrimitive("bundled-ghidra-java-api-runtime-v5"))),
+            JsonObject(runtimeDocument + ("processorCount" to JsonPrimitive(4))),
+            JsonObject(runtimeDocument + ("workerOperation" to JsonPrimitive("analyze-diagnostics-v1"))),
+            JsonObject(runtimeDocument + ("nativeCallCollector" to JsonObject(identity.toJson() + ("extra" to JsonPrimitive(true))))))
+        for (value in bad) assertFailsWith<IllegalArgumentException> { GccBundledGhidraRuntime.parse(value) }
+    }
+    @Test
     fun `bundled worker command binds writable JVM home and temp before shared prefix and exporter arguments`() {
         val runtime = runtime()
         val artifacts = artifacts(runtime)

@@ -13,9 +13,12 @@ internal object GccBundledCliIntentBuilder {
     fun build(operationId: String, engineId: String, runKind: GccCompilerEngineContainmentRunKind,
         binary: Path, profilePath: Path, archive: Path, controls: Path, journalRoot: Path, scratch: Path,
         diskPolicy: FullTreeDiskScratchPolicy, cliInvocation: GccBundledCliInvocation? = null,
-        fullRecoveryExport: Boolean = false, runtimeDiagnostics: Boolean = false): GccBundledOperationIntent {
+        fullRecoveryExport: Boolean = false, runtimeDiagnostics: Boolean = false, nativeCallObservations: Boolean = false): GccBundledOperationIntent {
         require(!runtimeDiagnostics || (fullRecoveryExport && engineId == "cc1")) {
             "runtime diagnostics require a fresh cc1 full-recovery operation"
+        }
+        require(!nativeCallObservations || (!fullRecoveryExport && !runtimeDiagnostics)) {
+            "distinct export commands cannot be combined"
         }
         require(operationId.matches(Regex("[a-f0-9]{64}")))
         require(engineId in setOf("cc1", "lto1", "driver") && runKind in setOf(
@@ -32,6 +35,15 @@ internal object GccBundledCliIntentBuilder {
         require(cliInvocation == null || (cliInvocation.options.fullRecoveryExport == fullRecoveryExport &&
             cliInvocation.options.runtimeDiagnostics == runtimeDiagnostics)) {
             "CLI invocation command differs from requested recovery mode"
+        }
+        require(!nativeCallObservations || (engineId == "cc1" && runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL)) {
+            "native call observations require a fresh uninterrupted cc1 operation"
+        }
+        require(!nativeCallObservations || cliInvocation != null) {
+            "native call observations require a bound production CLI invocation"
+        }
+        require(cliInvocation == null || cliInvocation.options.nativeCallObservations == nativeCallObservations) {
+            "CLI invocation command differs from requested native call mode"
         }
         val roots = listOf(controls, journalRoot, scratch)
         (roots + listOf(binary, profilePath, archive)).forEach { path ->
@@ -52,6 +64,7 @@ internal object GccBundledCliIntentBuilder {
             require(LinuxFilesystemSyscalls.directoryEntryNames(directory, 1).isEmpty()) { "CLI control directory must be empty" }
             GccRetainedCompilerEngineProfile.open(profilePath, engineId).use { profile ->
                 profile.requireDisjoint(roots)
+                if (nativeCallObservations) profile.requireNativeCallProfile()
                 val suite = profile.suite
                 val engine = profile.target(engineId)
                 cliInvocation?.options?.resumeAfterCheckpoint?.let { threshold ->
@@ -84,7 +97,11 @@ internal object GccBundledCliIntentBuilder {
                             val runtime = GccBundledGhidraRuntime(bundle, reference.classPath.map { relative ->
                                 val entry = reference.entries.getValue(relative)
                                 GccBundledGhidraClassPathEntry(bundle.resolve(relative), checkNotNull(entry.bytes), checkNotNull(entry.sha256))
-                            }, invocationVersion = profile.invocationVersion(engineId, fullRecoveryExport, runtimeDiagnostics))
+                            }, invocationVersion = if (nativeCallObservations) 8 else
+                                profile.invocationVersion(engineId, fullRecovery = fullRecoveryExport, runtimeDiagnostics = runtimeDiagnostics),
+                                nativeCallCollector = if (nativeCallObservations) requireNotNull(reference.nativeCallCollector) {
+                                    "bundled deployment does not contain the independently pinned native call collector"
+                                } else null)
                             val manifest = boot.invocationManifestBytes()
                             val exporter = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java"))
                                 .use { it.readNBytes(MAXIMUM_CONTROL_BYTES + 1) }

@@ -45,9 +45,9 @@ class GccBundledCliCommandTest {
         assertEquals("gcc-engine-runtime-diagnostic", diagnostic.commandName)
         assertFails { GccBundledCliOptions.parse(args, runtimeDiagnostics = true) }
         for (engine in listOf("driver", "lto1")) {
-            assertFails { GccBundledCliOptions.parse(listOf(engine) + args.drop(1), true, true) }
+            assertFails { GccBundledCliOptions.parse(listOf(engine) + args.drop(1), fullRecoveryExport = true, runtimeDiagnostics = true) }
         }
-        assertFails { GccBundledCliOptions.parse(args + listOf("--resume-after-checkpoint", "512"), true, true) }
+        assertFails { GccBundledCliOptions.parse(args + listOf("--resume-after-checkpoint", "512"), fullRecoveryExport = true, runtimeDiagnostics = true) }
         val children = listOf(diagnostic.output, privateDirectory(diagnostic.output.resolve("inputs")),
             privateDirectory(diagnostic.output.resolve("journal")))
         val identities = children.associateWith { path -> LinuxFilesystemSyscalls.openRoot(path).use { it.identity } }
@@ -55,7 +55,7 @@ class GccBundledCliCommandTest {
         val document = OracleJson.parseCanonical(invocation.canonicalBytes).jsonObject
         assertEquals("gcc-engine-runtime-diagnostic", document.getValue("argv").jsonArray.first().jsonPrimitive.content)
         assertFalse(invocation.canonicalBytes.contentEquals(
-            GccBundledCliInvocation(GccBundledCliOptions.parse(args, true), args, identities).canonicalBytes))
+            GccBundledCliInvocation(GccBundledCliOptions.parse(args, fullRecoveryExport = true), args, identities).canonicalBytes))
     }
 
     @Test
@@ -116,6 +116,49 @@ class GccBundledCliCommandTest {
         val planning = GccBundledCliInvocation(GccBundledCliOptions.parse(args), args, identities)
         val planningDocument = OracleJson.parseCanonical(planning.canonicalBytes).jsonObject
         assertEquals("gcc-engine-plan", planningDocument.getValue("argv").jsonArray.first().jsonPrimitive.content)
+    }
+
+    @Test
+    fun `native call command is fresh cc1 and cannot select scripts or legacy export mode`() = fixture { root ->
+        val args = arguments(root)
+        val options = GccBundledCliOptions.parse(args, nativeCallObservations = true)
+        assertTrue(options.nativeCallObservations)
+        assertFalse(options.fullRecoveryExport)
+        assertFalse(options.runtimeDiagnostics)
+        assertEquals("gcc-engine-native-calls", options.commandName)
+        val children = listOf(options.output, privateDirectory(options.output.resolve("inputs")), privateDirectory(options.output.resolve("journal")))
+        val identities = children.associateWith { path -> LinuxFilesystemSyscalls.openRoot(path).use { it.identity } }
+        val document = OracleJson.parseCanonical(GccBundledCliInvocation(options, args, identities).canonicalBytes).jsonObject
+        assertEquals("gcc-engine-native-calls", document.getValue("argv").jsonArray.first().jsonPrimitive.content)
+        for (bad in listOf(args + listOf("--resume-after-checkpoint", "512"),
+            args + listOf("--collector", "Other.class"), args + listOf("--script", "Other.java"),
+            listOf("lto1") + args.drop(1), listOf("driver") + args.drop(1))) {
+            assertFails { GccBundledCliOptions.parse(bad, nativeCallObservations = true) }
+        }
+        assertFails { GccBundledCliOptions.parse(args, fullRecoveryExport = true, nativeCallObservations = true) }
+        assertFails { GccBundledCliOptions.parse(args, fullRecoveryExport = true, runtimeDiagnostics = true, nativeCallObservations = true) }
+        assertFails { GccBundledCliOptions.parse(args, runtimeDiagnostics = true, nativeCallObservations = true) }
+        assertFails { GccBundledCliInvocation(options.copy(nativeCallObservations = false), args, identities).also {
+            GccBundledCliIntentBuilder.build("a".repeat(64), "cc1", GccCompilerEngineContainmentRunKind.FRESH_CONTROL,
+                options.binary, options.profile, options.archive, options.output.resolve("inputs"), options.output.resolve("journal"),
+                options.scratch, options.diskPolicy, it, nativeCallObservations = true)
+        } }
+        for (path in children.drop(1)) Files.list(path).use { assertEquals(0L, it.count()) }
+    }
+
+    @Test
+    fun `native call CLI rejects an untrusted binary before leasing or publishing evidence`() = fixture { root ->
+        val profile = Path.of(System.getProperty("user.dir"), "oracle/gcc/16.2.0/compiler-engines.json").toRealPath()
+        val args = arguments(root).map { if (it == root.resolve("profile").toString()) profile.toString() else it }
+        val options = GccBundledCliOptions.parse(args, nativeCallObservations = true)
+        val failure = assertFails { GccBundledCliCommand.run(options, args) }
+        assertTrue(failure.message.orEmpty().contains("binary differs from selected profile engine"), failure.toString())
+        val invocation = OracleJson.parseCanonical(Files.readAllBytes(options.output.resolve("invocation.json"))).jsonObject
+        assertEquals("gcc-engine-native-calls", invocation.getValue("argv").jsonArray.first().jsonPrimitive.content)
+        assertFalse(Files.exists(options.output.resolve("result.json")))
+        for (path in listOf(options.output.resolve("inputs"), options.output.resolve("journal"), options.scratch)) {
+            Files.list(path).use { assertEquals(0L, it.count()) }
+        }
     }
 
     @Test

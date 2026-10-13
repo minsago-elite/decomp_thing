@@ -122,13 +122,23 @@ internal class GccRetainedCompilerEngineProfile private constructor(
         engineId: String,
         artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
         budgets: GccCompilerEngineContainmentBudgets,
-        fullRecoveryExport: Boolean,
+        fullRecoveryExport: Boolean = false,
         bundledRuntime: GccBundledGhidraRuntime? = null,
+        nativeCallObservations: Boolean = false,
     ): ByteArray {
         requireCurrent()
         target(engineId)
         require(bundledRuntime?.invocationVersion != 7 && bundledRuntime?.runtimeDiagnostics != true) {
             "diagnostic runtime cannot enter ordinary GCC export admission"
+        }
+        require(!nativeCallObservations || (engineId == "cc1" && !fullRecoveryExport)) {
+            "native call observations require the distinct pinned cc1 profile engine"
+        }
+        if (nativeCallObservations) requireNativeCallProfile()
+        bundledRuntime?.let { runtime ->
+            require((runtime.invocationVersion == 8) == nativeCallObservations) {
+                "native call observations require their distinct runtime invocation"
+            }
         }
         val throughput = suite.fullRecoveryCc1Throughput?.takeIf { engineId == "cc1" && fullRecoveryExport }
         if (throughput != null) {
@@ -143,7 +153,7 @@ internal class GccRetainedCompilerEngineProfile private constructor(
             }
         }
         bundledRuntime?.let { runtime ->
-            require((runtime.recoveryMode == "full") == fullRecoveryExport) {
+            require((runtime.recoveryMode == "full") == (fullRecoveryExport || nativeCallObservations)) {
                 "GCC operation runtime differs from its retained recovery mode"
             }
         }
@@ -226,6 +236,20 @@ internal class GccRetainedCompilerEngineProfile private constructor(
         require(archive.bytes == suite.analysis.ghidraArchive.bytes && archive.sha256 == suite.analysis.ghidraArchive.sha256 &&
             byRole.getValue(GccCompilerEngineContainmentArtifactRole.EXPORTER_SOURCE).sha256 == suite.analysis.exporterSha256
         ) { "GCC operation analysis tools differ from its retained planner profile" }
+    }
+
+    /** Fixed production inputs, independently pinned by the existing structural profile reader. */
+    @Synchronized
+    fun requireNativeCallProfile(): GccDriverStructuralInputsV1 {
+        requireCurrent()
+        val pinned = GccDriverStructuralInputsV1.load(suite.profilePath.parent)
+        require(pinned.compilerEngineProfileSha256 == suite.profileSha256 &&
+            suite.target == "x86_64-linux-gnu" &&
+            suite.engine("cc1").strippedArtifact.let { it.sha256 == pinned.strippedBinary.sha256 && it.bytes == pinned.strippedBinary.bytes }) {
+            "native call observations require the independently pinned production cc1 profile"
+        }
+        requireCurrent()
+        return pinned
     }
 
     @Synchronized

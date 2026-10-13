@@ -14,23 +14,33 @@ internal data class GccBundledCliOptions(
     val output: Path, val scratch: Path, val diskPolicy: FullTreeDiskScratchPolicy,
     val resumeAfterCheckpoint: Long?, val fullRecoveryExport: Boolean = false,
     val runtimeDiagnostics: Boolean = false,
+    val nativeCallObservations: Boolean = false,
 ) {
     val commandName: String get() = when {
+        nativeCallObservations -> "gcc-engine-native-calls"
         runtimeDiagnostics -> "gcc-engine-runtime-diagnostic"
         fullRecoveryExport -> "gcc-engine-full-export"
         else -> "gcc-engine-plan"
     }
 
     companion object {
-        fun engineUsage(fullRecoveryExport: Boolean, runtimeDiagnostics: Boolean = false): String = when {
-            runtimeDiagnostics -> "cc1"
+        fun engineUsage(fullRecoveryExport: Boolean, runtimeDiagnostics: Boolean = false,
+            nativeCallObservations: Boolean = false): String = when {
+            runtimeDiagnostics || nativeCallObservations -> "cc1"
             fullRecoveryExport -> "<cc1|driver>"
             else -> "<cc1|lto1>"
         }
 
+        fun engineArgumentUsage(fullRecoveryExport: Boolean, nativeCallObservations: Boolean = false): String =
+            engineUsage(fullRecoveryExport = fullRecoveryExport, nativeCallObservations = nativeCallObservations)
+                .removeSurrounding("<", ">")
+
         fun parse(arguments: List<String>, fullRecoveryExport: Boolean = false,
-            runtimeDiagnostics: Boolean = false): GccBundledCliOptions {
+            runtimeDiagnostics: Boolean = false, nativeCallObservations: Boolean = false): GccBundledCliOptions {
             require(!runtimeDiagnostics || fullRecoveryExport) { "runtime diagnostics require full recovery" }
+            require(!nativeCallObservations || (!fullRecoveryExport && !runtimeDiagnostics)) {
+                "distinct export commands cannot be combined"
+            }
             require(arguments.size in 2..32 && arguments.sumOf { it.toByteArray().size.toLong() + 1 } <= 65536)
             val positionals = mutableListOf<String>()
             val values = linkedMapOf<String, String>()
@@ -58,6 +68,9 @@ internal data class GccBundledCliOptions(
             require(positionals[0] != "driver" || fullRecoveryExport) {
                 "driver admission requires a fresh full-recovery export"
             }
+            require(!nativeCallObservations || positionals[0] == "cc1") {
+                "native call observations are currently supported only for cc1"
+            }
             fun path(value: String) = Path.of(value).toAbsolutePath().normalize()
             fun required(name: String) = path(requireNotNull(values[name]) { "$name is required" })
             fun number(name: String, default: Long? = null): Long? = values[name]?.let {
@@ -66,12 +79,14 @@ internal data class GccBundledCliOptions(
             } ?: default
             val threshold = number("--resume-after-checkpoint")?.also { GccBundledCheckpointTrigger(it) }
             require(!fullRecoveryExport || threshold == null) { "full-recovery export cannot resume from a planning checkpoint" }
+            require(!nativeCallObservations || threshold == null) { "native call observations cannot resume from a planning checkpoint" }
             return GccBundledCliOptions(positionals[0], path(positionals[1]), required("--profile"), required("--ghidra-archive"),
                 required("--output"), required("--scratch"), FullTreeDiskScratchPolicy(
                     number("--scratch-min-bytes", 8L * 1024 * 1024 * 1024)!!,
                     number("--scratch-max-bytes", 64L * 1024 * 1024 * 1024)!!,
                     number("--scratch-min-inodes", 32768)!!, number("--scratch-max-inodes", 1_000_000)!!), threshold,
-                fullRecoveryExport, runtimeDiagnostics).also {
+                fullRecoveryExport = fullRecoveryExport, runtimeDiagnostics = runtimeDiagnostics,
+                nativeCallObservations = nativeCallObservations).also {
                 require(it.diskPolicy.maximumFilesystemBytes <= 1024L * 1024 * 1024 * 1024 &&
                     it.diskPolicy.maximumFilesystemInodes <= 2_000_000)
                 require(!it.output.startsWith(it.scratch) && !it.scratch.startsWith(it.output)) { "output and scratch must be disjoint" }
@@ -107,7 +122,8 @@ internal class GccBundledCliInvocation(val options: GccBundledCliOptions, argume
 
     init {
         require(directories.keys == setOf(options.output, options.output.resolve("inputs"), options.output.resolve("journal")))
-        require(GccBundledCliOptions.parse(arguments, options.fullRecoveryExport, options.runtimeDiagnostics) == options) {
+        require(GccBundledCliOptions.parse(arguments, fullRecoveryExport = options.fullRecoveryExport,
+            runtimeDiagnostics = options.runtimeDiagnostics, nativeCallObservations = options.nativeCallObservations) == options) {
             "CLI argv differs from its selected options"
         }
     }

@@ -46,6 +46,35 @@ class DwarfSysvAmd64InterfaceProjectionTest {
     }
 
     @Test
+    fun `selected parameter provenance errors remain unresolved despite a directly known type`() {
+        val clean = parameter("int")
+        val positive = project(function(parameters = listOf(clean, parameter("int", ordinal = 1))), intType).functions.single()
+        assertTrue(positive.fullyObservable, positive.reasons.toString())
+        assertTrue(positive.parameters.all { it?.observable == true })
+
+        listOf("origin-specification-cycle", "origin-specification-tag-mismatch",
+            "unsupported-origin-specification-reference:0x31", "unsupported-origin-specification-reference:0x47").forEach { reason ->
+            val unresolved = parameter("int", ordinal = 1, reasons = listOf(reason))
+            val raw = function(parameters = listOf(clean, unresolved))
+            val before = raw.toJson()
+            assertEquals(DwarfInterfaceFactState.KNOWN, unresolved.type.state)
+            assertTrue(unresolved.type.reasons.isEmpty())
+
+            val projected = project(raw, intType).functions.single()
+            assertFalse(projected.fullyObservable, reason)
+            assertEquals(2, projected.arity, reason)
+            assertEquals(false, projected.variadic, reason)
+            assertTrue(projected.returnType?.observable == true, reason)
+            assertEquals(2, projected.parameters.size, reason)
+            assertTrue(projected.parameters[0]?.observable == true, reason)
+            assertNull(projected.parameters[1], reason)
+            assertTrue("raw-parameter:1:$reason" in projected.reasons, reason)
+            assertTrue("unresolved-parameter-ABI" in projected.reasons, reason)
+            assertEquals(before, raw.toJson(), reason)
+        }
+    }
+
+    @Test
     fun `unsupported prototype language convention and inheritance never manufacture complete signatures`() {
         val unprototyped = project(function(prototyped = absent()), intType).functions.single()
         assertFalse(unprototyped.fullyObservable)
@@ -349,9 +378,9 @@ class DwarfSysvAmd64InterfaceProjectionTest {
         assertFailsWith<IllegalArgumentException> { DwarfSysvAmd64InterfaceProjection.project(listOf(function()), mapOf("int" to intType), changed) }
         assertFailsWith<IllegalArgumentException> { DwarfSysvAmd64InterfaceProjection.project(listOf(function(), function()), mapOf("int" to intType), target) }
         val projected = project(function(), intType)
-        assertEquals("dwarf-sysv-amd64-lp64-projection-v3", DwarfSysvAmd64InterfaceProjection.VERSION)
+        assertEquals("dwarf-sysv-amd64-lp64-projection-v4", DwarfSysvAmd64InterfaceProjection.VERSION)
         assertEquals(64, projected.ruleProfileSha256.length)
-        assertEquals("021b9e246e8c0cd250dbd660e03b0baba41338ba4c23e0fe4831fc11570c35df", projected.ruleProfileSha256)
+        assertEquals("76387963923f75b839885d6ec13ba2cf25fb0770f3361d0be7585d3584223da1", projected.ruleProfileSha256)
         assertFailsWith<UnsupportedOperationException> { (projected.functions as MutableList<*>).clear() }
         assertFailsWith<UnsupportedOperationException> { (projected.types as MutableList<*>).clear() }
         assertEquals(projected.ruleProfileSha256, project(function(), intType).ruleProfileSha256)
@@ -495,8 +524,8 @@ class DwarfSysvAmd64InterfaceProjectionTest {
         scopes = emptyList(), origins = listOf(id), reasons = emptyList(),
     )
 
-    private fun parameter(type: String, ordinal: Int = 0) = DwarfInterfaceParameterFacts(
-        ordinal, "parameter-$ordinal", absent(), known(type), absent(), listOf("parameter-$ordinal"), emptyList(),
+    private fun parameter(type: String, ordinal: Int = 0, reasons: List<String> = emptyList()) = DwarfInterfaceParameterFacts(
+        ordinal, "parameter-$ordinal", absent(), known(type), absent(), listOf("parameter-$ordinal"), reasons,
     )
 
     private fun node(

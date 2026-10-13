@@ -1,0 +1,273 @@
+{
+  "$defs": {
+    "annotation": {
+      "additionalProperties": false,
+      "properties": {
+        "disposition": {
+          "enum": [
+            "accepted",
+            "unresolved"
+          ]
+        },
+        "mismatchId": {
+          "pattern": "^(?:clang-diagnostic|clang-behavior)-[0-9a-f]{32}$",
+          "type": "string"
+        },
+        "origin": {
+          "enum": [
+            "caller-annotation",
+            "generated-unresolved"
+          ]
+        },
+        "rationale": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "mismatchId",
+        "disposition",
+        "rationale",
+        "origin"
+      ],
+      "type": "object"
+    },
+    "event": {
+      "additionalProperties": false,
+      "properties": {
+        "annotations": {
+          "items": {
+            "$ref": "#/$defs/annotation"
+          },
+          "maxItems": 50400,
+          "type": "array"
+        },
+        "assessmentBase64": {
+          "maxLength": 22369624,
+          "minLength": 4,
+          "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
+          "type": "string"
+        },
+        "assessmentBytes": {
+          "maximum": 16777216,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "assessmentSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "candidateExecutableSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "eventId": {
+          "$ref": "#/$defs/sha256"
+        },
+        "previousLedgerSha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sequence": {
+          "maximum": 64,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sequence",
+        "previousLedgerSha256",
+        "eventId",
+        "assessmentSha256",
+        "assessmentBytes",
+        "assessmentBase64",
+        "candidateExecutableSha256",
+        "annotations"
+      ],
+      "type": "object"
+    },
+    "id": {
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+      "type": "string"
+    },
+    "reference": {
+      "additionalProperties": false,
+      "properties": {
+        "artifactManifestSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "corpusId": {
+          "$ref": "#/$defs/id"
+        },
+        "corpusSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "diagnosticMatrixSelfSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "diagnosticMatrixSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "reportSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sandboxSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "required": [
+        "corpusId",
+        "corpusSha256",
+        "reportSha256",
+        "diagnosticMatrixSha256",
+        "diagnosticMatrixSelfSha256",
+        "artifactManifestSha256",
+        "sandboxSha256"
+      ],
+      "type": "object"
+    },
+    "sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "$id": "https://github.com/minsago-elite/decomp_thing/oracle/llvm-behavior-mismatch-ledger-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "annotationAuthority": {
+      "const": "untrusted-metadata-only"
+    },
+    "authority": {
+      "const": "integrity-only-retained-comparison-and-annotations-v1"
+    },
+    "events": {
+      "items": {
+        "$ref": "#/$defs/event"
+      },
+      "maxItems": 64,
+      "minItems": 1,
+      "type": "array"
+    },
+    "previousLedgerSha256": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/sha256"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "releaseEligible": {
+      "const": false
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "scope": {
+      "additionalProperties": false,
+      "properties": {
+        "ownershipId": {
+          "const": "clang-22-1-6-behavior-case-ownership-v1"
+        },
+        "ownershipSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "reference": {
+          "$ref": "#/$defs/reference"
+        }
+      },
+      "required": [
+        "reference",
+        "ownershipId",
+        "ownershipSha256"
+      ],
+      "type": "object"
+    },
+    "scoringAuthority": {
+      "const": false
+    },
+    "summary": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptedAnnotations": {
+          "maximum": 3225600,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "annotationEvents": {
+          "maximum": 3225600,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "distinctAssessments": {
+          "maximum": 3225600,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "distinctCandidateExecutables": {
+          "maximum": 3225600,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "distinctMismatchIds": {
+          "maximum": 3225600,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "mismatchOccurrences": {
+          "maximum": 3225600,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "retainedAssessmentBytes": {
+          "maximum": 67108864,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "retainedRationaleBytes": {
+          "maximum": 67108864,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unresolvedAnnotations": {
+          "maximum": 3225600,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "annotationEvents",
+        "distinctAssessments",
+        "distinctCandidateExecutables",
+        "distinctMismatchIds",
+        "mismatchOccurrences",
+        "acceptedAnnotations",
+        "unresolvedAnnotations",
+        "retainedAssessmentBytes",
+        "retainedRationaleBytes"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "authority",
+    "releaseEligible",
+    "scoringAuthority",
+    "annotationAuthority",
+    "scope",
+    "previousLedgerSha256",
+    "summary",
+    "events"
+  ],
+  "title": "Integrity-only retained LLVM comparison and annotation ledger v1",
+  "type": "object"
+}

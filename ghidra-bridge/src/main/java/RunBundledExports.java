@@ -9,7 +9,7 @@ public final class RunBundledExports extends GhidraScript {
         BundledGhidraWorker.diagnosticsGuard();
         String[] arguments = getScriptArgs();
         if (arguments.length == 0) throw new IllegalArgumentException("No bundled exporters requested");
-        Set<String> exporters = Set.of("ExportProgramModel.java", "ExportRecoveredCallSites.java", "ExportDecompiledC.java");
+        Set<String> exporters = Set.of("ExportProgramModel.java", "ExportRecoveredCallSites.java", "ExportDecompiledC.java", "ExportNativeCallsV1.class");
         for (int index = 0; index < arguments.length;) {
             String name = arguments[index++];
             if (!exporters.contains(name) || index == arguments.length) {
@@ -21,7 +21,13 @@ public final class RunBundledExports extends GhidraScript {
             }
             BundledGhidraWorker.diagnosticsExporter(name);
             try {
-                runScript(name, Arrays.copyOfRange(arguments, index, index + count));
+                String[] exporterArguments = Arrays.copyOfRange(arguments, index, index + count);
+                if (name.equals("ExportNativeCallsV1.class")) {
+                    // The nested source-script loader cannot load the pinned compiled collector.
+                    ExportNativeCallsV1.collect(currentProgram, monitor, exporterArguments);
+                } else {
+                    runScript(name, exporterArguments);
+                }
             } finally {
                 BundledGhidraWorker.diagnosticsGuard();
             }

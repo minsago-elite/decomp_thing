@@ -248,6 +248,7 @@ internal class BoundedDwarfGlobalFactReader(
             val evidence = "${dwarfInterfaceLocator(source)}:attribute=0x1c"
             val value = when (val raw = attribute.value) {
                 is FullTreeDwarfUnsignedConstantValue -> "unsigned:${raw.rawValue}"
+                is FullTreeDwarfWideUnsignedConstantValue -> "unsigned:${raw.rawValue}"
                 is FullTreeDwarfSignedConstantValue -> "signed:${raw.rawValue}"
                 is FullTreeDwarfExpressionValue -> raw.inspect { bytes ->
                     if (bytes.size > limits.maximumLocationExpressionBytes) throw FullTreeControlException("DWARF global constant exceeds byte bound")

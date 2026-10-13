@@ -38,7 +38,7 @@ internal class GccBundledOperationIntent(
             runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL && plannerProfile != null)) {
             "GCC driver requires retained full-recovery export in a fresh uninterrupted operation"
         }
-        require(bundledRuntime.invocationVersion in 1..3 || bundledRuntime.invocationVersion in 5..7) {
+        require(bundledRuntime.invocationVersion in 1..3 || bundledRuntime.invocationVersion in 5..8) {
             "fresh operation intent cannot select the resume-only runtime"
         }
         require(runKind != GccCompilerEngineContainmentRunKind.RESUMED) { "GCC bundled prepared operations require fresh analysis" }
@@ -50,6 +50,9 @@ internal class GccBundledOperationIntent(
         }
         require(bundledRuntime.invocationVersion !in setOf(6, 7) || (engineId == "cc1" && plannerProfile != null)) {
             "parallel full recovery and diagnostics require a retained cc1 policy"
+        }
+        require(bundledRuntime.invocationVersion != 8 || (plannerProfile != null && cliInvocation != null)) {
+            "native call observations require a retained production profile and bound CLI invocation"
         }
         require(budgets.wallClockMillis % 1_000L == 0L) { "GCC bundled wall budget must use whole seconds" }
         require(diskPolicy.maximumFilesystemBytes <= 1024L * 1024 * 1024 * 1024 &&
@@ -69,8 +72,10 @@ internal class GccBundledOperationIntent(
         bundledRuntime.requireArtifacts(this.artifacts)
         profilePolicy = plannerProfile?.let { profile ->
             if (bundledRuntime.runtimeDiagnostics) profile.bindDiagnosticInvocation(
-                engineId, this.artifacts, budgets, bundledRuntime.recoveryMode == "full", bundledRuntime)
-            else profile.bindInvocation(engineId, this.artifacts, budgets, bundledRuntime.recoveryMode == "full", bundledRuntime)
+                engineId, this.artifacts, budgets, fullRecoveryExport = true, bundledRuntime = bundledRuntime)
+            else profile.bindInvocation(engineId, this.artifacts, budgets,
+                fullRecoveryExport = bundledRuntime.recoveryMode == "full" && bundledRuntime.invocationVersion != 8,
+                bundledRuntime = bundledRuntime, nativeCallObservations = bundledRuntime.invocationVersion == 8)
         }
         val byRole = this.artifacts.associateBy { it.role }
         cliInvocation?.let { invocation ->
@@ -79,8 +84,9 @@ internal class GccBundledOperationIntent(
                 selected.binary == byRole.getValue(GccCompilerEngineContainmentArtifactRole.ENGINE_BINARY).path &&
                 selected.profile == byRole.getValue(GccCompilerEngineContainmentArtifactRole.BENCHMARK_PROFILE).path &&
                 selected.archive == byRole.getValue(GccCompilerEngineContainmentArtifactRole.GHIDRA_ARCHIVE).path &&
-                selected.fullRecoveryExport == (bundledRuntime.recoveryMode == "full") &&
+                selected.fullRecoveryExport == (bundledRuntime.recoveryMode == "full" && bundledRuntime.invocationVersion != 8) &&
                 selected.runtimeDiagnostics == bundledRuntime.runtimeDiagnostics &&
+                selected.nativeCallObservations == (bundledRuntime.invocationVersion == 8) &&
                 (selected.resumeAfterCheckpoint != null) == (runKind == GccCompilerEngineContainmentRunKind.INTERRUPTED)) {
                 "CLI selection differs from operation intent"
             }
@@ -94,11 +100,20 @@ internal class GccBundledOperationIntent(
             "sourceLockSha256" to JsonPrimitive(byRole.getValue(GccCompilerEngineContainmentArtifactRole.SOURCE_LOCK).sha256),
         ))))
         encoded = OracleJson.canonicalBytes(JsonObject(mapOf(
-            "schemaVersion" to JsonPrimitive(if (bundledRuntime.runtimeDiagnostics) 4
-                else if (bundledRuntime.invocationVersion == 6) 3 else if (profilePolicy == null) 1 else 2),
-            "provider" to JsonPrimitive(if (bundledRuntime.runtimeDiagnostics) "gcc-bundled-operation-intent-v4"
-                else if (bundledRuntime.invocationVersion == 6) "gcc-bundled-operation-intent-v3"
-                else if (profilePolicy == null) "gcc-bundled-operation-intent-v1" else "gcc-bundled-operation-intent-v2"),
+            "schemaVersion" to JsonPrimitive(when {
+                bundledRuntime.invocationVersion == 8 -> 5
+                bundledRuntime.runtimeDiagnostics -> 4
+                bundledRuntime.invocationVersion == 6 -> 3
+                profilePolicy == null -> 1
+                else -> 2
+            }),
+            "provider" to JsonPrimitive(when {
+                bundledRuntime.invocationVersion == 8 -> "gcc-bundled-operation-intent-v5"
+                bundledRuntime.runtimeDiagnostics -> "gcc-bundled-operation-intent-v4"
+                bundledRuntime.invocationVersion == 6 -> "gcc-bundled-operation-intent-v3"
+                profilePolicy == null -> "gcc-bundled-operation-intent-v1"
+                else -> "gcc-bundled-operation-intent-v2"
+            }),
             "operationId" to JsonPrimitive(operationId),
             "engineId" to JsonPrimitive(engineId),
             "runKind" to JsonPrimitive(runKind.wireName),
@@ -135,8 +150,10 @@ internal class GccBundledOperationIntent(
         try {
             retained.requireDisjoint(excludedRoots + bundledRuntime.root)
             val selected = if (bundledRuntime.runtimeDiagnostics) retained.bindDiagnosticInvocation(
-                engineId, artifacts, budgets, bundledRuntime.recoveryMode == "full", bundledRuntime)
-            else retained.bindInvocation(engineId, artifacts, budgets, bundledRuntime.recoveryMode == "full", bundledRuntime)
+                engineId, artifacts, budgets, fullRecoveryExport = true, bundledRuntime = bundledRuntime)
+            else retained.bindInvocation(engineId, artifacts, budgets,
+                fullRecoveryExport = bundledRuntime.recoveryMode == "full" && bundledRuntime.invocationVersion != 8,
+                bundledRuntime = bundledRuntime, nativeCallObservations = bundledRuntime.invocationVersion == 8)
             require(selected.contentEquals(expected)) {
                 "GCC planner profile differs from its prepared operation intent"
             }
@@ -149,7 +166,7 @@ internal class GccBundledOperationIntent(
 
     /** Selection gate shared by admission controls and the coordinator before any full-export launch. */
     fun requireFullExportExecution() {
-        check(bundledRuntime.recoveryMode == "full" && !bundledRuntime.runtimeDiagnostics) {
+        check(bundledRuntime.recoveryMode == "full" && !bundledRuntime.runtimeDiagnostics && bundledRuntime.invocationVersion != 8) {
             "full export execution requires an ordinary full-recovery runtime"
         }
     }

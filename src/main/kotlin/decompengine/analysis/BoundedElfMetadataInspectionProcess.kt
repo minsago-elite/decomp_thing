@@ -63,7 +63,7 @@ internal class BoundedElfMetadataInspectionProcess(
         }
         checkpoint("before launching bounded ELF metadata worker")
         val launch = try {
-            CompletableFuture.supplyAsync({ processStarter(command, path.parent ?: path) }, LAUNCH_EXECUTOR)
+            CompletableFuture.supplyAsync({ processStarter(command, path.parent ?: path) }, ANALYSIS_PROCESS_LAUNCH_EXECUTOR)
         } catch (failure: RejectedExecutionException) {
             throw GhidraAnalysisException("bounded ELF metadata worker launch capacity is exhausted", failure)
         }
@@ -229,11 +229,6 @@ internal class BoundedElfMetadataInspectionProcess(
         const val CAPTURE_DRAIN_MILLIS = 5_000L
         val MAXIMUM_WALL_MILLIS = TimeUnit.MINUTES.toMillis(10)
         val POLL_NANOS = TimeUnit.MILLISECONDS.toNanos(25)
-        private val LAUNCH_EXECUTOR = ThreadPoolExecutor(
-            0, 2, 60L, TimeUnit.SECONDS, SynchronousQueue(),
-            { task -> Thread(task, "elf-metadata-worker-launch").apply { isDaemon = true } },
-            ThreadPoolExecutor.AbortPolicy(),
-        )
         private val CAPTURE_EXECUTOR = ThreadPoolExecutor(
             0, 4, 60L, TimeUnit.SECONDS, SynchronousQueue(),
             { task -> Thread(task, "elf-metadata-worker-capture").apply { isDaemon = true } },

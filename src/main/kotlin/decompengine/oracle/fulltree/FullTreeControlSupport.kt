@@ -372,6 +372,42 @@ internal class StableControlFile private constructor(
         }
     }
 
+    /** Checks the original path binding and mutation history without hashing or invoking callbacks. */
+    @Synchronized
+    internal fun requirePathAndIdentity(label: String) {
+        check(!closed) { "stable control file is closed" }
+        readLease.requireHeld(label)
+        requireCurrentMetadata(label)
+    }
+
+    /**
+     * Proves continuity of an already pinned inode across an intentional parent-directory rename.
+     * Callers must separately authenticate the relocated pathname. This neither clears mutation
+     * history nor changes the original path binding used by ordinary reads and [verifyUnchanged].
+     */
+    @Synchronized
+    internal fun requireRetainedLeaseAndIdentity(label: String) {
+        check(!closed) { "stable control file is closed" }
+        readLease.requireHeld(label)
+        val current = readable.whileOpen(LinuxFilesystemSyscalls::identity)
+        if (!sameStableControlIdentity(selectedIdentity, current) ||
+            !sameStableControlIdentity(readableIdentity, current)
+        ) {
+            throw FullTreeControlException("$label retained read descriptor changed identity or metadata")
+        }
+        requireStableControlFile(current, label)
+        val attributes = descriptorAttributes(readable, label)
+        val currentChangeTime = descriptorChangeTime(readable, label)
+        if (
+            attributes.size() != size || attributes.size() !in 1L..maximumBytes ||
+            attributes.lastModifiedTime() != lastModifiedTime || !attributes.isRegularFile ||
+            attributes.isSymbolicLink || currentChangeTime != selectedChangeTime
+        ) {
+            throw FullTreeControlException("$label changed size, type, timestamps, or retained read state")
+        }
+        readLease.requireHeld(label)
+    }
+
     private fun readDescriptorAt(position: Long, destination: ByteArray, offset: Int, length: Int): Int {
         check(!closed) { "stable control file is closed" }
         readLease.requireHeld(label)

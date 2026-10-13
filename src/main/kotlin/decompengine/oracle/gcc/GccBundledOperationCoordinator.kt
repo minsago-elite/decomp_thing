@@ -104,6 +104,32 @@ internal class GccBundledFullExportOperation(
     }
 }
 
+/** Retained native collection provenance; no scored or release authority is granted. */
+internal class GccBundledNativeCallOperation(
+    intentBytes: ByteArray,
+    executionReceiptBytes: ByteArray,
+    nativeAssessmentReceiptBytes: ByteArray,
+    val model: GccBundledFullExportSnapshot,
+    val snapshot: GccBundledNativeCallSnapshot,
+    constructionPermit: Any,
+) {
+    val complete = false
+    val scored = false
+    val releaseEligible = false
+    private val intent = intentBytes.copyOf()
+    private val execution = executionReceiptBytes.copyOf()
+    private val assessment = nativeAssessmentReceiptBytes.copyOf()
+    val intentBytes: ByteArray get() = intent.copyOf()
+    val executionReceiptBytes: ByteArray get() = execution.copyOf()
+    val nativeAssessmentReceiptBytes: ByteArray get() = assessment.copyOf()
+
+    init {
+        check(constructionPermit === GCC_BUNDLED_PREPARED_OPERATION_PERMIT) {
+            "GCC native call operation requires retained coordinator ownership"
+        }
+    }
+}
+
 internal class GccBundledInterruptedOperation(
     executionReceiptBytes: ByteArray,
     prefixAssessmentReceiptBytes: ByteArray,
@@ -150,6 +176,7 @@ internal class GccBundledPreparedOperation internal constructor(
     private var pendingCleanup: KotlinSystemdCgroupCommandCleanup? = null
     private var completedExport: GccBundledExecutedOperation? = null
     private var completedFullExport: GccBundledFullExportOperation? = null
+    private var completedNativeCalls: GccBundledNativeCallOperation? = null
     private val completedControls = linkedMapOf<String, LinuxFileIdentity>()
     private var plannerAttempted = false
     private var completedPlan: GccBundledPlannedOperation? = null
@@ -230,8 +257,41 @@ internal class GccBundledPreparedOperation internal constructor(
         }
     }
 
+    /** Captures both outputs only after the contained worker and its cgroup are absent. */
+    @Synchronized
+    fun executeNativeCallObservations(): GccBundledNativeCallOperation {
+        check(intent.bundledRuntime.invocationVersion == 8 && intent.engineId == "cc1" &&
+            intent.runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL && intent.cliInvocation != null
+        ) { "native observations require the retained fresh pinned cc1 CLI operation" }
+        return executeRun(GccCompilerEngineContainmentRunKind.FRESH_CONTROL, null) { borrowed, execution ->
+            val receipt = journal.recordExecution(execution.canonicalBytes)
+            val deadline = checkNotNull(operationDeadline)
+            val target = inputs.nativeCallTargetEvidence { deadline.requireCurrent() }
+            val captured = borrowed.withPinnedDescriptor { descriptor ->
+                val model = GccBundledFullExportCapture.captureWithNativeCallSibling(
+                    descriptor, directories.getValue("reports"), intent.artifacts,
+                    checkpoint = { deadline.requireCurrent() },
+                )
+                val controlName = checkNotNull(intent.bundledRuntime.freshControlDirectoryName(borrowed.path))
+                val native = GccBundledNativeCallCapture.capture(
+                    descriptor, directories.getValue("reports"), controlName,
+                    checkNotNull(execution.controlDirectoryIdentity), model,
+                    checkNotNull(intent.bundledRuntime.nativeCallCollector).sourceSha256, target,
+                    checkpoint = { deadline.requireCurrent() },
+                )
+                model to native
+            }
+            inputs.verify("after GCC native call snapshot")
+            lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+            val assessment = journal.recordExportAssessment(bindWallTime(captured.second.assessmentBytes))
+            GccBundledNativeCallOperation(intent.canonicalBytes, receipt, assessment,
+                captured.first, captured.second, GCC_BUNDLED_PREPARED_OPERATION_PERMIT)
+        }.also { completedNativeCalls = it }
+    }
+
     @Synchronized
     fun executeUntilCheckpoint(minimumCompletedFunctions: Long): GccBundledInterruptedOperation {
+        check(intent.bundledRuntime.invocationVersion != 8) { "native call collection does not support checkpoint or resume" }
         intent.cliInvocation?.requireCheckpointSelection(minimumCompletedFunctions)
         val trigger = GccBundledCheckpointTrigger(minimumCompletedFunctions)
         var stoppedExport: GccBundledInterruptedExportSnapshot? = null
@@ -530,7 +590,7 @@ internal class GccBundledPreparedOperation internal constructor(
     @Synchronized
     fun publishFullExportCliResult(authenticatedExport: GccDriverStructuralAuthenticatedFullExportV1): Path {
         check(!closed && !poisoned && !cliPublicationAttempted)
-        check(intent.bundledRuntime.recoveryMode == "full") {
+        check(intent.bundledRuntime.recoveryMode == "full" && intent.bundledRuntime.invocationVersion != 8) {
             "structural binding publication requires a full-recovery operation"
         }
         val cli = checkNotNull(intent.cliInvocation) { "operation has no bound CLI output" }
@@ -621,6 +681,51 @@ internal class GccBundledPreparedOperation internal constructor(
         }
     }
 
+    /** Result pointers bind the unchanged model tree and native bytes under this same owner. */
+    @Synchronized
+    fun publishNativeCallCliResult(): Path {
+        check(!closed && !poisoned && !cliPublicationAttempted)
+        check(intent.bundledRuntime.invocationVersion == 8)
+        val cli = checkNotNull(intent.cliInvocation)
+        val operation = checkNotNull(completedNativeCalls) { "operation has no completed native capture" }
+        cliPublicationAttempted = true
+        try {
+            val deadline = checkNotNull(operationDeadline)
+            val original = GccCompilerEngineContainmentContract.parseDefinitionForLiveController(definition)
+            fun requireCapturedOutputs() {
+                deadline.requireCurrent()
+                inputs.verify("before native result publication")
+                journal.verify("before native result publication")
+                lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+                lease.withCurrentOperationRunRootBeforeLaunch(runRoot) { borrowed ->
+                    borrowed.withPinnedDescriptor { descriptor ->
+                        GccBundledNativeCallCapture.requireUnchanged(descriptor, operation.snapshot,
+                            operation.model, intent.artifacts, checkpoint = { deadline.requireCurrent() })
+                    }
+                }
+                deadline.requireCurrent()
+            }
+            requireCapturedOutputs()
+            val binding = GccNativeCallReceiptLineage.createBinding(operation)
+            val bindingName = "native-call-observation-binding.json"
+            val treeName = GccBundledFullExportCliResultV2.TREE_MANIFEST_NAME
+            val result = GccBundledNativeCallCliResult.create(operation, binding,
+                journal.path, original.outputLease.path, cli.options.output, deadline.snapshot())
+            LinuxFilesystemSyscalls.openRoot(cli.options.output).use { output ->
+                cli.requireCurrent()
+                DescriptorBoundAtomicStateFile.publishManifestNoReplace(output, treeName,
+                    operation.model.sidecarManifest, GccBundledFullExportCliResultV2.MAXIMUM_TREE_MANIFEST_BYTES)
+                DescriptorBoundAtomicStateFile.publishNoReplace(output, bindingName, binding, 256 * 1024)
+                GccBundledNativeCallCliPublication.publishResultMarker(output, result,
+                    beforeCommit = { requireCapturedOutputs(); cli.requireCurrent() })
+            }
+            return cli.options.output.resolve("result.json")
+        } catch (failure: Throwable) {
+            poisoned = true
+            throw failure
+        }
+    }
+
     private fun bindWallTime(assessmentBytes: ByteArray): ByteArray {
         val assessment = OracleJson.parseCanonical(assessmentBytes) as JsonObject
         val fields = assessment - "assessmentSha256" + ("operationWallTime" to checkNotNull(operationDeadline).snapshot())
@@ -641,7 +746,7 @@ internal class GccBundledPreparedOperation internal constructor(
     ): T {
         requireCurrent()
         require(intent.runKind == kind) { "GCC bundled execution kind differs from the prepared intent" }
-        require(intent.bundledRuntime.invocationVersion in 2..3 || intent.bundledRuntime.invocationVersion in 5..7) {
+        require(intent.bundledRuntime.invocationVersion in 2..3 || intent.bundledRuntime.invocationVersion in 5..8) {
             "GCC contained execution requires an explicitly bound fresh JVM runtime"
         }
         executionAttempted = true
@@ -697,11 +802,13 @@ internal class GccBundledPreparedOperation internal constructor(
                     beforeStart = { attachment ->
                         inputs.verify("before GCC command START")
                         lease.requireCurrentOperationRunRootAfterScopeAttachment(runRoot)
+                        requireFreshNativeReports(borrowed)
                         journal.recordAttachment(attachment.canonicalBytes)
                         journal.recordStartAuthorization()
                         inputs.verify("after durable GCC command START authorization")
                         journal.verify("before GCC command START delivery")
                         lease.requireCurrentOperationRunRootAfterScopeAttachment(runRoot)
+                        requireFreshNativeReports(borrowed)
                     },
                 )
                 lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
@@ -715,6 +822,18 @@ internal class GccBundledPreparedOperation internal constructor(
             poisoned = true
             if (failure is KotlinSystemdCgroupCommandExecutionException) pendingCleanup = failure.cleanup
             throw failure
+        }
+    }
+
+    private fun requireFreshNativeReports(borrowed: FullTreeDiskScratchBorrowedRunRoot) {
+        if (intent.bundledRuntime.invocationVersion != 8) return
+        borrowed.withPinnedDescriptor { run ->
+            LinuxFilesystemSyscalls.openDirectoryAt(run.fd, "reports").use { reports ->
+                require(reports.identity == directories.getValue("reports") &&
+                    LinuxFilesystemSyscalls.directoryEntryNames(reports, 1).isEmpty()) {
+                    "native collector output must be absent before START"
+                }
+            }
         }
     }
 

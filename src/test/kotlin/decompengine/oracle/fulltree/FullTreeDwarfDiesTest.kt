@@ -213,6 +213,29 @@ class FullTreeDwarfDiesTest {
     }
 
     @Test
+    fun `wide data16 payload storage is charged before retained attribute admission`() {
+        val abbreviations = section(byteArrayOf(
+            1, DW_TAG_COMPILE_UNIT.toByte(), 0,
+            0x1c, FULL_TREE_DW_FORM_DATA16.toByte(), 0, 0, 0,
+        ), ".debug_abbrev")
+        fun capture(payload: ByteArray, maximumBytes: Long = 1024L * 1024L): FullTreeDwarfDieIndex {
+            val unit = compilationUnit(byteArrayOf(1) + payload)
+            return FullTreeDwarfDies.readCompilationUnit(
+                unit.info, abbreviations, unit.header, FullTreeControlLimits(),
+                generousLimits().copy(maximumRetainedBytes = maximumBytes), FullTreeDwarfParseBudget(256L),
+                contextForAttribute = { FullTreeDwarfFormContext.DATA_VALUE },
+            )
+        }
+        val narrowBytes = capture(ByteArray(16)).modeledRetainedBytes
+        val wide = ByteArray(16) { 0xff.toByte() }
+        val expectedBytes = narrowBytes + 128L
+        assertEquals(expectedBytes, capture(wide, expectedBytes).modeledRetainedBytes)
+        assertFailsWith<FullTreeControlException> { capture(wide, expectedBytes - 1L) }
+        assertIs<FullTreeDwarfWideUnsignedConstantValue>(capture(wide).root.attributes.single().value)
+        assertIs<FullTreeDwarfUnsignedConstantValue>(capture(ByteArray(16), narrowBytes).root.attributes.single().value)
+    }
+
+    @Test
     fun `filtered retention still parses counts and validates the complete DIE tree`() {
         val abbreviations = byteArrayOf(
             1, DW_TAG_COMPILE_UNIT.toByte(), 1, 0, 0,

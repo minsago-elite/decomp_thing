@@ -26,6 +26,7 @@ internal class GccBundledGhidraRetainedRuntime private constructor(
     private val descriptor: LinuxDescriptor,
     private val mount: FullTreeDiskMount,
     private val inventory: Map<String, GccBundledRuntimeEntryState>,
+    private val nativeProfile: GccRetainedCompilerEngineProfile?,
 ) : AutoCloseable {
     val deploymentClosureSha256: String = deployment.reference.closureSha256
     val runtimeIdentitySha256: String = runtimeIdentity(root, deploymentClosureSha256, mount, inventory)
@@ -34,6 +35,7 @@ internal class GccBundledGhidraRetainedRuntime private constructor(
     @Synchronized
     fun verify(label: String) {
         check(!closed) { "bundled Ghidra retained runtime is closed" }
+        nativeProfile?.requireCurrent()
         deployment.verify(label)
         openTrustedRuntimeRoot(root).use { current ->
             require(current.identity == descriptor.identity && LinuxFilesystemSyscalls.identity(descriptor.fd) == descriptor.identity) {
@@ -49,6 +51,7 @@ internal class GccBundledGhidraRetainedRuntime private constructor(
             require(current.identity == descriptor.identity) { "bundled Ghidra runtime root changed during verification" }
         }
         deployment.verify("after runtime verification $label")
+        nativeProfile?.requireCurrent()
     }
 
     @Synchronized
@@ -61,26 +64,40 @@ internal class GccBundledGhidraRetainedRuntime private constructor(
             val previous = failure
             if (previous == null) failure = next else if (previous !== next) previous.addSuppressed(next)
         }
+        runCatching { nativeProfile?.close() }.exceptionOrNull()?.let { next ->
+            val previous = failure
+            if (previous == null) failure = next else if (previous !== next) previous.addSuppressed(next)
+        }
         failure?.let { throw it }
     }
 
     companion object {
         fun open(definition: GccCompilerEngineValidatedContainmentDefinition): GccBundledGhidraRetainedRuntime {
             val runtime = requireNotNull(definition.bundledRuntime) { "retained Ghidra runtime requires a bundled v2 definition" }
-            return open(runtime, definition.artifacts, listOf(definition.outputLease.path))
+            return open(runtime, definition.artifacts, listOf(definition.outputLease.path), definition.budgets)
         }
 
         fun open(
             runtime: GccBundledGhidraRuntime,
             artifacts: List<GccCompilerEngineContainmentArtifactIdentity>,
             excludedRoots: List<Path>,
+            budgets: GccCompilerEngineContainmentBudgets? = null,
         ): GccBundledGhidraRetainedRuntime {
             require(excludedRoots.size in 1..16 && excludedRoots.all { it.isAbsolute && it.normalize() == it }) {
                 "bundled Ghidra excluded roots are not bounded canonical paths"
             }
             val deployment = GccBundledGhidraDeploymentReference.open()
             var descriptor: LinuxDescriptor? = null
+            var nativeProfile: GccRetainedCompilerEngineProfile? = null
             try {
+                if (runtime.invocationVersion == 8) {
+                    val selectedBudget = requireNotNull(budgets) { "native call runtime admission requires independently bound resource ceilings" }
+                    val path = artifacts.single { it.role == GccCompilerEngineContainmentArtifactRole.BENCHMARK_PROFILE }.path
+                    val profile = GccRetainedCompilerEngineProfile.open(path)
+                    nativeProfile = profile
+                    profile.requireDisjoint(excludedRoots + runtime.root)
+                    profile.bindInvocation("cc1", artifacts, selectedBudget, nativeCallObservations = true)
+                }
                 deployment.reference.requireCandidate(runtime, artifacts)
                 require(excludedRoots.none { runtime.root.startsWith(it) || it.startsWith(runtime.root) }) {
                     "bundled Ghidra runtime overlaps writable output"
@@ -90,12 +107,13 @@ internal class GccBundledGhidraRetainedRuntime private constructor(
                 require(selected.identity.mode and 0xfff == 493) { "bundled Ghidra root permissions differ from the deployment reference" }
                 val mount = readRuntimeMount(runtime.root, selected.identity)
                 val inventory = captureInventory(selected, deployment.reference, hashContents = true)
-                val retained = GccBundledGhidraRetainedRuntime(runtime.root, deployment, selected, mount, inventory)
+                val retained = GccBundledGhidraRetainedRuntime(runtime.root, deployment, selected, mount, inventory, nativeProfile)
                 retained.verify("after full content authentication")
                 return retained
             } catch (failure: Throwable) {
                 runCatching { descriptor?.close() }.exceptionOrNull()?.takeIf { it !== failure }?.let(failure::addSuppressed)
                 runCatching { deployment.close() }.exceptionOrNull()?.takeIf { it !== failure }?.let(failure::addSuppressed)
+                runCatching { nativeProfile?.close() }.exceptionOrNull()?.takeIf { it !== failure }?.let(failure::addSuppressed)
                 throw failure
             }
         }
