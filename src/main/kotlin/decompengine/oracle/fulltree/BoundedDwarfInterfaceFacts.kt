@@ -254,10 +254,16 @@ internal class BoundedDwarfInterfaceFacts internal constructor(
         val writer = BoundedDwarfCanonicalShardWriter(limits.shardLimits.copy(
             maximumTotalBytes = minOf(limits.maximumOutputBytes, limits.shardLimits.maximumTotalBytes),
         ), consumer)
+        visitCanonicalRecordGroups(writer::write)
+        return writer.finish()
+    }
+
+    /** Shared normalized record stream; never constructs an inline type graph or all-record array. */
+    fun visitCanonicalRecordGroups(consumer: (String, Sequence<JsonObject>) -> Unit) {
         val orderedTypes = types.values.sortedBy { it.id }
         val metadata = metadataJson()
-        writer.write("metadata", sequenceOf(JsonObject(metadata + mapOf(
-            "typeChildEncoding" to JsonPrimitive("type-headers-with-ordered-child-locators-v2"),
+        consumer("metadata", sequenceOf(JsonObject(metadata + mapOf(
+            "typeChildEncoding" to JsonPrimitive(RAW_RECORD_ENCODING),
             "typePromotedFactFallbacks" to JsonObject(linkedMapOf(
                 "types" to JsonObject(TYPE_PROMOTED_FACT_ATTRIBUTES.mapValues { JsonPrimitive(it.value) }),
                 "typeChildren" to JsonObject(CHILD_PROMOTED_FACT_ATTRIBUTES.mapValues { JsonPrimitive(it.value) }),
@@ -269,17 +275,16 @@ internal class BoundedDwarfInterfaceFacts internal constructor(
             "ordering" to JsonPrimitive("functions-by-address-locator;types-by-locator;" +
                 "typeChildren-by-parent-locator-physical-child;globals-by-physical-DIE;objects-by-table-entry"),
         ))))
-        writer.write("functions", functions.asSequence().map { it.toJson() })
-        writer.write("types", orderedTypes.asSequence().map(::typeShardHeader))
-        writer.write("typeChildren", orderedTypes.asSequence().flatMap { parent ->
+        consumer("functions", functions.asSequence().map { it.toJson() })
+        consumer("types", orderedTypes.asSequence().map(::typeShardHeader))
+        consumer("typeChildren", orderedTypes.asSequence().flatMap { parent ->
             parent.children.asSequence().map { child -> JsonObject(linkedMapOf(
                 "parentTypeId" to JsonPrimitive(parent.id),
                 "child" to compactPromotedTypeFacts(child.toJson(), CHILD_PROMOTED_FACT_ATTRIBUTES),
             )) }
         })
-        writer.write("globals", globals.asSequence().map { it.toJson() })
-        writer.write("objectSymbols", objectSymbols.asSequence().map { it.toJson() })
-        return writer.finish()
+        consumer("globals", globals.asSequence().map { it.toJson() })
+        consumer("objectSymbols", objectSymbols.asSequence().map { it.toJson() })
     }
 
     /** Project the header directly: inline child JSON can itself exceed a shard's node bound. */
@@ -303,10 +308,11 @@ internal class BoundedDwarfInterfaceFacts internal constructor(
         })
     }
 
-    private companion object {
-        val TYPE_PROMOTED_FACT_ATTRIBUTES = linkedMapOf("name" to "0x3", "byteSize" to "0xb",
+    companion object {
+        const val RAW_RECORD_ENCODING = "type-headers-with-ordered-child-locators-v2"
+        private val TYPE_PROMOTED_FACT_ATTRIBUTES = linkedMapOf("name" to "0x3", "byteSize" to "0xb",
             "encoding" to "0x3e", "type" to "0x49")
-        val CHILD_PROMOTED_FACT_ATTRIBUTES = linkedMapOf("name" to "0x3", "type" to "0x49")
+        private val CHILD_PROMOTED_FACT_ATTRIBUTES = linkedMapOf("name" to "0x3", "type" to "0x49")
     }
     fun canonicalBytes(): ByteArray = OracleJson.canonicalBytes(toJson(), StrictJsonLimits(
         maximumInputBytes = minOf(limits.maximumOutputBytes, 64L * 1024L * 1024L).toInt(),

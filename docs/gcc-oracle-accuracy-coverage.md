@@ -101,6 +101,35 @@ omitted only when its full value and evidence equal that attribute. An
 explicit promoted field takes precedence, preserving differing or missing
 attributes without loss.
 
+The version 3 evidence bundle adds a `dwarf-pre-policy-inventory-v1` manifest
+and bounded observation-inventory shards. The manifest binds the checked
+input roles, scanner producer, raw record encoding and type-graph scope. Its
+independent SHA-256 commitment frames each canonical record with its kind,
+byte length and final record count, so it does not depend on shard boundaries
+or ABI projection results. Raw record publication is unchanged. Only semantic
+metadata participates in this commitment; operational scan counters and
+resource ceilings remain in the outer evidence without changing observation
+identity.
+
+The inventory retains every captured return type, candidate parameter-list
+type and variable type, including automatic locals and unresolved or deferred
+references. It also retains type and child type references, containing-type
+references, and physical type identities without deduplicating equal names or
+layouts. The reviewed function selections remain visible even when excluded
+or missing DWARF candidates. Cycle, missing-target, deferred-expansion and
+member-population findings stay explicit. Observed member counts are not
+required member cardinalities: `requiredMemberCardinality` is null, and both
+per-type completeness and `requiredTypePopulationComplete` remain false.
+
+Bundle verification checks closed schemas, stream order, input bindings,
+commitments and inventory counts. It does not authenticate the supplied
+manifest or independently rederive root/reference coverage from the raw
+streams. Recomputing a changed inventory produces a different identity that
+requires external authentication and review. This pre-policy checkpoint does
+not define admitted global/shared-type entities, fold aliases or declarations,
+prove member completeness, bind a recovered model, or replace the reviewed
+population ledger required before ABI scoring.
+
 The driver profile separately bounds the retained fact model at 1 GiB using
 fixed record/container allowances and UTF-16 string payload sizes. This is
 a deterministic resource model, not an RSS measurement. Encoded publication

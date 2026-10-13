@@ -10,6 +10,9 @@ import decompengine.oracle.structural.DwarfSysvAmd64Classification
 import decompengine.oracle.fulltree.BoundedDwarfInterfaceFactScanner
 import decompengine.oracle.fulltree.BoundedDwarfInterfaceFacts
 import decompengine.oracle.fulltree.BoundedDwarfInterfaceTypeResolver
+import decompengine.oracle.fulltree.BoundedDwarfObservationInventoryV1
+import decompengine.oracle.fulltree.BoundedDwarfObservationInput
+import decompengine.oracle.fulltree.BoundedDwarfInterfaceFactLimits
 import decompengine.oracle.fulltree.DwarfInterfaceFact
 import decompengine.oracle.fulltree.DwarfInterfaceFactState
 import decompengine.oracle.fulltree.DwarfInterfaceFunctionFacts
@@ -76,6 +79,22 @@ class GccDriverDwarfInterfaceEvidenceTest {
     }
 
     @Test
+    fun `inventory selections preserve every reviewed record independently of ABI classification`() {
+        val oracle = JsonArray(listOf(oracle("known", "0x3000"), oracle("missing", "0x3010"), oracle("inline", null, true)))
+        val mapping = GccDriverDwarfInterfaceEvidence.mapFunctions(oracle, listOf(function(0x3000UL, "die-1")))
+        val changed = JsonObject(mapping + ("functions" to JsonArray(mapping.getValue("functions").jsonArray.map {
+            JsonObject(it.jsonObject + mapOf("abiStatus" to JsonPrimitive("changed-ABI-assessment"),
+                "projectedAbiLocator" to JsonPrimitive("unrelated-projection")))
+        })))
+        fun selectionFields(value: JsonObject) = GccDriverDwarfInterfaceEvidence.inventorySelections(value).map {
+            listOf(it.id, it.rva?.toString(16), it.candidateLocators.joinToString(","), it.excluded.toString())
+        }
+        assertEquals(listOf(listOf("known", "3000", "die-1", "false"),
+            listOf("missing", "3010", "", "false"), listOf("inline", null, "", "true")), selectionFields(mapping))
+        assertEquals(selectionFields(mapping), selectionFields(changed))
+    }
+
+    @Test
     fun `driver capture rejects a same-size changed checked control before scanning`() = temporary { temp ->
         val path = temp.resolve("oracle/targets/sysv-amd64-v1.json")
         Files.createDirectories(path.parent)
@@ -130,6 +149,7 @@ class GccDriverDwarfInterfaceEvidenceTest {
             GccDriverDwarfInterfaceEvidence.verifyBundle(first.canonicalBytes(), listOf(parts.first().first to changedPart) + parts.drop(1))
         }
         val document = OracleJson.parseCanonical(first.canonicalBytes(), GccDriverDwarfInterfaceEvidence.EVIDENCE_JSON_LIMITS).jsonObject
+        assertEquals(JsonPrimitive(3), document.getValue("schemaVersion"))
         listOf("complete", "scored", "productionVerified", "releaseEligible").forEach {
             assertEquals(JsonPrimitive(false), document.getValue(it), it)
         }
@@ -150,6 +170,17 @@ class GccDriverDwarfInterfaceEvidenceTest {
         assertTrue(records("types").isNotEmpty())
         assertTrue(records("globals").isNotEmpty())
         assertTrue(records("globalProjection").isNotEmpty())
+        val inventory = document.getValue("prePolicyInventory").jsonObject
+        val secondInventory = OracleJson.parseCanonical(second.canonicalBytes(),
+            GccDriverDwarfInterfaceEvidence.EVIDENCE_JSON_LIMITS).jsonObject.getValue("prePolicyInventory")
+        assertEquals(inventory, secondInventory, "both authenticated captures must reproduce the pre-policy commitment")
+        val inventoryCounts = inventory.getValue("counts").jsonObject
+        assertEquals(JsonPrimitive(records("functions").size), inventoryCounts.getValue("functionReturnRoots"))
+        assertEquals(JsonPrimitive(records("globals").size), inventoryCounts.getValue("variableRoots"))
+        assertEquals(JsonPrimitive(12_844), inventoryCounts.getValue("selections"))
+        assertEquals(12_844, records("inventorySelections").size)
+        assertTrue(records("inventoryRoots").isNotEmpty())
+        assertTrue(records("inventoryTypeCompleteness").isNotEmpty())
         val candidateIds = records("functions").map { it.getValue("locator").jsonPrimitive.content }.toSet()
         records("oracleFunctions").forEach { record ->
             record.getValue("candidateDieLocators").jsonArray.forEach { assertTrue(it.jsonPrimitive.content in candidateIds) }
@@ -164,7 +195,8 @@ class GccDriverDwarfInterfaceEvidenceTest {
         OracleArtifacts.publishAtomically(destination.resolve(GccDriverDwarfInterfaceEvidence.EVIDENCE_NAME), first.canonicalBytes(),
             OracleArtifactLimits(GccDriverDwarfInterfaceEvidence.MAXIMUM_EVIDENCE_BYTES))
         val qualification = JsonObject(mapOf(
-            "provider" to JsonPrimitive("gcc-driver-dwarf-interface-qualification-v2"),
+            "provider" to JsonPrimitive("gcc-driver-dwarf-interface-qualification-v3"),
+            "prePolicyInventorySha256" to inventory.getValue("inventorySha256"),
             "evidenceSha256" to JsonPrimitive(first.sha256), "evidenceBytes" to JsonPrimitive(first.canonicalBytes().size),
             "deterministicRepeat" to JsonPrimitive(true), "deterministicBundleParts" to JsonPrimitive(first.partNames.size), "tamperChecks" to JsonArray(tamperResults.map(::JsonPrimitive)),
             "elapsedMillis" to JsonPrimitive((System.nanoTime() - started) / 1_000_000),
@@ -177,6 +209,7 @@ class GccDriverDwarfInterfaceEvidenceTest {
                 BoundedDwarfInterfaceFacts::class.java, GccDriverDwarfInterfaceEvidence::class.java,
                 DwarfSysvAmd64InterfaceProjection::class.java, DwarfSysvAmd64Classification::class.java,
                 GccDriverDwarfGlobalProjection::class.java, BoundedDwarfCanonicalShardWriter::class.java,
+                BoundedDwarfObservationInventoryV1::class.java,
             ).map(::compiledClassIdentity)),
             "identityScope" to JsonPrimitive("bounded classpath resource bytes read during qualification; not a signed or complete runtime closure"),
             "complete" to JsonPrimitive(false), "scored" to JsonPrimitive(false),
@@ -188,17 +221,29 @@ class GccDriverDwarfInterfaceEvidenceTest {
     }
 
     @Test
-    fun `small v2 bundle rejects missing altered reordered and rehashed reordered parts`() {
-        val base = JsonObject(mapOf("schemaVersion" to JsonPrimitive(2),
-            "provider" to JsonPrimitive("gcc-driver-dwarf-interface-evidence-v2"),
+    fun `small v3 bundle rejects missing altered reordered and rehashed reordered parts`() {
+        val facts = BoundedDwarfInterfaceFacts("0".repeat(64), 1L, "ET_EXEC", 0x400000UL,
+            emptyList(), emptyList(), emptyMap(), 0L, 0, true, BoundedDwarfInterfaceFactLimits())
+        val inventory = BoundedDwarfObservationInventoryV1.collect(facts, emptyList(), null,
+            listOf(BoundedDwarfObservationInput("rich", facts.inputSha256, facts.inputBytes)))
+        val base = JsonObject(mapOf("schemaVersion" to JsonPrimitive(3),
+            "provider" to JsonPrimitive("gcc-driver-dwarf-interface-evidence-v3"),
             "complete" to JsonPrimitive(false), "scored" to JsonPrimitive(false),
-            "productionVerified" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false)))
+            "productionVerified" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
+            "prePolicyInventory" to inventory.manifest, "strippedObjectLayout" to JsonNull))
         val kinds = listOf("metadata", "functions", "types", "typeChildren", "globals", "objectSymbols", "strippedObjects",
-            "projectedTypes", "projectedFunctions", "projectedGlobalTypes", "oracleFunctions", "unmatchedFunctions", "globalProjection")
+            "projectedTypes", "projectedFunctions", "projectedGlobalTypes", "oracleFunctions", "unmatchedFunctions", "globalProjection") +
+            BoundedDwarfObservationInventoryV1.RECORD_KINDS
+        val groups = kinds.associateWith { mutableListOf<JsonObject>() }
+        val retain: (String, Int, ByteArray, Int) -> Unit = { kind, ordinal, bytes, count ->
+            groups.getValue(kind) += parseCanonicalDwarfShard(bytes, expectedKind = kind,
+                expectedOrdinal = ordinal, expectedRecordCount = count).records
+        }
+        facts.visitCanonicalShards(retain)
+        inventory.visitCanonicalShards(retain)
         fun bundle(order: List<String> = kinds) = GccDriverDwarfInterfaceEvidence.pack(base) { consume ->
             val writer = BoundedDwarfCanonicalShardWriter(GccDriverDwarfInterfaceEvidence.SHARD_LIMITS, consume)
-            order.forEach { writer.write(it, if (it == "typeChildren") emptySequence()
-                else sequenceOf(JsonObject(mapOf("identity" to JsonPrimitive(it))))) }
+            order.forEach { writer.write(it, groups[it]?.asSequence() ?: emptySequence()) }
             writer.finish()
         }
         val first = bundle(); val second = bundle()
