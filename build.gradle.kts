@@ -1415,10 +1415,12 @@ distributions {
 }
 
 // Resident checks use process-wide RSS/high-water data. Keep these callback-boundary tests out
-// of the shared core-suite worker when CI requests isolated execution.
+// of the shared core-suite worker when CI requests isolated execution, including
+// the census test whose authenticated whole-run bound includes earlier RSS peaks.
 private val v3BoundaryIsolatedTestMethods = listOf(
     "decompengine.oracle.fulltree.FullTreeFunctionTruthSqliteV3Test.truth v3 final staging recheck rejects rewriting an earlier shard",
     "decompengine.oracle.fulltree.FullTreeFunctionTruthSqliteV3Test.truth v3 publication retains member guards through rename and revokes raced output",
+    "decompengine.oracle.fulltree.FullTreeFunctionTruthSqliteV3Test.truth v3 rederives observation census and preserves one score row per RVA",
 )
 private val isolateV3BoundaryTests = providers.gradleProperty("isolateV3BoundaryTests")
     .map { it == "true" }
@@ -1538,7 +1540,7 @@ tasks.test {
 private fun registerV3BoundaryIsolatedTest(taskName: String, testMethod: String) =
     tasks.register<Test>(taskName) {
         group = "verification"
-        description = "Runs one V3 publication-boundary test in a fresh test JVM"
+        description = "Runs one V3 resident-memory-sensitive test in a fresh test JVM"
         testClassesDirs = sourceSets["test"].output.classesDirs
         classpath = sourceSets["test"].runtimeClasspath
         useJUnitPlatform { excludeTags("ci-live") }
@@ -1559,8 +1561,12 @@ private val v3BoundaryFinalStagingIsolated = registerV3BoundaryIsolatedTest(
 private val v3BoundaryPublicationIsolated = registerV3BoundaryIsolatedTest(
     "v3BoundaryPublicationIsolated", v3BoundaryIsolatedTestMethods[1],
 )
+private val v3BoundaryCensusIsolated = registerV3BoundaryIsolatedTest(
+    "v3BoundaryCensusIsolated", v3BoundaryIsolatedTestMethods[2],
+)
 v3BoundaryFinalStagingIsolated.configure { shouldRunAfter(tasks.named("test")) }
 v3BoundaryPublicationIsolated.configure { shouldRunAfter(v3BoundaryFinalStagingIsolated) }
+v3BoundaryCensusIsolated.configure { shouldRunAfter(v3BoundaryPublicationIsolated) }
 
 dependencies {
     implementation("com.agentclientprotocol:acp:0.30.1")
