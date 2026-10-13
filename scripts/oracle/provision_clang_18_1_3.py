@@ -36,6 +36,15 @@ ROOT = Path(__file__).resolve().parents[2]
 CONTRACT_PATH = ROOT / "oracle/clang/18.1.3/provisioning-contract.json"
 DEFAULT_KEYRING = Path("/usr/share/keyrings/ubuntu-archive-keyring.gpg")
 APT_KEYRING_IN_ROOT = "/usr/share/keyrings/decomp-thing-ubuntu-archive-keyring.gpg"
+PROBE_RETAIN_DIRECTORY = "/usr/local/libexec/decomp-thing/clang-18.1.3"
+PROBE_SOURCE_IN_ROOT = PROBE_RETAIN_DIRECTORY + "/libtooling-probe.cpp"
+PROBE_BINARY_IN_ROOT = PROBE_RETAIN_DIRECTORY + "/libtooling-probe"
+PROBE_FIXTURE_IN_ROOT = PROBE_RETAIN_DIRECTORY + "/libtooling-positive.cpp"
+PROBE_SANDBOX_BLOCK_REASON = (
+    "Clang probe execution is disabled: this provisioning CLI has no reviewed unprivileged "
+    "bubblewrap/cgroup-v2 adapter with capability dropping, CPU/RSS/process/disk/output/wall-time "
+    "limits, and descendant cleanup; do not substitute sudo chroot"
+)
 OCI_INDEX_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json"
 OCI_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
 OCI_CONFIG_MEDIA_TYPE = "application/vnd.oci.image.config.v1+json"
@@ -65,6 +74,7 @@ MAX_DEB822_PARAGRAPH_BYTES = 16 * 1024 * 1024
 MAX_SOURCE_DIAGNOSTIC_ROWS = 256
 MAX_UPSTREAM_ARCHIVE_MEMBERS = 300_000
 MAX_UPSTREAM_EXPANDED_BYTES = 3 * 1024 * 1024 * 1024
+ROOTFS_TAR_BUDGET_TIMEOUT_SECONDS = 120
 SNAPSHOT_METADATA_PROBE = "20240702T000000Z"
 PAUSED_UPSTREAM_SIGNATURE_URL = (
     "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.3/"
@@ -531,10 +541,63 @@ def package_source_identity(package: dict[str, str]) -> tuple[str, str | None]:
     return match.group(1), match.group(2)
 
 
-def select_source_record(indexes: list[dict], package_name: str, version: str) -> dict:
+def source_location_identity(package_name: object, version: object, directory: object,
+                             suite: object, component: object, profile: dict) -> dict[str, str]:
+    """Validate and normalize the signed source row's complete location identity."""
+    if package_name != profile["sourcePackage"]["name"] or version != profile["sourcePackage"]["version"]:
+        raise ProvisionError("signed source package name/version differs from the pinned profile")
+    if suite not in profile["suites"] or component not in profile["components"]:
+        raise ProvisionError("signed source row suite/component is outside the pinned profile")
+    if not isinstance(directory, str):
+        raise ProvisionError("signed source Directory field is missing or unsafe")
+    parts = PurePosixPath(directory).parts
+    bucket = "lib" if str(package_name).startswith("lib") else str(package_name)[0].lower()
+    if (directory != "/".join(parts) or len(parts) < 4 or parts[0] != "pool" or
+            parts[1] != component or parts[2] != bucket or
+            any(part in ("", ".", "..") or re.fullmatch(r"[A-Za-z0-9+._~-]+", part) is None
+                for part in parts)):
+        raise ProvisionError("signed source Directory does not identify the pinned component/package pool path")
+    return {
+        "name": str(package_name), "version": str(version), "directory": directory,
+        "suite": str(suite), "component": str(component),
+    }
+
+
+def candidate_source_location_identity(source: dict, profile: dict) -> dict[str, str]:
+    if not isinstance(source, dict):
+        raise ProvisionError("candidate source location identity is malformed")
+    return source_location_identity(
+        source.get("name"), source.get("version"), source.get("directory"),
+        source.get("suite"), source.get("component"), profile,
+    )
+
+
+def verify_candidate_source_identity(candidate_source: dict, signed_source: dict, profile: dict) -> None:
+    expected = source_location_identity(
+        signed_source.get("Package"), signed_source.get("Version"), signed_source.get("Directory"),
+        signed_source.get("_suite"), signed_source.get("_component"), profile,
+    )
+    if candidate_source_location_identity(candidate_source, profile) != expected:
+        raise ProvisionError("candidate source location identity differs from the selected signed source row")
+
+
+def select_source_record(indexes: list[dict], package_name: str, version: str, profile: dict) -> dict:
+    """Select identical signed copies by explicit pinned suite/component order."""
     rows = [row for row in indexes if row.get("Package") == package_name and row.get("Version") == version]
-    unique = {(row.get("Directory"), row.get("Checksums-Sha256")) for row in rows}
-    if not rows or len(unique) != 1:
+    identities = []
+    for row in rows:
+        identities.append(source_location_identity(
+            row.get("Package"), row.get("Version"), row.get("Directory"),
+            row.get("_suite"), row.get("_component"), profile,
+        ))
+        source_file_rows(row)
+    unique_coordinates = {(row["suite"], row["component"]) for row in identities}
+    payload_identities = {
+        (row["directory"], tuple(sorted((item["name"], item["bytes"], item["sha256"])
+                                         for item in source_file_rows(source))))
+        for row, source in zip(identities, rows)
+    }
+    if not rows or len(unique_coordinates) != len(rows) or len(payload_identities) != 1:
         observed = sorted({
             f"{row.get('Version', '<missing>')}@{row.get('_suite', '<unknown>')}/{row.get('_component', '<unknown>')}"
             for row in indexes if row.get("Package") == package_name
@@ -544,6 +607,9 @@ def select_source_record(indexes: list[dict], package_name: str, version: str) -
             f"expected a unique signed source record for {package_name}={version}; "
             f"found {len(rows)} exact records; observed signed versions: {observed_text}"
         )
+    suite_order = {suite: index for index, suite in enumerate(profile["suites"])}
+    component_order = {component: index for index, component in enumerate(profile["components"])}
+    rows.sort(key=lambda row: (suite_order[row["_suite"]], component_order[row["_component"]]))
     return rows[0]
 
 
@@ -930,7 +996,7 @@ def acquire_candidate(contract: dict, output: Path, keyring: Path) -> dict:
     diagnostic = source_index_diagnostic(profile, repo_rows, index_records, all_sources,
                                          related_source_rows, related_source_record_count, all_binaries)
     atomic_write(output / "source-selection-diagnostics.json", canonical_json(diagnostic))
-    source = select_source_record(all_sources, source_pin["name"], source_pin["version"])
+    source = select_source_record(all_sources, source_pin["name"], source_pin["version"], profile)
     source_files = source_file_rows(source)
     directory = source.get("Directory")
     if not directory or directory.startswith("/") or ".." in PurePosixPath(directory).parts:
@@ -1047,6 +1113,7 @@ def ensure_source_artifact_contract(candidate: dict, contract: dict | None = Non
     contract = contract or read_contract()
     if candidate.get("profileId") != contract["profile"]["id"]:
         raise ProvisionError("candidate profile ID mismatch")
+    candidate_source_location_identity(candidate.get("source"), contract["profile"])
     keyring = candidate.get("trustedKeyring", {})
     if (keyring.get("bytes", 0) < 1 or not isinstance(keyring.get("sha256"), str) or
             not re.fullmatch(r"[0-9a-f]{64}", keyring["sha256"])):
@@ -1143,7 +1210,8 @@ def verify_candidate_data(candidate_root: Path, candidate: dict, contract: dict,
                     parsed_indexes.append(dict(row, _suite=suite, _component=component))
 
     source_pin = profile["sourcePackage"]
-    source = select_source_record(parsed_indexes, source_pin["name"], source_pin["version"])
+    source = select_source_record(parsed_indexes, source_pin["name"], source_pin["version"], profile)
+    verify_candidate_source_identity(candidate["source"], source, profile)
     authenticated_source_files = {
         str(row["name"]): (int(row["bytes"]), str(row["sha256"]))
         for row in source_file_rows(source)
@@ -1345,142 +1413,6 @@ def _cxx_template_close(tokens: list[str], start: int) -> int | None:
                     return index
     return None
 
-
-def _cxx_member_declarator_names(statement: str, class_name: str) -> list[str]:
-    statement = re.sub(r"\b(?:public|protected|private)\s*:\s*", " ", statement).strip()
-    tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*|::|&&|->|<=|>=|==|!=|\S", statement)
-    if not tokens:
-        return []
-    if tokens[0] in {"using", "typedef", "friend", "static_assert", "class", "struct", "union", "enum", "template"}:
-        return []
-
-    # This lightweight source audit deliberately rejects multiple declarators
-    # instead of guessing where one initializer ends and the next field starts.
-    # Nested commas in function calls, braced initializers, and recognized
-    # template-ids are kept inside their syntactic delimiters.
-    initializer_seen = False
-    paren_depth = bracket_depth = brace_depth = 0
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if token == "(" :
-            paren_depth += 1
-        elif token == ")" and paren_depth:
-            paren_depth -= 1
-        elif token == "[":
-            bracket_depth += 1
-        elif token == "]" and bracket_depth:
-            bracket_depth -= 1
-        elif token == "{":
-            brace_depth += 1
-        elif token == "}" and brace_depth:
-            brace_depth -= 1
-        elif not (paren_depth or bracket_depth or brace_depth):
-            if token == "=" and not initializer_seen:
-                initializer_seen = True
-            elif token == "<":
-                close = _cxx_template_close(tokens, index)
-                if close is not None:
-                    suffix = tokens[close + 1] if close + 1 < len(tokens) else ""
-                    if initializer_seen:
-                        template_suffix = {"(", "{", "::", ".", "->", ";", ",", ")", "]"}
-                        if suffix in template_suffix:
-                            index = close + 1
-                            continue
-                    else:
-                        # In the declared type, a template-id may be followed
-                        # by the member name, a cv/ref/pointer qualifier, or an
-                        # array declarator.
-                        type_suffix = {"*", "&", "&&", "[", "::", "const", "volatile", "="}
-                        if (suffix in type_suffix or
-                                re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", suffix)):
-                            index = close + 1
-                            continue
-            elif token == ",":
-                raise ProvisionError(
-                    "unsupported top-level comma declarator in LangOptions member declaration"
-                )
-        index += 1
-
-    declarators = []
-    paren_depth = bracket_depth = brace_depth = 0
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if token == "<":
-            template_close = _cxx_template_close(tokens, index)
-            if template_close is not None:
-                declarators.extend(tokens[index:template_close + 1])
-                index = template_close + 1
-                continue
-        if not (paren_depth or bracket_depth or brace_depth) and token in ("=", "{"):
-            break
-        declarators.append(token)
-        if token == "(":
-            paren_depth += 1
-        elif token == ")" and paren_depth:
-            paren_depth -= 1
-        elif token == "[":
-            bracket_depth += 1
-        elif token == "]" and bracket_depth:
-            bracket_depth -= 1
-        elif token == "{":
-            brace_depth += 1
-        elif token == "}" and brace_depth:
-            brace_depth -= 1
-        index += 1
-
-    # Distinguish ordinary member functions from data members with a
-    # parenthesized declarator. Function-pointer/data-member forms are not
-    # silently discarded: unsupported forms fail closed below.
-    paren_depth = bracket_depth = 0
-    top_level_parens: list[tuple[int, int]] = []
-    open_index: int | None = None
-    token_index = 0
-    while token_index < len(declarators):
-        token = declarators[token_index]
-        if token == "<":
-            template_close = _cxx_template_close(declarators, token_index)
-            if template_close is not None:
-                token_index = template_close + 1
-                continue
-        if token == "[":
-            bracket_depth += 1
-        elif token == "]" and bracket_depth:
-            bracket_depth -= 1
-        elif not bracket_depth and token == "(":
-            if paren_depth == 0:
-                open_index = token_index
-            paren_depth += 1
-        elif not bracket_depth and token == ")" and paren_depth:
-            paren_depth -= 1
-            if paren_depth == 0 and open_index is not None:
-                top_level_parens.append((open_index, token_index))
-                open_index = None
-        token_index += 1
-    if top_level_parens:
-        first_open, first_close = top_level_parens[0]
-        first_before = declarators[:first_open]
-        first_name = first_before[-1] if first_before else ""
-        first_is_method_parameters = (
-            len(first_before) >= 2 and
-            re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", first_name) is not None
-        ) or (len(first_before) == 1 and first_name == class_name)
-        if (any(token in {"*", "&", "&&"} for token in declarators[first_open + 1:first_close]) and
-                not first_is_method_parameters):
-            raise ProvisionError("unsupported function-pointer/member-pointer declarator in LangOptions class")
-        if _cxx_prefix_has_method_parameter_list(" ".join(declarators), class_name):
-            return []
-        raise ProvisionError("unsupported or ambiguous parenthesized LangOptions member declarator")
-
-    if ":" in declarators:
-        declarators = declarators[:declarators.index(":")]
-    identifiers = [token for token in declarators if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token)]
-    if len(identifiers) >= 2:
-        return [identifiers[-1]]
-    return []
-
-
 _CXX_NON_FUNCTION_IDENTIFIERS = frozenset("""
 alignas alignof asm auto bool break case catch char char8_t char16_t char32_t
 class compl concept const consteval constexpr constinit const_cast continue
@@ -1492,11 +1424,11 @@ static_assert static_cast struct switch template this thread_local throw true
 try typedef typeid typename union unsigned using virtual void volatile wchar_t
 while typeof __typeof __typeof__ __alignof__ __attribute__ __declspec
 """.split())
+
 _CXX_DECLARATION_SPECIFIERS = frozenset("""
 const consteval constexpr constinit explicit export extern friend inline
 mutable register static thread_local typedef virtual
 """.split())
-
 
 def _cxx_prefix_has_method_parameter_list(prefix: str, class_name: str) -> bool:
     """Recognize only a supported function declarator before a member body.
@@ -1563,9 +1495,196 @@ def _cxx_prefix_has_method_parameter_list(prefix: str, class_name: str) -> bool:
     return False
 
 
+def _cxx_member_declarator_names(statement: str, class_name: str) -> list[str]:
+    """Scan the supported pinned-header declarators; reject ambiguous direct state."""
+    statement = re.sub(r"\b(?:public|protected|private)\s*:\s*", " ", statement).strip()
+    tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*|::|&&|->|<=|>=|==|!=|\S", statement)
+    if not tokens:
+        return []
+    templated = tokens[0] == "template"
+    if templated:
+        close = _cxx_template_close(tokens, 1) if len(tokens) > 1 and tokens[1] == "<" else None
+        if close is None or close + 1 >= len(tokens):
+            raise ProvisionError("unsupported direct template state declaration in pinned LangOptions header")
+        tokens = tokens[close + 1:]
+    identifier = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+    reserved = {"void", "bool", "char", "short", "int", "long", "signed", "unsigned",
+                "float", "double", "const", "volatile", "static", "constexpr", "mutable", "auto"}
+    if tokens[0] in {"using", "typedef", "friend", "static_assert"}:
+        return []
+    if tokens[0] in {"class", "struct", "union", "enum"}:
+        if len(tokens) == 2 and identifier.fullmatch(tokens[1]):
+            return []  # A type-only forward declaration cannot add direct data state.
+        raise ProvisionError("unsupported direct state declaration in pinned LangOptions header")
+    if (any(token in {"__attribute__", "__declspec"} for token in tokens) or
+            any(tokens[index:index + 2] == ["[", "["] for index in range(len(tokens)))):
+        raise ProvisionError("unsupported direct state declaration in pinned LangOptions header")
+
+    def supported_return_type(prefix: list[str]) -> bool:
+        if prefix == ["decltype", "(", "auto", ")"]:
+            return True
+        qualifiers = {"const", "volatile", "static", "constexpr", "consteval", "inline", "virtual", "explicit", "typename"}
+        builtin_types = {"void", "bool", "char", "short", "int", "long", "signed", "unsigned", "float", "double", "auto"}
+        atoms = 0
+        builtin = False
+        index = 0
+        while index < len(prefix):
+            token = prefix[index]
+            if token in qualifiers or token in {"*", "&", "&&"}:
+                index += 1
+            elif token in builtin_types:
+                builtin = True
+                index += 1
+            elif identifier.fullmatch(token):
+                atoms += 1
+                index += 1
+                while index + 1 < len(prefix) and prefix[index] == "::" and identifier.fullmatch(prefix[index + 1]):
+                    index += 2
+                if index < len(prefix) and prefix[index] == "<":
+                    depth = 0
+                    while index < len(prefix):
+                        if prefix[index] == "<":
+                            depth += 1
+                        elif prefix[index] == ">":
+                            depth -= 1
+                        index += 1
+                        if depth == 0:
+                            break
+                    if depth:
+                        return False
+            else:
+                return False
+        return (builtin and atoms == 0) or (not builtin and atoms == 1)
+
+    if "operator" in tokens and _cxx_prefix_has_method_parameter_list(statement, class_name):
+        if not supported_return_type(tokens[:tokens.index("operator")]):
+            raise ProvisionError("unsupported direct operator/state declaration in pinned LangOptions header")
+        # An operator such as '<' is punctuation in its name, not an unmatched template angle.
+        nesting = {"(": 0, "[": 0, "{": 0}
+        matching = {")": "(", "]": "[", "}": "{"}
+        for token in tokens[tokens.index("operator") + 1:]:
+            if token in nesting:
+                nesting[token] += 1
+            elif token in matching and nesting[matching[token]]:
+                nesting[matching[token]] -= 1
+            elif token == "," and not any(nesting.values()):
+                raise ProvisionError("unsupported direct mixed method/state declaration in pinned LangOptions header")
+        return []
+
+    initializer_start = first_paren = len(tokens)
+    angle_depth = bracket_depth = 0
+    for index, token in enumerate(tokens):
+        if not angle_depth and not bracket_depth:
+            if token in ("=", "{"):
+                initializer_start = index
+                break
+            if token == "(":
+                first_paren = index
+                break
+        if token == "<":
+            angle_depth += 1
+        elif token == ">" and angle_depth:
+            angle_depth -= 1
+        elif token == "[":
+            bracket_depth += 1
+        elif token == "]" and bracket_depth:
+            bracket_depth -= 1
+    if first_paren < initializer_start:
+        if tokens[:first_paren] == ["decltype"]:
+            # Support the pinned method return spelling without treating a decltype field as a method.
+            if tokens[first_paren:first_paren + 3] == ["(", "auto", ")"]:
+                next_open = first_paren + 4
+                if next_open < len(tokens) and tokens[next_open] == "(":
+                    first_paren = next_open
+        prefix = tokens[:first_paren]
+        group_prefix = " ".join(tokens[first_paren + 1:])
+        if re.match(r"^(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*[*&]", group_prefix):
+            raise ProvisionError("unsupported direct parenthesized state declarator in pinned LangOptions header")
+        if prefix in ([class_name], ["~", class_name]):
+            return []
+        if (prefix and identifier.fullmatch(prefix[-1]) and prefix[-1] not in reserved and
+                supported_return_type(prefix[:-1])):
+            nesting = {"<": 0, "(": 0, "[": 0, "{": 0}
+            matching = {">": "<", ")": "(", "]": "[", "}": "{"}
+            for token in tokens[first_paren:]:
+                if token in nesting:
+                    nesting[token] += 1
+                elif token in matching and nesting[matching[token]]:
+                    nesting[matching[token]] -= 1
+                elif token == "," and not any(nesting.values()):
+                    raise ProvisionError("unsupported direct mixed method/state declaration in pinned LangOptions header")
+            return []  # Only a supported method prefix may discard a parameter list.
+        raise ProvisionError("unsupported direct parenthesized state declarator in pinned LangOptions header")
+
+    if templated:
+        raise ProvisionError("unsupported direct template state declaration in pinned LangOptions header")
+
+    # Split each declarator before stripping its own initializer. Nested initializer commas
+    # and template arguments stay within their declarator rather than hiding later fields.
+    chunks = []
+    current = []
+    depths = {"<": 0, "(": 0, "[": 0, "{": 0}
+    closing = {">": "<", ")": "(", "]": "[", "}": "{"}
+    for token in tokens:
+        if token in depths:
+            depths[token] += 1
+        elif token in closing:
+            opener = closing[token]
+            if not depths[opener]:
+                raise ProvisionError("unsupported direct unbalanced declarator in pinned LangOptions header")
+            depths[opener] -= 1
+        if token == "," and not any(depths.values()):
+            chunks.append(current)
+            current = []
+        else:
+            current.append(token)
+    if any(depths.values()) or not current:
+        raise ProvisionError("unsupported direct unbalanced declarator in pinned LangOptions header")
+    chunks.append(current)
+
+    names = []
+    for index, chunk in enumerate(chunks):
+        head = []
+        angle_depth = 0
+        for token in chunk:
+            if not angle_depth and token in ("=", "{", "[", ":"):
+                break
+            if token == "<":
+                angle_depth += 1
+            elif token == ">":
+                angle_depth -= 1
+            head.append(token)
+        root_identifiers = []
+        angle_depth = 0
+        for token in head:
+            if token == "<":
+                angle_depth += 1
+            elif token == ">":
+                angle_depth -= 1
+            elif not angle_depth and identifier.fullmatch(token):
+                root_identifiers.append(token)
+            elif token not in {"::", "*", "&", "&&", ","} and not angle_depth:
+                raise ProvisionError("unsupported direct state declarator in pinned LangOptions header")
+        if (not head or not identifier.fullmatch(head[-1]) or head[-1] in reserved or
+                len(root_identifiers) < (2 if index == 0 else 1) or
+                (index > 0 and len(root_identifiers) != 1)):
+            raise ProvisionError("unsupported direct state declarator in pinned LangOptions header")
+        names.append(head[-1])
+    return names
+
+
 def extract_cxx_class_data_members(text: str, class_name: str) -> list[str]:
-    """Enumerate direct data-member declarations in one C++ class definition."""
-    masked = _mask_cxx_comments_and_literals(text)
+    """Enumerate supported pinned-header fields, rejecting unrecognized direct state."""
+    # This exact pinned accessor block expands only methods. Other directives inside
+    # the class remain unsupported rather than being silently omitted from the audit.
+    accessor_block = r"""#define LANGOPT(Name, Bits, Default, Description)
+#define ENUM_LANGOPT(Name, Type, Bits, Default, Description) \
+  Type get##Name() const { return static_cast<Type>(Name); } \
+  void set##Name(Type Value) { Name = static_cast<unsigned>(Value); }
+#include "clang/Basic/LangOptions.def"
+"""
+    scanned_text = text.replace(accessor_block, "".join("\n" if char == "\n" else " " for char in accessor_block))
+    masked = _mask_cxx_comments_and_literals(scanned_text)
     match = re.search(r"\bclass\s+" + re.escape(class_name) + r"\b[^;{}]*\{", masked)
     if match is None:
         raise ProvisionError(f"header does not contain the {class_name} class definition")
@@ -1581,6 +1700,8 @@ def extract_cxx_class_data_members(text: str, class_name: str) -> list[str]:
     if depth:
         raise ProvisionError(f"header contains an unterminated {class_name} class definition")
     body = masked[open_brace + 1:close_brace - 1]
+    if "#" in body:
+        raise ProvisionError("unsupported direct preprocessor state declaration in pinned LangOptions header")
     names = []
     statement = []
     initializer_depth = 0
@@ -1589,8 +1710,17 @@ def extract_cxx_class_data_members(text: str, class_name: str) -> list[str]:
         char = body[index]
         if char == "{" and initializer_depth == 0:
             prefix = "".join(statement)
-            is_type_body = re.search(r"\b(?:class|struct|union|enum)\b", prefix)
+            declaration_head = prefix.split("=", 1)[0]
+            type_head = re.sub(r"\b(?:public|protected|private)\s*:\s*", " ", declaration_head).strip()
+            is_type_body = re.match(r"^(?:class|struct|union|enum)\b", type_head)
+            if is_type_body and re.fullmatch(
+                    r"(?:class|struct|union|enum(?:\s+(?:class|struct))?)\s+[A-Za-z_][A-Za-z0-9_]*(?:\s*:\s*[^{};]+)?",
+                    type_head) is None:
+                raise ProvisionError("unsupported direct anonymous or ambiguous type/state declaration in pinned LangOptions header")
             is_function_body = _cxx_prefix_has_method_parameter_list(prefix, class_name)
+            if is_function_body and not is_type_body:
+                # Do not discard an unrecognized state declarator as if it were a method body.
+                is_function_body = not _cxx_member_declarator_names(prefix, class_name)
             if is_type_body or is_function_body:
                 nested = 1
                 index += 1
@@ -1613,11 +1743,16 @@ def extract_cxx_class_data_members(text: str, class_name: str) -> list[str]:
             initializer_depth -= 1
             statement.append(char)
         elif char == ";" and initializer_depth == 0:
-            names.extend(_cxx_member_declarator_names("".join(statement), class_name))
+            # An already scanned nested type body with no following instance adds no state.
+            if "".join(statement).strip() != "__nested_member_type":
+                names.extend(_cxx_member_declarator_names("".join(statement), class_name))
             statement = []
         else:
             statement.append(char)
         index += 1
+    tail = re.sub(r"\b(?:public|protected|private)\s*:\s*", " ", "".join(statement)).strip()
+    if tail:
+        raise ProvisionError("unterminated direct state declaration in pinned LangOptions header")
     return names
 
 
@@ -1883,29 +2018,55 @@ def check_runner_bounds(workdir: Path, profile: dict) -> None:
         raise ProvisionError("standard runner has less than the pinned memory budget")
 
 
+def rootfs_tar_budget_command(rootfs: Path, maximum_bytes: int) -> list[str]:
+    if type(maximum_bytes) is not int or maximum_bytes < 1:
+        raise ProvisionError("rootfs archive budget must be a positive integer")
+    return ["sudo", "-n", "/usr/bin/python3", "-I", "-B", str(RECIPE_FILES["provisionerSha256"]),
+            "check-rootfs-tar-budget", "--rootfs", str(rootfs.absolute()), "--max-bytes", str(maximum_bytes)]
+
+
+def command_check_rootfs_tar_budget(args: argparse.Namespace) -> int:
+    rootfs = args.rootfs
+    if (not rootfs.is_absolute() or ".." in rootfs.parts or rootfs.is_symlink() or not rootfs.is_dir()):
+        raise ProvisionError("rootfs budget inspection requires an absolute non-symlink directory")
+    if type(args.max_bytes) is not int or args.max_bytes < 1:
+        raise ProvisionError("rootfs archive budget must be a positive integer")
+    check_rootfs_tar_budget(rootfs, args.max_bytes)
+    print("read-only rootfs archive budget passed; native qualification remains incomplete")
+    return 0
+
+
 def check_rootfs_tar_budget(rootfs: Path, maximum_bytes: int) -> None:
     """Conservatively bound canonical tar input size and entry count before writing it."""
+    # The canonical GNU tar command writes at least one default 20 x 512-byte record.
+    if maximum_bytes < 20 * 512:
+        raise ProvisionError("rootfs archive budget is below the minimum canonical tar record size")
     entry_count = 1  # tar includes the root directory as '.'
     payload_bytes = 0
     max_entries = maximum_bytes // 8192
     try:
-        for directory, dirnames, filenames in os.walk(rootfs, followlinks=False):
-            dirnames.sort()
-            filenames.sort()
-            current = Path(directory)
-            for name in [*dirnames, *filenames]:
-                entry_count += 1
-                if entry_count > max_entries:
-                    raise ProvisionError("rootfs entry count exceeds the canonical archive budget")
-                entry = current / name
-                mode = entry.lstat().st_mode
-                if stat.S_ISREG(mode):
-                    payload_bytes += entry.lstat().st_size
-                elif not (stat.S_ISDIR(mode) or stat.S_ISLNK(mode) or stat.S_ISCHR(mode) or
-                          stat.S_ISBLK(mode) or stat.S_ISFIFO(mode)):
-                    raise ProvisionError("rootfs contains an unsupported filesystem entry")
-                if payload_bytes + entry_count * 8192 > maximum_bytes:
-                    raise ProvisionError("rootfs contents exceed the canonical archive byte budget")
+        pending = [rootfs]
+        while pending:
+            current = pending.pop()
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    name = entry.name
+                    if name in (".", ".."):
+                        raise ProvisionError("rootfs contains an invalid directory entry")
+                    entry_count += 1
+                    if entry_count > max_entries:
+                        raise ProvisionError("rootfs entry count exceeds the canonical archive budget")
+                    metadata = entry.stat(follow_symlinks=False)
+                    mode = metadata.st_mode
+                    if stat.S_ISREG(mode):
+                        payload_bytes += metadata.st_size
+                    elif stat.S_ISDIR(mode):
+                        pending.append(current / name)
+                    elif not (stat.S_ISLNK(mode) or stat.S_ISCHR(mode) or
+                              stat.S_ISBLK(mode) or stat.S_ISFIFO(mode)):
+                        raise ProvisionError("rootfs contains an unsupported filesystem entry")
+                    if payload_bytes + entry_count * 8192 > maximum_bytes:
+                        raise ProvisionError("rootfs contents exceed the canonical archive byte budget")
     except OSError as error:
         raise ProvisionError(f"could not inspect retained rootfs for archive bounds: {error}") from error
 
@@ -1922,6 +2083,16 @@ def rootfs_run(rootfs: Path, command: list[str], contract: dict, timeout: int = 
     return run_checked(
         ["sudo", "chroot", str(rootfs), *env_args, *command], timeout=timeout,
     ).stdout
+
+
+def run_probe_sandboxed(rootfs: Path, command: list[str], contract: dict,
+                        timeout: int = 120) -> str:
+    """Fail closed until the reviewed unprivileged resource-bounded adapter is available.
+
+    This intentionally has no fallback to rootfs_run/run_checked: sudo chroot does not
+    contain a candidate probe or descendants and their output is not bounded there.
+    """
+    raise ProvisionError(PROBE_SANDBOX_BLOCK_REASON)
 
 
 def candidate_build_evidence(candidate: dict, contract: dict) -> dict:
@@ -1996,6 +2167,100 @@ def verify_candidate_download_inventory(candidate_root: Path, candidate: dict) -
         raise ProvisionError("candidate download inventory contains unrecorded files")
 
 
+def copy_verified_source_payload(source: Path, destination: Path, expected_bytes: int,
+                                 expected_sha256: str) -> None:
+    """Copy one already-authenticated retained payload into fresh scratch, rechecking bytes."""
+    if (type(expected_bytes) is not int or expected_bytes < 0 or not isinstance(expected_sha256, str) or
+            not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)):
+        raise ProvisionError("authenticated source payload identity is malformed")
+    digest = hashlib.sha256()
+    copied = 0
+    try:
+        source_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+        with os.fdopen(os.open(source, source_flags), "rb") as incoming:
+            if not stat.S_ISREG(os.fstat(incoming.fileno()).st_mode):
+                raise ProvisionError("authenticated source payload is not a regular file")
+            with destination.open("xb") as outgoing:
+                while True:
+                    block = incoming.read(1024 * 1024)
+                    if not block:
+                        break
+                    copied += len(block)
+                    if copied > expected_bytes:
+                        raise ProvisionError("verified source payload grew while copying to audit scratch")
+                    digest.update(block)
+                    outgoing.write(block)
+    except ProvisionError:
+        destination.unlink(missing_ok=True)
+        raise
+    except OSError as error:
+        destination.unlink(missing_ok=True)
+        raise ProvisionError(f"could not copy verified source payload to audit scratch: {error}") from error
+    if copied != expected_bytes or digest.hexdigest() != expected_sha256:
+        destination.unlink(missing_ok=True)
+        raise ProvisionError("verified source payload changed while copying to audit scratch")
+
+
+def audit_fresh_source_payloads(candidate_root: Path, candidate: dict,
+                                scratch_root: Path, contract: dict) -> dict:
+    """Recreate both source trees from verified payload bytes; never reuse caller-owned trees."""
+    source = candidate.get("source")
+    files = source.get("files") if isinstance(source, dict) else None
+    if not isinstance(files, list):
+        raise ProvisionError("authenticated source inputs are malformed for audit replay")
+    dsc_rows = [row for row in files if isinstance(row, dict) and row.get("name", "").endswith(".dsc")]
+    if len(dsc_rows) != 1:
+        raise ProvisionError("authenticated source inputs do not identify one .dsc for audit replay")
+
+    payload_dir = scratch_root / "verified-source-payloads"
+    payload_dir.mkdir()
+    dsc_path: Path | None = None
+    seen_names: set[str] = set()
+    for row in files:
+        if (not isinstance(row, dict) or not isinstance(row.get("name"), str) or
+                PurePosixPath(row["name"]).name != row["name"] or row["name"] in seen_names or
+                not isinstance(row.get("path"), str)):
+            raise ProvisionError("authenticated source payload inventory is malformed")
+        seen_names.add(row["name"])
+        relative = PurePosixPath(row["path"])
+        if relative.is_absolute() or ".." in relative.parts or relative.parts[:1] != ("downloads",):
+            raise ProvisionError("authenticated source payload path is unsafe")
+        original = candidate_root.joinpath(*relative.parts)
+        copied = payload_dir / row["name"]
+        copy_verified_source_payload(original, copied, row.get("bytes"), row.get("sha256"))
+        if row is dsc_rows[0]:
+            dsc_path = copied
+    if dsc_path is None:
+        raise ProvisionError("authenticated source inputs do not contain their pinned .dsc")
+
+    upstream_path = source.get("upstreamArchivePath")
+    if not isinstance(upstream_path, str):
+        raise ProvisionError("authenticated upstream source archive path is malformed")
+    upstream_relative = PurePosixPath(upstream_path)
+    upstream_identity = source.get("upstreamArchive")
+    if (upstream_relative.is_absolute() or ".." in upstream_relative.parts or
+            upstream_relative.parts[:1] != ("downloads",) or not isinstance(upstream_identity, dict)):
+        raise ProvisionError("authenticated upstream source archive path is unsafe")
+    copied_upstream = scratch_root / "upstream-source.tar.xz"
+    copy_verified_source_payload(
+        candidate_root.joinpath(*upstream_relative.parts), copied_upstream,
+        upstream_identity.get("bytes"), upstream_identity.get("sha256"),
+    )
+
+    package_source = scratch_root / "package-source"
+    extract = subprocess.run(
+        ["dpkg-source", "-x", str(dsc_path), str(package_source)],
+        cwd=payload_dir, check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, timeout=900,
+    )
+    if extract.returncode != 0:
+        raise ProvisionError(
+            "dpkg-source rejected the verified .dsc/payload during audit replay: " + extract.stdout[-4000:]
+        )
+    upstream_root = safe_extract_xz_tar(copied_upstream, scratch_root / "upstream")
+    return audit_patches(package_source, upstream_root, scratch_root / "patch-audit.json", contract)
+
+
 def load_candidate(candidate_root: Path, contract: dict, keyring: Path,
                    build_record: dict | None = None) -> tuple[dict, list[dict]]:
     candidate_path = candidate_root / "acquisition-candidate.json"
@@ -2024,28 +2289,8 @@ def load_candidate(candidate_root: Path, contract: dict, keyring: Path,
         key: audit[key] for key in ("status", "patchCount", "patchInventorySha256", "relevantFileCount", "relevantFileManifestSha256")
     }:
         raise ProvisionError("patch audit is missing, incompatible, or changed after acquisition")
-    source_root = candidate_root / "source/package-source"
-    upstream_root = candidate_root / "source/upstream/llvm-project-18.1.3.src"
-    if not source_root.is_dir() and not upstream_root.exists():
-        dsc_rows = [row for row in candidate["source"]["files"] if row["name"].endswith(".dsc")]
-        if len(dsc_rows) != 1:
-            raise ProvisionError("authenticated source inputs do not identify one .dsc for audit replay")
-        dsc_path = candidate_root / dsc_rows[0]["path"]
-        source_root.parent.mkdir(parents=True, exist_ok=True)
-        extract = subprocess.run(
-            ["dpkg-source", "-x", str(dsc_path), str(source_root)],
-            cwd=dsc_path.parent, check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, timeout=900,
-        )
-        if extract.returncode != 0:
-            raise ProvisionError("dpkg-source rejected the authenticated .dsc/payload during audit replay: " + extract.stdout[-4000:])
-        upstream_root = safe_extract_xz_tar(
-            candidate_root / candidate["source"]["upstreamArchivePath"], candidate_root / "source/upstream",
-        )
-    elif not source_root.is_dir() or not upstream_root.is_dir():
-        raise ProvisionError("only one audited source tree is present; refusing partial source state")
     with tempfile.TemporaryDirectory(prefix="patch-audit-replay-", dir=candidate_root) as replay_root:
-        reaudited = audit_patches(source_root, upstream_root, Path(replay_root) / "patch-audit.json", contract)
+        reaudited = audit_fresh_source_payloads(candidate_root, candidate, Path(replay_root), contract)
         if canonical_json(reaudited) != canonical_json(audit):
             raise ProvisionError("patch audit inventory changed between acquisition and provisioning")
     return candidate, parsed
@@ -2197,6 +2442,33 @@ def rootfs_path(rootfs: Path, absolute_path: str) -> Path:
     return result
 
 
+def rootfs_regular_file(rootfs: Path, absolute_path: str, *, executable: bool = False) -> tuple[Path, int]:
+    """Require a non-symlink regular file at the exact in-root path."""
+    try:
+        path = rootfs_path(rootfs, absolute_path)
+    except OSError as error:
+        raise ProvisionError(f"retained rootfs file is unavailable: {absolute_path}") from error
+    root = rootfs.resolve(strict=True)
+    current = root
+    parts = PurePosixPath(absolute_path).parts[1:]
+    for index, part in enumerate(parts):
+        current = current / part
+        try:
+            metadata = current.lstat()
+        except OSError as error:
+            raise ProvisionError(f"retained rootfs file is unavailable: {absolute_path}") from error
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ProvisionError(f"retained rootfs file path contains a symlink: {absolute_path}")
+        if index < len(parts) - 1 and not stat.S_ISDIR(metadata.st_mode):
+            raise ProvisionError(f"retained rootfs file path contains a non-directory parent: {absolute_path}")
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ProvisionError(f"retained rootfs path is not a regular file: {absolute_path}")
+    mode = metadata.st_mode & 0o7777
+    if executable and not (mode & 0o111):
+        raise ProvisionError(f"retained rootfs executable lacks execute permission: {absolute_path}")
+    return path, mode
+
+
 def file_entry(rootfs: Path, absolute_path: str) -> dict:
     path = rootfs_path(rootfs, absolute_path)
     if path.is_symlink():
@@ -2209,13 +2481,93 @@ def file_entry(rootfs: Path, absolute_path: str) -> dict:
     return {"path": absolute_path, "bytes": len(data), "sha256": sha256(data)}
 
 
+def runtime_file_entry(rootfs: Path, absolute_path: str) -> dict:
+    """Retain file kind and symlink bytes so the recorded closure is independently projectable."""
+    _, path = symlink_chain(rootfs, absolute_path, follow_leaf=False)
+    if path.is_symlink():
+        # Interpret absolute targets in the rootfs, never against the host filesystem.
+        symlink_chain(rootfs, absolute_path, allow_directory_target=True)
+        target = os.readlink(path)
+        try:
+            target_bytes = target.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as error:
+            raise ProvisionError("runtime symlink target is not valid UTF-8") from error
+        if len(target_bytes) > 4096:
+            raise ProvisionError("runtime symlink target is outside filesystem bounds")
+        return {"path": absolute_path, "bytes": len(target_bytes), "sha256": sha256(b"symlink\0" + target_bytes),
+                "kind": "symlink", "target": target}
+    data = path.read_bytes()
+    return {"path": absolute_path, "bytes": len(data), "sha256": sha256(data),
+            "kind": "regular-file", "target": None}
+
+
 def manifest(entries: list[dict]) -> dict:
     entries.sort(key=lambda row: row["path"])
     content = canonical_json({"entries": entries})
     return {"entryCount": len(entries), "bytes": len(content), "sha256": sha256(content), "entries": entries}
 
 
-def symlink_chain(rootfs: Path, logical_path: str) -> tuple[list[str], Path]:
+def validated_runtime_entries(runtime: object) -> list[dict]:
+    if not isinstance(runtime, dict) or set(runtime) != {"entryCount", "bytes", "sha256", "entries"}:
+        raise ProvisionError("build record runtime manifest is malformed")
+    if (type(runtime["entryCount"]) is not int or runtime["entryCount"] < 1 or
+            type(runtime["bytes"]) is not int or runtime["bytes"] < 1 or
+            not isinstance(runtime["sha256"], str) or re.fullmatch(r"[0-9a-f]{64}", runtime["sha256"]) is None):
+        raise ProvisionError("build record runtime manifest has invalid count or byte identity")
+    entries = runtime.get("entries")
+    if not isinstance(entries, list) or not entries:
+        raise ProvisionError("build record runtime manifest is empty or malformed")
+    paths = []
+    for row in entries:
+        if isinstance(row, dict) and set(row) - {"path", "bytes", "sha256", "kind", "target"}:
+            raise ProvisionError("build record violates checked-in schema at runtime entry: unknown field")
+        if not isinstance(row, dict) or set(row) != {"path", "bytes", "sha256", "kind", "target"}:
+            raise ProvisionError("build record runtime entry lacks exact file classification metadata")
+        path, size, digest, kind, target = (row[key] for key in ("path", "bytes", "sha256", "kind", "target"))
+        if (not isinstance(path, str) or not path.startswith("/") or path.startswith("//") or
+                any(part in ("", ".", "..") for part in path[1:].split("/")) or "\0" in path or "\\" in path or
+                type(size) is not int or size < 0 or not isinstance(digest, str) or
+                re.fullmatch(r"[0-9a-f]{64}", digest) is None):
+            raise ProvisionError("build record runtime entry has invalid file identity")
+        try:
+            path_bytes = path.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as error:
+            raise ProvisionError("build record runtime path is not valid UTF-8") from error
+        if len(path_bytes) > 4096 or any(len(part.encode("utf-8")) > 255 for part in path[1:].split("/")):
+            raise ProvisionError("build record runtime path is outside filesystem bounds")
+        if kind == "regular-file":
+            if target is not None:
+                raise ProvisionError("regular runtime file must not carry a symlink target")
+            if len(b"toolchain") + len(path_bytes) > 4096:
+                raise ProvisionError("regular runtime projection path is outside the A-loader bound")
+        elif kind == "symlink":
+            if not isinstance(target, str) or not target or "\0" in target:
+                raise ProvisionError("runtime symlink target is malformed")
+            try:
+                target_bytes = target.encode("utf-8", errors="strict")
+            except UnicodeEncodeError as error:
+                raise ProvisionError("runtime symlink target is not valid UTF-8") from error
+            if len(target_bytes) > 4096 or size != len(target_bytes) or digest != sha256(b"symlink\0" + target_bytes):
+                raise ProvisionError("runtime symlink target differs from its recorded byte identity")
+        else:
+            raise ProvisionError("build record runtime file kind is unsupported")
+        paths.append(path)
+    if paths != sorted(set(paths), key=lambda path: path.encode("utf-8")):
+        raise ProvisionError("build record runtime paths are duplicated or not in canonical order")
+    expected = manifest(list(entries))
+    if any(runtime[key] != expected[key] for key in ("entryCount", "bytes", "sha256")):
+        raise ProvisionError("build record runtime manifest digest/count mismatch")
+    return entries
+
+
+def verify_recorded_runtime_manifest(rootfs: Path, record: dict) -> None:
+    for row in validated_runtime_entries(record.get("runtime")):
+        if runtime_file_entry(rootfs, row["path"]) != row:
+            raise ProvisionError(f"runtime file classification or bytes changed before A-loader smoke: {row['path']}")
+
+
+def symlink_chain(rootfs: Path, logical_path: str, follow_leaf: bool = True,
+                  allow_directory_target: bool = False) -> tuple[list[str], Path]:
     rootfs = rootfs.resolve(strict=True)
     pure = PurePosixPath(logical_path)
     if not pure.is_absolute() or ".." in pure.parts:
@@ -2234,7 +2586,7 @@ def symlink_chain(rootfs: Path, logical_path: str) -> tuple[list[str], Path]:
             current = current.parent
             continue
         candidate = current / part
-        if candidate.is_symlink():
+        if candidate.is_symlink() and (pending or follow_leaf):
             rel = candidate.relative_to(rootfs).as_posix()
             if rel in visited or len(chain) >= 16:
                 raise ProvisionError(f"symlink cycle/depth overflow for {logical_path}")
@@ -2250,7 +2602,8 @@ def symlink_chain(rootfs: Path, logical_path: str) -> tuple[list[str], Path]:
             current = candidate
             if pending and not current.is_dir():
                 raise ProvisionError(f"driver symlink chain contains a missing/non-directory component: {logical_path}")
-    if not current.is_file():
+    if (not current.is_file() and not (not follow_leaf and current.is_symlink()) and
+            not (allow_directory_target and current.is_dir())):
         raise ProvisionError(f"driver resolves to non-regular file: {logical_path}")
     return chain, current
 
@@ -2291,11 +2644,10 @@ def runtime_dependencies(rootfs: Path, logical_paths: list[str], contract: dict)
     for path in sorted(paths):
         chain, target = symlink_chain(rootfs, path)
         if target.is_file():
-            content = target.read_bytes()
             target_path = "/" + target.relative_to(rootfs).as_posix()
-            entries.append({"path": target_path, "bytes": len(content), "sha256": sha256(content)})
+            entries.append(runtime_file_entry(rootfs, target_path))
             for link in chain:
-                entries.append(file_entry(rootfs, link.split(" -> ", 1)[0]))
+                entries.append(runtime_file_entry(rootfs, link.split(" -> ", 1)[0]))
     # Same file path can appear through multiple executable mappings; retain one row.
     by_path = {row["path"]: row for row in entries}
     return sorted(by_path.values(), key=lambda row: row["path"])
@@ -2349,25 +2701,10 @@ def verify_recorded_resource_manifest(rootfs: Path, record: dict) -> dict:
     return actual
 
 
-def frontend_runtime_library_digests(rootfs: Path, record: dict) -> list[dict[str, str]]:
-    """Apply the A-loader selection rule to the authenticated regular runtime files."""
-    tool = next(row for row in record["tools"] if row["role"] == "cxx-driver")
-    rows = []
-    for row in record["runtime"]["entries"]:
-        path = rootfs_path(rootfs, row["path"])
-        if path.is_symlink():
-            actual = file_entry(rootfs, row["path"])
-            if actual["bytes"] != row["bytes"] or actual["sha256"] != row["sha256"]:
-                raise ProvisionError(f"runtime symlink bytes changed before A-loader projection: {row['path']}")
-            continue
-        if not path.is_file() or sha256_file(path) != row["sha256"]:
-            raise ProvisionError(f"runtime library bytes changed before A-loader projection: {row['path']}")
-        if row["sha256"] != tool["sha256"]:
-            rows.append({"path": "toolchain" + row["path"], "sha256": row["sha256"]})
-    rows.sort(key=lambda row: row["path"].encode("utf-8"))
-    if not rows:
-        raise ProvisionError("A-loader profile projection has no runtime-library rows")
-    return rows
+def verified_frontend_runtime_library_digests(rootfs: Path, record: dict) -> list[dict[str, str]]:
+    """Recheck the exact typed runtime closure before projecting its authenticated regular files."""
+    verify_recorded_runtime_manifest(rootfs, record)
+    return frontend_runtime_library_digests(record)
 
 
 def normalize_rootfs(rootfs: Path, epoch: int) -> None:
@@ -2391,7 +2728,7 @@ def deterministic_rootfs_tar(rootfs: Path, destination: Path, epoch: int, *,
     if normalize:
         normalize_rootfs(rootfs, epoch)
     if max_bytes is not None:
-        check_rootfs_tar_budget(rootfs, max_bytes)
+        run_checked(rootfs_tar_budget_command(rootfs, max_bytes), timeout=ROOTFS_TAR_BUDGET_TIMEOUT_SECONDS)
     command = [
         "sudo", "env", "LC_ALL=C", "tar", "--sort=name", "--format=posix", "--numeric-owner",
         f"--mtime=@{epoch}", "--pax-option=delete=atime,delete=ctime",
@@ -2644,8 +2981,33 @@ def probe_compile_command() -> list[str]:
     return ["/usr/bin/clang++-18", "-I/usr/lib/llvm-18/include", "--target=x86_64-pc-linux-gnu",
             "-std=c++17", "-fno-exceptions", "-fno-rtti", "-D_GNU_SOURCE", "-D__STDC_CONSTANT_MACROS",
             "-D__STDC_FORMAT_MACROS", "-D__STDC_LIMIT_MACROS",
-            "/tmp/clang18-libtooling-probe.cpp", "-L/usr/lib/llvm-18/lib",
-            "-Wl,-rpath,/usr/lib/llvm-18/lib", "-lclang-cpp", "-lLLVM-18", "-o", "/tmp/clang18-libtooling-probe"]
+            PROBE_SOURCE_IN_ROOT, "-L/usr/lib/llvm-18/lib",
+            "-Wl,-rpath,/usr/lib/llvm-18/lib", "-lclang-cpp", "-lLLVM-18", "-o", PROBE_BINARY_IN_ROOT]
+
+
+def stage_probe_inputs(rootfs: Path) -> tuple[Path, Path]:
+    """Install immutable probe inputs under /usr/local so /tmp normalization cannot erase them."""
+    if rootfs.is_symlink() or not rootfs.is_dir():
+        raise ProvisionError("probe staging requires the fresh non-symlink rootfs")
+    source = RECIPE_FILES["probeSha256"]
+    fixture = RECIPE_FILES["fixtureSha256"]
+    source_target = rootfs.joinpath(*PurePosixPath(PROBE_SOURCE_IN_ROOT).parts[1:])
+    fixture_target = rootfs.joinpath(*PurePosixPath(PROBE_FIXTURE_IN_ROOT).parts[1:])
+    run_checked(["sudo", "install", "-D", "-m", "0444", str(source), str(source_target)])
+    run_checked(["sudo", "install", "-D", "-m", "0444", str(fixture), str(fixture_target)])
+    return source_target, fixture_target
+
+
+def verify_staged_probe_source(rootfs: Path, expected_recipe_sha256: str) -> str:
+    """Bind the retained source bytes to the recipe before compiling the probe."""
+    if (not isinstance(expected_recipe_sha256, str) or
+            not re.fullmatch(r"[0-9a-f]{64}", expected_recipe_sha256)):
+        raise ProvisionError("recipe has an invalid probe-source digest")
+    source_path, _ = rootfs_regular_file(rootfs, PROBE_SOURCE_IN_ROOT)
+    actual_sha256 = sha256_file(source_path)
+    if actual_sha256 != expected_recipe_sha256:
+        raise ProvisionError("staged probe source differs from the expected recipe source bytes")
+    return actual_sha256
 
 
 def canonical_commands(contract: dict, keyring_sha256: str) -> dict[str, list[str]]:
@@ -2654,6 +3016,9 @@ def canonical_commands(contract: dict, keyring_sha256: str) -> dict[str, list[st
     pinned = [f"{row['name']}={row['version']}" for row in contract["profile"]["binaryRoots"]]
     epoch = int(contract["environment"]["SOURCE_DATE_EPOCH"])
     source_list_sha256 = sha256(apt_source_list(contract))
+    budget_command = rootfs_tar_budget_command(Path("<PROFILE_ROOT>"), contract["profile"]["bounds"]["maxArtifactBytes"])
+    budget_command[5] = f"<PROVISIONER_SHA256:{sha256_file(RECIPE_FILES['provisionerSha256'])}>"
+    budget_command[8] = "<PROFILE_ROOT>"
 
     def in_root(command: list[str], apt_environment: bool = False) -> list[str]:
         extra = {"DEBIAN_FRONTEND": "noninteractive"} if apt_environment else None
@@ -2677,7 +3042,8 @@ def canonical_commands(contract: dict, keyring_sha256: str) -> dict[str, list[st
         "llvmConfigLibdir": in_root(["/usr/bin/llvm-config-18", "--libdir"]),
         "llvmConfigCxxflags": in_root(["/usr/bin/llvm-config-18", "--cxxflags"]),
         "probeCompile": in_root(probe_compile_command()),
-        "probeRun": in_root(["/tmp/clang18-libtooling-probe", "/tmp/clang18-positive.cpp"]),
+        "probeRun": in_root([PROBE_BINARY_IN_ROOT, PROBE_FIXTURE_IN_ROOT]),
+        "rootfsTarBudget": budget_command,
         "rootfsTar": ["sudo", "env", "LC_ALL=C", "tar", "--sort=name", "--format=posix",
                       "--numeric-owner", f"--mtime=@{epoch}",
                       "--pax-option=delete=atime,delete=ctime", "-cf", "<ROOTFS_TAR>", "-C", "<PROFILE_ROOT>", "."],
@@ -2709,6 +3075,64 @@ def downloaded_package_key(deb: Path) -> tuple[str, str, str]:
     return tuple(records[0][name] for name in names)
 
 
+def remove_optional_source_caches(acquisition: Path) -> None:
+    """Remove only optional cached trees through an authenticated no-follow parent descriptor."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    acquisition_fd = os.open(acquisition, flags)
+    try:
+        acquisition_identity = os.fstat(acquisition_fd)
+
+        def require_acquisition_binding() -> None:
+            try:
+                current_fd = os.open(acquisition, flags)
+            except OSError as error:
+                raise ProvisionError("acquisition source cache root pathname changed") from error
+            try:
+                current = os.fstat(current_fd)
+                if (current.st_dev, current.st_ino) != (acquisition_identity.st_dev, acquisition_identity.st_ino):
+                    raise ProvisionError("acquisition source cache root identity changed")
+            finally:
+                os.close(current_fd)
+
+        require_acquisition_binding()
+        try:
+            expected_parent = os.stat("source", dir_fd=acquisition_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            require_acquisition_binding()
+            return
+        if not stat.S_ISDIR(expected_parent.st_mode):
+            raise ProvisionError("acquisition source cache parent must be a real directory")
+        source_fd = os.open("source", flags, dir_fd=acquisition_fd)
+        try:
+            source_identity = os.fstat(source_fd)
+            if (source_identity.st_dev, source_identity.st_ino) != (expected_parent.st_dev, expected_parent.st_ino):
+                raise ProvisionError("acquisition source cache parent identity changed")
+
+            def require_source_binding() -> None:
+                require_acquisition_binding()
+                current = os.stat("source", dir_fd=acquisition_fd, follow_symlinks=False)
+                if (not stat.S_ISDIR(current.st_mode) or
+                        (current.st_dev, current.st_ino) != (source_identity.st_dev, source_identity.st_ino)):
+                    raise ProvisionError("acquisition source cache parent pathname changed")
+
+            for name in ("package-source", "upstream"):
+                require_source_binding()
+                try:
+                    metadata = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    require_source_binding()
+                    continue
+                if not stat.S_ISDIR(metadata.st_mode):
+                    raise ProvisionError("acquisition source cache must be a real directory")
+                require_source_binding()
+                shutil.rmtree(name, dir_fd=source_fd)
+                require_source_binding()
+        finally:
+            os.close(source_fd)
+    finally:
+        os.close(acquisition_fd)
+
+
 def provision_rootfs(args: argparse.Namespace) -> int:
     contract = read_contract(args.contract)
     profile = contract["profile"]
@@ -2716,8 +3140,7 @@ def provision_rootfs(args: argparse.Namespace) -> int:
     if args.rootfs.exists() or args.output.exists():
         raise ProvisionError("rootfs and evidence output paths must not exist")
     candidate, indexes = load_candidate(args.acquisition, contract, args.keyring)
-    shutil.rmtree(args.acquisition / "source/package-source")
-    shutil.rmtree(args.acquisition / "source/upstream")
+    remove_optional_source_caches(args.acquisition)
     check_runner_bounds(args.workdir, profile)
     profile_root = args.rootfs
     profile_root.parent.mkdir(parents=True, exist_ok=True)
@@ -2788,31 +3211,33 @@ def provision_rootfs(args: argparse.Namespace) -> int:
         raise ProvisionError(f"resolved Clang resource directory is not a versioned LLVM 18 directory: {resource_dir}")
     resource_files = resource_manifest(profile_root, resource_dir)
 
-    probe_source = ROOT / "oracle/clang/18.1.3/libtooling-probe.cpp"
-    fixture = ROOT / "oracle/clang/18.1.3/fixtures/libtooling-positive.cpp"
-    probe_in_root = profile_root / "tmp/clang18-libtooling-probe.cpp"
-    fixture_in_root = profile_root / "tmp/clang18-positive.cpp"
-    shutil.copyfile(probe_source, probe_in_root)
-    shutil.copyfile(fixture, fixture_in_root)
-    probe_in_root.chmod(0o444)
-    fixture_in_root.chmod(0o444)
+    fixture = RECIPE_FILES["fixtureSha256"]
+    expected_probe_source_sha256 = recipe_identity(args.contract)["probeSha256"]
+    probe_in_root, fixture_in_root = stage_probe_inputs(profile_root)
+    staged_probe_source_sha256 = verify_staged_probe_source(profile_root, expected_probe_source_sha256)
     libdir = rootfs_run(profile_root, ["/usr/bin/llvm-config-18", "--libdir"], contract).strip()
     if libdir != "/usr/lib/llvm-18/lib":
         raise ProvisionError("llvm-config library directory differs from the versioned probe recipe")
     # Retain the diagnostic command, but use the fixed reviewed probe arguments.
     # Tool-reported flags cannot inject additional compiler/linker operations.
     rootfs_run(profile_root, ["/usr/bin/llvm-config-18", "--cxxflags"], contract)
-    probe_path = "/tmp/clang18-libtooling-probe"
+    probe_path = PROBE_BINARY_IN_ROOT
     compile_command = probe_compile_command()
+    source_sha256_before_compile = staged_probe_source_sha256
     rootfs_run(profile_root, compile_command, contract, timeout=600)
-    runtime_report = rootfs_run(profile_root, [probe_path, "/tmp/clang18-positive.cpp"], contract, timeout=120)
+    staged_probe_source_sha256 = verify_staged_probe_source(profile_root, expected_probe_source_sha256)
+    if staged_probe_source_sha256 != source_sha256_before_compile:
+        raise ProvisionError("staged probe source changed during compilation")
+    runtime_report = run_probe_sandboxed(
+        profile_root, [probe_path, PROBE_FIXTURE_IN_ROOT], contract, timeout=120,
+    )
     runtime_json = json.loads(runtime_report)
     inventory = audit_langoptions(
         rootfs_path(profile_root, "/usr/lib/llvm-18/include/clang/Basic/LangOptions.def"),
         rootfs_path(profile_root, "/usr/lib/llvm-18/include/clang/Basic/LangOptions.h"), contract,
     )
     probe_checked = validate_probe_report(runtime_json, inventory, contract)
-    probe_checked["sourceSha256"] = sha256(probe_source.read_bytes())
+    probe_checked["sourceSha256"] = staged_probe_source_sha256
     probe_checked["binarySha256"] = sha256(rootfs_path(profile_root, probe_path).read_bytes())
     probe_checked["apiChecks"] = runtime_json["apiChecks"]
     probe_checked["fixtureSha256"] = sha256(fixture.read_bytes())
@@ -3043,6 +3468,9 @@ def validate_build_record(record: dict, contract: dict, contract_path: Path = CO
         raise ProvisionError("build record probe bytes are not authenticated")
 
     for name in ("runtime", "resources"):
+        if name == "runtime":
+            validated_runtime_entries(record.get("runtime"))
+            continue
         value = record.get(name, {})
         entries = value.get("entries", [])
         expected = manifest(list(entries))
@@ -3075,6 +3503,8 @@ def validate_build_record(record: dict, contract: dict, contract_path: Path = CO
         raise ProvisionError("build record environment differs from fixed UTC/source-date profile")
     if record.get("recipe") != recipe_identity(contract_path):
         raise ProvisionError("build record recipe hashes do not match the reviewed contract, tooling, and workflow bytes")
+    if probe.get("sourceSha256") != record["recipe"].get("probeSha256"):
+        raise ProvisionError("build record probe source digest differs from its recipe source bytes")
     repositories = record.get("acquisition", {}).get("repositories", [])
     if {row.get("suite") for row in repositories} != set(profile["suites"]):
         raise ProvisionError("build record does not bind every pinned signed repository suite")
@@ -3180,7 +3610,7 @@ def command_write_loader_input(args: argparse.Namespace) -> int:
         raise ProvisionError("C++ driver executable mode changed before A-loader smoke")
     path_value = contract["environment"]["PATH"]
     profile_digest = sha256(canonical_json(record["profile"]))
-    runtime_rows = frontend_runtime_library_digests(rootfs_dir, record)
+    runtime_rows = verified_frontend_runtime_library_digests(rootfs_dir, record)
     values = {
         "rootfs": str(rootfs_dir),
         "buildRecordSha256": sha256(args.record.read_bytes()),
@@ -3242,9 +3672,74 @@ def read_provenance_report(path: Path, label: str) -> dict:
     return report
 
 
-def validate_provenance_probe_report(report: dict, record: dict) -> None:
+def preflight_provenance_output(output: Path, input_roots: list[Path], input_files: list[Path]) -> Path:
+    """Resolve output aliases and reject all packaged-tree overlaps before creating paths."""
+    if output.is_symlink() or output.exists():
+        raise ProvisionError("provenance archive output must not already exist or be a symlink")
+    try:
+        canonical_output = output.resolve(strict=False)
+        canonical_roots = []
+        for root in input_roots:
+            if root.is_symlink():
+                raise ProvisionError("provenance input root must not be a symlink")
+            canonical_roots.append(root.resolve(strict=True))
+        canonical_files = []
+        for path in input_files:
+            if path.is_symlink():
+                canonical_files.append(path.resolve(strict=True))
+            elif path.exists():
+                canonical_files.append(path.resolve(strict=True))
+    except OSError as error:
+        raise ProvisionError(f"could not resolve provenance output/input paths: {error}") from error
+    for root in canonical_roots:
+        if canonical_output == root or root in canonical_output.parents:
+            raise ProvisionError("provenance archive output overlaps a recursively packaged input tree")
+    if canonical_output in canonical_files:
+        raise ProvisionError("provenance archive output overlaps a packaged input file")
+    return canonical_output
+
+
+def validate_provenance_probe_report(
+        report: dict, record: dict, rootfs: Path, contract: dict) -> tuple[Path, Path, Path, int]:
     if canonical_json(report) != canonical_json(record.get("probe")):
         raise ProvisionError("probe provenance report differs from the reproducible build-record probe")
+    probe_path, probe_mode = rootfs_regular_file(rootfs, PROBE_BINARY_IN_ROOT, executable=True)
+    fixture_path, _ = rootfs_regular_file(rootfs, PROBE_FIXTURE_IN_ROOT)
+    source_path, _ = rootfs_regular_file(rootfs, PROBE_SOURCE_IN_ROOT)
+    expected_recipe_source = record.get("recipe", {}).get("probeSha256")
+    source_digest = verify_staged_probe_source(rootfs, expected_recipe_source)
+    if source_digest != record["probe"]["sourceSha256"]:
+        raise ProvisionError("retained probe source bytes differ from the build-record sourceSha256")
+    probe_digest = sha256_file(probe_path)
+    expected_probe_digest = record["probe"]["binarySha256"]
+    if probe_digest != expected_probe_digest:
+        raise ProvisionError("retained probe executable bytes differ from the build-record binarySha256")
+    fixture_digest = sha256_file(fixture_path)
+    if (fixture_digest != record["probe"]["fixtureSha256"] or
+            fixture_digest != record["recipe"]["fixtureSha256"]):
+        raise ProvisionError("retained probe fixture bytes differ from the authenticated fixture identity")
+
+    replay_output = run_probe_sandboxed(
+        rootfs, [PROBE_BINARY_IN_ROOT, PROBE_FIXTURE_IN_ROOT], contract, timeout=120,
+    )
+    try:
+        replay_report = json.loads(replay_output)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise ProvisionError("retained probe replay did not emit valid JSON") from error
+    if not isinstance(replay_report, dict):
+        raise ProvisionError("retained probe replay output must be a JSON object")
+    inventory = audit_langoptions(
+        rootfs_path(rootfs, "/usr/lib/llvm-18/include/clang/Basic/LangOptions.def"),
+        rootfs_path(rootfs, "/usr/lib/llvm-18/include/clang/Basic/LangOptions.h"),
+        contract,
+    )
+    checked = validate_probe_report(replay_report, inventory, contract)
+    checked["sourceSha256"] = source_digest
+    checked["binarySha256"] = probe_digest
+    checked["fixtureSha256"] = fixture_digest
+    if canonical_json(checked) != canonical_json(record["probe"]):
+        raise ProvisionError("retained probe replay differs from the reproducible build-record probe")
+    return probe_path, fixture_path, source_path, probe_mode
 
 
 def frontend_cxx_driver_identity_sha256(record: dict, record_sha256: str) -> str:
@@ -3315,37 +3810,24 @@ def frontend_path_transform_sha256(record: dict) -> str:
     return domain_hash("decomp-thing/generic-template/path-transform/v1", transform)
 
 
-def frontend_profile_projection_preimage(record: dict, record_sha256: str,
-                                          runtime_rows: object,
-                                          expected_runtime_rows: list[dict[str, str]] | None = None) -> dict:
-    """Build A's exact profile preimage, binding its runtime rows to the recorded closure."""
-    if not isinstance(runtime_rows, list) or not runtime_rows:
-        raise ProvisionError("A-loader profile projection has no runtime-library rows")
+def frontend_runtime_library_digests(record: dict) -> list[dict]:
+    """Project the complete regular-file closure from authenticated classification metadata."""
     tool = next((row for row in record.get("tools", []) if row.get("role") == "cxx-driver"), None)
     if not isinstance(tool, dict):
         raise ProvisionError("build record has no C++ driver for the A-loader projection")
-    recorded_runtime = {
-        ("toolchain" + row["path"], row["sha256"])
-        for row in record.get("runtime", {}).get("entries", [])
-        if isinstance(row, dict) and isinstance(row.get("path"), str) and isinstance(row.get("sha256"), str)
-    }
-    normalized_runtime = []
-    seen_paths = set()
-    for row in runtime_rows:
-        if not isinstance(row, dict) or set(row) != {"path", "sha256"}:
-            raise ProvisionError("A-loader profile projection runtime row is malformed")
-        path, digest = row.get("path"), row.get("sha256")
-        if (not isinstance(path, str) or not isinstance(digest, str) or
-                not re.fullmatch(r"toolchain/[^\x00]+", path) or
-                not re.fullmatch(r"[0-9a-f]{64}", digest) or digest == tool["sha256"] or
-                (path, digest) not in recorded_runtime or path in seen_paths):
-            raise ProvisionError("A-loader profile projection runtime row differs from the build-record closure")
-        seen_paths.add(path)
-        normalized_runtime.append({"path": path, "sha256": digest})
-    if normalized_runtime != sorted(normalized_runtime, key=lambda row: row["path"].encode("utf-8")):
-        raise ProvisionError("A-loader profile projection runtime rows are not in canonical path order")
-    if expected_runtime_rows is not None and normalized_runtime != expected_runtime_rows:
-        raise ProvisionError("A-loader profile projection omits, adds, or changes authenticated regular runtime files")
+    rows = [{"path": "toolchain" + row["path"], "sha256": row["sha256"]}
+            for row in validated_runtime_entries(record.get("runtime"))
+            if row["kind"] == "regular-file" and row["sha256"] != tool["sha256"]]
+    if not rows:
+        raise ProvisionError("A-loader profile projection has no runtime-library rows")
+    return rows
+
+
+def frontend_profile_projection_preimage(record: dict, record_sha256: str) -> dict:
+    """Build A's exact profile preimage independently of a supplied loader report."""
+    tool = next((row for row in record.get("tools", []) if row.get("role") == "cxx-driver"), None)
+    if not isinstance(tool, dict):
+        raise ProvisionError("build record has no C++ driver for the A-loader projection")
     return {
         "adapterApiVersion": "clang-libtooling-18.1.3-v1",
         "adapterSha256": sha256_file(ROOT / "oracle/clang/18.1.3/Clang1813AProfileLoaderSmoke.java"),
@@ -3356,7 +3838,7 @@ def frontend_profile_projection_preimage(record: dict, record_sha256: str,
         "resourceHeaderManifestSha256": frontend_resource_manifest_sha256(
             record["resourceDirectory"], record["resources"]),
         "resolvedResourceDirectory": "toolchain" + record["resourceDirectory"],
-        "runtimeLibraryDigests": normalized_runtime,
+        "runtimeLibraryDigests": frontend_runtime_library_digests(record),
         "targetTriple": record["probe"]["target"],
         "toolchainProfileSha256": sha256(canonical_json(record["profile"])),
     }
@@ -3388,10 +3870,8 @@ def validate_provenance_loader_report(report: dict, record: dict, record_sha256:
     projection = report.get("infrastructureProfileProjection")
     if not isinstance(projection, dict):
         raise ProvisionError("A-loader smoke report lacks its frontend profile projection preimage")
-    expected_runtime_rows = frontend_runtime_library_digests(rootfs, record)
-    expected_projection = frontend_profile_projection_preimage(
-        record, record_sha256, projection.get("runtimeLibraryDigests"), expected_runtime_rows,
-    )
+    verified_frontend_runtime_library_digests(rootfs, record)
+    expected_projection = frontend_profile_projection_preimage(record, record_sha256)
     if projection != expected_projection:
         raise ProvisionError("A-loader smoke report frontend profile projection differs from the build record")
     if report.get("infrastructureProfileProjectionSha256") != frontend_profile_projection_sha256(expected_projection):
@@ -3485,32 +3965,21 @@ def command_package_provenance(args: argparse.Namespace) -> int:
         "cleanBuilds": 2, "matchingRootfsSha256": True, "matchingImageDigest": True,
     }:
         raise ProvisionError("provenance packaging requires a final reproducible build record")
+    initial_files = [
+        args.record, args.oci_archive, args.probe_report, args.loader_report, args.negative_report,
+        args.contract, args.keyring, *RECIPE_FILES.values(),
+    ]
+    preflight_provenance_output(args.output, [args.acquisition, args.rootfs], initial_files)
     candidate = args.acquisition / "acquisition-candidate.json"
     patch_audit = args.acquisition / "patch-audit.json"
     if not candidate.is_file() or not patch_audit.is_file() or not (args.acquisition / "downloads").is_dir():
         raise ProvisionError("provenance package is missing authenticated acquisition inputs")
     if args.rootfs.is_symlink() or not args.rootfs.is_dir():
         raise ProvisionError("provenance packaging requires the retained final rootfs directory")
-    _, parsed_indexes = load_candidate(args.acquisition, contract, args.keyring, build_record=record)
-    if args.oci_archive.is_symlink() or not args.oci_archive.is_file():
-        raise ProvisionError("provenance packaging requires the retained run-two OCI image archive")
-    verify_retained_rootfs_and_image(args.rootfs, args.oci_archive, record, contract)
-    signed_package_metadata = package_metadata_map(parsed_indexes)
-    validate_record_package_metadata(
-        record, signed_package_metadata, installed_package_keys(args.rootfs, contract),
-    )
-    verify_recorded_runtime_closure(args.rootfs, record, contract)
-    record_sha256 = sha256_file(args.record)
-    probe_report = read_provenance_report(args.probe_report, "LibTooling probe")
-    loader_report = read_provenance_report(args.loader_report, "A-loader")
-    negative_report = read_provenance_report(args.negative_report, "Clang 22.1.6 negative")
-    validate_provenance_probe_report(probe_report, record)
-    validate_provenance_loader_report(loader_report, record, record_sha256, args.rootfs)
-    comparator_manifest, comparator_manifest_sha256 = validate_provenance_negative_report(
-        negative_report, record, contract,
-    )
     comparator_lock = ROOT / contract["negativeControl"]["artifactLock"]
-    comparator_lock_sha256 = negative_report["artifactLockSha256"]
+    _, comparator_manifest, _, _ = validate_locked_comparator_manifest(
+        comparator_lock, contract["negativeControl"],
+    )
     expected_artifacts = [
         candidate, patch_audit, args.acquisition / "downloads",
         args.record, args.probe_report, args.loader_report, args.negative_report,
@@ -3524,16 +3993,40 @@ def command_package_provenance(args: argparse.Namespace) -> int:
         ROOT / "oracle/clang/18.1.3/test_provisioning.py",
         ROOT / "oracle/clang/18.1.3/ACQUISITION_STATUS.md",
         ROOT / ".github/workflows/generic-template-toolchain.yml",
-        comparator_lock,
-        comparator_manifest,
+        comparator_lock, comparator_manifest,
         args.keyring, ROOT / contract["profile"]["upstream"]["keyFile"],
     ]
-    if args.output.exists():
-        raise ProvisionError("provenance archive output must not already exist")
-    args.output.parent.mkdir(parents=True, exist_ok=True)
+    preflight_provenance_output(args.output, [args.acquisition, args.rootfs], expected_artifacts)
+    _, parsed_indexes = load_candidate(args.acquisition, contract, args.keyring, build_record=record)
+    if args.oci_archive.is_symlink() or not args.oci_archive.is_file():
+        raise ProvisionError("provenance packaging requires the retained run-two OCI image archive")
+    verify_retained_rootfs_and_image(args.rootfs, args.oci_archive, record, contract)
+    signed_package_metadata = package_metadata_map(parsed_indexes)
+    validate_record_package_metadata(
+        record, signed_package_metadata, installed_package_keys(args.rootfs, contract),
+    )
+    verify_recorded_runtime_closure(args.rootfs, record, contract)
+    record_sha256 = sha256_file(args.record)
+    probe_report = read_provenance_report(args.probe_report, "LibTooling probe")
+    loader_report = read_provenance_report(args.loader_report, "A-loader")
+    negative_report = read_provenance_report(args.negative_report, "Clang 22.1.6 negative")
+    probe_binary, probe_fixture, probe_source, probe_mode = validate_provenance_probe_report(
+        probe_report, record, args.rootfs, contract,
+    )
+    validate_provenance_loader_report(loader_report, record, record_sha256, args.rootfs)
+    comparator_manifest, comparator_manifest_sha256 = validate_provenance_negative_report(
+        negative_report, record, contract,
+    )
+    comparator_lock_sha256 = negative_report["artifactLockSha256"]
+    output_path = preflight_provenance_output(args.output, [args.acquisition, args.rootfs], expected_artifacts)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if preflight_provenance_output(args.output, [args.acquisition, args.rootfs], expected_artifacts) != output_path:
+        raise ProvisionError("provenance output path changed after its preflight")
+    archive_created = False
     epoch = int(contract["environment"]["SOURCE_DATE_EPOCH"])
     try:
-        with tarfile.open(args.output, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        with tarfile.open(output_path, mode="x", format=tarfile.PAX_FORMAT) as archive:
+            archive_created = True
             for source in expected_artifacts:
                 if not source.exists():
                     raise ProvisionError(f"provenance evidence file is missing: {source}")
@@ -3605,12 +4098,39 @@ def command_package_provenance(args: argparse.Namespace) -> int:
                             comparator_lock_sha256 if source == comparator_lock else None
                         ),
                     )
+            current_probe_binary, current_probe_mode = rootfs_regular_file(
+                args.rootfs, PROBE_BINARY_IN_ROOT, executable=True,
+            )
+            current_probe_fixture, _ = rootfs_regular_file(args.rootfs, PROBE_FIXTURE_IN_ROOT)
+            current_probe_source, _ = rootfs_regular_file(args.rootfs, PROBE_SOURCE_IN_ROOT)
+            if (current_probe_mode != probe_mode or sha256_file(current_probe_binary) != record["probe"]["binarySha256"] or
+                    sha256_file(current_probe_fixture) != record["probe"]["fixtureSha256"] or
+                    sha256_file(current_probe_source) != record["probe"]["sourceSha256"]):
+                raise ProvisionError("retained probe source/binary/fixture changed after sandbox replay")
+            _add_provenance_file(
+                archive, probe_binary, "rootfs" + PROBE_BINARY_IN_ROOT, epoch,
+                expected_sha256=record["probe"]["binarySha256"], mode=probe_mode,
+            )
+            _add_provenance_file(
+                archive, probe_fixture, "rootfs" + PROBE_FIXTURE_IN_ROOT, epoch,
+                expected_sha256=record["probe"]["fixtureSha256"], mode=0o444,
+            )
+            _add_provenance_file(
+                archive, probe_source, "rootfs" + PROBE_SOURCE_IN_ROOT, epoch,
+                expected_sha256=record["probe"]["sourceSha256"], mode=0o444,
+            )
+    except ProvisionError:
+        if archive_created:
+            output_path.unlink(missing_ok=True)
+        raise
     except (OSError, tarfile.TarError) as error:
+        if archive_created:
+            output_path.unlink(missing_ok=True)
         raise ProvisionError(f"could not build provenance archive: {error}") from error
-    if args.output.stat().st_size > contract["profile"]["bounds"]["maxArtifactBytes"]:
-        args.output.unlink(missing_ok=True)
+    if output_path.stat().st_size > contract["profile"]["bounds"]["maxArtifactBytes"]:
+        output_path.unlink(missing_ok=True)
         raise ProvisionError("provenance archive exceeds the configured artifact byte budget")
-    print(f"packaged authenticated provenance archive ({args.output.stat().st_size} bytes)")
+    print(f"packaged authenticated provenance archive ({output_path.stat().st_size} bytes)")
     return 0
 
 
@@ -3661,8 +4181,10 @@ def command_negative_version_smoke(args: argparse.Namespace) -> int:
 
 
 def _add_provenance_file(archive: tarfile.TarFile, source: Path, arcname: str, epoch: int,
-                         expected_sha256: str | None = None) -> None:
+                         expected_sha256: str | None = None, mode: int = 0o444) -> None:
     info = tarfile.TarInfo(arcname)
+    if expected_sha256 is not None and (source.is_symlink() or not source.is_file()):
+        raise ProvisionError(f"provenance input is not a regular file: {arcname}")
     payload = source.read_bytes() if expected_sha256 is not None else None
     if payload is not None and sha256(payload) != expected_sha256:
         raise ProvisionError(f"provenance input changed before packaging: {arcname}")
@@ -3670,7 +4192,7 @@ def _add_provenance_file(archive: tarfile.TarFile, source: Path, arcname: str, e
     info.mtime = epoch
     info.uid = info.gid = 0
     info.uname = info.gname = ""
-    info.mode = 0o444
+    info.mode = mode & 0o7777
     if payload is not None:
         archive.addfile(info, io.BytesIO(payload))
     else:
@@ -3692,6 +4214,10 @@ def build_parser() -> argparse.ArgumentParser:
     metadata.add_argument("--output", type=Path, required=True)
     metadata.add_argument("--keyring", type=Path, default=DEFAULT_KEYRING)
     metadata.set_defaults(run=command_probe_snapshot_metadata)
+    budget = sub.add_parser("check-rootfs-tar-budget", help="read-only archive budget inspection; not native qualification")
+    budget.add_argument("--rootfs", type=Path, required=True)
+    budget.add_argument("--max-bytes", type=int, required=True)
+    budget.set_defaults(run=command_check_rootfs_tar_budget)
     acquire = sub.add_parser("acquire", help="authenticate pinned Snapshot indexes and source artifacts")
     acquire.add_argument("--contract", type=Path, default=CONTRACT_PATH)
     acquire.add_argument("--output", type=Path, required=True)

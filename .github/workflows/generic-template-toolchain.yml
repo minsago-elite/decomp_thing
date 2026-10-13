@@ -41,7 +41,7 @@ concurrency:
 jobs:
   snapshot-metadata:
     name: Production snapshot metadata diagnostic
-    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'snapshot-metadata-diagnostic') }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'snapshot-metadata-diagnostic' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -123,6 +123,9 @@ jobs:
 
       - name: Run offline fail-closed provisioning tests
         run: python3 -m unittest discover -s oracle/clang/18.1.3 -p 'test_*.py' -v
+
+      - name: Verify inert root-owned archive preflight without acquisition
+        run: python3 oracle/clang/18.1.3/test_provisioning.py --privilege-smoke sudo
 
   qualify:
     name: Native toolchain qualification
