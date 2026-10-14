@@ -15,6 +15,7 @@ internal enum class AcpProviderQualificationPurpose {
     PROCESS_CONFIGURATION,
     FIXTURE_POLICY,
     INVOCATION_EVIDENCE,
+    GUARDIAN_LAUNCH_DESCRIPTOR,
 }
 
 /** Closed credential-free profile; none of its authority is selected by operator input. */

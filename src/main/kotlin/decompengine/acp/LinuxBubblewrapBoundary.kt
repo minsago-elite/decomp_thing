@@ -17,6 +17,8 @@ import java.nio.ByteOrder
 import java.security.MessageDigest
 import java.time.Duration
 import java.util.Collections
+import java.util.IdentityHashMap
+import java.util.WeakHashMap
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
@@ -250,6 +252,175 @@ internal enum class AcpSandboxStdinDisposition(internal val protocolArgument: St
     CLOSED_BEFORE_EXEC("closed-before-exec"),
 }
 
+/**
+ * One factory-owned launch commitment. Artifact metadata alone is not launch authority: the exact
+ * configuration must own a single-use factory permit and every executable is pinned again by the
+ * ordinary boundary. There is no operator-selected guardian or alternate launcher constructor.
+ */
+internal class AcpProviderGuardianLaunchDescriptor private constructor(
+    private val configuration: AcpProcessConfiguration,
+    internal val guardianMount: AcpSandboxReadOnlyMount,
+    internal val childMount: AcpSandboxReadOnlyMount,
+    internal val codexMount: AcpSandboxReadOnlyMount,
+    val factoryConfigurationSha256: String,
+    val guardianExecutableSha256: String,
+    val childExecutableSha256: String,
+    val codexExecutableSha256: String,
+) {
+    private val launchClaimed = AtomicBoolean(false)
+    internal val command: List<String> = Collections.unmodifiableList(listOf(
+        ACP_PROVIDER_GUARDIAN_PATH.toString(), "--state-root", ACP_PROVIDER_STATE_ROOT.toString(),
+        "--codex-path", codexMount.destination.toString(), "--",
+    ) + configuration.command())
+    val orderedArgumentsSha256: String = canonicalStringDigest(command, NO_SANDBOX_CHECKPOINT)
+    val privateStateRootSha256: String = sha256(ACP_PROVIDER_STATE_ROOT.toString())
+    val guardianManifestSha256: String get() = requireNotNull(guardianMount.expectedManifestSha256)
+    val childManifestSha256: String get() = requireNotNull(childMount.expectedManifestSha256)
+    val codexManifestSha256: String get() = requireNotNull(codexMount.expectedManifestSha256)
+    internal val runtimeMounts: List<AcpSandboxReadOnlyMount> = Collections.unmodifiableList(
+        (listOf(guardianMount, childMount) + requireNotNull(configuration.sandboxBoundary).agentRuntimeMounts)
+            .distinctBy { it.destination },
+    )
+
+    internal fun requireLaunchAuthority(sandbox: AcpLinuxSandboxConfiguration, launch: AcpSandboxLaunch) {
+        check(isIssued() && launchClaimed.compareAndSet(false, true)) {
+            "ACP provider guardian launch authority is invalid or consumed"
+        }
+        requireLaunchMatches(sandbox, launch)
+    }
+
+    internal fun requireLaunchMatches(sandbox: AcpLinuxSandboxConfiguration, launch: AcpSandboxLaunch) {
+        require(isIssued() && configuration.sandboxBoundary === sandbox && launch.guardianDescriptor === this &&
+            launch.purpose == AcpSandboxLaunchPurpose.OUTER_AGENT && launch.command == command &&
+            launch.readOnlyMounts.size == runtimeMounts.size &&
+            launch.readOnlyMounts.zip(runtimeMounts).all { (left, right) -> left.hasSameMountAuthority(right) } &&
+            launch.stagingRoots.isEmpty() && launch.environment.isEmpty() &&
+            launch.workingDirectory == sandbox.agentWorkingDirectory &&
+            launch.resourceLimits == sandbox.agentResourceLimits &&
+            ACP_PROVIDER_STATE_ROOT in launch.emptyDirectories &&
+            launch.emptyDirectories.filter { it != ACP_PROVIDER_STATE_ROOT }.none {
+                pathsOverlap(it, ACP_PROVIDER_STATE_ROOT)
+            } && launch.stdinDisposition == AcpSandboxStdinDisposition.INHERITED_PIPE
+        ) { "ACP provider guardian launch differs from its factory-owned commitment" }
+        AcpProviderQualificationProfile.CREDENTIAL_FREE.requireSandboxResourceLimits(launch.resourceLimits)
+    }
+
+    private fun isIssued(): Boolean = issuer.isIssued(this)
+
+    private class Issuer {
+        // All maps are instance-private. Kotlin synthetic accessors must never expose them.
+        private val issued = WeakHashMap<AcpProviderGuardianLaunchDescriptor, Boolean>()
+        private val selected = IdentityHashMap<AcpProcessConfiguration, AcpProviderGuardianLaunchDescriptor>()
+        private val claimedConfigurations = WeakHashMap<AcpProcessConfiguration, Boolean>()
+
+        fun isIssued(descriptor: AcpProviderGuardianLaunchDescriptor): Boolean =
+            synchronized(issued) { issued.containsKey(descriptor) }
+
+        fun authenticateAndBind(
+            configuration: AcpProcessConfiguration,
+            artifact: AcpProviderGuardianArtifact,
+            trustedGuardianSha256: String,
+            codexMount: AcpSandboxReadOnlyMount,
+            factoryConfigurationSha256: String,
+            permit: AcpProviderQualificationPermit,
+        ): AcpProviderGuardianLaunchDescriptor {
+            val profile = AcpHarnessFactory.consumeProviderQualificationPermit(
+                permit, configuration, AcpProviderQualificationPurpose.GUARDIAN_LAUNCH_DESCRIPTOR,
+            )
+            val sandbox = requireNotNull(configuration.sandboxBoundary)
+            profile.requireSandboxResourceLimits(sandbox.agentResourceLimits)
+            require(factoryConfigurationSha256.matches(Regex("[0-9a-f]{64}")))
+            require(trustedGuardianSha256.matches(Regex("[0-9a-f]{64}")) &&
+                artifact.executableSha256 == trustedGuardianSha256)
+            require(!configuration.inheritParentEnvironment && configuration.environment.isEmpty()) {
+                "ACP provider guardian owns its cleared child environment"
+            }
+            val childMount = AcpSandboxReadOnlyMount(
+                configuration.executable, configuration.executable,
+                requireNotNull(configuration.expectedExecutableManifestSha256),
+            )
+            require(sandbox.agentRuntimeMounts.any { it.hasSameMountAuthority(codexMount) } &&
+                codexMount.expectedManifestSha256 != null && codexMount.destination != childMount.destination)
+            val guardian = AcpSandboxReadOnlyMount.trustedInternal(
+                artifact.executable, ACP_PROVIDER_GUARDIAN_PATH, artifact.runtimeManifestSha256,
+            )
+            val all = listOf(guardian, childMount) + sandbox.agentRuntimeMounts
+            require(all.groupBy { it.destination }.values.all { group ->
+                group.all { it.hasSameMountAuthority(group.first()) }
+            }) { "ACP provider executable mounts conflict" }
+            fun executableDigest(mount: AcpSandboxReadOnlyMount): String {
+                require(Files.isRegularFile(mount.source, LinkOption.NOFOLLOW_LINKS) &&
+                    Files.isExecutable(mount.source) &&
+                    calculateAcpRuntimeManifestSha256(mount.source) == mount.expectedManifestSha256)
+                return requireNotNull(LinuxFilesystemSyscalls.openAbsolutePathOrNull(mount.source)).use {
+                    sha256(it, sandbox.runtimeClosureLimits.maximumUserOwnedFileBytes)
+                }
+            }
+            // The artifact was authenticated by its owner. Recheck here and once more against the
+            // boundary's pinned descriptor immediately before gate release.
+            require(executableDigest(guardian) == trustedGuardianSha256)
+            val descriptor = AcpProviderGuardianLaunchDescriptor(
+                configuration, guardian, childMount, codexMount, factoryConfigurationSha256,
+                trustedGuardianSha256, executableDigest(childMount), executableDigest(codexMount),
+            )
+            synchronized(selected) {
+                check(!selected.containsKey(configuration) && !claimedConfigurations.containsKey(configuration)) {
+                    "ACP provider guardian is already bound or consumed"
+                }
+                synchronized(issued) { issued[descriptor] = true }
+                selected[configuration] = descriptor
+            }
+            return descriptor
+        }
+
+        fun claimForLaunch(configuration: AcpProcessConfiguration): AcpProviderGuardianLaunchDescriptor? =
+            synchronized(selected) {
+                check(!claimedConfigurations.containsKey(configuration)) {
+                    "ACP provider guardian selection is already consumed"
+                }
+                selected.remove(configuration)?.also { claimedConfigurations[configuration] = true }
+            }
+    }
+    companion object {
+        private val issuer = Issuer()
+
+        internal fun authenticateAndBind(
+            configuration: AcpProcessConfiguration,
+            artifact: AcpProviderGuardianArtifact,
+            trustedGuardianSha256: String,
+            codexMount: AcpSandboxReadOnlyMount,
+            factoryConfigurationSha256: String,
+            permit: AcpProviderQualificationPermit,
+        ): AcpProviderGuardianLaunchDescriptor = issuer.authenticateAndBind(
+            configuration, artifact, trustedGuardianSha256, codexMount, factoryConfigurationSha256, permit,
+        )
+
+        internal fun claimForLaunch(configuration: AcpProcessConfiguration): AcpProviderGuardianLaunchDescriptor? =
+            issuer.claimForLaunch(configuration)
+    }
+}
+
+/** Boundary-only observations; no native child/reap/descriptor cleanup is inferred from them. */
+internal data class AcpSandboxBoundaryCleanupFacts(
+    val observedTaskPeak: Int?,
+    val finalMembershipZero: Boolean,
+    val cgroupRemoved: Boolean,
+    val scopeRemoved: Boolean,
+    val lastTaskPeakObservationNanos: Long? = null,
+    val cgroupIdentitySha256: String? = null,
+)
+
+internal enum class AcpGuardianSignalOutcome { DELIVERED, ALREADY_EXITED }
+
+internal enum class AcpGuardianStderrObservation { EMPTY, NONEMPTY, DRAIN_INCOMPLETE }
+
+/** I/O facts only. Native receipt, router joins and later boundary cleanup remain separate proofs. */
+internal data class AcpGuardianIoCompletion(
+    val diagnostics: AcpProcessDiagnostics,
+    val stderrObservation: AcpGuardianStderrObservation,
+    val stdoutAccountingVerified: Boolean,
+)
+
 internal data class AcpSandboxLaunch(
     val command: List<String>,
     val environment: Map<String, String>,
@@ -262,6 +433,7 @@ internal data class AcpSandboxLaunch(
     /** Private empty namespace anchors, never host binds. Used for ACP session cwd declarations. */
     val emptyDirectories: List<Path> = emptyList(),
     val stdinDisposition: AcpSandboxStdinDisposition = AcpSandboxStdinDisposition.INHERITED_PIPE,
+    internal val guardianDescriptor: AcpProviderGuardianLaunchDescriptor? = null,
 ) {
     init {
         require(!maximumWallDuration.isZero && !maximumWallDuration.isNegative) {
@@ -371,7 +543,10 @@ internal class AcpSandboxedProcess internal constructor(
 ) : AcpContainedProcess {
     private val cleanup = CompletableFuture<Unit>()
     private val rootProcessHandleClosed = AtomicBoolean(false)
+    private val guardianHandle = AtomicReference<LinuxProcessDescriptor?>()
+    private val guardianHandleBound = AtomicBoolean(false)
     internal val scopeIdentity: AcpSandboxScopeIdentity get() = scope.identity
+    internal val hasAuthenticatedGuardian: Boolean get() = guardianHandleBound.get()
 
     init {
         process.onExit().whenComplete { _, _ ->
@@ -422,6 +597,35 @@ internal class AcpSandboxedProcess internal constructor(
             }
         }
     }
+
+    /** The gate waiter execs the guardian without changing pidfd identity. No stream is touched. */
+    internal fun bindGuardianHandle(handle: LinuxProcessDescriptor) {
+        check(guardianHandleBound.compareAndSet(false, true)) { "guardian process handle is already bound" }
+        guardianHandle.set(handle)
+        if (cleanup.isDone) guardianHandle.getAndSet(null)?.close()
+        scope.observeTaskPeak()
+    }
+
+    internal fun terminateGuardian(): Boolean {
+        check(guardianHandleBound.get()) { "sandbox has no authenticated guardian process" }
+        scope.observeTaskPeak()
+        val handle = guardianHandle.get() ?: return false
+        return LinuxFilesystemSyscalls.terminateProcess(handle)
+    }
+
+    internal fun killGuardian(): Boolean {
+        check(guardianHandleBound.get()) { "sandbox has no authenticated guardian process" }
+        val handle = guardianHandle.get() ?: return false
+        return LinuxFilesystemSyscalls.killProcess(handle)
+    }
+
+    internal fun guardianExited(): Boolean {
+        check(guardianHandleBound.get()) { "sandbox has no authenticated guardian process" }
+        val handle = guardianHandle.get() ?: return cleanup.isDone
+        return LinuxFilesystemSyscalls.processExited(handle)
+    }
+
+    internal fun boundaryCleanupFacts(): AcpSandboxBoundaryCleanupFacts = scope.cleanupFacts()
 
     override fun destroy() = signal(force = false)
 
@@ -475,6 +679,7 @@ internal class AcpSandboxedProcess internal constructor(
     }
 
     private fun closeRootProcessHandle() {
+        guardianHandle.getAndSet(null)?.close()
         if (rootProcessHandleClosed.compareAndSet(false, true)) rootProcessHandle.close()
     }
 }
@@ -679,6 +884,7 @@ internal class LinuxBubblewrapBoundary private constructor(
     ): AcpSandboxedProcess {
         closeFailure.get()?.let { throw it }
         if (closed.get()) throw IOException("ACP sandbox boundary is closed")
+        launch.guardianDescriptor?.requireLaunchAuthority(configuration, launch)
         requireAcpSandboxLaunchPolicy(configuration, launch, mergeError, cancellationCheck)
         // Empty-directory anchors become target-side bubblewrap --dir entries, not host sources.
         launch.stagingRoots.forEach { grant ->
@@ -801,6 +1007,15 @@ internal class LinuxBubblewrapBoundary private constructor(
                 it.mount.destination.toString() == launch.command.firstOrNull()
             } ?: throw IOException("sandbox command executable is not an exact authenticated runtime mount")
             executableMount.requireNativeExecveatTarget(cancellationCheck)
+            launch.guardianDescriptor?.let { descriptor ->
+                executableMount.requireCommittedExecutable(descriptor.guardianExecutableSha256, true, cancellationCheck)
+                listOf(descriptor.childMount to descriptor.childExecutableSha256,
+                    descriptor.codexMount to descriptor.codexExecutableSha256).forEach { (mount, digest) ->
+                    val pinned = launchMounts.single { it.mount.hasSameMountAuthority(mount) }
+                    pinned.requireNativeExecveatTarget(cancellationCheck)
+                    pinned.requireCommittedExecutable(digest, false, cancellationCheck)
+                }
+            }
             var setupWaiter = verifiedScope.requireSetupWaiter(
                 launchGateHelper.setupAttestation(),
                 executableMount.setupAttestation(),
@@ -910,6 +1125,29 @@ internal class LinuxBubblewrapBoundary private constructor(
                     launchCheckpoint(AcpSandboxLaunchStage.DURING_SETUP_ATTESTATION, cancellationCheck)
                 },
             )
+            launch.guardianDescriptor?.let { descriptor ->
+                val handle = LinuxFilesystemSyscalls.openProcessHandle(setupWaiterPid)
+                try {
+                    require(readProcessStartTime(setupWaiterPid, cancellationCheck) == setupWaiter.helperStartTime)
+                    verifiedScope.requireSetupWaiter(
+                        launchGateHelper.setupAttestation(), executableMount.setupAttestation(),
+                        createdEnvironment.setupAttestation(), launch.command, launch.workingDirectory,
+                        launch.stdinDisposition, setupWaiter, cancellationCheck,
+                    )
+                    // Recheck all executable bytes after the final mount attestation and before
+                    // the one-way gate commit, including the separately authenticated children.
+                    executableMount.requireCommittedExecutable(descriptor.guardianExecutableSha256, true, cancellationCheck)
+                    listOf(descriptor.childMount to descriptor.childExecutableSha256,
+                        descriptor.codexMount to descriptor.codexExecutableSha256).forEach { (mount, digest) ->
+                        launchMounts.single { it.mount.hasSameMountAuthority(mount) }
+                            .requireCommittedExecutable(digest, false, cancellationCheck)
+                    }
+                    created.bindGuardianHandle(handle)
+                } catch (failure: Throwable) {
+                    handle.close()
+                    throw failure
+                }
+            }
             if (launch.purpose == AcpSandboxLaunchPurpose.CANDIDATE_VALIDATION) {
                 writableMountClosureSha256 = requireCandidateWritableMountClosure(
                     setupWaiterPid, launch.stagingRoots, cancellationCheck,
@@ -1307,6 +1545,11 @@ internal class LinuxBubblewrapBoundary private constructor(
             cancellationCheck()
             add("--dir")
             add(directory.toString())
+            if (launch.guardianDescriptor != null && directory == ACP_PROVIDER_STATE_ROOT) {
+                add("--chmod")
+                add("0700")
+                add(directory.toString())
+            }
         }
         allMounts.forEach { pinned ->
             cancellationCheck()
@@ -1578,8 +1821,10 @@ internal fun requireAcpSandboxLaunchPolicy(
         throw IOException("a Ninja compdb query requires separately captured stdout and stderr")
     }
 
+    launch.guardianDescriptor?.requireLaunchMatches(configuration, launch)
     val trustedProtectedMounts = when (launch.purpose) {
-        AcpSandboxLaunchPurpose.OUTER_AGENT -> configuration.agentRuntimeMounts
+        AcpSandboxLaunchPurpose.OUTER_AGENT -> configuration.agentRuntimeMounts +
+            listOfNotNull(launch.guardianDescriptor?.guardianMount)
         AcpSandboxLaunchPurpose.TERMINAL -> emptyList()
         AcpSandboxLaunchPurpose.NINJA_COMPDB_QUERY -> configuration.ninjaCompdbRuntimeMounts
         AcpSandboxLaunchPurpose.CANDIDATE_VALIDATION -> configuration.validationRuntimeMounts
@@ -3154,6 +3399,42 @@ internal class VerifiedSystemdScope(
     private val leaderPid: Long,
 ) {
     val identity: AcpSandboxScopeIdentity = AcpSandboxScopeIdentity(unitName, cgroupPath)
+    private val cgroupDescriptor = LinuxFilesystemSyscalls.openRoot(cgroupPath)
+    private val observedTaskPeak = AtomicLong(-1)
+    private val lastTaskPeakObservationNanos = AtomicLong(-1)
+    private val cgroupIdentitySha256 = cgroupDescriptor.identity.let {
+        sha256("acp-cgroup-v1:${it.key.device}:${it.key.inode}:${it.mountId}")
+    }
+    private val finalMembershipZero = AtomicBoolean(false)
+    private val cgroupRemoved = AtomicBoolean(false)
+    private val scopeRemoved = AtomicBoolean(false)
+
+    /** Kernel cumulative peak for this exact authenticated leaf; a missing reading stays absent. */
+    internal fun observeTaskPeak() {
+        runCatching {
+            val bytes = cgroupDescriptor.whileOpen { directoryFd ->
+                LinuxFilesystemSyscalls.openPathAtOrNull(directoryFd, "pids.peak")?.use { authorized ->
+                    LinuxFilesystemSyscalls.openReadableFrom(authorized).use { readable ->
+                        LinuxFilesystemSyscalls.read(readable, 31, NO_SANDBOX_CHECKPOINT)
+                    }
+                }
+            } ?: return@runCatching
+            val peak = bytes.toString(Charsets.US_ASCII).trim().toLongOrNull() ?: return@runCatching
+            if (peak in 1..Int.MAX_VALUE.toLong()) {
+                observedTaskPeak.accumulateAndGet(peak, ::maxOf)
+                lastTaskPeakObservationNanos.set(System.nanoTime())
+            }
+        }
+    }
+
+    internal fun cleanupFacts(): AcpSandboxBoundaryCleanupFacts {
+        observeTaskPeak()
+        return AcpSandboxBoundaryCleanupFacts(
+            observedTaskPeak.get().takeIf { it >= 0 }?.toInt(), finalMembershipZero.get(),
+            cgroupRemoved.get(), scopeRemoved.get(),
+            lastTaskPeakObservationNanos.get().takeIf { it >= 0 }, cgroupIdentitySha256,
+        )
+    }
 
     /** Proves the fully mounted static helper and its pre-opened target/environment descriptors. */
     fun requireSetupWaiter(
@@ -3333,7 +3614,16 @@ internal class VerifiedSystemdScope(
         val deadline = System.nanoTime() + CLEANUP_TIMEOUT.toNanos()
         while (System.nanoTime() < deadline) {
             val properties = systemctlShow(inspector, bus, unitName)
-            if (properties["LoadState"] == "not-found" && !Files.exists(cgroupPath, LinkOption.NOFOLLOW_LINKS)) return
+            observeTaskPeak()
+            if (properties["LoadState"] == "not-found" && !Files.exists(cgroupPath, LinkOption.NOFOLLOW_LINKS)) {
+                // The exact leaf's absence proves it contains no members. These facts do not
+                // prove native child reaping or receipt delivery.
+                finalMembershipZero.set(true)
+                cgroupRemoved.set(true)
+                scopeRemoved.set(true)
+                cgroupDescriptor.close()
+                return
+            }
             killAll()
             runCatching { systemctl(inspector, bus, listOf("stop", unitName)) }
             Thread.sleep(SCOPE_POLL_MILLIS)
@@ -3946,6 +4236,21 @@ private class PinnedReadOnlyMount private constructor(
             expectedSha256,
             manifest.rootIdentity.mode,
             cancellationCheck,
+        )
+    }
+
+    fun requireCommittedExecutable(
+        expectedSha256: String,
+        staticGuardian: Boolean,
+        cancellationCheck: () -> Unit,
+    ) {
+        if (manifest.rootDirectory || sha256(sourceDescriptor, limits.maximumUserOwnedFileBytes,
+                cancellationCheck) != expectedSha256) {
+            throw IOException("provider executable differs from its factory-owned commitment")
+        }
+        if (staticGuardian) verifyStaticAcpProviderGuardian(
+            readPinnedBytes(sourceDescriptor, MAXIMUM_GATE_HELPER_BYTES, cancellationCheck),
+            expectedSha256, manifest.rootIdentity.mode,
         )
     }
 
@@ -6134,6 +6439,8 @@ private const val ELF_DT_NEEDED = 1L
 private const val CONTROL_DIRECTORY_MODE = 0x1c0 // 0700
 private const val SANDBOX_ENVIRONMENT_FILE_MODE = 0x180 // 0600
 private val ACP_SANDBOX_GATE_HELPER_PATH = ACP_INTERNAL_SANDBOX_ROOT.resolve("gate-helper")
+private val ACP_PROVIDER_GUARDIAN_PATH = ACP_INTERNAL_SANDBOX_ROOT.resolve("provider-guardian")
+internal val ACP_PROVIDER_STATE_ROOT: Path = Path.of("/tmp/decomp-acp-provider-state")
 private val ACP_SANDBOX_ENVIRONMENT_PATH = ACP_INTERNAL_SANDBOX_ROOT.resolve("environment")
 private const val SANDBOX_GATE_TARGET_FD = 3
 private const val SANDBOX_GATE_ENVIRONMENT_FD = 4

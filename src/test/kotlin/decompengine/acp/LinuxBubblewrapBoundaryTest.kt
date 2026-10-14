@@ -1680,10 +1680,18 @@ class LinuxBubblewrapBoundaryTest {
         )
         try {
             val gated = fallbackBoundary.launch(probeLaunch(listOf("terminal-sleep")), true) {}
+            val beforeCleanup = gated.boundaryCleanupFacts()
+            assertTrue(requireNotNull(beforeCleanup.observedTaskPeak) in 1..TEST_LIMITS.maximumProcesses)
+            assertTrue(requireNotNull(beforeCleanup.lastTaskPeakObservationNanos) > 0)
+            assertTrue(requireNotNull(beforeCleanup.cgroupIdentitySha256).matches(Regex("[0-9a-f]{64}")))
+            assertFalse(beforeCleanup.cgroupRemoved)
             assertFailsWith<IOException> { gated.destroyForcibly() }
             assertTrue(rootSignalAttempted.get(), "scope failure must not skip the exact pidfd signal")
             assertTrue(gated.process.waitFor(5, TimeUnit.SECONDS))
             gated.awaitCleanup(Duration.ofSeconds(5))
+            val afterCleanup = gated.boundaryCleanupFacts()
+            assertTrue(afterCleanup.finalMembershipZero && afterCleanup.cgroupRemoved && afterCleanup.scopeRemoved)
+            assertEquals(beforeCleanup.cgroupIdentitySha256, afterCleanup.cgroupIdentitySha256)
         } finally {
             fallbackBoundary.close()
         }

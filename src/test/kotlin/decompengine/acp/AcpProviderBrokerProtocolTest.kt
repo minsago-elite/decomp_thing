@@ -320,6 +320,209 @@ class AcpProviderBrokerProtocolTest {
         assertEquals(0, output.size())
     }
 
+    @Test
+    fun `v2 setup appends exactly the required feature and never changes v1 bytes`() {
+        val v1 = AcpProviderBrokerProtocol.channelSetupPayload(capability, policy, binding, 60_000)
+        val v2 = setupV2()
+        assertEquals(156, v2.size)
+        assertContentEquals(v1, v2.copyOfRange(0, 152))
+        assertContentEquals(byteArrayOf(0, 0, 0, 1), v2.copyOfRange(152, 156))
+        AcpProviderBrokerProtocol.decodeChannelSetupPayload(v2, policy, AcpProviderProtocolVersion.V2)
+        listOf(0, 2, 3, -1).forEach { feature ->
+            val altered = v2.copyOf().also { ByteBuffer.wrap(it).putInt(152, feature) }
+            assertFailsWith<AcpProviderProtocolException> {
+                AcpProviderBrokerProtocol.decodeChannelSetupPayload(altered, version = AcpProviderProtocolVersion.V2)
+            }
+        }
+        assertFailsWith<AcpProviderProtocolException> { AcpProviderBrokerProtocol.decodeChannelSetupPayload(v2) }
+        assertFailsWith<AcpProviderProtocolException> {
+            AcpProviderBrokerProtocol.decodeChannelSetupPayload(v1, version = AcpProviderProtocolVersion.V2)
+        }
+    }
+
+    @Test
+    fun `v2 header callback revokes synchronously before any cleanup payload read`() {
+        val frame = cleanupFrame()
+        val bytes = encode(frame, guardian)
+        var callbackRan = false
+        var consumed = 0
+        val source = object : InputStream() {
+            override fun read(): Int {
+                if (consumed >= 18) assertTrue(callbackRan)
+                return if (consumed == bytes.size) -1 else bytes[consumed++].toInt() and 0xff
+            }
+        }
+        val decoded = AcpProviderBrokerProtocol.readFrame(source, 256, guardian, AcpProviderProtocolVersion.V2) { header ->
+            assertEquals(18, consumed)
+            assertEquals(AcpProviderFrameHeader(AcpProviderProtocolVersion.V2, AcpProviderFrameTag.CHANNEL_CLEANUP, 0, 116), header)
+            callbackRan = true
+        }!!
+        assertEquals(AcpProviderFrameTag.CHANNEL_CLEANUP, decoded.tag)
+        assertTrue(callbackRan)
+    }
+
+    @Test
+    fun `v2 malformed fixed headers refuse before callback and payload allocation`() {
+        val valid = encode(cleanupFrame(), guardian).copyOf(18)
+        val examples = listOf(valid.copyOf().also { it[4] = 1 }, valid.copyOf().also { it[13] = 1 },
+            valid.copyOf().also { it[17] = 115 }, valid.copyOf().also { it[17] = 117 },
+            valid.copyOf().also { it[5] = 7 })
+        examples.forEach { bytes ->
+            var called = false
+            val input = HeaderOnlyInput(bytes)
+            assertFailsWith<AcpProviderProtocolException> {
+                AcpProviderBrokerProtocol.readFrame(input, 256, guardian, AcpProviderProtocolVersion.V2) { called = true }
+            }
+            assertFalse(called)
+            assertEquals(18, input.consumed)
+        }
+        assertFailsWith<AcpProviderProtocolException> { encode(cleanupFrame(), host) }
+        assertFailsWith<AcpProviderProtocolException> {
+            AcpProviderBrokerProtocol.readFrame(ByteArrayInputStream(encode(cleanupFrame(), guardian)), 256, guardian)
+        }
+    }
+
+    @Test
+    fun `cleanup revokes an active sequence permits one final receipt and rejects all later frames`() {
+        val order = orderV2()
+        order.accept(AcpProviderFrame(AcpProviderFrameTag.PROVIDER_REQUEST, 1, request().payload, AcpProviderProtocolVersion.V2))
+        assertTrue(order.hasActiveRequest())
+        order.beginCleanup()
+        assertFalse(order.hasActiveRequest())
+        assertFailsWith<AcpProviderProtocolException> { order.beginCleanup() }
+        order.accept(cleanupFrame())
+        order.finish()
+        listOf(cleanupFrame(), AcpProviderFrame(AcpProviderFrameTag.ACP_BYTES, 0, byteArrayOf(1), AcpProviderProtocolVersion.V2)).forEach {
+            assertFailsWith<AcpProviderProtocolException> { order.accept(it) }
+        }
+        assertFailsWith<AcpProviderProtocolException> { orderV2().accept(cleanupFrame()) }
+        assertFailsWith<AcpProviderProtocolException> { orderV2().finish() }
+        assertFailsWith<AcpProviderProtocolException> { orderV2().accept(AcpProviderFrame(AcpProviderFrameTag.ACP_BYTES, 0, byteArrayOf(1))) }
+    }
+
+    @Test
+    fun `cleanup after an earlier protocol failure never repairs sticky failure`() {
+        val order = orderV2()
+        assertFailsWith<AcpProviderProtocolException> {
+            order.accept(AcpProviderFrame(AcpProviderFrameTag.PROVIDER_RESPONSE_CHUNK, 1, byteArrayOf(1), AcpProviderProtocolVersion.V2))
+        }
+        order.beginCleanup()
+        order.accept(cleanupFrame())
+        assertTrue(order.hasFailed())
+        assertFailsWith<AcpProviderProtocolException> { order.finish() }
+    }
+
+    @Test
+    fun `cleanup identity uses the fixed domain including NUL and erases every raw identity on success and rejection`() {
+        val setup = setupV2().also { for (i in 0 until 96) it[i] = (i + 1).toByte() }
+        val auth = AcpProviderCleanupAuthenticator.fromSetup(setup)
+        val field = AcpProviderCleanupAuthenticator::class.java.getDeclaredField("digest").also { it.isAccessible = true }
+        val digest = field.get(auth) as ByteArray
+        assertEquals("b9a35035080be9e2917503d1795ce11ca784de48689e186e5b18bd92e106c2c9", digest.joinToString("") { "%02x".format(it) })
+        val receipt = cleanupBytes(setup)
+        val decoded = AcpProviderBrokerProtocol.decodeCleanupReceipt(receipt, auth, 3_000)
+        assertTrue(receipt.take(96).all { it == 0.toByte() })
+        assertTrue(decoded.nativeCleanupVerified)
+        assertFalse(decoded.toString().contains(digest.joinToString("")))
+        val nativeSetup = setupV2().also {
+            for (i in 0 until 32) it[i] = i.toByte()
+            it.fill(0x11, 32, 64); it.fill(0x22, 64, 96)
+        }
+        val nativeAuth = AcpProviderCleanupAuthenticator.fromSetup(nativeSetup)
+        assertEquals("4459a42aef304df78057779ff8fba8c874da172721f2e93a0e6d1566c297cc85",
+            (field.get(nativeAuth) as ByteArray).joinToString("") { "%02x".format(it) })
+        assertTrue(AcpProviderBrokerProtocol.decodeCleanupReceipt(cleanupBytes(nativeSetup), nativeAuth, 3_000).nativeCleanupVerified)
+        val ctor = AcpProviderCleanupAuthenticator::class.java.getDeclaredConstructor(ByteArray::class.java).also { it.isAccessible = true }
+        val exactPrefix = "acpp-v2-cleanup\u0000".toByteArray(Charsets.US_ASCII)
+        val wrongPrefixes = exactPrefix.indices.flatMap { index ->
+            listOf(exactPrefix.copyOf().also { it[index] = (it[index].toInt() xor 1).toByte() },
+                exactPrefix.filterIndexed { position, _ -> position != index }.toByteArray())
+        }
+        wrongPrefixes.forEach { prefix ->
+            val wrong = java.security.MessageDigest.getInstance("SHA-256").run {
+                update(prefix); update(setup, 0, 96); digest()
+            }
+            val raw = cleanupBytes(setup)
+            assertFailsWith<AcpProviderProtocolException> {
+                AcpProviderBrokerProtocol.decodeCleanupReceipt(raw, ctor.newInstance(wrong), 3_000)
+            }
+            assertTrue(raw.take(96).all { it == 0.toByte() })
+        }
+        for (index in listOf(0, 32, 64)) {
+            val raw = cleanupBytes(setup).also { it[index] = (it[index].toInt() xor 1).toByte() }
+            assertFailsWith<AcpProviderProtocolException> { AcpProviderBrokerProtocol.decodeCleanupReceipt(raw, auth, 3_000) }
+            assertTrue(raw.take(96).all { it == 0.toByte() })
+        }
+    }
+
+    @Test
+    fun `cleanup maps actual exit and signal wait statuses without parent inference`() {
+        data class Case(val outcome: Int, val raw: Int, val kind: AcpProviderChildExitKind, val exit: Int?, val signal: Int?)
+        val cases = listOf(Case(1, 0, AcpProviderChildExitKind.EXITED, 0, null),
+            Case(1, 127 shl 8, AcpProviderChildExitKind.EXITED, 127, null),
+            Case(2, 15, AcpProviderChildExitKind.SIGTERM, null, 15),
+            Case(3, 9, AcpProviderChildExitKind.SIGKILL, null, 9),
+            Case(4, 6 or 128, AcpProviderChildExitKind.OTHER_SIGNAL, null, 6))
+        cases.forEach { case ->
+            val raw = cleanupBytes().also { it[97] = 1; it[98] = case.outcome.toByte(); ByteBuffer.wrap(it).putInt(100, case.raw) }
+            val decoded = decodeCleanup(raw)
+            assertEquals(case.kind, decoded.childExitKind)
+            assertEquals(case.exit, decoded.childExitCode)
+            assertEquals(case.signal, decoded.childSignal)
+            assertTrue(decoded.nativeCleanupVerified)
+        }
+        val naturalSignal = cleanupBytes().also { it[98] = 4; ByteBuffer.wrap(it).putInt(100, 10) }
+        assertEquals(AcpProviderChildExitKind.OTHER_SIGNAL, decodeCleanup(naturalSignal).childExitKind)
+        val absent = cleanupBytes().also { it[97] = 6; it[98] = 0; it[99] = 0x70; ByteBuffer.wrap(it).putInt(104, -1) }
+        absent[99] = 0x30
+        val unknown = decodeCleanup(absent)
+        assertEquals(AcpProviderChildExitKind.UNOBSERVED, unknown.childExitKind)
+        assertNull(unknown.remainingDescendants)
+        assertFalse(unknown.nativeCleanupVerified)
+    }
+
+    @Test
+    fun `cleanup rejects inconsistent outcome flags status counts descriptor masks and elapsed bounds`() {
+        val alterations: List<(ByteArray) -> Unit> = listOf(
+            { it[96] = 2 }, { it[97] = 7 }, { it[98] = 0 }, { it[98] = 5 },
+            { it[99] = (it[99].toInt() and 0xfe).toByte() },
+            { ByteBuffer.wrap(it).putInt(100, 0xffff) }, { ByteBuffer.wrap(it).putInt(100, 0x1_0000) },
+            { ByteBuffer.wrap(it).putInt(104, 1) }, { ByteBuffer.wrap(it).putInt(104, 33) },
+            { ByteBuffer.wrap(it).putInt(108, 0x3e) }, { ByteBuffer.wrap(it).putInt(108, 0x7f) },
+            { it[99] = (it[99].toInt() or 8).toByte() },
+            { ByteBuffer.wrap(it).putInt(112, 3_001) }, { ByteBuffer.wrap(it).putInt(112, 3_002) },
+            { it[99] = (it[99].toInt() or 128).toByte() },
+        )
+        alterations.forEach { alter ->
+            val raw = cleanupBytes().also(alter)
+            assertFailsWith<AcpProviderProtocolException> { decodeCleanup(raw) }
+            assertTrue(raw.take(96).all { it == 0.toByte() })
+        }
+        val timedOut = cleanupBytes().also {
+            it[97] = 3; it[99] = (it[99].toInt() or 128).toByte(); ByteBuffer.wrap(it).putInt(112, 3_001)
+        }
+        assertFalse(decodeCleanup(timedOut).nativeCleanupVerified)
+    }
+
+    @Test
+    fun `frame cleanup consumption destroys retained capability and cannot authenticate twice`() {
+        val frame = cleanupFrame()
+        val auth = AcpProviderCleanupAuthenticator.fromSetup(setupV2())
+        assertTrue(frame.consumeCleanupPayload(auth, 3_000).nativeCleanupVerified)
+        assertTrue(frame.payload.take(96).all { it == 0.toByte() })
+        assertFailsWith<AcpProviderProtocolException> { frame.consumeCleanupPayload(auth, 3_000) }
+    }
+
+    private fun setupV2(): ByteArray = AcpProviderBrokerProtocol.channelSetupPayload(capability, policy, binding, 60_000, AcpProviderProtocolVersion.V2)
+    private fun cleanupBytes(setup: ByteArray = setupV2()): ByteArray = ByteBuffer.allocate(116).order(ByteOrder.BIG_ENDIAN)
+        .put(setup, 0, 96).put(1).put(0).put(1).put(0x73).putInt(0).putInt(0).putInt(0x3f).putInt(2).array()
+    private fun cleanupFrame(): AcpProviderFrame = AcpProviderFrame(AcpProviderFrameTag.CHANNEL_CLEANUP, 0, cleanupBytes(), AcpProviderProtocolVersion.V2)
+    private fun decodeCleanup(bytes: ByteArray): AcpProviderCleanupReceipt = AcpProviderBrokerProtocol.decodeCleanupReceipt(bytes,
+        AcpProviderCleanupAuthenticator.fromSetup(setupV2()), 3_000)
+    private fun orderV2(): AcpProviderFrameOrder = AcpProviderFrameOrder(policy, binding, capability, AcpProviderProtocolVersion.V2).also {
+        it.accept(AcpProviderFrame(AcpProviderFrameTag.CHANNEL_OPEN, 0, setupV2(), AcpProviderProtocolVersion.V2))
+    }
+
     private fun encode(frame: AcpProviderFrame, direction: AcpProviderFrameDirection): ByteArray =
         ByteArrayOutputStream().also { AcpProviderBrokerProtocol.writeFrame(it, frame, 256, direction) }.toByteArray()
 

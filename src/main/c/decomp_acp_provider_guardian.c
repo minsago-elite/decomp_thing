@@ -1,5 +1,5 @@
 /*
- * Credential-free provider guardian candidate, ACPP wire version 1.
+ * Credential-free provider guardian candidate, ACPP wire versions 1 and 2.
  *
  * This is deliberately not wired into the production gate. Its caller must supply
  * an isolated network/PID namespace, the existing cgroup/resource ceilings and an
@@ -10,8 +10,10 @@
  *
  * Public launch arguments: --state-root ABS --codex-path ABS -- CHILD_ABS [ARGS...]
  * The first stdin frame is CHANNEL_OPEN. No additional gate byte is consumed.
- * All diagnostics are fixed strings: neither raw ACP/HTTP bytes nor capabilities
- * may be written to stderr. ACP is opaque and uses independent child pipe FDs.
+ * V1 diagnostics are fixed strings; negotiated V2 emits no stderr and carries
+ * terminal metadata only in its authenticated receipt and exit status. Neither
+ * raw ACP/HTTP bytes nor capabilities may be written to stderr. ACP is opaque
+ * and uses independent child pipe FDs.
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>
@@ -36,8 +38,15 @@
 #include <time.h>
 #include <unistd.h>
 
-enum { ACP = 1, REQUEST = 2, HEADERS = 3, CHUNK = 4, END = 5, CANCEL = 6, OPEN = 7 };
-enum { FRAME_HEADER = 18, SETUP_BYTES = 152, ABS_FRAME = 8 * 1024 * 1024, ABS_CHUNK = 65536 };
+enum { ACP = 1, REQUEST = 2, HEADERS = 3, CHUNK = 4, END = 5, CANCEL = 6, OPEN = 7, CLEANUP = 8 };
+enum { FRAME_HEADER = 18, SETUP_BYTES = 152, SETUP_V2_BYTES = 156, CLEANUP_BYTES = 116,
+       TERMINAL_CLEANUP_RECEIPT = 1, ABS_FRAME = 8 * 1024 * 1024, ABS_CHUNK = 65536 };
+enum { NORMAL, HOST_REVOKED, GUARDIAN_SIGNAL, DEADLINE, PROTOCOL_FAILURE, CHILD_STDERR,
+       LAUNCH_FAILURE, UNKNOWN = 255 };
+enum { UNOBSERVED, EXITED, TERM, KILL, OTHER_SIGNAL };
+enum { STATUS_PRESENT = 1, FINAL_ECHILD = 2, SIGTERM_SENT = 4, SIGKILL_SENT = 8,
+       DESCRIPTORS_CLOSED = 16, STATE_ROOT_REMOVED = 32, DESCENDANTS_ZERO = 64,
+       CLEANUP_DEADLINE_EXPIRED = 128 };
 typedef struct {
     unsigned char *data;
     size_t off, len, cap, chunk_ends[16];
@@ -68,6 +77,11 @@ typedef struct {
     size_t request_used, header_length, content_length;
     bool opened, active, response_headers, cancelled, http_finish, child_eof;
     bool child_reaped, http_rejected;
+    bool setup_accepted, state_owned, auxiliary_close_failure;
+    unsigned version, terminal_cause, descriptor_failures;
+    unsigned char setup_identity[96];
+    dev_t state_dev;
+    ino_t state_ino;
     unsigned response_status;
     int child_status;
     const char *state_root, *codex_path;
@@ -102,11 +116,26 @@ static int nonblock(int fd) {
     int f = fcntl(fd, F_GETFL);
     return f < 0 ? -1 : fcntl(fd, F_SETFL, f | O_NONBLOCK);
 }
-static void closefd(int *fd) {
+static int closefd(int *fd) {
+    int result = 0;
     if (*fd >= 0) {
-        close(*fd);
+        result = close(*fd);
         *fd = -1;
     }
+    return result;
+}
+static void close_owned(Guardian *g, int *fd, unsigned bit) {
+    if (closefd(fd))
+        g->descriptor_failures |= 1U << bit;
+}
+static void close_auxiliary(Guardian *g, int *fd) {
+    if (closefd(fd))
+        g->auxiliary_close_failure = true;
+}
+static int terminal(Guardian *g, unsigned cause, int result) {
+    if (g->terminal_cause == UNKNOWN)
+        g->terminal_cause = cause;
+    return result;
 }
 static int queue_init(Queue *q, size_t cap) {
     q->data = malloc(cap);
@@ -147,9 +176,10 @@ static int queue_write(Queue *q, int fd, Guardian *g) {
     return -1;
 }
 static int emit(Guardian *g, unsigned tag, uint64_t seq, const void *p, size_t n) {
-    unsigned char h[FRAME_HEADER] = {'A', 'C', 'P', 'P', 1, 0};
+    unsigned char h[FRAME_HEADER] = {'A', 'C', 'P', 'P', 0, 0};
     if (queue_space(&g->host) < FRAME_HEADER + n || (tag == ACP && g->host.chunks >= g->lim.queued))
         return 0;
+    h[4] = (unsigned char)g->version;
     h[5] = (unsigned char)tag;
     put64(h + 6, seq);
     put32(h + 14, (uint32_t)n);
@@ -161,6 +191,8 @@ static int emit(Guardian *g, unsigned tag, uint64_t seq, const void *p, size_t n
 }
 static int parse_setup(Guardian *g, const unsigned char *p) {
     Limits *l = &g->lim;
+    if (g->version == 2 && be32(p + SETUP_BYTES) != TERMINAL_CLEANUP_RECEIPT)
+        return -1;
     memcpy(l->capability, p, 32);
     l->request = be32(p + 96);
     l->response = be32(p + 100);
@@ -186,7 +218,11 @@ static int parse_setup(Guardian *g, const unsigned char *p) {
         queue_init(&g->child, window) || queue_init(&g->http, window + 1024))
         return -1;
     g->request = malloc((size_t)l->header + l->request + 1);
-    return g->request ? 0 : -1;
+    if (!g->request)
+        return -1;
+    memcpy(g->setup_identity, p, sizeof g->setup_identity);
+    g->setup_accepted = true;
+    return 0;
 }
 static int executable_fd(const char *path) {
     struct stat st;
@@ -201,7 +237,8 @@ static int executable_fd(const char *path) {
     }
     return fd;
 }
-static int private_dirs(const char *root) {
+static int private_dirs(Guardian *g) {
+    const char *root = g->state_root;
     char canonical[PATH_MAX];
     struct stat st;
     if (!root || root[0] != '/' || !realpath(root, canonical) || strcmp(root, canonical))
@@ -210,12 +247,12 @@ static int private_dirs(const char *root) {
     if (fd < 0)
         return -1;
     if (fstat(fd, &st) || st.st_uid != geteuid() || (st.st_mode & 0777) != 0700) {
-        close(fd);
+        close_auxiliary(g, &fd);
         return -1;
     }
     DIR *dir = fdopendir(dup(fd));
     if (!dir) {
-        close(fd);
+        close_auxiliary(g, &fd);
         return -1;
     }
     struct dirent *ent;
@@ -228,25 +265,51 @@ static int private_dirs(const char *root) {
         }
     if (errno)
         empty = false;
-    closedir(dir);
+    if (closedir(dir))
+        g->auxiliary_close_failure = true;
     const char *names[] = {"home", "codex", "config", "cache", "data", "tmp"};
-    if (empty)
+    if (empty) {
+        g->state_owned = true;
+        g->state_dev = st.st_dev;
+        g->state_ino = st.st_ino;
         for (size_t i = 0; i < sizeof names / sizeof *names; i++)
             if (mkdirat(fd, names[i], 0700)) {
                 empty = false;
                 break;
             }
-    close(fd);
+    }
+    close_auxiliary(g, &fd);
     return empty ? 0 : -1;
+}
+static _Noreturn void child_launch_failure(int fd, int code) {
+    ssize_t reported;
+    do {
+        reported = write(fd, "E", 1);
+    } while (reported < 0 && errno == EINTR);
+    _exit(code);
+}
+static uint64_t launch_deadline(const Guardian *g) {
+    uint64_t overall = g->started + g->lim.overall, idle = g->last_progress + g->lim.idle;
+    return overall < idle ? overall : idle;
+}
+static bool launch_expired(Guardian *g) {
+    if (now_ms() < launch_deadline(g))
+        return false;
+    (void)terminal(g, DEADLINE, -1);
+    return true;
 }
 static int launch(Guardian *g) {
     int exe = -1, codex = -1, pin[2] = {-1, -1}, pout[2] = {-1, -1}, perr[2] = {-1, -1},
-        exec_gate[2] = {-1, -1};
+        exec_gate[2] = {-1, -1}, exec_status[2] = {-1, -1};
+    if (launch_expired(g))
+        goto fail;
     exe = executable_fd(g->child_argv[0]);
     codex = executable_fd(g->codex_path);
-    if (exe < 0 || codex < 0 || private_dirs(g->state_root))
+    if (exe < 0 || codex < 0 || private_dirs(g))
         goto fail;
-    closefd(&codex);
+    if (launch_expired(g))
+        goto fail;
+    close_auxiliary(g, &codex);
     g->listener = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     struct sockaddr_in address = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
     socklen_t address_size = sizeof address;
@@ -256,7 +319,7 @@ static int launch(Guardian *g) {
         goto fail;
     g->port = ntohs(address.sin_port);
     if (pipe2(pin, O_CLOEXEC) || pipe2(pout, O_CLOEXEC) || pipe2(perr, O_CLOEXEC) ||
-        pipe2(exec_gate, O_CLOEXEC))
+        pipe2(exec_gate, O_CLOEXEC) || pipe2(exec_status, O_CLOEXEC | O_NONBLOCK))
         goto fail;
     char home[PATH_MAX + 16], codexhome[PATH_MAX + 20], config[PATH_MAX + 20], cache[PATH_MAX + 20];
     char data[PATH_MAX + 20], tmp[PATH_MAX + 20], codexenv[PATH_MAX + 20], gateway[512], hex[65];
@@ -297,76 +360,113 @@ static int launch(Guardian *g) {
                    "\"experimental_request_user_input\":{\"enabled\":false}}}",
                    NULL};
     pid_t parent = getpid();
+    if (launch_expired(g))
+        goto fail;
     g->childpid = fork();
     if (g->childpid < 0)
         goto fail;
     if (g->childpid == 0) {
         close(exec_gate[1]);
+        close(exec_status[0]);
         if (prctl(PR_SET_PDEATHSIG, SIGKILL) || getppid() != parent || setpgid(0, 0) ||
-            dup2(pin[0], 0) < 0 || dup2(pout[1], 1) < 0 || dup2(perr[1], 2) < 0)
-            _exit(121);
-        char released;
-        if (read(exec_gate[0], &released, 1) != 1 || released != 'R')
-            _exit(121);
-        close(exec_gate[0]);
-        /* Keep only the executable descriptor across this pre-exec cleanup. */
-        int keep = fcntl(exe, F_DUPFD_CLOEXEC, 3);
-        if (keep < 0)
-            _exit(121);
-        if (keep != 3) {
-            if (dup3(keep, 3, O_CLOEXEC) < 0)
-                _exit(121);
-            close(keep);
+            dup2(pin[0], 0) < 0 || dup2(pout[1], 1) < 0 || dup2(perr[1], 2) < 0) {
+            child_launch_failure(exec_status[1], 121);
         }
-        if (syscall(SYS_close_range, 4U, ~0U, 0))
-            _exit(121);
+        char released;
+        if (read(exec_gate[0], &released, 1) != 1 || released != 'R') {
+            child_launch_failure(exec_status[1], 121);
+        }
+        close(exec_gate[0]);
+        /* These are guardian-private pre-exec descriptors. Both close at exec;
+         * the executable's first instruction still sees only standard FDs. */
+        int keep = fcntl(exe, F_DUPFD_CLOEXEC, 5);
+        int report = fcntl(exec_status[1], F_DUPFD_CLOEXEC, 5);
+        if (keep < 0 || report < 0 || dup3(keep, 3, O_CLOEXEC) < 0 ||
+            dup3(report, 4, O_CLOEXEC) < 0) {
+            child_launch_failure(exec_status[1], 121);
+        }
+        if (syscall(SYS_close_range, 5U, ~0U, 0)) {
+            child_launch_failure(4, 121);
+        }
         struct sigaction sa = {.sa_handler = SIG_DFL};
         sigemptyset(&sa.sa_mask);
         (void)sigaction(SIGPIPE, &sa, NULL);
         (void)sigaction(SIGTERM, &sa, NULL);
         (void)sigaction(SIGINT, &sa, NULL);
-        if (chdir(g->state_root) || prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0))
-            _exit(121);
+        if (chdir(g->state_root) || prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
+            child_launch_failure(4, 121);
+        }
         syscall(SYS_execveat, 3, "", g->child_argv, env, AT_EMPTY_PATH);
-        _exit(122);
+        child_launch_failure(4, 122);
     }
     (void)setpgid(g->childpid, g->childpid);
     g->childpidfd = (int)syscall(SYS_pidfd_open, g->childpid, 0);
-    closefd(&exec_gate[0]);
+    close_auxiliary(g, &exec_gate[0]);
+    close_auxiliary(g, &exec_status[1]);
     /* The target cannot run before its parent holds the direct-child pidfd. */
     if (g->childpidfd < 0) {
-        closefd(&exec_gate[1]);
+        close_auxiliary(g, &exec_gate[1]);
         goto fail;
     }
+    if (launch_expired(g))
+        goto fail;
     ssize_t released = write(exec_gate[1], "R", 1);
-    closefd(&exec_gate[1]);
+    close_auxiliary(g, &exec_gate[1]);
     if (released != 1)
         goto fail;
-    closefd(&exe);
-    closefd(&pin[0]);
-    closefd(&pout[1]);
-    closefd(&perr[1]);
+    close_auxiliary(g, &exe);
+    close_auxiliary(g, &pin[0]);
+    close_auxiliary(g, &pout[1]);
+    close_auxiliary(g, &perr[1]);
     g->childin = pin[1];
     g->childout = pout[0];
     g->childerr = perr[0];
+    pin[1] = pout[0] = perr[0] = -1;
     if (g->childpidfd < 0 || nonblock(g->childin) || nonblock(g->childout) || nonblock(g->childerr))
-        return -1;
+        goto fail;
+    for (;;) {
+        if (launch_expired(g))
+            goto fail;
+        char status;
+        ssize_t read_status = read(exec_status[0], &status, 1);
+        if (read_status == 0) {
+            if (launch_expired(g))
+                goto fail;
+            break; /* EOF alone is not proof the target ran: preserve its later wait result. */
+        }
+        if (read_status > 0 || (errno != EAGAIN && errno != EINTR))
+            goto fail;
+        if (interrupted) {
+            (void)terminal(g, GUARDIAN_SIGNAL, -1);
+            goto fail;
+        }
+        struct pollfd p = {.fd = exec_status[0], .events = POLLIN};
+        uint64_t deadline = launch_deadline(g), now = now_ms();
+        if (now >= deadline) {
+            (void)terminal(g, DEADLINE, -1);
+            goto fail;
+        }
+        uint64_t remaining = deadline - now;
+        (void)poll(&p, 1, (int)(remaining < 5 ? remaining : 5));
+    }
+    close_auxiliary(g, &exec_status[0]);
     explicit_bzero(hex, sizeof hex);
     explicit_bzero(gateway, sizeof gateway);
     return 0;
 fail:
-    closefd(&exe);
-    closefd(&codex);
+    close_auxiliary(g, &exe);
+    close_auxiliary(g, &codex);
     for (unsigned i = 0; i < 2; i++) {
-        closefd(&pin[i]);
-        closefd(&pout[i]);
-        closefd(&perr[i]);
-        closefd(&exec_gate[i]);
+        close_auxiliary(g, &pin[i]);
+        close_auxiliary(g, &pout[i]);
+        close_auxiliary(g, &perr[i]);
+        close_auxiliary(g, &exec_gate[i]);
+        close_auxiliary(g, &exec_status[i]);
     }
     return -1;
 }
 static void reset_http(Guardian *g) {
-    closefd(&g->connection);
+    close_owned(g, &g->connection, 1);
     g->request_used = 0;
     g->header_length = 0;
     g->content_length = 0;
@@ -525,7 +625,8 @@ static int submit_request(Guardian *g) {
     size_t n = 32 + g->content_length;
     if (queue_space(&g->host) < FRAME_HEADER + n)
         return 0;
-    unsigned char h[FRAME_HEADER] = {'A', 'C', 'P', 'P', 1, REQUEST};
+    unsigned char h[FRAME_HEADER] = {'A', 'C', 'P', 'P', 0, REQUEST};
+    h[4] = (unsigned char)g->version;
     put64(h + 6, ++g->sequence);
     put32(h + 14, (uint32_t)n);
     (void)queue_add(&g->host, h, sizeof h);
@@ -582,14 +683,18 @@ static int http_read(Guardian *g) {
 }
 static int validate_header(Guardian *g) {
     Frame *f = &g->frame;
-    if (memcmp(f->header, "ACPP", 4) || f->header[4] != 1)
+    unsigned version = f->header[4];
+    if (memcmp(f->header, "ACPP", 4) || (version != 1 && version != 2) ||
+        (g->version && version != g->version))
         return -1;
     f->tag = f->header[5];
     f->seq = be64(f->header + 6);
     f->length = be32(f->header + 14);
     if (!g->opened) {
-        if (f->tag != OPEN || f->seq || f->length != SETUP_BYTES)
+        if (g->version || f->tag != OPEN || f->seq ||
+            f->length != (version == 1 ? SETUP_BYTES : SETUP_V2_BYTES))
             return -1;
+        g->version = version;
     } else {
         if (f->tag == ACP) {
             if (f->seq || !f->length || f->length > g->lim.chunk)
@@ -635,10 +740,13 @@ static int apply_frame(Guardian *g) {
         (!g->active || f->seq != g->sequence || (g->cancelled && f->tag != END)))
         return -1;
     if (f->tag == OPEN) {
-        if (parse_setup(g, f->body) || launch(g))
+        /* Admission starts one budget before allocation or any launch work. */
+        g->started = g->last_progress = now_ms();
+        if (parse_setup(g, f->body))
             return -1;
+        if (launch(g))
+            return terminal(g, LAUNCH_FAILURE, -1);
         g->opened = true;
-        g->started = now_ms();
     } else if (f->tag == ACP) {
         if (g->child.chunks >= g->lim.queued || !queue_add(&g->child, f->body, f->length))
             return 0;
@@ -708,8 +816,11 @@ static int host_read(Guardian *g) {
     ssize_t n = read(0, where, amount);
     if (n < 0 && (errno == EAGAIN || errno == EINTR))
         return 0;
-    if (n <= 0)
+    if (n <= 0) {
+        if (n == 0 && g->opened && !f->used)
+            (void)terminal(g, HOST_REVOKED, -1);
         return -1;
+    }
     g->last_progress = now_ms();
     if (f->validated)
         f->received += (size_t)n;
@@ -729,6 +840,10 @@ static int drain_child(Guardian *g, int *fd, bool acp) {
         return 0;
     ssize_t n = read(*fd, bytes, cap);
     if (n > 0) {
+        if (!acp) {
+            explicit_bzero(bytes, sizeof bytes);
+            return terminal(g, CHILD_STDERR, -1);
+        }
         g->last_progress = now_ms();
         if (acp && !emit(g, ACP, 0, bytes, (size_t)n))
             return -1;
@@ -738,22 +853,22 @@ static int drain_child(Guardian *g, int *fd, bool acp) {
         return 0;
     if (n < 0)
         return -1;
-    closefd(fd);
+    close_owned(g, fd, acp ? 3 : 4);
     if (acp)
         g->child_eof = true;
     return 1;
 }
 /* Only direct children reported by our own proc task are considered. Open pidfds
  * before signalling and repeat after reparenting; no ambient PID/cmdline scan. */
-static int terminate_owned_children(void) {
+static int owned_children(Guardian *g, int sig, unsigned *flags) {
     char path[96], bytes[4096];
     snprintf(path, sizeof path, "/proc/self/task/%ld/children", (long)getpid());
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return -1;
     ssize_t n = read(fd, bytes, sizeof bytes - 1);
-    close(fd);
-    if (n < 0 || n == (ssize_t)sizeof bytes - 1)
+    int closed = close(fd);
+    if (n < 0 || n == (ssize_t)sizeof bytes - 1 || closed)
         return -1;
     bytes[n] = 0;
     char *cursor = bytes;
@@ -768,46 +883,164 @@ static int terminate_owned_children(void) {
         long pid = strtol(cursor, &end, 10);
         if (errno || end == cursor || pid <= 0 || pid > INT_MAX || ++count > 32)
             return -1;
-        int pidfd = (int)syscall(SYS_pidfd_open, (pid_t)pid, 0);
-        if (pidfd >= 0) {
-            int rc = (int)syscall(SYS_pidfd_send_signal, pidfd, SIGKILL, NULL, 0);
-            int saved = errno;
-            close(pidfd);
-            if (rc && saved != ESRCH)
+        if (sig) {
+            int pidfd = (int)syscall(SYS_pidfd_open, (pid_t)pid, 0);
+            if (pidfd >= 0) {
+                *flags |= sig == SIGTERM ? SIGTERM_SENT : SIGKILL_SENT;
+                int rc = (int)syscall(SYS_pidfd_send_signal, pidfd, sig, NULL, 0);
+                int saved = errno;
+                if (close(pidfd))
+                    g->auxiliary_close_failure = true;
+                if (rc && saved != ESRCH)
+                    return -1;
+            } else if (errno != ESRCH)
                 return -1;
-        } else if (errno != ESRCH)
-            return -1;
+        }
         cursor = end;
     }
     return (int)count;
 }
+static int reap_owned(Guardian *g) {
+    int status;
+    pid_t pid;
+    while ((pid = waitpid(-1, &status, WNOHANG | __WALL)) > 0)
+        if (pid == g->childpid && !g->child_reaped) {
+            /* Preserve only the actual direct child's status, never a descendant. */
+            g->child_status = status;
+            g->child_reaped = true;
+        }
+    return pid < 0 ? (errno == ECHILD ? 1 : -1) : 0;
+}
+static bool remove_state(Guardian *g) {
+    if (!g->state_owned)
+        return false;
+    int fd = open(g->state_root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    struct stat st;
+    if (fd < 0)
+        return false;
+    bool removed = !fstat(fd, &st) && st.st_dev == g->state_dev && st.st_ino == g->state_ino &&
+                   st.st_uid == geteuid() && (st.st_mode & 0777) == 0700;
+    const char *names[] = {"home", "codex", "config", "cache", "data", "tmp"};
+    if (removed)
+        for (size_t i = 0; i < sizeof names / sizeof *names; i++)
+            if (unlinkat(fd, names[i], AT_REMOVEDIR) && errno != ENOENT)
+                removed = false;
+    if (close(fd))
+        removed = false;
+    return removed && !rmdir(g->state_root);
+}
+static unsigned child_outcome(const Guardian *g) {
+    if (!g->child_reaped)
+        return UNOBSERVED;
+    if (WIFEXITED(g->child_status))
+        return EXITED;
+    if (WIFSIGNALED(g->child_status)) {
+        int sig = WTERMSIG(g->child_status);
+        return sig == SIGTERM ? TERM : sig == SIGKILL ? KILL : OTHER_SIGNAL;
+    }
+    return UNOBSERVED;
+}
+/* A terminal frame fits PIPE_BUF and is written atomically. Prior partial frames
+ * must finish first; a saturated/broken pipe never becomes cleanup proof. */
+static int flush_cleanup(Guardian *g, unsigned flags, uint32_t count, uint32_t mask,
+                         uint64_t started, uint64_t deadline) {
+    while (g->host.len) {
+        if (now_ms() >= deadline || queue_write(&g->host, 1, g) < 0)
+            return -1;
+        if (g->host.len)
+            (void)poll(NULL, 0, 1);
+    }
+    unsigned char frame[FRAME_HEADER + CLEANUP_BYTES] = {'A', 'C', 'P', 'P', 2, CLEANUP};
+    put32(frame + 14, CLEANUP_BYTES);
+    unsigned char *p = frame + FRAME_HEADER;
+    memcpy(p, g->setup_identity, sizeof g->setup_identity);
+    p[96] = 1;
+    p[97] = (unsigned char)g->terminal_cause;
+    p[98] = (unsigned char)child_outcome(g);
+    put32(p + 100, (flags & STATUS_PRESENT) ? (uint32_t)g->child_status : 0);
+    put32(p + 104, count);
+    put32(p + 108, mask);
+    for (;;) {
+        uint64_t now = now_ms(), elapsed = now - started;
+        bool expired = elapsed > g->lim.cleanup;
+        p[99] = (unsigned char)(flags | (expired ? CLEANUP_DEADLINE_EXPIRED : 0));
+        put32(p + 112, (uint32_t)(expired ? g->lim.cleanup + 1 : elapsed));
+        ssize_t n = write(1, frame, sizeof frame);
+        if (n == (ssize_t)sizeof frame) {
+            explicit_bzero(frame, sizeof frame);
+            return expired ? -1 : 0;
+        }
+        if (expired || (n < 0 && errno != EAGAIN && errno != EINTR) || n >= 0) {
+            explicit_bzero(frame, sizeof frame);
+            return -1;
+        }
+        (void)poll(NULL, 0, 1);
+    }
+}
 static int cleanup(Guardian *g) {
-    closefd(&g->listener);
-    closefd(&g->connection);
-    closefd(&g->childin);
-    closefd(&g->childout);
-    closefd(&g->childerr);
-    explicit_bzero(g->lim.capability, sizeof g->lim.capability);
-    uint64_t deadline = now_ms() + (g->lim.cleanup ? g->lim.cleanup : 1000);
-    if (g->childpidfd >= 0)
-        (void)syscall(SYS_pidfd_send_signal, g->childpidfd, SIGTERM, NULL, 0);
-    closefd(&g->childpidfd);
-    bool verified = false;
+    uint64_t started = now_ms(), timeout = g->lim.cleanup ? g->lim.cleanup : 1000,
+             deadline = started + timeout;
+    close_owned(g, &g->listener, 0);
+    close_owned(g, &g->connection, 1);
+    close_owned(g, &g->childin, 2);
+    close_owned(g, &g->childout, 3);
+    close_owned(g, &g->childerr, 4);
+    unsigned flags = 0;
+    uint32_t count = UINT32_MAX;
+    bool observed = false;
+    uint64_t grace = timeout / 4;
+    if (!grace)
+        grace = 1;
+    if (grace > 100)
+        grace = 100;
+    uint64_t term_started = now_ms();
+    bool first_pass = true;
     do {
-        int count = terminate_owned_children();
-        if (count < 0)
+        int reaped = reap_owned(g);
+        int remaining = owned_children(g, first_pass || now_ms() - term_started < grace ? SIGTERM : SIGKILL, &flags);
+        first_pass = false;
+        if (remaining < 0 || reaped < 0) {
+            count = UINT32_MAX;
             break;
-        int status;
-        pid_t pid;
-        do {
-            pid = waitpid(-1, &status, WNOHANG | __WALL);
-        } while (pid > 0);
-        if (pid < 0 && errno == ECHILD && count == 0) {
-            verified = true;
+        }
+        count = (uint32_t)remaining;
+        /* Observe ECHILD and the proc-owned list again after any reparenting/reap. */
+        if (!remaining && reap_owned(g) == 1 && owned_children(g, 0, &flags) == 0) {
+            flags |= FINAL_ECHILD | DESCENDANTS_ZERO;
+            observed = true;
             break;
         }
         (void)poll(NULL, 0, 5);
     } while (now_ms() < deadline);
+    close_owned(g, &g->childpidfd, 5);
+    if (count == 0)
+        flags |= DESCENDANTS_ZERO;
+    unsigned outcome = child_outcome(g);
+    if (g->child_reaped && outcome != UNOBSERVED)
+        flags |= STATUS_PRESENT;
+    uint32_t mask = 0x3fU & ~g->descriptor_failures;
+    if (mask == 0x3f)
+        flags |= DESCRIPTORS_CLOSED;
+    bool state_removed = g->version == 2 && remove_state(g);
+    if (state_removed)
+        flags |= STATE_ROOT_REMOVED;
+    bool within_bound = now_ms() <= deadline;
+    bool verified = observed && mask == 0x3f && within_bound && !g->auxiliary_close_failure;
+    if (g->auxiliary_close_failure)
+        g->terminal_cause = UNKNOWN;
+    if (g->version == 2 && g->setup_accepted) {
+        verified = verified && state_removed && (flags & STATUS_PRESENT);
+        /* v2 stdout must be a nonblocking pipe for the terminal atomic write. */
+        struct stat output;
+        bool pipe = !fstat(1, &output) && S_ISFIFO(output.st_mode) &&
+                    fpathconf(1, _PC_PIPE_BUF) >= FRAME_HEADER + CLEANUP_BYTES;
+        if (!pipe || flush_cleanup(g, flags, count, mask, started, deadline))
+            verified = false;
+    }
+    explicit_bzero(g->lim.capability, sizeof g->lim.capability);
+    explicit_bzero(g->setup_identity, sizeof g->setup_identity);
+    if (g->frame.body)
+        explicit_bzero(g->frame.body, g->frame.length);
     free(g->frame.body);
     free(g->host.data);
     free(g->child.data);
@@ -820,7 +1053,7 @@ static int run(Guardian *g) {
         uint64_t now = now_ms(), overall = g->opened ? g->lim.overall : 5000,
                  idle = g->opened ? g->lim.idle : 5000;
         if (now - g->started >= overall || now - g->last_progress >= idle)
-            return 124;
+            return terminal(g, DEADLINE, 124);
         if (g->opened) {
             if (g->http_finish && !g->http.len)
                 reset_http(g);
@@ -829,23 +1062,23 @@ static int run(Guardian *g) {
                 if (p == g->childpid)
                     g->child_reaped = true;
                 else if (p < 0)
-                    return 125;
+                    return terminal(g, PROTOCOL_FAILURE, 125);
             }
-            if (g->child_reaped && g->child_eof && !g->host.len) {
+            if (g->child_reaped && g->child_eof && g->childerr < 0 && !g->host.len) {
                 if (g->active || g->frame.used || g->child.len || g->connection >= 0)
-                    return 126;
-                return WIFEXITED(g->child_status) ? WEXITSTATUS(g->child_status)
-                                                  : 128 + WTERMSIG(g->child_status);
+                    return terminal(g, PROTOCOL_FAILURE, 126);
+                return terminal(g, NORMAL, WIFEXITED(g->child_status) ? WEXITSTATUS(g->child_status)
+                                                   : 128 + WTERMSIG(g->child_status));
             }
             if (submit_request(g) < 0)
-                return 126;
+                return terminal(g, PROTOCOL_FAILURE, 126);
         }
         Frame *f = &g->frame;
         bool pending = f->validated && f->received == f->length;
         if (pending) {
             int r = apply_frame(g);
             if (r < 0)
-                return 126;
+                return terminal(g, PROTOCOL_FAILURE, 126);
             if (r > 0)
                 continue;
         }
@@ -872,24 +1105,24 @@ static int run(Guardian *g) {
         if (ready < 0) {
             if (errno == EINTR)
                 continue;
-            return 126;
+            return terminal(g, PROTOCOL_FAILURE, 126);
         }
         if (p[0].revents & (POLLHUP | POLLERR | POLLNVAL))
-            return 126;
+            return terminal(g, (!g->frame.used && g->opened) ? HOST_REVOKED : PROTOCOL_FAILURE, 126);
         if ((p[0].revents & POLLIN) && (host_read(g) < 0))
-            return 126;
+            return terminal(g, PROTOCOL_FAILURE, 126);
         if (p[1].revents && queue_write(&g->host, 1, g) < 0)
-            return 126;
+            return terminal(g, PROTOCOL_FAILURE, 126);
         if (p[2].revents && drain_child(g, &g->childout, true) < 0)
-            return 126;
+            return terminal(g, PROTOCOL_FAILURE, 126);
         if (p[3].revents && drain_child(g, &g->childerr, false) < 0)
-            return 126;
+            return terminal(g, PROTOCOL_FAILURE, 126);
         if (p[4].revents && queue_write(&g->child, g->childin, g) < 0)
-            return 126;
+            return terminal(g, PROTOCOL_FAILURE, 126);
         if (p[5].revents) {
             int fd = accept4(g->listener, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
             if (fd < 0 && errno != EAGAIN && errno != EINTR)
-                return 126;
+                return terminal(g, PROTOCOL_FAILURE, 126);
             if (fd >= 0) {
                 if (g->active || g->connection >= 0)
                     close(fd);
@@ -900,7 +1133,7 @@ static int run(Guardian *g) {
                     int send_buffer = (int)(window < 4096 ? 4096 : window > 65536 ? 65536 : window);
                     if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &send_buffer, sizeof send_buffer)) {
                         close(fd);
-                        return 126;
+                        return terminal(g, PROTOCOL_FAILURE, 126);
                     }
                     g->connection = fd;
                 }
@@ -908,19 +1141,19 @@ static int run(Guardian *g) {
         }
         if (p[6].revents & (POLLIN | POLLHUP | POLLERR)) {
             if (http_read(g) < 0)
-                return 126;
+                return terminal(g, PROTOCOL_FAILURE, 126);
         }
         if (g->connection >= 0 && (p[6].revents & POLLOUT) &&
             queue_write(&g->http, g->connection, g) < 0) {
             if (g->active && !g->cancelled) {
                 if (!emit(g, CANCEL, g->sequence, "", 0))
-                    return 126;
+                    return terminal(g, PROTOCOL_FAILURE, 126);
                 g->cancelled = true;
             }
             reset_http(g);
         }
     }
-    return 130;
+    return terminal(g, GUARDIAN_SIGNAL, 130);
 }
 int main(int argc, char **argv) {
     Guardian g = {.listener = -1,
@@ -929,7 +1162,8 @@ int main(int argc, char **argv) {
                   .childout = -1,
                   .childerr = -1,
                   .childpidfd = -1,
-                  .childpid = -1};
+                  .childpid = -1,
+                  .terminal_cause = UNKNOWN};
     if (argc < 7 || strcmp(argv[1], "--state-root") || strcmp(argv[3], "--codex-path") ||
         strcmp(argv[5], "--"))
         return 120;
@@ -956,11 +1190,13 @@ int main(int argc, char **argv) {
     g.started = g.last_progress = now_ms();
     int result = run(&g);
     if (cleanup(&g)) {
-        ssize_t ignored = write(2, "guardian: cleanup unverified\n", 29);
-        (void)ignored;
+        if (g.version != 2) {
+            ssize_t ignored = write(2, "guardian: cleanup unverified\n", 29);
+            (void)ignored;
+        }
         return 127;
     }
-    if (result) {
+    if (result && g.version != 2) {
         ssize_t ignored = write(2, "guardian: bounded session failed\n", 33);
         (void)ignored;
     }

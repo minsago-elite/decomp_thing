@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Run the 42 credential-free native provider guardian controls.
+"""Run the 42 v1 credential-free native provider guardian controls.
+
+--include-v2 also runs separately counted authenticated terminal-receipt controls.
 
 Usage: python3 scripts/verify-acp-provider-guardian.py [--output-dir build/NAME]
 Requires Linux with usable bubblewrap user/PID/network namespaces, Python 3.9+,
@@ -18,6 +20,7 @@ backpressure assertion; the retained control uses 1 MiB and requires >=100 ms.
 import sys
 sys.dont_write_bytecode = True
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -36,7 +39,12 @@ parser.add_argument(
     default=ROOT / 'build/provider-guardian-qualification',
     help='Evidence directory inside this checkout (default: build/provider-guardian-qualification)',
 )
+parser.add_argument('--include-v2', action='store_true', help='Also run independent v2 terminal receipt controls')
+parser.add_argument('--compare-prior-guardian', type=pathlib.Path,
+                    help='Optional repository-local pre-fix guardian for startup regression comparison')
 args = parser.parse_args()
+if args.compare_prior_guardian and not args.include_v2:
+    parser.error('--compare-prior-guardian requires --include-v2')
 if not sys.platform.startswith('linux'):
     parser.error('Linux namespaces and Linux-specific guardian syscalls are required')
 if not __debug__:
@@ -58,11 +66,21 @@ ENV = {'PATH': '/usr/bin:/bin', 'TMPDIR': str(TEMP), 'LANG': 'C', 'UNTRUSTED_SEN
 CAP = bytes(range(32))  # Deterministic synthetic capability, never a real credential.
 LIMITS = (4096, 65536, 2048, 16, 1024, 2, 4, 128)
 HEADERS = struct.pack('!HH', 200, 17) + b'text/event-stream'
+CLEANUP_DOMAIN = bytes.fromhex('616370702d76322d636c65616e757000')
+CLEANUP_GOLDEN = '4459a42aef304df78057779ff8fba8c874da172721f2e93a0e6d1566c297cc85'
 
 def digest(p):
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
 INPUT_HASHES = {path: digest(path) for path in (SOURCE, FIXTURE, pathlib.Path(__file__).resolve())}
+PRIOR_GUARDIAN = None
+if args.compare_prior_guardian:
+    PRIOR_GUARDIAN = (ROOT / args.compare_prior_guardian).resolve()
+    if not PRIOR_GUARDIAN.is_relative_to(ROOT):
+        parser.error('--compare-prior-guardian must resolve inside this checkout')
+    INPUT_HASHES[PRIOR_GUARDIAN] = digest(PRIOR_GUARDIAN)
+    if INPUT_HASHES[PRIOR_GUARDIAN] != '3a051d6335798e471c865fac800c8a984cbae6b071cedae19d5f5ca7490bb598':
+        parser.error('--compare-prior-guardian does not match the retained pre-fix binary')
 TOOLCHAIN = {
     name: {
         'path': str(pathlib.Path('/usr/bin') / name),
@@ -72,11 +90,12 @@ TOOLCHAIN = {
     for name in ('cc', 'bwrap', 'readelf')
 }
 
-def frame(tag, seq=0, payload=b''):
-    return struct.pack('!4sBBQI', b'ACPP', 1, tag, seq, len(payload)) + payload
+def frame(tag, seq=0, payload=b'', version=1):
+    return struct.pack('!4sBBQI', b'ACPP', version, tag, seq, len(payload)) + payload
 
-def setup(limits=LIMITS, times=(3000, 750, 500)):
-    return CAP + bytes([0x11]) * 32 + bytes([0x22]) * 32 + struct.pack('!8I3Q', *limits, *times)
+def setup(limits=LIMITS, times=(3000, 750, 500), version=1, features=1):
+    baseline = CAP + bytes([0x11]) * 32 + bytes([0x22]) * 32 + struct.pack('!8I3Q', *limits, *times)
+    return baseline + (struct.pack('!I', features) if version == 2 else b'')
 
 def compile_one(source, output):
     source_hash = digest(source)
@@ -116,6 +135,9 @@ def compile_one(source, output):
         'sourceSha256': source_hash, 'binarySha256': digest(output),
     }
 BUILD = [compile_one(SOURCE, RUN / 'guardian'), compile_one(FIXTURE, RUN / 'fixture')]
+BAD_EXECUTABLE = RUN / 'bad-executable'
+BAD_EXECUTABLE.write_bytes(b'Not an executable format; this must make execveat fail.\n')
+BAD_EXECUTABLE.chmod(0o555)
 for binary in ('guardian', 'fixture'):
     p = subprocess.run(['/usr/bin/readelf', '-l', '-d', str(RUN / binary)], capture_output=True, env=ENV, timeout=5)
     assert p.returncode == 0 and b'INTERP' not in p.stdout and (b'NEEDED' not in p.stdout)
@@ -124,21 +146,34 @@ CHILDREN = []
 
 class Case:
 
-    def __init__(self, name, mode='success', initial=None, limits=LIMITS, times=(3000, 750, 500)):
+    def __init__(self, name, mode='success', initial=None, limits=LIMITS, times=(3000, 750, 500), version=1, child_path='/fixture', suite=None, supervisor='supervise', guardian_binary=None):
         self.name = name
+        self.version = version
+        self.suite = suite or ('v1' if version == 1 else 'v2')
+        self.supervisor = supervisor
+        self.times = times
+        self.receipt = None
         self.dir = RUN / name
         self.dir.mkdir(mode=0o700)
         self.state = self.dir / 'state'
         self.state.mkdir(mode=0o700)
-        command = [str(BWRAP), '--unshare-all', '--new-session', '--die-with-parent', '--ro-bind', str(RUN / 'guardian'), '/guardian', '--ro-bind', str(RUN / 'fixture'), '/fixture']
+        guardian_binary = guardian_binary or RUN / 'guardian'
+        assert guardian_binary.resolve().is_relative_to(ROOT)
+        self.guardian_binary_sha256 = digest(guardian_binary)
+        command = [str(BWRAP), '--unshare-all', '--new-session', '--die-with-parent', '--ro-bind', str(guardian_binary), '/guardian', '--ro-bind', str(RUN / 'fixture'), '/fixture']
+        if child_path == '/bad-executable':
+            command += ['--ro-bind', str(BAD_EXECUTABLE), child_path]
         for path in reversed(self.state.parents):
             if str(path) != '/':
                 command += ['--dir', str(path)]
-        command += ['--bind', str(self.state), str(self.state), '--proc', '/proc', '--dev', '/dev', '--chdir', str(self.state), '--', '/fixture', 'supervise', '/guardian', '--state-root', str(self.state), '--codex-path', '/fixture', '--', '/fixture', mode]
+        command += (['--bind', str(self.state), str(self.state)] if version == 1 else ['--perms', '0700', '--dir', str(self.state)])
+        command += ['--proc', '/proc', '--dev', '/dev', '--chdir', str(self.state), '--', '/fixture', supervisor, '/guardian', '--state-root', str(self.state), '--codex-path', '/fixture', '--', child_path, mode]
         self.command = command
         self.started = time.monotonic()
         self.p = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=ENV, bufsize=0)
         CHILDREN.append(self.p)
+        if version == 2 and mode == 'flood':
+            assert fcntl.fcntl(self.p.stdout, fcntl.F_SETPIPE_SZ, 4096) == 4096
         os.set_blocking(self.p.stdin.fileno(), False)
         self.raw = bytearray()
         self.stderr = bytearray()
@@ -146,7 +181,12 @@ class Case:
         self.acp = bytearray()
         self.requests = []
         self.guardian = None
-        self.send(frame(7, payload=setup(limits, times)) if initial is None else initial)
+        initial_frame = frame(7, payload=setup(limits, times, version), version=version) if initial is None else initial
+        self.v2_selected = (len(initial_frame) >= 18 and
+                            struct.unpack('!4sBBQI', initial_frame[:18]) == (b'ACPP', 2, 7, 0, 156))
+        if version == 2 and initial is None:
+            (self.dir / 'setup.bin').write_bytes(setup(limits, times, version))
+        self.send(initial_frame)
 
     def send(self, data, timeout=5, release_after_pressure=False):
         deadline = time.monotonic() + timeout
@@ -211,12 +251,35 @@ class Case:
                     assert len(self.raw) < 262144, 'unbounded test capture'
                     while len(self.raw) >= 18:
                         magic, ver, tag, seq, n = struct.unpack('!4sBBQI', self.raw[:18])
-                        assert magic == b'ACPP' and ver == 1 and (tag in (1, 2, 6)) and (n <= 8 * 1024 * 1024)
+                        assert magic == b'ACPP' and ver == self.version and (tag in ((1, 2, 6, 8) if ver == 2 else (1, 2, 6))) and (n <= 8 * 1024 * 1024)
                         if len(self.raw) < 18 + n:
                             break
                         payload = bytes(self.raw[18:18 + n])
                         del self.raw[:18 + n]
                         self.frames.append((tag, seq, payload))
+                        assert self.receipt is None, 'Frame followed the final cleanup receipt'
+                        if tag == 8:
+                            assert ver == 2 and seq == 0 and n == 116
+                            assert payload[:96] == setup()[:96], 'Wrong cleanup capability/policy/invocation identity'
+                            assert hashlib.sha256(CLEANUP_DOMAIN + payload[:96]).hexdigest() == CLEANUP_GOLDEN
+                            for domain in (CLEANUP_DOMAIN[:-1], b'\x00' + CLEANUP_DOMAIN[1:], CLEANUP_DOMAIN[:-1] + b'\x01'):
+                                assert hashlib.sha256(domain + payload[:96]).hexdigest() != CLEANUP_GOLDEN
+                            schema, cause, outcome, flags, status, count, mask, elapsed = struct.unpack('!4B4I', payload[96:])
+                            assert schema == 1 and cause in (0, 1, 2, 3, 4, 5, 6, 255) and outcome in range(5)
+                            present = bool(flags & 1)
+                            assert present == (outcome != 0)
+                            assert present or status == 0
+                            if present:
+                                assert (outcome == 1 and os.WIFEXITED(status)) or (os.WIFSIGNALED(status) and outcome == (2 if os.WTERMSIG(status) == 15 else 3 if os.WTERMSIG(status) == 9 else 4))
+                            assert count == 0xffffffff or count in range(33)
+                            assert bool(flags & 64) == (count == 0)
+                            assert mask & ~0x3f == 0 and bool(flags & 16) == (mask == 0x3f)
+                            assert elapsed <= self.times[2] + 1
+                            assert bool(flags & 128) == (elapsed == self.times[2] + 1)
+                            self.receipt = {'cause': cause, 'outcome': outcome, 'flags': flags, 'rawWaitStatus': status, 'remainingDescendants': count, 'closedDescriptorMask': mask, 'elapsedMillis': elapsed}
+                            (self.dir / 'cleanup-frame.bin').write_bytes(frame(8, payload=payload, version=2))
+                            (self.dir / 'cleanup-payload.bin').write_bytes(payload)
+                            # Raw receipt identity is test-only; evidence records no capability bytes.
                         if tag == 1:
                             assert seq == 0
                             self.acp.extend(payload)
@@ -244,11 +307,18 @@ class Case:
             assert marker in self.acp, (self.name, bytes(self.acp))
         assert self.p.poll() is None, 'namespace disappeared before cleanup observation'
         if not self.p.stdin.closed:
-            self.send(b'X')
+            self.send(b'\x1eDECOMP_SUPERVISOR_RELEASE\x1f')
             self.p.stdin.close()
         self.p.wait(timeout=2)
         assert self.p.returncode == 0
         assert CAP.hex().encode() not in self.stderr and CAP not in self.stderr
+        prefix = bytes(self.stderr).split(b'SUPERVISOR guardian=', 1)[0]
+        trace_lines = ([line.decode('ascii') for line in prefix.splitlines() if line.startswith(b'TRACE_')]
+                       if self.supervisor != 'supervise' else [])
+        guardian_stderr = b''.join(line for line in prefix.splitlines(keepends=True)
+                                   if not (self.supervisor != 'supervise' and line.startswith(b'TRACE_')))
+        if self.v2_selected:
+            assert not guardian_stderr, (self.name, guardian_stderr)
         record = {
             'name': self.name,
             'command': self.command,
@@ -262,9 +332,26 @@ class Case:
             'diagnostics': self.stderr.decode('ascii'),
             'stateFiles': [str(p.relative_to(self.state)) for p in self.state.rglob('*')],
         }
+        if self.version == 2:
+            record['cleanupReceipt'] = self.receipt
+            record['guardianStderrBytes'] = len(guardian_stderr)
+            record['guardianBinarySha256'] = self.guardian_binary_sha256
+            if trace_lines:
+                record['trustedSupervisorTrace'] = trace_lines
+            record.pop('stateFiles')
+            record['stateObservation'] = 'authenticated receipt; namespace-private root is not a host bind'
+            if self.receipt:
+                record['cleanupFrameSha256'] = digest(self.dir / 'cleanup-frame.bin')
+                record['cleanupPayloadSha256'] = digest(self.dir / 'cleanup-payload.bin')
+            if (self.dir / 'setup.bin').exists():
+                record['setupSha256'] = digest(self.dir / 'setup.bin')
         (self.dir / 'result.json').write_text(json.dumps(record, indent=2) + '\n')
-        RESULTS.append(record)
+        (RESULTS if self.suite == 'v1' else V2_RESULTS if self.suite == 'v2' else
+         REVIEW_RESULTS if self.suite == 'review-regression' else PRIOR_RESULTS).append(record)
 RESULTS = []
+V2_RESULTS = []
+REVIEW_RESULTS = []
+PRIOR_RESULTS = []
 try:
     c = Case('allowed-exchange')
     c.request()
@@ -372,6 +459,195 @@ try:
     c.finish({124}, b'DESCENDANT_READY')
     c = Case('blocked-output-deadline', 'flood', times=(1000, 150, 500))
     c.finish({124}, read_stdout=False)
+    if args.include_v2:
+        def complete_receipt(case, cause, outcome=None):
+            receipt = case.receipt
+            assert receipt is not None, case.name
+            assert receipt['cause'] == cause, (case.name, receipt)
+            assert receipt['flags'] & 0x73 == 0x73 and not receipt['flags'] & 128, (case.name, receipt)
+            assert receipt['remainingDescendants'] == 0 and receipt['closedDescriptorMask'] == 0x3f
+            if outcome is not None:
+                assert receipt['outcome'] == outcome, (case.name, receipt)
+
+        c = Case('v2-opaque-echo-natural', 'echo', version=2)
+        c.pump(lambda x: b'ECHO_READY' in x.acp)
+        c.send(frame(1, payload=b'v2 opaque\x00\xffACP\n', version=2))
+        c.finish({0}, b'v2 opaque\x00\xffACP\n')
+        complete_receipt(c, 0, 1)
+        assert os.WEXITSTATUS(c.receipt['rawWaitStatus']) == 0 and c.receipt['flags'] & 12 == 0
+
+        c = Case('v2-allowed-exchange', version=2)
+        c.request()
+        c.send(frame(3, 1, HEADERS, 2) + frame(4, 1, b'data: fixture\n\n', 2) + frame(5, 1, b'\x00', 2))
+        c.finish({0}, b'HTTP_OK')
+        complete_receipt(c, 0, 1)
+
+        for mode, outcome in (('term-exit', 1), ('ignore-term', 3)):
+            c = Case('v2-owner-eof-' + mode, mode, version=2)
+            c.pump(lambda x: b'SIGNAL_READY' in x.acp)
+            c.p.stdin.close()
+            c.finish({126})
+            complete_receipt(c, 1, outcome)
+            assert c.receipt['flags'] & 4
+            if mode == 'term-exit':
+                assert os.WEXITSTATUS(c.receipt['rawWaitStatus']) == 23 and not c.receipt['flags'] & 8
+            else:
+                assert os.WTERMSIG(c.receipt['rawWaitStatus']) == 9 and c.receipt['flags'] & 8
+
+        c = Case('v2-other-signal', 'other-signal', version=2)
+        c.finish({128 + signal.SIGUSR1})
+        complete_receipt(c, 0, 4)
+        assert os.WTERMSIG(c.receipt['rawWaitStatus']) == signal.SIGUSR1
+
+        c = Case('v2-secret-stderr-race', 'stderr-exit', version=2)
+        c.finish({126})
+        complete_receipt(c, 5)
+        assert b'DEFAULT_AUTH_REQUEST' not in c.stderr and b'gateway' not in c.stderr and not c.acp
+
+        c = Case('v2-nonempty-state-unverified', 'nonempty-state', version=2)
+        c.finish({127}, b'STATE_NONEMPTY')
+        assert c.receipt and c.receipt['cause'] == 0 and not c.receipt['flags'] & 32
+        assert c.receipt['flags'] & 3 == 3 and c.receipt['remainingDescendants'] == 0
+
+        c = Case('v2-prelaunch-no-child-status', 'idle', version=2, child_path='/missing-child')
+        c.finish({127})
+        assert c.receipt and c.receipt['cause'] == 6 and c.receipt['outcome'] == 0
+        assert not c.receipt['flags'] & 1 and c.receipt['rawWaitStatus'] == 0
+
+        c = Case('v2-real-execveat-failure', 'idle', version=2, child_path='/bad-executable')
+        c.finish({126})
+        complete_receipt(c, 6, 1)
+        assert os.WEXITSTATUS(c.receipt['rawWaitStatus']) == 122
+
+        c = Case('v2-deadline-truthful', 'idle', version=2, times=(1000, 100, 500))
+        c.finish({124}, b'IDLE_READY')
+        complete_receipt(c, 3, 2)
+
+        c = Case('v2-detached-descendants', 'descendant', version=2, times=(1000, 100, 500))
+        c.finish({124}, b'DESCENDANT_READY')
+        complete_receipt(c, 3, 2)
+        assert c.receipt['flags'] & 12 == 12
+
+        for name, initial in (
+            ('missing-feature', frame(7, payload=setup(version=2, features=0), version=2)),
+            ('unknown-feature', frame(7, payload=setup(version=2, features=3), version=2)),
+            ('v1-sized-setup', frame(7, payload=setup(), version=2)),
+            ('nonzero-open-sequence', frame(7, 1, setup(version=2), 2)),
+        ):
+            c = Case('v2-reject-' + name, 'idle', initial=initial, version=2)
+            c.finish({126})
+            assert not c.frames and not c.receipt
+
+        for name, data in (
+            ('downgrade', frame(1, payload=b'x')),
+            ('host-cleanup-role', frame(8, payload=bytes(116), version=2)),
+            ('duplicate-open', frame(7, payload=setup(version=2), version=2)),
+        ):
+            c = Case('v2-reject-' + name, 'idle', version=2)
+            c.pump(lambda x: b'IDLE_READY' in x.acp)
+            c.send(data)
+            c.finish({126})
+            complete_receipt(c, 4, 2)
+
+        c = Case('v1-reject-cleanup-tag', 'idle', suite='v2')
+        c.pump(lambda x: b'IDLE_READY' in x.acp)
+        c.send(frame(8, payload=bytes(116)))
+        c.finish({126})
+        assert c.receipt is None and all(tag != 8 for tag, _, _ in c.frames)
+
+        c = Case('v1-reject-version-upgrade', 'idle', suite='v2')
+        c.pump(lambda x: b'IDLE_READY' in x.acp)
+        c.send(frame(1, payload=b'x', version=2))
+        c.finish({126})
+        assert c.receipt is None and all(tag != 8 for tag, _, _ in c.frames)
+
+        # 4114-byte ACP frames exceed the exact4096-byte pipe, forcing a real
+        # partial frame and preventing any terminal receipt from fitting.
+        c = Case('v2-blocked-receipt-unverified', 'flood', version=2,
+                 limits=(4096, 65536, 2048, 16, 4096, 2, 4, 128), times=(1000, 100, 150))
+        c.finish({127}, read_stdout=False)
+        assert c.receipt is None
+        blocked_prefix = c.p.stdout.read()
+        assert len(blocked_prefix) == 4096
+        assert struct.unpack('!4sBBQI', blocked_prefix[:18]) == (b'ACPP', 2, 1, 0, 4096)
+        assert blocked_prefix[18:] == b'x' * (4096 - 18)
+        (c.dir / 'blocked-stdout-prefix.bin').write_bytes(blocked_prefix)
+        V2_RESULTS[-1]['blockedPipeBytes'] = len(blocked_prefix)
+        V2_RESULTS[-1]['unfinishedFrameBytes'] = 4114 - len(blocked_prefix)
+        V2_RESULTS[-1]['blockedStdoutPrefixSha256'] = digest(c.dir / 'blocked-stdout-prefix.bin')
+        (c.dir / 'result.json').write_text(json.dumps(V2_RESULTS[-1], indent=2) + '\n')
+
+        for dimension, times, point, supervisor, expected_exit in (
+            (dimension, times, *control)
+            for dimension, times in (('overall', (100, 750, 500)), ('idle', (1000, 100, 500)))
+            for control in (('state-mkdir', 'supervise-delay-state', 127),
+                            ('exec-read', 'supervise-delay-exec-read', 126))
+        ):
+            c = Case('review-startup-' + dimension + '-deadline-' + point, 'idle', version=2,
+                     times=times, suite='review-regression', supervisor=supervisor)
+            c.finish({expected_exit})
+            assert c.receipt and c.receipt['cause'] == 3 and not c.acp
+            traces = REVIEW_RESULTS[-1].get('trustedSupervisorTrace', [])
+            assert any('TRACE_HOLD point=' + point in line and
+                       int(line.split('elapsedMillis=')[1].split()[0]) >= 200 for line in traces)
+            summaries = [dict(part.split('=', 1) for part in line.split()[1:])
+                         for line in traces if line.startswith('TRACE_SUMMARY ')]
+            assert len(summaries) == 1
+            assert summaries[0]['point'] == point and int(summaries[0]['held']) == 1
+            assert int(summaries[0]['forkCloneCount']) == (0 if point == 'state-mkdir' else 1)
+            assert c.receipt['flags'] & 0x72 == 0x72 and not c.receipt['flags'] & 128
+            if point == 'state-mkdir':
+                assert c.receipt['outcome'] == 0 and not c.receipt['flags'] & 1
+            else:
+                assert c.receipt['flags'] & 1 and c.receipt['outcome'] == 2
+
+        c = Case('review-stderr-flood-rejected', 'stderr-flood', version=2,
+                 suite='review-regression')
+        c.finish({126})
+        complete_receipt(c, 5)
+        assert not REVIEW_RESULTS[-1]['guardianStderrBytes']
+
+        # Call the actual production static drain function with a real flooded
+        # stderr pipe. Immediate rejection must not count as valid idle progress.
+        progress_source = RUN / 'stderr-progress-control.c'
+        progress_source.write_text('#define main guardian_program_main\n#include "' + str(SOURCE) + '"\n#undef main\n' + r'''
+int main(void) {
+    int pipes[2];
+    if (pipe2(pipes, O_CLOEXEC | O_NONBLOCK)) return 1;
+    unsigned char bytes[1024];
+    memset(bytes, 's', sizeof bytes);
+    unsigned filled = 0;
+    for (unsigned i = 0; i < 128; i++) {
+        ssize_t n = write(pipes[1], bytes, sizeof bytes);
+        if (n > 0) filled += (unsigned)n;
+        else if (n < 0 && errno == EAGAIN) break;
+        else return 2;
+    }
+    Guardian g = {.last_progress = 123, .terminal_cause = UNKNOWN};
+    int result = drain_child(&g, &pipes[0], false);
+    close(pipes[0]); close(pipes[1]);
+    return filled >= sizeof bytes && result == -1 &&
+           g.terminal_cause == CHILD_STDERR && g.last_progress == 123 ? 0 : 3;
+}
+''')
+        progress_binary = RUN / 'stderr-progress-control'
+        BUILD.append(compile_one(progress_source, progress_binary))
+        p = subprocess.run([str(progress_binary)], capture_output=True, env=ENV, timeout=3)
+        assert p.returncode == 0 and not p.stdout and not p.stderr
+        REVIEW_RESULTS.append({'name': 'review-rejected-stderr-is-not-progress',
+                               'sourceSha256': digest(progress_source),
+                               'binarySha256': digest(progress_binary), 'exitCode': p.returncode,
+                               'realPipeFlooded': True, 'lastProgressUnchanged': True})
+
+        if args.compare_prior_guardian:
+            for point, supervisor in (('state-mkdir', 'supervise-delay-state'),
+                                      ('exec-read', 'supervise-delay-exec-read')):
+                c = Case('prior-startup-budget-reset-' + point, 'idle', version=2,
+                         times=(100, 750, 500), suite='prior-regression', supervisor=supervisor,
+                         guardian_binary=PRIOR_GUARDIAN)
+                c.finish({124}, b'IDLE_READY')
+                assert c.receipt and c.receipt['cause'] == 3 and c.receipt['flags'] & 1
+                PRIOR_RESULTS[-1]['regressionObserved'] = 'child ACP forwarded after original startup budget expired'
 finally:
     failure_type = sys.exc_info()[0]
     cleanup_failures = []
@@ -401,6 +677,9 @@ finally:
     report = {
         'schema': 'native-provider-guardian-control-v1',
         'scope': 'standalone credential-free candidate, NOT production qualification',
+        'hostMachine': os.uname().machine,
+        'startupDelayMechanism': ('trusted supervisor PTRACE_SYSCALL/GET_SYSCALL_INFO scheduling hold; native ABI only'
+                                  if args.include_v2 else None),
         'sourceSha256': INPUT_HASHES[SOURCE],
         'runnerSha256': INPUT_HASHES[pathlib.Path(__file__).resolve()],
         'fixtureSha256': INPUT_HASHES[FIXTURE],
@@ -423,12 +702,24 @@ finally:
             'cgroupAdmissionQualified': False,
         },
         'completed': (failure_type is None and not cleanup_failures and len(RESULTS) == 42
+                      and (not args.include_v2 or len(V2_RESULTS) == 21)
+                      and (not args.include_v2 or len(REVIEW_RESULTS) == 6)
+                      and (not args.compare_prior_guardian or len(PRIOR_RESULTS) == 2)
                       and inputs_unchanged and tools_unchanged and binaries_unchanged),
         'expectedControlCount': 42,
         'failureType': None if failure_type is None else failure_type.__name__,
         'cleanupFailures': cleanup_failures,
         'passed': len(RESULTS),
         'results': RESULTS,
+        'v2ExpectedControlCount': 21 if args.include_v2 else 0,
+        'v2Passed': len(V2_RESULTS),
+        'v2Results': V2_RESULTS,
+        'reviewRegressionExpectedCount': 6 if args.include_v2 else 0,
+        'reviewRegressionPassed': len(REVIEW_RESULTS),
+        'reviewRegressionResults': REVIEW_RESULTS,
+        'priorRegressionResults': PRIOR_RESULTS,
+        'priorGuardianSha256': INPUT_HASHES.get(PRIOR_GUARDIAN),
+        'v2CleanupCommitmentGolden': {'domainHex': CLEANUP_DOMAIN.hex(), 'sha256': CLEANUP_GOLDEN},
     }
     (RUN / 'verification.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps({'report': str(RUN / 'verification.json'), 'passed': len(RESULTS)}), flush=True)
