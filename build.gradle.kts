@@ -173,7 +173,11 @@ val buildProviderDnsLoopbackFixture = tasks.register("buildProviderDnsLoopbackFi
 }
 tasks.processTestResources {
     dependsOn(buildProviderDnsLoopbackFixture)
-    from(listOf("src/test/provider-dns/native/provider_dns_loopback_fixture.c", "src/test/kotlin/decompengine/acp/AcpProviderNativeDnsContractTest.kt")) {
+    from(listOf("src/test/provider-dns/native/provider_dns_loopback_fixture.c", "src/test/kotlin/decompengine/acp/AcpProviderNativeDnsContractTest.kt",
+        "src/test/kotlin/decompengine/acp/NativeDnsOwnedDomainContract.kt",
+        "src/main/kotlin/decompengine/acp/LinuxBubblewrapBoundary.kt",
+        "src/main/kotlin/decompengine/acp/LinuxFilesystemSyscalls.kt",
+        "src/main/kotlin/decompengine/acp/AcpSandboxPolicy.kt", "src/main/resources/oracle-native-libraries-v1.properties", "build.gradle.kts")) {
         into("acp-provider-dns-native")
     }
     from(providerDnsLoopbackReferenceDigest) { into("acp-provider-dns-native") }
@@ -1834,6 +1838,10 @@ private fun configureOracleTestRuntime(testTask: Test) {
     // Keep the split test tasks on the same staged native/runtime inputs as the regular suite.
     testTask.dependsOn("installDist")
     testTask.dependsOn(stageOracleNativeLibraries)
+    testTask.dependsOn("stageProviderDnsHostRuntime")
+    testTask.inputs.dir(layout.buildDirectory.dir("provider-dns/host-runtime"))
+    testTask.jvmArgs("-Djna.nosys=true", "-Djna.nounpack=true",
+        "-Djna.boot.library.path=" + layout.buildDirectory.dir("provider-dns/host-runtime").get().asFile.absolutePath)
     testTask.dependsOn(":ghidra-bridge:stageBundle")
     val testInstalledGhidra = providers.environmentVariable("RUN_REAL_GHIDRA").orNull == "true" ||
         providers.environmentVariable("RUN_REAL_GHIDRA_CALL_SITES").orNull == "true" ||
@@ -1859,6 +1867,7 @@ private fun configureOracleTestRuntime(testTask: Test) {
     testTask.inputs.file(llvmHostedWorkerClasspathReference)
     testTask.inputs.dir(kotlinBootRuntimeDirectory)
     testTask.doFirst {
+        testTask.systemProperty("decompengine.acp.providerDns.hostRuntime", layout.buildDirectory.dir("provider-dns/host-runtime").get().asFile.absolutePath)
         testTask.systemProperty("decompengine.analysis.io.testHelper", analysisIoHelperBinary.get().asFile.absolutePath)
         testTask.systemProperty("decompengine.analysis.io.helper", analysisIoHelperBinary.get().asFile.absolutePath)
         testTask.systemProperty("decompengine.analysis.io.testCompiler", file(analysisIoHelperCompiler.get()).canonicalPath)
@@ -1922,6 +1931,16 @@ private fun configureOracleTestRuntime(testTask: Test) {
 }
 
 tasks.test {
+    // Required native fixture executor is explicitly serial in this actual task.
+    maxParallelForks = 1
+    forkEvery = 0
+    systemProperty("junit.jupiter.execution.parallel.enabled", "false")
+    doFirst {
+        require(maxParallelForks == 1 && forkEvery == 0L)
+        systemProperty("decompengine.acp.providerDns.testTask", path)
+        systemProperty("decompengine.acp.providerDns.maxParallelForks", maxParallelForks.toString())
+        systemProperty("decompengine.acp.providerDns.forkEvery", forkEvery.toString())
+    }
     // The authenticated model boundary returns a real 512 MiB array in the largest ordinary test.
     maxHeapSize = "2g"
     val shard = providers.gradleProperty("ciTestShard").orNull
@@ -2297,9 +2316,103 @@ tasks.named("check") {
 
 // The dependency resolution and compiled class outputs are trusted gate inputs, not receipt claims.
 // This task never depends on test execution, so testClasses does not form a task cycle.
+
+// Host-only bytecode/native dependency binding. Never mounted into the DNS payload.
+// Compile task dependencies, source digests, bounded class SourceFile checks in
+// the owner/verifier, and current compiled-byte comparisons jointly bind generation.
+val stageProviderDnsHostRuntime = tasks.register("stageProviderDnsHostRuntime") {
+    group = "verification"
+    dependsOn("compileKotlin", "compileTestKotlin", stageOracleNativeLibraries)
+    val destination = layout.buildDirectory.dir("provider-dns/host-runtime")
+    inputs.files("src/test/kotlin/decompengine/acp/AcpProviderNativeDnsContractTest.kt",
+        "src/test/kotlin/decompengine/acp/NativeDnsOwnedDomainContract.kt",
+        "src/main/kotlin/decompengine/acp/LinuxBubblewrapBoundary.kt",
+        "src/main/kotlin/decompengine/acp/LinuxFilesystemSyscalls.kt",
+        "src/main/kotlin/decompengine/acp/AcpSandboxPolicy.kt", "src/main/resources/oracle-native-libraries-v1.properties", "build.gradle.kts")
+    inputs.dir(layout.buildDirectory.dir("classes/kotlin/main"))
+    inputs.dir(layout.buildDirectory.dir("classes/kotlin/test"))
+    inputs.files(configurations.testRuntimeClasspath)
+    outputs.dir(destination)
+    doLast {
+        fun hash(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+        fun bounded(path: Path, maximum: Int): ByteArray {
+            require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) && path.toRealPath() == path && Files.size(path) in 1..maximum.toLong())
+            return Files.newInputStream(path).use { it.readNBytes(maximum + 1) }.also { require(it.size in 1..maximum) }
+        }
+        val roots = mapOf(
+            "test" to mapOf(
+                "AcpProviderNativeDnsContractTest.kt" to setOf("AcpProviderNativeDnsContractTestKt", "AcpProviderNativeDnsControl", "NativeNamespace", "NativeNamespaceCredentials", "NativeNamespaceWaitFailure", "NativeObserverBudget", "NativeObserverBudgetOwner", "NativeVisibilityAccumulator", "NativeObserverFailure", "NativeDnsOwnedDomainOwner", "NativeDnsOwnedResult", "NativeDnsOwnedLib", "NativeDnsOwnedFd", "AcpProviderNativeDnsContractTest", "NativeDnsOwnedDomainBoundaryTest"),
+                "NativeDnsOwnedDomainContract.kt" to setOf("NativeDnsOwnedDomainContract")
+            ),
+            "main" to mapOf(
+                "LinuxBubblewrapBoundary.kt" to setOf("LinuxBubblewrapBoundaryKt", "SystemdScopeController", "VerifiedScopeManager", "VerifiedSystemdScope", "PinnedSecurityExecutable", "PinnedSystemdBusEndpoint", "PinnedFileIdentity", "AcpSandboxScopeIdentity", "AcpCgroupControllerEvidence", "AcpSandboxRlimitEvidence", "AcpSecurityExecutableEvidence", "AcpCleanupProofFailure", "CommandResult", "TrustedControlProcessOwner", "TrustedControlProcesses"),
+                "LinuxFilesystemSyscalls.kt" to setOf("LinuxFilesystemSyscalls", "LinuxFilesystemSyscallsKt", "LinuxFileKey", "LinuxFileIdentity", "LinuxFilesystemCapacity", "LinuxDescriptor", "LinuxProcessDescriptor", "LinuxDescriptorReserve", "NativeClose", "LinuxSyscallException", "LinuxResourceLimitException", "LinuxNamedRegularFileReplacedException", "RuntimeCopyStatistics"),
+                "AcpSandboxPolicy.kt" to setOf("AcpSandboxPolicyKt", "AcpSandboxResourceLimits")
+            )
+        )
+        val sources = mapOf(
+            "testSourceSha256" to "src/test/kotlin/decompengine/acp/AcpProviderNativeDnsContractTest.kt",
+            "ownedContractSourceSha256" to "src/test/kotlin/decompengine/acp/NativeDnsOwnedDomainContract.kt",
+            "scopeBackendSourceSha256" to "src/main/kotlin/decompengine/acp/LinuxBubblewrapBoundary.kt",
+            "scopeFilesystemSourceSha256" to "src/main/kotlin/decompengine/acp/LinuxFilesystemSyscalls.kt",
+            "scopePolicySourceSha256" to "src/main/kotlin/decompengine/acp/AcpSandboxPolicy.kt",
+            "hostNativePolicySourceSha256" to "src/main/resources/oracle-native-libraries-v1.properties",
+            "hostBuildSourceSha256" to "build.gradle.kts"
+        )
+        val sourceHashes = sources.mapValues { (_, path) -> hash(bounded(layout.projectDirectory.file(path).asFile.toPath().toAbsolutePath().normalize(), 1024 * 1024)) }
+        val entries = sortedMapOf<String, ByteArray>()
+        for ((set, bySource) in roots) {
+            val directory = layout.buildDirectory.dir("classes/kotlin/" + set + "/decompengine/acp").get().asFile.toPath().toAbsolutePath().normalize()
+            require(directory.toRealPath() == directory)
+            val paths = Files.newDirectoryStream(directory, "*.class").use { it.asSequence().take(8193).toList() }
+            require(paths.size <= 8192)
+            val selected = paths.filter { path -> bySource.values.flatten().any { root -> path.fileName.toString() == root + ".class" || path.fileName.toString().startsWith(root + "$" ) } }
+            for (path in selected) {
+                val key = "decompengine/acp/" + path.fileName
+                require(entries.put(key, bounded(path, 1024 * 1024)) == null)
+            }
+            require(bySource.values.flatten().all { root -> "decompengine/acp/" + root + ".class" in entries })
+        }
+        require(entries.size in 1..256 && entries.values.sumOf { it.size.toLong() } <= 16L * 1024 * 1024)
+        fun artifact(group: String, name: String, version: String): Path {
+            val selected = configurations.testRuntimeClasspath.get().resolvedConfiguration.resolvedArtifacts.filter {
+                it.moduleVersion.id.group == group && it.moduleVersion.id.name == name
+            }
+            require(selected.size == 1 && selected.single().moduleVersion.id.version == version)
+            return selected.single().file.toPath().toAbsolutePath().normalize()
+        }
+        val stdlib = bounded(artifact("org.jetbrains.kotlin", "kotlin-stdlib", "2.4.0"), 8 * 1024 * 1024)
+        val jna = bounded(artifact("net.java.dev.jna", "jna", "5.19.1"), 8 * 1024 * 1024)
+        val policy = Properties().apply { Files.newInputStream(oracleNativeLibraryPolicy.asFile.toPath()).use(::load) }
+        require(hash(jna) == policy.getProperty("jna.artifactSha256") && policy.getProperty("jna.artifact") == "jna-5.19.1.jar")
+        val dispatch = bounded(oracleNativeLibraryDirectory.get().file("libjnidispatch.so").asFile.toPath().toAbsolutePath().normalize(), 1024 * 1024)
+        require(dispatch.size.toString() == policy.getProperty("jna.bytes") && hash(dispatch) == policy.getProperty("jna.sha256"))
+        val out = destination.get().asFile.toPath().toAbsolutePath().normalize()
+        Files.createDirectories(out); require(out.toRealPath() == out)
+        for (name in listOf("host-control.jar", "kotlin-stdlib.jar", "jna.jar", "libjnidispatch.so", "host-runtime.properties")) require(!Files.isSymbolicLink(out.resolve(name)))
+        java.util.jar.JarOutputStream(Files.newOutputStream(out.resolve("host-control.jar"))).use { jar -> entries.forEach { (name, bytes) ->
+            jar.putNextEntry(java.util.jar.JarEntry(name).also { it.time = 0 }); jar.write(bytes); jar.closeEntry()
+        } }
+        Files.write(out.resolve("kotlin-stdlib.jar"), stdlib); Files.write(out.resolve("jna.jar"), jna); Files.write(out.resolve("libjnidispatch.so"), dispatch)
+        val metadata = sortedMapOf("schema" to "2", "kotlinCoordinates" to "org.jetbrains.kotlin:kotlin-stdlib:2.4.0",
+            "jnaCoordinates" to "net.java.dev.jna:jna:5.19.1", "stdlibSha256" to hash(stdlib), "jnaJarSha256" to hash(jna),
+            "jniDispatchSha256" to hash(dispatch), "hostClassesSha256" to hash(bounded(out.resolve("host-control.jar"), 16 * 1024 * 1024)),
+            "bytecodeClosureSha256" to hash(entries.entries.joinToString("\u0000") { it.key + ":" + hash(it.value) }.toByteArray(StandardCharsets.UTF_8)),
+            "sourceGenerationSha256" to hash(sourceHashes.toSortedMap().entries.joinToString("\u0000") { it.key + ":" + it.value }.toByteArray(StandardCharsets.UTF_8)))
+        metadata.putAll(sourceHashes)
+        sources.forEach { (key, path) -> require(hash(bounded(layout.projectDirectory.file(path).asFile.toPath().toAbsolutePath().normalize(), 1024 * 1024)) == sourceHashes.getValue(key)) }
+        val record = metadata.entries.joinToString("\n", postfix = "\n") { it.key + "=" + it.value }.toByteArray(StandardCharsets.US_ASCII)
+        require(record.size in 1..16384)
+        Files.write(out.resolve("host-runtime.properties"), record)
+        val expected = setOf("host-control.jar", "kotlin-stdlib.jar", "jna.jar", "libjnidispatch.so", "host-runtime.properties")
+        require(Files.newDirectoryStream(out).use { it.asSequence().take(6).map { p -> p.fileName.toString() }.toSet() } == expected)
+        require(entries.size + 4 <= 256 && entries.values.sumOf { it.size.toLong() } + stdlib.size + jna.size + dispatch.size + record.size <= 16L * 1024 * 1024)
+    }
+}
+
 tasks.register<Exec>("verifyProviderDnsNativeQualification") {
     group = "verification"
-    dependsOn("testClasses")
+    dependsOn("testClasses", stageProviderDnsHostRuntime)
     doFirst {
         val artifacts = configurations.testRuntimeClasspath.get().resolvedConfiguration.resolvedArtifacts.filter {
             it.moduleVersion.id.group == "org.jetbrains.kotlin" && it.moduleVersion.id.name == "kotlin-stdlib"
@@ -2308,9 +2421,15 @@ tasks.register<Exec>("verifyProviderDnsNativeQualification") {
             "Native DNS gate requires the exact resolved org.jetbrains.kotlin:kotlin-stdlib:2.4.0 artifact"
         }
         val stdlib = artifacts.single().file.toPath().toAbsolutePath().normalize()
+        val jnaArtifacts = configurations.testRuntimeClasspath.get().resolvedConfiguration.resolvedArtifacts.filter {
+            it.moduleVersion.id.group == "net.java.dev.jna" && it.moduleVersion.id.name == "jna"
+        }
+        require(jnaArtifacts.size == 1 && jnaArtifacts.single().moduleVersion.id.version == "5.19.1")
+        val jna = jnaArtifacts.single().file.toPath().toAbsolutePath().normalize()
+        require(Files.isRegularFile(jna, LinkOption.NOFOLLOW_LINKS) && jna.toRealPath() == jna)
         require(Files.isRegularFile(stdlib, LinkOption.NOFOLLOW_LINKS) && stdlib.toRealPath() == stdlib)
         val runId = providers.environmentVariable("DECOMP_ACP_CONTRACT_RUN_ID").get()
         require(runId.matches(Regex("[A-Za-z0-9-]{1,80}")))
-        commandLine("python3", "-B", "scripts/verify-acp-provider-dns.py", runId, stdlib.toString())
+        commandLine("python3", "-B", "scripts/verify-acp-provider-dns.py", runId, stdlib.toString(), jna.toString())
     }
 }
