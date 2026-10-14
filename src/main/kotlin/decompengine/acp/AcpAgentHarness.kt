@@ -256,6 +256,7 @@ class AcpAgentHarness(
         authenticationInventory: AtomicReference<AcpAuthenticationInventory?>? = null,
     ): AgentExecutionReceipt {
         val wallDeadline = MonotonicDeadline(request.limits.wallClockTimeout)
+        val prefixObservation = RuntimeCopyStatistics.Prefix.create(wallDeadline::observationSample)
         val binding = AgentExecutionRequestBinding.capture(request)
         val evidenceState = AcpInvocationEvidenceState(factoryProvenance.get())
         var schedulingPermit: AcpExecutionScheduler.Permit? = null
@@ -299,19 +300,26 @@ class AcpAgentHarness(
                     wallDeadline,
                     sessionJournal,
                     authenticationInventory,
+                    prefixObservation,
                 ),
             )
         } catch (_: WorkspaceSnapshotCancelled) {
             AgentExecutionOutcome.Returned(AgentExecutionResult(AgentStopReason.CANCELLED, "cancelled during ACP session reconciliation"))
         } catch (failure: Error) {
+            prefixObservation?.failureCurrent(RuntimeCopyStatistics.Prefix.Failure.ERROR)
+            RuntimeCopyStatistics.Prefix.attach(prefixObservation, failure)
             try { sessionJournal?.close() } catch (cleanup: Throwable) { if (cleanup !== failure) failure.addSuppressed(cleanup) }
             throw failure
         } catch (failure: AgentExecutionException) {
+            prefixObservation?.failureCurrent()
+            RuntimeCopyStatistics.Prefix.attach(prefixObservation, failure)
             // Preserve the typed exception itself as the compatibility exception's cause. This
             // retains its original stack, nested cause, and suppressed cleanup diagnostics.
             cause = failure
             AgentExecutionOutcome.Failed(failure.failure)
         } catch (failure: Exception) {
+            prefixObservation?.failureCurrent()
+            RuntimeCopyStatistics.Prefix.attach(prefixObservation, failure)
             cause = failure
             AgentExecutionOutcome.Failed(
                 AgentFailure(
@@ -373,6 +381,7 @@ class AcpAgentHarness(
         wallDeadline: MonotonicDeadline,
         sessionJournal: AgentSessionJournal?,
         authenticationInventory: AtomicReference<AcpAuthenticationInventory?>?,
+        prefixObservation: RuntimeCopyStatistics.Prefix?,
     ): AgentExecutionResult {
         unresolvedCleanupFailure.get()?.let { throw it }
         if (preflightWorkflow != null) {
@@ -467,6 +476,7 @@ class AcpAgentHarness(
                 request,
                 translator.activity,
                 wallDeadline,
+                prefixObservation,
             )
         } catch (cancelled: RequestedAcpCancellation) {
             return AgentExecutionResult(
@@ -1888,16 +1898,29 @@ private class ProductionAcpSandboxExecution(
     request: AgentExecutionRequest,
     activity: ProtocolActivity,
     wallDeadline: MonotonicDeadline,
+    private val prefixObservation: RuntimeCopyStatistics.Prefix?,
 ) : AutoCloseable {
     private val boundary: LinuxBubblewrapBoundary
     val guardianDescriptor: AcpProviderGuardianLaunchDescriptor? =
         AcpProviderGuardianLaunchDescriptor.claimForLaunch(configuration)
     private val executionCheck: () -> Unit = {
-        if (request.cancellation.isCancellationRequested()) {
-            throw RequestedAcpCancellation("sandbox launch")
+        try {
+            if (request.cancellation.isCancellationRequested()) {
+                throw RequestedAcpCancellation("sandbox launch")
+            }
+            if (wallDeadline.hasExpired()) throw AcpPhaseTimeout("wall-clock")
+        } catch (failure: Throwable) {
+            prefixObservation?.failureCurrent(when (failure) {
+                is AcpPhaseTimeout -> RuntimeCopyStatistics.Prefix.Failure.TIMEOUT
+                is RequestedAcpCancellation -> RuntimeCopyStatistics.Prefix.Failure.CANCELLED
+                is Error -> RuntimeCopyStatistics.Prefix.Failure.ERROR
+                else -> RuntimeCopyStatistics.Prefix.Failure.OTHER
+            })
+            throw failure
         }
-        if (wallDeadline.hasExpired()) throw AcpPhaseTimeout("wall-clock")
     }
+    private fun <T> observePrefix(phase: RuntimeCopyStatistics.Prefix.Phase, action: () -> T): T =
+        if (prefixObservation == null) action() else prefixObservation.measure(phase, action)
     val running: RunningAcpProcess
     val networkIsolated: Boolean get() = boundary.networkIsolated
 
@@ -1918,10 +1941,13 @@ private class ProductionAcpSandboxExecution(
             ),
         )
         boundary = try {
-            LinuxBubblewrapBoundary.prepare(
-                sandboxConfiguration,
-                cancellationCheck = executionCheck,
-            )
+            observePrefix(RuntimeCopyStatistics.Prefix.Phase.PREPARE) {
+                LinuxBubblewrapBoundary.prepare(
+                    sandboxConfiguration,
+                    cancellationCheck = executionCheck,
+                    prefixObservation = prefixObservation,
+                )
+            }
         } catch (failure: Exception) {
             if (failure is RequestedAcpCancellation) throw failure
             if (failure is AcpPhaseTimeout) {
@@ -1961,8 +1987,10 @@ private class ProductionAcpSandboxExecution(
             )
             val outerMounts = guardianDescriptor?.runtimeMounts ?:
                 (listOf(executableMount) + sandboxConfiguration.agentRuntimeMounts)
-            boundary.validateReadOnlyMounts(outerMounts, executionCheck)
-            val sandboxed = boundary.launch(
+            observePrefix(RuntimeCopyStatistics.Prefix.Phase.VALIDATE) {
+                boundary.validateReadOnlyMounts(outerMounts, executionCheck)
+            }
+            val sandboxed = observePrefix(RuntimeCopyStatistics.Prefix.Phase.LAUNCH) { boundary.launch(
                 AcpSandboxLaunch(
                     command = guardianDescriptor?.command ?: configuration.command(),
                     environment = configuration.environmentValues(),
@@ -1978,7 +2006,9 @@ private class ProductionAcpSandboxExecution(
                 ),
                 mergeError = false,
                 cancellationCheck = executionCheck,
-            )
+            ) }
+            // Retain completed owner statistics, but do not mix later broker launches into them.
+            boundary.finishPrelaunchObservation()
             RunningAcpProcess(
                 process = sandboxed.process,
                 sandboxed = sandboxed,
@@ -1989,7 +2019,7 @@ private class ProductionAcpSandboxExecution(
             )
         } catch (failure: Throwable) {
             val cleanupFailure = try {
-                boundary.close()
+                observePrefix(RuntimeCopyStatistics.Prefix.Phase.BOUNDARY_CLOSE) { boundary.close() }
                 null
             } catch (cleanup: Throwable) {
                 cleanup
@@ -2048,7 +2078,7 @@ private class ProductionAcpSandboxExecution(
 
     fun boundaryCleanupFacts(): AcpSandboxBoundaryCleanupFacts = running.boundaryCleanupFacts()
 
-    override fun close() = boundary.close()
+    override fun close() = observePrefix(RuntimeCopyStatistics.Prefix.Phase.BOUNDARY_CLOSE) { boundary.close() }
 
     private fun mapLaunchFailure(failure: Throwable): Throwable = when (failure) {
         is RequestedAcpCancellation, is AgentExecutionException -> failure
@@ -3717,6 +3747,12 @@ internal class MonotonicDeadline(timeout: Duration) {
     fun remainingMillis(now: Long = System.nanoTime()): Long {
         val remaining = (timeoutNanos - elapsedNanos(now)).coerceAtLeast(0)
         return remaining / NANOS_PER_MILLI + if (remaining % NANOS_PER_MILLI == 0L) 0 else 1
+    }
+
+    /** Observation only, using this original deadline; never a fresh budget. */
+    fun observationSample(now: Long): LongArray {
+        val elapsed = elapsedNanos(now)
+        return longArrayOf(elapsed, (timeoutNanos - elapsed).coerceAtLeast(0))
     }
 
     private fun elapsedNanos(now: Long): Long = (now - startedAt).coerceAtLeast(0)
