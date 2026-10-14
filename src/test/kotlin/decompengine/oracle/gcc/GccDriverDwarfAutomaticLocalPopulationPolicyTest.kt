@@ -118,15 +118,19 @@ class GccDriverDwarfAutomaticLocalPopulationPolicyTest {
             variable("0x8", storage = known("thread-local", "storage:tls")),
             variable("0x9", location = location("location-list", "location:list", state = "unknown")),
             variable("0xa", location = location("expression-unsupported", "location:composite", state = "unknown")),
+            variable("0xb", declaration = known("18446744073709551616", "declaration:wide-positive")),
+            variable("0xc", declaration = known("-9223372036854775809", "declaration:wide-negative")),
         )
         val application = apply(records)
         assertEquals(records.map { it.text("locator") }, application.decisions.map { it.text("sourceLocator") })
-        assertEquals(listOf("excluded", "excluded") + List(8) { "retained-raw-candidate" },
+        assertEquals(listOf("excluded", "excluded") + List(10) { "retained-raw-candidate" },
             application.decisions.map { it.text("classification") })
         assertEquals("declaration-is-not-a-proved-definition", application.decisions[2].text("reason"))
         assertEquals("declaration-is-not-a-proved-definition", application.decisions[3].text("reason"))
         assertEquals("declaration-is-not-a-proved-definition", application.decisions[4].text("reason"))
         assertEquals("declaration-is-not-a-proved-definition", application.decisions[5].text("reason"))
+        assertEquals("declaration-is-not-a-proved-definition", application.decisions[10].text("reason"))
+        assertEquals("declaration-is-not-a-proved-definition", application.decisions[11].text("reason"))
         assertEquals(listOf("storage:auto", "scope:function", "location:frame", "declaration:absent"),
             application.decisions[0].strings("evidenceLocators"))
         assertEquals(listOf("declaration:one"), application.decisions[2].strings("evidenceLocators"))
@@ -135,9 +139,9 @@ class GccDriverDwarfAutomaticLocalPopulationPolicyTest {
             assertEquals(OracleArtifacts.sha256(OracleJson.canonicalBytes(record)), decision.text("sourceRecordSha256"))
         }
         val counts = application.summary.getValue("counts").jsonObject
-        assertEquals(10L, counts.long("rawVariableRecords"))
+        assertEquals(12L, counts.long("rawVariableRecords"))
         assertEquals(2L, counts.long("excludedAutomaticLocalRecords"))
-        assertEquals(8L, counts.long("retainedRawCandidateRecords"))
+        assertEquals(10L, counts.long("retainedRawCandidateRecords"))
         assertEquals(1L, counts.long("excludedFunctionScopeRecords"))
         assertEquals(1L, counts.long("excludedBlockScopeRecords"))
         assertEquals(1L, counts.long("excludedFrameRelativeRecords"))
@@ -194,10 +198,12 @@ class GccDriverDwarfAutomaticLocalPopulationPolicyTest {
                 "evidence" to JsonArray(emptyList()),
             ))))))
         }
-        assertPolicyFailure("non-decimal declaration") {
-            apply(listOf(JsonObject(records[0] + ("declaration" to fact(
-                "known", listOf("junk"), emptyList(), emptyList(),
-            )))))
+        listOf("junk", "", "-", "+1", "00", "01", "-0", "-01", "1_0", "1.0").forEach { malformed ->
+            assertPolicyFailure("noncanonical decimal declaration '$malformed'") {
+                apply(listOf(JsonObject(records[0] + ("declaration" to fact(
+                    "known", listOf(malformed), emptyList(), emptyList(),
+                )))))
+            }
         }
     }
 

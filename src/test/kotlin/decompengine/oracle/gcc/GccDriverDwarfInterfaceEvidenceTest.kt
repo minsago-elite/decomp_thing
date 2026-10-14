@@ -4,6 +4,7 @@ import decompengine.oracle.core.OracleArtifactLimits
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.fulltree.BoundedDwarfCanonicalShardWriter
+import decompengine.oracle.fulltree.BoundedDwarfShardLimits
 import decompengine.oracle.fulltree.parseCanonicalDwarfShard
 import decompengine.oracle.structural.DwarfSysvAmd64InterfaceProjection
 import decompengine.oracle.structural.DwarfSysvAmd64Classification
@@ -354,6 +355,19 @@ class GccDriverDwarfInterfaceEvidenceTest {
             GccDriverDwarfInterfaceEvidence.verifyBundle(OracleJson.canonicalBytes(changed), parts,
                 automaticLocalPolicy = fixture.policy)
         }
+        val shardLimits = BoundedDwarfShardLimits()
+        val largeEnvelope = OracleJson.canonicalBytes(JsonObject(linkedMapOf(
+            "schema" to JsonPrimitive("bounded-dwarf-record-shard-v1"),
+            "kind" to JsonPrimitive(GccDriverAutomaticLocalPopulationPolicyV1.DECISION_KIND),
+            "ordinal" to JsonPrimitive(0), "recordCount" to JsonPrimitive(300),
+            "records" to JsonArray(List(300) { JsonObject(mapOf(
+                "payload" to JsonPrimitive("x".repeat(14_000)),
+            )) }),
+        )), shardLimits.jsonLimits())
+        assertTrue(largeEnvelope.size > 4 * 1024 * 1024, "fixture must exceed the generic JSON input limit")
+        val parsedLargeEnvelope = parseDecisionEnvelopeForTamper(largeEnvelope)
+        assertEquals(300, parsedLargeEnvelope.getValue("records").jsonArray.size)
+        assertContentEquals(largeEnvelope, canonicalDecisionEnvelopeForTamper(parsedLargeEnvelope))
     }
 
     private data class EmptyPolicyBundleFixture(
@@ -478,7 +492,7 @@ class GccDriverDwarfInterfaceEvidenceTest {
     ) {
         val index = parts.indexOfFirst { it.first.contains("-${GccDriverAutomaticLocalPopulationPolicyV1.DECISION_KIND}-") }
         assertTrue(index >= 0, "decision shard is absent")
-        val envelope = OracleJson.parseCanonical(parts[index].second).jsonObject
+        val envelope = parseDecisionEnvelopeForTamper(parts[index].second)
         val records = envelope.getValue("records").jsonArray
         assertTrue(records.isNotEmpty(), "actual qualification must emit policy decisions")
         val first = records.first().jsonObject
@@ -489,7 +503,7 @@ class GccDriverDwarfInterfaceEvidenceTest {
                 "automatic-local-not-positively-proved" else "positively-proved-automatic-local"),
         ))
         val forgedEnvelope = JsonObject(envelope + ("records" to JsonArray(listOf(forged) + records.drop(1))))
-        val forgedBytes = OracleJson.canonicalBytes(forgedEnvelope)
+        val forgedBytes = canonicalDecisionEnvelopeForTamper(forgedEnvelope)
         val parsed = parseCanonicalDwarfShard(forgedBytes)
         val descriptor = manifest.getValue("parts").jsonArray[index].jsonObject
         val forgedDescriptor = JsonObject(descriptor + mapOf(
@@ -508,6 +522,12 @@ class GccDriverDwarfInterfaceEvidenceTest {
                 automaticLocalPolicy = policy)
         }
     }
+
+    private fun parseDecisionEnvelopeForTamper(bytes: ByteArray): JsonObject =
+        OracleJson.parseCanonical(bytes, BoundedDwarfShardLimits().jsonLimits()).jsonObject
+
+    private fun canonicalDecisionEnvelopeForTamper(envelope: JsonObject): ByteArray =
+        OracleJson.canonicalBytes(envelope, BoundedDwarfShardLimits().jsonLimits())
 
     private fun compiledClassIdentity(type: Class<*>): JsonObject {
         val resource = "/${type.name.replace('.', '/')}.class"

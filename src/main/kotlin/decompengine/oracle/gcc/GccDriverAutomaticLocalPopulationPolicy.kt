@@ -334,8 +334,7 @@ internal object GccDriverAutomaticLocalPopulationPolicyV1 {
 
     private fun declarationFact(owner: JsonObject): Fact = fact(owner, "declaration", stringsOnly = true).also { declaration ->
         declaration.stringValues.forEachIndexed { index, value ->
-            val canonical = value.toLongOrNull()?.toString() == value || value.toULongOrNull()?.toString() == value
-            if (!canonical) policyFail("declaration.values[$index] must be a canonical decimal string")
+            if (!isCanonicalDecimal(value)) policyFail("declaration.values[$index] must be a canonical decimal string")
         }
     }
 
@@ -509,6 +508,22 @@ private fun boolean(owner: JsonObject, field: String): Boolean =
 private fun number(owner: JsonObject, field: String): Long =
     (owner[field] as? JsonPrimitive)?.takeUnless { it.isString }?.longOrNull?.takeIf { it >= 0 }
         ?: policyFail("$field must be a nonnegative integer")
+private fun isCanonicalDecimal(value: String): Boolean {
+    if (value.isEmpty()) return false
+    var index = 0
+    if (value[0] == '-') {
+        if (value.length == 1) return false
+        index = 1
+    }
+    if (value[index] == '0') return index == 0 && value.length == 1
+    if (value[index] !in '1'..'9') return false
+    index++
+    while (index < value.length) {
+        if (value[index] !in '0'..'9') return false
+        index++
+    }
+    return true
+}
 private fun requireSha(value: String, label: String) {
     if (!SHA.matches(value)) policyFail("$label SHA-256 is malformed")
 }
