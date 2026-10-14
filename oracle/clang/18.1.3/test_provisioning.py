@@ -1309,11 +1309,14 @@ class ProvisioningNegativeTests(unittest.TestCase):
                     mock.patch.object(provision, "check_runner_bounds"), \
                     mock.patch.object(provision, "run_checked", side_effect=run_checked), \
                     mock.patch.object(provision, "installed_package_keys", return_value=packages), \
+                    mock.patch.object(provision, "package_metadata_for_keys", return_value={}), \
+                    mock.patch.object(provision, "retain_signed_package_payloads",
+                                      side_effect=lambda *a: events.append("retained-payloads")), \
                     mock.patch.object(provision, "rootfs_run", side_effect=rootfs_run), \
                     mock.patch.object(provision.BoundedDownloader, "get") as network:
                 with self.assertRaisesRegex(provision.ProvisionError, "stop before package fetch"):
                     provision._provision_rootfs_unqualified(args)
-            self.assertEqual(events, ["selected-keyring", "source-list", "apt-update"])
+            self.assertEqual(events, ["retained-payloads", "selected-keyring", "source-list", "apt-update"])
             self.assertEqual((rootfs / Path(provision.APT_KEYRING_IN_ROOT).relative_to("/")).read_bytes(),
                              keyring.read_bytes())
             self.assertIn(f"signed-by={provision.APT_KEYRING_IN_ROOT}",
@@ -4769,6 +4772,18 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
         with self.assertRaisesRegex(provision.ProvisionError, r"recipe hashes|checked-in schema.*recipe"):
             provision.validate_build_record(record, self.contract)
 
+    def test_recipe_rejects_changed_transitive_loader_helpers_and_snapshot_recipe(self):
+        record = self.valid_build_record()
+        provision.validate_build_record(record, self.contract)
+        for key in ("aLoaderArtifactsSha256", "aLoaderJsonSha256", "aLoaderSnapshotSha256",
+                    "hostTransportSha256", "hostJournalSha256", "gradleBuildSha256"):
+            with self.subTest(key=key), self.temporary_directory() as temp:
+                changed = Path(temp) / "changed-source"
+                changed.write_bytes(provision.RECIPE_FILES[key].read_bytes() + b"\nchanged authored fixture\n")
+                with mock.patch.dict(provision.RECIPE_FILES, {key: changed}):
+                    with self.assertRaisesRegex(provision.ProvisionError, r"recipe hashes|checked-in schema.*recipe"):
+                        provision.validate_build_record(record, self.contract)
+
     def test_record_commands_propagate_selected_contract_to_verification(self):
         with self.temporary_directory() as temp:
             base = Path(temp)
@@ -5094,6 +5109,7 @@ class RecipeAndCandidateBindingTests(unittest.TestCase):
             root, candidate, record, keyring = self.candidate_fixture(base)
             rootfs = base / "rootfs"
             rootfs.mkdir()
+            (base / "package-payloads").mkdir()
             record_path = base / "record.json"
             record_path.write_bytes(provision.canonical_json(record))
             args = provision.argparse.Namespace(contract=provision.CONTRACT_PATH, record=record_path,
@@ -6379,6 +6395,139 @@ if mode == "socket":
     print("inert root-owned 0700 preflight/tar passed; replacement helper and planted output symlink preserved root-owned canary; oversized/socket refused; cleanup passed")
     print("scope=offline-privilege-smoke; nativeQualification=not-run; qualified=false")
 
+
+
+class LoaderCompileSnapshotTests(unittest.TestCase):
+    def test_descriptor_root_driver_and_resource_paths_are_container_relative(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            (root / "usr/bin").mkdir(parents=True)
+            (root / "usr/bin/clang").write_bytes(b"inert driver")
+            (root / "usr/include").mkdir()
+            (root / "usr/include/header.h").write_bytes(b"inert header")
+            fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                held = Path(f"/proc/{os.getpid()}/fd/{fd}")
+                record = provision.driver_record(held, "/usr/bin/clang", "c-driver", "clang version 18.1.3")
+                self.assertEqual(record["resolvedPath"], "/usr/bin/clang")
+                resources = provision.resource_manifest(held, "/usr/include")
+                self.assertEqual(resources["entries"][0]["path"], "/usr/include/header.h")
+            finally:
+                os.close(fd)
+
+    def fixture(self, base):
+        import clang_18_1_3_loader_snapshot as snapshot
+        root = base / "checkout"
+        root.mkdir()
+        expected = {}
+        for name in snapshot.SOURCE_PATHS:
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            raw = ("authored inert source " + name).encode()
+            path.write_bytes(raw)
+            expected[name] = hashlib.sha256(raw).hexdigest()
+        jar = base / "dependency.jar"
+        jar.write_bytes(b"authored inert dependency, not executable")
+        return snapshot, root, expected, jar
+
+    def capture(self, base):
+        snapshot, root, expected, jar = self.fixture(base)
+        output = base / "captured"
+        manifest = snapshot.prepare(root, output, [jar], expected)
+        digest = hashlib.sha256(snapshot._json(manifest)).hexdigest()
+        return snapshot, output, digest, manifest, root, jar, expected
+
+    def test_compiler_inputs_use_captured_source_and_complete_classpath(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot, output, digest, manifest, root, jar, expected = self.capture(Path(tmp))
+            for name in snapshot.SOURCE_PATHS:
+                (root / name).write_bytes(b"later checkout mutation")
+            jar.write_bytes(b"later dependency mutation")
+            self.assertEqual(snapshot.verify(output, digest), manifest)
+            self.assertEqual(len(manifest["files"]), 5)
+            self.assertEqual((output / "classpath/000.jar").read_bytes(), b"authored inert dependency, not executable")
+
+    def test_changed_source_refuses_before_snapshot_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            snapshot, root, expected, jar = self.fixture(base)
+            (root / snapshot.SOURCE_PATHS[0]).write_bytes(b"different smoke harness")
+            with self.assertRaisesRegex(snapshot.SnapshotError, "selected recipe"):
+                snapshot.prepare(root, base / "captured", [jar], expected)
+            self.assertFalse((base / "captured").exists())
+
+    def test_snapshot_source_dependency_and_manifest_rewrites_refuse(self):
+        for target in ("source", "dependency", "coherent manifest"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as tmp:
+                snapshot, output, digest, manifest, *_ = self.capture(Path(tmp))
+                name = next(iter(manifest["files"])) if target == "source" else "classpath/000.jar"
+                path = output / name
+                path.chmod(0o600)
+                path.write_bytes(b"changed captured bytes")
+                if target == "coherent manifest":
+                    manifest["files"][name] = {"bytes": path.stat().st_size, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+                    mpath = output / "manifest.json"
+                    mpath.chmod(0o600)
+                    mpath.write_bytes(snapshot._json(manifest))
+                with self.assertRaises(snapshot.SnapshotError):
+                    snapshot.verify(output, digest)
+
+    def test_extra_classpath_and_symlink_inputs_refuse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot, output, digest, *_ = self.capture(Path(tmp))
+            (output / "classpath/extra.jar").write_bytes(b"unrecorded dependency")
+            with self.assertRaisesRegex(snapshot.SnapshotError, "undeclared"):
+                snapshot.verify(output, digest)
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            snapshot, root, expected, jar = self.fixture(base)
+            link = base / "link.jar"
+            link.symlink_to(jar)
+            with self.assertRaisesRegex(snapshot.SnapshotError, "symlink"):
+                snapshot.prepare(root, base / "captured", [link], expected)
+
+    def test_capture_bounds_and_closed_source_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            snapshot, root, expected, jar = self.fixture(base)
+            with mock.patch.object(snapshot, "MAX_TOTAL_BYTES", 1):
+                with self.assertRaisesRegex(snapshot.SnapshotError, "bounded"):
+                    snapshot.prepare(root, base / "captured", [jar], expected)
+            self.assertFalse((base / "captured").exists())
+            with self.assertRaisesRegex(snapshot.SnapshotError, "fixed loader closure"):
+                snapshot.prepare(root, base / "captured", [jar], {})
+            with self.assertRaisesRegex(snapshot.SnapshotError, "count"):
+                snapshot.prepare(root, base / "captured", [jar] * snapshot.MAX_FILES, expected)
+
+    def test_recipe_schema_and_both_workflow_filters_cover_helper_closure(self):
+        import clang_18_1_3_loader_snapshot as snapshot
+        expected_paths = set(snapshot.SOURCE_PATHS) | {
+            "scripts/oracle/clang_18_1_3_loader_snapshot.py",
+            "scripts/oracle/clang_18_1_3_transport.py", "scripts/oracle/clang_18_1_3_journal.py",
+            "build.gradle.kts", "settings.gradle.kts", "gradle.properties", "gradlew",
+            "gradle/wrapper/gradle-wrapper.jar", "gradle/wrapper/gradle-wrapper.properties",
+        }
+        paths = {p.relative_to(ROOT).as_posix() for p in provision.RECIPE_FILES.values()}
+        self.assertLessEqual(expected_paths, paths)
+        schema = json.loads((ROOT / "oracle/clang/18.1.3/build-record.schema.json").read_bytes())
+        self.assertEqual(set(schema["$defs"]["recipe"]["required"]), set(provision.RECIPE_FILES))
+        workflow = (ROOT / ".github/workflows/generic-template-toolchain.yml").read_text()
+        for path in expected_paths - {"gradle/wrapper/gradle-wrapper.jar", "gradle/wrapper/gradle-wrapper.properties"}:
+            if path.startswith("oracle/clang/"):
+                continue
+            self.assertEqual(workflow.count("      - '" + path + "'"), 2, path)
+        init = (ROOT / "oracle/clang/18.1.3/clang1813-loader-smoke.init.gradle").read_text()
+        self.assertNotIn("project.exec {", init)
+        self.assertNotIn("project.services", init)
+        self.assertIn("abstract class Clang1813LoaderCapture extends DefaultTask", init)
+        self.assertIn("@Inject\n    abstract ExecOperations getExecOperations()", init)
+        self.assertIn("execOperations.exec { spec ->", init)
+        self.assertIn('register("clang1813CaptureLoaderInputs", Clang1813LoaderCapture)', init)
+        self.assertNotIn("project.javaexec", init)
+        self.assertNotIn('dependsOn project.tasks.named("classes")', init)
+        self.assertIn('clang1813AProfileLoaderCompile', workflow)
+        self.assertIn('sources.compileClasspath = capturedClasspath', init)
+        self.assertIn('"--manifest-sha256", manifestSha256', init)
 
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--privilege-smoke":

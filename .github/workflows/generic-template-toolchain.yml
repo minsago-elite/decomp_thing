@@ -20,6 +20,16 @@ on:
       - 'oracle/llvm/22.1.6/keys/douglas-yung-llvm-release.asc'
       - 'scripts/oracle/provision_clang_18_1_3.py'
       - 'scripts/oracle/clang_18_1_3_worker.py'
+      - 'scripts/oracle/clang_18_1_3_transport.py'
+      - 'scripts/oracle/clang_18_1_3_journal.py'
+      - 'scripts/oracle/clang_18_1_3_loader_snapshot.py'
+      - 'src/main/kotlin/decompengine/oracle/core/OracleArtifacts.kt'
+      - 'src/main/kotlin/decompengine/oracle/core/OracleJson.kt'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle.properties'
+      - 'gradlew'
+      - 'gradle/wrapper/**'
       - 'src/main/kotlin/decompengine/oracle/fulltree/FullTreeGenericTemplateFrontendProfileV1.kt'
   push:
     branches: [master]
@@ -31,6 +41,16 @@ on:
       - 'oracle/llvm/22.1.6/keys/douglas-yung-llvm-release.asc'
       - 'scripts/oracle/provision_clang_18_1_3.py'
       - 'scripts/oracle/clang_18_1_3_worker.py'
+      - 'scripts/oracle/clang_18_1_3_transport.py'
+      - 'scripts/oracle/clang_18_1_3_journal.py'
+      - 'scripts/oracle/clang_18_1_3_loader_snapshot.py'
+      - 'src/main/kotlin/decompengine/oracle/core/OracleArtifacts.kt'
+      - 'src/main/kotlin/decompengine/oracle/core/OracleJson.kt'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle.properties'
+      - 'gradlew'
+      - 'gradle/wrapper/**'
       - 'src/main/kotlin/decompengine/oracle/fulltree/FullTreeGenericTemplateFrontendProfileV1.kt'
 
 permissions:
@@ -128,6 +148,47 @@ jobs:
 
       - name: Verify inert root-owned archive preflight without acquisition
         run: python3 oracle/clang/18.1.3/test_provisioning.py --privilege-smoke sudo
+
+  loader-compilation:
+    name: Loader compilation only (acquisition remains paused)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      HOME: ${{ github.workspace }}/build/clang1813-loader-ci/home
+      GRADLE_USER_HOME: ${{ github.workspace }}/build/clang1813-loader-ci/gradle-home
+      TMPDIR: ${{ github.workspace }}/build/clang1813-loader-ci/tmp
+      TMP: ${{ github.workspace }}/build/clang1813-loader-ci/tmp
+      TEMP: ${{ github.workspace }}/build/clang1813-loader-ci/tmp
+      XDG_CACHE_HOME: ${{ github.workspace }}/build/clang1813-loader-ci/xdg-cache
+      XDG_CONFIG_HOME: ${{ github.workspace }}/build/clang1813-loader-ci/xdg-config
+      XDG_DATA_HOME: ${{ github.workspace }}/build/clang1813-loader-ci/xdg-data
+      XDG_STATE_HOME: ${{ github.workspace }}/build/clang1813-loader-ci/xdg-state
+      XDG_RUNTIME_DIR: ${{ github.workspace }}/build/clang1813-loader-ci/xdg-runtime
+      JAVA_TOOL_OPTIONS: >-
+        -Djava.io.tmpdir=${{ github.workspace }}/build/clang1813-loader-ci/tmp
+        -Djna.tmpdir=${{ github.workspace }}/build/clang1813-loader-ci/tmp
+        -Duser.home=${{ github.workspace }}/build/clang1813-loader-ci/home
+        -Dkotlin.daemon.options=runFilesPath=${{ github.workspace }}/build/clang1813-loader-ci/kotlin-runfiles
+        -XX:-UsePerfData
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Allocate repository-owned tool state before Java and Gradle setup
+        shell: bash
+        run: |
+          install -d -m 0700 "$HOME" "$GRADLE_USER_HOME" "$TMPDIR" \
+            "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" \
+            "$XDG_STATE_HOME" "$XDG_RUNTIME_DIR" \
+            "$GITHUB_WORKSPACE/build/clang1813-loader-ci/kotlin-runfiles"
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6
+        with:
+          cache-provider: basic
+          cache-read-only: ${{ github.ref != 'refs/heads/master' }}
+      - name: Compile captured loader source and closed helper dependencies without target execution
+        run: ./gradlew --no-daemon -Pkotlin.compiler.execution.strategy=in-process -I oracle/clang/18.1.3/clang1813-loader-smoke.init.gradle clang1813AProfileLoaderCompile
 
   qualify:
     name: Native toolchain qualification

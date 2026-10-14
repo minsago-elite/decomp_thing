@@ -63,6 +63,18 @@ FRONTEND_RUNTIME_ROOTS = (
     "/usr/lib/llvm-18/lib/libLLVM-18.so",
 )
 RECIPE_FILES = {
+    "aLoaderArtifactsSha256": ROOT / "src/main/kotlin/decompengine/oracle/core/OracleArtifacts.kt",
+    "aLoaderJsonSha256": ROOT / "src/main/kotlin/decompengine/oracle/core/OracleJson.kt",
+    "aLoaderSnapshotSha256": ROOT / "scripts/oracle/clang_18_1_3_loader_snapshot.py",
+    "hostTransportSha256": ROOT / "scripts/oracle/clang_18_1_3_transport.py",
+    "hostJournalSha256": ROOT / "scripts/oracle/clang_18_1_3_journal.py",
+    "gradleBuildSha256": ROOT / "build.gradle.kts",
+    "gradleSettingsSha256": ROOT / "settings.gradle.kts",
+    "gradlePropertiesSha256": ROOT / "gradle.properties",
+    "gradleWrapperPropertiesSha256": ROOT / "gradle/wrapper/gradle-wrapper.properties",
+    "gradleWrapperSha256": ROOT / "gradle/wrapper/gradle-wrapper.jar",
+    "gradleLauncherSha256": ROOT / "gradlew",
+
     "contractSha256": CONTRACT_PATH,
     "schemaSha256": CONTRACT_PATH.parent / "build-record.schema.json",
     "provisionerSha256": ROOT / "scripts/oracle/provision_clang_18_1_3.py",
@@ -3312,7 +3324,7 @@ def driver_record(rootfs: Path, logical_path: str, role: str, version_output: st
         raise ProvisionError(f"{role} version output does not identify Clang 18.1.3")
     return {
         "role": role, "path": logical_path, "symlinkChain": chain,
-        "resolvedPath": "/" + binary.relative_to(rootfs).as_posix(),
+        "resolvedPath": "/" + binary.relative_to(rootfs.resolve(strict=True)).as_posix(),
         "bytes": len(payload), "sha256": sha256(payload),
         "mode": f"{binary.stat().st_mode & 0o7777:04o}", "versionOutput": version_output,
     }
@@ -3343,7 +3355,7 @@ def runtime_dependencies(rootfs: Path, logical_paths: list[str], contract: dict)
     for path in sorted(paths):
         chain, target = symlink_chain(rootfs, path)
         if target.is_file():
-            target_path = "/" + target.relative_to(rootfs).as_posix()
+            target_path = "/" + target.relative_to(rootfs.resolve(strict=True)).as_posix()
             entries.append(runtime_file_entry(rootfs, target_path))
             for link in chain:
                 entries.append(runtime_file_entry(rootfs, link.split(" -> ", 1)[0]))
@@ -5961,6 +5973,7 @@ def _package_provenance_unqualified(args: argparse.Namespace) -> int:
         comparator_lock, contract["negativeControl"], captured=captured,
     )
     expected_artifacts = [
+        RECIPE_FILES["aLoaderArtifactsSha256"], RECIPE_FILES["aLoaderJsonSha256"], RECIPE_FILES["aLoaderSnapshotSha256"], RECIPE_FILES["hostTransportSha256"], RECIPE_FILES["hostJournalSha256"], RECIPE_FILES["gradleBuildSha256"], RECIPE_FILES["gradleSettingsSha256"], RECIPE_FILES["gradlePropertiesSha256"], RECIPE_FILES["gradleWrapperPropertiesSha256"], RECIPE_FILES["gradleWrapperSha256"], RECIPE_FILES["gradleLauncherSha256"],
         candidate, patch_audit, args.acquisition / "downloads",
         args.record, args.probe_report, args.loader_report, args.negative_report,
         args.contract, RECIPE_FILES["schemaSha256"],
@@ -6085,6 +6098,8 @@ def _package_provenance_pinned(args, contract, record, captured, candidate, patc
                         elif source in (RECIPE_FILES["hostWorkerSha256"], RECIPE_FILES["hostPolicySha256"],
                                          RECIPE_FILES["hostEnvironmentRecipeSha256"]):
                             arcname = "host-execution/" + source.name
+                        elif source in (RECIPE_FILES["aLoaderArtifactsSha256"], RECIPE_FILES["aLoaderJsonSha256"], RECIPE_FILES["aLoaderSnapshotSha256"], RECIPE_FILES["hostTransportSha256"], RECIPE_FILES["hostJournalSha256"], RECIPE_FILES["gradleBuildSha256"], RECIPE_FILES["gradleSettingsSha256"], RECIPE_FILES["gradlePropertiesSha256"], RECIPE_FILES["gradleWrapperPropertiesSha256"], RECIPE_FILES["gradleWrapperSha256"], RECIPE_FILES["gradleLauncherSha256"]):
+                            arcname = "recipe/" + source.relative_to(ROOT).as_posix()
                         elif source == RECIPE_FILES["aLoaderSha256"]:
                             arcname = "src/main/kotlin/decompengine/oracle/fulltree/FullTreeGenericTemplateFrontendProfileV1.kt"
                         elif source == ROOT / "oracle/clang/18.1.3/Clang1813AProfileLoaderSmoke.java":
