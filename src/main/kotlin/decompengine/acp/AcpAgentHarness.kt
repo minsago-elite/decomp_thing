@@ -2208,7 +2208,8 @@ private class RunningAcpProcess(
     /** Upper cleanup revokes admission first. Existing failure latches are never cleared. */
     fun markGuardianClosing() {
         guardianOwner()
-        if (!process.isAlive) fail(AcpProcessExitedFailure(process.exitValue()))
+        // Publish expected teardown before an exit callback can classify its process exit.
+        // A liveness sample here could race that callback and invent a cleanup failure.
         closing.set(true)
     }
 

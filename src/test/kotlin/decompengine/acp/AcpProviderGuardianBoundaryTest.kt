@@ -443,6 +443,83 @@ class AcpProviderGuardianBoundaryTest {
             println("GUARDIAN_BOUNDARY_LATE_EOF firstStdoutAccountingVerified=false lateEofObserved=true finalizationRetryRefused=true")
         }
 
+    @Test
+    fun `guardian closing precedes exit callback publication and preserves prior failures idempotently`() =
+        withLiveFixture("idle") { fixture, _, sandboxed, running ->
+            val input = running.stdout()
+            val authenticator = initializeIdleChannel(running, input)
+            val sample = observeQuiescentPeak(fixture, sandboxed)
+
+            // These memory-only Process controls exercise the private lower lifecycle. Their
+            // streams never touch the native process; its sole real I/O owner remains running.
+            val racingProcess = ClosingExitPublicationProcess()
+            val racing = Running(sandboxed, racingProcess)
+            racingProcess.publishOnNextLivenessProbe = true
+            racing.markClosing()
+            racingProcess.publishExit()
+            assertTrue(racing.closing())
+            assertNull(racing.failure(), "expected cleanup must publish closing before an exit callback can fail it")
+            racing.markClosing()
+            assertNull(racing.failure(), "repeated cleanup must not synthesize a new process-exit failure")
+            racing.assertNaturalEmptyStderr()
+
+            val priorProcess = ClosingExitPublicationProcess()
+            val prior = Running(sandboxed, priorProcess)
+            priorProcess.publishExit()
+            val observedBeforeCleanup = assertNotNull(prior.failure())
+            assertEquals("AcpProcessExitedFailure", observedBeforeCleanup.javaClass.simpleName)
+            prior.markClosing()
+            prior.markClosing()
+            assertSame(observedBeforeCleanup, prior.failure(), "cleanup must retain an already published failure")
+            prior.assertNaturalEmptyStderr()
+
+            val rejectedProcess = ClosingExitPublicationProcess()
+            val rejected = Running(null, rejectedProcess)
+            assertFailsWith<IllegalStateException> { rejected.markClosing() }
+            assertFalse(rejected.closing(), "owner rejection must not publish cleanup intent")
+            assertNull(rejected.failure(), "owner rejection must not synthesize an exit observation")
+            rejectedProcess.publishExit()
+            assertEquals("AcpProcessExitedFailure", assertNotNull(rejected.failure()).javaClass.simpleName)
+            rejected.assertNaturalEmptyStderr()
+
+            running.markClosing()
+            assertFalse(running.guardianExited(), "cleanup intent is not guardian exit evidence")
+            assertFalse(sandboxed.boundaryCleanupFacts().finalMembershipZero,
+                "cleanup intent is not final boundary membership evidence")
+            assertEquals("DELIVERED", running.signal().get(2, TimeUnit.SECONDS).toString())
+            assertTrue(drainIdleReceipt(running, input, authenticator).nativeCleanupVerified)
+            input.close()
+            running.assertNaturalEmptyStderr()
+            assertBoundaryGone(sandboxed, sample)
+        }
+
+    /** Deterministic exit publication at the old isAlive-before-closing boundary; no native I/O. */
+    private class ClosingExitPublicationProcess : Process() {
+        private val exit = CompletableFuture<Process>()
+        private var alive = true
+        var publishOnNextLivenessProbe = false
+        fun publishExit() { alive = false; exit.complete(this) }
+        override fun isAlive(): Boolean {
+            val sampledAlive = alive
+            if (publishOnNextLivenessProbe) {
+                publishOnNextLivenessProbe = false
+                publishExit()
+            }
+            return sampledAlive
+        }
+        override fun onExit(): CompletableFuture<Process> = exit
+        override fun exitValue(): Int { check(!alive); return 17 }
+        override fun getInputStream(): InputStream = InputStream.nullInputStream()
+        override fun getErrorStream(): InputStream = InputStream.nullInputStream()
+        override fun getOutputStream(): OutputStream = OutputStream.nullOutputStream()
+        override fun waitFor(): Int = exitValue()
+        override fun waitFor(timeout: Long, unit: TimeUnit): Boolean = !alive
+        override fun destroy() = Unit
+        override fun destroyForcibly(): Process = this
+        override fun pid(): Long = Long.MAX_VALUE
+        override fun toHandle(): ProcessHandle = throw UnsupportedOperationException("memory-only lifecycle control")
+    }
+
     private fun initializeIdleChannel(running: Running, input: InputStream): AcpProviderCleanupAuthenticator {
         val setup = channelSetup()
         val authenticator = AcpProviderCleanupAuthenticator.fromSetup(setup)
@@ -489,11 +566,11 @@ class AcpProviderGuardianBoundaryTest {
         )
     }
 
-    /** Reflection constructs only the existing lower owner around the actual production sandbox. */
-    private class Running(private val sandboxed: AcpSandboxedProcess) {
+    /** Reflection uses the existing lower constructor; null ownership exercises fail-closed admission. */
+    private class Running(sandboxed: AcpSandboxedProcess?, process: Process = requireNotNull(sandboxed).process) {
         private val type = Class.forName("decompengine.acp.RunningAcpProcess")
         private val instance = type.declaredConstructors.single().apply { isAccessible = true }.newInstance(
-            sandboxed.process, sandboxed, AcpProcessContainment.LINUX_BUBBLEWRAP_CGROUP_V2,
+            process, sandboxed, AcpProcessContainment.LINUX_BUBBLEWRAP_CGROUP_V2,
             1024, 1024L * 1024, ProtocolActivity(),
         )
         private var rawFrameBytes = 0L
